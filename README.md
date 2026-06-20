@@ -2,10 +2,12 @@
 
 **Manage a fleet of [Oh My Pi](https://omp.sh) agents running in parallel — one per git worktree — from a terminal TUI *and* a web dashboard.**
 
-Like `claude agents`, but for the omp harness, and built to go further: every agent
-is an isolated worktree process, you can see at a glance **what each is doing and which
-need input**, and you can steer any of them from either surface. Designed from day one
-to grow into cross-operator (team) coordination — see [Phase 2](#phase-2--cross-operator-federation).
+Like `claude agents`, but for the omp harness, and built to go further. The end goal is a
+single **control plane you run wherever development happens** — a web UI where you coordinate
+your own agents *and* any linked agents across your organization. Every agent is an isolated
+worktree process; you see at a glance **what each is doing and which need input**, and you can
+dive into any one and steer it. Cross-org coordination is the [Phase 2](#phase-2--cross-operator-federation)
+federation layer — the same UI, with teammates' agents in the roster.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -123,10 +125,15 @@ controls do everything the CLI does.
 > hard work. (Inheriting a global `high` default makes every agent grind — opt in
 > deliberately.)
 
-### TUI keys
+### TUI navigation
 
-`↑/↓` select · `Enter` prompt · `a` answer a pending request · `y`/`n` approve/deny ·
-`i` interrupt · `r` restart · `k` kill · `q` quit.
+Two levels, arrow-driven (like `claude agents`):
+
+- **Dashboard (list):** `↑/↓` move between agents · `→` (or `Enter`) open the selected agent · **type a task + `Enter` to spawn a new agent** in the launch directory.
+- **Agent (session):** type + `Enter` to steer it (or answer a pending request) · `←` on an empty prompt returns to the dashboard · `↑/↓` scroll the transcript · `/stop` `/restart` `/kill` as slash-commands.
+- `Ctrl-C` quits anywhere; `Esc` backs out (agent → list → quit).
+
+New agents spawn in a git worktree when the directory is a repo, otherwise they run in place.
 
 ## Verify
 

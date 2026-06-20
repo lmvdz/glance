@@ -123,10 +123,19 @@ export class SquadManager extends EventEmitter {
 			repo = opts.repo;
 			resolvedBranch = (await worktreeStatus(cwd).catch(() => ({ branch: undefined }))).branch;
 		} else {
-			const wt = await addWorktree({ repo: opts.repo, branch });
-			cwd = wt.worktree;
-			repo = wt.repo;
-			resolvedBranch = wt.branch;
+			try {
+				const wt = await addWorktree({ repo: opts.repo, branch });
+				cwd = wt.worktree;
+				repo = wt.repo;
+				resolvedBranch = wt.branch;
+			} catch (err) {
+				// Not a git repo (or worktree creation failed): run the agent directly in the
+				// target directory. No isolation, but "spawn anywhere" still works.
+				cwd = opts.repo;
+				repo = opts.repo;
+				resolvedBranch = undefined;
+				this.log("warn", `no worktree for ${opts.repo} (${err instanceof Error ? err.message : String(err)}); running in place`);
+			}
 		}
 
 		const persisted: PersistedAgent = {

@@ -1,10 +1,12 @@
 /**
- * Terminal dashboard for a SquadManager.
+ * Terminal dashboard for a SquadManager — two-level, arrow-driven navigation.
+ *
+ *   LIST view   ↑/↓ move · → open agent · type a task + Enter = spawn agent
+ *   AGENT view  transcript + composer · ← (empty draft) back · /stop /restart /kill
  *
  * `buildBoard()` is a pure (state) → lines renderer (unit-testable). `SquadTui`
- * is the interactive shell: alt-screen, raw-mode key handling, live redraw on
- * manager events. Width safety borrows pi-tui's truncation helpers so output is
- * consistent with omp's own renderer.
+ * is the interactive shell: alt-screen, raw-mode keys, live redraw on manager
+ * events. Width safety borrows pi-tui's truncation helpers.
  */
 
 import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
@@ -25,9 +27,8 @@ const codes: Record<string, string> = {
 	red: "91",
 	cyan: "96",
 };
-function c(name: keyof typeof codes | (string & {}), s: string): string {
-	const code = codes[name] ?? "0";
-	return `${ESC}${code}m${s}${RESET}`;
+function c(name: string, s: string): string {
+	return `${ESC}${codes[name] ?? "0"}m${s}${RESET}`;
 }
 
 const STATUS_COLOR: Record<AgentStatus, string> = {
@@ -47,19 +48,21 @@ const STATUS_DOT: Record<AgentStatus, string> = {
 	stopped: "◌",
 };
 
-export type TuiMode = "nav" | "input";
+export type TuiView = "list" | "agent";
 
 export interface BoardState {
+	view: TuiView;
 	agents: AgentDTO[];
 	selectedId?: string;
 	transcript: TranscriptEntry[];
-	mode: TuiMode;
 	draft: string;
-	/** What the draft will do on Enter: a free prompt, or an answer to a pending request. */
-	draftTarget: "prompt" | { requestId: string };
+	/** Lines scrolled up from the bottom in agent view (0 = latest). */
+	scroll: number;
 	width: number;
 	height: number;
 	connected: boolean;
+	/** Directory new agents are spawned in (the daemon's launch cwd). */
+	cwd: string;
 }
 
 function statusRank(s: AgentStatus): number {
@@ -67,95 +70,91 @@ function statusRank(s: AgentStatus): number {
 	return rank[s];
 }
 
+function sortAgents(agents: AgentDTO[]): AgentDTO[] {
+	return [...agents].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
+}
+
 function pad(s: string, w: number): string {
 	const vis = visibleWidth(s);
 	return vis >= w ? truncateToWidth(s, w) : s + " ".repeat(w - vis);
 }
 
-/** Pure renderer: produce exactly `height` width-safe lines for the current state. */
-export function buildBoard(state: BoardState): string[] {
-	const { width, height } = state;
-	const lines: string[] = [];
-	const agents = [...state.agents].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
-	const needInput = agents.filter((a) => a.status === "input").length;
-
-	// Title bar
-	const title = `${c("bold", c("cyan", "omp-squad"))}  ${c("dim", `${agents.length} agents`)}${
-		needInput ? c("red", ` · ${needInput} need input`) : ""
-	}${state.connected ? "" : c("red", "  [disconnected]")}`;
-	lines.push(pad(title, width));
-	lines.push(c("gray", "─".repeat(width)));
-
-	// Roster: dot + name + branch + activity + todo + ctx
-	const nameW = 16;
-	const branchW = 18;
-	const metaW = 14;
-	const actW = Math.max(10, width - (3 + nameW + branchW + metaW + 4));
-	for (const a of agents) {
-		const sel = a.id === state.selectedId;
-		const dot = c(STATUS_COLOR[a.status], STATUS_DOT[a.status]);
-		const name = pad(a.name, nameW);
-		const branch = c("dim", pad(a.branch ?? "—", branchW));
-		const act = pad(a.activity ?? a.todo?.active ?? (a.error ? `⚠ ${a.error}` : "—"), actW);
-		const todo = a.todo ? `${a.todo.done}/${a.todo.total}` : "";
-		const ctx = a.contextPct != null ? `${Math.round(a.contextPct * 100)}%` : "";
-		const meta = c("dim", pad(`${todo}  ${ctx}`, metaW));
-		const row = `${dot} ${sel ? c("bold", name) : name} ${branch} ${act} ${meta}`;
-		lines.push(sel ? `${ESC}7m${pad(stripForReverse(row), width)}${RESET}` : pad(row, width));
-	}
-
-	// Detail
-	const sel = agents.find((a) => a.id === state.selectedId);
-	lines.push(c("gray", "─".repeat(width)));
-	if (sel) {
-		const head = `${c("bold", sel.name)} ${c(STATUS_COLOR[sel.status], `[${sel.status}]`)} ${c("dim", sel.model ?? "")}  ${c("dim", sel.worktree)}`;
-		lines.push(pad(head, width));
-
-		const footerLines = sel.pending.length + 2; // pending + separator + input
-		const transcriptRows = Math.max(3, height - lines.length - footerLines);
-		const tail = state.transcript.slice(-transcriptRows);
-		for (const e of tail) lines.push(pad(renderEntry(e, width), width));
-		while (lines.length < height - footerLines) lines.push("");
-
-		for (const p of sel.pending) {
-			const hint = p.kind === "confirm" ? "[y/n]" : p.kind === "select" ? `[${(p.options ?? []).join("/")}]` : "[Enter to answer]";
-			lines.push(pad(c("red", `⛔ ${p.title}${p.message ? ` — ${p.message}` : ""} ${c("dim", hint)}`), width));
-		}
-	} else {
-		lines.push(c("dim", "Select an agent (↑/↓). Enter: prompt · i: interrupt · r: restart · k: kill · q: quit"));
-		while (lines.length < height - 1) lines.push("");
-	}
-
-	// Input / footer line
-	if (state.mode === "input") {
-		const label = state.draftTarget === "prompt" ? "prompt" : "answer";
-		lines.push(pad(`${c("cyan", `${label}›`)} ${state.draft}${c("rev", " ")}`, width));
-	} else {
-		lines.push(pad(c("dim", "↑/↓ select · Enter prompt · a answer · i interrupt · r restart · k kill · q quit"), width));
-	}
-
-	// Clamp to exactly height
-	if (lines.length > height) return lines.slice(0, height);
-	while (lines.length < height) lines.push("");
-	return lines;
+function composerLine(label: string, draft: string, width: number): string {
+	return pad(`${c("cyan", `${label}›`)} ${draft}${c("rev", " ")}`, width);
 }
 
-function stripForReverse(s: string): string {
-	// Reverse-video the whole row: drop inner color codes so the highlight is uniform.
+function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 function renderEntry(e: TranscriptEntry, width: number): string {
 	const who = e.kind.toUpperCase().padEnd(9);
-	const colorByKind: Record<string, string> = {
-		user: "blue",
-		assistant: "green",
-		tool: "gray",
-		system: "yellow",
-		thinking: "gray",
-	};
-	const text = e.text.replace(/\n/g, " ");
-	return `${c(colorByKind[e.kind] ?? "dim", who)} ${truncateToWidth(text, Math.max(1, width - 10))}`;
+	const colorByKind: Record<string, string> = { user: "blue", assistant: "green", tool: "gray", system: "yellow", thinking: "gray" };
+	return `${c(colorByKind[e.kind] ?? "dim", who)} ${truncateToWidth(e.text.replace(/\n/g, " "), Math.max(1, width - 10))}`;
+}
+
+/** Pure renderer: produce exactly `height` width-safe lines for the current state. */
+export function buildBoard(state: BoardState): string[] {
+	const { width, height, view } = state;
+	const agents = sortAgents(state.agents);
+	const need = agents.filter((a) => a.status === "input").length;
+	const lines: string[] = [];
+
+	const title = `${c("bold", c("cyan", "omp-squad"))}  ${c("dim", `${agents.length} agents`)}${
+		need ? c("red", ` · ${need} need input`) : ""
+	}${state.connected ? "" : c("red", "  [disconnected]")}`;
+	lines.push(pad(title, width));
+	lines.push(c("gray", "─".repeat(width)));
+
+	if (view === "list") {
+		const nameW = 16;
+		const branchW = 18;
+		const metaW = 14;
+		const actW = Math.max(10, width - (3 + nameW + branchW + metaW + 4));
+		const slots = Math.max(1, height - 4); // title, sep, hint, composer
+		const shown = agents.slice(0, slots);
+		for (const a of shown) {
+			const selRow = a.id === state.selectedId;
+			const dot = c(STATUS_COLOR[a.status], STATUS_DOT[a.status]);
+			const name = pad(a.name, nameW);
+			const branch = c("dim", pad(a.branch ?? "—", branchW));
+			const act = pad(a.activity ?? a.todo?.active ?? (a.error ? `⚠ ${a.error}` : "—"), actW);
+			const meta = c("dim", pad(`${a.todo ? `${a.todo.done}/${a.todo.total}` : ""}  ${a.contextPct != null ? `${Math.round(a.contextPct * 100)}%` : ""}`, metaW));
+			const row = `${dot} ${selRow ? c("bold", name) : name} ${branch} ${act} ${meta}`;
+			lines.push(selRow ? `${ESC}7m${pad(stripAnsi(row), width)}${RESET}` : pad(row, width));
+		}
+		if (!agents.length) lines.push(c("dim", "  No agents yet — type a task below and press Enter to spawn one."));
+		while (lines.length < height - 2) lines.push("");
+		const short = state.cwd.length > 40 ? `…${state.cwd.slice(-39)}` : state.cwd;
+		lines.push(pad(c("dim", `↑/↓ select · → open · Enter = new agent in ${short} · Ctrl-C quit`), width));
+		lines.push(composerLine("new", state.draft, width));
+	} else {
+		const sel = agents.find((a) => a.id === state.selectedId);
+		if (!sel) {
+			lines.push(c("dim", "agent unavailable — ← back to list"));
+			while (lines.length < height - 2) lines.push("");
+			lines.push(pad(c("dim", "← back · Ctrl-C quit"), width));
+			lines.push(composerLine("", state.draft, width));
+		} else {
+			const head = `${c("bold", sel.name)} ${c(STATUS_COLOR[sel.status], `[${sel.status}]`)} ${c("dim", sel.model ?? "")}  ${c("dim", sel.worktree)}`;
+			lines.push(pad(head, width));
+			const transcriptRows = Math.max(1, height - lines.length - sel.pending.length - 2);
+			const end = Math.max(0, state.transcript.length - state.scroll);
+			const start = Math.max(0, end - transcriptRows);
+			for (const e of state.transcript.slice(start, end)) lines.push(pad(renderEntry(e, width), width));
+			while (lines.length < height - sel.pending.length - 2) lines.push("");
+			for (const p of sel.pending) {
+				const hint = p.kind === "confirm" ? "[y/n]" : p.kind === "select" ? `[${(p.options ?? []).join("/")}]` : "[type an answer]";
+				lines.push(pad(c("red", `⛔ ${p.title}${p.message ? ` — ${p.message}` : ""} ${c("dim", hint)}`), width));
+			}
+			lines.push(pad(c("dim", "← back · Enter send · /stop /restart /kill · Ctrl-C quit"), width));
+			lines.push(composerLine(sel.pending.length ? "answer" : "", state.draft, width));
+		}
+	}
+
+	if (lines.length > height) return lines.slice(0, height);
+	while (lines.length < height) lines.push("");
+	return lines;
 }
 
 // ── Interactive shell ─────────────────────────────────────────────────────
@@ -170,38 +169,37 @@ export class SquadTui {
 	private readonly onKey: (data: Buffer) => void;
 	private onQuit?: () => void;
 
-	constructor(manager: SquadManager) {
+	constructor(manager: SquadManager, cwd: string = process.cwd()) {
 		this.manager = manager;
 		this.state = {
+			view: "list",
 			agents: manager.list(),
 			selectedId: manager.list()[0]?.id,
 			transcript: [],
-			mode: "nav",
 			draft: "",
-			draftTarget: "prompt",
+			scroll: 0,
 			width: process.stdout.columns ?? 100,
 			height: process.stdout.rows ?? 30,
 			connected: true,
+			cwd,
 		};
 		for (const a of this.state.agents) this.transcripts.set(a.id, manager.getTranscript(a.id));
-		this.syncSelectedTranscript();
+		this.syncTranscript();
 		this.onEvent = (e) => this.handleEvent(e);
 		this.onKey = (data) => this.handleKey(data);
 	}
 
-	/** Run until the user quits. Resolves on quit. */
 	run(): Promise<void> {
 		return new Promise<void>((resolve) => {
 			this.onQuit = resolve;
 			this.running = true;
 			this.manager.on("event", this.onEvent);
-			process.stdout.write(`${ESC}?1049h${ESC}?25l`); // alt screen, hide cursor
-			const onResize = () => {
+			process.stdout.write(`${ESC}?1049h${ESC}?25l`);
+			process.stdout.on("resize", () => {
 				this.state.width = process.stdout.columns ?? 100;
 				this.state.height = process.stdout.rows ?? 30;
 				this.scheduleRedraw();
-			};
-			process.stdout.on("resize", onResize);
+			});
 			if (process.stdin.isTTY) {
 				process.stdin.setRawMode(true);
 				process.stdin.resume();
@@ -221,7 +219,7 @@ export class SquadTui {
 			process.stdin.setRawMode(false);
 			process.stdin.pause();
 		}
-		process.stdout.write(`${ESC}?25h${ESC}?1049l`); // show cursor, leave alt screen
+		process.stdout.write(`${ESC}?25h${ESC}?1049l`);
 		this.onQuit?.();
 	}
 
@@ -229,7 +227,7 @@ export class SquadTui {
 		switch (e.type) {
 			case "roster":
 				this.state.agents = e.agents;
-				if (!this.state.selectedId) this.state.selectedId = e.agents[0]?.id;
+				if (!this.state.selectedId) this.state.selectedId = sortAgents(e.agents)[0]?.id;
 				break;
 			case "agent": {
 				const i = this.state.agents.findIndex((a) => a.id === e.agent.id);
@@ -241,7 +239,10 @@ export class SquadTui {
 			case "removed":
 				this.state.agents = this.state.agents.filter((a) => a.id !== e.id);
 				this.transcripts.delete(e.id);
-				if (this.state.selectedId === e.id) this.state.selectedId = this.state.agents[0]?.id;
+				if (this.state.selectedId === e.id) {
+					this.state.selectedId = sortAgents(this.state.agents)[0]?.id;
+					this.state.view = "list";
+				}
 				break;
 			case "transcript": {
 				const arr = this.transcripts.get(e.id) ?? [];
@@ -252,117 +253,129 @@ export class SquadTui {
 			case "log":
 				break;
 		}
-		this.syncSelectedTranscript();
+		this.syncTranscript();
 		this.scheduleRedraw();
 	}
 
-	private syncSelectedTranscript(): void {
+	private syncTranscript(): void {
 		this.state.transcript = this.state.selectedId ? (this.transcripts.get(this.state.selectedId) ?? []) : [];
 	}
 
-	private selectedAgent(): AgentDTO | undefined {
+	private selected(): AgentDTO | undefined {
 		return this.state.agents.find((a) => a.id === this.state.selectedId);
 	}
 
 	private moveSelection(delta: number): void {
-		const sorted = [...this.state.agents].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
+		const sorted = sortAgents(this.state.agents);
 		if (!sorted.length) return;
 		const idx = Math.max(0, sorted.findIndex((a) => a.id === this.state.selectedId));
-		const next = Math.min(sorted.length - 1, Math.max(0, idx + delta));
-		this.state.selectedId = sorted[next].id;
-		this.syncSelectedTranscript();
+		this.state.selectedId = sorted[Math.min(sorted.length - 1, Math.max(0, idx + delta))].id;
+		this.syncTranscript();
+	}
+
+	private openSelected(): void {
+		if (!this.selected()) return;
+		this.state.view = "agent";
+		this.state.scroll = 0;
+		this.syncTranscript();
+		if (this.state.selectedId) this.manager.applyCommand({ type: "subscribe", id: this.state.selectedId });
+	}
+
+	private spawnFromDraft(): void {
+		const task = this.state.draft.trim();
+		if (!task) return;
+		this.state.draft = "";
+		this.manager
+			.create({ repo: this.state.cwd, task })
+			.then((dto) => {
+				this.state.selectedId = dto.id;
+				this.state.view = "agent";
+				this.state.scroll = 0;
+				this.syncTranscript();
+				this.scheduleRedraw();
+			})
+			.catch(() => {});
 	}
 
 	private handleKey(data: Buffer): void {
 		const s = data.toString();
-		if (this.state.mode === "input") {
-			this.handleInputKey(s);
-			this.scheduleRedraw();
-			return;
-		}
-		switch (s) {
-			case "\x03": // Ctrl-C
-			case "q":
-				this.quit();
-				return;
-			case "\x1b[A":
-				this.moveSelection(-1);
-				break;
-			case "\x1b[B":
-				this.moveSelection(1);
-				break;
-			case "\r":
-			case "\n":
-				this.state.mode = "input";
-				this.state.draft = "";
-				this.state.draftTarget = "prompt";
-				break;
-			case "a": {
-				const sel = this.selectedAgent();
-				if (sel?.pending.length) {
-					const p = sel.pending[0];
-					if (p.kind === "confirm") break; // answered via y/n below
-					this.state.mode = "input";
-					this.state.draft = "";
-					this.state.draftTarget = { requestId: p.id };
-				}
-				break;
-			}
-			case "y":
-			case "n": {
-				const sel = this.selectedAgent();
-				const p = sel?.pending.find((x) => x.kind === "confirm");
-				if (sel && p) void this.manager.applyCommand({ type: "answer", id: sel.id, requestId: p.id, value: s === "y" ? "yes" : "no" });
-				break;
-			}
-			case "i": {
-				const sel = this.selectedAgent();
-				if (sel) void this.manager.applyCommand({ type: "interrupt", id: sel.id });
-				break;
-			}
-			case "r": {
-				const sel = this.selectedAgent();
-				if (sel) void this.manager.applyCommand({ type: "restart", id: sel.id });
-				break;
-			}
-			case "k": {
-				const sel = this.selectedAgent();
-				if (sel) void this.manager.applyCommand({ type: "kill", id: sel.id });
-				break;
-			}
+		if (s === "\x03") return this.quit(); // Ctrl-C
+		if (s === "\x1b[A") this.onUp();
+		else if (s === "\x1b[B") this.onDown();
+		else if (s === "\x1b[C") this.onRight();
+		else if (s === "\x1b[D") this.onLeft();
+		else if (s === "\x1b") this.onEsc();
+		else if (s === "\r" || s === "\n") this.onEnter();
+		else if (s === "\x7f" || s === "\b") this.state.draft = this.state.draft.slice(0, -1);
+		else {
+			const printable = s.replace(/[\x00-\x1f]/g, "");
+			if (printable) this.state.draft += printable;
 		}
 		this.scheduleRedraw();
 	}
 
-	private handleInputKey(s: string): void {
-		if (s === "\x1b") {
-			this.state.mode = "nav";
+	private onUp(): void {
+		if (this.state.view === "list") this.moveSelection(-1);
+		else this.state.scroll = Math.min(this.state.transcript.length, this.state.scroll + 1);
+	}
+
+	private onDown(): void {
+		if (this.state.view === "list") this.moveSelection(1);
+		else this.state.scroll = Math.max(0, this.state.scroll - 1);
+	}
+
+	private onRight(): void {
+		if (this.state.view === "list") this.openSelected();
+	}
+
+	private onLeft(): void {
+		if (this.state.view === "agent" && this.state.draft === "") this.state.view = "list";
+	}
+
+	private onEsc(): void {
+		if (this.state.view === "agent") this.state.view = "list";
+		else this.quit();
+	}
+
+	private onEnter(): void {
+		if (this.state.view === "list") {
+			if (this.state.draft.trim()) this.spawnFromDraft();
+			else this.openSelected();
+			return;
+		}
+		// agent view
+		const sel = this.selected();
+		const text = this.state.draft.trim();
+		if (!sel) {
+			this.state.view = "list";
+			return;
+		}
+		if (text.startsWith("/")) {
+			this.runSlash(sel, text);
 			this.state.draft = "";
 			return;
 		}
-		if (s === "\r" || s === "\n") {
-			const sel = this.selectedAgent();
-			const text = this.state.draft.trim();
-			this.state.mode = "nav";
-			this.state.draft = "";
-			if (!sel || !text) return;
-			if (this.state.draftTarget === "prompt") {
-				void this.manager.applyCommand({ type: "prompt", id: sel.id, message: text });
-			} else {
-				void this.manager.applyCommand({ type: "answer", id: sel.id, requestId: this.state.draftTarget.requestId, value: text });
-			}
-			return;
+		if (!text) return;
+		this.state.draft = "";
+		const pending = sel.pending[0];
+		if (pending) {
+			const value = pending.kind === "confirm" ? (/^y/i.test(text) ? "yes" : "no") : text;
+			this.manager.applyCommand({ type: "answer", id: sel.id, requestId: pending.id, value });
+		} else {
+			this.manager.applyCommand({ type: "prompt", id: sel.id, message: text });
 		}
-		if (s === "\x7f" || s === "\b") {
-			this.state.draft = this.state.draft.slice(0, -1);
-			return;
+	}
+
+	private runSlash(sel: AgentDTO, cmd: string): void {
+		const verb = cmd.slice(1).trim().toLowerCase();
+		if (verb === "stop" || verb === "interrupt") this.manager.applyCommand({ type: "interrupt", id: sel.id });
+		else if (verb === "restart") this.manager.applyCommand({ type: "restart", id: sel.id });
+		else if (verb === "kill") this.manager.applyCommand({ type: "kill", id: sel.id });
+		else if (verb === "back") this.state.view = "list";
+		else if (verb === "rm") {
+			this.manager.applyCommand({ type: "remove", id: sel.id });
+			this.state.view = "list";
 		}
-		if (s === "\x03") {
-			this.quit();
-			return;
-		}
-		// Append printable characters (ignore other escape sequences).
-		if (!s.startsWith("\x1b")) this.state.draft += s;
 	}
 
 	private scheduleRedraw(): void {
@@ -375,7 +388,6 @@ export class SquadTui {
 
 	private render(): void {
 		if (!this.running) return;
-		const lines = buildBoard(this.state);
-		process.stdout.write(`${ESC}H${ESC}J${lines.join("\r\n")}`);
+		process.stdout.write(`${ESC}H${ESC}J${buildBoard(this.state).join("\r\n")}`);
 	}
 }

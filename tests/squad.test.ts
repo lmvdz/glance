@@ -107,35 +107,41 @@ function board(over: Partial<BoardState> = {}): BoardState {
 			{ kind: "user", text: "do it", ts: 0 },
 			{ kind: "assistant", text: "working on it", ts: 0 },
 		],
-		mode: "nav",
+		view: "list",
 		draft: "",
-		draftTarget: "prompt",
+		scroll: 0,
 		width: 100,
 		height: 24,
 		connected: true,
+		cwd: "/home/me/project",
 		...over,
 	};
 }
 
-test("buildBoard emits exactly height lines, none over width", () => {
-	const lines = buildBoard(board());
-	expect(lines.length).toBe(24);
-	for (const l of lines) expect(visibleWidth(l)).toBeLessThanOrEqual(100);
+test("buildBoard emits exactly height lines, none over width (both views)", () => {
+	for (const view of ["list", "agent"] as const) {
+		const lines = buildBoard(board({ view }));
+		expect(lines.length).toBe(24);
+		for (const l of lines) expect(visibleWidth(l)).toBeLessThanOrEqual(100);
+	}
 });
 
-test("buildBoard surfaces needs-input, pending detail, and transcript", () => {
-	const plain = buildBoard(board()).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+test("list view shows roster, needs-input, and the new-agent composer", () => {
+	const plain = buildBoard(board({ view: "list" })).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
 	expect(plain).toContain("need input");
 	expect(plain).toContain("alpha");
-	expect(plain).toContain("Delete?");
-	expect(plain).toContain("working on it");
+	expect(plain).toContain("new agent in");
+	expect(plain).toContain("new›");
 });
 
-test("buildBoard input mode renders the draft line", () => {
-	const plain = buildBoard(board({ mode: "input", draft: "hello there" }))
+test("agent view shows transcript, pending detail, and the draft", () => {
+	const plain = buildBoard(board({ view: "agent", draft: "hello there" }))
 		.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""))
 		.join("\n");
+	expect(plain).toContain("working on it");
+	expect(plain).toContain("Delete?");
 	expect(plain).toContain("hello there");
+	expect(plain).toContain("← back");
 });
 
 // ── RPC transport (real omp, no model tokens) ────────────────────────────────
