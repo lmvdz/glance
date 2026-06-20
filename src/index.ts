@@ -19,7 +19,7 @@ import { all as allPresence, who as whoPresence } from "./presence.ts";
 import { SquadServer } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
 import { SquadTui } from "./tui.ts";
-import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel } from "./types.ts";
+import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
 
@@ -32,6 +32,7 @@ USAGE
   omp-squad prompt <id> <message...>               Send an instruction to an agent
   omp-squad rm <id> [--delete-worktree]            Remove an agent
   omp-squad who [repo]                             Who/what is working a repo (any omp agent)
+  omp-squad logs <id> [--limit N]                  Print an agent's recent transcript
   omp-squad open                                   Print the dashboard URL
   omp-squad commission <name> --purpose <s> [flags]  Author + validate a Flue worker; onboard if it passes
 
@@ -216,6 +217,33 @@ async function cmdRm(args: string[]): Promise<void> {
 	process.stdout.write(res.ok ? "removed\n" : `failed: ${await res.text()}\n`);
 }
 
+async function cmdLogs(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const id = positional[0];
+	if (!id) {
+		process.stderr.write("usage: omp-squad logs <id> [--limit N]\n");
+		process.exit(1);
+	}
+	const limit = flags.limit ? Number(flags.limit) : 40;
+	let entries: TranscriptEntry[];
+	try {
+		const res = await fetch(`${base(flags)}/api/agents/${encodeURIComponent(id)}/transcript`);
+		entries = (await res.json()) as TranscriptEntry[];
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: omp-squad up\n`);
+		process.exit(1);
+	}
+	if (!entries.length) {
+		process.stdout.write("no transcript\n");
+		return;
+	}
+	const recent = entries.slice(-limit);
+	const w = Math.max(...recent.map((e) => e.kind.length));
+	for (const e of recent) {
+		process.stdout.write(`${e.kind.toUpperCase().padEnd(w)}  ${e.text}\n`);
+	}
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -304,6 +332,9 @@ async function main(): Promise<void> {
 		case "rm":
 		case "remove":
 			await cmdRm(rest);
+			break;
+		case "logs":
+			await cmdLogs(rest);
 			break;
 		case "commission":
 		case "hire":
