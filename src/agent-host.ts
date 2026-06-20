@@ -162,6 +162,10 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 		},
 	});
 
+	// Opportunistic GC: a freshly-started host prunes any dead sibling sockets
+	// (its own is now live, so hostAlive() spares it).
+	void pruneStaleSockets().catch(() => []);
+
 	// Pump omp stdout → ring + clients; detect readiness.
 	void (async () => {
 		const decoder = new TextDecoder();
