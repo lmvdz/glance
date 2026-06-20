@@ -28,6 +28,8 @@ export interface AgentDriver extends EventEmitter {
 	start(timeoutMs?: number): Promise<void>;
 	/** Tear down; never throws. */
 	stop(): Promise<void>;
+	/** Disconnect but leave the backing process running (daemon restart/upgrade). Optional. */
+	detach?(): void;
 
 	/** Begin a unit of work. omp: an agent turn. flue: invoke the worker's workflow. */
 	prompt(message: string): Promise<void>;

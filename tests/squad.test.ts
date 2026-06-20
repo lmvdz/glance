@@ -18,6 +18,8 @@ import { addWorktree, removeWorktree, repoRoot, worktreeStatus } from "../src/wo
 import { TemplateArchitect } from "../src/architect.ts";
 import { FlueServiceDriver } from "../src/flue-service-driver.ts";
 import type { CommissionSpec } from "../src/types.ts";
+import { validateWorker } from "../src/validate.ts";
+import { generateWorkerFiles } from "../src/worker-template.ts";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 
 const tmps: string[] = [];
@@ -151,11 +153,12 @@ test("agent view shows transcript, pending detail, and the draft", () => {
 // ── RPC transport (real omp, no model tokens) ────────────────────────────────
 
 test(
-	"RpcAgent: spawn → ready → get_state → bash, then clean stop",
+	"RpcAgent: spawn host → ready → get_state → bash; detach leaves host alive; a new client re-attaches",
 	async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-rpc-"));
 		tmps.push(dir);
-		const a = new RpcAgent({ cwd: dir, approvalMode: "yolo", thinking: "minimal" });
+		const id = `rpc-test-${Date.now().toString(36)}`;
+		const a = new RpcAgent({ id, cwd: dir, approvalMode: "yolo", thinking: "minimal" });
 		await a.start(25_000);
 		expect(a.isReady).toBe(true);
 		const state = await a.getState();
@@ -163,10 +166,22 @@ test(
 		const res = (await a.bash("echo squad-test-OK")) as { exitCode: number; output: string };
 		expect(res.exitCode).toBe(0);
 		expect(res.output).toContain("squad-test-OK");
-		await a.stop();
-		expect(a.isAlive).toBe(false);
+
+		// Detach: the daemon-side client goes away, but the detached host keeps omp alive.
+		a.detach();
+		await Bun.sleep(200);
+		// A fresh client (same id → same socket) re-attaches to the SAME live session.
+		const b = new RpcAgent({ id, cwd: dir, approvalMode: "yolo", thinking: "minimal" });
+		await b.start(10_000);
+		expect(b.isReady).toBe(true);
+		const state2 = await b.getState();
+		expect(state2.sessionId).toBe(state.sessionId); // same omp session survived
+
+		await b.stop(); // terminate the host
+		await Bun.sleep(200);
+		expect(b.isAlive).toBe(false);
 	},
-	30_000,
+	40_000,
 );
 
 // ── manager lifecycle (no task → no model turn) ──────────────────────────────
@@ -298,4 +313,50 @@ test("FlueServiceDriver: invokes a worker and emits omp-shaped frames around the
 	expect(frames).toEqual(["agent_start", "tool_execution_start", "message_update", "message_end", "agent_end"]);
 	expect(driver.lastResult).toEqual({ ok: true, echo: { text: "hi" } });
 	await driver.stop();
+});
+
+// ── ponytail gate (lazy-senior-dev acceptance dimension) ─────────────────────
+
+async function writeWorker(spec: CommissionSpec): Promise<string> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-pony-"));
+	tmps.push(dir);
+	for (const f of generateWorkerFiles(spec)) {
+		const target = path.join(dir, f.path);
+		await fs.mkdir(path.dirname(target), { recursive: true });
+		await fs.writeFile(target, f.content);
+	}
+	return dir;
+}
+
+test("ponytail gate: a minimal template worker passes the lazy-dev check", async () => {
+	const dir = await writeWorker(emailSpec());
+	const report = await validateWorker(dir, emailSpec());
+	expect(report.checks.find((c) => c.name === "ponytail")?.status).toBe("pass");
+});
+
+test("ponytail gate: an unrequested dependency fails the gate (report.ok=false → commission onboards nothing)", async () => {
+	const spec = emailSpec();
+	const dir = await writeWorker(spec);
+	// The architect reached for a dependency the pinned skeleton already covers.
+	const pkgPath = path.join(dir, "package.json");
+	const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8")) as { dependencies: Record<string, string> };
+	pkg.dependencies.lodash = "^4.17.21";
+	await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2));
+
+	const report = await validateWorker(dir, spec);
+	const check = report.checks.find((c) => c.name === "ponytail");
+	expect(check?.status).toBe("fail");
+	expect(check?.detail).toContain("lodash");
+	expect(report.ok).toBe(false);
+});
+
+test("ponytail gate: an over-built workflow fails the size budget", async () => {
+	const filler = Array.from({ length: 90 }, (_, i) => `const x${i} = ${i};`).join("\n");
+	const spec: CommissionSpec = { ...emailSpec(), workflowBody: `${filler}\nreturn { emails: [], count: 0 };` };
+	const dir = await writeWorker(spec);
+	const report = await validateWorker(dir, spec);
+	const check = report.checks.find((c) => c.name === "ponytail");
+	expect(check?.status).toBe("fail");
+	expect(check?.detail).toContain("non-blank lines");
+	expect(report.ok).toBe(false);
 });

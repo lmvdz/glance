@@ -1,32 +1,33 @@
 /**
- * RpcAgent — owns one `omp --mode rpc` child process and speaks the
- * newline-delimited JSON protocol documented in omp's rpc.md.
+ * RpcAgent — the daemon-side client for one agent, talking to a detached
+ * `agent-host` over a Unix domain socket (NOT a direct child anymore).
  *
- * We deliberately re-implement the thin transport (rather than importing the
- * heavyweight `RpcClient`) so omp-squad stays decoupled from omp's internal
- * module graph and survives `omp update`. We import omp's RPC *types*
- * (erased at runtime) to stay faithful to the wire contract.
+ * `start()` attaches to an existing host if its socket is live (so the daemon
+ * reconnects to surviving agents after a restart/upgrade), otherwise spawns a
+ * fresh detached host and connects. The public surface is unchanged — it still
+ * implements `AgentDriver` (same events, same convenience methods) — only the
+ * transport moved from child stdio to a socket. omp RPC *types* are imported
+ * type-only to stay faithful to the wire contract.
  */
 
 import { EventEmitter } from "node:events";
-import type { Subprocess } from "bun";
+import * as path from "node:path";
+import type { Socket } from "bun";
 import type { AgentDriver } from "./agent-driver.ts";
-import type {
-	ApprovalMode,
-	ThinkingLevel,
-	RpcExtensionUIRequest,
-	RpcSessionState,
-} from "./types.ts";
+import { socketPathFor } from "./agent-host.ts";
+import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
 
 export interface RpcAgentOptions {
+	/** Stable id (socket path derives from it). Omit for a transient auto-generated id. */
+	id?: string;
 	cwd: string;
 	model?: string;
 	approvalMode?: ApprovalMode;
 	thinking?: ThinkingLevel;
-	/** Extra CLI args appended verbatim. */
-	extraArgs?: string[];
-	/** Override the omp binary (defaults to `omp` on PATH). */
+	/** Override the omp binary the host launches (defaults to `omp` on PATH). */
 	bin?: string;
+	/** Socket path override (defaults to socketPathFor(id)). */
+	socket?: string;
 }
 
 type ResponseFrame = {
@@ -51,71 +52,99 @@ type Pending = {
 	reject: (err: Error) => void;
 };
 
+const HOST_ENTRY = path.join(import.meta.dir, "agent-host-main.ts");
+
 /**
  * Events emitted:
- *  - "ready"                       child wrote the ready frame
- *  - "event"   (frame)             any AgentSessionEvent (agent_start, message_update, …)
+ *  - "ready"                        host's omp child is live
+ *  - "event"   (frame)              any AgentSessionEvent (agent_start, message_update, …)
  *  - "ui"      (RpcExtensionUIRequest)  extension UI request
- *  - "hosttool"(HostToolCallFrame) host tool call needing a result
- *  - "exit"    ({code, signal})    child exited
- *  - "stderr"  (text)              child stderr line
- *  - "rawerror"(Error)             parse / transport error
+ *  - "hosttool"(HostToolCallFrame)  host tool call needing a result
+ *  - "exit"    ({code})             the omp child / host ended
+ *  - "stderr"  (text)               diagnostic line
  */
 export class RpcAgent extends EventEmitter implements AgentDriver {
-	private proc?: Subprocess<"pipe", "pipe", "pipe">;
+	private sock?: Socket<undefined>;
 	private readonly opts: RpcAgentOptions;
+	private readonly socketPath: string;
+	private readonly id: string;
 	private seq = 0;
 	private readonly pending = new Map<string, Pending>();
 	private buf = "";
 	private ready = false;
 	private exited = false;
+	private detaching = false;
+	private hostPid?: number;
 
 	constructor(opts: RpcAgentOptions) {
 		super();
 		this.opts = opts;
+		this.id = opts.id ?? `omp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+		this.socketPath = opts.socket ?? socketPathFor(this.id);
 	}
 
 	get isReady(): boolean {
 		return this.ready;
 	}
 	get isAlive(): boolean {
-		return !!this.proc && !this.exited;
+		return !!this.sock && !this.exited;
 	}
 	get pid(): number | undefined {
-		return this.proc?.pid;
+		return this.hostPid;
 	}
 
-	/** Spawn the child and resolve once the `ready` frame arrives (or reject on early exit/timeout). */
+	/** Attach to a live host, or spawn a detached one, then resolve once ready. */
 	async start(timeoutMs = 30_000): Promise<void> {
-		const args = ["--mode", "rpc", "--cwd", this.opts.cwd];
-		if (this.opts.model) args.push("--model", this.opts.model);
-		if (this.opts.approvalMode) args.push("--approval-mode", this.opts.approvalMode);
-		if (this.opts.thinking) args.push("--thinking", this.opts.thinking);
-		if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
+		let connected = await this.connect();
+		if (!connected) {
+			this.spawnHost();
+			connected = await this.connectWithRetry(timeoutMs);
+			if (!connected) throw new Error(`agent host for ${this.id} did not come up`);
+		}
+		await this.waitReady(timeoutMs);
+	}
 
-		const proc = Bun.spawn([this.opts.bin ?? "omp", ...args], {
-			cwd: this.opts.cwd,
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-			env: { ...process.env, PI_RPC_EMIT_TITLE: "0" },
-		});
-		this.proc = proc;
+	private spawnHost(): void {
+		const cmd = [process.execPath, HOST_ENTRY, "--id", this.id, "--cwd", this.opts.cwd, "--socket", this.socketPath];
+		if (this.opts.model) cmd.push("--model", this.opts.model);
+		if (this.opts.approvalMode) cmd.push("--approval", this.opts.approvalMode);
+		if (this.opts.thinking) cmd.push("--thinking", this.opts.thinking);
+		if (this.opts.bin) cmd.push("--bin", this.opts.bin);
+		const proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
+		proc.unref();
+	}
 
-		void this.pumpStdout(proc.stdout);
-		void this.pumpStderr(proc.stderr);
-		void proc.exited.then((code) => {
-			this.exited = true;
-			const signal = proc.signalCode ?? undefined;
-			for (const [, p] of this.pending) p.reject(new Error("agent exited"));
-			this.pending.clear();
-			this.emit("exit", { code, signal });
-		});
+	private async connect(): Promise<boolean> {
+		try {
+			this.sock = await Bun.connect<undefined>({
+				unix: this.socketPath,
+				socket: {
+					data: (_s, chunk) => this.onData(chunk),
+					close: () => this.onClose(),
+					error: () => {},
+				},
+			});
+			return true;
+		} catch {
+			return false;
+		}
+	}
 
-		await new Promise<void>((resolve, reject) => {
+	private async connectWithRetry(timeoutMs: number): Promise<boolean> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (await this.connect()) return true;
+			await Bun.sleep(120);
+		}
+		return false;
+	}
+
+	private waitReady(timeoutMs: number): Promise<void> {
+		if (this.ready) return Promise.resolve();
+		return new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				cleanup();
-				reject(new Error(`omp --mode rpc did not become ready within ${timeoutMs}ms`));
+				reject(new Error(`agent ${this.opts.id} not ready within ${timeoutMs}ms`));
 			}, timeoutMs);
 			const onReady = () => {
 				cleanup();
@@ -123,7 +152,7 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 			};
 			const onExit = () => {
 				cleanup();
-				reject(new Error("omp --mode rpc exited before ready"));
+				reject(new Error("agent exited before ready"));
 			};
 			const cleanup = () => {
 				clearTimeout(timer);
@@ -133,60 +162,54 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 			this.once("ready", onReady);
 			this.once("exit", onExit);
 		});
-
-		// Stream subagent lifecycle/progress so the manager can build the hierarchy tree.
-		this.sendRaw({ type: "set_subagent_subscription", level: "progress" });
 	}
 
-	private async pumpStdout(stream: ReadableStream<Uint8Array>): Promise<void> {
-		const decoder = new TextDecoder();
-		try {
-			for await (const chunk of stream) {
-				this.buf += decoder.decode(chunk, { stream: true });
-				let nl: number;
-				while ((nl = this.buf.indexOf("\n")) >= 0) {
-					const line = this.buf.slice(0, nl).trim();
-					this.buf = this.buf.slice(nl + 1);
-					if (line) this.handleLine(line);
-				}
-			}
-		} catch (err) {
-			this.emit("rawerror", err instanceof Error ? err : new Error(String(err)));
+	private onData(chunk: Buffer | Uint8Array): void {
+		this.buf += Buffer.from(chunk).toString();
+		let nl: number;
+		while ((nl = this.buf.indexOf("\n")) >= 0) {
+			const line = this.buf.slice(0, nl).trim();
+			this.buf = this.buf.slice(nl + 1);
+			if (line) this.handleLine(line);
 		}
 	}
 
-	private async pumpStderr(stream: ReadableStream<Uint8Array>): Promise<void> {
-		const decoder = new TextDecoder();
-		let acc = "";
-		try {
-			for await (const chunk of stream) {
-				acc += decoder.decode(chunk, { stream: true });
-				let nl: number;
-				while ((nl = acc.indexOf("\n")) >= 0) {
-					const line = acc.slice(0, nl);
-					acc = acc.slice(nl + 1);
-					if (line.trim()) this.emit("stderr", line);
-				}
-			}
-		} catch {
-			/* stderr best-effort */
-		}
+	private onClose(): void {
+		this.sock = undefined;
+		// A deliberate detach (daemon shutdown) leaves the host alive — not an exit.
+		if (this.detaching || this.exited) return;
+		this.exited = true;
+		for (const [, p] of this.pending) p.reject(new Error("agent connection lost"));
+		this.pending.clear();
+		this.emit("exit", { code: 1 });
 	}
 
 	private handleLine(line: string): void {
-		let frame: { type?: string; [k: string]: unknown };
+		let frame: { type?: string; __sq?: string; [k: string]: unknown };
 		try {
 			frame = JSON.parse(line);
 		} catch {
-			// Non-JSON noise on stdout — surface as stderr-ish.
 			this.emit("stderr", line);
 			return;
 		}
-		const t = frame.type;
-		switch (t) {
-			case "ready":
+		if (frame.__sq === "meta") {
+			if (typeof frame.pid === "number") this.hostPid = frame.pid;
+			if (frame.ready === true && !this.ready) {
 				this.ready = true;
 				this.emit("ready");
+			}
+			if (frame.exited !== false && frame.exited !== undefined && !this.exited) {
+				this.exited = true;
+				this.emit("exit", { code: typeof frame.exited === "number" ? frame.exited : 0 });
+			}
+			return;
+		}
+		switch (frame.type) {
+			case "ready":
+				if (!this.ready) {
+					this.ready = true;
+					this.emit("ready");
+				}
 				return;
 			case "response": {
 				const r = frame as ResponseFrame;
@@ -204,28 +227,24 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 			case "host_tool_call":
 				this.emit("hosttool", frame as HostToolCallFrame);
 				return;
-			case "host_tool_cancel":
-			case "host_uri_request":
-			case "host_uri_cancel":
-				// Not driven by omp-squad surfaces; let the child time out / handle defaults.
-				this.emit("event", frame);
-				return;
 			default:
-				// Everything else (agent_start, message_update, tool_execution_*, etc.)
 				this.emit("event", frame);
 				return;
 		}
 	}
 
 	private write(obj: unknown): void {
-		if (!this.proc || this.exited) return;
-		this.proc.stdin.write(`${JSON.stringify(obj)}\n`);
-		this.proc.stdin.flush();
+		if (!this.sock) return;
+		try {
+			this.sock.write(`${JSON.stringify(obj)}\n`);
+		} catch {
+			/* socket gone */
+		}
 	}
 
 	/** Send a command and await its correlated response. */
 	send<T = unknown>(cmd: Record<string, unknown>, timeoutMs = 60_000): Promise<T> {
-		if (!this.proc || this.exited) return Promise.reject(new Error("agent not running"));
+		if (!this.sock || this.exited) return Promise.reject(new Error("agent not connected"));
 		const id = `sq_${++this.seq}`;
 		return new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -246,23 +265,21 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		});
 	}
 
-	/** Fire-and-forget (used for UI responses / host-tool results that have no `response`). */
+	/** Fire-and-forget (UI responses / host-tool results have no `response`). */
 	sendRaw(obj: unknown): void {
 		this.write(obj);
 	}
 
-	// ── Convenience wrappers ──────────────────────────────────────────────────
+	// ── AgentDriver convenience wrappers ──────────────────────────────────────
 
 	getState(): Promise<RpcSessionState> {
 		return this.send<RpcSessionState>({ type: "get_state" });
 	}
 
 	async prompt(message: string): Promise<void> {
-		// While streaming the child requires a streamingBehavior; default to steering.
 		try {
 			await this.send({ type: "prompt", message });
 		} catch (err) {
-			// Retry as a steer if it rejected for needing streamingBehavior.
 			if (err instanceof Error && /streamingBehavior|streaming/i.test(err.message)) {
 				await this.send({ type: "prompt", message, streamingBehavior: "steer" });
 				return;
@@ -287,41 +304,38 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		return this.send({ type: "bash", command });
 	}
 
-	/** Answer an extension_ui_request. */
 	respondUi(requestId: string, payload: { value?: string; confirmed?: boolean; cancelled?: true }): void {
 		this.sendRaw({ type: "extension_ui_response", id: requestId, ...payload });
 	}
 
-	/** Complete a host_tool_call. */
 	respondHostTool(callId: string, text: string, isError = false): void {
-		this.sendRaw({
-			type: "host_tool_result",
-			id: callId,
-			isError,
-			result: { content: [{ type: "text", text }] },
-		});
+		this.sendRaw({ type: "host_tool_result", id: callId, isError, result: { content: [{ type: "text", text }] } });
 	}
 
+	/** Disconnect but LEAVE the host + omp running (daemon shutdown / upgrade). */
+	detach(): void {
+		this.detaching = true;
+		try {
+			this.sock?.end();
+		} catch {
+			/* ignore */
+		}
+		this.sock = undefined;
+	}
+
+	/** Terminate the agent entirely: tell the host to kill omp and exit. */
 	async stop(): Promise<void> {
-		if (!this.proc || this.exited) return;
-		try {
-			this.proc.stdin.end();
-		} catch {
-			/* ignore */
-		}
-		this.proc.kill();
-		try {
-			await Promise.race([this.proc.exited, Bun.sleep(2000)]);
-		} catch {
-			/* ignore */
-		}
-		if (!this.exited) {
+		if (this.sock) {
+			this.write({ __sq: "shutdown" });
+			await Bun.sleep(150);
 			try {
-				this.proc.kill(9 as never);
+				this.sock.end();
 			} catch {
 				/* ignore */
 			}
+			this.sock = undefined;
 		}
+		this.exited = true;
 	}
 }
 

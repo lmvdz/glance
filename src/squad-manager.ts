@@ -15,6 +15,7 @@ import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand 
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver } from "./agent-driver.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
+import { WorkflowDriver } from "./workflow-driver.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
 import type {
@@ -38,6 +39,7 @@ import type {
 	TranscriptKind,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
+import { hostAlive, socketPathFor } from "./agent-host.ts";
 import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
 
 const MAX_TRANSCRIPT = 800;
@@ -112,13 +114,63 @@ export class SquadManager extends EventEmitter {
 			void this.applyCommand(remote.cmd, remote.actor);
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
+		await this.reconnectLive();
 	}
 
 	async stop(): Promise<void> {
 		clearInterval(this.pollTimer);
 		await this.persist();
-		await Promise.all([...this.agents.values()].map((r) => r.agent.stop()));
+		// Detach (don't kill): leave each agent's detached host + omp running so a
+		// restart/upgrade reconnects to live agents with full context.
+		for (const r of this.agents.values()) r.agent.detach?.();
 		await this.bus.stop();
+	}
+
+	/** On daemon start, reattach to any agent whose detached host survived (upgrade/restart). */
+	private async reconnectLive(): Promise<number> {
+		let raw: string;
+		try {
+			raw = await fs.readFile(this.stateFile, "utf8");
+		} catch {
+			return 0;
+		}
+		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[] };
+		let n = 0;
+		for (const p of parsed.agents ?? []) {
+			if (p.kind === "flue-service" || p.kind === "workflow" || this.agents.has(p.id)) continue;
+			if (!(await hostAlive(socketPathFor(p.id)))) continue;
+			await this.attachExisting(p).catch((err) => this.log("warn", `reattach ${p.name} failed: ${String(err)}`));
+			n++;
+		}
+		if (n) this.log("info", `reattached ${n} live agent(s)`);
+		return n;
+	}
+
+	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
+	private async attachExisting(p: PersistedAgent): Promise<void> {
+		const dto: AgentDTO = {
+			id: p.id,
+			name: p.name,
+			status: "starting",
+			repo: p.repo,
+			worktree: p.worktree,
+			branch: p.branch,
+			model: p.model,
+			approvalMode: p.approvalMode,
+			pending: [],
+			lastActivity: Date.now(),
+			messageCount: 0,
+			issue: p.issue,
+			kind: p.kind ?? "omp-operator",
+		};
+		const agent = this.makeDriver(p);
+		const rec: AgentRecord = { dto, agent, options: p, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		this.agents.set(p.id, rec);
+		this.wire(rec);
+		this.emitAgent(rec);
+		await agent.start();
+		rec.dto.status = this.derive(rec);
+		this.emitAgent(rec);
 	}
 
 	list(): AgentDTO[] {
@@ -162,6 +214,7 @@ export class SquadManager extends EventEmitter {
 		const branch = opts.branch ?? `squad/${name}`;
 		const approvalMode = opts.approvalMode ?? "write";
 		const thinking = opts.thinking ?? "low";
+		const kind = opts.workflow ? "workflow" : "omp-operator";
 
 		let cwd: string;
 		let resolvedBranch: string | undefined;
@@ -197,7 +250,8 @@ export class SquadManager extends EventEmitter {
 			task: opts.task,
 			thinking,
 			issue: opts.issue,
-			kind: "omp-operator",
+			kind,
+			workflow: opts.workflow ? { path: opts.workflow } : undefined,
 		};
 
 		const dto: AgentDTO = {
@@ -213,7 +267,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 			issue: opts.issue,
-			kind: "omp-operator",
+			kind,
 		};
 
 		const agent = this.makeDriver(persisted);
@@ -246,7 +300,10 @@ export class SquadManager extends EventEmitter {
 		if (p.kind === "flue-service" && p.flue) {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
 		}
-		return new RpcAgent({ cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
+		if (p.kind === "workflow" && p.workflow) {
+			return new WorkflowDriver({ id: p.id, workflowPath: p.workflow.path, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
+		}
+		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
 	}
 
 	/**
@@ -546,7 +603,7 @@ export class SquadManager extends EventEmitter {
 	// ── Polling (todos / context / streaming truth) ───────────────────────────
 
 	private async poll(): Promise<void> {
-		const live = [...this.agents.values()].filter((r) => r.dto.kind === "omp-operator" && r.agent.isReady && r.agent.isAlive);
+		const live = [...this.agents.values()].filter((r) => (r.dto.kind === "omp-operator" || r.dto.kind === "workflow") && r.agent.isReady && r.agent.isAlive);
 		await Promise.all(
 			live.map(async (rec) => {
 				try {
@@ -643,6 +700,7 @@ export class SquadManager extends EventEmitter {
 				approvalMode: p.approvalMode,
 				thinking: p.thinking,
 				issue: p.issue,
+				workflow: p.workflow?.path,
 			}).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
 		return list.length;

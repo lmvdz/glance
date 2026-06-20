@@ -16,6 +16,7 @@ import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { listPlaneIssues } from "./plane.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
+import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
@@ -103,6 +104,23 @@ export class SquadServer {
 					const issues = await listPlaneIssues(url.searchParams.get("project") ?? "");
 					if (issues === null) return new Response("plane not configured", { status: 501 });
 					return Response.json(issues);
+				}
+				if (url.pathname === "/api/upgrade/status") return Response.json(await gitState(process.cwd()));
+				if (url.pathname === "/api/upgrade" && req.method === "POST") {
+					const repo = process.cwd();
+					const pull = await pullLatest(repo);
+					const after = await gitState(repo);
+					// Detach agents (their hosts survive), free the port, and re-exec — the
+					// relaunched daemon reconnects to the live agents with full context.
+					setTimeout(() => {
+						void (async () => {
+							await manager.stop();
+							this.server?.stop(true);
+							reexecDaemon({ cmd: process.argv, cwd: repo });
+							process.exit(0);
+						})();
+					}, 300);
+					return Response.json({ ok: true, pull, git: after, restarting: true });
 				}
 				if (url.pathname === "/api/command" && req.method === "POST") {
 					let cmd: ClientCommand;

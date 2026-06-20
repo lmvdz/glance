@@ -98,6 +98,7 @@
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
+  <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
   <button class="primary" id="addBtn">+ New agent</button>
 </header>
 <main>
@@ -378,6 +379,25 @@ $("#addForm").onsubmit = (e) => {
 };
 
 fetch("/api/info").then(r=>r.json()).then(i=>{ spawnCwd = i.cwd || "."; }).catch(()=>{});
+
+// Upgrade: pull latest + re-exec the daemon (agents survive via detached hosts).
+async function refreshUpgrade() {
+  try {
+    const g = await (await fetch("/api/upgrade/status")).json();
+    const btn = document.querySelector("#upgradeBtn");
+    btn.textContent = g.behind > 0 ? `⤴ Upgrade (${g.behind})` : "⤴ Upgrade";
+    btn.title = g.behind > 0 ? `${g.behind} commit(s) behind ${g.upstream||"upstream"} — pull + restart` : "Restart the daemon to load new code (agents survive)";
+  } catch {}
+}
+document.querySelector("#upgradeBtn").onclick = async () => {
+  if (!confirm("Pull latest + restart the daemon? Agents keep running; the dashboard will reconnect.")) return;
+  toast("upgrading — pulling + restarting…", "info");
+  try {
+    const res = await (await fetch("/api/upgrade", { method:"POST", headers:{"content-type":"application/json"}, body:"{}" })).json();
+    toast(res.pull?.detail ? `pull: ${res.pull.detail}` : "restarting…", res.pull?.ok===false ? "warn" : "info");
+  } catch { toast("restarting…", "info"); }
+};
+refreshUpgrade(); setInterval(refreshUpgrade, 30000);
 connect();
 </script>
 </body>
