@@ -15,6 +15,7 @@ import type { ClientCommand, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { listPlaneIssues } from "./plane.ts";
 import { all, claim, release, who } from "./presence.ts";
+import { landAgent } from "./land.ts";
 import type { SquadManager } from "./squad-manager.ts";
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
@@ -85,6 +86,18 @@ export class SquadServer {
 					const dto = manager.getAgent(decodeURIComponent(mdiff[1]));
 					if (!dto) return new Response("no such agent", { status: 404 });
 					return Response.json(mdiff[2] === "diff" ? await worktreeDiff(dto.worktree) : await worktreeTree(dto.worktree));
+				}
+				const mland = url.pathname.match(/^\/api\/agents\/([^/]+)\/land$/);
+				if (mland && req.method === "POST") {
+					const dto = manager.getAgent(decodeURIComponent(mland[1]));
+					if (!dto) return new Response("no such agent", { status: 404 });
+					let message = `squad(${dto.name}): ${dto.issue?.name ?? "agent changes"}`;
+					const body: unknown = await req.json().catch(() => null);
+					if (body && typeof body === "object" && "message" in body && typeof body.message === "string" && body.message.trim()) {
+						message = body.message.trim();
+					}
+					const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message });
+					return Response.json(result);
 				}
 				if (url.pathname === "/api/plane/issues") {
 					const issues = await listPlaneIssues(url.searchParams.get("project") ?? "");

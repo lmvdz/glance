@@ -79,6 +79,10 @@
   .composer { border-top:1px solid var(--line); padding:10px 16px; display:flex; gap:8px; background:var(--panel); grid-column:1 / -1; }
   .composer textarea { flex:1; resize:none; height:40px; background:var(--panel2); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:8px 10px; font:inherit; }
   .controls { display:flex; gap:6px; }
+  .controls { flex-wrap:wrap; }
+  .diffpre { max-height:240px; overflow:auto; background:#0d1014; border:1px solid var(--line); border-radius:6px; padding:8px; font:11px/1.4 ui-monospace,monospace; white-space:pre; margin:4px 0; }
+  .dl.add { color:var(--ok); } .dl.del { color:var(--err); } .dl.hunk { color:var(--accent); }
+  details summary { cursor:pointer; padding:2px 0; }
   dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:0; width:420px; } dialog::backdrop { background:rgba(0,0,0,.5); }
   .modal { padding:18px; display:flex; flex-direction:column; gap:10px; } .modal h2 { margin:0 0 4px; font-size:15px; }
   .field { display:flex; flex-direction:column; gap:3px; } .field label { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
@@ -286,7 +290,7 @@ function renderAgent(body, a) {
           <textarea id="composerInput" placeholder="Instruct this agent… (Enter to send)"></textarea>
           <div class="controls">
             <button class="primary" id="sendBtn">Send</button>
-            <button id="intBtn">Interrupt</button><button id="rstBtn">Restart</button><button class="danger" id="killBtn">Kill</button>
+            <button id="intBtn">Interrupt</button><button id="rstBtn">Restart</button><button class="danger" id="killBtn">Kill</button><button class="primary" id="landBtn" title="Commit this agent's work + merge its branch">⤳ Land</button>
           </div>
         </div>
       </div>
@@ -299,6 +303,16 @@ function renderAgent(body, a) {
   $("#intBtn").onclick = () => send({ type:"interrupt", id:a.id });
   $("#rstBtn").onclick = () => send({ type:"restart", id:a.id });
   $("#killBtn").onclick = () => { if (confirm("Kill this agent?")) send({ type:"kill", id:a.id }); };
+  $("#landBtn").onclick = async () => {
+    const btn = $("#landBtn"); btn.disabled = true; btn.textContent = "Landing…";
+    try {
+      const r = await fetch(`/api/agents/${encodeURIComponent(a.id)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
+      const res = await r.json();
+      toast(res.ok ? `landed ${esc(a.name)}: ${res.detail||"merged"}` : `land failed: ${res.detail||r.status}`, res.ok ? "info" : "error");
+      loadDiff(a.id);
+    } catch { toast("land failed", "error"); }
+    btn.disabled = false; btn.textContent = "⤳ Land";
+  };
   loadSubs(a.id); loadDiff(a.id);
 }
 
@@ -311,9 +325,17 @@ async function loadSubs(id) {
 }
 async function loadDiff(id) {
   const box = $("#diff"); if (!box) return;
-  try { const r = await fetch(`/api/agents/${encodeURIComponent(id)}/diff`); if (!r.ok) throw 0;
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(id)}/diff`); if (!r.ok) throw 0;
     const diffs = await r.json();
-    box.innerHTML = diffs.length ? diffs.map(d=>`<div class="n changed">${esc(d.status)} ${esc(d.file)}</div>`).join("") : `<span style="color:var(--dim)">no changes</span>`;
+    if (!diffs.length) { box.innerHTML = `<span style="color:var(--dim)">no changes</span>`; return; }
+    box.innerHTML = diffs.map(d => {
+      const lines = String(d.diff || "").split("\n").map(l => {
+        const cls = (l[0] === "+" && !l.startsWith("+++")) ? "add" : (l[0] === "-" && !l.startsWith("---")) ? "del" : l.startsWith("@@") ? "hunk" : "";
+        return `<span class="dl ${cls}">${esc(l) || " "}</span>`;
+      }).join("\n");
+      return `<details><summary class="n changed">${esc(d.status)} ${esc(d.file)}</summary><pre class="diffpre">${lines}</pre></details>`;
+    }).join("");
   } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
 }
 
