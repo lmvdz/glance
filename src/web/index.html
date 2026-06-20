@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>omp-squad</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14181d; --panel2: #1b2127; --line: #262e36;
+    --ink: #e6e9ed; --mut: #8a96a3; --dim: #5c6873;
+    --accent: #6ea8fe; --ok: #57c08a; --work: #e2b84a; --input: #e0654f; --err: #d6473b; --stop: #5c6873;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--ink); height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .04em; font-weight: 600; }
+  header h1 .sq { color: var(--accent); }
+  .spacer { flex: 1; }
+  .conn { font-size: 12px; color: var(--mut); display: flex; align-items: center; gap: 6px; }
+  .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
+  .conn.up .dot { background: var(--ok); }
+  button { font: inherit; background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+           padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #0b0d10; border-color: var(--accent); font-weight: 600; }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+  main { flex: 1; display: grid; grid-template-columns: 380px 1fr; min-height: 0; }
+  .roster { border-right: 1px solid var(--line); overflow-y: auto; background: var(--bg); }
+  .empty { color: var(--dim); padding: 24px; text-align: center; font-size: 13px; }
+  .card { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
+  .card:hover { background: var(--panel); }
+  .card.sel { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
+  .card.needs { box-shadow: inset 3px 0 0 var(--input); }
+  .card .row1 { display: flex; align-items: center; gap: 8px; }
+  .name { font-weight: 600; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  .b-idle { background: #1d2a24; color: var(--ok); } .b-working { background: #2c2716; color: var(--work); }
+  .b-input { background: #2e1a16; color: var(--input); } .b-error { background: #2e1614; color: var(--err); }
+  .b-starting { background: #1a2230; color: var(--accent); } .b-stopped { background: #1c2228; color: var(--stop); }
+  .meta { font-size: 12px; color: var(--mut); display: flex; gap: 10px; flex-wrap: wrap; }
+  .meta .k { color: var(--dim); }
+  .activity { font-size: 12px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .detail { display: flex; flex-direction: column; min-height: 0; }
+  .dhead { padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; gap: 6px; }
+  .dhead .t { display: flex; align-items: center; gap: 10px; }
+  .dhead .sub { font-size: 12px; color: var(--mut); display: flex; gap: 14px; flex-wrap: wrap; }
+  .transcript { flex: 1; overflow-y: auto; padding: 12px 16px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .te { margin-bottom: 8px; white-space: pre-wrap; word-break: break-word; }
+  .te .who { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .te.user .who { color: var(--accent); } .te.assistant .who { color: var(--ok); }
+  .te.tool { color: var(--mut); } .te.system { color: var(--work); } .te.thinking { color: var(--dim); font-style: italic; }
+  .pending { border-top: 1px solid var(--line); background: #1c1410; padding: 10px 16px; }
+  .pending h3 { margin: 0 0 8px; font-size: 12px; color: var(--input); text-transform: uppercase; letter-spacing: .06em; }
+  .preq { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  .preq .q { font-size: 13px; }
+  .preq .ctl { display: flex; gap: 6px; flex-wrap: wrap; }
+  .preq input { flex: 1; background: var(--panel2); border: 1px solid var(--line); color: var(--ink); border-radius: 6px; padding: 6px 10px; }
+  .composer { border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 8px; background: var(--panel); }
+  .composer textarea { flex: 1; resize: none; height: 40px; background: var(--panel2); color: var(--ink); border: 1px solid var(--line);
+                       border-radius: 6px; padding: 8px 10px; font: inherit; }
+  .controls { display: flex; gap: 6px; }
+  .nodetail { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); }
+  dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 0; width: 420px; }
+  dialog::backdrop { background: rgba(0,0,0,.5); }
+  .modal { padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .modal h2 { margin: 0 0 4px; font-size: 15px; }
+  .field { display: flex; flex-direction: column; gap: 3px; }
+  .field label { font-size: 11px; color: var(--mut); text-transform: uppercase; letter-spacing: .05em; }
+  .field input, .field select, .field textarea { background: var(--panel2); border: 1px solid var(--line); color: var(--ink);
+        border-radius: 6px; padding: 7px 10px; font: inherit; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  .log { position: fixed; bottom: 10px; left: 396px; right: 16px; pointer-events: none; display: flex; flex-direction: column; gap: 4px; }
+  .toast { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12px; opacity: .95; }
+  .toast.error { border-color: var(--err); color: #ffb4ad; } .toast.warn { color: var(--work); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="sq">omp</span>-squad</h1>
+  <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
+  <div class="spacer"></div>
+  <span id="counts" class="conn"></span>
+  <button class="primary" id="addBtn">+ Add agent</button>
+</header>
+<main>
+  <div class="roster" id="roster"><div class="empty">No agents yet. Click “+ Add agent”.</div></div>
+  <div class="detail" id="detail"><div class="nodetail">Select an agent to view its transcript.</div></div>
+</main>
+<div class="log" id="log"></div>
+
+<dialog id="addDlg">
+  <form method="dialog" class="modal" id="addForm">
+    <h2>Add an agent</h2>
+    <div class="field"><label>Repo path</label><input name="repo" placeholder="/home/you/project" required /></div>
+    <div class="field"><label>Name</label><input name="name" placeholder="auth-refactor" /></div>
+    <div class="field"><label>Branch (optional)</label><input name="branch" placeholder="squad/&lt;name&gt;" /></div>
+    <div class="field"><label>Model (optional)</label><input name="model" placeholder="opus / gpt-5.2 / …" /></div>
+    <div class="field"><label>Approval mode</label>
+      <select name="approvalMode"><option value="write">write</option><option value="yolo">yolo</option><option value="always-ask">always-ask</option></select>
+    </div>
+    <div class="field"><label>Thinking</label>
+      <select name="thinking"><option value="low">low</option><option value="minimal">minimal</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select>
+    </div>
+    <div class="field"><label>Initial task (optional)</label><textarea name="task" rows="3" placeholder="Refactor the auth module to…"></textarea></div>
+    <div class="actions"><button type="button" id="addCancel">Cancel</button><button class="primary" id="addOk" value="ok">Spawn</button></div>
+  </form>
+</dialog>
+
+<script type="module">
+const agents = new Map();          // id -> AgentDTO
+const transcripts = new Map();     // id -> TranscriptEntry[]
+let selected = null;
+let ws = null;
+
+const $ = (s) => document.querySelector(s);
+const rosterEl = $("#roster"), detailEl = $("#detail"), connEl = $("#conn"), connText = $("#connText"), countsEl = $("#counts");
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { connEl.classList.add("up"); connText.textContent = "live"; };
+  ws.onclose = () => { connEl.classList.remove("up"); connText.textContent = "reconnecting…"; setTimeout(connect, 1000); };
+  ws.onmessage = (e) => handle(JSON.parse(e.data));
+}
+function send(cmd) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd)); }
+
+function handle(ev) {
+  switch (ev.type) {
+    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); renderRoster(); break;
+    case "agent": agents.set(ev.agent.id, ev.agent); renderRoster(); if (ev.agent.id === selected) renderDetailHead(); break;
+    case "removed": agents.delete(ev.id); transcripts.delete(ev.id); if (selected === ev.id) { selected = null; renderDetail(); } renderRoster(); break;
+    case "transcript": {
+      const arr = transcripts.get(ev.id) ?? []; arr.push(ev.entry); transcripts.set(ev.id, arr);
+      if (ev.id === selected) appendTranscript(ev.entry);
+      break;
+    }
+    case "log": toast(ev.text, ev.level); break;
+  }
+}
+
+const ICON = { idle: "idle", working: "working", input: "needs input", error: "error", starting: "starting", stopped: "stopped" };
+function renderRoster() {
+  const list = [...agents.values()].sort((a, b) => {
+    const rank = { input: 0, working: 1, idle: 2, starting: 3, error: 4, stopped: 5 };
+    return (rank[a.status] - rank[b.status]) || a.name.localeCompare(b.name);
+  });
+  const need = list.filter(a => a.status === "input").length;
+  countsEl.textContent = `${list.length} agents` + (need ? ` · ${need} need input` : "");
+  if (!list.length) { rosterEl.innerHTML = `<div class="empty">No agents yet. Click “+ Add agent”.</div>`; return; }
+  rosterEl.innerHTML = "";
+  for (const a of list) {
+    const card = document.createElement("div");
+    card.className = "card" + (a.id === selected ? " sel" : "") + (a.status === "input" ? " needs" : "");
+    const todo = a.todo ? `<span><span class="k">todo</span> ${a.todo.done}/${a.todo.total}</span>` : "";
+    const ctx = a.contextPct != null ? `<span><span class="k">ctx</span> ${Math.round(a.contextPct*100)}%</span>` : "";
+    const pend = a.pending && a.pending.length ? `<span style="color:var(--input)">⛔ ${a.pending.length}</span>` : "";
+    card.innerHTML = `
+      <div class="row1"><span class="badge b-${a.status}">${ICON[a.status]||a.status}</span><span class="name">${esc(a.name)}</span>${pend}</div>
+      <div class="meta"><span><span class="k">branch</span> ${esc(a.branch||"—")}</span>${todo}${ctx}</div>
+      <div class="activity">${esc(a.activity || a.todo?.active || (a.error ? "⚠ "+a.error : "—"))}</div>`;
+    card.onclick = () => selectAgent(a.id);
+    rosterEl.appendChild(card);
+  }
+}
+
+function selectAgent(id) {
+  selected = id;
+  if (!transcripts.has(id)) { transcripts.set(id, []); send({ type: "subscribe", id }); }
+  renderRoster(); renderDetail();
+}
+
+function renderDetail() {
+  const a = agents.get(selected);
+  if (!a) { detailEl.innerHTML = `<div class="nodetail">Select an agent to view its transcript.</div>`; return; }
+  detailEl.innerHTML = `
+    <div class="dhead" id="dhead"></div>
+    <div class="transcript" id="transcript"></div>
+    <div id="pendingWrap"></div>
+    <div class="composer">
+      <textarea id="composerInput" placeholder="Send an instruction… (Enter to send)"></textarea>
+      <div class="controls">
+        <button class="primary" id="sendBtn">Send</button>
+        <button id="intBtn">Interrupt</button>
+        <button id="rstBtn">Restart</button>
+        <button class="danger" id="killBtn">Kill</button>
+      </div>
+    </div>`;
+  renderDetailHead();
+  const t = $("#transcript"); t.innerHTML = "";
+  for (const e of (transcripts.get(selected) || [])) appendTranscript(e);
+  const input = $("#composerInput");
+  $("#sendBtn").onclick = () => { const v = input.value.trim(); if (v) { send({ type: "prompt", id: selected, message: v }); input.value = ""; } };
+  input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
+  $("#intBtn").onclick = () => send({ type: "interrupt", id: selected });
+  $("#rstBtn").onclick = () => send({ type: "restart", id: selected });
+  $("#killBtn").onclick = () => { if (confirm("Kill this agent?")) send({ type: "kill", id: selected }); };
+}
+
+function renderDetailHead() {
+  const a = agents.get(selected); if (!a) return;
+  const h = $("#dhead"); if (!h) return;
+  h.innerHTML = `
+    <div class="t"><span class="badge b-${a.status}">${ICON[a.status]||a.status}</span>
+      <strong>${esc(a.name)}</strong></div>
+    <div class="sub">
+      <span><span class="k">model</span> ${esc(a.model||"—")}</span>
+      <span><span class="k">branch</span> ${esc(a.branch||"—")}</span>
+      <span><span class="k">cwd</span> ${esc(a.worktree)}</span>
+    </div>`;
+  renderPending(a);
+}
+
+function renderPending(a) {
+  const wrap = $("#pendingWrap"); if (!wrap) return;
+  if (!a.pending || !a.pending.length) { wrap.innerHTML = ""; return; }
+  wrap.innerHTML = `<div class="pending"><h3>Needs your input</h3>${a.pending.map(renderPreq).join("")}</div>`;
+  for (const p of a.pending) {
+    const node = wrap.querySelector(`[data-req="${p.id}"]`); if (!node) continue;
+    if (p.kind === "confirm") {
+      node.querySelector(".yes").onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: "yes" });
+      node.querySelector(".no").onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: "no" });
+    } else if (p.kind === "select") {
+      node.querySelectorAll("button[data-opt]").forEach(b =>
+        b.onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: b.dataset.opt }));
+    } else {
+      const inp = node.querySelector("input");
+      node.querySelector(".submit").onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: inp.value });
+    }
+  }
+}
+
+function renderPreq(p) {
+  let ctl = "";
+  if (p.kind === "confirm") ctl = `<div class="ctl"><button class="yes primary">Yes</button><button class="no">No</button></div>`;
+  else if (p.kind === "select") ctl = `<div class="ctl">${(p.options||[]).map(o => `<button data-opt="${esc(o)}">${esc(o)}</button>`).join("")}</div>`;
+  else ctl = `<div class="ctl"><input placeholder="${esc(p.placeholder||"your answer")}" /><button class="submit primary">Submit</button></div>`;
+  return `<div class="preq" data-req="${esc(p.id)}"><div class="q"><strong>${esc(p.title)}</strong>${p.message ? " — "+esc(p.message) : ""}</div>${ctl}</div>`;
+}
+
+function appendTranscript(e) {
+  const t = $("#transcript"); if (!t) return;
+  const div = document.createElement("div");
+  div.className = "te " + e.kind;
+  div.innerHTML = `<span class="who">${e.kind}</span>  ${esc(e.text)}`;
+  const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+  t.appendChild(div);
+  if (atBottom) t.scrollTop = t.scrollHeight;
+}
+
+function toast(text, level) {
+  const el = document.createElement("div");
+  el.className = "toast " + (level || "info"); el.textContent = text;
+  $("#log").appendChild(el); setTimeout(() => el.remove(), 5000);
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c])); }
+
+// Add-agent modal
+const dlg = $("#addDlg");
+$("#addBtn").onclick = () => dlg.showModal();
+$("#addCancel").onclick = () => dlg.close();
+$("#addForm").onsubmit = (e) => {
+  const f = new FormData(e.target);
+  const options = { repo: f.get("repo").trim() };
+  for (const k of ["name","branch","model","task"]) { const v = (f.get(k)||"").trim(); if (v) options[k] = v; }
+  options.approvalMode = f.get("approvalMode");
+  options.thinking = f.get("thinking");
+  send({ type: "create", options });
+  e.target.reset();
+};
+
+connect();
+</script>
+</body>
+</html>
