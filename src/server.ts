@@ -41,6 +41,8 @@ export class SquadServer {
 	private presenceDebounce?: Timer;
 	/** agentId → repo it's claimed under, so we can release the claim on removal. */
 	private readonly claimed = new Map<string, string>();
+	/** Agent ids present when the server booted = survivors the daemon reattached to (vs spawned later). */
+	private readonly startupAgentIds = new Set<string>();
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
@@ -54,6 +56,7 @@ export class SquadServer {
 	}
 
 	start(): string {
+		for (const a of this.manager.list()) this.startupAgentIds.add(a.id);
 		const manager = this.manager;
 		const clients = this.clients;
 		const indexFile = Bun.file(INDEX_HTML);
@@ -204,7 +207,7 @@ export class SquadServer {
 		for (const a of this.manager.list()) {
 			liveIds.add(a.id);
 			this.claimed.set(a.id, a.repo);
-			await claim({ repo: a.repo, agent: a.name, branch: a.branch, task: a.issue?.name ?? a.activity, source: "squad", id: a.id });
+			await claim({ repo: a.repo, agent: a.name, branch: a.branch, task: a.issue?.name ?? a.activity, source: "squad", id: a.id, reattached: this.startupAgentIds.has(a.id) });
 		}
 		for (const [id, repo] of this.claimed) {
 			if (!liveIds.has(id)) {

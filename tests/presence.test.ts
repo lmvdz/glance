@@ -33,6 +33,16 @@ test("claim is discoverable via who()", async () => {
 	expect(live[0].repo).toBe(path.resolve(repo));
 });
 
+test("reattached flag round-trips through the registry", async () => {
+	const repo = await tmpDir();
+	const fresh = await claim({ repo, agent: "fresh", source: "squad" });
+	const back = await claim({ repo, agent: "back", source: "squad", reattached: true });
+	made.push({ id: fresh, repo }, { id: back, repo });
+	const live = await who(repo);
+	expect(live.find((e) => e.agent === "back")?.reattached).toBe(true);
+	expect(live.find((e) => e.agent === "fresh")?.reattached).toBeFalsy();
+});
+
 test("two agents on the same repo are both visible (collision-safe)", async () => {
 	const repo = await tmpDir();
 	const a = await claim({ repo, agent: "a", source: "squad" });

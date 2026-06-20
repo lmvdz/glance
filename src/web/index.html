@@ -247,7 +247,8 @@ async function loadPresence(repo) {
     box.innerHTML = live.map(e => {
       const s = Math.max(0, Math.round((Date.now() - e.heartbeat) / 1000));
       const t = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s/60)}m` : `${Math.round(s/3600)}h`;
-      return `<div class="subnode"><span class="badge b-${e.source==='squad'?'working':'idle'}">${esc(e.source)}</span> ${esc(e.operator)}/${esc(e.agent)} <span style="color:var(--dim)">${esc(e.branch||'')} · ${t} ago</span></div>`;
+      const re = e.reattached ? ` <span title="reattached to a surviving host after a restart" style="color:var(--accent)">↻ reattached</span>` : "";
+      return `<div class="subnode"><span class="badge b-${e.source==='squad'?'working':'idle'}">${esc(e.source)}</span> ${esc(e.operator)}/${esc(e.agent)} <span style="color:var(--dim)">${esc(e.branch||'')} · ${t} ago</span>${re}</div>`;
     }).join("");
   } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
 }

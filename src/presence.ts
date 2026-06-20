@@ -43,6 +43,8 @@ export interface PresenceEntry {
 	task?: string;
 	/** Where the claim came from. */
 	source: "squad" | "omp" | "other";
+	/** True if the daemon reattached to this agent's surviving host after a restart/upgrade. */
+	reattached?: boolean;
 	startedAt: number;
 	heartbeat: number;
 }
@@ -53,6 +55,7 @@ export interface ClaimInput {
 	agent: string;
 	branch?: string;
 	task?: string;
+	reattached?: boolean;
 	source?: PresenceEntry["source"];
 	/** Provide to update an existing claim; omit to mint a new one. */
 	id?: string;
@@ -97,6 +100,7 @@ export async function claim(input: ClaimInput): Promise<string> {
 		branch: input.branch,
 		task: input.task,
 		source: input.source ?? "other",
+		reattached: input.reattached,
 		startedAt,
 		heartbeat: now,
 	};
