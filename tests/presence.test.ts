@@ -48,8 +48,9 @@ test("stale claims (no heartbeat within TTL) are excluded", async () => {
 	const id = await claim({ repo, agent: "stale", source: "omp" });
 	made.push({ id, repo });
 	expect((await who(repo, 60_000)).length).toBe(1);
-	// With a 0ms TTL the just-written heartbeat is already "too old".
-	expect((await who(repo, 0)).length).toBe(0);
+	// Let the heartbeat age, then query with a 1ms TTL → it's stale and excluded.
+	await Bun.sleep(8);
+	expect((await who(repo, 1)).length).toBe(0);
 });
 
 test("heartbeat keeps a claim live; release removes it", async () => {

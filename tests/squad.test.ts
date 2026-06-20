@@ -15,6 +15,9 @@ import { SquadManager } from "../src/squad-manager.ts";
 import { buildBoard, type BoardState } from "../src/tui.ts";
 import type { AgentDTO } from "../src/types.ts";
 import { addWorktree, removeWorktree, repoRoot, worktreeStatus } from "../src/worktree.ts";
+import { TemplateArchitect } from "../src/architect.ts";
+import { FlueServiceDriver } from "../src/flue-service-driver.ts";
+import type { CommissionSpec } from "../src/types.ts";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 
 const tmps: string[] = [];
@@ -86,6 +89,7 @@ function dto(o: Partial<AgentDTO>): AgentDTO {
 		pending: o.pending ?? [],
 		lastActivity: Date.now(),
 		messageCount: 0,
+		kind: o.kind ?? "omp-operator",
 		...o,
 	};
 }
@@ -189,3 +193,109 @@ test(
 	},
 	30_000,
 );
+
+// ── commissioning loop (deterministic — no model, no network) ────────────────
+
+const EMAIL_BODY = `const text = String(payload.text ?? "");
+const emails = text.match(/[\\w.+-]+@[\\w-]+\\.[\\w.-]+/g) ?? [];
+return { emails, count: emails.length };`;
+
+function emailSpec(): CommissionSpec {
+	return {
+		name: "extract-emails",
+		purpose: "Extract email addresses from text.",
+		model: false,
+		capabilities: [],
+		workflowBody: EMAIL_BODY,
+		accept: { payload: { text: "a@x.io b@y.org" }, expect: { count: 2 } },
+	};
+}
+
+test("commission: TemplateArchitect authors a worker, lint gate passes, manager onboards a flue-service member", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-state-"));
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-worker-"));
+	tmps.push(stateDir, dir);
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+
+	const result = await mgr.commission(emailSpec(), { architect: new TemplateArchitect(), dir });
+	expect(result.ok).toBe(true);
+	expect(result.report.checks.find((c) => c.name === "lint")?.status).toBe("pass");
+	// No flue toolchain installed in the temp worker → acceptance is skipped, not failed.
+	expect(result.report.checks.find((c) => c.name === "acceptance")?.status).toBe("skip");
+
+	const member = mgr.list().find((a) => a.name === "extract-emails");
+	expect(member?.kind).toBe("flue-service");
+	expect(member?.status).toBe("idle");
+	expect(member?.verified).toBe(false);
+	expect(await fs.exists(path.join(dir, ".flue", "workflows", "extract-emails.ts"))).toBe(true);
+	expect(await fs.exists(path.join(dir, "flue.worker.json"))).toBe(true);
+	await mgr.stop();
+});
+
+test("commission: a candidate failing the lint gate is rejected, nothing onboarded", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-state-"));
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-worker-"));
+	tmps.push(stateDir, dir);
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+
+	// A model string that is not a provider/model specifier → lint fails the candidate.
+	const spec: CommissionSpec = { name: "bad-worker", purpose: "broken", model: "notaspecifier" };
+	const result = await mgr.commission(spec, { architect: new TemplateArchitect(), dir });
+	expect(result.ok).toBe(false);
+	expect(result.report.checks.find((c) => c.name === "lint")?.status).toBe("fail");
+	expect(mgr.list().length).toBe(0);
+	await mgr.stop();
+});
+
+test("commission: an onboarded flue-service member persists and is restored without re-validation", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-state-"));
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-worker-"));
+	tmps.push(stateDir, dir);
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	await mgr.commission(emailSpec(), { architect: new TemplateArchitect(), dir });
+	await mgr.stop();
+
+	const persisted = JSON.parse(await fs.readFile(path.join(stateDir, "state.json"), "utf8")) as {
+		agents: { name: string; kind?: string; flue?: { workflow?: string } }[];
+	};
+	const saved = persisted.agents.find((a) => a.name === "extract-emails");
+	expect(saved?.kind).toBe("flue-service");
+	expect(saved?.flue?.workflow).toBe("extract-emails");
+
+	const restored = new SquadManager({ stateDir });
+	const n = await restored.loadPersisted();
+	expect(n).toBe(1);
+	const member = restored.list().find((a) => a.name === "extract-emails");
+	expect(member?.kind).toBe("flue-service");
+	expect(member?.status).toBe("idle");
+	await restored.stop();
+});
+
+test("FlueServiceDriver: invokes a worker and emits omp-shaped frames around the result", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-fixture-"));
+	tmps.push(dir);
+	const fixture = path.join(dir, "fixture.ts");
+	await fs.writeFile(
+		fixture,
+		`const i = process.argv.indexOf("--payload");\nconst payload = i >= 0 ? JSON.parse(process.argv[i + 1]) : {};\nconsole.log("banner: running");\nconsole.log(JSON.stringify({ ok: true, echo: payload }, null, 2));\n`,
+	);
+	const driver = new FlueServiceDriver({
+		dir,
+		workflow: "echo",
+		target: "node",
+		buildInvocation: (payload) => ({ bin: "bun", args: [fixture, "--payload", JSON.stringify(payload)] }),
+	});
+	const frames: string[] = [];
+	driver.on("event", (f: { type?: string }) => {
+		if (typeof f.type === "string") frames.push(f.type);
+	});
+	await driver.start();
+	expect(driver.isReady).toBe(true);
+	await driver.prompt('{"text":"hi"}');
+	expect(frames).toEqual(["agent_start", "tool_execution_start", "message_update", "message_end", "agent_end"]);
+	expect(driver.lastResult).toEqual({ ok: true, echo: { text: "hi" } });
+	await driver.stop();
+});

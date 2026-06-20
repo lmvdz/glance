@@ -17,6 +17,13 @@ export type AgentStatus =
 	| "error" // spawn failed, child crashed, or fatal RPC error
 	| "stopped"; // intentionally terminated
 
+/**
+ * Which runtime backs a managed agent.
+ *  - "omp-operator": an `omp --mode rpc` child in a git worktree (interactive, steerable).
+ *  - "flue-service": a Flue worker invoked via `flue run` (autonomous / bounded).
+ */
+export type AgentKind = "omp-operator" | "flue-service";
+
 /** A request from the agent that a human must answer before it can proceed. */
 export interface PendingRequest {
 	/** Correlates with the answer the surface sends back. */
@@ -43,11 +50,40 @@ export interface TranscriptEntry {
 	ts: number;
 }
 
+/** A work item (e.g. a Plane issue) an agent is advancing. */
+export interface IssueRef {
+	/** Provider issue id. */
+	id: string;
+	/** Human identifier, e.g. "DAGON-263". */
+	identifier?: string;
+	name: string;
+	state?: string;
+	url?: string;
+	/** Provider project id this issue belongs to. */
+	projectId?: string;
+}
+
+/** A project / workstream — the top level of the command center. Derived from agents' repos. */
+export interface ProjectDTO {
+	/** Stable id = repo root path. */
+	id: string;
+	name: string;
+	repo: string;
+	agentCount: number;
+	statusCounts: Partial<Record<AgentStatus, number>>;
+	pendingCount: number;
+	lastActivity: number;
+}
+
 /** Serializable per-agent snapshot sent to surfaces. */
 export interface AgentDTO {
 	id: string;
 	name: string;
 	status: AgentStatus;
+	/** Which runtime backs this agent. */
+	kind: AgentKind;
+	/** flue-service only: passed the acceptance gate at onboard time. */
+	verified?: boolean;
 	/** Repo root the worktree was cut from. */
 	repo: string;
 	/** Absolute path of this agent's git worktree (its cwd). */
@@ -69,6 +105,8 @@ export interface AgentDTO {
 	messageCount: number;
 	/** Last error string, if status === "error". */
 	error?: string;
+	/** Work item this agent is advancing (e.g. a Plane issue). */
+	issue?: IssueRef;
 }
 
 export type ApprovalMode = "always-ask" | "write" | "yolo";
@@ -87,6 +125,11 @@ export interface PersistedAgent {
 	/** Initial task prompt, if the agent was created with one. */
 	task?: string;
 	thinking?: ThinkingLevel;
+	issue?: IssueRef;
+	/** Runtime class; defaults to "omp-operator" when absent (back-compat). */
+	kind?: AgentKind;
+	/** flue-service only: worker invocation config. */
+	flue?: FlueMemberConfig;
 }
 
 /** Options when adding an agent to the squad. */
@@ -103,6 +146,63 @@ export interface CreateAgentOptions {
 	task?: string;
 	/** Reasoning effort for this agent (defaults to "low" so fleet agents stay responsive). */
 	thinking?: ThinkingLevel;
+	/** Work item to advance (shown in the command center; e.g. a Plane issue). */
+	issue?: IssueRef;
+}
+
+// ── Commissioning (agents that author agents) ────────────────────────────────
+
+/** flue-service only: how to invoke the worker's workflow. */
+export interface FlueMemberConfig {
+	/** Worker project directory (its cwd). */
+	dir: string;
+	/** Flue workflow module name to invoke (e.g. "extract-emails"). */
+	workflow: string;
+	/** Deploy/run target. */
+	target: "node" | "cloudflare";
+}
+
+/** A job spec handed to the commissioning loop — the "job description". */
+export interface CommissionSpec {
+	/** Kebab worker name; becomes the Flue workflow + module name. */
+	name: string;
+	/** The ability this worker compartmentalizes (the JD). */
+	purpose: string;
+	/** Model specifier, or false for a deterministic (no-LLM) worker. */
+	model?: string | false;
+	/** Least-privilege tool/skill allowlist, recorded in the worker manifest. */
+	capabilities?: string[];
+	/** Deploy/run target. Defaults to "node". */
+	deployTarget?: "node" | "cloudflare";
+	/** TemplateArchitect: the run() body to splice into the workflow. */
+	workflowBody?: string;
+	/** Acceptance check — the "interview" the candidate must pass to be onboarded. */
+	accept?: { payload: unknown; expect?: Record<string, unknown> };
+}
+
+/** One acceptance-gate check result. */
+export interface GateCheck {
+	name: "lint" | "typecheck" | "acceptance";
+	status: "pass" | "fail" | "skip";
+	detail?: string;
+}
+
+/** Outcome of the acceptance gate. */
+export interface GateReport {
+	ok: boolean;
+	checks: GateCheck[];
+	/** acceptance result payload, when the acceptance check ran. */
+	result?: unknown;
+}
+
+/** Outcome of a commission() call. */
+export interface CommissionResult {
+	ok: boolean;
+	report: GateReport;
+	/** The onboarded fleet member, when ok. */
+	member?: AgentDTO;
+	/** Worker project directory. */
+	dir: string;
 }
 
 // ── Manager → surface events ────────────────────────────────────────────────
@@ -125,7 +225,8 @@ export type ClientCommand =
 	| { type: "remove"; id: string; deleteWorktree?: boolean }
 	| { type: "create"; options: CreateAgentOptions }
 	| { type: "snapshot" } // request a full roster + recent transcript replay
-	| { type: "subscribe"; id: string }; // ask for transcript replay of one agent
+	| { type: "subscribe"; id: string } // ask for transcript replay of one agent
+	| { type: "commission"; spec: CommissionSpec };
 
 // ── Federation (Phase 2): cross-operator coordination ───────────────────────
 

@@ -153,6 +153,63 @@ omp-squad list           # watch demo go working → idle
 cat ~/.omp/squad/worktrees/<repo>-squad-demo/proof.txt   # → OK
 ```
 
+## Command center
+
+The web UI is an **organizational command center**, not a flat list:
+
+- **Projects** (sidebar) — agents grouped by repo, each with a live status rollup and a needs-input badge.
+- **Project view** — the agents advancing that project, a *spawn-in-this-project* composer (type a task → agent), and a **Plane issues** panel (open issues; click to spawn an agent on one).
+- **Agent view** — transcript + composer + pending-answer controls, plus side panels:
+  - **Subagents** — the live tree of `task`-spawned children (via omp's RPC subagent stream).
+  - **Changes** — the agent's worktree git diff, so you can review before merging.
+
+### Plane integration
+
+Set on the daemon to pull real work items into the command center:
+
+| Env | Meaning |
+|---|---|
+| `PLANE_API_KEY` | Plane API token (required to enable) |
+| `PLANE_WORKSPACE` | Workspace slug (required) |
+| `PLANE_BASE_URL` | API base (default `https://api.plane.so`) |
+| `PLANE_PROJECT_ID` | Fallback Plane project id for every repo |
+| `PLANE_PROJECT_MAP` | JSON `{ "<repo path or basename>": "<plane project id>" }` |
+
+Unset → the issues panel shows "Plane not connected" and everything else works.
+
+### Federation (opt-in)
+
+`OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
+(or your OS username) via `TailnetFederationBus`; unset → single-operator with `NullFederationBus`.
+
+## Commissioning — agents that author agents
+
+A second fleet class lives beside the interactive omp operators: **`flue-service`
+workers**. Instead of hiring a human when a job opens, the OS **authors its own
+specialized worker** — a small, scoped [Flue](https://flueframework.com) agent — and
+onboards it only if it passes an acceptance gate. The hire-replacement loop:
+
+```bash
+# Deterministic worker (no model): author → validate → onboard if the gate passes
+omp-squad commission extract-emails \
+  --purpose "Extract email addresses from payload.text; return { emails, count }." \
+  --accept-payload '{"text":"a@x.io b@y.org"}' --accept-expect '{"count":2}'
+```
+
+- **Author** — an `Architect` writes the worker. `OmpArchitect` (default) drives a real
+  `omp --mode rpc` agent to write the workflow; `TemplateArchitect` renders it
+  deterministically. (`--model <spec>` makes the worker itself model-backed.)
+- **Acceptance gate** (`src/validate.ts`) — tiered + degrading: **lint** (always) →
+  **typecheck** → **`flue run` acceptance** (when the worker's toolchain is installed),
+  deep-matching the result against `--accept-expect`. A failed gate onboards nothing.
+- **Onboard** — a passing worker becomes a `flue-service` member via `FlueServiceDriver`,
+  which adapts `flue run` into the same omp event frames the manager already derives
+  status from. It shows in the roster (and federates) like any other agent.
+
+Both classes implement one `AgentDriver` seam, so `kind` is the only thing surfaces
+need to tell an interactive operator from a commissioned worker. Design + rationale:
+[`docs/commission-loop.md`](docs/commission-loop.md).
+
 ## Phase 2 — cross-operator federation
 
 The single-operator squad above is built **federation-ready**: the manager already
@@ -190,6 +247,14 @@ Phase 2 — transport + policy, not surgery.
 | `src/squad-manager.ts` | Roster, status derivation, transcript, persistence, `applyCommand` |
 | `src/server.ts` | HTTP + WebSocket bridge (web dashboard + REST) |
 | `src/web/index.html` | Single-page web dashboard |
-| `src/tui.ts` | Terminal dashboard (pure `buildBoard` + interactive shell) |
-| `src/federation.ts` | Phase-2 transport seam (`FederationBus`) |
+| `src/tui.ts` | Terminal dashboard — `buildBoard` chrome + pi-tui `Editor` input, two-level nav |
+| `src/subagents.ts` | `SubagentTracker` — RPC subagent stream → live hierarchy tree |
+| `src/agent-driver.ts` | `AgentDriver` seam shared by `RpcAgent` + `FlueServiceDriver` |
+| `src/flue-service-driver.ts` | Adapts a commissioned Flue worker (`flue run`) to `AgentDriver` |
+| `src/architect.ts` | `TemplateArchitect` (deterministic) + `OmpArchitect` (omp-authored) |
+| `src/worker-template.ts` | `CommissionSpec` → runnable Flue worker project files |
+| `src/validate.ts` | Acceptance gate — lint · typecheck · `flue run` |
+| `src/explore.ts` | Worktree file tree + git diff (the Changes panel) |
+| `src/plane.ts` | Plane issue client (env-configured) |
+| `src/federation.ts` | Federation seam + `TailnetFederationBus`, `mergeRosters`, `detectCollisions` |
 | `src/index.ts` | CLI |

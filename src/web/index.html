@@ -3,296 +3,359 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>omp-squad</title>
+<title>omp-squad · command center</title>
 <style>
   :root {
-    --bg: #0b0d10; --panel: #14181d; --panel2: #1b2127; --line: #262e36;
-    --ink: #e6e9ed; --mut: #8a96a3; --dim: #5c6873;
-    --accent: #6ea8fe; --ok: #57c08a; --work: #e2b84a; --input: #e0654f; --err: #d6473b; --stop: #5c6873;
+    --bg:#0b0d10; --panel:#14181d; --panel2:#1b2127; --line:#262e36;
+    --ink:#e6e9ed; --mut:#8a96a3; --dim:#5c6873;
+    --accent:#6ea8fe; --ok:#57c08a; --work:#e2b84a; --input:#e0654f; --err:#d6473b; --stop:#5c6873;
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-         background: var(--bg); color: var(--ink); height: 100vh; display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
-  header h1 { font-size: 15px; margin: 0; letter-spacing: .04em; font-weight: 600; }
-  header h1 .sq { color: var(--accent); }
-  .spacer { flex: 1; }
-  .conn { font-size: 12px; color: var(--mut); display: flex; align-items: center; gap: 6px; }
-  .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
-  .conn.up .dot { background: var(--ok); }
-  button { font: inherit; background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
-           padding: 6px 12px; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); color: #0b0d10; border-color: var(--accent); font-weight: 600; }
-  button.danger:hover { border-color: var(--err); color: var(--err); }
-  main { flex: 1; display: grid; grid-template-columns: 380px 1fr; min-height: 0; }
-  .rostercol { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
-  .roster { flex: 1; overflow-y: auto; }
-  .quickspawn { border-top: 1px solid var(--line); padding: 8px; display: flex; }
-  .quickspawn input { flex: 1; background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: inherit; }
-  .quickspawn input:focus { outline: none; border-color: var(--accent); }
-  .empty { color: var(--dim); padding: 24px; text-align: center; font-size: 13px; }
-  .card { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
-  .card:hover { background: var(--panel); }
-  .card.sel { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
-  .card.needs { box-shadow: inset 3px 0 0 var(--input); }
-  .card .row1 { display: flex; align-items: center; gap: 8px; }
-  .name { font-weight: 600; }
-  .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
-  .b-idle { background: #1d2a24; color: var(--ok); } .b-working { background: #2c2716; color: var(--work); }
-  .b-input { background: #2e1a16; color: var(--input); } .b-error { background: #2e1614; color: var(--err); }
-  .b-starting { background: #1a2230; color: var(--accent); } .b-stopped { background: #1c2228; color: var(--stop); }
-  .meta { font-size: 12px; color: var(--mut); display: flex; gap: 10px; flex-wrap: wrap; }
-  .meta .k { color: var(--dim); }
-  .activity { font-size: 12px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
-  .bar > i { display: block; height: 100%; background: var(--accent); }
-  .detail { display: flex; flex-direction: column; min-height: 0; }
-  .dhead { padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; gap: 6px; }
-  .dhead .t { display: flex; align-items: center; gap: 10px; }
-  .dhead .sub { font-size: 12px; color: var(--mut); display: flex; gap: 14px; flex-wrap: wrap; }
-  .transcript { flex: 1; overflow-y: auto; padding: 12px 16px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .te { margin-bottom: 8px; white-space: pre-wrap; word-break: break-word; }
-  .te .who { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-  .te.user .who { color: var(--accent); } .te.assistant .who { color: var(--ok); }
-  .te.tool { color: var(--mut); } .te.system { color: var(--work); } .te.thinking { color: var(--dim); font-style: italic; }
-  .pending { border-top: 1px solid var(--line); background: #1c1410; padding: 10px 16px; }
-  .pending h3 { margin: 0 0 8px; font-size: 12px; color: var(--input); text-transform: uppercase; letter-spacing: .06em; }
-  .preq { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
-  .preq .q { font-size: 13px; }
-  .preq .ctl { display: flex; gap: 6px; flex-wrap: wrap; }
-  .preq input { flex: 1; background: var(--panel2); border: 1px solid var(--line); color: var(--ink); border-radius: 6px; padding: 6px 10px; }
-  .composer { border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 8px; background: var(--panel); }
-  .composer textarea { flex: 1; resize: none; height: 40px; background: var(--panel2); color: var(--ink); border: 1px solid var(--line);
-                       border-radius: 6px; padding: 8px 10px; font: inherit; }
-  .controls { display: flex; gap: 6px; }
-  .nodetail { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); }
-  dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 0; width: 420px; }
-  dialog::backdrop { background: rgba(0,0,0,.5); }
-  .modal { padding: 18px; display: flex; flex-direction: column; gap: 10px; }
-  .modal h2 { margin: 0 0 4px; font-size: 15px; }
-  .field { display: flex; flex-direction: column; gap: 3px; }
-  .field label { font-size: 11px; color: var(--mut); text-transform: uppercase; letter-spacing: .05em; }
-  .field input, .field select, .field textarea { background: var(--panel2); border: 1px solid var(--line); color: var(--ink);
-        border-radius: 6px; padding: 7px 10px; font: inherit; }
-  .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
-  .log { position: fixed; bottom: 10px; left: 396px; right: 16px; pointer-events: none; display: flex; flex-direction: column; gap: 4px; }
-  .toast { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12px; opacity: .95; }
-  .toast.error { border-color: var(--err); color: #ffb4ad; } .toast.warn { color: var(--work); }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; flex-direction:column; }
+  a { color:var(--accent); text-decoration:none; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:15px; margin:0; letter-spacing:.04em; font-weight:600; } header h1 .sq { color:var(--accent); }
+  .spacer { flex:1; }
+  .conn { font-size:12px; color:var(--mut); display:flex; align-items:center; gap:6px; }
+  .conn .dot { width:8px; height:8px; border-radius:50%; background:var(--err); } .conn.up .dot { background:var(--ok); }
+  button { font:inherit; background:var(--panel2); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button:hover { border-color:var(--accent); } button.primary { background:var(--accent); color:#0b0d10; border-color:var(--accent); font-weight:600; }
+  button.danger:hover { border-color:var(--err); color:var(--err); } button.sm { padding:3px 8px; font-size:12px; }
+  main { flex:1; display:grid; grid-template-columns:300px 1fr; min-height:0; }
+  /* sidebar */
+  .sidebar { border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); }
+  .side-h { padding:10px 14px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); border-bottom:1px solid var(--line); }
+  .projects { flex:1; overflow-y:auto; }
+  .proj { padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .proj:hover { background:var(--panel); } .proj.sel { background:var(--panel2); box-shadow:inset 3px 0 0 var(--accent); }
+  .proj.needs { box-shadow:inset 3px 0 0 var(--input); }
+  .proj .pn { font-weight:600; display:flex; align-items:center; gap:8px; }
+  .proj .pmeta { font-size:12px; color:var(--mut); margin-top:3px; display:flex; gap:8px; flex-wrap:wrap; }
+  .dots { display:inline-flex; gap:3px; }
+  .d { width:8px; height:8px; border-radius:50%; display:inline-block; }
+  .d.working{background:var(--work)} .d.idle{background:var(--ok)} .d.input{background:var(--input)} .d.error{background:var(--err)} .d.starting{background:var(--accent)} .d.stopped{background:var(--stop)}
+  .empty { color:var(--dim); padding:24px; text-align:center; font-size:13px; }
+  /* content */
+  .content { display:flex; flex-direction:column; min-height:0; }
+  .crumb { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; align-items:center; gap:8px; font-size:13px; }
+  .crumb .seg { color:var(--mut); cursor:pointer; } .crumb .seg:hover { color:var(--ink); } .crumb .cur { font-weight:600; }
+  .body { flex:1; overflow-y:auto; min-height:0; }
+  .nodetail { height:100%; display:flex; align-items:center; justify-content:center; color:var(--dim); }
+  /* project view */
+  .pv { padding:14px 16px; display:flex; flex-direction:column; gap:14px; }
+  .pv h2 { margin:0; font-size:16px; } .pv .sub { color:var(--mut); font-size:12px; }
+  .agrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px; }
+  .acard { border:1px solid var(--line); border-radius:8px; padding:10px 12px; cursor:pointer; background:var(--panel); display:flex; flex-direction:column; gap:6px; }
+  .acard:hover { border-color:var(--accent); } .acard.needs { border-color:var(--input); }
+  .acard .r1 { display:flex; align-items:center; gap:8px; }
+  .badge { font-size:11px; padding:1px 7px; border-radius:999px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
+  .b-idle{background:#1d2a24;color:var(--ok)} .b-working{background:#2c2716;color:var(--work)} .b-input{background:#2e1a16;color:var(--input)} .b-error{background:#2e1614;color:var(--err)} .b-starting{background:#1a2230;color:var(--accent)} .b-stopped{background:#1c2228;color:var(--stop)}
+  .acard .nm { font-weight:600; } .acard .meta { font-size:12px; color:var(--mut); }
+  .issue { font-size:12px; color:var(--accent); }
+  .section { border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+  .section > h3 { margin:0; padding:8px 12px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); border-bottom:1px solid var(--line); }
+  .section .inner { padding:10px 12px; }
+  .spawnrow { display:flex; gap:8px; } .spawnrow input { flex:1; background:var(--panel2); border:1px solid var(--line); color:var(--ink); border-radius:6px; padding:8px 10px; font:inherit; }
+  .issuelist { display:flex; flex-direction:column; gap:6px; }
+  .issuerow { display:flex; align-items:center; gap:8px; padding:6px 8px; border:1px solid var(--line); border-radius:6px; }
+  .issuerow .iid { color:var(--dim); font-family:ui-monospace,monospace; font-size:12px; } .issuerow .inm { flex:1; }
+  /* agent view */
+  .av { display:flex; flex-direction:column; height:100%; min-height:0; }
+  .ahead { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; flex-direction:column; gap:6px; }
+  .ahead .sub { font-size:12px; color:var(--mut); display:flex; gap:14px; flex-wrap:wrap; }
+  .avmain { flex:1; display:grid; grid-template-columns:1fr 300px; min-height:0; }
+  .transcript { overflow-y:auto; padding:12px 16px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .te { margin-bottom:8px; white-space:pre-wrap; word-break:break-word; } .te .who { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .te.user .who{color:var(--accent)} .te.assistant .who{color:var(--ok)} .te.tool{color:var(--mut)} .te.system{color:var(--work)} .te.thinking{color:var(--dim);font-style:italic}
+  .aside { border-left:1px solid var(--line); overflow-y:auto; padding:0; }
+  .aside .section { border:0; border-bottom:1px solid var(--line); border-radius:0; }
+  .tree { font:12px/1.5 ui-monospace,monospace; }
+  .tree .n { white-space:nowrap; } .tree .dir { color:var(--accent); } .tree .changed { color:var(--work); }
+  .subnode { font-size:12px; padding:3px 0; display:flex; gap:6px; align-items:center; }
+  .pending { border-top:1px solid var(--line); background:#1c1410; padding:10px 16px; }
+  .pending h3 { margin:0 0 8px; font-size:12px; color:var(--input); text-transform:uppercase; letter-spacing:.06em; }
+  .preq { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; } .preq .ctl { display:flex; gap:6px; flex-wrap:wrap; }
+  .preq input { flex:1; background:var(--panel2); border:1px solid var(--line); color:var(--ink); border-radius:6px; padding:6px 10px; }
+  .composer { border-top:1px solid var(--line); padding:10px 16px; display:flex; gap:8px; background:var(--panel); grid-column:1 / -1; }
+  .composer textarea { flex:1; resize:none; height:40px; background:var(--panel2); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:8px 10px; font:inherit; }
+  .controls { display:flex; gap:6px; }
+  dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:0; width:420px; } dialog::backdrop { background:rgba(0,0,0,.5); }
+  .modal { padding:18px; display:flex; flex-direction:column; gap:10px; } .modal h2 { margin:0 0 4px; font-size:15px; }
+  .field { display:flex; flex-direction:column; gap:3px; } .field label { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
+  .field input, .field select, .field textarea { background:var(--panel2); border:1px solid var(--line); color:var(--ink); border-radius:6px; padding:7px 10px; font:inherit; }
+  .modal .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
+  .log { position:fixed; bottom:10px; right:16px; width:360px; pointer-events:none; display:flex; flex-direction:column; gap:4px; }
+  .toast { background:var(--panel2); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12px; opacity:.95; } .toast.error{border-color:var(--err);color:#ffb4ad} .toast.warn{color:var(--work)}
 </style>
 </head>
 <body>
 <header>
-  <h1><span class="sq">omp</span>-squad</h1>
+  <h1><span class="sq">omp</span>-squad <span style="color:var(--dim);font-weight:400">command center</span></h1>
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
-  <button class="primary" id="addBtn">+ Add agent</button>
+  <button class="primary" id="addBtn">+ New agent</button>
 </header>
 <main>
-  <div class="rostercol">
-    <div class="roster" id="roster"><div class="empty">No agents yet — type a task below or click “+ Add agent”.</div></div>
-    <form class="quickspawn" id="quickForm"><input id="quickInput" placeholder="New task… (Enter to spawn)" autocomplete="off" /></form>
+  <div class="sidebar">
+    <div class="side-h">Projects</div>
+    <div class="projects" id="projects"><div class="empty">No projects yet.</div></div>
   </div>
-  <div class="detail" id="detail"><div class="nodetail">Select an agent to view its transcript.</div></div>
+  <div class="content">
+    <div class="crumb" id="crumb"></div>
+    <div class="body" id="body"><div class="nodetail">Select a project.</div></div>
+  </div>
 </main>
 <div class="log" id="log"></div>
 
 <dialog id="addDlg">
   <form method="dialog" class="modal" id="addForm">
-    <h2>Add an agent</h2>
-    <div class="field"><label>Repo path</label><input name="repo" placeholder="/home/you/project" required /></div>
+    <h2>New agent</h2>
+    <div class="field"><label>Repo / project path</label><input name="repo" placeholder="/home/you/project" required /></div>
     <div class="field"><label>Name</label><input name="name" placeholder="auth-refactor" /></div>
-    <div class="field"><label>Branch (optional)</label><input name="branch" placeholder="squad/&lt;name&gt;" /></div>
-    <div class="field"><label>Model (optional)</label><input name="model" placeholder="opus / gpt-5.2 / …" /></div>
-    <div class="field"><label>Approval mode</label>
-      <select name="approvalMode"><option value="write">write</option><option value="yolo">yolo</option><option value="always-ask">always-ask</option></select>
-    </div>
-    <div class="field"><label>Thinking</label>
-      <select name="thinking"><option value="low">low</option><option value="minimal">minimal</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select>
-    </div>
-    <div class="field"><label>Initial task (optional)</label><textarea name="task" rows="3" placeholder="Refactor the auth module to…"></textarea></div>
-    <div class="actions"><button type="button" id="addCancel">Cancel</button><button class="primary" id="addOk" value="ok">Spawn</button></div>
+    <div class="field"><label>Approval</label><select name="approvalMode"><option value="write">write</option><option value="yolo">yolo</option><option value="always-ask">always-ask</option></select></div>
+    <div class="field"><label>Thinking</label><select name="thinking"><option value="low">low</option><option value="minimal">minimal</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></div>
+    <div class="field"><label>Task</label><textarea name="task" rows="3" placeholder="Refactor the auth module to…"></textarea></div>
+    <div class="actions"><button type="button" id="addCancel">Cancel</button><button class="primary" value="ok">Spawn</button></div>
   </form>
 </dialog>
 
 <script type="module">
-const agents = new Map();          // id -> AgentDTO
-const transcripts = new Map();     // id -> TranscriptEntry[]
-let selected = null;
+const agents = new Map();        // id -> AgentDTO
+const transcripts = new Map();   // id -> TranscriptEntry[]
+let view = "project";            // "project" | "agent"
+let selProject = null;           // repo path
+let selAgent = null;             // agent id
+let spawnCwd = ".";
 let ws = null;
 
 const $ = (s) => document.querySelector(s);
-const rosterEl = $("#roster"), detailEl = $("#detail"), connEl = $("#conn"), connText = $("#connText"), countsEl = $("#counts");
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+const STATUSES = ["working","input","idle","starting","error","stopped"];
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { connEl.classList.add("up"); connText.textContent = "live"; };
-  ws.onclose = () => { connEl.classList.remove("up"); connText.textContent = "reconnecting…"; setTimeout(connect, 1000); };
+  ws.onopen = () => { $("#conn").classList.add("up"); $("#connText").textContent = "live"; };
+  ws.onclose = () => { $("#conn").classList.remove("up"); $("#connText").textContent = "reconnecting…"; setTimeout(connect, 1000); };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function send(cmd) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd)); }
 
 function handle(ev) {
   switch (ev.type) {
-    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); renderRoster(); break;
-    case "agent": agents.set(ev.agent.id, ev.agent); renderRoster(); if (ev.agent.id === selected) renderDetailHead(); break;
-    case "removed": agents.delete(ev.id); transcripts.delete(ev.id); if (selected === ev.id) { selected = null; renderDetail(); } renderRoster(); break;
-    case "transcript": {
-      const arr = transcripts.get(ev.id) ?? []; arr.push(ev.entry); transcripts.set(ev.id, arr);
-      if (ev.id === selected) appendTranscript(ev.entry);
-      break;
-    }
+    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); renderAll(); break;
+    case "agent": agents.set(ev.agent.id, ev.agent); renderAll(); break;
+    case "removed": agents.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
+    case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
   }
 }
 
-const ICON = { idle: "idle", working: "working", input: "needs input", error: "error", starting: "starting", stopped: "stopped" };
-function renderRoster() {
-  const list = [...agents.values()].sort((a, b) => {
-    const rank = { input: 0, working: 1, idle: 2, starting: 3, error: 4, stopped: 5 };
-    return (rank[a.status] - rank[b.status]) || a.name.localeCompare(b.name);
-  });
-  const need = list.filter(a => a.status === "input").length;
-  countsEl.textContent = `${list.length} agents` + (need ? ` · ${need} need input` : "");
-  if (!list.length) { rosterEl.innerHTML = `<div class="empty">No agents yet. Click “+ Add agent”.</div>`; return; }
-  rosterEl.innerHTML = "";
-  for (const a of list) {
-    const card = document.createElement("div");
-    card.className = "card" + (a.id === selected ? " sel" : "") + (a.status === "input" ? " needs" : "");
-    const todo = a.todo ? `<span><span class="k">todo</span> ${a.todo.done}/${a.todo.total}</span>` : "";
-    const ctx = a.contextPct != null ? `<span><span class="k">ctx</span> ${Math.round(a.contextPct*100)}%</span>` : "";
-    const pend = a.pending && a.pending.length ? `<span style="color:var(--input)">⛔ ${a.pending.length}</span>` : "";
-    card.innerHTML = `
-      <div class="row1"><span class="badge b-${a.status}">${ICON[a.status]||a.status}</span><span class="name">${esc(a.name)}</span>${pend}</div>
-      <div class="meta"><span><span class="k">branch</span> ${esc(a.branch||"—")}</span>${todo}${ctx}</div>
-      <div class="activity">${esc(a.activity || a.todo?.active || (a.error ? "⚠ "+a.error : "—"))}</div>`;
-    card.onclick = () => selectAgent(a.id);
-    rosterEl.appendChild(card);
+// ── derive projects from the live roster ────────────────────────────────────
+function projects() {
+  const byRepo = new Map();
+  for (const a of agents.values()) {
+    let p = byRepo.get(a.repo);
+    if (!p) { p = { id: a.repo, name: a.repo.split("/").filter(Boolean).pop() || a.repo, repo: a.repo, agents: [], counts: {}, pending: 0, last: 0 }; byRepo.set(a.repo, p); }
+    p.agents.push(a); p.counts[a.status] = (p.counts[a.status]||0)+1; p.pending += a.pending.length; p.last = Math.max(p.last, a.lastActivity);
+  }
+  return [...byRepo.values()].sort((x,y) => y.last - x.last);
+}
+
+function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCounts(); }
+
+function renderCounts() {
+  const all = [...agents.values()]; const need = all.filter(a => a.status === "input").length;
+  $("#counts").textContent = `${projects().length} projects · ${all.length} agents` + (need ? ` · ${need} need input` : "");
+}
+
+function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="d ${s}" title="${counts[s]} ${s}"></span>`).join("")}</span>`; }
+
+function renderSidebar() {
+  const ps = projects(); const el = $("#projects");
+  if (!ps.length) { el.innerHTML = `<div class="empty">No projects yet — “+ New agent”.</div>`; return; }
+  el.innerHTML = "";
+  for (const p of ps) {
+    const div = document.createElement("div");
+    div.className = "proj" + (p.id === selProject ? " sel" : "") + (p.pending ? " needs" : "");
+    div.innerHTML = `<div class="pn">${esc(p.name)}</div>
+      <div class="pmeta">${dots(p.counts)} <span>${p.agents.length} agent${p.agents.length===1?"":"s"}</span>${p.pending?`<span style="color:var(--input)">⛔ ${p.pending}</span>`:""}</div>`;
+    div.onclick = () => { selProject = p.id; selAgent = null; view = "project"; renderAll(); };
+    el.appendChild(div);
   }
 }
 
-function selectAgent(id) {
-  selected = id;
-  if (!transcripts.has(id)) { transcripts.set(id, []); send({ type: "subscribe", id }); }
-  renderRoster(); renderDetail();
+function renderCrumb() {
+  const c = $("#crumb"); const p = projects().find(x => x.id === selProject);
+  if (!p) { c.innerHTML = `<span class="cur">Overview</span>`; return; }
+  const a = selAgent ? agents.get(selAgent) : null;
+  c.innerHTML = `<span class="seg" id="cbProj">Projects</span> <span style="color:var(--dim)">/</span> `
+    + (a ? `<span class="seg" id="cbP">${esc(p.name)}</span> <span style="color:var(--dim)">/</span> <span class="cur">${esc(a.name)}</span>`
+         : `<span class="cur">${esc(p.name)}</span>`);
+  const cbP = document.getElementById("cbP"); if (cbP) cbP.onclick = () => { selAgent = null; view = "project"; renderAll(); };
 }
 
-function renderDetail() {
-  const a = agents.get(selected);
-  if (!a) { detailEl.innerHTML = `<div class="nodetail">Select an agent to view its transcript.</div>`; return; }
-  detailEl.innerHTML = `
-    <div class="dhead" id="dhead"></div>
-    <div class="transcript" id="transcript"></div>
-    <div id="pendingWrap"></div>
-    <div class="composer">
-      <textarea id="composerInput" placeholder="Send an instruction… (Enter to send)"></textarea>
-      <div class="controls">
-        <button class="primary" id="sendBtn">Send</button>
-        <button id="intBtn">Interrupt</button>
-        <button id="rstBtn">Restart</button>
-        <button class="danger" id="killBtn">Kill</button>
+function renderBody() {
+  const body = $("#body");
+  const p = projects().find(x => x.id === selProject);
+  if (!p) { body.innerHTML = `<div class="nodetail">Select a project, or “+ New agent”.</div>`; return; }
+  if (view === "agent" && selAgent && agents.has(selAgent)) return renderAgent(body, agents.get(selAgent));
+  renderProject(body, p);
+}
+
+function renderProject(body, p) {
+  body.innerHTML = `
+    <div class="pv">
+      <div><h2>${esc(p.name)}</h2><div class="sub">${esc(p.repo)}</div></div>
+      <div class="agrid" id="agrid"></div>
+      <div class="section"><h3>Spawn an agent in this project</h3><div class="inner"><div class="spawnrow">
+        <input id="pspawn" placeholder="Describe a task… (Enter to spawn an agent here)" autocomplete="off" />
+      </div></div></div>
+      <div class="section"><h3>Active on this repo</h3><div class="inner" id="presence"><span style="color:var(--dim)">…</span></div></div>
+      <div class="section"><h3>Plane issues</h3><div class="inner" id="issues"><span style="color:var(--dim)">Loading…</span></div></div>
+    </div>`;
+  const grid = $("#agrid");
+  if (!p.agents.length) grid.innerHTML = `<span style="color:var(--dim)">No agents yet.</span>`;
+  for (const a of p.agents.sort((x,y)=>STATUSES.indexOf(x.status)-STATUSES.indexOf(y.status))) {
+    const card = document.createElement("div");
+    card.className = "acard" + (a.status==="input"?" needs":"");
+    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span><span class="nm">${esc(a.name)}</span></div>
+      ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
+      <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
+      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${a.contextPct!=null?`ctx ${Math.round(a.contextPct*100)}%`:""}</div>`;
+    card.onclick = () => openAgent(a.id);
+    grid.appendChild(card);
+  }
+  const sp = $("#pspawn");
+  sp.onkeydown = (e) => { if (e.key==="Enter") { const t = sp.value.trim(); if (t) { send({ type:"create", options:{ repo:p.repo, task:t } }); sp.value=""; } } };
+  loadIssues(p.repo);
+  loadPresence(p.repo);
+}
+
+async function loadPresence(repo) {
+  const box = $("#presence"); if (!box) return;
+  try {
+    const r = await fetch(`/api/presence?repo=${encodeURIComponent(repo)}`);
+    if (!r.ok) throw 0;
+    const live = await r.json();
+    if (!live.length) { box.innerHTML = `<span style="color:var(--dim)">nobody claimed this repo.</span>`; return; }
+    box.innerHTML = live.map(e => {
+      const s = Math.max(0, Math.round((Date.now() - e.heartbeat) / 1000));
+      const t = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s/60)}m` : `${Math.round(s/3600)}h`;
+      return `<div class="subnode"><span class="badge b-${e.source==='squad'?'working':'idle'}">${esc(e.source)}</span> ${esc(e.operator)}/${esc(e.agent)} <span style="color:var(--dim)">${esc(e.branch||'')} · ${t} ago</span></div>`;
+    }).join("");
+  } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
+}
+
+async function loadIssues(repo) {
+  const box = $("#issues"); if (!box) return;
+  try {
+    const r = await fetch(`/api/plane/issues?project=${encodeURIComponent(repo)}`);
+    if (r.status === 501 || r.status === 404) { box.innerHTML = `<span style="color:var(--dim)">Plane not connected. Set PLANE_API_KEY + PLANE_WORKSPACE on the daemon to pull issues here.</span>`; return; }
+    const issues = await r.json();
+    if (!Array.isArray(issues) || !issues.length) { box.innerHTML = `<span style="color:var(--dim)">No open issues.</span>`; return; }
+    box.innerHTML = `<div class="issuelist">${issues.map(i=>`<div class="issuerow"><span class="iid">${esc(i.identifier||"")}</span><span class="inm">${esc(i.name)}</span><button class="sm" data-id="${esc(i.id)}">Spawn</button></div>`).join("")}</div>`;
+    for (const i of issues) {
+      const btn = box.querySelector(`button[data-id="${CSS.escape(i.id)}"]`);
+      if (btn) btn.onclick = () => send({ type:"create", options:{ repo, task:`Work on ${i.identifier||i.id}: ${i.name}`, issue:i } });
+    }
+  } catch { box.innerHTML = `<span style="color:var(--dim)">Plane not connected.</span>`; }
+}
+
+function openAgent(id) {
+  selAgent = id; view = "agent";
+  if (!transcripts.has(id)) { transcripts.set(id, []); send({ type:"subscribe", id }); }
+  renderAll();
+}
+
+function renderAgent(body, a) {
+  body.innerHTML = `
+    <div class="av">
+      <div class="ahead">
+        <div><span class="badge b-${a.status}">${a.status}</span> <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}</div>
+        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span></div>
+      </div>
+      <div class="avmain">
+        <div class="transcript" id="transcript"></div>
+        <div class="aside">
+          <div class="section"><h3>Subagents</h3><div class="inner tree" id="subs"><span style="color:var(--dim)">none</span></div></div>
+          <div class="section"><h3>Changes</h3><div class="inner tree" id="diff"><span style="color:var(--dim)">—</span></div></div>
+        </div>
+        <div id="pendingWrap"></div>
+        <div class="composer">
+          <textarea id="composerInput" placeholder="Instruct this agent… (Enter to send)"></textarea>
+          <div class="controls">
+            <button class="primary" id="sendBtn">Send</button>
+            <button id="intBtn">Interrupt</button><button id="rstBtn">Restart</button><button class="danger" id="killBtn">Kill</button>
+          </div>
+        </div>
       </div>
     </div>`;
-  renderDetailHead();
-  const t = $("#transcript"); t.innerHTML = "";
-  for (const e of (transcripts.get(selected) || [])) appendTranscript(e);
-  const input = $("#composerInput");
-  $("#sendBtn").onclick = () => { const v = input.value.trim(); if (v) { send({ type: "prompt", id: selected, message: v }); input.value = ""; } };
-  input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
-  $("#intBtn").onclick = () => send({ type: "interrupt", id: selected });
-  $("#rstBtn").onclick = () => send({ type: "restart", id: selected });
-  $("#killBtn").onclick = () => { if (confirm("Kill this agent?")) send({ type: "kill", id: selected }); };
+  const t = $("#transcript"); t.innerHTML = ""; for (const e of (transcripts.get(a.id)||[])) appendTranscript(e);
+  renderPending(a);
+  const inp = $("#composerInput");
+  $("#sendBtn").onclick = () => { const v = inp.value.trim(); if (v) { send({ type:"prompt", id:a.id, message:v }); inp.value=""; } };
+  inp.onkeydown = (e) => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
+  $("#intBtn").onclick = () => send({ type:"interrupt", id:a.id });
+  $("#rstBtn").onclick = () => send({ type:"restart", id:a.id });
+  $("#killBtn").onclick = () => { if (confirm("Kill this agent?")) send({ type:"kill", id:a.id }); };
+  loadSubs(a.id); loadDiff(a.id);
 }
 
-function renderDetailHead() {
-  const a = agents.get(selected); if (!a) return;
-  const h = $("#dhead"); if (!h) return;
-  h.innerHTML = `
-    <div class="t"><span class="badge b-${a.status}">${ICON[a.status]||a.status}</span>
-      <strong>${esc(a.name)}</strong></div>
-    <div class="sub">
-      <span><span class="k">model</span> ${esc(a.model||"—")}</span>
-      <span><span class="k">branch</span> ${esc(a.branch||"—")}</span>
-      <span><span class="k">cwd</span> ${esc(a.worktree)}</span>
-    </div>`;
-  renderPending(a);
+async function loadSubs(id) {
+  const box = $("#subs"); if (!box) return;
+  try { const r = await fetch(`/api/agents/${encodeURIComponent(id)}/subagents`); if (!r.ok) throw 0;
+    const subs = await r.json();
+    box.innerHTML = subs.length ? subs.map(s=>`<div class="subnode"><span class="badge b-${({running:"working"})[s.status]||"starting"}">${esc(s.status)}</span> ${esc(s.agent)} <span style="color:var(--dim)">${esc(s.description||s.task||"")}</span></div>`).join("") : `<span style="color:var(--dim)">none</span>`;
+  } catch { box.innerHTML = `<span style="color:var(--dim)">none</span>`; }
+}
+async function loadDiff(id) {
+  const box = $("#diff"); if (!box) return;
+  try { const r = await fetch(`/api/agents/${encodeURIComponent(id)}/diff`); if (!r.ok) throw 0;
+    const diffs = await r.json();
+    box.innerHTML = diffs.length ? diffs.map(d=>`<div class="n changed">${esc(d.status)} ${esc(d.file)}</div>`).join("") : `<span style="color:var(--dim)">no changes</span>`;
+  } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
 }
 
 function renderPending(a) {
   const wrap = $("#pendingWrap"); if (!wrap) return;
   if (!a.pending || !a.pending.length) { wrap.innerHTML = ""; return; }
-  wrap.innerHTML = `<div class="pending"><h3>Needs your input</h3>${a.pending.map(renderPreq).join("")}</div>`;
+  wrap.innerHTML = `<div class="pending"><h3>Needs your input</h3>${a.pending.map(preq).join("")}</div>`;
   for (const p of a.pending) {
-    const node = wrap.querySelector(`[data-req="${p.id}"]`); if (!node) continue;
-    if (p.kind === "confirm") {
-      node.querySelector(".yes").onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: "yes" });
-      node.querySelector(".no").onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: "no" });
-    } else if (p.kind === "select") {
-      node.querySelectorAll("button[data-opt]").forEach(b =>
-        b.onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: b.dataset.opt }));
-    } else {
-      const inp = node.querySelector("input");
-      node.querySelector(".submit").onclick = () => send({ type: "answer", id: selected, requestId: p.id, value: inp.value });
-    }
+    const node = wrap.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (!node) continue;
+    if (p.kind === "confirm") { node.querySelector(".yes").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:"yes"}); node.querySelector(".no").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:"no"}); }
+    else if (p.kind === "select") node.querySelectorAll("button[data-opt]").forEach(b => b.onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:b.dataset.opt}));
+    else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:i.value}); }
   }
 }
-
-function renderPreq(p) {
-  let ctl = "";
-  if (p.kind === "confirm") ctl = `<div class="ctl"><button class="yes primary">Yes</button><button class="no">No</button></div>`;
-  else if (p.kind === "select") ctl = `<div class="ctl">${(p.options||[]).map(o => `<button data-opt="${esc(o)}">${esc(o)}</button>`).join("")}</div>`;
-  else ctl = `<div class="ctl"><input placeholder="${esc(p.placeholder||"your answer")}" /><button class="submit primary">Submit</button></div>`;
-  return `<div class="preq" data-req="${esc(p.id)}"><div class="q"><strong>${esc(p.title)}</strong>${p.message ? " — "+esc(p.message) : ""}</div>${ctl}</div>`;
+function preq(p) {
+  let ctl = p.kind==="confirm" ? `<div class="ctl"><button class="yes primary">Yes</button><button class="no">No</button></div>`
+    : p.kind==="select" ? `<div class="ctl">${(p.options||[]).map(o=>`<button data-opt="${esc(o)}">${esc(o)}</button>`).join("")}</div>`
+    : `<div class="ctl"><input placeholder="${esc(p.placeholder||"answer")}" /><button class="submit primary">Submit</button></div>`;
+  return `<div class="preq" data-req="${esc(p.id)}"><div><strong>${esc(p.title)}</strong>${p.message?" — "+esc(p.message):""}</div>${ctl}</div>`;
 }
 
 function appendTranscript(e) {
   const t = $("#transcript"); if (!t) return;
-  const div = document.createElement("div");
-  div.className = "te " + e.kind;
+  const div = document.createElement("div"); div.className = "te " + e.kind;
   div.innerHTML = `<span class="who">${e.kind}</span>  ${esc(e.text)}`;
-  const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
-  t.appendChild(div);
-  if (atBottom) t.scrollTop = t.scrollHeight;
+  const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60; t.appendChild(div); if (atBottom) t.scrollTop = t.scrollHeight;
 }
 
-function toast(text, level) {
-  const el = document.createElement("div");
-  el.className = "toast " + (level || "info"); el.textContent = text;
-  $("#log").appendChild(el); setTimeout(() => el.remove(), 5000);
-}
-function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c])); }
+function toast(text, level) { const el = document.createElement("div"); el.className = "toast " + (level||"info"); el.textContent = text; $("#log").appendChild(el); setTimeout(()=>el.remove(), 5000); }
 
-// Add-agent modal
+// add modal
 const dlg = $("#addDlg");
-$("#addBtn").onclick = () => dlg.showModal();
+$("#addBtn").onclick = () => { const repo = $("#addForm").repo; if (selProject) repo.value = selProject; dlg.showModal(); };
 $("#addCancel").onclick = () => dlg.close();
 $("#addForm").onsubmit = (e) => {
-  const f = new FormData(e.target);
-  const options = { repo: f.get("repo").trim() };
-  for (const k of ["name","branch","model","task"]) { const v = (f.get(k)||"").trim(); if (v) options[k] = v; }
-  options.approvalMode = f.get("approvalMode");
-  options.thinking = f.get("thinking");
-  send({ type: "create", options });
-  e.target.reset();
+  const f = new FormData(e.target); const options = { repo: f.get("repo").trim() };
+  for (const k of ["name","task"]) { const v=(f.get(k)||"").trim(); if (v) options[k]=v; }
+  options.approvalMode = f.get("approvalMode"); options.thinking = f.get("thinking");
+  send({ type:"create", options }); e.target.reset();
 };
 
-// Quick-spawn: type a task to spawn an agent in the daemon's directory.
-let spawnCwd = ".";
-fetch("/api/info").then(r => r.json()).then(info => {
-  spawnCwd = info.cwd || ".";
-  const qi = document.querySelector("#quickInput");
-  if (qi) qi.placeholder = `New task in ${spawnCwd}… (Enter to spawn)`;
-}).catch(() => {});
-document.querySelector("#quickForm").onsubmit = (e) => {
-  e.preventDefault();
-  const inp = document.querySelector("#quickInput");
-  const task = inp.value.trim();
-  if (!task) return;
-  send({ type: "create", options: { repo: spawnCwd, task } });
-  inp.value = "";
-};
-
+fetch("/api/info").then(r=>r.json()).then(i=>{ spawnCwd = i.cwd || "."; }).catch(()=>{});
 connect();
 </script>
 </body>

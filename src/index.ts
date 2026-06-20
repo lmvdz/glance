@@ -13,10 +13,13 @@
  * HTTP clients that talk to a running daemon's REST surface.
  */
 
+import * as os from "node:os";
+import { TailnetFederationBus } from "./federation.ts";
+import { all as allPresence, who as whoPresence } from "./presence.ts";
 import { SquadServer } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
 import { SquadTui } from "./tui.ts";
-import type { AgentDTO, ApprovalMode, ClientCommand, CreateAgentOptions, ThinkingLevel } from "./types.ts";
+import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
 
@@ -28,7 +31,9 @@ USAGE
   omp-squad list                                   Show the roster
   omp-squad prompt <id> <message...>               Send an instruction to an agent
   omp-squad rm <id> [--delete-worktree]            Remove an agent
+  omp-squad who [repo]                             Who/what is working a repo (any omp agent)
   omp-squad open                                   Print the dashboard URL
+  omp-squad commission <name> --purpose <s> [flags]  Author + validate a Flue worker; onboard if it passes
 
 ADD FLAGS
   --name <s>        Agent name (default: agent-N)
@@ -37,6 +42,13 @@ ADD FLAGS
   --approval <m>    always-ask | write | yolo (default: write)
   --thinking <l>    minimal | low | medium | high | xhigh (default: low)
   --task <s>        Initial instruction sent once the agent is ready
+
+COMMISSION FLAGS
+  --purpose <s>            What the worker does (required)
+  --model <spec>           Model specifier, or "false" for a deterministic worker (default: false)
+  --target <t>             node | cloudflare (default: node)
+  --capabilities <a,b>     Least-privilege tool allowlist (recorded in the manifest)
+  --accept-payload <json>  Acceptance input · pair with --accept-expect <json> (expected result subset)
 
 GLOBAL
   --port <N>        Daemon port (default: ${DEFAULT_PORT}, or $OMP_SQUAD_PORT)
@@ -88,8 +100,12 @@ async function postCommand(flags: Record<string, string | boolean>, cmd: ClientC
 async function cmdUp(args: string[]): Promise<void> {
 	const { flags } = parseArgs(args);
 	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
-	const manager = new SquadManager();
+	const coordinator = process.env.OMP_SQUAD_COORDINATOR;
+	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
+	const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
+	const manager = new SquadManager({ bus, operator });
 	await manager.start();
+	if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
 	if (flags.restore) {
 		const n = await manager.loadPersisted();
 		if (n) process.stderr.write(`restored ${n} agent(s)\n`);
@@ -127,6 +143,13 @@ async function cmdAdd(args: string[]): Promise<void> {
 	if (typeof flags.task === "string") options.task = flags.task;
 	if (typeof flags.approval === "string") options.approvalMode = flags.approval as ApprovalMode;
 	if (typeof flags.thinking === "string") options.thinking = flags.thinking as ThinkingLevel;
+
+	// Discoverability: warn if anyone (squad agent or raw omp session) is already on this repo.
+	const present = await whoPresence(repo).catch(() => []);
+	if (present.length) {
+		process.stderr.write(`⚠ ${present.length} agent(s) already active on ${repo}:\n`);
+		for (const p of present) process.stderr.write(`    ${p.source} ${p.operator}/${p.agent}${p.branch ? ` (${p.branch})` : ""}\n`);
+	}
 
 	const res = await postCommand(flags, { type: "create", options });
 	if (!res.ok) {
@@ -193,6 +216,70 @@ async function cmdRm(args: string[]): Promise<void> {
 	process.stdout.write(res.ok ? "removed\n" : `failed: ${await res.text()}\n`);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function cmdCommission(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const name = positional[0];
+	const purpose = typeof flags.purpose === "string" ? flags.purpose : "";
+	if (!name || !purpose) {
+		process.stderr.write('usage: omp-squad commission <name> --purpose "..." [--model <spec|false>] [--target node|cloudflare] [--capabilities a,b] [--accept-payload <json> --accept-expect <json>]\n');
+		process.exit(1);
+	}
+	const spec: CommissionSpec = { name, purpose, model: false };
+	if (typeof flags.model === "string") spec.model = flags.model === "false" ? false : flags.model;
+	if (typeof flags.target === "string") spec.deployTarget = flags.target === "cloudflare" ? "cloudflare" : "node";
+	if (typeof flags.capabilities === "string") {
+		spec.capabilities = flags.capabilities
+			.split(",")
+			.map((s) => s.trim())
+			.filter(Boolean);
+	}
+	if (typeof flags["accept-payload"] === "string") {
+		const payload: unknown = JSON.parse(flags["accept-payload"]);
+		let expect: Record<string, unknown> | undefined;
+		if (typeof flags["accept-expect"] === "string") {
+			const parsed: unknown = JSON.parse(flags["accept-expect"]);
+			if (isRecord(parsed)) expect = parsed;
+		}
+		spec.accept = { payload, expect };
+	}
+	process.stdout.write(`commissioning "${name}" — authoring + validating (this can take a while)…\n`);
+	const res = await postCommand(flags, { type: "commission", spec });
+	if (!res.ok) {
+		process.stderr.write(`commission failed: ${res.status} ${await res.text()}\n`);
+		process.exit(1);
+	}
+	const result = (await res.json()) as CommissionResult;
+	for (const c of result.report.checks) {
+		const mark = c.status === "pass" ? "✓" : c.status === "fail" ? "✗" : "·";
+		process.stdout.write(`  ${mark} ${c.name}${c.detail ? ` — ${c.detail}` : ""}\n`);
+	}
+	if (result.ok && result.member) {
+		process.stdout.write(`onboarded ${result.member.name} [flue-service${result.member.verified ? ", verified" : ""}]\n  id: ${result.member.id}\n  dir: ${result.dir}\n`);
+	} else {
+		process.stdout.write(`rejected — gate failed; worker left at ${result.dir}\n`);
+		process.exit(1);
+	}
+}
+
+async function cmdWho(args: string[]): Promise<void> {
+	const { positional } = parseArgs(args);
+	const repo = positional[0];
+	const entries = repo ? await whoPresence(repo) : await allPresence();
+	if (!entries.length) {
+		process.stdout.write(repo ? `nobody is working on ${repo}\n` : "no active agents\n");
+		return;
+	}
+	for (const e of entries) {
+		const s = Math.max(0, Math.round((Date.now() - e.heartbeat) / 1000));
+		const ago = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+		process.stdout.write(`${e.source.padEnd(5)} ${e.operator}/${e.agent}  ${e.repoName}${e.branch ? ` (${e.branch})` : ""}  ${ago} ago\n`);
+	}
+}
+
 async function main(): Promise<void> {
 	const [cmd, ...rest] = process.argv.slice(2);
 	switch (cmd) {
@@ -202,6 +289,9 @@ async function main(): Promise<void> {
 			break;
 		case "add":
 			await cmdAdd(rest);
+			break;
+		case "who":
+			await cmdWho(rest);
 			break;
 		case "list":
 		case "ls":
@@ -214,6 +304,10 @@ async function main(): Promise<void> {
 		case "rm":
 		case "remove":
 			await cmdRm(rest);
+			break;
+		case "commission":
+		case "hire":
+			await cmdCommission(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

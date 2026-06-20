@@ -13,21 +13,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
 import { RpcAgent } from "./rpc-agent.ts";
+import type { AgentDriver } from "./agent-driver.ts";
+import { FlueServiceDriver } from "./flue-service-driver.ts";
+import { type Architect, OmpArchitect } from "./architect.ts";
+import { validateWorker } from "./validate.ts";
 import type {
 	Actor,
 	AgentDTO,
 	AgentStatus,
 	ClientCommand,
 	CreateAgentOptions,
+	CommissionResult,
+	CommissionSpec,
+	FlueMemberConfig,
+	GateReport,
 	OperatorPresence,
 	PendingRequest,
 	PersistedAgent,
+	ProjectDTO,
 	RpcExtensionUIRequest,
 	RpcSessionState,
 	SquadEvent,
 	TranscriptEntry,
 	TranscriptKind,
 } from "./types.ts";
+import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
 
 const MAX_TRANSCRIPT = 800;
@@ -43,13 +53,15 @@ const BLOCKING_UI_METHODS: Record<string, true> = {
 
 interface AgentRecord {
 	dto: AgentDTO;
-	agent: RpcAgent;
+	agent: AgentDriver;
 	options: PersistedAgent;
 	transcript: TranscriptEntry[];
 	/** Accumulated streaming text since the last flush. */
 	assistantBuf: string;
 	/** True between agent_start/turn_start and agent_end. */
 	streaming: boolean;
+	/** Live subagent (task-spawned children) tree for this agent. */
+	subs: SubagentTracker;
 }
 
 export interface SquadManagerOptions {
@@ -58,6 +70,17 @@ export interface SquadManagerOptions {
 	stateDir?: string;
 	/** omp binary override (passed to each RpcAgent). */
 	bin?: string;
+}
+
+export interface CommissionOptions {
+	/** Authoring strategy. Default: OmpArchitect (drive a real omp agent). */
+	architect?: Architect;
+	/** Run `bun install` in the worker before validating (enables typecheck/acceptance tiers). */
+	install?: boolean;
+	/** Reject the candidate if the acceptance check can't run (no flue toolchain). */
+	requireAcceptance?: boolean;
+	/** Worker dir override. Default: <stateDir>/workers/<name>. */
+	dir?: string;
 }
 
 export class SquadManager extends EventEmitter {
@@ -106,6 +129,31 @@ export class SquadManager extends EventEmitter {
 		return this.agents.get(id)?.transcript ?? [];
 	}
 
+	getAgent(id: string): AgentDTO | undefined {
+		return this.agents.get(id)?.dto;
+	}
+
+	subagents(id: string): SubagentNode[] {
+		return this.agents.get(id)?.subs.list() ?? [];
+	}
+
+	/** Group agents into projects (by repo root) with status rollups — the command-center top level. */
+	projects(): ProjectDTO[] {
+		const byRepo = new Map<string, ProjectDTO>();
+		for (const { dto } of this.agents.values()) {
+			let p = byRepo.get(dto.repo);
+			if (!p) {
+				p = { id: dto.repo, name: path.basename(dto.repo) || dto.repo, repo: dto.repo, agentCount: 0, statusCounts: {}, pendingCount: 0, lastActivity: 0 };
+				byRepo.set(dto.repo, p);
+			}
+			p.agentCount++;
+			p.statusCounts[dto.status] = (p.statusCounts[dto.status] ?? 0) + 1;
+			p.pendingCount += dto.pending.length;
+			p.lastActivity = Math.max(p.lastActivity, dto.lastActivity);
+		}
+		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity);
+	}
+
 	// ── Roster mutation ───────────────────────────────────────────────────────
 
 	async create(opts: CreateAgentOptions): Promise<AgentDTO> {
@@ -148,6 +196,8 @@ export class SquadManager extends EventEmitter {
 			approvalMode,
 			task: opts.task,
 			thinking,
+			issue: opts.issue,
+			kind: "omp-operator",
 		};
 
 		const dto: AgentDTO = {
@@ -162,10 +212,12 @@ export class SquadManager extends EventEmitter {
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
+			issue: opts.issue,
+			kind: "omp-operator",
 		};
 
-		const agent = new RpcAgent({ cwd, model: opts.model, approvalMode, thinking, bin: this.bin });
-		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", streaming: false };
+		const agent = this.makeDriver(persisted);
+		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
 		this.agents.set(id, rec);
 		this.wire(rec);
 		this.emitAgent(rec);
@@ -173,7 +225,7 @@ export class SquadManager extends EventEmitter {
 		try {
 			await agent.start();
 			rec.dto.status = "idle";
-			if (resolvedBranch) await agent.setSessionName(`squad:${name}`).catch(() => {});
+			if (agent.setSessionName) await agent.setSessionName(`squad:${name}`).catch(() => {});
 			this.emitAgent(rec);
 			if (opts.task) {
 				this.append(rec, "user", opts.task);
@@ -190,6 +242,90 @@ export class SquadManager extends EventEmitter {
 		return rec.dto;
 	}
 
+	private makeDriver(p: PersistedAgent): AgentDriver {
+		if (p.kind === "flue-service" && p.flue) {
+			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
+		}
+		return new RpcAgent({ cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
+	}
+
+	/**
+	 * Author → validate → onboard a Flue worker (an agent that fills a job).
+	 * On a failed gate nothing is onboarded — the candidate is rejected.
+	 */
+	async commission(spec: CommissionSpec, opts: CommissionOptions = {}, actor: Actor = LOCAL_ACTOR): Promise<CommissionResult> {
+		const dir = opts.dir ?? path.join(this.stateDir, "workers", spec.name);
+		await fs.mkdir(dir, { recursive: true });
+		this.log("info", `${actor.id} commissioning "${spec.name}" → ${truncate(spec.purpose, 80)}`);
+		const architect = opts.architect ?? new OmpArchitect({ bin: this.bin });
+		await architect.author(spec, dir);
+		if (opts.install) await this.installWorker(dir);
+		const report = await validateWorker(dir, spec, { requireAcceptance: opts.requireAcceptance });
+		this.log(report.ok ? "info" : "warn", `gate "${spec.name}": ${report.checks.map((c) => `${c.name}=${c.status}`).join(" ")}`);
+		if (!report.ok) return { ok: false, report, dir };
+		const member = await this.onboardFlueWorker(spec, dir, report);
+		return { ok: true, report, member, dir };
+	}
+
+	private async installWorker(dir: string): Promise<void> {
+		const proc = Bun.spawn(["bun", "install"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		const [, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+		if ((await proc.exited) !== 0) throw new Error(`worker install failed: ${err.trim().slice(0, 200)}`);
+	}
+
+	private async onboardFlueWorker(spec: CommissionSpec, dir: string, report: GateReport): Promise<AgentDTO> {
+		const id = `${spec.name}-${Date.now().toString(36)}`;
+		const target = spec.deployTarget ?? "node";
+		const model = typeof spec.model === "string" ? spec.model : undefined;
+		const verified = report.checks.some((c) => c.name === "acceptance" && c.status === "pass");
+		const flue: FlueMemberConfig = { dir, workflow: spec.name, target };
+		const persisted: PersistedAgent = { id, name: spec.name, repo: "(flue-service)", worktree: dir, approvalMode: "yolo", model, kind: "flue-service", flue };
+		const dto: AgentDTO = {
+			id,
+			name: spec.name,
+			status: "idle",
+			kind: "flue-service",
+			verified,
+			repo: "(flue-service)",
+			worktree: dir,
+			approvalMode: "yolo",
+			model,
+			pending: [],
+			lastActivity: Date.now(),
+			messageCount: 0,
+		};
+		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		this.agents.set(id, rec);
+		this.wire(rec);
+		await rec.agent.start();
+		this.append(rec, "system", `commissioned · gate ${report.checks.map((c) => `${c.name}=${c.status}`).join(" ")}${verified ? " · verified" : ""}`);
+		this.emitAgent(rec);
+		await this.persist();
+		return dto;
+	}
+
+	private async restoreFlueMember(p: PersistedAgent): Promise<void> {
+		if (!p.flue) return;
+		const dto: AgentDTO = {
+			id: p.id,
+			name: p.name,
+			status: "idle",
+			kind: "flue-service",
+			repo: p.repo,
+			worktree: p.worktree,
+			approvalMode: p.approvalMode,
+			model: p.model,
+			pending: [],
+			lastActivity: Date.now(),
+			messageCount: 0,
+		};
+		const rec: AgentRecord = { dto, agent: this.makeDriver(p), options: p, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		this.agents.set(p.id, rec);
+		this.wire(rec);
+		await rec.agent.start();
+		this.emitAgent(rec);
+	}
+
 	async applyCommand(cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): Promise<void> {
 		if (cmd.type === "create") {
 			await this.create(cmd.options);
@@ -202,6 +338,10 @@ export class SquadManager extends EventEmitter {
 		if (cmd.type === "subscribe") {
 			const rec = this.agents.get(cmd.id);
 			if (rec) for (const entry of rec.transcript) this.emit("event", { type: "transcript", id: cmd.id, entry } satisfies SquadEvent);
+			return;
+		}
+		if (cmd.type === "commission") {
+			await this.commission(cmd.spec, {}, actor);
 			return;
 		}
 
@@ -257,18 +397,13 @@ export class SquadManager extends EventEmitter {
 
 	private async restart(rec: AgentRecord): Promise<void> {
 		await rec.agent.stop();
-		const fresh = new RpcAgent({
-			cwd: rec.options.worktree,
-			model: rec.options.model,
-			approvalMode: rec.options.approvalMode,
-			thinking: rec.options.thinking,
-			bin: this.bin,
-		});
+		const fresh = this.makeDriver(rec.options);
 		rec.agent = fresh;
 		rec.dto.status = "starting";
 		rec.dto.pending = [];
 		rec.dto.error = undefined;
 		rec.streaming = false;
+		rec.subs.clear();
 		this.wire(rec);
 		this.emitAgent(rec);
 		try {
@@ -311,6 +446,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private onAgentEvent(rec: AgentRecord, frame: { type?: string; [k: string]: unknown }): void {
+		if (frame.type?.startsWith("subagent_")) {
+			rec.subs.ingest(frame as { type: string; payload?: unknown });
+			return;
+		}
 		switch (frame.type) {
 			case "agent_start":
 			case "turn_start":
@@ -407,7 +546,7 @@ export class SquadManager extends EventEmitter {
 	// ── Polling (todos / context / streaming truth) ───────────────────────────
 
 	private async poll(): Promise<void> {
-		const live = [...this.agents.values()].filter((r) => r.agent.isReady && r.agent.isAlive);
+		const live = [...this.agents.values()].filter((r) => r.dto.kind === "omp-operator" && r.agent.isReady && r.agent.isAlive);
 		await Promise.all(
 			live.map(async (rec) => {
 				try {
@@ -491,6 +630,10 @@ export class SquadManager extends EventEmitter {
 		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[] };
 		const list = parsed.agents ?? [];
 		for (const p of list) {
+			if (p.kind === "flue-service" && p.flue) {
+				await this.restoreFlueMember(p).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
+				continue;
+			}
 			await this.create({
 				name: p.name,
 				repo: p.repo,
@@ -499,6 +642,7 @@ export class SquadManager extends EventEmitter {
 				model: p.model,
 				approvalMode: p.approvalMode,
 				thinking: p.thinking,
+				issue: p.issue,
 			}).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
 		return list.length;

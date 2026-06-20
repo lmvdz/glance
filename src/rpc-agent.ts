@@ -10,6 +10,7 @@
 
 import { EventEmitter } from "node:events";
 import type { Subprocess } from "bun";
+import type { AgentDriver } from "./agent-driver.ts";
 import type {
 	ApprovalMode,
 	ThinkingLevel,
@@ -60,7 +61,7 @@ type Pending = {
  *  - "stderr"  (text)              child stderr line
  *  - "rawerror"(Error)             parse / transport error
  */
-export class RpcAgent extends EventEmitter {
+export class RpcAgent extends EventEmitter implements AgentDriver {
 	private proc?: Subprocess<"pipe", "pipe", "pipe">;
 	private readonly opts: RpcAgentOptions;
 	private seq = 0;
@@ -132,6 +133,9 @@ export class RpcAgent extends EventEmitter {
 			this.once("ready", onReady);
 			this.once("exit", onExit);
 		});
+
+		// Stream subagent lifecycle/progress so the manager can build the hierarchy tree.
+		this.sendRaw({ type: "set_subagent_subscription", level: "progress" });
 	}
 
 	private async pumpStdout(stream: ReadableStream<Uint8Array>): Promise<void> {

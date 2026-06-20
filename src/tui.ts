@@ -9,7 +9,7 @@
  * events. Width safety borrows pi-tui's truncation helpers.
  */
 
-import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, Editor, type EditorTheme, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { SquadManager } from "./squad-manager.ts";
 import type { AgentDTO, AgentStatus, SquadEvent, TranscriptEntry } from "./types.ts";
 
@@ -159,10 +159,47 @@ export function buildBoard(state: BoardState): string[] {
 
 // ── Interactive shell ─────────────────────────────────────────────────────
 
+/** Box glyphs + thin-bar cursor for the mounted Editor. Mirrors omp's composer
+ *  styling without importing omp's runtime theme module (type-only contract). */
+const EDITOR_SYMBOLS = {
+	cursor: "›",
+	inputCursor: "▏",
+	boxRound: { topLeft: "╭", topRight: "╮", bottomLeft: "╰", bottomRight: "╯", horizontal: "─", vertical: "│" },
+	boxSharp: { topLeft: "┌", topRight: "┐", bottomLeft: "└", bottomRight: "┘", horizontal: "─", vertical: "│", teeDown: "┬", teeUp: "┴", teeLeft: "┤", teeRight: "├", cross: "┼" },
+	table: { topLeft: "┌", topRight: "┐", bottomLeft: "└", bottomRight: "┘", horizontal: "─", vertical: "│", teeDown: "┬", teeUp: "┴", teeLeft: "┤", teeRight: "├", cross: "┼" },
+	quoteBorder: "│",
+	hrChar: "─",
+	spinnerFrames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+};
+
+const EDITOR_THEME: EditorTheme = {
+	borderColor: (s) => c("gray", s),
+	hintStyle: (s) => c("dim", s),
+	symbols: EDITOR_SYMBOLS,
+	selectList: {
+		selectedPrefix: (s) => c("cyan", s),
+		selectedText: (s) => c("cyan", s),
+		description: (s) => c("dim", s),
+		scrollInfo: (s) => c("dim", s),
+		noMatch: (s) => c("dim", s),
+		symbols: EDITOR_SYMBOLS,
+	},
+};
+
+/** Max visual rows the composer may occupy before it scrolls internally. */
+const EDITOR_MAX_LINES = 8;
+
+/** The Editor emits a hardware-cursor APC marker when focused; we paint a
+ *  software cursor in the composed frame instead, so drop the marker. */
+function stripCursorMarker(line: string): string {
+	return line.includes(CURSOR_MARKER) ? line.split(CURSOR_MARKER).join("") : line;
+}
+
 export class SquadTui {
 	private readonly manager: SquadManager;
 	private state: BoardState;
 	private readonly transcripts = new Map<string, TranscriptEntry[]>();
+	private readonly editor: Editor;
 	private redrawTimer?: Timer;
 	private running = false;
 	private readonly onEvent: (e: SquadEvent) => void;
@@ -185,8 +222,24 @@ export class SquadTui {
 		};
 		for (const a of this.state.agents) this.transcripts.set(a.id, manager.getTranscript(a.id));
 		this.syncTranscript();
+		this.editor = this.makeEditor();
 		this.onEvent = (e) => this.handleEvent(e);
 		this.onKey = (data) => this.handleKey(data);
+	}
+
+	/** Build the borderless composer: a real pi-tui Editor (multiline, cursor,
+	 *  paste, kill-ring, undo, PageUp/PageDown history) painted as the input row. */
+	private makeEditor(): Editor {
+		const editor = new Editor(EDITOR_THEME);
+		editor.setBorderVisible(false);
+		editor.setPaddingX(0);
+		editor.focused = true;
+		editor.onChange = (text) => {
+			this.state.draft = text;
+			this.scheduleRedraw();
+		};
+		editor.onSubmit = (text) => this.submit(text);
+		return editor;
 	}
 
 	run(): Promise<void> {
@@ -194,7 +247,7 @@ export class SquadTui {
 			this.onQuit = resolve;
 			this.running = true;
 			this.manager.on("event", this.onEvent);
-			process.stdout.write(`${ESC}?1049h${ESC}?25l`);
+			process.stdout.write(`${ESC}?1049h${ESC}?25l${ESC}?2004h`);
 			process.stdout.on("resize", () => {
 				this.state.width = process.stdout.columns ?? 100;
 				this.state.height = process.stdout.rows ?? 30;
@@ -219,7 +272,7 @@ export class SquadTui {
 			process.stdin.setRawMode(false);
 			process.stdin.pause();
 		}
-		process.stdout.write(`${ESC}?25h${ESC}?1049l`);
+		process.stdout.write(`${ESC}?2004l${ESC}?25h${ESC}?1049l`);
 		this.onQuit?.();
 	}
 
@@ -281,10 +334,45 @@ export class SquadTui {
 		if (this.state.selectedId) this.manager.applyCommand({ type: "subscribe", id: this.state.selectedId });
 	}
 
-	private spawnFromDraft(): void {
-		const task = this.state.draft.trim();
-		if (!task) return;
-		this.state.draft = "";
+	/** Editor `onSubmit` sink: route the composed text by view + pending state.
+	 *  The Editor has already trimmed the value and cleared itself by this point. */
+	private submit(text: string): void {
+		const t = text.trim();
+		if (this.state.view === "list") {
+			if (t) {
+				this.editor.addToHistory(t);
+				this.spawn(t);
+			} else {
+				this.openSelected();
+			}
+			this.scheduleRedraw();
+			return;
+		}
+		const sel = this.selected();
+		if (!sel) {
+			this.state.view = "list";
+			this.scheduleRedraw();
+			return;
+		}
+		if (t.startsWith("/")) {
+			this.editor.addToHistory(t);
+			this.runSlash(sel, t);
+			this.scheduleRedraw();
+			return;
+		}
+		if (!t) return;
+		this.editor.addToHistory(t);
+		const pending = sel.pending[0];
+		if (pending) {
+			const value = pending.kind === "confirm" ? (/^y/i.test(t) ? "yes" : "no") : t;
+			this.manager.applyCommand({ type: "answer", id: sel.id, requestId: pending.id, value });
+		} else {
+			this.manager.applyCommand({ type: "prompt", id: sel.id, message: t });
+		}
+		this.scheduleRedraw();
+	}
+
+	private spawn(task: string): void {
 		this.manager
 			.create({ repo: this.state.cwd, task })
 			.then((dto) => {
@@ -297,20 +385,18 @@ export class SquadTui {
 			.catch(() => {});
 	}
 
+	/** Two-level key router: navigation keys steer the board; everything else
+	 *  (typing, backspace, Enter=submit, bracketed paste, Ctrl shortcuts) flows
+	 *  straight to the mounted Editor. */
 	private handleKey(data: Buffer): void {
 		const s = data.toString();
 		if (s === "\x03") return this.quit(); // Ctrl-C
-		if (s === "\x1b[A") this.onUp();
+		if (s === "\x1b") this.onEsc(); // bare Esc
+		else if (s === "\x1b[A") this.onUp();
 		else if (s === "\x1b[B") this.onDown();
 		else if (s === "\x1b[C") this.onRight();
 		else if (s === "\x1b[D") this.onLeft();
-		else if (s === "\x1b") this.onEsc();
-		else if (s === "\r" || s === "\n") this.onEnter();
-		else if (s === "\x7f" || s === "\b") this.state.draft = this.state.draft.slice(0, -1);
-		else {
-			const printable = s.replace(/[\x00-\x1f]/g, "");
-			if (printable) this.state.draft += printable;
-		}
+		else this.editor.handleInput(s);
 		this.scheduleRedraw();
 	}
 
@@ -326,44 +412,17 @@ export class SquadTui {
 
 	private onRight(): void {
 		if (this.state.view === "list") this.openSelected();
+		else this.editor.handleInput("\x1b[C");
 	}
 
 	private onLeft(): void {
-		if (this.state.view === "agent" && this.state.draft === "") this.state.view = "list";
+		if (this.state.view === "agent" && this.editor.getText() === "") this.state.view = "list";
+		else this.editor.handleInput("\x1b[D");
 	}
 
 	private onEsc(): void {
 		if (this.state.view === "agent") this.state.view = "list";
 		else this.quit();
-	}
-
-	private onEnter(): void {
-		if (this.state.view === "list") {
-			if (this.state.draft.trim()) this.spawnFromDraft();
-			else this.openSelected();
-			return;
-		}
-		// agent view
-		const sel = this.selected();
-		const text = this.state.draft.trim();
-		if (!sel) {
-			this.state.view = "list";
-			return;
-		}
-		if (text.startsWith("/")) {
-			this.runSlash(sel, text);
-			this.state.draft = "";
-			return;
-		}
-		if (!text) return;
-		this.state.draft = "";
-		const pending = sel.pending[0];
-		if (pending) {
-			const value = pending.kind === "confirm" ? (/^y/i.test(text) ? "yes" : "no") : text;
-			this.manager.applyCommand({ type: "answer", id: sel.id, requestId: pending.id, value });
-		} else {
-			this.manager.applyCommand({ type: "prompt", id: sel.id, message: text });
-		}
 	}
 
 	private runSlash(sel: AgentDTO, cmd: string): void {
@@ -386,8 +445,29 @@ export class SquadTui {
 		}, 50);
 	}
 
+	/** Keep the composer's prompt gutter in sync with the current view/pending. */
+	private applyEditorChrome(): void {
+		const sel = this.selected();
+		const answering = this.state.view === "agent" && sel !== undefined && sel.pending.length > 0;
+		const label = this.state.view === "list" ? "new" : answering ? "answer" : "";
+		this.editor.setPromptGutter(`${c("cyan", `${label}›`)} `);
+	}
+
+	/** Compose the frame: `buildBoard` chrome (minus its static composer line)
+	 *  with the live mounted Editor painted where the composer used to be. */
 	private render(): void {
 		if (!this.running) return;
-		process.stdout.write(`${ESC}H${ESC}J${buildBoard(this.state).join("\r\n")}`);
+		const { width, height } = this.state;
+		this.applyEditorChrome();
+		this.editor.setMaxHeight(Math.max(1, Math.min(EDITOR_MAX_LINES, Math.floor(height / 3))));
+		const editorLines = this.editor.render(width).map(stripCursorMarker);
+		const composerRows = Math.max(1, editorLines.length);
+		const chromeHeight = Math.max(3, height - composerRows + 1);
+		const chrome = buildBoard({ ...this.state, height: chromeHeight });
+		chrome.pop(); // drop buildBoard's static composer; the Editor renders the live one
+		const out = [...chrome, ...editorLines];
+		if (out.length > height) out.length = height;
+		while (out.length < height) out.push("");
+		process.stdout.write(`${ESC}H${ESC}J${out.join("\r\n")}`);
 	}
 }

@@ -12,6 +12,9 @@
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import type { ClientCommand, SquadEvent } from "./types.ts";
+import { worktreeDiff, worktreeTree } from "./explore.ts";
+import { listPlaneIssues } from "./plane.ts";
+import { all, claim, release, who } from "./presence.ts";
 import type { SquadManager } from "./squad-manager.ts";
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
@@ -32,6 +35,10 @@ export class SquadServer {
 	private readonly opts: SquadServerOptions;
 	private sockSeq = 0;
 	private readonly onEvent: (e: SquadEvent) => void;
+	private presenceTimer?: Timer;
+	private presenceDebounce?: Timer;
+	/** agentId → repo it's claimed under, so we can release the claim on removal. */
+	private readonly claimed = new Map<string, string>();
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
@@ -62,9 +69,28 @@ export class SquadServer {
 					return new Response(indexFile, { headers: { "content-type": "text/html; charset=utf-8" } });
 				}
 				if (url.pathname === "/api/agents") return Response.json(manager.list());
+				if (url.pathname === "/api/projects") return Response.json(manager.projects());
 				if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
-				const m = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
-				if (m) return Response.json(manager.getTranscript(decodeURIComponent(m[1])));
+				if (url.pathname === "/api/health") return Response.json({ ok: true, agents: manager.list().length, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()) });
+				if (url.pathname === "/api/presence") {
+					const repo = url.searchParams.get("repo");
+					return Response.json(repo ? await who(repo) : await all());
+				}
+				const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
+				if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
+				const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
+				if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
+				const mdiff = url.pathname.match(/^\/api\/agents\/([^/]+)\/(diff|tree)$/);
+				if (mdiff) {
+					const dto = manager.getAgent(decodeURIComponent(mdiff[1]));
+					if (!dto) return new Response("no such agent", { status: 404 });
+					return Response.json(mdiff[2] === "diff" ? await worktreeDiff(dto.worktree) : await worktreeTree(dto.worktree));
+				}
+				if (url.pathname === "/api/plane/issues") {
+					const issues = await listPlaneIssues(url.searchParams.get("project") ?? "");
+					if (issues === null) return new Response("plane not configured", { status: 501 });
+					return Response.json(issues);
+				}
 				if (url.pathname === "/api/command" && req.method === "POST") {
 					let cmd: ClientCommand;
 					try {
@@ -75,6 +101,10 @@ export class SquadServer {
 					if (cmd.type === "create") {
 						const dto = await manager.create(cmd.options);
 						return Response.json(dto);
+					}
+					if (cmd.type === "commission") {
+						const result = await manager.commission(cmd.spec, { install: true });
+						return Response.json(result);
 					}
 					await manager.applyCommand(cmd);
 					return Response.json({ ok: true });
@@ -110,6 +140,9 @@ export class SquadServer {
 		});
 
 		manager.on("event", this.onEvent);
+		void this.syncPresence();
+		this.presenceTimer = setInterval(() => void this.syncPresence(), 25_000);
+		this.presenceTimer.unref?.();
 		return this.url;
 	}
 
@@ -122,10 +155,40 @@ export class SquadServer {
 				/* dropped client */
 			}
 		}
+		if (e.type === "agent" || e.type === "removed" || e.type === "roster") this.schedulePresence();
+	}
+
+	private schedulePresence(): void {
+		if (this.presenceDebounce) return;
+		this.presenceDebounce = setTimeout(() => {
+			this.presenceDebounce = undefined;
+			void this.syncPresence();
+		}, 1500);
+		this.presenceDebounce.unref?.();
+	}
+
+	/** Mirror live squad agents into the shared presence registry so `who` + the command center see them next to raw omp sessions. */
+	private async syncPresence(): Promise<void> {
+		const liveIds = new Set<string>();
+		for (const a of this.manager.list()) {
+			liveIds.add(a.id);
+			this.claimed.set(a.id, a.repo);
+			await claim({ repo: a.repo, agent: a.name, branch: a.branch, task: a.issue?.name ?? a.activity, source: "squad", id: a.id });
+		}
+		for (const [id, repo] of this.claimed) {
+			if (!liveIds.has(id)) {
+				await release(id, repo);
+				this.claimed.delete(id);
+			}
+		}
 	}
 
 	stop(): void {
 		this.manager.off("event", this.onEvent);
+		clearInterval(this.presenceTimer);
+		clearTimeout(this.presenceDebounce);
+		for (const [id, repo] of this.claimed) void release(id, repo);
+		this.claimed.clear();
 		this.server?.stop(true);
 	}
 }
