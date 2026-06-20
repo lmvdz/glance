@@ -16,6 +16,7 @@ import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { listPlaneIssues } from "./plane.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
+import { leasesFor } from "./leases.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 
@@ -81,6 +82,7 @@ export class SquadServer {
 					const repo = url.searchParams.get("repo");
 					return Response.json(repo ? await who(repo) : await all());
 				}
+				if (url.pathname === "/api/leases") return Response.json(await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
 				const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 				if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
 				const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);

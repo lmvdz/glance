@@ -90,6 +90,8 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 	if (opts.model) args.push("--model", opts.model);
 	if (opts.approvalMode) args.push("--approval-mode", opts.approvalMode);
 	if (opts.thinking) args.push("--thinking", opts.thinking);
+	// Squad agents participate in soft file leasing (claim on edit, ⚠ on conflict).
+	args.push("-e", path.join(import.meta.dir, "lease-hook.ts"));
 
 	const proc = Bun.spawn([opts.bin ?? "omp", ...args], {
 		cwd: opts.cwd,

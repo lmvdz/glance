@@ -217,6 +217,7 @@ function renderProject(body, p) {
         <input id="pspawn" placeholder="Describe a task… (Enter to spawn an agent here)" autocomplete="off" />
       </div></div></div>
       <div class="section"><h3>Active on this repo</h3><div class="inner" id="presence"><span style="color:var(--dim)">…</span></div></div>
+      <div class="section"><h3>Files in flight</h3><div class="inner tree" id="leases"><span style="color:var(--dim)">…</span></div></div>
       <div class="section"><h3>Plane issues</h3><div class="inner" id="issues"><span style="color:var(--dim)">Loading…</span></div></div>
     </div>`;
   const grid = $("#agrid");
@@ -235,6 +236,7 @@ function renderProject(body, p) {
   sp.onkeydown = (e) => { if (e.key==="Enter") { const t = sp.value.trim(); if (t) { send({ type:"create", options:{ repo:p.repo, task:t } }); sp.value=""; } } };
   loadIssues(p.repo);
   loadPresence(p.repo);
+  loadLeases(p.repo);
 }
 
 async function loadPresence(repo) {
@@ -249,6 +251,25 @@ async function loadPresence(repo) {
       const t = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s/60)}m` : `${Math.round(s/3600)}h`;
       const re = e.reattached ? ` <span title="reattached to a surviving host after a restart" style="color:var(--accent)">↻ reattached</span>` : "";
       return `<div class="subnode"><span class="badge b-${e.source==='squad'?'working':'idle'}">${esc(e.source)}</span> ${esc(e.operator)}/${esc(e.agent)} <span style="color:var(--dim)">${esc(e.branch||'')} · ${t} ago</span>${re}</div>`;
+    }).join("");
+  } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
+}
+
+async function loadLeases(repo) {
+  const box = $("#leases"); if (!box) return;
+  try {
+    const r = await fetch(`/api/leases?repo=${encodeURIComponent(repo)}`);
+    if (!r.ok) throw 0;
+    const leases = await r.json();
+    if (!leases.length) { box.innerHTML = `<span style="color:var(--dim)">no files claimed.</span>`; return; }
+    // Group by file; flag files held by >1 distinct holder as contended.
+    const byFile = new Map();
+    for (const l of leases) { const k = l.file; (byFile.get(k) || byFile.set(k, []).get(k)).push(l); }
+    box.innerHTML = [...byFile.entries()].map(([file, hs]) => {
+      const holders = [...new Set(hs.map(h => `${h.operator}/${h.session}`))];
+      const conflict = holders.length > 1;
+      const who = holders.join(", ");
+      return `<div class="n ${conflict?'changed':''}">${conflict?'⚠ ':''}${esc(file)} <span style="color:var(--dim)">— ${esc(who)}</span></div>`;
     }).join("");
   } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
 }
