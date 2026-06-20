@@ -26,7 +26,11 @@
   button.primary { background: var(--accent); color: #0b0d10; border-color: var(--accent); font-weight: 600; }
   button.danger:hover { border-color: var(--err); color: var(--err); }
   main { flex: 1; display: grid; grid-template-columns: 380px 1fr; min-height: 0; }
-  .roster { border-right: 1px solid var(--line); overflow-y: auto; background: var(--bg); }
+  .rostercol { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
+  .roster { flex: 1; overflow-y: auto; }
+  .quickspawn { border-top: 1px solid var(--line); padding: 8px; display: flex; }
+  .quickspawn input { flex: 1; background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: inherit; }
+  .quickspawn input:focus { outline: none; border-color: var(--accent); }
   .empty { color: var(--dim); padding: 24px; text-align: center; font-size: 13px; }
   .card { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
   .card:hover { background: var(--panel); }
@@ -86,7 +90,10 @@
   <button class="primary" id="addBtn">+ Add agent</button>
 </header>
 <main>
-  <div class="roster" id="roster"><div class="empty">No agents yet. Click “+ Add agent”.</div></div>
+  <div class="rostercol">
+    <div class="roster" id="roster"><div class="empty">No agents yet — type a task below or click “+ Add agent”.</div></div>
+    <form class="quickspawn" id="quickForm"><input id="quickInput" placeholder="New task… (Enter to spawn)" autocomplete="off" /></form>
+  </div>
   <div class="detail" id="detail"><div class="nodetail">Select an agent to view its transcript.</div></div>
 </main>
 <div class="log" id="log"></div>
@@ -268,6 +275,22 @@ $("#addForm").onsubmit = (e) => {
   options.thinking = f.get("thinking");
   send({ type: "create", options });
   e.target.reset();
+};
+
+// Quick-spawn: type a task to spawn an agent in the daemon's directory.
+let spawnCwd = ".";
+fetch("/api/info").then(r => r.json()).then(info => {
+  spawnCwd = info.cwd || ".";
+  const qi = document.querySelector("#quickInput");
+  if (qi) qi.placeholder = `New task in ${spawnCwd}… (Enter to spawn)`;
+}).catch(() => {});
+document.querySelector("#quickForm").onsubmit = (e) => {
+  e.preventDefault();
+  const inp = document.querySelector("#quickInput");
+  const task = inp.value.trim();
+  if (!task) return;
+  send({ type: "create", options: { repo: spawnCwd, task } });
+  inp.value = "";
 };
 
 connect();

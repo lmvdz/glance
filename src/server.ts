@@ -62,6 +62,7 @@ export class SquadServer {
 					return new Response(indexFile, { headers: { "content-type": "text/html; charset=utf-8" } });
 				}
 				if (url.pathname === "/api/agents") return Response.json(manager.list());
+				if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 				const m = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 				if (m) return Response.json(manager.getTranscript(decodeURIComponent(m[1])));
 				if (url.pathname === "/api/command" && req.method === "POST") {
