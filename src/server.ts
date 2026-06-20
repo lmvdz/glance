@@ -17,6 +17,7 @@ import { listPlaneIssues } from "./plane.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
 import { leasesFor } from "./leases.ts";
+import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 
@@ -83,6 +84,15 @@ export class SquadServer {
 					return Response.json(repo ? await who(repo) : await all());
 				}
 				if (url.pathname === "/api/leases") return Response.json(await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
+				if (url.pathname === "/api/spawn" && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => null);
+					const prompt = body && typeof body === "object" && "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";
+					if (prompt.length === 0) return new Response("empty prompt", { status: 400 });
+					const tracked = manager.projects().map((p) => p.repo);
+					const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
+					const dto = await manager.create(plan);
+					return Response.json({ agent: dto, plan });
+				}
 				const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 				if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
 				const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);

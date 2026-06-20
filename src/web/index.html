@@ -203,9 +203,67 @@ function renderCrumb() {
 function renderBody() {
   const body = $("#body");
   const p = projects().find(x => x.id === selProject);
-  if (!p) { body.innerHTML = `<div class="nodetail">Select a project, or “+ New agent”.</div>`; return; }
+  if (!p) return renderHome(body);
   if (view === "agent" && selAgent && agents.has(selAgent)) return renderAgent(body, agents.get(selAgent));
   renderProject(body, p);
+}
+
+let homeMsg = "";
+let homeDraft = "";
+let spawning = false;
+
+function setHomeStatus(msg) { homeMsg = msg; const el = $("#smartstatus"); if (el) el.textContent = msg; }
+
+function renderHome(body) {
+  body.innerHTML = `
+    <div class="pv">
+      <div><h2>What do you want done?</h2><div class="sub">Describe a task — squad picks the repo, names the agent, and runs it. No forms.</div></div>
+      <div class="section"><div class="inner">
+        <div class="spawnrow">
+          <input id="smartspawn" placeholder="e.g. add rate limiting to the login route" autocomplete="off" />
+          <button class="primary" id="smartgo">Spawn</button>
+        </div>
+        <div id="smartstatus" class="sub" style="margin-top:8px;min-height:1.2em"></div>
+      </div></div>
+      <div class="section"><h3>Or jump to a project</h3><div class="inner" id="homeprojects"></div></div>
+    </div>`;
+  const input = $("#smartspawn"); const go = $("#smartgo");
+  input.value = homeDraft;
+  $("#smartstatus").textContent = homeMsg;
+  input.disabled = spawning; go.disabled = spawning;
+  const run = () => { const t = input.value.trim(); if (t && !spawning) smartSpawn(t); };
+  go.onclick = run;
+  input.oninput = () => { homeDraft = input.value; };
+  input.onkeydown = (e) => { if (e.key === "Enter") run(); };
+  if (!spawning) input.focus();
+  const hp = $("#homeprojects");
+  const ps = projects();
+  hp.innerHTML = ps.length ? ps.map(p => `<div class="n" data-pid="${esc(p.id)}">${esc(p.name)} <span style="color:var(--dim)">${esc(p.repo)} · ${p.agents.length} agent(s)</span></div>`).join("") : `<span style="color:var(--dim)">none yet — spawn one above</span>`;
+  hp.querySelectorAll("[data-pid]").forEach(el => { el.style.cursor = "pointer"; el.onclick = () => { selProject = el.getAttribute("data-pid"); view = "project"; renderAll(); }; });
+}
+
+async function smartSpawn(prompt) {
+  spawning = true;
+  const go = $("#smartgo"); const input = $("#smartspawn");
+  if (go) go.disabled = true;
+  if (input) input.disabled = true;
+  setHomeStatus("Thinking… picking a repo and naming the agent (a few seconds)…");
+  try {
+    const r = await fetch("/api/spawn", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ prompt }) });
+    if (!r.ok) { setHomeStatus("Couldn't spawn: " + (await r.text())); return; }
+    const data = await r.json();
+    const repoShort = String(data.plan.repo).split("/").filter(Boolean).pop();
+    homeDraft = "";
+    setHomeStatus(`Spawned “${data.agent.name}” on ${repoShort}${data.plan.reason ? " — " + data.plan.reason : ""}. Open it from Projects →`);
+    toast(`Spawned ${data.agent.name} on ${repoShort}`, "info");
+  } catch (e) {
+    setHomeStatus("Spawn failed: " + (e && e.message ? e.message : e));
+  } finally {
+    spawning = false;
+    const g = $("#smartgo"); const i = $("#smartspawn");
+    if (g) g.disabled = false;
+    if (i) { i.disabled = false; i.value = homeDraft; }
+  }
 }
 
 function renderProject(body, p) {
