@@ -63,6 +63,27 @@ export async function hostAlive(socket: string): Promise<boolean> {
 	}
 }
 
+/** Remove socket files whose host no longer responds; returns the pruned paths. */
+export async function pruneStaleSockets(): Promise<string[]> {
+	const dir = squadSocketDir();
+	let entries: string[];
+	try {
+		entries = await fsp.readdir(dir);
+	} catch {
+		return [];
+	}
+	const pruned: string[] = [];
+	for (const entry of entries) {
+		if (!entry.endsWith(".sock")) continue;
+		const p = path.join(dir, entry);
+		if ((await hostAlive(p)) === false) {
+			await fsp.rm(p, { force: true });
+			pruned.push(p);
+		}
+	}
+	return pruned;
+}
+
 /** Run the host until the omp child exits. Resolves on exit (process should then exit). */
 export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 	const args = ["--mode", "rpc", "--cwd", opts.cwd];
