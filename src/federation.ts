@@ -15,6 +15,7 @@
  */
 
 import type { Actor, ClientCommand, OperatorPresence } from "./types.ts";
+import type { LeaseEntry } from "./leases.ts";
 
 export const LOCAL_ACTOR: Actor = { id: "local", origin: "local" };
 
@@ -28,6 +29,13 @@ export interface TeamMessage {
 	from: Actor;
 	text: string;
 	ts: number;
+}
+
+/** A batch of one repo's live file leases, gossiped by its operator. The repo is identified across hosts by `repoId` (a normalized git origin URL — see repo-identity.ts), not a host-local path. */
+export interface RemoteLeases {
+	repoId: string;
+	operator: Actor;
+	leases: LeaseEntry[];
 }
 
 export interface FederationBus {
@@ -47,6 +55,12 @@ export interface FederationBus {
 	/** Team chat. */
 	sendMessage(text: string): void;
 	onMessage(cb: (msg: TeamMessage) => void): void;
+
+	/** Publish this host's live file leases for a repo (cross-host advisory leasing). */
+	publishLeases(repoId: string, leases: LeaseEntry[]): void;
+
+	/** A peer published its file leases for a repo. */
+	onLeases(cb: (frame: RemoteLeases) => void): void;
 }
 
 /** v1 default: a bus with no peers. Keeps the manager's federation paths live but inert. */
@@ -58,6 +72,8 @@ export class NullFederationBus implements FederationBus {
 	onRemoteCommand(_cb: (remote: RemoteCommand) => void): void {}
 	sendMessage(_text: string): void {}
 	onMessage(_cb: (msg: TeamMessage) => void): void {}
+	publishLeases(_repoId: string, _leases: LeaseEntry[]): void {}
+	onLeases(_cb: (frame: RemoteLeases) => void): void {}
 }
 
 // ── Cross-operator layer (Phase 2) ───────────────────────────────────────────
@@ -131,7 +147,8 @@ const MAX_BACKOFF_MS = 30_000;
 type FederationFrame =
 	| { kind: "presence"; presence: OperatorPresence }
 	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string }
-	| { kind: "message"; from: Actor; text: string; ts: number };
+	| { kind: "message"; from: Actor; text: string; ts: number }
+	| { kind: "leases"; repoId: string; operator: Actor; leases: LeaseEntry[] };
 
 /** Shape of `tailscale whois --json <ip>` output we care about. */
 interface TailscaleWhoisResult {
@@ -182,11 +199,13 @@ export class TailnetFederationBus implements FederationBus {
 	private readonly presenceCbs: ((presence: OperatorPresence) => void)[] = [];
 	private readonly commandCbs: ((remote: RemoteCommand) => void)[] = [];
 	private readonly messageCbs: ((msg: TeamMessage) => void)[] = [];
+	private readonly leasesCbs: ((frame: RemoteLeases) => void)[] = [];
 	private ws?: WebSocket;
 	private reconnectTimer?: Timer;
 	private backoffMs = INITIAL_BACKOFF_MS;
 	private stopped = true;
 	private lastPresence?: OperatorPresence;
+	private readonly lastLeases = new Map<string, LeaseEntry[]>();
 
 	constructor(opts: { coordinatorUrl: string; operator: Actor; whois?: (ip: string) => Promise<Actor | undefined> }) {
 		this.coordinatorUrl = opts.coordinatorUrl;
@@ -235,6 +254,15 @@ export class TailnetFederationBus implements FederationBus {
 		this.messageCbs.push(cb);
 	}
 
+	publishLeases(repoId: string, leases: LeaseEntry[]): void {
+		this.lastLeases.set(repoId, leases);
+		this.send({ kind: "leases", repoId, operator: this.operator, leases });
+	}
+
+	onLeases(cb: (frame: RemoteLeases) => void): void {
+		this.leasesCbs.push(cb);
+	}
+
 	private connect(): void {
 		if (this.stopped) return;
 		let ws: WebSocket;
@@ -250,6 +278,8 @@ export class TailnetFederationBus implements FederationBus {
 			this.backoffMs = INITIAL_BACKOFF_MS;
 			// Re-announce our latest presence to the (re)connected coordinator.
 			if (this.lastPresence !== undefined) this.send({ kind: "presence", presence: this.lastPresence });
+			// Re-announce our latest per-repo leases too, so a sync that publishes before the socket opens still reaches the coordinator.
+			for (const [repoId, leases] of this.lastLeases) this.send({ kind: "leases", repoId, operator: this.operator, leases });
 		};
 		ws.onmessage = (event: MessageEvent): void => {
 			void this.handleFrame(event.data);
@@ -296,6 +326,9 @@ export class TailnetFederationBus implements FederationBus {
 				}
 				case "message":
 					for (const cb of this.messageCbs) cb({ from: frame.from, text: frame.text, ts: frame.ts });
+					break;
+				case "leases":
+					for (const cb of this.leasesCbs) cb({ repoId: frame.repoId, operator: frame.operator, leases: frame.leases });
 					break;
 			}
 		} catch {

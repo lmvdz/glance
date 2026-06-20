@@ -133,3 +133,19 @@ export async function releaseSession(session: string, repo: string): Promise<voi
 		if (l.session === session) await fsp.rm(path.join(dirFor(repo), `${l.id}.json`), { force: true }).catch(() => {});
 	}
 }
+
+/**
+ * Mirror a peer's lease into the LOCAL registry for `targetRepo`, preserving the
+ * remote operator/host/session/heartbeat so `leasesFor`/`holdersOf` (and the
+ * lease-hook + command center) surface cross-host holders. Keyed in a distinct id
+ * space (host+session+file) so two machines with the same pid never collide, and
+ * never touched by the local heartbeat/release loops. The TTL prunes it on its
+ * own once the peer stops gossiping.
+ */
+export async function mirrorLease(targetRepo: string, entry: LeaseEntry): Promise<void> {
+	const dir = dirFor(targetRepo);
+	await fsp.mkdir(dir, { recursive: true });
+	const id = createHash("sha1").update(`mirror\0${entry.host}\0${entry.session}\0${entry.file}`).digest("hex").slice(0, 24);
+	const mirrored: LeaseEntry = { ...entry, id, repo: path.resolve(targetRepo) };
+	await fsp.writeFile(path.join(dir, `${id}.json`), JSON.stringify(mirrored)).catch(() => {});
+}

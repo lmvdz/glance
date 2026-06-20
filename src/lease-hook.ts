@@ -1,21 +1,32 @@
 /**
- * omp lease-hook — soft, advisory file leasing for any omp session.
+ * omp lease-hook — soft file leasing with soft-block-with-override.
  *
  * Load it (RpcAgent/agent-host loads it for squad agents; raw sessions via
- * `omp -e lease-hook.ts`). On an edit/write it CLAIMS a lease on the target
- * file(s); when another session already holds a file, it appends a ⚠ note to
- * the tool result (and notifies in interactive mode) so the agent coordinates.
- * It never blocks — leases are advisory; contended files show up in the command
- * center for the human in the loop.
+ * `omp -e lease-hook.ts`). On an edit/write it resolves the target file(s) to
+ * repo-relative paths. If another session already holds one and we have not yet
+ * warned about it this session, the hook BLOCKS the first attempt: it returns a
+ * reason that omp surfaces to the (possibly autonomous) agent in-stream AS AN
+ * ERROR, naming the current holder(s). Re-issuing the same edit overrides — the
+ * file is now flagged as warned, so the hook claims the lease and lets it run.
+ *
+ * Still advisory: it blocks at most once per file per session, never blocks an
+ * uncontested file, and contended files surface in the command center for the
+ * human in the loop. Leases release on session shutdown.
  */
 
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { claimLease, heartbeatSession, holdersOf, LEASE_TTL_MS, releaseSession } from "./leases.ts";
+import type { LeaseEntry } from "./leases.ts";
 
 interface ToolCallEvent {
 	toolName: string;
 	input: Record<string, unknown>;
+}
+
+interface ContestedFile {
+	rel: string;
+	holders: LeaseEntry[];
 }
 
 function git(cwd: string, args: string[]): string | undefined {
@@ -51,6 +62,7 @@ export default function leaseHook(pi: ExtensionAPI): void {
 	let repo = process.cwd();
 	const session = `omp:${process.pid}`;
 	let timer: Timer | undefined;
+	const warned = new Set<string>();
 
 	pi.on("session_start", async () => {
 		repo = git(process.cwd(), ["rev-parse", "--show-toplevel"]) ?? process.cwd();
@@ -60,22 +72,42 @@ export default function leaseHook(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const ev = event as ToolCallEvent;
-		if (ev.toolName !== "edit" && ev.toolName !== "write") return;
+		if (ev.toolName !== "edit" && ev.toolName !== "write") return undefined;
+		const rels: string[] = [];
 		for (const f of targetFiles(ev)) {
 			const abs = path.isAbsolute(f) ? f : path.resolve(repo, f);
-			const rel = path.relative(repo, abs) || f;
-			try {
-				const others = await holdersOf(repo, rel, session);
-				if (others.length && ctx.hasUI) {
-					const o = others[0];
-					await ctx.ui.notify(`⚠ ${rel} is also being edited by ${o.operator}/${o.session} (${ago(o.heartbeat)})`, "warning");
-				}
-				await claimLease({ repo, file: rel, session });
-			} catch {
-				/* advisory — never disrupt the edit */
-			}
+			rels.push(path.relative(repo, abs) || f);
 		}
-		// Soft lease: never block.
+		try {
+			// First pass: which target files are freshly contested (held by another
+			// session and not yet warned about this session)?
+			const contested: ContestedFile[] = [];
+			for (const rel of rels) {
+				if (warned.has(rel)) continue;
+				const holders = await holdersOf(repo, rel, session);
+				if (holders.length) contested.push({ rel, holders });
+			}
+			if (contested.length) {
+				// Soft-block the first attempt: warn, then return an error to the agent.
+				// Do NOT claim leases here — the edit will not run.
+				for (const c of contested) {
+					warned.add(c.rel);
+					if (ctx.hasUI) {
+						const o = c.holders[0];
+						await ctx.ui.notify(`⚠ ${c.rel} is also being edited by ${o.operator}/${o.session} (${ago(o.heartbeat)})`, "warning");
+					}
+				}
+				const detail = contested
+					.map((c) => `${c.rel} held by ${c.holders.map((h) => `${h.operator}/${h.session} (${ago(h.heartbeat)})`).join(", ")}`)
+					.join("; ");
+				return { block: true, reason: `File lease conflict: ${detail} — re-issue the edit to override.` };
+			}
+			// No fresh conflict (uncontested, or this is the override re-issue): claim
+			// leases on every target and let the edit proceed.
+			for (const rel of rels) await claimLease({ repo, file: rel, session });
+		} catch {
+			/* advisory — a registry error must never block or throw */
+		}
 		return undefined;
 	});
 
