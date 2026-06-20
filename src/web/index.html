@@ -84,6 +84,8 @@
   .md table { border-collapse:collapse; margin:6px 0; font-size:.96em; }
   .md th, .md td { border:1px solid var(--line); padding:3px 8px; }
   .md th { background:var(--panel2); font-weight:600; text-align:left; }
+  .md .tok-k { color:var(--accent); } .md .tok-s { color:var(--ok); } .md .tok-c { color:var(--dim); font-style:italic; } .md .tok-n { color:var(--work); }
+  .md .md-task { color:var(--accent); } .md img.md-img { max-width:100%; border-radius:6px; margin:4px 0; }
   .aside { border-left:1px solid var(--line); overflow-y:auto; padding:0; }
   .aside .section { border:0; border-bottom:1px solid var(--line); border-radius:0; }
   .tree { font:12px/1.5 ui-monospace,monospace; }
@@ -562,12 +564,57 @@ function mdEsc(s) { return String(s).replace(/[&<>]/g, c => ({ "&":"&amp;", "<":
 function mdInline(s) {
   const codes = [];
   s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, a, u) => `<img class="md-img" src="${u.replace(/"/g, "%22")}" alt="${a}" loading="lazy">`);
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => `<a href="${u.replace(/"/g, "%22")}" target="_blank" rel="noopener">${t}</a>`);
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+)__/g, "<strong>$1</strong>");
   s = s.replace(/(^|[^*\w])\*([^*\n]+)\*/g, "$1<em>$2</em>").replace(/(^|[^_\w])_([^_\n]+)_/g, "$1<em>$2</em>");
   s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
   s = s.replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[+n]}</code>`);
   return s;
+}
+
+// Best-effort, dependency-free syntax highlighting: comments, strings, numbers, and a
+// generic keyword set across common languages. Strings are matched before line comments,
+// so a `//` inside a string isn't mistaken for a comment.
+function highlightCode(code, lang) {
+  const hash = /^(py|python|bash|sh|shell|zsh|ruby|rb|yaml|yml|toml|ini|makefile|dockerfile|r|perl|pl|nim|elixir|ex)$/i.test(lang || "");
+  const kw = new Set(["function","fn","def","return","if","else","elif","for","while","do","switch","case","break","continue","const","let","var","new","class","struct","enum","interface","type","import","export","from","as","default","public","private","protected","static","async","await","yield","try","catch","finally","throw","raise","with","in","of","is","not","and","or","pub","impl","trait","mut","use","mod","match","where","func","package","val","when","extends","implements","super","this","self","void","null","nil","none","true","false","undefined","lambda","print","echo","local","then","fi","done","esac","require","module","go","defer","chan","map","string","int","bool","float","double","char","namespace"]);
+  const re = /(\/\/[^\n]*|#[^\n]*)|(\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = "", last = 0, m;
+  while ((m = re.exec(code))) {
+    out += mdEsc(code.slice(last, m.index));
+    last = re.lastIndex;
+    if (m[1]) out += (m[1][0] === "#" && !hash) ? mdEsc(m[1]) : `<span class="tok-c">${mdEsc(m[1])}</span>`;
+    else if (m[2]) out += `<span class="tok-c">${mdEsc(m[2])}</span>`;
+    else if (m[3]) out += `<span class="tok-s">${mdEsc(m[3])}</span>`;
+    else if (m[4]) out += `<span class="tok-n">${mdEsc(m[4])}</span>`;
+    else if (m[5]) out += kw.has(m[5]) ? `<span class="tok-k">${mdEsc(m[5])}</span>` : mdEsc(m[5]);
+    else out += mdEsc(m[0]);
+  }
+  out += mdEsc(code.slice(last));
+  return out;
+}
+
+function renderItemText(t) {
+  const cb = t.match(/^\[([ xX])\]\s+(.*)$/);
+  if (cb) return `<span class="md-task">${cb[1] === " " ? "☐" : "☑"}</span> ${mdInline(mdEsc(cb[2]))}`;
+  return mdInline(mdEsc(t));
+}
+
+// Build nested <ul>/<ol> from flat {indent, ordered, text} items by indentation depth.
+function buildList(items, pos) {
+  const indent = items[pos].indent, ordered = items[pos].ordered;
+  let html = ordered ? "<ol>" : "<ul>", i = pos;
+  while (i < items.length && items[i].indent >= indent) {
+    if (items[i].indent > indent) { i++; continue; }
+    let inner = renderItemText(items[i].text);
+    let j = i + 1;
+    if (j < items.length && items[j].indent > indent) { const sub = buildList(items, j); inner += sub.html; j = sub.next; }
+    html += `<li>${inner}</li>`;
+    i = j;
+  }
+  html += ordered ? "</ol>" : "</ul>";
+  return { html, next: i };
 }
 
 // Compact CommonMark-ish renderer: fenced + inline code, headings, lists, quotes, rules, emphasis, links.
@@ -578,10 +625,10 @@ function renderMarkdown(src) {
     const line = lines[i];
     const fence = line.match(/^\s*(```+|~~~+)(.*)$/);
     if (fence) {
-      const mark = fence[1][0].repeat(3); const buf = []; i++;
+      const mark = fence[1][0].repeat(3); const lang = fence[2].trim().split(/\s+/)[0]; const buf = []; i++;
       while (i < lines.length && !lines[i].trimStart().startsWith(mark)) { buf.push(lines[i]); i++; }
       i++;
-      html += `<pre><code>${mdEsc(buf.join("\n"))}</code></pre>`;
+      html += `<pre><code>${highlightCode(buf.join("\n"), lang)}</code></pre>`;
       continue;
     }
     if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) { html += "<hr>"; i++; continue; }
@@ -592,9 +639,13 @@ function renderMarkdown(src) {
       html += `<blockquote>${renderMarkdown(buf.join("\n"))}</blockquote>`; continue;
     }
     if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
-      const ordered = /^\s*\d+[.)]\s+/.test(line); const items = [];
-      while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/, "")); i++; }
-      html += `<${ordered ? "ol" : "ul"}>${items.map(it => `<li>${mdInline(mdEsc(it))}</li>`).join("")}</${ordered ? "ol" : "ul"}>`;
+      const items = [];
+      while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
+        const mm = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        items.push({ indent: mm[1].replace(/\t/g, "  ").length, ordered: /\d/.test(mm[2]), text: mm[3] });
+        i++;
+      }
+      html += buildList(items, 0).html;
       continue;
     }
     if (line.includes("|") && i + 1 < lines.length && /^[\s|:-]+$/.test(lines[i + 1]) && lines[i + 1].includes("-") && lines[i + 1].includes("|")) {
