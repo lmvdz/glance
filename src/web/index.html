@@ -81,6 +81,9 @@
   .md code { background:var(--panel2); border:1px solid var(--line); border-radius:4px; padding:0 4px; font-size:.92em; }
   .md a { color:var(--accent); } .md hr { border:0; border-top:1px solid var(--line); margin:8px 0; }
   .md strong { font-weight:600; } .md em { font-style:italic; } .md del { opacity:.7; }
+  .md table { border-collapse:collapse; margin:6px 0; font-size:.96em; }
+  .md th, .md td { border:1px solid var(--line); padding:3px 8px; }
+  .md th { background:var(--panel2); font-weight:600; text-align:left; }
   .aside { border-left:1px solid var(--line); overflow-y:auto; padding:0; }
   .aside .section { border:0; border-bottom:1px solid var(--line); border-radius:0; }
   .tree { font:12px/1.5 ui-monospace,monospace; }
@@ -594,9 +597,20 @@ function renderMarkdown(src) {
       html += `<${ordered ? "ol" : "ul"}>${items.map(it => `<li>${mdInline(mdEsc(it))}</li>`).join("")}</${ordered ? "ol" : "ul"}>`;
       continue;
     }
+    if (line.includes("|") && i + 1 < lines.length && /^[\s|:-]+$/.test(lines[i + 1]) && lines[i + 1].includes("-") && lines[i + 1].includes("|")) {
+      const cells = (r) => r.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(c => c.trim());
+      const headers = cells(line);
+      const aligns = cells(lines[i + 1]).map(c => (c.startsWith(":") && c.endsWith(":")) ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "");
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].includes("|") && !/^\s*$/.test(lines[i])) { rows.push(cells(lines[i])); i++; }
+      const cell = (c, a, tag) => `<${tag}${a ? ` style="text-align:${a}"` : ""}>${mdInline(mdEsc(c ?? ""))}</${tag}>`;
+      html += `<table><thead><tr>${headers.map((c, j) => cell(c, aligns[j], "th")).join("")}</tr></thead><tbody>${rows.map(r => `<tr>${headers.map((_, j) => cell(r[j], aligns[j], "td")).join("")}</tr>`).join("")}</tbody></table>`;
+      continue;
+    }
     if (/^\s*$/.test(line)) { i++; continue; }
     const buf = [line]; i++;
-    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^\s*(```+|~~~+|#{1,6}\s|>\s?)/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && !/^\s*(---+|\*\*\*+|___+)\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^\s*(```+|~~~+|#{1,6}\s|>\s?)/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && !/^\s*(---+|\*\*\*+|___+)\s*$/.test(lines[i]) && !(lines[i].includes("|") && i + 1 < lines.length && /^[\s|:-]+$/.test(lines[i + 1]) && lines[i + 1].includes("-") && lines[i + 1].includes("|"))) { buf.push(lines[i]); i++; }
     html += `<p>${mdInline(mdEsc(buf.join("\n")))}</p>`;
   }
   return html;
