@@ -51,6 +51,8 @@
   .badge { font-size:11px; padding:1px 7px; border-radius:999px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
   .b-idle{background:#1d2a24;color:var(--ok)} .b-working{background:#2c2716;color:var(--work)} .b-input{background:#2e1a16;color:var(--input)} .b-error{background:#2e1614;color:var(--err)} .b-starting{background:#1a2230;color:var(--accent)} .b-stopped{background:#1c2228;color:var(--stop)}
   .acard .nm { font-weight:600; } .acard .meta { font-size:12px; color:var(--mut); }
+  .acard.child { margin-left:20px; border-left:2px solid var(--accent); }
+  .b-kind { background:#16242c; color:var(--accent); } .branchmark { font-size:11px; color:var(--dim); }
   .issue { font-size:12px; color:var(--accent); }
   .section { border:1px solid var(--line); border-radius:8px; background:var(--panel); }
   .section > h3 { margin:0; padding:8px 12px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); border-bottom:1px solid var(--line); }
@@ -65,8 +67,20 @@
   .ahead .sub { font-size:12px; color:var(--mut); display:flex; gap:14px; flex-wrap:wrap; }
   .avmain { flex:1; display:grid; grid-template-columns:1fr 300px; min-height:0; }
   .transcript { overflow-y:auto; padding:12px 16px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
-  .te { margin-bottom:8px; white-space:pre-wrap; word-break:break-word; } .te .who { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .te { margin-bottom:10px; word-break:break-word; } .te .who { display:block; color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin-bottom:3px; }
+  .te .body { white-space:pre-wrap; }
   .te.user .who{color:var(--accent)} .te.assistant .who{color:var(--ok)} .te.tool{color:var(--mut)} .te.system{color:var(--work)} .te.thinking{color:var(--dim);font-style:italic}
+  .md { white-space:normal; }
+  .md > :first-child { margin-top:0; } .md > :last-child { margin-bottom:0; }
+  .md p { margin:0 0 6px; white-space:pre-wrap; }
+  .md h1,.md h2,.md h3,.md h4,.md h5,.md h6 { margin:8px 0 4px; font-weight:600; line-height:1.3; font-size:1em; }
+  .md ul,.md ol { margin:4px 0 6px; padding-left:20px; } .md li { margin:1px 0; }
+  .md blockquote { margin:4px 0; padding-left:10px; border-left:2px solid var(--line); color:var(--dim); }
+  .md pre { margin:6px 0; padding:8px 10px; background:var(--panel2); border:1px solid var(--line); border-radius:6px; overflow-x:auto; }
+  .md pre code { background:none; border:0; padding:0; white-space:pre; font:12px/1.45 ui-monospace,Menlo,monospace; }
+  .md code { background:var(--panel2); border:1px solid var(--line); border-radius:4px; padding:0 4px; font-size:.92em; }
+  .md a { color:var(--accent); } .md hr { border:0; border-top:1px solid var(--line); margin:8px 0; }
+  .md strong { font-weight:600; } .md em { font-style:italic; } .md del { opacity:.7; }
   .aside { border-left:1px solid var(--line); overflow-y:auto; padding:0; }
   .aside .section { border:0; border-bottom:1px solid var(--line); border-radius:0; }
   .tree { font:12px/1.5 ui-monospace,monospace; }
@@ -90,6 +104,17 @@
   .modal .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
   .log { position:fixed; bottom:10px; right:16px; width:360px; pointer-events:none; display:flex; flex-direction:column; gap:4px; }
   .toast { background:var(--panel2); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12px; opacity:.95; } .toast.error{border-color:var(--err);color:#ffb4ad} .toast.warn{color:var(--work)}
+  /* slash-command / skill completion */
+  .cmpl { position:fixed; z-index:60; background:var(--panel2); border:1px solid var(--line); border-radius:8px; box-shadow:0 10px 30px rgba(0,0,0,.55); max-height:300px; overflow-y:auto; min-width:340px; max-width:560px; padding:4px; display:none; }
+  .cmpl.open { display:block; }
+  .cmpl .ci { padding:5px 9px; border-radius:6px; cursor:pointer; }
+  .cmpl .ci.sel { background:var(--panel); box-shadow:inset 2px 0 0 var(--accent); }
+  .cmpl .ci .top { display:flex; align-items:baseline; gap:8px; }
+  .cmpl .ci .nm { color:var(--accent); font-family:ui-monospace,monospace; font-size:13px; }
+  .cmpl .ci .hint { color:var(--dim); font-size:11px; font-family:ui-monospace,monospace; }
+  .cmpl .ci .src { margin-left:auto; color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.05em; }
+  .cmpl .ci .desc { color:var(--mut); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cmpl .none { padding:6px 10px; color:var(--dim); font-size:12px; }
 </style>
 </head>
 <body>
@@ -128,6 +153,8 @@
 <script type="module">
 const agents = new Map();        // id -> AgentDTO
 const transcripts = new Map();   // id -> TranscriptEntry[]
+const commandsByAgent = new Map();// id -> CommandInfo[] (slash commands + skills + extensions)
+const composerDraft = new Map();  // id -> in-progress composer text (survives re-renders)
 let view = "project";            // "project" | "agent"
 let selProject = null;           // repo path
 let selAgent = null;             // agent id
@@ -146,10 +173,69 @@ function connect() {
 }
 function send(cmd) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd)); }
 
+// Slash-command / skill completion: when the token at the cursor starts with "/",
+// show a filtered menu over the agent's available commands. Returns { handleKey }
+// so the host's keydown handler can defer nav/accept to the menu when it's open.
+function attachCompletion(input, getItems) {
+  let menu = document.getElementById("cmplMenu");
+  if (!menu) { menu = document.createElement("div"); menu.id = "cmplMenu"; menu.className = "cmpl"; document.body.appendChild(menu); }
+  let items = [], sel = 0, open = false;
+  const tokenAt = () => {
+    const v = input.value, pos = input.selectionStart ?? v.length;
+    const m = v.slice(0, pos).match(/(^|\s)(\/[^\s]*)$/);
+    return m ? { start: pos - m[2].length, query: m[2].slice(1).toLowerCase(), end: pos } : null;
+  };
+  const close = () => { open = false; menu.classList.remove("open"); };
+  const position = () => {
+    const r = input.getBoundingClientRect();
+    menu.style.left = r.left + "px";
+    menu.style.width = Math.min(560, Math.max(340, r.width)) + "px";
+    if (r.top > window.innerHeight / 2) { menu.style.bottom = (window.innerHeight - r.top + 6) + "px"; menu.style.top = "auto"; }
+    else { menu.style.top = (r.bottom + 6) + "px"; menu.style.bottom = "auto"; }
+  };
+  const render = () => {
+    menu.innerHTML = items.length
+      ? items.map((c, i) => `<div class="ci ${i===sel?'sel':''}" data-i="${i}"><div class="top"><span class="nm">/${esc(c.name)}</span>${c.hint?`<span class="hint">${esc(c.hint)}</span>`:''}${c.source?`<span class="src">${esc(c.source)}</span>`:''}</div>${c.description?`<div class="desc">${esc(c.description)}</div>`:''}</div>`).join("")
+      : `<div class="none">no matching commands</div>`;
+    for (const el of menu.querySelectorAll(".ci")) el.onmousedown = (e) => { e.preventDefault(); accept(items[+el.dataset.i]); };
+  };
+  const refresh = () => {
+    const tok = tokenAt();
+    const all = getItems() || [];
+    if (!tok || !all.length) return close();
+    const q = tok.query;
+    items = all.filter(c => c.name.toLowerCase().includes(q) || (c.aliases||[]).some(a => a.toLowerCase().includes(q)))
+      .sort((a, b) => (a.name.toLowerCase().startsWith(q)?0:1) - (b.name.toLowerCase().startsWith(q)?0:1) || a.name.localeCompare(b.name))
+      .slice(0, 50);
+    sel = 0; open = true; menu.classList.add("open"); position(); render();
+  };
+  const accept = (c) => {
+    const tok = tokenAt(); if (!c || !tok) return;
+    const insert = "/" + c.name + " ";
+    input.value = input.value.slice(0, tok.start) + insert + input.value.slice(tok.end);
+    input.selectionStart = input.selectionEnd = tok.start + insert.length;
+    close(); input.focus(); input.dispatchEvent(new Event("input"));
+  };
+  input.addEventListener("input", refresh);
+  input.addEventListener("blur", () => setTimeout(close, 120));
+  return {
+    handleKey(e) {
+      if (!open) return false;
+      if (!items.length) { if (e.key === "Escape") { close(); e.preventDefault(); return true; } return false; }
+      if (e.key === "ArrowDown") { sel = (sel + 1) % items.length; render(); e.preventDefault(); return true; }
+      if (e.key === "ArrowUp") { sel = (sel - 1 + items.length) % items.length; render(); e.preventDefault(); return true; }
+      if (e.key === "Enter" || e.key === "Tab") { accept(items[sel]); e.preventDefault(); return true; }
+      if (e.key === "Escape") { close(); e.preventDefault(); return true; }
+      return false;
+    },
+  };
+}
+
 function handle(ev) {
   switch (ev.type) {
-    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); renderAll(); break;
-    case "agent": agents.set(ev.agent.id, ev.agent); renderAll(); break;
+    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); refreshShell(); break;
+    case "agent": agents.set(ev.agent.id, ev.agent); refreshShell(); break;
+    case "commands": commandsByAgent.set(ev.id, ev.commands); break;
     case "removed": agents.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
@@ -280,10 +366,16 @@ function renderProject(body, p) {
     </div>`;
   const grid = $("#agrid");
   if (!p.agents.length) grid.innerHTML = `<span style="color:var(--dim)">No agents yet.</span>`;
-  for (const a of p.agents.sort((x,y)=>STATUSES.indexOf(x.status)-STATUSES.indexOf(y.status))) {
+  const byStatus = (x,y)=>STATUSES.indexOf(x.status)-STATUSES.indexOf(y.status);
+  const inProj = new Set(p.agents.map(a=>a.id));
+  const roots = p.agents.filter(a=>!a.parentId || !inProj.has(a.parentId)).sort(byStatus);
+  const ordered = [];
+  for (const r of roots) { ordered.push([r,false]); for (const ch of p.agents.filter(a=>a.parentId===r.id).sort(byStatus)) ordered.push([ch,true]); }
+  for (const [a,child] of ordered) {
     const card = document.createElement("div");
-    card.className = "acard" + (a.status==="input"?" needs":"");
-    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span><span class="nm">${esc(a.name)}</span></div>
+    card.className = "acard" + (a.status==="input"?" needs":"") + (child?" child":"");
+    const kindBadge = a.kind==="workflow" ? `<span class="badge b-kind">⚙ workflow</span>` : a.kind==="flue-service" ? `<span class="badge b-kind">⚒ service</span>` : "";
+    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span></div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
       <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${a.contextPct!=null?`ctx ${Math.round(a.contextPct*100)}%`:""}</div>`;
@@ -291,7 +383,9 @@ function renderProject(body, p) {
     grid.appendChild(card);
   }
   const sp = $("#pspawn");
-  sp.onkeydown = (e) => { if (e.key==="Enter") { const t = sp.value.trim(); if (t) { send({ type:"create", options:{ repo:p.repo, task:t } }); sp.value=""; } } };
+  const spSrc = p.agents[0] && p.agents[0].id;
+  const spComp = attachCompletion(sp, () => (spSrc && commandsByAgent.get(spSrc)) || []);
+  sp.onkeydown = (e) => { if (spComp.handleKey(e)) return; if (e.key==="Enter") { const t = sp.value.trim(); if (t) { send({ type:"create", options:{ repo:p.repo, task:t } }); sp.value=""; } } };
   loadIssues(p.repo);
   loadPresence(p.repo);
   loadLeases(p.repo);
@@ -353,13 +447,32 @@ function openAgent(id) {
   renderAll();
 }
 
+function agentHeaderHTML(a) {
+  return `
+        <div><span class="badge b-${a.status}">${a.status}</span> <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}</div>
+        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span></div>`;
+}
+
+// Live agent/roster updates must NOT rebuild the agent view — that drops composer focus
+// and yanks the transcript to the bottom mid-typing. Patch the header + pending in place;
+// the transcript updates separately via appendTranscript, which preserves scroll.
+function patchAgentView(a) {
+  const h = $("#ahead");
+  if (!h) { renderBody(); return; }
+  h.innerHTML = agentHeaderHTML(a);
+  renderPending(a);
+}
+
+function refreshShell() {
+  renderSidebar(); renderCrumb(); renderCounts();
+  if (view === "agent" && selAgent && agents.has(selAgent)) patchAgentView(agents.get(selAgent));
+  else renderBody();
+}
+
 function renderAgent(body, a) {
   body.innerHTML = `
     <div class="av">
-      <div class="ahead">
-        <div><span class="badge b-${a.status}">${a.status}</span> <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}</div>
-        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span></div>
-      </div>
+      <div class="ahead" id="ahead">${agentHeaderHTML(a)}</div>
       <div class="avmain">
         <div class="transcript" id="transcript"></div>
         <div class="aside">
@@ -379,8 +492,11 @@ function renderAgent(body, a) {
   const t = $("#transcript"); t.innerHTML = ""; for (const e of (transcripts.get(a.id)||[])) appendTranscript(e);
   renderPending(a);
   const inp = $("#composerInput");
-  $("#sendBtn").onclick = () => { const v = inp.value.trim(); if (v) { send({ type:"prompt", id:a.id, message:v }); inp.value=""; } };
-  inp.onkeydown = (e) => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
+  inp.value = composerDraft.get(a.id) || "";
+  const comp = attachCompletion(inp, () => commandsByAgent.get(a.id) || []);
+  inp.addEventListener("input", () => composerDraft.set(a.id, inp.value));
+  $("#sendBtn").onclick = () => { const v = inp.value.trim(); if (v) send({ type:"prompt", id:a.id, message:v }); composerDraft.delete(a.id); inp.value=""; };
+  inp.onkeydown = (e) => { if (comp.handleKey(e)) return; if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
   $("#intBtn").onclick = () => send({ type:"interrupt", id:a.id });
   $("#rstBtn").onclick = () => send({ type:"restart", id:a.id });
   $("#killBtn").onclick = () => { if (confirm("Kill this agent?")) send({ type:"kill", id:a.id }); };
@@ -438,10 +554,60 @@ function preq(p) {
   return `<div class="preq" data-req="${esc(p.id)}"><div><strong>${esc(p.title)}</strong>${p.message?" — "+esc(p.message):""}</div>${ctl}</div>`;
 }
 
+function mdEsc(s) { return String(s).replace(/[&<>]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;" }[c])); }
+
+function mdInline(s) {
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => `<a href="${u.replace(/"/g, "%22")}" target="_blank" rel="noopener">${t}</a>`);
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*\w])\*([^*\n]+)\*/g, "$1<em>$2</em>").replace(/(^|[^_\w])_([^_\n]+)_/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[+n]}</code>`);
+  return s;
+}
+
+// Compact CommonMark-ish renderer: fenced + inline code, headings, lists, quotes, rules, emphasis, links.
+function renderMarkdown(src) {
+  const lines = String(src ?? "").split("\n");
+  let html = "", i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^\s*(```+|~~~+)(.*)$/);
+    if (fence) {
+      const mark = fence[1][0].repeat(3); const buf = []; i++;
+      while (i < lines.length && !lines[i].trimStart().startsWith(mark)) { buf.push(lines[i]); i++; }
+      i++;
+      html += `<pre><code>${mdEsc(buf.join("\n"))}</code></pre>`;
+      continue;
+    }
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) { html += "<hr>"; i++; continue; }
+    const h = line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if (h) { const l = h[1].length; html += `<h${l}>${mdInline(mdEsc(h[2]))}</h${l}>`; i++; continue; }
+    if (/^\s*>\s?/.test(line)) {
+      const buf = []; while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
+      html += `<blockquote>${renderMarkdown(buf.join("\n"))}</blockquote>`; continue;
+    }
+    if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(line); const items = [];
+      while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/, "")); i++; }
+      html += `<${ordered ? "ol" : "ul"}>${items.map(it => `<li>${mdInline(mdEsc(it))}</li>`).join("")}</${ordered ? "ol" : "ul"}>`;
+      continue;
+    }
+    if (/^\s*$/.test(line)) { i++; continue; }
+    const buf = [line]; i++;
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^\s*(```+|~~~+|#{1,6}\s|>\s?)/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && !/^\s*(---+|\*\*\*+|___+)\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+    html += `<p>${mdInline(mdEsc(buf.join("\n")))}</p>`;
+  }
+  return html;
+}
+
 function appendTranscript(e) {
   const t = $("#transcript"); if (!t) return;
   const div = document.createElement("div"); div.className = "te " + e.kind;
-  div.innerHTML = `<span class="who">${e.kind}</span>  ${esc(e.text)}`;
+  const rich = e.kind === "assistant" || e.kind === "user" || e.kind === "thinking" || e.kind === "system";
+  const body = rich ? `<div class="md">${renderMarkdown(e.text)}</div>` : `<span class="body">${esc(e.text)}</span>`;
+  div.innerHTML = `<span class="who">${e.kind}</span>${body}`;
   const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60; t.appendChild(div); if (atBottom) t.scrollTop = t.scrollHeight;
 }
 
