@@ -158,6 +158,7 @@
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
   <button id="waitingBtn" class="toggle attn" style="display:none" title="Everything waiting on you — open the attention queue">⛔ waiting</button>
+  <button id="muteBtn" class="navbtn" title="Mute notification sound">🔔</button>
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
   <button id="featBtn" title="Feature board — what's in flight + what needs landing">▦ Features</button>
   <button class="primary" id="addBtn">+ New agent</button>
@@ -203,6 +204,13 @@ let ws = null;
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 const STATUSES = ["working","input","idle","starting","error","stopped"];
+
+// ── Push signals (OMPSQ-4) ───────────────────────────────────────────────────
+// Notify out-of-band on status transitions so the operator can look away.
+const prevStatus = new Map();   // id -> last seen status (transition detection)
+const lastNotify = new Map();   // id -> ms of last notification (per-agent throttle)
+let muted = localStorage.getItem("squad.mute") === "1";
+const baseTitle = document.title;
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -272,14 +280,59 @@ function attachCompletion(input, getItems) {
 
 function handle(ev) {
   switch (ev.type) {
-    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); refreshShell(); break;
-    case "agent": agents.set(ev.agent.id, ev.agent); refreshShell(); break;
+    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); seedStatus(); refreshShell(); break;
+    case "agent": { const prev = prevStatus.get(ev.agent.id); agents.set(ev.agent.id, ev.agent); signalTransition(prev, ev.agent); prevStatus.set(ev.agent.id, ev.agent.status); refreshShell(); break; }
     case "commands": commandsByAgent.set(ev.id, ev.commands); break;
     case "features-changed": if (view === "board" || view === "feature") loadFeatures(); break;
-    case "removed": agents.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
+    case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
   }
+}
+
+// Seed status from a full roster snapshot WITHOUT notifying — guards the initial load
+// and every reconnect replay from firing a notification storm.
+function seedStatus() { prevStatus.clear(); for (const a of agents.values()) prevStatus.set(a.id, a.status); }
+
+function signalTransition(prev, a) {
+  if (prev === undefined || prev === a.status) return;   // brand-new agent or no change
+  if (a.status === "input") { const p = (a.pending || [])[0]; notify(a.id, `⛔ ${a.name} needs you`, p ? p.title : "waiting for input", true); }
+  else if (a.status === "error") notify(a.id, `⚠ ${a.name} errored`, a.error || "agent error", true);
+  else if (a.status === "idle" && prev === "working") notify(a.id, `✓ ${a.name} finished`, a.activity || "turn complete", false);
+}
+
+// Out-of-band signal: desktop Notification (lazy permission) + optional beep. Title/favicon
+// badge is driven separately by updateBadge() in renderCounts.
+function notify(id, title, body, sound) {
+  const now = Date.now();
+  if (now - (lastNotify.get(id) || 0) < 2000) return;   // per-agent throttle
+  lastNotify.set(id, now);
+  if (sound && !muted) beep();
+  if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+    try { const n = new Notification(title, { body, tag: id }); n.onclick = () => { window.focus(); openAgent(id); }; } catch {}
+  }
+}
+
+function beep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return;
+    const ctx = beep.ctx || (beep.ctx = new Ctx());
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = 660; g.gain.value = 0.05;
+    o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.15);
+  } catch {}
+}
+
+// Title + favicon badge reflect the count of requests waiting on the operator.
+function updateBadge(n) { document.title = n > 0 ? `(${n}) ${baseTitle}` : baseTitle; setFavicon(n); }
+function setFavicon(n) {
+  let link = document.getElementById("favicon");
+  if (!link) { link = document.createElement("link"); link.id = "favicon"; link.rel = "icon"; document.head.appendChild(link); }
+  const c = document.createElement("canvas"); c.width = c.height = 32; const x = c.getContext("2d");
+  x.fillStyle = "#14181d"; x.fillRect(0, 0, 32, 32);
+  x.fillStyle = "#6ea8fe"; x.font = "bold 22px sans-serif"; x.textAlign = "center"; x.textBaseline = "middle"; x.fillText("◆", 16, 17);
+  if (n > 0) { x.fillStyle = "#e0654f"; x.beginPath(); x.arc(23, 9, 8, 0, 2 * Math.PI); x.fill(); x.fillStyle = "#fff"; x.font = "bold 12px sans-serif"; x.fillText(n > 9 ? "9+" : String(n), 23, 10); }
+  link.href = c.toDataURL("image/png");
 }
 
 // ── derive projects from the live roster ────────────────────────────────────
@@ -323,6 +376,7 @@ function renderCounts() {
   $("#counts").textContent = `${projects().length} projects · ${all.length} agents`;
   const wb = $("#waitingBtn");
   if (wb) { wb.style.display = need ? "" : "none"; wb.textContent = `⛔ ${need} waiting`; }
+  updateBadge(need);
 }
 
 function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="d ${s}" title="${counts[s]} ${s}"></span>`).join("")}</span>`; }
@@ -1035,6 +1089,13 @@ refreshUpgrade(); setInterval(refreshUpgrade, 30000);
 const mainEl = document.querySelector("main");
 if (localStorage.getItem("squad.navCollapsed") === "1") mainEl.classList.add("nav-collapsed");
 $("#navToggle").onclick = () => { const c = mainEl.classList.toggle("nav-collapsed"); localStorage.setItem("squad.navCollapsed", c ? "1" : "0"); };
+const muteBtn = $("#muteBtn");
+const syncMute = () => { if (muteBtn) muteBtn.textContent = muted ? "🔕" : "🔔"; };
+const reqNotifyPerm = () => { try { if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission(); } catch {} };
+syncMute();
+if (muteBtn) muteBtn.onclick = () => { muted = !muted; localStorage.setItem("squad.mute", muted ? "1" : "0"); syncMute(); reqNotifyPerm(); };
+window.addEventListener("pointerdown", reqNotifyPerm, { once: true });
+window.addEventListener("focus", () => updateBadge(waitingAgents().length));
 connect();
 </script>
 </body>
