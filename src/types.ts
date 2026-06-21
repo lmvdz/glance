@@ -230,6 +230,8 @@ export interface PersistedFeature {
 	/** Repo-relative provenance. */
 	origin?: { planDir?: string; briefPath?: string };
 	plane?: { moduleId?: string; moduleUrl?: string; issueIdentifiers?: string[] };
+	/** Deterministic acceptance command (exit 0 = pass) that gates landing. Defaults to the repo's detected verify command. */
+	acceptance?: string;
 	/** Snapshot of member branches so land status survives an agent being killed. */
 	branches?: { branch?: string; worktree: string; agentId?: string }[];
 	createdAt: number;

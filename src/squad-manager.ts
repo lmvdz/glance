@@ -25,12 +25,13 @@ import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
-import { type Classify, ompClassify, routeIntake } from "./intake.ts";
+import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent } from "./land.ts";
 import { ownershipConflict } from "./ownership.ts";
+import { proofGate, runProof } from "./proof.ts";
 import type {
 	Actor,
 	IssueRef,
@@ -384,6 +385,12 @@ export class SquadManager extends EventEmitter {
 		for (const b of pf.branches ?? []) if (!members.some((m) => m.agentId === b.agentId)) members.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo: pf.repo });
 		const wts = await featureLandStatus(members);
 		if (!force && wts.some((w) => w.readiness === "diverged")) return { ok: false, stopped: "a branch is diverged — resolve it (or force)", results: [] };
+		if (!force) {
+			for (const m of members) {
+				const reason = await proofGate(pf.repo, m.worktree, m.branch);
+				if (reason) return { ok: false, stopped: `${m.agentName ?? m.branch ?? "member"}: ${reason}`, results: [] };
+			}
+		}
 		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] = [];
 		for (const w of landOrder(wts)) {
 			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
@@ -394,6 +401,24 @@ export class SquadManager extends EventEmitter {
 		}
 		this.emitFeaturesChanged();
 		return { ok: true, results };
+	}
+
+	/** Run the feature's acceptance command in each member worktree, recording a land proof per branch. */
+	async verifyFeature(id: string): Promise<{ ok: boolean; command?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string; artifacts: number }[] } | null> {
+		const pf = this.featureStore.get(id);
+		if (!pf) return null;
+		const command = pf.acceptance ?? (await detectVerify(pf.repo));
+		if (!command) return { ok: false, results: [{ ok: false, detail: "no acceptance command — set the feature's acceptance or add a test script to the repo", artifacts: 0 }] };
+		this.snapshotBranches(id);
+		const members: LandMember[] = [...this.agents.values()].filter((r) => r.dto.featureId === id).map((r) => ({ agentId: r.dto.id, agentName: r.dto.name, branch: r.dto.branch, worktree: r.dto.worktree, repo: pf.repo }));
+		for (const b of pf.branches ?? []) if (!members.some((m) => m.agentId === b.agentId)) members.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo: pf.repo });
+		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string; artifacts: number }[] = [];
+		for (const m of members) {
+			const proof = await runProof({ repo: pf.repo, worktree: m.worktree, command });
+			results.push({ agentId: m.agentId, branch: m.branch, ok: proof.ok, detail: proof.detail, artifacts: proof.artifacts.length });
+		}
+		this.emitFeaturesChanged();
+		return { ok: results.every((r) => r.ok), command, results };
 	}
 
 	private emitFeaturesChanged(): void {

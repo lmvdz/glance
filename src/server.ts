@@ -17,6 +17,8 @@ import type { ClientCommand, FeatureStage, IssueRef, SquadEvent } from "./types.
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { parsePlanConcerns } from "./features.ts";
 import { listPlaneIssues } from "./plane.ts";
+import { proofGate, runProof } from "./proof.ts";
+import { detectVerify } from "./intake.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
 import { leasesFor } from "./leases.ts";
@@ -267,9 +269,28 @@ export class SquadServer {
 					if (body && typeof body === "object" && "message" in body && typeof body.message === "string" && body.message.trim()) {
 						message = body.message.trim();
 					}
+					const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
+					if (!force) {
+						const reason = await proofGate(dto.repo, dto.worktree, dto.branch);
+						if (reason) return Response.json({ ok: false, committed: false, merged: false, message, detail: reason }, { status: 409 });
+					}
 					const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
 					const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message, commitWip: !busy });
 					return Response.json(result);
+				}
+				const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
+				if (mverify && req.method === "POST") {
+					const dto = manager.getAgent(decodeURIComponent(mverify[1]));
+					if (!dto) return new Response("no such agent", { status: 404 });
+					const command = await detectVerify(dto.repo);
+					if (!command) return new Response("no acceptance command detected for this repo", { status: 422 });
+					const proof = await runProof({ repo: dto.repo, worktree: dto.worktree, command });
+					return Response.json(proof);
+				}
+				const mfverify = url.pathname.match(/^\/api\/features\/([^/]+)\/verify$/);
+				if (mfverify && req.method === "POST") {
+					const out = await manager.verifyFeature(decodeURIComponent(mfverify[1]));
+					return out ? Response.json(out) : new Response("no such feature", { status: 404 });
 				}
 				if (url.pathname === "/api/plane/issues") {
 					const issues = await listPlaneIssues(url.searchParams.get("project") ?? "");
