@@ -1,9 +1,9 @@
 # TUI parity — attention, push, liveness
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
-TOUCHES: src/tui.ts, tests/tui.test.ts
+TOUCHES: src/tui.ts, tests/squad.test.ts
 BLOCKED_BY: —
 VERIFY_BLOCKER: —
 PLANE: OMPSQ-5 — https://app.plane.so/inkwell-finance/browse/OMPSQ-5/
@@ -52,3 +52,15 @@ both — no import across HTML/TS). Any existing `buildBoard` test must pass the
   - `frame` advances the spinner glyph for a `working` agent.
 - Manual: `omp-squad up`; spawn an `always-ask` agent; trigger an approval → terminal bell rings,
   `a` jumps to it; while it works the row spins; pause it past STALL_MS → stall marker appears.
+
+## Resolution
+
+Closed 2026-06-21 via OMPSQ-5 (https://app.plane.so/inkwell-finance/browse/OMPSQ-5/).
+`BoardState` gained injected `now`+`frame` so `buildBoard` stays pure; the list view now renders a
+braille spinner on `working` rows, a "⏳" stall marker past STALL_MS (=120000, matches OMPSQ-7),
+and a "⛔ N waiting · press a to answer" hint. `handleEvent` rings a terminal bell + OSC 9 notify
+on →input/→error (seeded + per-agent 2s throttle so reconnects don't storm); `a` (empty composer)
+jumps to the oldest blocked agent; a `maybeAnimate` timer advances the spinner only while agents
+work. Tests live in `tests/squad.test.ts` (where the existing pure-`buildBoard` cases already are),
+not a new `tui.test.ts` — reusing the `board()` fixture rather than forking it. Gate: `bun run
+check` clean, 130 tests pass (+3 new).

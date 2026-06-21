@@ -1,5 +1,5 @@
 # Web in-app dialogs — replace native prompt/confirm
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -45,3 +45,12 @@ None — client-only.
   network call; submitting creates the feature exactly as before.
 - "⤴ Upgrade" → styled confirm gates the restart as before.
 - Grep confirms no remaining `prompt(`/`confirm(` native calls in `src/web/index.html`.
+
+## Resolution
+
+Closed 2026-06-21 via OMPSQ-2 (https://app.plane.so/inkwell-finance/browse/OMPSQ-2/).
+Added async `confirmModal()` / `promptModal()` on one lazily-created shared `<dialog>` (reusing
+`.modal/.field/.actions/.danger` CSS); OK is the submit (Enter), Cancel is a button, Esc resolves
+false/null with no side effect. Swapped all four native call sites — newAutoFeature + newFeature
+(prompt), kill (danger confirm), upgrade (confirm). Gate green; `node --check` OK; static grep
+confirms zero native `prompt(`/`confirm(` calls remain.

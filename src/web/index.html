@@ -159,6 +159,7 @@
   <span id="counts" class="conn"></span>
   <button id="waitingBtn" class="toggle attn" style="display:none" title="Everything waiting on you — open the attention queue">⛔ waiting</button>
   <button id="muteBtn" class="navbtn" title="Mute notification sound">🔔</button>
+  <button id="cmdkBtn" class="navbtn" title="Command palette (⌘K / Ctrl-K)">⌘K</button>
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
   <button id="featBtn" title="Feature board — what's in flight + what needs landing">▦ Features</button>
   <button class="primary" id="addBtn">+ New agent</button>
@@ -211,6 +212,21 @@ const prevStatus = new Map();   // id -> last seen status (transition detection)
 const lastNotify = new Map();   // id -> ms of last notification (per-agent throttle)
 let muted = localStorage.getItem("squad.mute") === "1";
 const baseTitle = document.title;
+let navSel = null;   // OMPSQ-6: keyboard-highlighted agent card id in the project view
+
+// ── Liveness & staleness (OMPSQ-7) ───────────────────────────────────────────
+const STALL_MS = 120000;   // working but silent longer than this = stalled (matches TUI / OMPSQ-5)
+const SPIN = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+let spinFrame = 0;
+function ago(ms) { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
+function isStalled(a, now) { return a.status === "working" && now - a.lastActivity > STALL_MS; }
+function ctxColor(p) { return p == null ? "var(--mut)" : p > 0.9 ? "var(--err)" : p > 0.7 ? "var(--work)" : "var(--mut)"; }
+// One shared timer ticks working spinners + relative-time read-outs in place (no re-render).
+setInterval(() => {
+  spinFrame = (spinFrame + 1) % SPIN.length;
+  for (const el of document.querySelectorAll(".spin")) el.textContent = SPIN[spinFrame];
+  for (const el of document.querySelectorAll(".agotime")) { const ts = +el.dataset.ts; if (ts) el.textContent = ago(ts) + " ago"; }
+}, 120);
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -251,9 +267,7 @@ function attachCompletion(input, getItems) {
     const all = getItems() || [];
     if (!tok || !all.length) return close();
     const q = tok.query;
-    items = all.filter(c => c.name.toLowerCase().includes(q) || (c.aliases||[]).some(a => a.toLowerCase().includes(q)))
-      .sort((a, b) => (a.name.toLowerCase().startsWith(q)?0:1) - (b.name.toLowerCase().startsWith(q)?0:1) || a.name.localeCompare(b.name))
-      .slice(0, 50);
+    items = fuzzyRank(all, q, c => c.name);
     sel = 0; open = true; menu.classList.add("open"); position(); render();
   };
   const accept = (c) => {
@@ -558,8 +572,31 @@ function renderFeatureGate(f) {
     else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({type:"answer",id:aid,requestId:p.id,value:i.value}); }
   }
 }
+
+// ── Styled in-app dialogs (OMPSQ-2): replace the native browser prompt/confirm calls ──
+let genDlg;
+function ensureGenDlg() { if (!genDlg) { genDlg = document.createElement("dialog"); document.body.appendChild(genDlg); } return genDlg; }
+function confirmModal({ title, body = "", danger = false, okText = "Confirm" }) {
+  const d = ensureGenDlg();
+  return new Promise(resolve => {
+    d.innerHTML = `<form method="dialog" class="modal"><h2>${esc(title)}</h2>${body?`<div class="sub">${esc(body)}</div>`:""}<div class="actions"><button id="gmCancel" type="button">Cancel</button><button value="ok" class="${danger?"danger":"primary"}" type="submit">${esc(okText)}</button></div></form>`;
+    d.onclose = () => resolve(d.returnValue === "ok");
+    d.querySelector("#gmCancel").onclick = () => d.close("cancel");
+    d.showModal(); const ok = d.querySelector('button[value="ok"]'); if (ok) ok.focus();
+  });
+}
+function promptModal({ title, label = "", placeholder = "", value = "" }) {
+  const d = ensureGenDlg();
+  return new Promise(resolve => {
+    d.innerHTML = `<form method="dialog" class="modal"><h2>${esc(title)}</h2><div class="field">${label?`<label>${esc(label)}</label>`:""}<input id="gmInput" placeholder="${esc(placeholder)}" value="${esc(value)}" /></div><div class="actions"><button id="gmCancel" type="button">Cancel</button><button value="ok" class="primary" type="submit">OK</button></div></form>`;
+    const input = d.querySelector("#gmInput");
+    d.onclose = () => resolve(d.returnValue === "ok" ? input.value : null);
+    d.querySelector("#gmCancel").onclick = () => d.close("cancel");
+    d.showModal(); input.focus();
+  });
+}
 async function newAutoFeature() {
-  const goal = prompt("Goal for the auto feature (research → plan → file to Plane → implement):");
+  const goal = await promptModal({ title: "New auto feature", label: "Goal", placeholder: "research → plan → file to Plane → implement" });
   if (!goal || !goal.trim()) return;
   try {
     const r = await fetch("/api/features/auto", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ goal: goal.trim(), repo: spawnCwd }) });
@@ -581,7 +618,7 @@ async function landFromFeature(agentId, btn) {
 }
 
 async function newFeature() {
-  const title = prompt("New feature title:");
+  const title = await promptModal({ title: "New feature", label: "Title", placeholder: "feature title" });
   if (!title || !title.trim()) return;
   try { await fetch("/api/features", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ title: title.trim(), repo: spawnCwd }) }); }
   catch { toast("create failed", "error"); }
@@ -707,15 +744,116 @@ function fillAgentGrid(p) {
   for (const [a,child] of ordered) {
     const card = document.createElement("div");
     card.className = "acard" + (a.status==="input"?" needs":"") + (child?" child":"");
+    card.dataset.aid = a.id;
+    if (a.id === navSel) card.style.outline = "2px solid var(--accent)";
     const kindBadge = a.kind==="workflow" ? `<span class="badge b-kind">⚙ workflow</span>` : a.kind==="flue-service" ? `<span class="badge b-kind">⚒ service</span>` : "";
-    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span></div>
+    const stalled = isStalled(a, Date.now()); const pct = a.contextPct;
+    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?`<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""}${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${stalled?`<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
-      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${a.contextPct!=null?`ctx ${Math.round(a.contextPct*100)}%`:""}</div>`;
+      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
     card.onclick = () => openAgent(a.id);
     grid.appendChild(card);
   }
 }
+
+// ── Command palette + keyboard nav (OMPSQ-6) ─────────────────────────────────
+// Shared fuzzy matcher: also backs the composer slash menu (attachCompletion). Matches
+// keyFn(item) by substring, ranks prefix hits first; tolerates an optional aliases[] array.
+function fuzzyRank(items, query, keyFn) {
+  const q = query.toLowerCase();
+  const hit = c => keyFn(c).toLowerCase().includes(q) || (c.aliases || []).some(a => a.toLowerCase().includes(q));
+  return items.filter(hit)
+    .sort((a, b) => (keyFn(a).toLowerCase().startsWith(q) ? 0 : 1) - (keyFn(b).toLowerCase().startsWith(q) ? 0 : 1) || keyFn(a).localeCompare(keyFn(b)))
+    .slice(0, 50);
+}
+
+// Live registry of destinations + actions, built from current state. Each item runs on accept.
+function paletteItems() {
+  const out = [
+    { label: "Home", hint: "overview", run: () => { selProject = null; selAgent = null; view = "project"; renderAll(); } },
+    { label: "Attention queue", hint: "blocked agents", run: openQueue },
+    { label: "Feature board", hint: "", run: openBoard },
+    { label: "New agent", hint: "spawn", run: () => $("#addBtn").click() },
+    { label: "Upgrade daemon", hint: "pull + restart", run: () => $("#upgradeBtn").click() },
+  ];
+  if (waitingAgents().length) out.splice(1, 0, { label: "Answer next blocked", hint: "queue", run: openQueue });
+  for (const p of projects()) out.push({ label: `Project: ${p.name}`, hint: `${p.agents.length} agent(s)`, run: () => { selProject = p.id; selAgent = null; view = "project"; renderAll(); } });
+  for (const a of agents.values()) out.push({ label: `Agent: ${a.name}`, hint: a.status, run: () => openAgent(a.id) });
+  if (view === "agent" && selAgent) {
+    out.push({ label: "Land this agent", hint: "merge", run: () => $("#landBtn")?.click() });
+    out.push({ label: "Interrupt this agent", hint: "", run: () => $("#intBtn")?.click() });
+    out.push({ label: "Restart this agent", hint: "", run: () => $("#rstBtn")?.click() });
+    out.push({ label: "Kill this agent", hint: "danger", run: () => $("#killBtn")?.click() });
+  }
+  return out;
+}
+
+const palette = (() => {
+  let el, input, list, items = [], sel = 0, prevFocus = null, open = false;
+  const build = () => {
+    el = document.createElement("div");
+    el.style.cssText = "position:fixed;inset:0;z-index:80;display:none;align-items:flex-start;justify-content:center;background:rgba(0,0,0,.45)";
+    el.innerHTML = `<div style="margin-top:12vh;width:560px;max-width:92vw;background:var(--panel2);border:1px solid var(--line);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.6);overflow:hidden">
+      <input id="palInput" placeholder="Jump to a project/agent or run a command…" autocomplete="off" style="width:100%;box-sizing:border-box;background:var(--panel);border:0;border-bottom:1px solid var(--line);color:var(--ink);padding:12px 14px;font:inherit;outline:none" />
+      <div id="palList" style="max-height:50vh;overflow-y:auto;padding:4px"></div></div>`;
+    document.body.appendChild(el);
+    input = el.querySelector("#palInput"); list = el.querySelector("#palList");
+    input.addEventListener("input", refresh);
+    input.addEventListener("keydown", onKey);
+    el.addEventListener("mousedown", e => { if (e.target === el) close(); });
+  };
+  const refresh = () => {
+    const q = input.value.trim(); const all = paletteItems();
+    items = q ? fuzzyRank(all, q, i => i.label) : all.slice(0, 50);
+    sel = 0; render();
+  };
+  const render = () => {
+    list.innerHTML = items.length
+      ? items.map((it, i) => `<div data-i="${i}" style="padding:7px 12px;border-radius:6px;cursor:pointer;${i===sel?'background:var(--panel);box-shadow:inset 2px 0 0 var(--accent)':''}"><span style="color:var(--accent);font-family:ui-monospace,monospace">${esc(it.label)}</span>${it.hint?` <span style="color:var(--dim);font-size:11px">${esc(it.hint)}</span>`:''}</div>`).join("")
+      : `<div style="padding:8px 12px;color:var(--dim);font-size:12px">no matches</div>`;
+    for (const n of list.querySelectorAll("[data-i]")) n.onmousedown = (e) => { e.preventDefault(); run(items[+n.dataset.i]); };
+  };
+  const run = (it) => { if (!it) return; close(); it.run(); };
+  const onKey = (e) => {
+    if (!items.length) { if (e.key === "Escape") { close(); e.preventDefault(); } return; }
+    if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) { sel = (sel + 1) % items.length; render(); e.preventDefault(); }
+    else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) { sel = (sel - 1 + items.length) % items.length; render(); e.preventDefault(); }
+    else if (e.key === "Enter") { run(items[sel]); e.preventDefault(); }
+    else if (e.key === "Escape") { close(); e.preventDefault(); }
+  };
+  const openIt = () => { if (!el) build(); prevFocus = document.activeElement; open = true; el.style.display = "flex"; input.value = ""; refresh(); input.focus(); };
+  const close = () => { if (!el) return; open = false; el.style.display = "none"; if (prevFocus && prevFocus.focus) prevFocus.focus(); };
+  return { toggle: () => open ? close() : openIt(), close, isOpen: () => open };
+})();
+
+// Move the keyboard highlight through the visible agent cards (DOM order).
+function moveNav(delta) {
+  const cards = [...document.querySelectorAll("#agrid .acard")];
+  if (!cards.length) return;
+  let idx = cards.findIndex(c => c.dataset.aid === navSel);
+  idx = idx < 0 ? 0 : Math.min(cards.length - 1, Math.max(0, idx + delta));
+  navSel = cards[idx].dataset.aid;
+  for (const c of cards) c.style.outline = c.dataset.aid === navSel ? "2px solid var(--accent)" : "";
+  cards[idx].scrollIntoView({ block: "nearest" });
+}
+
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); palette.toggle(); return; }
+  if (palette.isOpen()) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (view === "project" && selProject) {
+    if (e.key === "j" || e.key === "ArrowDown") { moveNav(1); e.preventDefault(); return; }
+    if (e.key === "k" || e.key === "ArrowUp") { moveNav(-1); e.preventDefault(); return; }
+    if ((e.key === "Enter" || e.key === "ArrowRight") && navSel) { openAgent(navSel); e.preventDefault(); return; }
+  }
+  if (e.key === "Escape" || e.key === "ArrowLeft") {
+    if (view === "agent") { selAgent = null; view = "project"; renderAll(); e.preventDefault(); }
+    else if (view === "queue" || view === "board" || view === "feature" || (view === "project" && selProject)) { selProject = null; selAgent = null; view = "project"; renderAll(); e.preventDefault(); }
+  }
+});
+const cmdkBtn = $("#cmdkBtn"); if (cmdkBtn) cmdkBtn.onclick = () => palette.toggle();
 
 // Live updates while viewing a project: refresh only the agent cards + side panels,
 // never the spawn box (#pspawn) — rebuilding it would drop focus mid-typing.
@@ -756,8 +894,7 @@ async function loadPresence(repo) {
     const live = await r.json();
     if (!live.length) { box.innerHTML = `<span style="color:var(--dim)">nobody claimed this repo.</span>`; return; }
     box.innerHTML = live.map(e => {
-      const s = Math.max(0, Math.round((Date.now() - e.heartbeat) / 1000));
-      const t = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s/60)}m` : `${Math.round(s/3600)}h`;
+      const t = ago(e.heartbeat);
       const re = e.reattached ? ` <span title="reattached to a surviving host after a restart" style="color:var(--accent)">↻ reattached</span>` : "";
       return `<div class="subnode"><span class="badge b-${e.source==='squad'?'working':'idle'}">${esc(e.source)}</span> ${esc(e.operator)}/${esc(e.agent)} <span style="color:var(--dim)">${esc(e.branch||'')} · ${t} ago</span>${re}</div>`;
     }).join("");
@@ -806,9 +943,10 @@ function openAgent(id) {
 }
 
 function agentHeaderHTML(a) {
+  const stalled = isStalled(a, Date.now()); const pct = a.contextPct;
   return `
-        <div><span class="badge b-${a.status}">${a.status}</span> <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}</div>
-        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span></div>`;
+        <div><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?` <span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""} <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}${stalled?` <span class="pill bad">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
+        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span>${pct!=null?`<span style="color:${ctxColor(pct)}">ctx ${Math.round(pct*100)}%</span>`:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
 }
 
 // Live agent/roster updates must NOT rebuild the agent view — that drops composer focus
@@ -864,7 +1002,7 @@ function renderAgent(body, a) {
   inp.onkeydown = (e) => { if (comp.handleKey(e)) return; if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
   $("#intBtn").onclick = () => send({ type:"interrupt", id:a.id });
   $("#rstBtn").onclick = () => send({ type:"restart", id:a.id });
-  $("#killBtn").onclick = () => { if (confirm("Kill this agent?")) send({ type:"kill", id:a.id }); };
+  $("#killBtn").onclick = async () => { if (await confirmModal({ title: "Kill this agent?", body: "The agent process will be terminated.", danger: true, okText: "Kill" })) send({ type:"kill", id:a.id }); };
   $("#landBtn").onclick = async () => {
     const btn = $("#landBtn"); btn.disabled = true; btn.textContent = "Landing…";
     try {
@@ -1078,7 +1216,7 @@ async function refreshUpgrade() {
   } catch {}
 }
 document.querySelector("#upgradeBtn").onclick = async () => {
-  if (!confirm("Pull latest + restart the daemon? Agents keep running; the dashboard will reconnect.")) return;
+  if (!(await confirmModal({ title: "Upgrade daemon?", body: "Pull latest + restart. Agents keep running; the dashboard will reconnect." }))) return;
   toast("upgrading — pulling + restarting…", "info");
   try {
     const res = await (await fetch("/api/upgrade", { method:"POST", headers:{"content-type":"application/json"}, body:"{}" })).json();

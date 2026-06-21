@@ -1,5 +1,5 @@
 # Web push signals — close the doomscrolling gap
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -52,3 +52,12 @@ None — client-only.
 - Let an agent finish a turn → "finished" notification; kill one → "errored" notification.
 - Toggle mute → no sound on next `→input`; notification still respects browser permission.
 - Reconnect the WebSocket (restart daemon) → no notification storm from the replayed roster.
+
+## Resolution
+
+Closed 2026-06-21 via OMPSQ-4 (https://app.plane.so/inkwell-finance/browse/OMPSQ-4/).
+`handle()` now diffs per-agent status transitions; a full `roster` snapshot re-seeds via
+`seedStatus()` without notifying (reconnect-storm guard). Crossings into `input`/`error` and
+`working→idle` fire a native `Notification` (lazy permission on first gesture, per-agent 2s
+throttle) + a beep (mutable, persisted `squad.mute`), and `updateBadge()` sets a `(N)` title +
+canvas favicon dot from the reused `waitingAgents()` count. Gate green; `node --check` OK.

@@ -120,6 +120,8 @@ function board(over: Partial<BoardState> = {}): BoardState {
 		height: 24,
 		connected: true,
 		cwd: "/home/me/project",
+		now: Date.now(),
+		frame: 0,
 		...over,
 	};
 }
@@ -380,4 +382,26 @@ test("ponytail gate: an over-built workflow fails the size budget", async () => 
 	expect(check?.status).toBe("fail");
 	expect(check?.detail).toContain("non-blank lines");
 	expect(report.ok).toBe(false);
+});
+
+test("buildBoard spinner advances with the frame for working agents", () => {
+	const a = dto({ id: "a", name: "alpha", status: "working", lastActivity: Date.now() });
+	const f0 = buildBoard(board({ view: "list", agents: [a], frame: 0 })).join("\n");
+	const f1 = buildBoard(board({ view: "list", agents: [a], frame: 1 })).join("\n");
+	expect(f0).not.toBe(f1); // spinner glyph differs between frames
+});
+
+test("buildBoard marks a working-but-silent agent as stalled", () => {
+	const now = Date.now();
+	const fresh = dto({ id: "a", name: "alpha", status: "working", lastActivity: now });
+	const stale = dto({ id: "a", name: "alpha", status: "working", lastActivity: now - 200000 });
+	const recent = buildBoard(board({ view: "list", agents: [fresh], now })).join("\n");
+	const stalled = buildBoard(board({ view: "list", agents: [stale], now })).join("\n");
+	expect(recent).not.toContain("⏳");
+	expect(stalled).toContain("⏳");
+});
+
+test("list view prompts to answer when agents need input", () => {
+	const plain = buildBoard(board({ view: "list" })).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+	expect(plain).toContain("press a to answer");
 });

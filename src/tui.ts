@@ -49,6 +49,9 @@ const STATUS_DOT: Record<AgentStatus, string> = {
 };
 const KIND_GLYPH: Record<string, string> = { workflow: "⚙", "flue-service": "⚒" };
 const KIND_COLOR: Record<string, string> = { workflow: "cyan", "flue-service": "magenta" };
+/** Working but silent longer than this = stalled. Matches the web (OMPSQ-7) by value. */
+const STALL_MS = 120000;
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 export type TuiView = "list" | "agent";
 
@@ -65,6 +68,10 @@ export interface BoardState {
 	connected: boolean;
 	/** Directory new agents are spawned in (the daemon's launch cwd). */
 	cwd: string;
+	/** Wall clock for stall derivation. Injected so buildBoard stays pure + testable. */
+	now: number;
+	/** Spinner animation frame counter (advances while an agent is working). */
+	frame: number;
 }
 
 function statusRank(s: AgentStatus): number {
@@ -128,12 +135,13 @@ export function buildBoard(state: BoardState): string[] {
 		const slots = Math.max(1, height - 4); // title, sep, hint, composer
 		for (const { agent: a, depth } of orderedAgents(state.agents).slice(0, slots)) {
 			const selRow = a.id === state.selectedId;
-			const dot = c(STATUS_COLOR[a.status], STATUS_DOT[a.status]);
+			const stalled = a.status === "working" && state.now - a.lastActivity > STALL_MS;
+			const dot = a.status === "working" ? c(STATUS_COLOR.working, SPINNER[state.frame % SPINNER.length]) : c(STATUS_COLOR[a.status], STATUS_DOT[a.status]);
 			const g = KIND_GLYPH[a.kind];
 			const kindMark = g ? c(KIND_COLOR[a.kind] ?? "dim", g) : " ";
 			const name = pad((depth ? "└ " : "") + a.name, nameW);
 			const branch = c("dim", pad(a.branch ?? "—", branchW));
-			const act = pad(a.activity ?? a.todo?.active ?? (a.error ? `⚠ ${a.error}` : "—"), actW);
+			const act = pad((stalled ? "⏳ " : "") + (a.activity ?? a.todo?.active ?? (a.error ? `⚠ ${a.error}` : "—")), actW);
 			const meta = c("dim", pad(`${a.todo ? `${a.todo.done}/${a.todo.total}` : ""}  ${a.contextPct != null ? `${Math.round(a.contextPct * 100)}%` : ""}`, metaW));
 			const row = `${dot} ${kindMark} ${selRow ? c("bold", name) : name} ${branch} ${act} ${meta}`;
 			lines.push(selRow ? `${ESC}7m${pad(stripAnsi(row), width)}${RESET}` : pad(row, width));
@@ -141,7 +149,8 @@ export function buildBoard(state: BoardState): string[] {
 		if (!state.agents.length) lines.push(c("dim", "  No agents yet — type a task below and press Enter to spawn one."));
 		while (lines.length < height - 2) lines.push("");
 		const short = state.cwd.length > 40 ? `…${state.cwd.slice(-39)}` : state.cwd;
-		lines.push(pad(c("dim", `↑/↓ select · → open · Enter = new agent in ${short} · Ctrl-C quit`), width));
+		const navHint = `↑/↓ select · → open · Enter = new agent in ${short} · Ctrl-C quit`;
+		lines.push(pad(need ? `${c("red", `⛔ ${need} waiting · press a to answer`)} ${c("dim", navHint)}` : c("dim", navHint), width));
 		lines.push(composerLine("new", state.draft, width));
 	} else {
 		const sel = agents.find((a) => a.id === state.selectedId);
@@ -220,6 +229,10 @@ export class SquadTui {
 	private readonly onEvent: (e: SquadEvent) => void;
 	private readonly onKey: (data: Buffer) => void;
 	private onQuit?: () => void;
+	private spinTimer?: Timer;
+	private readonly prevStatus = new Map<string, AgentStatus>();
+	private readonly lastBell = new Map<string, number>();
+	private seeded = false;
 
 	constructor(manager: SquadManager, cwd: string = process.cwd()) {
 		this.manager = manager;
@@ -234,8 +247,12 @@ export class SquadTui {
 			height: process.stdout.rows ?? 30,
 			connected: true,
 			cwd,
+			now: Date.now(),
+			frame: 0,
 		};
 		for (const a of this.state.agents) this.transcripts.set(a.id, manager.getTranscript(a.id));
+		for (const a of this.state.agents) this.prevStatus.set(a.id, a.status);
+		this.seeded = true;
 		this.syncTranscript();
 		this.editor = this.makeEditor();
 		this.onEvent = (e) => this.handleEvent(e);
@@ -281,6 +298,7 @@ export class SquadTui {
 		if (!this.running) return;
 		this.running = false;
 		clearTimeout(this.redrawTimer);
+		if (this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = undefined; }
 		this.manager.off("event", this.onEvent);
 		if (process.stdin.isTTY) {
 			process.stdin.off("data", this.onKey);
@@ -296,12 +314,18 @@ export class SquadTui {
 			case "roster":
 				this.state.agents = e.agents;
 				if (!this.state.selectedId) this.state.selectedId = orderedAgents(e.agents)[0]?.agent.id;
+				this.prevStatus.clear();
+				for (const a of e.agents) this.prevStatus.set(a.id, a.status);
+				this.seeded = true;
 				break;
 			case "agent": {
+				const prev = this.prevStatus.get(e.agent.id);
 				const i = this.state.agents.findIndex((a) => a.id === e.agent.id);
 				if (i >= 0) this.state.agents[i] = e.agent;
 				else this.state.agents.push(e.agent);
 				if (!this.state.selectedId) this.state.selectedId = e.agent.id;
+				this.signal(e.agent, prev);
+				this.prevStatus.set(e.agent.id, e.agent.status);
 				break;
 			}
 			case "removed":
@@ -323,6 +347,19 @@ export class SquadTui {
 		}
 		this.syncTranscript();
 		this.scheduleRedraw();
+	}
+
+	/** Out-of-band attention signal on a status transition into a blocking/error state:
+	 *  terminal bell + OSC 9 desktop notify. Guarded by the initial seed + a per-agent
+	 *  throttle so a reconnect/replay never rings a storm. */
+	private signal(a: AgentDTO, prev?: AgentStatus): void {
+		if (!this.seeded || prev === a.status) return;
+		if (a.status !== "input" && a.status !== "error") return;
+		const now = Date.now();
+		if (now - (this.lastBell.get(a.id) ?? 0) < 2000) return;
+		this.lastBell.set(a.id, now);
+		process.stdout.write("\x07");
+		process.stdout.write(`\x1b]9;${a.name} ${a.status === "input" ? "needs input" : "errored"}\x07`);
 	}
 
 	private syncTranscript(): void {
@@ -347,6 +384,15 @@ export class SquadTui {
 		this.state.scroll = 0;
 		this.syncTranscript();
 		if (this.state.selectedId) this.manager.applyCommand({ type: "subscribe", id: this.state.selectedId });
+	}
+
+	/** Jump selection to the next blocked agent (oldest-waiting first) and open it. */
+	private jumpToBlocked(): void {
+		const blocked = this.state.agents.filter((a) => a.status === "input").sort((x, y) => x.lastActivity - y.lastActivity);
+		if (!blocked.length) return;
+		const cur = blocked.findIndex((a) => a.id === this.state.selectedId);
+		this.state.selectedId = (blocked[(cur + 1) % blocked.length] ?? blocked[0]).id;
+		this.openSelected();
 	}
 
 	/** Editor `onSubmit` sink: route the composed text by view + pending state.
@@ -411,6 +457,7 @@ export class SquadTui {
 		else if (s === "\x1b[B") this.onDown();
 		else if (s === "\x1b[C") this.onRight();
 		else if (s === "\x1b[D") this.onLeft();
+		else if (s === "a" && this.state.view === "list" && this.state.draft === "" && this.state.agents.some((a) => a.status === "input")) this.jumpToBlocked();
 		else this.editor.handleInput(s);
 		this.scheduleRedraw();
 	}
@@ -460,6 +507,14 @@ export class SquadTui {
 		}, 50);
 	}
 
+	/** Animate spinners only while an agent is working — advance the frame + redraw,
+	 *  stop the timer when nothing is working (no idle CPU burn). */
+	private maybeAnimate(): void {
+		const working = this.state.agents.some((a) => a.status === "working");
+		if (working && !this.spinTimer) this.spinTimer = setInterval(() => { this.state.frame++; this.render(); }, 120);
+		else if (!working && this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = undefined; }
+	}
+
 	/** Keep the composer's prompt gutter in sync with the current view/pending. */
 	private applyEditorChrome(): void {
 		const sel = this.selected();
@@ -478,11 +533,13 @@ export class SquadTui {
 		const editorLines = this.editor.render(width).map(stripCursorMarker);
 		const composerRows = Math.max(1, editorLines.length);
 		const chromeHeight = Math.max(3, height - composerRows + 1);
+		this.state.now = Date.now();
 		const chrome = buildBoard({ ...this.state, height: chromeHeight });
 		chrome.pop(); // drop buildBoard's static composer; the Editor renders the live one
 		const out = [...chrome, ...editorLines];
 		if (out.length > height) out.length = height;
 		while (out.length < height) out.push("");
 		process.stdout.write(`${ESC}H${ESC}J${out.join("\r\n")}`);
+		this.maybeAnimate();
 	}
 }
