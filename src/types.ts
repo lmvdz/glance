@@ -182,6 +182,8 @@ export interface AgentDTO {
 	issue?: IssueRef;
 	/** Feature this agent belongs to (single source of truth for membership). */
 	featureId?: string;
+	/** Repo-relative path prefixes this agent owns — overlapping spawns are refused (partition). */
+	owns?: string[];
 }
 
 export type ApprovalMode = "always-ask" | "write" | "yolo";
@@ -214,6 +216,8 @@ export interface PersistedAgent {
 	parentId?: string;
 	/** When set, run this agent inside a container instead of locally. */
 	sandbox?: SandboxConfig;
+	/** Repo-relative path prefixes this agent owns — restored so partition survives a restart. */
+	owns?: string[];
 }
 
 /** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */
@@ -263,6 +267,8 @@ export interface CreateAgentOptions {
 	sandbox?: SandboxConfig;
 	/** Auto-pick a process (verify / plan-approve / fan-out) from the task. Default on; false = plain agent. */
 	autoRoute?: boolean;
+	/** Repo-relative path prefixes this agent will edit. A spawn whose paths overlap a live agent's is refused. */
+	owns?: string[];
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

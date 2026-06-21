@@ -30,6 +30,7 @@ import { Dispatcher } from "./dispatch.ts";
 import { closePlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent } from "./land.ts";
+import { ownershipConflict } from "./ownership.ts";
 import type {
 	Actor,
 	IssueRef,
@@ -231,6 +232,7 @@ export class SquadManager extends EventEmitter {
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
 			featureId: p.featureId,
+			owns: p.owns,
 		};
 		const agent = this.makeDriver(p);
 		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", streaming: false, subs: new SubagentTracker() };
@@ -402,6 +404,10 @@ export class SquadManager extends EventEmitter {
 	// ── Roster mutation ───────────────────────────────────────────────────────
 
 	async create(opts: CreateAgentOptions): Promise<AgentDTO> {
+		if (opts.owns?.length) {
+			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
+			if (conflict) throw new Error(`path ownership conflict: ${conflict.paths.join(", ")} held by agent "${conflict.agent}" — narrow the scope or stop that agent`);
+		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
 		const id = `${name}-${Date.now().toString(36)}`;
 		const branch = opts.branch ?? `squad/${name}`;
@@ -453,6 +459,7 @@ export class SquadManager extends EventEmitter {
 			sandbox: opts.sandbox,
 			parentId: opts.parentId,
 			featureId: opts.featureId,
+			owns: opts.owns,
 		};
 
 		const dto: AgentDTO = {
@@ -471,6 +478,7 @@ export class SquadManager extends EventEmitter {
 			kind,
 			parentId: opts.parentId,
 			featureId: opts.featureId,
+			owns: opts.owns,
 		};
 
 		const agent = this.makeDriver(persisted);
@@ -1027,6 +1035,7 @@ export class SquadManager extends EventEmitter {
 				issue: p.issue,
 				parentId: p.parentId,
 				featureId: p.featureId,
+				owns: p.owns,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				sandbox: p.sandbox,
