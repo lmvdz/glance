@@ -7,10 +7,12 @@
 //
 // One persistent omp thread carries context across phases, so the plan path, the
 // research brief, and the filed issue IDs flow forward without re-deriving them.
-// Each skill's own gates (WIP-check, design approval, plan-to-plane project pick,
-// claim-and-implement refusals) surface as the workflow agent's needs-input — the
-// reviewable process, intact. Implementation commits but does NOT push; you review
-// and push.
+// The single human checkpoint is the plan-approval gate (the `approve` hexagon):
+// review scope before issues are filed and code is written. Phases otherwise run
+// autonomously — skills' interactive "present / confirm / ready to continue?" steps
+// are skipped (the node prompts say so); only a genuine blocker (e.g. plane not
+// connected, a claim-and-implement refusal) stops the run. Implementation commits
+// but does NOT push; you review and push.
 //
 // Prerequisites for the spawned agents:
 //   - the `plane` MCP (tools prefixed mcp__plane__*) configured + connected;
@@ -28,13 +30,13 @@ digraph ResearchPlanImplement {
     start     [shape=Mdiamond, label="Start"]
     exit      [shape=Msquare,  label="Exit"]
 
-    research  [label="Research", timeout_ms="2400000", prompt="Use the research skill (skill://research) to gather what this goal needs: scout relevant prior art, libraries, and the existing code in this repo; distill the transferable patterns and the concrete files/modules here they apply to. Write a short brief to plans/<short-topic>/BRIEF.md. Do NOT write production code — intelligence only. End by stating the abstracted concepts that should drive the plan."]
+    research  [label="Research", timeout_ms="2400000", prompt="Use the research skill (skill://research) to gather what this goal needs: scout relevant prior art, libraries, and the existing code in this repo; distill the transferable patterns and the concrete files/modules here they apply to. Write a short brief to plans/<short-topic>/BRIEF.md. Do NOT write production code — intelligence only. This is ONE phase of an autonomous workflow: do NOT present the brief for sign-off and do NOT ask whether to chain into /plan — finish the brief and end your turn so the workflow advances on its own. End by stating the abstracted concepts that should drive the plan. (The only human checkpoint is the plan-approval gate after the next phase.)"]
 
-    plan      [label="Plan", timeout_ms="3600000", prompt="Use the plan skill (skill://plan) to decompose the goal, informed by the research brief above, into an executable plan. Write plans/<goal-name>/00-overview.md plus NN-concern.md files using the STATUS / PRIORITY / COMPLEXITY / TOUCHES frontmatter convention. PLAN ONLY: do not execute concerns or write production code. When done, state the exact plan directory path."]
+    plan      [label="Plan", timeout_ms="3600000", prompt="Use the plan skill (skill://plan) to decompose the goal, informed by the research brief above, into an executable plan. Write plans/<goal-name>/00-overview.md plus NN-concern.md files using the STATUS / PRIORITY / COMPLEXITY / TOUCHES frontmatter convention. PLAN ONLY: do not execute concerns or write production code. Run autonomously: do NOT pause to ask whether to proceed — the plan-approval gate immediately after is where the human reviews scope. When done, state the exact plan directory path."]
 
     approve   [shape=hexagon, label="Approve plan"]
 
-    to_plane  [label="File to Plane", timeout_ms="1800000", prompt="Use the plan-to-plane skill (skill://plan-to-plane) on the plan directory from the Plan step: create one Plane work item per concern via the plane MCP (mcp__plane__*), mapping priority / state / labels and grouping them under a module named for the plan. If the plane MCP is not connected, STOP and report it rather than falling back to REST. Report the module URL and the created issue identifiers."]
+    to_plane  [label="File to Plane", timeout_ms="1800000", prompt="Use the plan-to-plane skill (skill://plan-to-plane) on the plan directory from the Plan step: create one Plane work item per concern via the plane MCP (mcp__plane__*), mapping priority / state / labels and grouping them under a module named for the plan. Run autonomously: if a choice is needed (e.g. which project/module), pick the sensible default and proceed without asking. If the plane MCP is not connected, STOP and report it rather than falling back to REST. Report the module URL and the created issue identifiers."]
 
     implement [label="Implement", timeout_ms="7200000", prompt="Implement the whole plan through the Plane pipeline, ONE issue at a time, until every issue created from this plan is Done. Loop over the plan module's issues: for each that is not yet Done, first run the promote-issue skill (skill://promote-issue) to upgrade it Backlog->Todo with the Tier-1 + Tier-2 schema, then run the claim-and-implement skill (skill://claim-and-implement) to execute it — baseline, implement within the declared scope, run its verification gate, accept, commit in logical groups, close the issue, and update the plan-doc STATUS. Honor each skill's gates and refusals (scope creep, design drift, SOUL conflict): if one issue refuses, surface why and move on to the next. Do NOT push. When no eligible issues remain, summarize what shipped and what was deferred."]
 
