@@ -26,6 +26,7 @@
   main.nav-collapsed .sidebar { display:none; }
   .navbtn { padding:6px 10px; font-size:14px; line-height:1; }
   button.toggle.active { background:var(--accent); color:#0b0d10; border-color:var(--accent); font-weight:600; }
+  button.toggle.attn { border-color:var(--input); color:var(--input); font-weight:600; }
   /* sidebar */
   .sidebar { border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); }
   .side-h { padding:10px 14px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); border-bottom:1px solid var(--line); }
@@ -550,9 +551,9 @@ function renderAgent(body, a) {
     localStorage.setItem("squad.showChanges", showChanges ? "1" : "0");
     document.querySelector(".av")?.classList.toggle("show-changes", showChanges);
     $("#changesToggle").classList.toggle("active", showChanges);
-    if (showChanges) { loadSubs(a.id); loadDiff(a.id); }
+    loadDiff(a.id); if (showChanges) loadSubs(a.id);
   };
-  if (showChanges) { loadSubs(a.id); loadDiff(a.id); }
+  loadDiff(a.id); if (showChanges) loadSubs(a.id);
 }
 
 async function loadSubs(id) {
@@ -562,11 +563,24 @@ async function loadSubs(id) {
     box.innerHTML = subs.length ? subs.map(s=>`<div class="subnode"><span class="badge b-${({running:"working"})[s.status]||"starting"}">${esc(s.status)}</span> ${esc(s.agent)} <span style="color:var(--dim)">${esc(s.description||s.task||"")}</span></div>`).join("") : `<span style="color:var(--dim)">none</span>`;
   } catch { box.innerHTML = `<span style="color:var(--dim)">none</span>`; }
 }
+// Surface how much of this agent's work is NOT yet in main: the count of changed
+// files in its worktree. Highlights the Changes toggle so it's obvious a Land is
+// needed before the work can be tested in the main checkout.
+function setChangeCount(n) {
+  const btn = $("#changesToggle"); if (!btn) return;
+  btn.textContent = n > 0 ? `⊟ Changes · ${n}` : "⊟ Changes";
+  btn.classList.toggle("attn", n > 0 && !showChanges);
+  btn.title = n > 0
+    ? `${n} file(s) changed in this agent's worktree — NOT in your main checkout yet. Open to review, then Land to merge into main and test.`
+    : "Show this agent's changes next to the chat";
+}
 async function loadDiff(id) {
-  const box = $("#diff"); if (!box) return;
+  const box = $("#diff");
   try {
     const r = await fetch(`/api/agents/${encodeURIComponent(id)}/diff`); if (!r.ok) throw 0;
     const diffs = await r.json();
+    setChangeCount(diffs.length);
+    if (!box) return;
     if (!diffs.length) { box.innerHTML = `<span style="color:var(--dim)">no changes</span>`; return; }
     box.innerHTML = diffs.map(d => {
       const lines = String(d.diff || "").split("\n").map(l => {
@@ -575,7 +589,7 @@ async function loadDiff(id) {
       }).join("\n");
       return `<details><summary class="n changed">${esc(d.status)} ${esc(d.file)}</summary><pre class="diffpre">${lines}</pre></details>`;
     }).join("");
-  } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
+  } catch { setChangeCount(0); if (box) box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
 }
 
 function renderPending(a) {
