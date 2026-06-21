@@ -160,6 +160,8 @@ export interface AgentDTO {
 	todo?: { done: number; total: number; active?: string };
 	/** Context window usage 0..1. */
 	contextPct?: number;
+	/** Compact rollup of the latest/in-flight run (tools, cost, duration); live/derived. */
+	receipt?: ReceiptRollup;
 	/** Pending human-input requests (status === "input" when non-empty). */
 	pending: PendingRequest[];
 	/** ms epoch of last activity of any kind. */
@@ -172,6 +174,36 @@ export interface AgentDTO {
 	issue?: IssueRef;
 	/** Feature this agent belongs to (single source of truth for membership). */
 	featureId?: string;
+}
+
+/**
+ * Durable per-run record (one JSONL line per completed/terminated agent run).
+ * Tokens/costUsd are OPTIONAL — omitted when no assistant usage was seen.
+ */
+export interface RunReceipt {
+	agentId: string;
+	name: string;
+	repo: string;
+	branch?: string;
+	model?: string;
+	runId: string;
+	startedAt: number;
+	endedAt?: number;
+	durationMs?: number;
+	status: AgentStatus;
+	toolCalls: number;
+	toolTally: Record<string, number>;
+	tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	costUsd?: number;
+	filesTouched: string[];
+}
+
+/** Compact run summary carried on the DTO for the dashboard. */
+export interface ReceiptRollup {
+	toolCalls: number;
+	costUsd?: number;
+	durationMs?: number;
+	endedAt?: number;
 }
 
 export type ApprovalMode = "always-ask" | "write" | "yolo";

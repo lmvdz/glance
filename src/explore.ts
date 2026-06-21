@@ -108,3 +108,22 @@ export async function worktreeDiff(dir: string): Promise<FileDiff[]> {
 	}
 	return diffs;
 }
+
+/**
+ * Changed file paths in `dir` via `git status --porcelain` — cheap, no per-file
+ * diff (unlike `worktreeDiff`). Reuses the rename `->` / quoted-path handling.
+ * Returns `[]` when `dir` is not a git repository.
+ */
+export async function changedFiles(dir: string): Promise<string[]> {
+	const status = await runGit(["-C", dir, "status", "--porcelain"]);
+	if (status.code !== 0 || !status.stdout) return [];
+	const files: string[] = [];
+	for (const line of status.stdout.split("\n")) {
+		if (!line) continue;
+		let rest = line.slice(3);
+		const arrow = rest.indexOf(" -> ");
+		if (arrow >= 0) rest = rest.slice(arrow + 4);
+		files.push(rest.startsWith('"') && rest.endsWith('"') ? (JSON.parse(rest) as string) : rest);
+	}
+	return files;
+}
