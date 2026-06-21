@@ -142,6 +142,20 @@ export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
 	return !!res && res.ok;
 }
 
+/** Create an issue in the Plane project mapped to `repo`, returning its ref. `null` ⇒ not configured / no project / failed. */
+export async function createPlaneIssue(repo: string, name: string): Promise<IssueRef | null> {
+	const cfg = readConfig();
+	if (!cfg) return null;
+	const projectId = projectIdFor(repo, cfg);
+	if (!projectId) return null;
+	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
+	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
+	const res = await fetch(`${base}/issues/`, { method: "POST", headers, body: JSON.stringify({ name }) }).catch(() => null);
+	if (!res || !res.ok) return null;
+	const raw = (await res.json().catch(() => null)) as PlaneIssue | null;
+	return raw?.id ? toIssueRef(raw, cfg, projectId) : null;
+}
+
 /** Web-app base for deep links — Plane cloud's app host differs from the API host. */
 function webBase(cfg: PlaneConfig): string {
 	if (process.env.PLANE_APP_URL) return process.env.PLANE_APP_URL.replace(/\/+$/, "");

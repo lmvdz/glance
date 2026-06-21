@@ -269,6 +269,8 @@ export interface CreateAgentOptions {
 	autoRoute?: boolean;
 	/** Repo-relative path prefixes this agent will edit. A spawn whose paths overlap a live agent's is refused. */
 	owns?: string[];
+	/** Auto-create + attach a tracking Plane issue for this spawn (work→Plane). Set at human/dispatch spawn entry points; off for restore/fan-out. */
+	track?: boolean;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

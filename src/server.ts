@@ -189,7 +189,7 @@ export class SquadServer {
 					if (body && typeof body === "object" && "task" in body && typeof body.task === "string" && body.task.trim()) {
 						const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 						const name = "name" in body && typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-						const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: id, approvalMode: "yolo" });
+						const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: id, approvalMode: "yolo", track: true });
 						manager.linkAgent(id, dto.id);
 						return Response.json({ agent: dto });
 					}
@@ -240,7 +240,7 @@ export class SquadServer {
 					const tracked = manager.projects().map((p) => p.repo);
 					const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
 					try {
-						const dto = await manager.create(plan);
+						const dto = await manager.create({ ...plan, track: true });
 						return Response.json({ agent: dto, plan });
 					} catch (err) {
 						return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
@@ -301,7 +301,7 @@ export class SquadServer {
 						return new Response("bad json", { status: 400 });
 					}
 					if (cmd.type === "create") {
-						const dto = await manager.create(cmd.options);
+						const dto = await manager.create({ ...cmd.options, track: true });
 						return Response.json(dto);
 					}
 					if (cmd.type === "commission") {

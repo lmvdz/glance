@@ -27,7 +27,7 @@ import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
-import { closePlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos } from "./plane.ts";
+import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent } from "./land.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -415,6 +415,16 @@ export class SquadManager extends EventEmitter {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
 			opts = { ...opts, workflow: decision.workflow, verify: decision.verify, thinking: decision.thinking ?? opts.thinking };
 			this.log("info", `routed "${name}": ${decision.reason}`);
+		}
+		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
+		// so the fleet is observable from the backlog without a manual plan-to-plane step. No-ops when
+		// Plane is unconfigured; restore / fan-out / flue paths never set `track`.
+		if (opts.track && !opts.issue && opts.task) {
+			const ref = await createPlaneIssue(opts.repo, opts.task.split("\n")[0].slice(0, 120).trim() || name);
+			if (ref) {
+				opts = { ...opts, issue: ref };
+				this.log("info", `tracked "${name}" as Plane ${ref.identifier ?? ref.id}`);
+			}
 		}
 		const approvalMode = opts.approvalMode ?? "write";
 		const thinking = opts.thinking ?? "low";
