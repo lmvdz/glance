@@ -243,6 +243,9 @@ let spinFrame = 0;
 function ago(ms) { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
 function isStalled(a, now) { return a.status === "working" && now - a.lastActivity > STALL_MS; }
 function ctxColor(p) { return p == null ? "var(--mut)" : p > 0.9 ? "var(--err)" : p > 0.7 ? "var(--work)" : "var(--mut)"; }
+function fmtDur(ms) { if (ms == null) return ""; const s = ms / 1000; return s < 60 ? `${s.toFixed(1)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`; }
+function fmtCost(n) { return n == null ? "" : `$${n.toFixed(4)}`; }
+function receiptSpan(r) { if (!r) return ""; const parts = [`🔧 ${r.toolCalls}`]; if (r.costUsd != null) parts.push(fmtCost(r.costUsd)); if (r.durationMs != null) parts.push(fmtDur(r.durationMs)); return ` · <span title="latest run: tool calls · cost · duration">${parts.join(" · ")}</span>`; }
 // One shared timer ticks working spinners + relative-time read-outs in place (no re-render).
 setInterval(() => {
   spinFrame = (spinFrame + 1) % SPIN.length;
@@ -888,7 +891,7 @@ function fillAgentGrid(p) {
     card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?`<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""}${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${stalled?`<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
-      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
+      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span>${receiptSpan(a.receipt)}</div>`;
     card.onclick = () => openAgent(a.id);
     grid.appendChild(card);
   }
@@ -1084,7 +1087,7 @@ function agentHeaderHTML(a) {
   const stalled = isStalled(a, Date.now()); const pct = a.contextPct;
   return `
         <div><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?` <span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""} <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}${stalled?` <span class="pill bad">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
-        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span>${pct!=null?`<span style="color:${ctxColor(pct)}">ctx ${Math.round(pct*100)}%</span>`:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
+        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span>${pct!=null?`<span style="color:${ctxColor(pct)}">ctx ${Math.round(pct*100)}%</span>`:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span>${a.receipt?`<span title="latest run: tool calls · cost · duration">🔧 ${a.receipt.toolCalls}${a.receipt.costUsd!=null?" · "+fmtCost(a.receipt.costUsd):""}${a.receipt.durationMs!=null?" · "+fmtDur(a.receipt.durationMs):""}</span>`:""}</div>`;
 }
 
 // Live agent/roster updates must NOT rebuild the agent view — that drops composer focus
