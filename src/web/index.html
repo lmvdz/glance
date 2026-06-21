@@ -184,7 +184,7 @@ const STATUSES = ["working","input","idle","starting","error","stopped"];
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { $("#conn").classList.add("up"); $("#connText").textContent = "live"; };
+  ws.onopen = () => { $("#conn").classList.add("up"); $("#connText").textContent = "live"; if (!routed) { routed = true; applyRoute(); } };
   ws.onclose = () => { $("#conn").classList.remove("up"); $("#connText").textContent = "reconnecting…"; setTimeout(connect, 1000); };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
@@ -270,7 +270,22 @@ function projects() {
   return [...byRepo.values()].sort((x,y) => y.last - x.last);
 }
 
-function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCounts(); }
+function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCounts(); pushRoute(); }
+
+// URL routing: the hash mirrors the view so refresh / deep-link / back-forward all work.
+let routed = false;
+function pushRoute() {
+  const h = view === "agent" && selAgent ? `#/agent/${encodeURIComponent(selAgent)}` : selProject ? `#/project/${encodeURIComponent(selProject)}` : "#/";
+  if (location.hash !== h) history.pushState(null, "", h);
+}
+function applyRoute() {
+  const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
+  if (m && m[1] === "agent") { openAgent(decodeURIComponent(m[2])); return; }
+  if (m && m[1] === "project") { selProject = decodeURIComponent(m[2]); selAgent = null; view = "project"; renderAll(); return; }
+  selProject = null; selAgent = null; view = "project"; renderAll();
+}
+window.addEventListener("hashchange", applyRoute);
+window.addEventListener("popstate", applyRoute);
 
 function renderCounts() {
   const all = [...agents.values()]; const need = all.filter(a => a.status === "input").length;
@@ -474,6 +489,7 @@ async function loadIssues(repo) {
 
 function openAgent(id) {
   selAgent = id; view = "agent";
+  const a = agents.get(id); if (a) { const pr = projects().find(p => p.repo === a.repo); if (pr) selProject = pr.id; }
   if (!transcripts.has(id)) { transcripts.set(id, []); send({ type:"subscribe", id }); }
   renderAll();
 }
