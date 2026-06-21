@@ -1,0 +1,51 @@
+// resolve-conflict — omp-squad's integration-layer resolver. When a feature branch
+// won't land because main moved under it, bring main INTO the branch, auto-resolve
+// the conflicts (git rerere replays resolutions it has seen before; an intent-aware
+// agent handles the rest), PROVE the result with the repo's own verify gate, and
+// commit — leaving the branch fast-forwardable into main.
+//
+// Resolution happens ON THE BRANCH, so the real land is just `git merge --ff-only`
+// and the resolved diff is reviewable in the Changes panel before main ever moves.
+// A textually-clean merge can still be semantically wrong (it silently drops one
+// side's behavior), so the verify gate — not the absence of conflict markers — is
+// what authorizes the commit. If verify can't be made green within the bounded
+// fix-up loop, the run fails and the land flow escalates to a human.
+//
+// Invoked by the land flow on a conflicting land, or run directly against a
+// conflicted branch's worktree:
+//   omp-squad add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
+//     --task "Make this branch land-able on main"
+//
+// The verify script auto-detects the repo toolchain; edit `script` for your stack.
+digraph ResolveConflict {
+    graph [ goal="Merge main into the branch, resolve conflicts, verify, and leave it fast-forwardable into main" ]
+
+    start   [shape=Mdiamond, label="Start"]
+    exit    [shape=Msquare,  label="Exit"]
+
+    merge   [shape=parallelogram, label="Merge main",
+             script="git -c rerere.enabled=true -c rerere.autoupdate=true merge --no-ff --no-commit main",
+             goal_gate=true, retry_target="resolve"]
+
+    resolve [label="Resolve conflicts",
+             prompt="Merging main into this branch left conflict markers. For EVERY file that still contains <<<<<<<, ======= or >>>>>>>, resolve it by COMBINING BOTH intents: keep this branch's feature AND the changes from main — never silently drop either side's behavior. If both sides made the same change (a duplicate fix), keep a single copy. Read the surrounding code to decide, not just the marker text. When every marker is gone, run `git add -A`. Do NOT commit and do NOT run the test suite — the workflow gates that in the next step."]
+
+    verify  [shape=parallelogram, label="Verify",
+             script="if test -f bun.lock; then bun run check 2>&1 && bun test 2>&1; elif test -f pnpm-lock.yaml; then pnpm -s check 2>&1 && pnpm -s test 2>&1; elif test -f package.json; then npm run check 2>&1 && npm test 2>&1; elif test -f Cargo.toml; then cargo check 2>&1 && cargo test 2>&1; else echo 'no known toolchain; skipping resolve verify'; fi",
+             goal_gate=true, retry_target="fixup"]
+
+    fixup   [label="Fixup", max_visits=3,
+             prompt="The verify step failed after the conflict resolution — most likely a hunk was resolved toward the wrong side, or an import or call drifted where the two branches met. Read the recent command output and fix ONLY what the failures require, then `git add -A`. Do not touch unrelated code."]
+
+    commit  [shape=parallelogram, label="Commit merge",
+             script="git diff --cached --quiet && echo 'nothing to commit (already up to date)' || git commit --no-edit"]
+
+    start -> merge
+    merge   -> verify [label="clean", condition="outcome=succeeded"]
+    merge   -> resolve
+    resolve -> verify
+    verify  -> commit [condition="outcome=succeeded"]
+    verify  -> fixup
+    fixup   -> verify
+    commit  -> exit
+}
