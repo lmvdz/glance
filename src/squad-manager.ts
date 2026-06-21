@@ -645,7 +645,8 @@ export class SquadManager extends EventEmitter {
 			return;
 		}
 		if (cmd.type === "snapshot") {
-			this.emit("event", { type: "roster", agents: this.list() } satisfies SquadEvent);
+			// version is stamped by SquadServer.broadcast (the manager doesn't own the served assets).
+			this.emit("event", { type: "roster", agents: this.list(), version: "" } satisfies SquadEvent);
 			return;
 		}
 		if (cmd.type === "subscribe") {

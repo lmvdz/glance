@@ -9,6 +9,8 @@
  * peers are a separate transport — see federation.ts — not this local server.)
  */
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import type { ClientCommand, FeatureStage, IssueRef, SquadEvent } from "./types.ts";
@@ -52,6 +54,12 @@ export interface SquadServerOptions {
 	push?: PushService;
 }
 
+/** Pure: a short, stable fingerprint of the served UI. Changes whenever index.html changes,
+ *  letting connected tabs detect a post-upgrade asset change and self-refresh. */
+export function computeUiVersion(html: string): string {
+	return createHash("sha256").update(html).digest("hex").slice(0, 12);
+}
+
 /** Pure: does this status transition warrant a human-attention push, and with what payload? */
 export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
 	if (!seeded || prev === undefined || prev === a.status) return null;
@@ -80,6 +88,8 @@ export class SquadServer {
 	private readonly lastPush = new Map<string, number>();
 	/** seeded after the first roster so a reconnect replay never alerts in bulk. */
 	private pushSeeded = false;
+	/** Fingerprint of the served UI at boot; sent on every roster so stale tabs self-refresh after an upgrade. */
+	private uiVersion = "";
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
@@ -98,6 +108,7 @@ export class SquadServer {
 		const manager = this.manager;
 		const clients = this.clients;
 		const indexFile = Bun.file(INDEX_HTML);
+		this.uiVersion = computeUiVersion(readFileSync(INDEX_HTML, "utf8"));
 
 		this.server = Bun.serve<SocketData>({
 			port: this.opts.port ?? 7878,
@@ -215,6 +226,7 @@ export class SquadServer {
 					return Response.json({ concerns, issues, agentIds: f.agentIds });
 				}
 				if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
+				if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
 				if (url.pathname === "/api/health") return Response.json({ ok: true, agents: manager.list().length, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()) });
 				if (url.pathname === "/api/presence") {
 					const repo = url.searchParams.get("repo");
@@ -304,7 +316,7 @@ export class SquadServer {
 			websocket: {
 				open: (ws) => {
 					clients.add(ws);
-					ws.send(JSON.stringify({ type: "roster", agents: manager.list() } satisfies SquadEvent));
+					ws.send(JSON.stringify({ type: "roster", agents: manager.list(), version: this.uiVersion } satisfies SquadEvent));
 					for (const a of manager.list()) {
 						const commands = manager.commandsFor(a.id);
 						if (commands?.length) ws.send(JSON.stringify({ type: "commands", id: a.id, commands } satisfies SquadEvent));
@@ -341,7 +353,8 @@ export class SquadServer {
 	}
 
 	private broadcast(e: SquadEvent): void {
-		const s = JSON.stringify(e);
+		// Stamp the live UI version onto roster snapshots (manager-emitted ones leave it blank).
+		const s = JSON.stringify(e.type === "roster" ? { ...e, version: this.uiVersion } : e);
 		for (const ws of this.clients) {
 			try {
 				ws.send(s);

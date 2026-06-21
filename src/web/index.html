@@ -400,7 +400,7 @@ function attachCompletion(input, getItems) {
 
 function handle(ev) {
   switch (ev.type) {
-    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); seedStatus(); refreshShell(); break;
+    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); seedStatus(); checkUiVersion(ev.version); refreshShell(); break;
     case "agent": { const prev = prevStatus.get(ev.agent.id); agents.set(ev.agent.id, ev.agent); signalTransition(prev, ev.agent); prevStatus.set(ev.agent.id, ev.agent.status); refreshShell(); break; }
     case "commands": commandsByAgent.set(ev.id, ev.commands); break;
     case "features-changed": if (view === "board" || view === "feature") loadFeatures(); break;
@@ -408,6 +408,15 @@ function handle(ev) {
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
   }
+}
+
+// Live-reload: the first roster after page load pins the UI version; a LATER reconnect
+// reporting a different version means the daemon upgraded the served assets — refresh.
+let uiVersion = null;
+function checkUiVersion(version) {
+  if (!version) return;
+  if (uiVersion === null) { uiVersion = version; return; }
+  if (version !== uiVersion) { toast("Updated — reloading…", "info"); setTimeout(() => location.reload(), 400); }
 }
 
 // Seed status from a full roster snapshot WITHOUT notifying — guards the initial load

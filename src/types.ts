@@ -369,7 +369,7 @@ export interface CommandInfo {
 // ── Manager → surface events ────────────────────────────────────────────────
 
 export type SquadEvent =
-	| { type: "roster"; agents: AgentDTO[] }
+	| { type: "roster"; agents: AgentDTO[]; version: string }
 	| { type: "agent"; agent: AgentDTO }
 	| { type: "removed"; id: string }
 	| { type: "transcript"; id: string; entry: TranscriptEntry }
