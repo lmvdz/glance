@@ -22,6 +22,10 @@
   button:hover { border-color:var(--accent); } button.primary { background:var(--accent); color:#0b0d10; border-color:var(--accent); font-weight:600; }
   button.danger:hover { border-color:var(--err); color:var(--err); } button.sm { padding:3px 8px; font-size:12px; }
   main { flex:1; display:grid; grid-template-columns:300px 1fr; min-height:0; }
+  main.nav-collapsed { grid-template-columns:0 1fr; }
+  main.nav-collapsed .sidebar { display:none; }
+  .navbtn { padding:6px 10px; font-size:14px; line-height:1; }
+  button.toggle.active { background:var(--accent); color:#0b0d10; border-color:var(--accent); font-weight:600; }
   /* sidebar */
   .sidebar { border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); }
   .side-h { padding:10px 14px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); border-bottom:1px solid var(--line); }
@@ -63,9 +67,11 @@
   .issuerow .iid { color:var(--dim); font-family:ui-monospace,monospace; font-size:12px; } .issuerow .inm { flex:1; }
   /* agent view */
   .av { display:flex; flex-direction:column; height:100%; min-height:0; }
-  .ahead { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; flex-direction:column; gap:6px; }
+  .ahead { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; flex-direction:row; align-items:flex-start; justify-content:space-between; gap:12px; }
+  .ahead #ahead { display:flex; flex-direction:column; gap:6px; min-width:0; }
   .ahead .sub { font-size:12px; color:var(--mut); display:flex; gap:14px; flex-wrap:wrap; }
-  .avmain { flex:1; display:grid; grid-template-columns:1fr 300px; grid-template-rows:1fr auto auto; min-height:0; }
+  .avmain { flex:1; display:grid; grid-template-columns:1fr 0; grid-template-rows:1fr auto auto; min-height:0; }
+  .av.show-changes .avmain { grid-template-columns:1fr 1fr; }
   .transcript { overflow-y:auto; min-height:0; padding:12px 16px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
   .te { margin-bottom:10px; word-break:break-word; } .te .who { display:block; color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin-bottom:3px; }
   .te .body { white-space:pre-wrap; }
@@ -86,7 +92,9 @@
   .md th { background:var(--panel2); font-weight:600; text-align:left; }
   .md .tok-k { color:var(--accent); } .md .tok-s { color:var(--ok); } .md .tok-c { color:var(--dim); font-style:italic; } .md .tok-n { color:var(--work); }
   .md .md-task { color:var(--accent); } .md img.md-img { max-width:100%; border-radius:6px; margin:4px 0; }
-  .aside { border-left:1px solid var(--line); overflow-y:auto; padding:0; }
+  .aside { border-left:1px solid var(--line); overflow-y:auto; padding:0; display:none; }
+  .av.show-changes .aside { display:block; }
+  .av.show-changes .diffpre { max-height:none; }
   .aside .section { border:0; border-bottom:1px solid var(--line); border-radius:0; }
   .tree { font:12px/1.5 ui-monospace,monospace; }
   .tree .n { white-space:nowrap; } .tree .dir { color:var(--accent); } .tree .changed { color:var(--work); }
@@ -124,6 +132,7 @@
 </head>
 <body>
 <header>
+  <button id="navToggle" class="navbtn" title="Toggle projects sidebar">☰</button>
   <h1><span class="sq">omp</span>-squad <span style="color:var(--dim);font-weight:400">command center</span></h1>
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
   <div class="spacer"></div>
@@ -148,7 +157,7 @@
     <h2>New agent</h2>
     <div class="field"><label>Repo / project path</label><input name="repo" placeholder="/home/you/project" required /></div>
     <div class="field"><label>Name</label><input name="name" placeholder="auth-refactor" /></div>
-    <div class="field"><label>Approval</label><select name="approvalMode"><option value="write">write</option><option value="yolo">yolo</option><option value="always-ask">always-ask</option></select></div>
+    <div class="field"><label>Approval</label><select name="approvalMode"><option value="yolo">yolo</option><option value="write">write</option><option value="always-ask">always-ask</option></select></div>
     <div class="field"><label>Thinking</label><select name="thinking"><option value="low">low</option><option value="minimal">minimal</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></div>
     <div class="field"><label>Task</label><textarea name="task" rows="3" placeholder="Refactor the auth module to…"></textarea></div>
     <div class="actions"><button type="button" id="addCancel">Cancel</button><button class="primary" value="ok">Spawn</button></div>
@@ -161,6 +170,7 @@ const transcripts = new Map();   // id -> TranscriptEntry[]
 const commandsByAgent = new Map();// id -> CommandInfo[] (slash commands + skills + extensions)
 const composerDraft = new Map();  // id -> in-progress composer text (survives re-renders)
 let view = "project";            // "project" | "agent"
+let showChanges = localStorage.getItem("squad.showChanges") === "1";
 let selProject = null;           // repo path
 let selAgent = null;             // agent id
 let spawnCwd = ".";
@@ -390,7 +400,7 @@ function renderProject(body, p) {
   const sp = $("#pspawn");
   const spSrc = p.agents[0] && p.agents[0].id;
   const spComp = attachCompletion(sp, () => (spSrc && commandsByAgent.get(spSrc)) || []);
-  sp.onkeydown = (e) => { if (spComp.handleKey(e)) return; if (e.key==="Enter") { const t = sp.value.trim(); if (t) { send({ type:"create", options:{ repo:p.repo, task:t } }); sp.value=""; } } };
+  sp.onkeydown = (e) => { if (spComp.handleKey(e)) return; if (e.key==="Enter") { const t = sp.value.trim(); if (t) { send({ type:"create", options:{ repo:p.repo, task:t, approvalMode:"yolo" } }); sp.value=""; } } };
   loadIssues(p.repo);
   loadPresence(p.repo);
   loadLeases(p.repo);
@@ -441,7 +451,7 @@ async function loadIssues(repo) {
     box.innerHTML = `<div class="issuelist">${issues.map(i=>`<div class="issuerow"><span class="iid">${esc(i.identifier||"")}</span><span class="inm">${esc(i.name)}</span><button class="sm" data-id="${esc(i.id)}">Spawn</button></div>`).join("")}</div>`;
     for (const i of issues) {
       const btn = box.querySelector(`button[data-id="${CSS.escape(i.id)}"]`);
-      if (btn) btn.onclick = () => send({ type:"create", options:{ repo, task:`Work on ${i.identifier||i.id}: ${i.name}`, issue:i } });
+      if (btn) btn.onclick = () => send({ type:"create", options:{ repo, task:`Work on ${i.identifier||i.id}: ${i.name}`, issue:i, approvalMode:"yolo" } });
     }
   } catch { box.innerHTML = `<span style="color:var(--dim)">Plane not connected.</span>`; }
 }
@@ -476,8 +486,11 @@ function refreshShell() {
 
 function renderAgent(body, a) {
   body.innerHTML = `
-    <div class="av">
-      <div class="ahead" id="ahead">${agentHeaderHTML(a)}</div>
+    <div class="av${showChanges ? " show-changes" : ""}">
+      <div class="ahead">
+        <div id="ahead">${agentHeaderHTML(a)}</div>
+        <button id="changesToggle" class="toggle${showChanges ? " active" : ""}" title="Show this agent's changes next to the chat">⊟ Changes</button>
+      </div>
       <div class="avmain">
         <div class="transcript" id="transcript"></div>
         <div class="aside">
@@ -495,7 +508,7 @@ function renderAgent(body, a) {
       </div>
     </div>`;
   const t = $("#transcript"); t.innerHTML = ""; const entries = transcripts.get(a.id) || []; for (const e of entries) appendTranscript(e);
-  if (!entries.length) t.innerHTML = `<div style="color:var(--dim);padding:8px 0">No messages yet${a.status === "stopped" ? " — this agent stopped before any turns" : "."}</div>`;
+  if (!entries.length) t.innerHTML = `<div class="te-empty" style="color:var(--dim);padding:8px 0">No messages yet${a.status === "stopped" ? " — this agent stopped before any turns" : "."}</div>`;
   renderPending(a);
   const inp = $("#composerInput");
   inp.value = composerDraft.get(a.id) || "";
@@ -516,7 +529,14 @@ function renderAgent(body, a) {
     } catch { toast("land failed", "error"); }
     btn.disabled = false; btn.textContent = "⤳ Land";
   };
-  loadSubs(a.id); loadDiff(a.id);
+  $("#changesToggle").onclick = () => {
+    showChanges = !showChanges;
+    localStorage.setItem("squad.showChanges", showChanges ? "1" : "0");
+    document.querySelector(".av")?.classList.toggle("show-changes", showChanges);
+    $("#changesToggle").classList.toggle("active", showChanges);
+    if (showChanges) { loadSubs(a.id); loadDiff(a.id); }
+  };
+  if (showChanges) { loadSubs(a.id); loadDiff(a.id); }
 }
 
 async function loadSubs(id) {
@@ -669,7 +689,7 @@ function renderMarkdown(src) {
 }
 
 function appendTranscript(e) {
-  const t = $("#transcript"); if (!t) return;
+  const t = $("#transcript"); if (!t) return; const ph = t.querySelector(".te-empty"); if (ph) ph.remove();
   const div = document.createElement("div"); div.className = "te " + e.kind;
   const rich = e.kind === "assistant" || e.kind === "user" || e.kind === "thinking" || e.kind === "system";
   const body = rich ? `<div class="md">${renderMarkdown(e.text)}</div>` : `<span class="body">${esc(e.text)}</span>`;
@@ -710,6 +730,9 @@ document.querySelector("#upgradeBtn").onclick = async () => {
   } catch { toast("restarting…", "info"); }
 };
 refreshUpgrade(); setInterval(refreshUpgrade, 30000);
+const mainEl = document.querySelector("main");
+if (localStorage.getItem("squad.navCollapsed") === "1") mainEl.classList.add("nav-collapsed");
+$("#navToggle").onclick = () => { const c = mainEl.classList.toggle("nav-collapsed"); localStorage.setItem("squad.navCollapsed", c ? "1" : "0"); };
 connect();
 </script>
 </body>
