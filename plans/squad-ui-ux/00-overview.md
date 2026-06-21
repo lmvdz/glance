@@ -25,6 +25,7 @@ OSC notify are native (rung 3). The command palette reuses the in-repo fuzzy mat
 | 04 | Web liveness & staleness cues | D | mechanical | `src/web/index.html` |
 | 05 | Web in-app dialogs (replace native prompt/confirm) | E | mechanical | `src/web/index.html` |
 | 06 | TUI parity: attention, push, liveness | A·B·D·F | architectural | `src/tui.ts`, `tests/tui.test.ts`* |
+| 07 | Web race-board (lane-per-agent pipeline view) | — (kanbun-inspired) | architectural | `src/web/index.html` |
 
 \* `tests/tui.test.ts` created/extended if not present; `buildBoard` is a pure renderer and is the
 testable seam (README: "the pure board renderer" is covered).
@@ -68,6 +69,10 @@ UI logic is DOM-coupled; "one runnable check" lives where pure logic is extracta
 
 6/6 closed (2026-06-21). All concerns shipped on branch `squad/make-the-omp-squad-ui-ux`; commits 41bb441, 67f42df, 78c4bba, 6859451, 8e36633 (web) + the TUI commit. Not pushed.
 
+**Concern 07 (race-board)** added 2026-06-21 — a follow-on win surfaced while comparing omp-squad to
+github.com/teamkit-ai/kanbun (its one borrowable idea: the lane-per-agent race-board). Pipelined
+through omp-squad's own `plan-implement` workflow on branch `squad/race-board`. STATUS: in-progress.
+
 ## Plane tracking
 - Project: omp-squad (`OMPSQ`)
 - Module: [Squad UI/UX](https://app.plane.so/inkwell-finance/projects/1eb181ba-f324-4767-a6d5-98953d5df011/modules/6a33515d-e048-480a-9fe5-7d42d55f3445/)
@@ -78,3 +83,4 @@ UI logic is DOM-coupled; "one runnable check" lives where pure logic is extracta
   - [04-web-liveness-staleness](https://app.plane.so/inkwell-finance/browse/OMPSQ-7/) — OMPSQ-7 ✅ done
   - [05-web-dialogs](https://app.plane.so/inkwell-finance/browse/OMPSQ-2/) — OMPSQ-2 ✅ done
   - [06-tui-parity](https://app.plane.so/inkwell-finance/browse/OMPSQ-5/) — OMPSQ-5 ✅ done
+  - [07-web-race-board](https://app.plane.so/inkwell-finance/browse/OMPSQ-8/) — OMPSQ-8 ◐ in-progress
