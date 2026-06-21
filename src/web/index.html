@@ -76,6 +76,7 @@
   .acard .r1 { display:flex; align-items:center; gap:8px; }
   .badge { font-size:11px; padding:1px 7px; border-radius:999px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
   .b-idle{background:#1d2a24;color:var(--ok)} .b-working{background:#2c2716;color:var(--work)} .b-input{background:#2e1a16;color:var(--input)} .b-error{background:#2e1614;color:var(--err)} .b-starting{background:#1a2230;color:var(--accent)} .b-stopped{background:#1c2228;color:var(--stop)}
+  .b-proof-fresh{background:#1d2a24;color:var(--ok)} .b-proof-stale{background:#2c2716;color:var(--work)} .b-proof-failed{background:#2e1614;color:var(--err)} .b-proof-none{background:#1c2228;color:var(--dim)}
   .acard .nm { font-weight:600; } .acard .meta { font-size:12px; color:var(--mut); }
   .acard.child { margin-left:20px; border-left:2px solid var(--accent); }
   .b-kind { background:#16242c; color:var(--accent); } .branchmark { font-size:11px; color:var(--dim); }
@@ -657,6 +658,11 @@ async function loadFeatures() {
 function openBoard() { view = "board"; selFeature = null; renderAll(); loadFeatures(); }
 function openFeature(id) { selFeature = id; view = "feature"; renderAll(); }
 function featNeedsLand(f) { return f.unlandedFiles > 0 || (f.worktrees || []).some(w => w.readiness === "ahead" || w.readiness === "uncommitted"); }
+// Land-proof badge text/tooltips, keyed by FeatureWorktreeStatus.proof.state (src/proof.ts).
+const PROOF_LABEL = { fresh:"✓ fresh", stale:"stale", failed:"✗ failed", none:"no proof" };
+const PROOF_TITLE = { fresh:"acceptance passed against the current HEAD — clear to land", stale:"passed, but HEAD moved since — re-verify before landing", failed:"acceptance command failed — fix and re-verify", none:"no proof recorded — Verify before landing" };
+// A landable branch (ahead/uncommitted) that isn't fresh-green is gated by proofGate on the server.
+function proofGatesLand(f) { return (f.worktrees||[]).some(w => (w.readiness === "ahead" || w.readiness === "uncommitted") && (!w.proof || w.proof.state !== "fresh")); }
 
 function renderBoard(body) {
   const fs = [...features.values()];
@@ -692,10 +698,12 @@ function renderBoard(body) {
 function renderFeature(body, f) {
   if (!f) { body.innerHTML = `<div class="nodetail">Loading feature…</div>`; return; }
   const landable = (f.worktrees||[]).some(w => w.readiness === "ahead" || w.readiness === "uncommitted");
+  const proofGated = landable && proofGatesLand(f);
   body.innerHTML = `<div class="pv">
     <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span>${f.workflowStage?` · <span class="badge b-stage" title="live workflow node">⚙ ${esc(f.workflowStage)}${f.workflowProgress?` ${f.workflowProgress.done}/${f.workflowProgress.total}`:""}</span>`:""}${f.persisted?"":` · <span style="color:var(--dim)">derived</span>`}</div></div>
-      <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>`:""}${!f.persisted&&f.planDir?`<button id="featAdopt" class="primary" title="Adopt this plan as a managed feature (then assign agents + Land)">＋ Adopt as feature</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
+      <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>${proofGated?`<button id="featForceLand" title="Skip the proof gate and land every landable branch now">⚡ Force land</button>`:""}`:""}${!f.persisted&&f.planDir?`<button id="featAdopt" class="primary" title="Adopt this plan as a managed feature (then assign agents + Land)">＋ Adopt as feature</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
     <div class="section"><h3>Worktrees · Land</h3><div class="inner tree" id="featland"></div></div>
+    <div class="section"><h3>Proof${f.persisted?` <button id="featVerify" class="sm" title="Run the feature's acceptance command in each member worktree and record a land proof">✓ Verify</button>`:""}</h3><div class="inner tree" id="featproof"></div></div>
     <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner"><div class="spawnrow"><input id="fspawnInput" placeholder="Describe a task — spawn an agent on this feature (Enter)" autocomplete="off" /><button id="fspawnBtn" class="sm primary">+ Agent</button></div></div><div class="inner" id="featassign"></div>`:""}</div>
     <div class="section"><h3>Plane tickets</h3><div class="inner" id="featplane"><span style="color:var(--dim)">loading…</span></div></div>
     <div class="section" id="featgatewrap" style="display:none"><h3>Needs your input</h3><div class="inner" id="featgate"></div></div>
@@ -709,16 +717,35 @@ function renderFeature(body, f) {
       const member = w.agentId ? agents.get(w.agentId) : undefined;
       const working = !!member && (member.status === "working" || member.status === "starting" || member.status === "input");
       const canLand = w.readiness === "ahead" || w.readiness === "uncommitted";
+      const proofState = (w.proof && w.proof.state) || "none";
+      const gated = canLand && proofState !== "fresh";
       const note = w.readiness === "diverged" ? "diverged — resolve before landing"
         : w.readiness === "no-branch" ? "runs in place (no branch)"
+        : gated ? `proof is ${proofState === "none" ? "missing" : proofState} — Verify first, or Force to land anyway`
         : working ? "agent still working — lands committed work only (its in-progress edits stay untouched)"
         : "merge this branch into main";
       return `<div class="landrow"><span class="branchmark">${esc(w.branch||"—")}</span>
         <span class="meta">↑${w.ahead} ↓${w.behind} · ${w.changedFiles} changed · <b class="rd-${w.readiness}">${w.readiness}</b>${working?` · <span style="color:var(--work)" title="this branch's agent is still running">⚙ working</span>`:""}</span>
-        ${w.agentId?`<button class="sm landbtn" data-aid="${esc(w.agentId)}" ${canLand?"":"disabled"} title="${esc(note)}">⤳ Land</button>`:""}</div>`;
+        ${w.agentId?`<button class="sm landbtn" data-aid="${esc(w.agentId)}" ${canLand?"":"disabled"} title="${esc(note)}">⤳ Land</button>${gated?`<button class="sm forcebtn" data-aid="${esc(w.agentId)}" title="skip the proof gate and land this branch now">⚡ Force</button>`:""}`:""}</div>`;
     }).join("");
     for (const btn of lt.querySelectorAll(".landbtn")) btn.onclick = () => landFromFeature(btn.dataset.aid, btn);
+    for (const btn of lt.querySelectorAll(".forcebtn")) btn.onclick = () => landFromFeature(btn.dataset.aid, btn, true);
   }
+  const pt = $("#featproof");
+  if (pt) {
+    const ws = f.worktrees || [];
+    if (!ws.length) pt.innerHTML = `<span style="color:var(--dim)">no worktrees — nothing to prove yet</span>`;
+    else pt.innerHTML = (proofGated?`<div class="meta" style="color:var(--work);margin-bottom:6px">⚠ Landing is gated until every landable branch is fresh — Verify (or Force).</div>`:"")
+      + ws.map(w => {
+        const pr = w.proof || { state:"none", artifacts:0 };
+        return `<div class="landrow"><span class="branchmark">${esc(w.branch||"—")}</span>`
+          + `<span class="badge b-proof-${esc(pr.state)}" title="${esc(PROOF_TITLE[pr.state]||"")}">${esc(PROOF_LABEL[pr.state]||pr.state)}</span>`
+          + `${pr.ranAt?` <span class="meta">${ago(pr.ranAt)} ago</span>`:""}`
+          + `${pr.artifacts?` <span class="meta" title="screenshot artifacts collected as vision evidence">📷 ${pr.artifacts}</span>`:""}</div>`;
+      }).join("");
+  }
+  const vb = $("#featVerify"); if (vb) vb.onclick = () => verifyFeature(f.id, vb);
+  const flb = $("#featForceLand"); if (flb) flb.onclick = () => landAll(f.id, flb, true);
   const fa = $("#featagents");
   const mem = f.agentIds.map(id => agents.get(id)).filter(Boolean);
   if (!mem.length) fa.innerHTML = `<span style="color:var(--dim)">no live agents</span>`;
@@ -840,13 +867,24 @@ async function newAutoFeature() {
   } catch { toast("auto feature failed", "error"); }
 }
 
-async function landFromFeature(agentId, btn) {
-  btn.disabled = true; btn.textContent = "Landing…";
+async function landFromFeature(agentId, btn, force) {
+  btn.disabled = true; btn.textContent = force ? "Forcing…" : "Landing…";
   try {
-    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
+    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(force ? { force: true } : {}) });
     const res = await r.json();
     toast(res.ok ? `landed: ${res.detail||"merged"}` : `land failed: ${res.detail||r.status}`, res.ok ? "info" : "error");
   } catch { toast("land failed", "error"); }
+  await loadFeatures();
+}
+
+// Run the feature's acceptance command in each member worktree (records a land proof per branch).
+async function verifyFeature(id, btn) {
+  btn.disabled = true; btn.textContent = "Verifying…";
+  try {
+    const r = await fetch(`/api/features/${encodeURIComponent(id)}/verify`, { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
+    if (!r.ok) { toast("verify failed: " + (await r.text().catch(() => r.status)), "error"); }
+    else { const res = await r.json(); toast(res.ok ? `proof green — ${res.results.length} branch(es) pass` : `proof red — ${res.results.filter(x => !x.ok).length}/${res.results.length} failing`, res.ok ? "info" : "warn"); }
+  } catch { toast("verify failed", "error"); }
   await loadFeatures();
 }
 
@@ -863,10 +901,10 @@ async function linkAgentUI(featureId, agentId, unlink) {
   catch { toast("link failed", "error"); }
   await loadFeatures();
 }
-async function landAll(id, btn) {
-  btn.disabled = true; btn.textContent = "Landing…";
+async function landAll(id, btn, force) {
+  btn.disabled = true; btn.textContent = force ? "Forcing…" : "Landing…";
   try {
-    const r = await fetch(`/api/features/${encodeURIComponent(id)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
+    const r = await fetch(`/api/features/${encodeURIComponent(id)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(force ? { force: true } : {}) });
     const res = await r.json();
     toast(res.ok ? `landed ${res.results.length} branch(es)` : (res.stopped || "land stopped"), res.ok ? "info" : "error");
   } catch { toast("land failed", "error"); }
