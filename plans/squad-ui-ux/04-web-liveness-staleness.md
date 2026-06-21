@@ -1,5 +1,5 @@
 # Web liveness & staleness cues
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -49,3 +49,14 @@ None — client-only.
   ctx% colored by band; the "ago" read-out ticks up between server events.
 - Force a stall (a long-running tool, or pause the child) → after STALL_MS the "⏳ idle" badge
   appears; resuming clears it.
+
+## Resolution
+
+Closed 2026-06-21 via OMPSQ-7 (https://app.plane.so/inkwell-finance/browse/OMPSQ-7/).
+Added pure helpers `ago()`, `isStalled()` (STALL_MS=120000, shared by value with OMPSQ-5) and a
+ctx color ramp; a single shared 120ms timer advances braille spinners on `working` cards/header
+and ticks `.agotime` read-outs in place (no re-render). Cards + agent header now show the spinner,
+a "⏳ idle Nm" stall badge, colored ctx%, and relative time; `loadPresence` refactored to reuse
+`ago()`. Gate green; `node --check` OK. Note: no isolated unit test — the helpers live in the
+no-build inline module; extracting a module solely to assert them would breach the AGENTS.md
+ponytail ladder, so they are verified by review + the regression gate.

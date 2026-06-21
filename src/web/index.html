@@ -214,6 +214,20 @@ let muted = localStorage.getItem("squad.mute") === "1";
 const baseTitle = document.title;
 let navSel = null;   // OMPSQ-6: keyboard-highlighted agent card id in the project view
 
+// ── Liveness & staleness (OMPSQ-7) ───────────────────────────────────────────
+const STALL_MS = 120000;   // working but silent longer than this = stalled (matches TUI / OMPSQ-5)
+const SPIN = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+let spinFrame = 0;
+function ago(ms) { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
+function isStalled(a, now) { return a.status === "working" && now - a.lastActivity > STALL_MS; }
+function ctxColor(p) { return p == null ? "var(--mut)" : p > 0.9 ? "var(--err)" : p > 0.7 ? "var(--work)" : "var(--mut)"; }
+// One shared timer ticks working spinners + relative-time read-outs in place (no re-render).
+setInterval(() => {
+  spinFrame = (spinFrame + 1) % SPIN.length;
+  for (const el of document.querySelectorAll(".spin")) el.textContent = SPIN[spinFrame];
+  for (const el of document.querySelectorAll(".agotime")) { const ts = +el.dataset.ts; if (ts) el.textContent = ago(ts) + " ago"; }
+}, 120);
+
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => { $("#conn").classList.add("up"); $("#connText").textContent = "live"; if (!routed) { routed = true; applyRoute(); } };
@@ -710,10 +724,11 @@ function fillAgentGrid(p) {
     card.dataset.aid = a.id;
     if (a.id === navSel) card.style.outline = "2px solid var(--accent)";
     const kindBadge = a.kind==="workflow" ? `<span class="badge b-kind">⚙ workflow</span>` : a.kind==="flue-service" ? `<span class="badge b-kind">⚒ service</span>` : "";
-    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span></div>
+    const stalled = isStalled(a, Date.now()); const pct = a.contextPct;
+    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?`<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""}${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${stalled?`<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
-      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${a.contextPct!=null?`ctx ${Math.round(a.contextPct*100)}%`:""}</div>`;
+      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
     card.onclick = () => openAgent(a.id);
     grid.appendChild(card);
   }
@@ -856,8 +871,7 @@ async function loadPresence(repo) {
     const live = await r.json();
     if (!live.length) { box.innerHTML = `<span style="color:var(--dim)">nobody claimed this repo.</span>`; return; }
     box.innerHTML = live.map(e => {
-      const s = Math.max(0, Math.round((Date.now() - e.heartbeat) / 1000));
-      const t = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s/60)}m` : `${Math.round(s/3600)}h`;
+      const t = ago(e.heartbeat);
       const re = e.reattached ? ` <span title="reattached to a surviving host after a restart" style="color:var(--accent)">↻ reattached</span>` : "";
       return `<div class="subnode"><span class="badge b-${e.source==='squad'?'working':'idle'}">${esc(e.source)}</span> ${esc(e.operator)}/${esc(e.agent)} <span style="color:var(--dim)">${esc(e.branch||'')} · ${t} ago</span>${re}</div>`;
     }).join("");
@@ -906,9 +920,10 @@ function openAgent(id) {
 }
 
 function agentHeaderHTML(a) {
+  const stalled = isStalled(a, Date.now()); const pct = a.contextPct;
   return `
-        <div><span class="badge b-${a.status}">${a.status}</span> <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}</div>
-        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span></div>`;
+        <div><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?` <span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""} <strong>${esc(a.name)}</strong> ${a.issue?`<span class="issue">· ${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</span>`:""}${stalled?` <span class="pill bad">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
+        <div class="sub"><span>${esc(a.model||"—")}</span><span>branch ${esc(a.branch||"—")}</span><span>${esc(a.worktree)}</span>${pct!=null?`<span style="color:${ctxColor(pct)}">ctx ${Math.round(pct*100)}%</span>`:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
 }
 
 // Live agent/roster updates must NOT rebuild the agent view — that drops composer focus
