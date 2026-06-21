@@ -7,6 +7,8 @@
  * In-place agent (ran directly in a dir, no worktree branch): just commit there.
  */
 
+import { detectVerify } from "./intake.ts";
+
 export interface LandResult {
 	ok: boolean;
 	committed: boolean;
@@ -22,6 +24,12 @@ export interface LandOpts {
 	branch?: string;
 	message: string;
 	commitWip: boolean;
+	/**
+	 * Verification command run against main AFTER the merge; the merge is rolled back
+	 * if it exits non-zero. undefined ⇒ auto-detect via detectVerify(repo); empty string
+	 * ⇒ skip verification.
+	 */
+	verify?: string;
 }
 
 /**
@@ -47,6 +55,27 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 		proc.exited,
 	]);
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output. */
+async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
+	const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe" });
+	const timer = setTimeout(() => proc.kill(), timeoutMs);
+	try {
+		const [stdout, stderr, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		return { code, output: `${stdout}${stderr}`.trim() };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** Cap a string to `n` chars so a gate's failure dump doesn't bloat the land detail. */
+function truncate(s: string, n: number): string {
+	return s.length <= n ? s : `${s.slice(0, n)}…`;
 }
 
 export function landAgent(opts: LandOpts): Promise<LandResult> {
@@ -91,12 +120,33 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 		return { ok: true, committed: false, merged: false, message, detail: commitWip ? "no changes to land" : "no committed changes to land (agent still working — uncommitted edits left untouched)" };
 	}
 
+	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the
+	// gate to run after merge (caller override wins; undefined ⇒ auto-detect; empty ⇒ skip).
+	const head0 = (await git(["rev-parse", "HEAD"], repo)).stdout;
+	const gate = opts.verify !== undefined ? opts.verify : await detectVerify(repo);
+
+	// Verify the merged main; if the gate fails, reset main to head0 so it stays green. The
+	// worktree branch keeps its commit (only main is reset), so it can be re-landed after a fix.
+	const verifyMerged = async (detail: string): Promise<LandResult> => {
+		if (!gate) return { ok: true, committed, merged: true, message, detail };
+		const v = await runGate(gate, repo);
+		if (v.code === 0) return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
+		await git(["reset", "--hard", head0], repo).catch(() => {});
+		return {
+			ok: false,
+			committed,
+			merged: false,
+			message,
+			detail: `merged ${branch} but verification failed (${gate}) — rolled main back to keep it green:\n${truncate(v.output, 800)}`,
+		};
+	};
+
 	const ff = await git(["merge", "--ff-only", branch], repo);
-	if (ff.code === 0) return { ok: true, committed, merged: true, message, detail: `merged ${branch} (fast-forward)` };
+	if (ff.code === 0) return verifyMerged(`merged ${branch} (fast-forward)`);
 
 	// Diverged → real merge commit.
 	const merge = await git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo);
-	if (merge.code === 0) return { ok: true, committed, merged: true, message, detail: `merged ${branch}` };
+	if (merge.code === 0) return verifyMerged(`merged ${branch}`);
 
 	await git(["merge", "--abort"], repo).catch(() => undefined);
 	return { ok: false, committed, merged: false, message, detail: `merge failed: ${merge.stderr || merge.stdout}` };
