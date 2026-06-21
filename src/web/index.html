@@ -572,8 +572,31 @@ function renderFeatureGate(f) {
     else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({type:"answer",id:aid,requestId:p.id,value:i.value}); }
   }
 }
+
+// ── Styled in-app dialogs (OMPSQ-2): replace the native browser prompt/confirm calls ──
+let genDlg;
+function ensureGenDlg() { if (!genDlg) { genDlg = document.createElement("dialog"); document.body.appendChild(genDlg); } return genDlg; }
+function confirmModal({ title, body = "", danger = false, okText = "Confirm" }) {
+  const d = ensureGenDlg();
+  return new Promise(resolve => {
+    d.innerHTML = `<form method="dialog" class="modal"><h2>${esc(title)}</h2>${body?`<div class="sub">${esc(body)}</div>`:""}<div class="actions"><button id="gmCancel" type="button">Cancel</button><button value="ok" class="${danger?"danger":"primary"}" type="submit">${esc(okText)}</button></div></form>`;
+    d.onclose = () => resolve(d.returnValue === "ok");
+    d.querySelector("#gmCancel").onclick = () => d.close("cancel");
+    d.showModal(); const ok = d.querySelector('button[value="ok"]'); if (ok) ok.focus();
+  });
+}
+function promptModal({ title, label = "", placeholder = "", value = "" }) {
+  const d = ensureGenDlg();
+  return new Promise(resolve => {
+    d.innerHTML = `<form method="dialog" class="modal"><h2>${esc(title)}</h2><div class="field">${label?`<label>${esc(label)}</label>`:""}<input id="gmInput" placeholder="${esc(placeholder)}" value="${esc(value)}" /></div><div class="actions"><button id="gmCancel" type="button">Cancel</button><button value="ok" class="primary" type="submit">OK</button></div></form>`;
+    const input = d.querySelector("#gmInput");
+    d.onclose = () => resolve(d.returnValue === "ok" ? input.value : null);
+    d.querySelector("#gmCancel").onclick = () => d.close("cancel");
+    d.showModal(); input.focus();
+  });
+}
 async function newAutoFeature() {
-  const goal = prompt("Goal for the auto feature (research → plan → file to Plane → implement):");
+  const goal = await promptModal({ title: "New auto feature", label: "Goal", placeholder: "research → plan → file to Plane → implement" });
   if (!goal || !goal.trim()) return;
   try {
     const r = await fetch("/api/features/auto", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ goal: goal.trim(), repo: spawnCwd }) });
@@ -595,7 +618,7 @@ async function landFromFeature(agentId, btn) {
 }
 
 async function newFeature() {
-  const title = prompt("New feature title:");
+  const title = await promptModal({ title: "New feature", label: "Title", placeholder: "feature title" });
   if (!title || !title.trim()) return;
   try { await fetch("/api/features", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ title: title.trim(), repo: spawnCwd }) }); }
   catch { toast("create failed", "error"); }
@@ -979,7 +1002,7 @@ function renderAgent(body, a) {
   inp.onkeydown = (e) => { if (comp.handleKey(e)) return; if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
   $("#intBtn").onclick = () => send({ type:"interrupt", id:a.id });
   $("#rstBtn").onclick = () => send({ type:"restart", id:a.id });
-  $("#killBtn").onclick = () => { if (confirm("Kill this agent?")) send({ type:"kill", id:a.id }); };
+  $("#killBtn").onclick = async () => { if (await confirmModal({ title: "Kill this agent?", body: "The agent process will be terminated.", danger: true, okText: "Kill" })) send({ type:"kill", id:a.id }); };
   $("#landBtn").onclick = async () => {
     const btn = $("#landBtn"); btn.disabled = true; btn.textContent = "Landing…";
     try {
@@ -1193,7 +1216,7 @@ async function refreshUpgrade() {
   } catch {}
 }
 document.querySelector("#upgradeBtn").onclick = async () => {
-  if (!confirm("Pull latest + restart the daemon? Agents keep running; the dashboard will reconnect.")) return;
+  if (!(await confirmModal({ title: "Upgrade daemon?", body: "Pull latest + restart. Agents keep running; the dashboard will reconnect." }))) return;
   toast("upgrading — pulling + restarting…", "info");
   try {
     const res = await (await fetch("/api/upgrade", { method:"POST", headers:{"content-type":"application/json"}, body:"{}" })).json();
