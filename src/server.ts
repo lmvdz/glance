@@ -179,6 +179,8 @@ export class SquadServer {
 				if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
 				const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
 				if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
+				const mrec = url.pathname.match(/^\/api\/agents\/([^/]+)\/receipts$/);
+				if (mrec) return Response.json(await manager.receipts(decodeURIComponent(mrec[1])));
 				const mcmd = url.pathname.match(/^\/api\/agents\/([^/]+)\/commands$/);
 				if (mcmd) return Response.json(manager.commandsFor(decodeURIComponent(mcmd[1])) ?? []);
 				const mdiff = url.pathname.match(/^\/api\/agents\/([^/]+)\/(diff|tree)$/);
