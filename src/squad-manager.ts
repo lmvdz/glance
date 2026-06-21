@@ -59,6 +59,8 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { hostAlive, pruneStaleSockets, socketPathFor } from "./agent-host.ts";
 import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
+import { changedFiles } from "./explore.ts";
+import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -84,6 +86,8 @@ interface AgentRecord {
 	subs: SubagentTracker;
 	/** Available slash commands (builtin + skills + extensions) reported by the agent. */
 	commands?: CommandInfo[];
+	/** Live receipt accumulator for the in-flight run (one per agent_start..end). */
+	run?: RunAccumulator;
 }
 
 export interface SquadManagerOptions {
@@ -722,6 +726,7 @@ export class SquadManager extends EventEmitter {
 				if (code !== 0) rec.dto.error = `agent exited (code ${code})`;
 				this.emitAgent(rec);
 			}
+			void this.finalizeRun(rec);
 		});
 	}
 
@@ -738,6 +743,16 @@ export class SquadManager extends EventEmitter {
 			case "agent_start":
 			case "turn_start":
 				rec.streaming = true;
+				if (!rec.run) {
+					rec.run = new RunAccumulator({
+						agentId: rec.dto.id,
+						name: rec.dto.name,
+						repo: rec.dto.repo,
+						branch: rec.dto.branch,
+						model: rec.dto.model,
+					});
+				}
+				rec.run.start(rec.dto.model);
 				break;
 			case "message_update": {
 				const ev = frame.assistantMessageEvent as { type?: string; delta?: string } | undefined;
@@ -745,6 +760,10 @@ export class SquadManager extends EventEmitter {
 				break;
 			}
 			case "message_end": {
+				const msg = frame.message as
+					| { role?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost?: { total: number } } }
+					| undefined;
+				if (msg?.role === "assistant" && msg.usage) rec.run?.onAssistantUsage(msg.usage);
 				if (rec.assistantBuf.trim()) {
 					this.append(rec, "assistant", rec.assistantBuf.trim());
 					rec.assistantBuf = "";
@@ -754,6 +773,7 @@ export class SquadManager extends EventEmitter {
 			case "tool_execution_start": {
 				const toolName = typeof frame.toolName === "string" ? frame.toolName : "tool";
 				const intent = typeof frame.intent === "string" ? frame.intent : "";
+				rec.run?.onTool(toolName);
 				rec.dto.activity = intent ? `${toolName}: ${truncate(intent, 60)}` : toolName;
 				this.append(rec, "tool", `▸ ${rec.dto.activity}`);
 				break;
@@ -766,9 +786,11 @@ export class SquadManager extends EventEmitter {
 				rec.streaming = false;
 				rec.dto.activity = undefined;
 				this.maybeCloseIssue(rec);
+				void this.finalizeRun(rec);
 				break;
 			}
 		}
+		rec.dto.receipt = rec.run?.rollup();
 		rec.dto.status = this.derive(rec);
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
@@ -785,6 +807,27 @@ export class SquadManager extends EventEmitter {
 		void closePlaneIssue(issue).then((ok) => {
 			if (!ok) this.log("warn", `auto-dispatch: could not close ${issue.identifier ?? issue.id}`);
 		});
+	}
+
+	/**
+	 * Persist one JSONL receipt line for a completed/terminated run, then clear
+	 * the accumulator so the next turn starts fresh. Idempotent per run via the
+	 * accumulator's `finalized` flag (agent_end + exit can both fire).
+	 */
+	private async finalizeRun(rec: AgentRecord): Promise<void> {
+		const run = rec.run;
+		if (!run || run.finalized) return;
+		run.finalized = true;
+		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
+		await appendReceipt(this.stateDir, run.snapshot());
+		rec.dto.receipt = run.rollup();
+		rec.run = undefined;
+		this.emitAgent(rec);
+	}
+
+	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
+	async receipts(id: string): Promise<RunReceipt[]> {
+		return readReceipts(this.stateDir, id);
 	}
 
 	private onUi(rec: AgentRecord, req: RpcExtensionUIRequest): void {
