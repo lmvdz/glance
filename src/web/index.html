@@ -22,8 +22,10 @@
   button:hover { border-color:var(--accent); } button.primary { background:var(--accent); color:#0b0d10; border-color:var(--accent); font-weight:600; }
   button.danger:hover { border-color:var(--err); color:var(--err); } button.sm { padding:3px 8px; font-size:12px; }
   main { flex:1; display:grid; grid-template-columns:300px 1fr; min-height:0; }
-  main.nav-collapsed { grid-template-columns:0 1fr; }
-  main.nav-collapsed .sidebar { display:none; }
+  main.nav-collapsed { grid-template-columns:54px 1fr; }
+  main.nav-collapsed .navrow .lbl, main.nav-collapsed .navrow .ct, main.nav-collapsed .side-h, main.nav-collapsed .proj .pn, main.nav-collapsed .proj .pmeta { display:none; }
+  main.nav-collapsed .navrow { justify-content:center; padding:8px 0; }
+  main.nav-collapsed .pinitial { display:flex; }
   .navbtn { padding:6px 10px; font-size:14px; line-height:1; }
   button.toggle.active { background:var(--accent); color:#0b0d10; border-color:var(--accent); font-weight:600; }
   button.toggle.attn { border-color:var(--input); color:var(--input); font-weight:600; }
@@ -40,6 +42,16 @@
   .d { width:8px; height:8px; border-radius:50%; display:inline-block; }
   .d.working{background:var(--work)} .d.idle{background:var(--ok)} .d.input{background:var(--input)} .d.error{background:var(--err)} .d.starting{background:var(--accent)} .d.stopped{background:var(--stop)}
   .empty { color:var(--dim); padding:24px; text-align:center; font-size:13px; }
+  /* unified left nav */
+  .navmain { padding:6px; display:flex; flex-direction:column; gap:2px; border-bottom:1px solid var(--line); }
+  .navrow { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--mut); user-select:none; }
+  .navrow:hover { background:var(--panel); color:var(--ink); }
+  .navrow.sel { background:var(--panel2); color:var(--ink); box-shadow:inset 3px 0 0 var(--accent); }
+  .navrow.attn .ico, .navrow.attn .lbl { color:var(--input); }
+  .navrow .ico { width:18px; text-align:center; flex:none; font-size:15px; }
+  .navrow .lbl { flex:1; font-weight:600; font-size:13px; }
+  .navrow .ct { background:var(--input); color:#0b0d10; border-radius:999px; font-size:11px; font-weight:700; padding:0 7px; line-height:18px; }
+  .pinitial { display:none; width:100%; height:20px; align-items:center; justify-content:center; font-weight:700; color:var(--mut); }
   /* content */
   .content { display:flex; flex-direction:column; min-height:0; }
   .crumb { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; align-items:center; gap:8px; font-size:13px; }
@@ -157,15 +169,14 @@
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
-  <button id="waitingBtn" class="toggle attn" style="display:none" title="Everything waiting on you — open the attention queue">⛔ waiting</button>
   <button id="muteBtn" class="navbtn" title="Mute notification sound">🔔</button>
   <button id="cmdkBtn" class="navbtn" title="Command palette (⌘K / Ctrl-K)">⌘K</button>
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
-  <button id="featBtn" title="Feature board — what's in flight + what needs landing">▦ Features</button>
   <button class="primary" id="addBtn">+ New agent</button>
 </header>
 <main>
   <div class="sidebar">
+    <nav class="navmain" id="navMain"></nav>
     <div class="side-h">Projects</div>
     <div class="projects" id="projects"><div class="empty">No projects yet.</div></div>
   </div>
@@ -388,9 +399,22 @@ window.addEventListener("popstate", applyRoute);
 function renderCounts() {
   const all = [...agents.values()]; const need = waitingAgents().length;
   $("#counts").textContent = `${projects().length} projects · ${all.length} agents`;
-  const wb = $("#waitingBtn");
-  if (wb) { wb.style.display = need ? "" : "none"; wb.textContent = `⛔ ${need} waiting`; }
   updateBadge(need);
+  renderNav();
+}
+
+// Unified left nav — the single navigation surface (Overview / Features / Queue),
+// above the Projects list. Header keeps only global actions (⌘K, New agent, Upgrade).
+function renderNav() {
+  const nav = $("#navMain"); if (!nav) return;
+  const need = waitingAgents().length;
+  const rows = [
+    { id:"home",  ico:"⌂",  lbl:"Overview", sel: view === "project" && !selProject, on: () => { selProject = null; selAgent = null; view = "project"; renderAll(); } },
+    { id:"board", ico:"▦",  lbl:"Features", sel: view === "board" || view === "feature", on: openBoard },
+    { id:"queue", ico:"⛔", lbl:"Queue",    sel: view === "queue", ct: need, attn: need > 0, on: openQueue },
+  ];
+  nav.innerHTML = rows.map(r => `<div class="navrow${r.sel?" sel":""}${r.attn?" attn":""}" data-id="${r.id}" title="${r.lbl}"><span class="ico">${r.ico}</span><span class="lbl">${r.lbl}</span>${r.ct?`<span class="ct">${r.ct}</span>`:""}</div>`).join("");
+  for (const r of rows) { const el = nav.querySelector(`[data-id="${r.id}"]`); if (el) el.onclick = r.on; }
 }
 
 function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="d ${s}" title="${counts[s]} ${s}"></span>`).join("")}</span>`; }
@@ -402,7 +426,7 @@ function renderSidebar() {
   for (const p of ps) {
     const div = document.createElement("div");
     div.className = "proj" + (p.id === selProject ? " sel" : "") + (p.pending ? " needs" : "");
-    div.innerHTML = `<div class="pn">${esc(p.name)}</div>
+    div.innerHTML = `<div class="pinitial">${esc((p.name[0]||"?").toUpperCase())}</div><div class="pn">${esc(p.name)}</div>
       <div class="pmeta">${dots(p.counts)} <span>${p.agents.length} agent${p.agents.length===1?"":"s"}</span>${p.pending?`<span style="color:var(--input)">⛔ ${p.pending}</span>`:""}</div>`;
     div.onclick = () => { selProject = p.id; selAgent = null; view = "project"; renderAll(); };
     el.appendChild(div);
@@ -519,7 +543,7 @@ function renderFeature(body, f) {
     <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span>${f.workflowStage?` · <span class="badge b-stage" title="live workflow node">⚙ ${esc(f.workflowStage)}${f.workflowProgress?` ${f.workflowProgress.done}/${f.workflowProgress.total}`:""}</span>`:""}${f.persisted?"":` · <span style="color:var(--dim)">derived</span>`}</div></div>
       <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>`:""}${!f.persisted&&f.planDir?`<button id="featAdopt" class="primary" title="Adopt this plan as a managed feature (then assign agents + Land)">＋ Adopt as feature</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
     <div class="section"><h3>Worktrees · Land</h3><div class="inner tree" id="featland"></div></div>
-    <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner" id="featassign"></div>`:""}</div>
+    <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner"><div class="spawnrow"><input id="fspawnInput" placeholder="Describe a task — spawn an agent on this feature (Enter)" autocomplete="off" /><button id="fspawnBtn" class="sm primary">+ Agent</button></div></div><div class="inner" id="featassign"></div>`:""}</div>
     <div class="section" id="featgatewrap" style="display:none"><h3>Needs your input</h3><div class="inner" id="featgate"></div></div>
     ${f.planDir?`<div class="section"><h3>Pipeline · concerns</h3><div class="inner tree" id="featpipe"><span style="color:var(--dim)">loading…</span></div></div>`:""}</div>`;
   $("#featBack").onclick = openBoard;
@@ -558,8 +582,25 @@ function renderFeature(body, f) {
     const ab = $("#assignBtn"); if (ab) ab.onclick = () => linkAgentUI(f.id, $("#assignSel").value, false);
   }
   const ad = $("#featAdopt"); if (ad) ad.onclick = () => adoptFeature(f);
+  const fsi = $("#fspawnInput"), fsb = $("#fspawnBtn");
+  if (fsi && fsb) {
+    const go = () => { const t = fsi.value.trim(); if (t) { fsi.value = ""; spawnAgentOnFeature(f, t); } };
+    fsb.onclick = go;
+    fsi.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } };
+  }
   if (f.planDir) loadPipeline(f);
   renderFeatureGate(f);
+}
+
+// Attach a NEW agent to a feature: the server creates an auto-routed agent (intake picks
+// the process) and links it to the feature in one call, then the board reflects it.
+async function spawnAgentOnFeature(f, task) {
+  try {
+    const r = await fetch(`/api/features/${encodeURIComponent(f.id)}/agents`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ task, repo: f.repo }) });
+    if (!r.ok) { toast("spawn failed: " + (await r.text()), "error"); return; }
+    toast(`spawned an agent on ${f.title}`, "info");
+    loadFeatures();
+  } catch { toast("spawn failed", "error"); }
 }
 
 function renderFeatureGate(f) {
@@ -1199,8 +1240,6 @@ function toast(text, level) { const el = document.createElement("div"); el.class
 // add modal
 const dlg = $("#addDlg");
 $("#addBtn").onclick = () => { const repo = $("#addForm").repo; if (selProject) repo.value = selProject; dlg.showModal(); };
-$("#featBtn").onclick = openBoard;
-$("#waitingBtn").onclick = openQueue;
 $("#addCancel").onclick = () => dlg.close();
 $("#addForm").onsubmit = (e) => {
   const f = new FormData(e.target); const options = { repo: f.get("repo").trim() };
