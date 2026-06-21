@@ -69,9 +69,10 @@ UI logic is DOM-coupled; "one runnable check" lives where pure logic is extracta
 
 6/6 closed (2026-06-21). All concerns shipped on branch `squad/make-the-omp-squad-ui-ux`; commits 41bb441, 67f42df, 78c4bba, 6859451, 8e36633 (web) + the TUI commit. Not pushed.
 
-**Concern 07 (race-board)** added 2026-06-21 — a follow-on win surfaced while comparing omp-squad to
-github.com/teamkit-ai/kanbun (its one borrowable idea: the lane-per-agent race-board). Pipelined
-through omp-squad's own `plan-implement` workflow on branch `squad/race-board`. STATUS: in-progress.
+**Concern 07 (race-board)** added & shipped 2026-06-21 — a follow-on win surfaced while comparing
+omp-squad to github.com/teamkit-ai/kanbun (its one borrowable idea: the lane-per-agent race-board).
+Implemented on branch `squad/race-board` (commit `a0e3a3d`), pipelined through omp-squad's own
+`plan-implement` workflow; gate green (`tsc` clean, 133 pass / 0 fail). Not yet merged to main.
 
 ## Plane tracking
 - Project: omp-squad (`OMPSQ`)
@@ -83,4 +84,4 @@ through omp-squad's own `plan-implement` workflow on branch `squad/race-board`. 
   - [04-web-liveness-staleness](https://app.plane.so/inkwell-finance/browse/OMPSQ-7/) — OMPSQ-7 ✅ done
   - [05-web-dialogs](https://app.plane.so/inkwell-finance/browse/OMPSQ-2/) — OMPSQ-2 ✅ done
   - [06-tui-parity](https://app.plane.so/inkwell-finance/browse/OMPSQ-5/) — OMPSQ-5 ✅ done
-  - [07-web-race-board](https://app.plane.so/inkwell-finance/browse/OMPSQ-8/) — OMPSQ-8 ◐ in-progress
+  - [07-web-race-board](https://app.plane.so/inkwell-finance/browse/OMPSQ-8/) — OMPSQ-8 ✅ done (branch `squad/race-board`)
