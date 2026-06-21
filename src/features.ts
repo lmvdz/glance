@@ -14,7 +14,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { worktreeDiff } from "./explore.ts";
-import type { AgentDTO, AgentStatus, FeatureDTO, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature } from "./types.ts";
+import { headCommit, isFresh, proofFor } from "./proof.ts";
+import type { AgentDTO, AgentStatus, FeatureDTO, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
 	try {
@@ -74,7 +75,13 @@ export async function featureLandStatus(members: LandMember[]): Promise<FeatureW
 			else if (ahead > 0) readiness = "ahead";
 			else readiness = "clean";
 		}
-		out.push({ agentId: m.agentId, agentName: m.agentName, branch: m.branch, worktree: m.worktree, changedFiles, ahead, behind, readiness });
+		// ponytail: one proof-file read + one `git rev-parse HEAD` per member. featureLandStatus
+		// already spawns git several times per member, so this marginal cost is acceptable.
+		const proof = await proofFor(m.repo, m.worktree);
+		let proofState: WorktreeProofSummary["state"] = "none";
+		if (proof) proofState = !proof.ok ? "failed" : isFresh(proof, await headCommit(m.worktree)) ? "fresh" : "stale";
+		const proofSummary: WorktreeProofSummary = { state: proofState, ranAt: proof?.ranAt, artifacts: proof?.artifacts.length ?? 0 };
+		out.push({ agentId: m.agentId, agentName: m.agentName, branch: m.branch, worktree: m.worktree, changedFiles, ahead, behind, readiness, proof: proofSummary });
 	}
 	return out;
 }

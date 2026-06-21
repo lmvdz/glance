@@ -93,6 +93,16 @@ export type FeatureStage = "planned" | "issues-created" | "in-progress" | "revie
 /** Per-branch land readiness — the heart of the "needs Land to test" / "can't cleanly land" signal. */
 export type LandReadiness = "clean" | "uncommitted" | "ahead" | "diverged" | "merged" | "no-branch";
 
+/** Land-proof rollup for one member worktree — see src/proof.ts. */
+export interface WorktreeProofSummary {
+	/** none = no proof recorded; failed = ran but did not pass; stale = passed but HEAD moved; fresh = passed against current HEAD. */
+	state: "none" | "failed" | "stale" | "fresh";
+	/** When the recorded proof last ran (ms epoch), if any. */
+	ranAt?: number;
+	/** Count of collected screenshot artifacts (vision evidence). */
+	artifacts: number;
+}
+
 /** Live land status of one member worktree/branch vs. main. */
 export interface FeatureWorktreeStatus {
 	agentId?: string;
@@ -106,6 +116,8 @@ export interface FeatureWorktreeStatus {
 	/** Commits on main not in the branch (divergence signal). */
 	behind: number;
 	readiness: LandReadiness;
+	/** Land-proof rollup (additive; absent on synthetic statuses that don't compute it). */
+	proof?: WorktreeProofSummary;
 }
 
 /**
