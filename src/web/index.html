@@ -274,6 +274,7 @@ function handle(ev) {
     case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); refreshShell(); break;
     case "agent": agents.set(ev.agent.id, ev.agent); refreshShell(); break;
     case "commands": commandsByAgent.set(ev.id, ev.commands); break;
+    case "features-changed": if (view === "board" || view === "feature") loadFeatures(); break;
     case "removed": agents.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
@@ -371,7 +372,7 @@ function featNeedsLand(f) { return f.unlandedFiles > 0 || (f.worktrees || []).so
 function renderBoard(body) {
   const fs = [...features.values()];
   body.innerHTML = `<div class="pv">
-    <div class="bvh"><div><h2>Features</h2><div class="sub">${fs.length} feature${fs.length===1?"":"s"} · in-flight work and what needs landing</div></div><button id="featRefresh" class="navbtn" title="Refresh">↻</button></div>
+    <div class="bvh"><div><h2>Features</h2><div class="sub">${fs.length} feature${fs.length===1?"":"s"} · in-flight work and what needs landing</div></div><div style="display:flex;gap:6px"><button id="featNew" class="primary">+ Feature</button><button id="featRefresh" class="navbtn" title="Refresh">↻</button></div></div>
     <div class="board" id="board"></div></div>`;
   const board = $("#board");
   if (!fs.length) { board.innerHTML = `<div class="nodetail" style="height:auto;padding:30px">No features yet — spawn an agent, or add a plans/&lt;name&gt;/ dir.</div>`; }
@@ -395,15 +396,19 @@ function renderBoard(body) {
   }
   for (const el of board.querySelectorAll("[data-fid]")) el.onclick = () => openFeature(el.dataset.fid);
   const rf = $("#featRefresh"); if (rf) rf.onclick = loadFeatures;
+  const nf = $("#featNew"); if (nf) nf.onclick = newFeature;
 }
 
 function renderFeature(body, f) {
   if (!f) { body.innerHTML = `<div class="nodetail">Loading feature…</div>`; return; }
+  const landable = (f.worktrees||[]).some(w => w.readiness === "ahead" || w.readiness === "uncommitted");
   body.innerHTML = `<div class="pv">
-    <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span></div></div><button id="featBack" class="navbtn" title="Back to board">← Board</button></div>
+    <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span>${f.persisted?"":` · <span style="color:var(--dim)">derived</span>`}</div></div>
+      <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
     <div class="section"><h3>Worktrees · Land</h3><div class="inner tree" id="featland"></div></div>
-    <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div></div></div>`;
+    <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner" id="featassign"></div>`:""}</div></div>`;
   $("#featBack").onclick = openBoard;
+  if (f.persisted && landable) { const la = $("#featLandAll"); if (la) la.onclick = () => landAll(f.id, la); }
   const lt = $("#featland");
   if (!f.worktrees || !f.worktrees.length) lt.innerHTML = `<span style="color:var(--dim)">no worktrees</span>`;
   else {
@@ -420,8 +425,17 @@ function renderFeature(body, f) {
   const mem = f.agentIds.map(id => agents.get(id)).filter(Boolean);
   if (!mem.length) fa.innerHTML = `<span style="color:var(--dim)">no live agents</span>`;
   else {
-    fa.innerHTML = mem.map(a => `<div class="n" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-${a.status}">${a.status}</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.activity||"—")}</span></div>`).join("");
-    for (const el of fa.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid);
+    fa.innerHTML = mem.map(a => `<div class="n" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-${a.status}">${a.status}</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.activity||"—")}</span>${f.persisted?` <button class="sm unlinkbtn" data-uid="${esc(a.id)}" title="Detach from feature">unlink</button>`:""}</div>`).join("");
+    for (const el of fa.querySelectorAll("[data-aid]")) el.onclick = (e) => { if (e.target.classList.contains("unlinkbtn")) return; openAgent(el.dataset.aid); };
+    for (const b of fa.querySelectorAll(".unlinkbtn")) b.onclick = (e) => { e.stopPropagation(); linkAgentUI(f.id, b.dataset.uid, true); };
+  }
+  if (f.persisted) {
+    const box = $("#featassign");
+    const unassigned = [...agents.values()].filter(a => a.repo === f.repo && !a.featureId);
+    if (box) box.innerHTML = unassigned.length
+      ? `<div class="spawnrow"><select id="assignSel">${unassigned.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}</select><button id="assignBtn" class="sm">+ Link agent</button></div>`
+      : `<span style="color:var(--dim)">no unassigned agents in this repo</span>`;
+    const ab = $("#assignBtn"); if (ab) ab.onclick = () => linkAgentUI(f.id, $("#assignSel").value, false);
   }
 }
 
@@ -431,6 +445,29 @@ async function landFromFeature(agentId, btn) {
     const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
     const res = await r.json();
     toast(res.ok ? `landed: ${res.detail||"merged"}` : `land failed: ${res.detail||r.status}`, res.ok ? "info" : "error");
+  } catch { toast("land failed", "error"); }
+  await loadFeatures();
+}
+
+async function newFeature() {
+  const title = prompt("New feature title:");
+  if (!title || !title.trim()) return;
+  try { await fetch("/api/features", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ title: title.trim(), repo: spawnCwd }) }); }
+  catch { toast("create failed", "error"); }
+  await loadFeatures();
+}
+async function linkAgentUI(featureId, agentId, unlink) {
+  if (!agentId) return;
+  try { await fetch(`/api/features/${encodeURIComponent(featureId)}/agents`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ agentId, unlink: !!unlink }) }); }
+  catch { toast("link failed", "error"); }
+  await loadFeatures();
+}
+async function landAll(id, btn) {
+  btn.disabled = true; btn.textContent = "Landing…";
+  try {
+    const r = await fetch(`/api/features/${encodeURIComponent(id)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
+    const res = await r.json();
+    toast(res.ok ? `landed ${res.results.length} branch(es)` : (res.stopped || "land stopped"), res.ok ? "info" : "error");
   } catch { toast("land failed", "error"); }
   await loadFeatures();
 }

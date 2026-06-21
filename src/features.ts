@@ -14,7 +14,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { worktreeDiff } from "./explore.ts";
-import type { AgentDTO, AgentStatus, FeatureDTO, FeatureStage, FeatureWorktreeStatus, LandReadiness } from "./types.ts";
+import type { AgentDTO, AgentStatus, FeatureDTO, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature } from "./types.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
 	try {
@@ -133,11 +133,45 @@ function deriveStage(opts: { agents: AgentDTO[]; worktrees: FeatureWorktreeStatu
 	return "planned";
 }
 
-/** Build the derived feature list for one repo: plan-dir features + per-agent features. */
-export async function buildFeatures(repo: string, agents: AgentDTO[]): Promise<FeatureDTO[]> {
+/** Build the feature list for one repo: persisted features (explicit membership) + unadopted plan dirs + unassigned agents. */
+export async function buildFeatures(repo: string, agents: AgentDTO[], persisted: PersistedFeature[] = []): Promise<FeatureDTO[]> {
 	const features: FeatureDTO[] = [];
+	const assigned = new Set<string>();
+	const adoptedDirs = new Set<string>();
+
+	for (const pf of persisted) {
+		if (pf.repo !== repo || pf.archived) continue;
+		if (pf.origin?.planDir) adoptedDirs.add(pf.origin.planDir);
+		const members = agents.filter((a) => a.featureId === pf.id);
+		for (const m of members) assigned.add(m.id);
+		// Live members + cached branches for members no longer in the roster (so land status survives agent removal).
+		const land: LandMember[] = members.map((a) => ({ agentId: a.id, agentName: a.name, branch: a.branch, worktree: a.worktree, repo }));
+		for (const b of pf.branches ?? []) {
+			if (!members.some((m) => m.id === b.agentId)) land.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo });
+		}
+		const worktrees = await featureLandStatus(land);
+		const unlandedFiles = worktrees.reduce((s, w) => s + w.changedFiles, 0);
+		const hasIssues = (pf.plane?.issueIdentifiers?.length ?? 0) > 0;
+		features.push({
+			id: pf.id,
+			title: pf.title,
+			repo,
+			stage: pf.stageOverride ?? deriveStage({ agents: members, worktrees, unlanded: unlandedFiles, planDir: pf.origin?.planDir, hasIssues }),
+			planDir: pf.origin?.planDir,
+			agentIds: members.map((a) => a.id),
+			worktrees,
+			unlandedFiles,
+			divergent: worktrees.some((w) => w.readiness === "diverged"),
+			blocked: members.some((a) => a.status === "input"),
+			statusCounts: countStatuses(members),
+			issueIdentifiers: hasIssues ? pf.plane?.issueIdentifiers : undefined,
+			persisted: true,
+			stageOverride: pf.stageOverride,
+		});
+	}
 
 	for (const pd of await listPlanDirs(repo)) {
+		if (adoptedDirs.has(pd.dir)) continue;
 		features.push({
 			id: `plan:${repo}:${pd.dir}`,
 			title: pd.title,
@@ -155,6 +189,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[]): Promise<F
 	}
 
 	for (const a of agents) {
+		if (assigned.has(a.id)) continue;
 		const worktrees = await featureLandStatus([{ agentId: a.id, agentName: a.name, branch: a.branch, worktree: a.worktree, repo }]);
 		const unlandedFiles = worktrees.reduce((s, w) => s + w.changedFiles, 0);
 		features.push({
@@ -173,4 +208,10 @@ export async function buildFeatures(repo: string, agents: AgentDTO[]): Promise<F
 	}
 
 	return features;
+}
+
+/** Order branches for a Land-all: fast-forward-safe (ahead) first, then uncommitted; clean/diverged/no-branch excluded. */
+export function landOrder(worktrees: FeatureWorktreeStatus[]): FeatureWorktreeStatus[] {
+	const rank = (r: LandReadiness): number => (r === "ahead" ? 0 : r === "uncommitted" ? 1 : 2);
+	return worktrees.filter((w) => w.readiness === "ahead" || w.readiness === "uncommitted").sort((a, b) => rank(a.readiness) - rank(b.readiness));
 }

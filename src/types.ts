@@ -122,6 +122,11 @@ export interface FeatureDTO {
 	statusCounts: Partial<Record<AgentStatus, number>>;
 	/** Plane issue identifiers referenced by this feature's plan concerns, if any. */
 	issueIdentifiers?: string[];
+	/** True when this is a real persisted Feature (vs a derived agent/plan-dir feature). */
+	persisted?: boolean;
+	/** Manual stage pin (persisted features only). */
+	stageOverride?: FeatureStage;
+	archived?: boolean;
 }
 
 /** Serializable per-agent snapshot sent to surfaces. */
@@ -158,6 +163,8 @@ export interface AgentDTO {
 	error?: string;
 	/** Work item this agent is advancing (e.g. a Plane issue). */
 	issue?: IssueRef;
+	/** Feature this agent belongs to (single source of truth for membership). */
+	featureId?: string;
 }
 
 export type ApprovalMode = "always-ask" | "write" | "yolo";
@@ -177,6 +184,7 @@ export interface PersistedAgent {
 	task?: string;
 	thinking?: ThinkingLevel;
 	issue?: IssueRef;
+	featureId?: string;
 	/** Runtime class; defaults to "omp-operator" when absent (back-compat). */
 	kind?: AgentKind;
 	/** flue-service only: worker invocation config. */
@@ -187,6 +195,23 @@ export interface PersistedAgent {
 	parentId?: string;
 	/** When set, run this agent inside a container instead of locally. */
 	sandbox?: SandboxConfig;
+}
+
+/** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */
+export interface PersistedFeature {
+	id: string;
+	title: string;
+	repo: string;
+	/** Manual stage pin; otherwise the stage is fully derived. */
+	stageOverride?: FeatureStage;
+	/** Repo-relative provenance. */
+	origin?: { planDir?: string; briefPath?: string };
+	plane?: { moduleId?: string; moduleUrl?: string; issueIdentifiers?: string[] };
+	/** Snapshot of member branches so land status survives an agent being killed. */
+	branches?: { branch?: string; worktree: string; agentId?: string }[];
+	createdAt: number;
+	updatedAt: number;
+	archived?: boolean;
 }
 
 /** Options when adding an agent to the squad. */
@@ -205,6 +230,8 @@ export interface CreateAgentOptions {
 	thinking?: ThinkingLevel;
 	/** Work item to advance (shown in the command center; e.g. a Plane issue). */
 	issue?: IssueRef;
+	/** Feature to attach this agent to on creation. */
+	featureId?: string;
 	/** Path to a workflow graph (`.fabro`) to run as the agent's process; `task` becomes the goal. */
 	workflow?: string;
 	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
@@ -320,7 +347,8 @@ export type SquadEvent =
 	| { type: "removed"; id: string }
 	| { type: "transcript"; id: string; entry: TranscriptEntry }
 	| { type: "log"; level: "info" | "warn" | "error"; text: string }
-	| { type: "commands"; id: string; commands: CommandInfo[] };
+	| { type: "commands"; id: string; commands: CommandInfo[] }
+	| { type: "features-changed" };
 
 // ── Surface → manager commands ──────────────────────────────────────────────
 

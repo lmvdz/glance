@@ -11,7 +11,7 @@
 
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
-import type { ClientCommand, SquadEvent } from "./types.ts";
+import type { ClientCommand, FeatureStage, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { listPlaneIssues } from "./plane.ts";
 import { all, claim, release, who } from "./presence.ts";
@@ -77,7 +77,40 @@ export class SquadServer {
 				}
 				if (url.pathname === "/api/agents") return Response.json(manager.list());
 				if (url.pathname === "/api/projects") return Response.json(manager.projects());
-				if (url.pathname === "/api/features") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
+				if (url.pathname === "/api/features" && req.method === "GET") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
+				if (url.pathname === "/api/features" && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => null);
+					if (!body || typeof body !== "object" || !("title" in body) || typeof body.title !== "string") return new Response("title required", { status: 400 });
+					const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+					const planDir = "planDir" in body && typeof body.planDir === "string" ? body.planDir : undefined;
+					manager.createFeature({ title: body.title, repo, planDir });
+					return Response.json({ ok: true });
+				}
+				const mfpatch = url.pathname.match(/^\/api\/features\/([^/]+)$/);
+				if (mfpatch && req.method === "PATCH") {
+					const body: unknown = await req.json().catch(() => null);
+					const patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean } = {};
+					if (body && typeof body === "object") {
+						if ("title" in body && typeof body.title === "string") patch.title = body.title;
+						if ("archived" in body && typeof body.archived === "boolean") patch.archived = body.archived;
+						if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
+					}
+					const pf = manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
+					return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
+				}
+				const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
+				if (mflink && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => null);
+					if (!body || typeof body !== "object" || !("agentId" in body) || typeof body.agentId !== "string") return new Response("agentId required", { status: 400 });
+					const unlink = "unlink" in body && body.unlink === true;
+					return Response.json({ ok: manager.linkAgent(decodeURIComponent(mflink[1]), body.agentId, unlink) });
+				}
+				const mfland = url.pathname.match(/^\/api\/features\/([^/]+)\/land$/);
+				if (mfland && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => null);
+					const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
+					return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force));
+				}
 				if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 				if (url.pathname === "/api/health") return Response.json({ ok: true, agents: manager.list().length, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()) });
 				if (url.pathname === "/api/presence") {

@@ -25,15 +25,18 @@ import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import type { NodeResult, Workflow } from "./workflow/types.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
-import { routeIntake } from "./intake.ts";
+import { type Classify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { closePlaneIssue, listPlaneIssues, planeRepos } from "./plane.ts";
-import { buildFeatures } from "./features.ts";
+import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
+import { landAgent } from "./land.ts";
 import type {
 	Actor,
 	IssueRef,
 	AgentDTO,
 	FeatureDTO,
+	PersistedFeature,
+	FeatureStage,
 	AgentStatus,
 	CommandInfo,
 	ClientCommand,
@@ -109,10 +112,12 @@ export class SquadManager extends EventEmitter {
 	private availability: OperatorPresence["availability"] = "active";
 	private readonly stateDir: string;
 	private readonly stateFile: string;
+	private readonly featureStore = new Map<string, PersistedFeature>();
 	private readonly bin?: string;
 	private pollTimer?: Timer;
 	private dispatcher?: Dispatcher;
 	private closeOnDone = false;
+	private llmClassify?: Classify;
 	private readonly closedIssues = new Set<string>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
@@ -125,6 +130,7 @@ export class SquadManager extends EventEmitter {
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
 		this.stateFile = path.join(this.stateDir, "state.json");
 		this.bin = opts.bin;
+		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 	}
 
 	async start(): Promise<void> {
@@ -180,7 +186,8 @@ export class SquadManager extends EventEmitter {
 		} catch {
 			return 0;
 		}
-		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[]; transcripts?: Record<string, TranscriptEntry[]> };
+		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[]; transcripts?: Record<string, TranscriptEntry[]>; features?: PersistedFeature[] };
+		for (const f of parsed.features ?? []) this.featureStore.set(f.id, f);
 		let n = 0;
 		for (const p of parsed.agents ?? []) {
 			if (p.kind === "flue-service" || p.kind === "workflow" || this.agents.has(p.id)) continue;
@@ -209,6 +216,7 @@ export class SquadManager extends EventEmitter {
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
+			featureId: p.featureId,
 		};
 		const agent = this.makeDriver(p);
 		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", streaming: false, subs: new SubagentTracker() };
@@ -260,13 +268,79 @@ export class SquadManager extends EventEmitter {
 		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity);
 	}
 
-	/** Derived feature view (Phase 1): plan-dir + per-agent features with live land status, per repo. */
+	/** Feature view: persisted features + derived plan-dir/agent features with live land status, per repo. */
 	async features(repo?: string): Promise<FeatureDTO[]> {
 		const list = this.list();
-		const repos = repo !== undefined ? [repo] : [...new Set(list.map((a) => a.repo))];
+		const persisted = [...this.featureStore.values()];
+		const repos = repo !== undefined ? [repo] : [...new Set([...list.map((a) => a.repo), ...persisted.map((f) => f.repo)])];
 		const out: FeatureDTO[] = [];
-		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r))));
+		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r), persisted)));
 		return out;
+	}
+
+	createFeature(opts: { title: string; repo: string; planDir?: string; stageOverride?: FeatureStage }): PersistedFeature {
+		const id = `feat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+		const now = Date.now();
+		const pf: PersistedFeature = { id, title: opts.title.trim() || "feature", repo: opts.repo, stageOverride: opts.stageOverride, origin: opts.planDir ? { planDir: opts.planDir } : undefined, createdAt: now, updatedAt: now };
+		this.featureStore.set(id, pf);
+		this.emitFeaturesChanged();
+		return pf;
+	}
+
+	updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean }): PersistedFeature | undefined {
+		const pf = this.featureStore.get(id);
+		if (!pf) return undefined;
+		if (patch.title !== undefined) pf.title = patch.title;
+		if (patch.stageOverride !== undefined) pf.stageOverride = patch.stageOverride ?? undefined;
+		if (patch.archived !== undefined) pf.archived = patch.archived;
+		pf.updatedAt = Date.now();
+		this.emitFeaturesChanged();
+		return pf;
+	}
+
+	/** Attach (or detach) an agent to a feature; membership lives on the agent. */
+	linkAgent(featureId: string, agentId: string, unlink = false): boolean {
+		const pf = this.featureStore.get(featureId);
+		const rec = this.agents.get(agentId);
+		if (!pf || !rec) return false;
+		rec.dto.featureId = unlink ? undefined : featureId;
+		rec.options.featureId = unlink ? undefined : featureId;
+		this.snapshotBranches(featureId);
+		pf.updatedAt = Date.now();
+		this.emitAgent(rec);
+		this.emitFeaturesChanged();
+		return true;
+	}
+
+	/** Cache the current member branches so land status survives an agent being killed. */
+	private snapshotBranches(featureId: string): void {
+		const pf = this.featureStore.get(featureId);
+		if (!pf) return;
+		pf.branches = [...this.agents.values()].filter((r) => r.dto.featureId === featureId).map((r) => ({ branch: r.dto.branch, worktree: r.dto.worktree, agentId: r.dto.id }));
+	}
+
+	/** Land all member branches: fast-forward-safe first, stop on a diverged/failed branch (unless force). */
+	async landFeature(id: string, force = false): Promise<{ ok: boolean; stopped?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] }> {
+		const pf = this.featureStore.get(id);
+		if (!pf) return { ok: false, stopped: "no such feature", results: [] };
+		this.snapshotBranches(id);
+		const members: LandMember[] = [...this.agents.values()].filter((r) => r.dto.featureId === id).map((r) => ({ agentId: r.dto.id, agentName: r.dto.name, branch: r.dto.branch, worktree: r.dto.worktree, repo: pf.repo }));
+		for (const b of pf.branches ?? []) if (!members.some((m) => m.agentId === b.agentId)) members.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo: pf.repo });
+		const wts = await featureLandStatus(members);
+		if (!force && wts.some((w) => w.readiness === "diverged")) return { ok: false, stopped: "a branch is diverged — resolve it (or force)", results: [] };
+		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] = [];
+		for (const w of landOrder(wts)) {
+			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}` });
+			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
+			if (!res.ok) { this.emitFeaturesChanged(); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
+		}
+		this.emitFeaturesChanged();
+		return { ok: true, results };
+	}
+
+	private emitFeaturesChanged(): void {
+		void this.persist();
+		this.emit("event", { type: "features-changed" } satisfies SquadEvent);
 	}
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
@@ -276,7 +350,7 @@ export class SquadManager extends EventEmitter {
 		const id = `${name}-${Date.now().toString(36)}`;
 		const branch = opts.branch ?? `squad/${name}`;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
-			const decision = await routeIntake(opts.task, opts.repo);
+			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
 			opts = { ...opts, workflow: decision.workflow, verify: decision.verify, thinking: decision.thinking ?? opts.thinking };
 			this.log("info", `routed "${name}": ${decision.reason}`);
 		}
@@ -322,6 +396,7 @@ export class SquadManager extends EventEmitter {
 			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify } } : undefined,
 			sandbox: opts.sandbox,
 			parentId: opts.parentId,
+			featureId: opts.featureId,
 		};
 
 		const dto: AgentDTO = {
@@ -339,6 +414,7 @@ export class SquadManager extends EventEmitter {
 			issue: opts.issue,
 			kind,
 			parentId: opts.parentId,
+			featureId: opts.featureId,
 		};
 
 		const agent = this.makeDriver(persisted);
@@ -837,7 +913,8 @@ export class SquadManager extends EventEmitter {
 		const agents = [...this.agents.values()].map((r) => r.options);
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
-		await fs.writeFile(this.stateFile, JSON.stringify({ version: 1, agents, transcripts }, null, 2)).catch(() => {});
+		const features = [...this.featureStore.values()];
+		await fs.writeFile(this.stateFile, JSON.stringify({ version: 1, agents, transcripts, features }, null, 2)).catch(() => {});
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
@@ -848,7 +925,8 @@ export class SquadManager extends EventEmitter {
 		} catch {
 			return 0;
 		}
-		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[] };
+		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[]; features?: PersistedFeature[] };
+		for (const f of parsed.features ?? []) this.featureStore.set(f.id, f);
 		const list = parsed.agents ?? [];
 		for (const p of list) {
 			if (p.kind === "flue-service" && p.flue) {
@@ -865,6 +943,7 @@ export class SquadManager extends EventEmitter {
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
+				featureId: p.featureId,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				sandbox: p.sandbox,
