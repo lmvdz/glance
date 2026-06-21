@@ -368,20 +368,10 @@ async function smartSpawn(prompt) {
   }
 }
 
-function renderProject(body, p) {
-  body.innerHTML = `
-    <div class="pv">
-      <div><h2>${esc(p.name)}</h2><div class="sub">${esc(p.repo)}</div></div>
-      <div class="agrid" id="agrid"></div>
-      <div class="section"><h3>Spawn an agent in this project</h3><div class="inner"><div class="spawnrow">
-        <input id="pspawn" placeholder="Describe a task… (Enter to spawn an agent here)" autocomplete="off" />
-      </div></div></div>
-      <div class="section"><h3>Active on this repo</h3><div class="inner" id="presence"><span style="color:var(--dim)">…</span></div></div>
-      <div class="section"><h3>Files in flight</h3><div class="inner tree" id="leases"><span style="color:var(--dim)">…</span></div></div>
-      <div class="section"><h3>Plane issues</h3><div class="inner" id="issues"><span style="color:var(--dim)">Loading…</span></div></div>
-    </div>`;
-  const grid = $("#agrid");
-  if (!p.agents.length) grid.innerHTML = `<span style="color:var(--dim)">No agents yet.</span>`;
+function fillAgentGrid(p) {
+  const grid = $("#agrid"); if (!grid) return;
+  grid.innerHTML = "";
+  if (!p.agents.length) { grid.innerHTML = `<span style="color:var(--dim)">No agents yet.</span>`; return; }
   const byStatus = (x,y)=>STATUSES.indexOf(x.status)-STATUSES.indexOf(y.status);
   const inProj = new Set(p.agents.map(a=>a.id));
   const roots = p.agents.filter(a=>!a.parentId || !inProj.has(a.parentId)).sort(byStatus);
@@ -398,6 +388,30 @@ function renderProject(body, p) {
     card.onclick = () => openAgent(a.id);
     grid.appendChild(card);
   }
+}
+
+// Live updates while viewing a project: refresh only the agent cards + side panels,
+// never the spawn box (#pspawn) — rebuilding it would drop focus mid-typing.
+function patchProjectView(p) {
+  if (!$("#agrid")) { renderBody(); return; }
+  fillAgentGrid(p);
+  loadPresence(p.repo);
+  loadLeases(p.repo);
+}
+
+function renderProject(body, p) {
+  body.innerHTML = `
+    <div class="pv">
+      <div><h2>${esc(p.name)}</h2><div class="sub">${esc(p.repo)}</div></div>
+      <div class="agrid" id="agrid"></div>
+      <div class="section"><h3>Spawn an agent in this project</h3><div class="inner"><div class="spawnrow">
+        <input id="pspawn" placeholder="Describe a task… (Enter to spawn an agent here)" autocomplete="off" />
+      </div></div></div>
+      <div class="section"><h3>Active on this repo</h3><div class="inner" id="presence"><span style="color:var(--dim)">…</span></div></div>
+      <div class="section"><h3>Files in flight</h3><div class="inner tree" id="leases"><span style="color:var(--dim)">…</span></div></div>
+      <div class="section"><h3>Plane issues</h3><div class="inner" id="issues"><span style="color:var(--dim)">Loading…</span></div></div>
+    </div>`;
+  fillAgentGrid(p);
   const sp = $("#pspawn");
   const spSrc = p.agents[0] && p.agents[0].id;
   const spComp = attachCompletion(sp, () => (spSrc && commandsByAgent.get(spSrc)) || []);
@@ -481,8 +495,9 @@ function patchAgentView(a) {
 
 function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
-  if (view === "agent" && selAgent && agents.has(selAgent)) patchAgentView(agents.get(selAgent));
-  else renderBody();
+  if (view === "agent" && selAgent && agents.has(selAgent)) { patchAgentView(agents.get(selAgent)); return; }
+  if (view === "project" && selProject) { const p = projects().find(x => x.id === selProject); if (p) { patchProjectView(p); return; } }
+  renderBody();
 }
 
 function renderAgent(body, a) {
