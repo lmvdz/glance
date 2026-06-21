@@ -528,10 +528,15 @@ function renderFeature(body, f) {
   if (!f.worktrees || !f.worktrees.length) lt.innerHTML = `<span style="color:var(--dim)">no worktrees</span>`;
   else {
     lt.innerHTML = f.worktrees.map(w => {
+      const member = w.agentId ? agents.get(w.agentId) : undefined;
+      const working = !!member && (member.status === "working" || member.status === "starting" || member.status === "input");
       const canLand = w.readiness === "ahead" || w.readiness === "uncommitted";
-      const note = w.readiness === "diverged" ? "diverged — resolve before landing" : w.readiness === "no-branch" ? "runs in place (no branch)" : "merge this branch into main";
+      const note = w.readiness === "diverged" ? "diverged — resolve before landing"
+        : w.readiness === "no-branch" ? "runs in place (no branch)"
+        : working ? "agent still working — lands committed work only (its in-progress edits stay untouched)"
+        : "merge this branch into main";
       return `<div class="landrow"><span class="branchmark">${esc(w.branch||"—")}</span>
-        <span class="meta">↑${w.ahead} ↓${w.behind} · ${w.changedFiles} changed · <b class="rd-${w.readiness}">${w.readiness}</b></span>
+        <span class="meta">↑${w.ahead} ↓${w.behind} · ${w.changedFiles} changed · <b class="rd-${w.readiness}">${w.readiness}</b>${working?` · <span style="color:var(--work)" title="this branch's agent is still running">⚙ working</span>`:""}</span>
         ${w.agentId?`<button class="sm landbtn" data-aid="${esc(w.agentId)}" ${canLand?"":"disabled"} title="${esc(note)}">⤳ Land</button>`:""}</div>`;
     }).join("");
     for (const btn of lt.querySelectorAll(".landbtn")) btn.onclick = () => landFromFeature(btn.dataset.aid, btn);
@@ -986,7 +991,7 @@ function renderAgent(body, a) {
           <textarea id="composerInput" placeholder="Instruct this agent… (Enter to send)"></textarea>
           <div class="controls">
             <button class="primary" id="sendBtn">Send</button>
-            <button id="intBtn">Interrupt</button><button id="rstBtn">Restart</button><button class="danger" id="killBtn">Kill</button><button class="primary" id="landBtn" title="Commit this agent's work + merge its branch">⤳ Land</button>
+            <button id="intBtn">Interrupt</button><button id="rstBtn">Restart</button><button class="danger" id="killBtn">Kill</button><button class="primary" id="landBtn" title="Merge this agent's work into main — commits saved changes; while it is still working, only already-committed work is landed (in-progress edits preserved)">⤳ Land</button>
           </div>
         </div>
       </div>
