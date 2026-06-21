@@ -21,6 +21,13 @@ export interface CommandResult {
 	stderr: string;
 }
 
+/** A canceller for a scheduled repeating check. */
+export interface IdleCheckHandle {
+	cancel: () => void;
+}
+/** Schedules a repeating idle check; returns a canceller. Default: setInterval; injected in tests to drive deterministically. */
+export type IdleScheduler = (check: () => void, intervalMs: number) => IdleCheckHandle;
+
 export interface SingleAgentExecutorOptions {
 	/** Worktree the run operates in (command cwd, prompt-ref base). */
 	cwd: string;
@@ -40,9 +47,14 @@ export interface SingleAgentExecutorOptions {
 	resolveStyle?: (node: WorkflowNode) => { model?: string; reasoningEffort?: string };
 	/** Spawn an independent fleet agent for a parallel-branch node. Absent → branches run sequentially on the shared thread. */
 	spawnBranch?: (node: WorkflowNode, task: string) => Promise<NodeResult>;
+	/** Schedule the idle turn-end check (default: setInterval). Injected in tests to drive it deterministically. */
+	scheduleIdleCheck?: IdleScheduler;
 }
 
 const MAX_CONTEXT_OUTPUT = 4000;
+const IDLE_POLL_MS = 5_000;
+/** Idle polls (~30s) with the inner loop reporting not-streaming, after it was seen active, before we treat a missing agent_end as turn-end. */
+const IDLE_TICKS = 6;
 
 export class SingleAgentExecutor implements NodeExecutor {
 	/** Stage rollup for the driver's synthetic getState (done/total + active). */
@@ -132,10 +144,20 @@ export class SingleAgentExecutor implements NodeExecutor {
 		return fs.readFile(path.join(this.opts.cwd, ref.slice(1)), "utf8");
 	}
 
-	/** Send a turn and resolve with the assistant text once the turn ends (mirrors OmpArchitect.runTurn). */
+	/**
+	 * Send a turn and resolve with the assistant text once the agent loop ends.
+	 * Primary signal: the `agent_end` frame. Fallback: the inner agent reports idle
+	 * (isStreaming false) for IDLE_TICKS polls after it was seen active — so if `agent_end`
+	 * is ever missed (e.g. after auto-compaction on a very long loop) a finished run can't
+	 * hang on its node until the hours-long turn timeout. isStreaming stays true through tool
+	 * calls, so a slow tool never trips the fallback.
+	 */
 	private awaitTurn(agent: AgentDriver, message: string, timeoutMs: number): Promise<string> {
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		let buf = "";
+		let settled = false;
+		let sawStreaming = false;
+		let idleTicks = 0;
 		const onEvent = (frame: { type?: string; assistantMessageEvent?: { type?: string; delta?: string } }) => {
 			if (frame.type === "message_update" && frame.assistantMessageEvent?.type === "text_delta") {
 				buf += frame.assistantMessageEvent.delta ?? "";
@@ -143,20 +165,45 @@ export class SingleAgentExecutor implements NodeExecutor {
 				finish();
 			}
 		};
-		const onExit = () => reject(new Error("agent exited mid-turn"));
-		const timer = setTimeout(() => reject(new Error(`stage timed out after ${timeoutMs}ms`)), timeoutMs);
+		const onExit = () => { if (!settled) reject(new Error("agent exited mid-turn")); };
+		const timer = setTimeout(() => { if (!settled) reject(new Error(`stage timed out after ${timeoutMs}ms`)); }, timeoutMs);
+		const idleCheck = () => {
+			void agent
+				.getState()
+				.then((st) => {
+					if (st.isStreaming) {
+						sawStreaming = true;
+						idleTicks = 0;
+					} else if (sawStreaming && ++idleTicks >= IDLE_TICKS) {
+						finish();
+					}
+				})
+				.catch(() => {});
+		};
+		const idle = (this.opts.scheduleIdleCheck ?? defaultIdleScheduler)(idleCheck, IDLE_POLL_MS);
 		const finish = () => {
+			if (settled) return;
+			settled = true;
 			clearTimeout(timer);
+			idle.cancel();
 			agent.off("event", onEvent);
 			agent.off("exit", onExit);
 			resolve(buf.trim());
 		};
 		agent.on("event", onEvent);
 		agent.once("exit", onExit);
-		agent.prompt(message).catch(reject);
+		agent.prompt(message).catch((err) => {
+			if (!settled) reject(err);
+		});
 		return promise;
 	}
 }
+
+const defaultIdleScheduler: IdleScheduler = (check, intervalMs) => {
+	const t: Timer = setInterval(check, intervalMs);
+	t.unref?.();
+	return { cancel: () => clearInterval(t) };
+};
 
 async function defaultExecCommand(script: string, cwd: string): Promise<CommandResult> {
 	const proc = Bun.spawn(["bash", "-lc", script], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env } });
