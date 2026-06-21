@@ -51,6 +51,7 @@ import type {
 	ProjectDTO,
 	RpcExtensionUIRequest,
 	RpcSessionState,
+	RunReceipt,
 	SandboxConfig,
 	SquadEvent,
 	TranscriptEntry,
