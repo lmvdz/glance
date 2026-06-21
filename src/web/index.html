@@ -157,6 +157,8 @@
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
+  <button id="waitingBtn" class="toggle attn" style="display:none" title="Everything waiting on you — open the attention queue">⛔ waiting</button>
+  <button id="muteBtn" class="navbtn" title="Mute notification sound">🔔</button>
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
   <button id="featBtn" title="Feature board — what's in flight + what needs landing">▦ Features</button>
   <button class="primary" id="addBtn">+ New agent</button>
@@ -202,6 +204,13 @@ let ws = null;
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 const STATUSES = ["working","input","idle","starting","error","stopped"];
+
+// ── Push signals (OMPSQ-4) ───────────────────────────────────────────────────
+// Notify out-of-band on status transitions so the operator can look away.
+const prevStatus = new Map();   // id -> last seen status (transition detection)
+const lastNotify = new Map();   // id -> ms of last notification (per-agent throttle)
+let muted = localStorage.getItem("squad.mute") === "1";
+const baseTitle = document.title;
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -271,14 +280,59 @@ function attachCompletion(input, getItems) {
 
 function handle(ev) {
   switch (ev.type) {
-    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); refreshShell(); break;
-    case "agent": agents.set(ev.agent.id, ev.agent); refreshShell(); break;
+    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); seedStatus(); refreshShell(); break;
+    case "agent": { const prev = prevStatus.get(ev.agent.id); agents.set(ev.agent.id, ev.agent); signalTransition(prev, ev.agent); prevStatus.set(ev.agent.id, ev.agent.status); refreshShell(); break; }
     case "commands": commandsByAgent.set(ev.id, ev.commands); break;
     case "features-changed": if (view === "board" || view === "feature") loadFeatures(); break;
-    case "removed": agents.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
+    case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
   }
+}
+
+// Seed status from a full roster snapshot WITHOUT notifying — guards the initial load
+// and every reconnect replay from firing a notification storm.
+function seedStatus() { prevStatus.clear(); for (const a of agents.values()) prevStatus.set(a.id, a.status); }
+
+function signalTransition(prev, a) {
+  if (prev === undefined || prev === a.status) return;   // brand-new agent or no change
+  if (a.status === "input") { const p = (a.pending || [])[0]; notify(a.id, `⛔ ${a.name} needs you`, p ? p.title : "waiting for input", true); }
+  else if (a.status === "error") notify(a.id, `⚠ ${a.name} errored`, a.error || "agent error", true);
+  else if (a.status === "idle" && prev === "working") notify(a.id, `✓ ${a.name} finished`, a.activity || "turn complete", false);
+}
+
+// Out-of-band signal: desktop Notification (lazy permission) + optional beep. Title/favicon
+// badge is driven separately by updateBadge() in renderCounts.
+function notify(id, title, body, sound) {
+  const now = Date.now();
+  if (now - (lastNotify.get(id) || 0) < 2000) return;   // per-agent throttle
+  lastNotify.set(id, now);
+  if (sound && !muted) beep();
+  if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+    try { const n = new Notification(title, { body, tag: id }); n.onclick = () => { window.focus(); openAgent(id); }; } catch {}
+  }
+}
+
+function beep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return;
+    const ctx = beep.ctx || (beep.ctx = new Ctx());
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = 660; g.gain.value = 0.05;
+    o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.15);
+  } catch {}
+}
+
+// Title + favicon badge reflect the count of requests waiting on the operator.
+function updateBadge(n) { document.title = n > 0 ? `(${n}) ${baseTitle}` : baseTitle; setFavicon(n); }
+function setFavicon(n) {
+  let link = document.getElementById("favicon");
+  if (!link) { link = document.createElement("link"); link.id = "favicon"; link.rel = "icon"; document.head.appendChild(link); }
+  const c = document.createElement("canvas"); c.width = c.height = 32; const x = c.getContext("2d");
+  x.fillStyle = "#14181d"; x.fillRect(0, 0, 32, 32);
+  x.fillStyle = "#6ea8fe"; x.font = "bold 22px sans-serif"; x.textAlign = "center"; x.textBaseline = "middle"; x.fillText("◆", 16, 17);
+  if (n > 0) { x.fillStyle = "#e0654f"; x.beginPath(); x.arc(23, 9, 8, 0, 2 * Math.PI); x.fill(); x.fillStyle = "#fff"; x.font = "bold 12px sans-serif"; x.fillText(n > 9 ? "9+" : String(n), 23, 10); }
+  link.href = c.toDataURL("image/png");
 }
 
 // ── derive projects from the live roster ────────────────────────────────────
@@ -297,7 +351,8 @@ function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCount
 // URL routing: the hash mirrors the view so refresh / deep-link / back-forward all work.
 let routed = false;
 function pushRoute() {
-  const h = view === "board" ? "#/board"
+  const h = view === "queue" ? "#/queue"
+    : view === "board" ? "#/board"
     : view === "feature" && selFeature ? `#/feature/${encodeURIComponent(selFeature)}`
     : view === "agent" && selAgent ? `#/agent/${encodeURIComponent(selAgent)}`
     : selProject ? `#/project/${encodeURIComponent(selProject)}` : "#/";
@@ -305,6 +360,7 @@ function pushRoute() {
 }
 function applyRoute() {
   if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
+  if (location.hash === "#/queue") { view = "queue"; selAgent = null; renderAll(); return; }
   const mf = location.hash.match(/^#\/feature\/(.+)$/);
   if (mf) { selFeature = decodeURIComponent(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
   const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
@@ -316,8 +372,11 @@ window.addEventListener("hashchange", applyRoute);
 window.addEventListener("popstate", applyRoute);
 
 function renderCounts() {
-  const all = [...agents.values()]; const need = all.filter(a => a.status === "input").length;
-  $("#counts").textContent = `${projects().length} projects · ${all.length} agents` + (need ? ` · ${need} need input` : "");
+  const all = [...agents.values()]; const need = waitingAgents().length;
+  $("#counts").textContent = `${projects().length} projects · ${all.length} agents`;
+  const wb = $("#waitingBtn");
+  if (wb) { wb.style.display = need ? "" : "none"; wb.textContent = `⛔ ${need} waiting`; }
+  updateBadge(need);
 }
 
 function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="d ${s}" title="${counts[s]} ${s}"></span>`).join("")}</span>`; }
@@ -349,11 +408,50 @@ function renderCrumb() {
 function renderBody() {
   const body = $("#body");
   if (view === "board") return renderBoard(body);
+  if (view === "queue") return renderQueue(body);
   if (view === "feature") return renderFeature(body, features.get(selFeature));
   const p = projects().find(x => x.id === selProject);
   if (!p) return renderHome(body);
   if (view === "agent" && selAgent && agents.has(selAgent)) return renderAgent(body, agents.get(selAgent));
   renderProject(body, p);
+}
+
+// ── Attention queue ─────────────────────────────────────────────────────────
+// Fold every pending request across the whole roster into one supervise-by-exception
+// surface, oldest-waiting first. Pure read over data already broadcast (pending[]).
+function waitingAgents() {
+  const reqs = [];
+  for (const a of agents.values()) for (const p of (a.pending || [])) reqs.push({ agent: a, req: p });
+  return reqs.sort((x, y) => x.agent.lastActivity - y.agent.lastActivity);
+}
+function erroredAgents() { return [...agents.values()].filter(a => a.status === "error").sort((x, y) => x.lastActivity - y.lastActivity); }
+function openQueue() { view = "queue"; selAgent = null; renderAll(); }
+
+// Wire one rendered preq() node to the answer channel. Shared by the queue + renderPending.
+function wireReq(node, agentId, p) {
+  if (p.kind === "confirm") { node.querySelector(".yes").onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:"yes" }); node.querySelector(".no").onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:"no" }); }
+  else if (p.kind === "select") node.querySelectorAll("button[data-opt]").forEach(b => b.onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:b.dataset.opt }));
+  else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:i.value }); }
+}
+
+function renderQueue(body) {
+  const reqs = waitingAgents(); const errs = erroredAgents();
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Attention queue</h2><div class="sub">${reqs.length} request${reqs.length===1?"":"s"} waiting${errs.length?` · ${errs.length} errored`:""} — answer in place, oldest first</div></div><button id="qHome" class="navbtn" title="Back">← Back</button></div>
+    <div class="section"><h3>Needs your input</h3><div class="inner" id="qreqs"></div></div>
+    ${errs.length?`<div class="section"><h3>Errored agents</h3><div class="inner" id="qerrs"></div></div>`:""}</div>`;
+  $("#qHome").onclick = () => { view = "project"; renderAll(); };
+  const box = $("#qreqs");
+  if (!reqs.length) box.innerHTML = `<span style="color:var(--dim)">Nothing waiting — all caught up.</span>`;
+  else {
+    box.innerHTML = reqs.map(({ agent:a, req:p }) => `<div style="margin-bottom:14px">
+      <div style="margin-bottom:4px"><span class="badge b-${a.status}">${esc(a.status)}</span> <strong>${esc(a.name)}</strong> <span style="color:var(--dim)">${esc(a.repo.split("/").filter(Boolean).pop()||a.repo)}</span> <a class="qopen" data-aid="${esc(a.id)}" style="color:var(--accent);cursor:pointer">open agent →</a></div>
+      ${preq(p)}</div>`).join("");
+    for (const { agent:a, req:p } of reqs) { const node = box.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (node) wireReq(node, a.id, p); }
+    for (const el of box.querySelectorAll(".qopen")) el.onclick = () => openAgent(el.dataset.aid);
+  }
+  const eb = $("#qerrs");
+  if (eb) { eb.innerHTML = errs.map(a => `<div class="subnode" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-error">error</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.error||"")}</span></div>`).join(""); for (const el of eb.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid); }
 }
 
 // ── Feature board ─────────────────────────────────────────────────────────
@@ -725,6 +823,7 @@ function patchAgentView(a) {
 
 function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
+  if (view === "queue") { renderBody(); return; }
   if (view === "board" || view === "feature") { renderBody(); scheduleFeatures(); return; }
   if (view === "agent" && selAgent && agents.has(selAgent)) { patchAgentView(agents.get(selAgent)); return; }
   if (view === "project" && selProject) { const p = projects().find(x => x.id === selProject); if (p) { patchProjectView(p); return; } }
@@ -826,12 +925,7 @@ function renderPending(a) {
   const wrap = $("#pendingWrap"); if (!wrap) return;
   if (!a.pending || !a.pending.length) { wrap.innerHTML = ""; return; }
   wrap.innerHTML = `<div class="pending"><h3>Needs your input</h3>${a.pending.map(preq).join("")}</div>`;
-  for (const p of a.pending) {
-    const node = wrap.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (!node) continue;
-    if (p.kind === "confirm") { node.querySelector(".yes").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:"yes"}); node.querySelector(".no").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:"no"}); }
-    else if (p.kind === "select") node.querySelectorAll("button[data-opt]").forEach(b => b.onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:b.dataset.opt}));
-    else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:i.value}); }
-  }
+  for (const p of a.pending) { const node = wrap.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (node) wireReq(node, a.id, p); }
 }
 function preq(p) {
   let ctl = p.kind==="confirm" ? `<div class="ctl"><button class="yes primary">Yes</button><button class="no">No</button></div>`
@@ -963,6 +1057,7 @@ function toast(text, level) { const el = document.createElement("div"); el.class
 const dlg = $("#addDlg");
 $("#addBtn").onclick = () => { const repo = $("#addForm").repo; if (selProject) repo.value = selProject; dlg.showModal(); };
 $("#featBtn").onclick = openBoard;
+$("#waitingBtn").onclick = openQueue;
 $("#addCancel").onclick = () => dlg.close();
 $("#addForm").onsubmit = (e) => {
   const f = new FormData(e.target); const options = { repo: f.get("repo").trim() };
@@ -994,6 +1089,13 @@ refreshUpgrade(); setInterval(refreshUpgrade, 30000);
 const mainEl = document.querySelector("main");
 if (localStorage.getItem("squad.navCollapsed") === "1") mainEl.classList.add("nav-collapsed");
 $("#navToggle").onclick = () => { const c = mainEl.classList.toggle("nav-collapsed"); localStorage.setItem("squad.navCollapsed", c ? "1" : "0"); };
+const muteBtn = $("#muteBtn");
+const syncMute = () => { if (muteBtn) muteBtn.textContent = muted ? "🔕" : "🔔"; };
+const reqNotifyPerm = () => { try { if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission(); } catch {} };
+syncMute();
+if (muteBtn) muteBtn.onclick = () => { muted = !muted; localStorage.setItem("squad.mute", muted ? "1" : "0"); syncMute(); reqNotifyPerm(); };
+window.addEventListener("pointerdown", reqNotifyPerm, { once: true });
+window.addEventListener("focus", () => updateBadge(waitingAgents().length));
 connect();
 </script>
 </body>
