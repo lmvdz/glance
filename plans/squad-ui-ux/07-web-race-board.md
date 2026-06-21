@@ -1,5 +1,5 @@
 # Web race-board — lane-per-agent pipeline view
-STATUS: planned
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -70,4 +70,14 @@ None. No `src/server.ts` / `src/types.ts` change — every field consumed alread
 - Deep-link: reload on `#/race` restores the view. Gate: `bun run check` + `bun test` green.
 
 ## Resolution
-(filled on close)
+Closed 2026-06-21 via OMPSQ-8. Implemented on branch `squad/race-board` (commit `a0e3a3d`),
+pipelined through omp-squad's own `plan-implement` workflow (plan → human-approved → implement →
+verify gate). Added a client-only `view==="race"` to `src/web/index.html`: `renderRace` +
+`raceTrack` fold over the roster — one lane per agent, a segmented phase track filled from
+`AgentDTO.todo.done/total` with the current phase labelled `todo.active`, fan-out branches indented
+under `parentId`, `isStalled()` liveness cue + live `ago()` stamp, status-pill fallback for agents
+without a stage rollup, click-through to the agent; plus a `⇶ Race` sidebar row, `#/race` deep-link,
+`refreshShell` live-patch, and a command-palette entry. Zero new deps; `src/server.ts`/`src/types.ts`
+untouched (every field already broadcast). Gate green: `tsc --noEmit` clean, 133 pass / 0 fail
+(re-run independently); `node --check` on the extracted module parses clean. Not yet merged to main
+(branch awaits the Land flow, like concerns 01–06).
