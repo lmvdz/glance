@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>omp-squad · command center</title>
+<meta name="theme-color" content="#0b0d10" />
+<meta name="color-scheme" content="dark" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" href="/icon.svg" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="omp-squad" />
 <style>
   :root {
     --bg:#0b0d10; --panel:#14181d; --panel2:#1b2127; --line:#262e36;
@@ -160,6 +169,30 @@
   .cmpl .ci .src { margin-left:auto; color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.05em; }
   .cmpl .ci .desc { color:var(--mut); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .cmpl .none { padding:6px 10px; color:var(--dim); font-size:12px; }
+  /* ── mobile / PWA ───────────────────────────────────────────────────────── */
+  @media (max-width:760px) {
+    header { flex-wrap:wrap; gap:8px; padding:8px 10px; padding-top:calc(8px + env(safe-area-inset-top)); }
+    header h1 { font-size:14px; }
+    #counts, #upgradeBtn { display:none; }   /* keep the header lean; both live in the ⌘K palette */
+    main { grid-template-columns:1fr; }
+    /* the sidebar becomes an off-canvas drawer toggled by ☰ */
+    .sidebar { position:fixed; z-index:60; top:0; bottom:0; left:0; width:82vw; max-width:300px;
+               background:var(--panel); border-right:1px solid var(--line); overflow-y:auto;
+               transform:translateX(-100%); transition:transform .2s ease; box-shadow:2px 0 18px rgba(0,0,0,.5);
+               padding-top:env(safe-area-inset-top); }
+    main.nav-open .sidebar { transform:none; }
+    main.nav-collapsed { grid-template-columns:1fr; }   /* the desktop rail-collapse is meaningless on a phone */
+    main.nav-collapsed .navrow .lbl, main.nav-collapsed .proj .pn, main.nav-collapsed .proj .pmeta { display:revert; }
+    main.nav-collapsed .pinitial { display:none; }
+    .content { min-width:0; }
+    .agrid { grid-template-columns:1fr; }
+    .avmain, .av.show-changes .avmain { grid-template-columns:1fr; }
+    .av.show-changes .aside { display:none; }   /* phone keeps the transcript in focus; diff stays on desktop */
+    button { padding:9px 13px; }
+    .navbtn { padding:9px 12px; }
+    .navrow { padding:12px 14px; }
+    body { padding-bottom:env(safe-area-inset-bottom); }
+  }
 </style>
 </head>
 <body>
@@ -200,6 +233,57 @@
 </dialog>
 
 <script type="module">
+// ── Access token + authed transport ──────────────────────────────────────────
+// One-tap sign-in: a ?token= in the URL (printed by the daemon) is captured into
+// localStorage then stripped. Every /api call carries it as a Bearer header; the
+// WebSocket carries it as a query param (browsers can't set WS request headers).
+(function captureToken(){ try {
+  const u = new URL(location.href);
+  const t = u.searchParams.get("token");
+  if (t) { localStorage.setItem("ompsq_token", t); u.searchParams.delete("token"); history.replaceState(null, "", u.pathname + u.hash); }
+} catch {} })();
+const TOKEN = () => localStorage.getItem("ompsq_token") || "";
+const _fetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const url = typeof input === "string" ? input : (input && input.url) || "";
+  if (url.startsWith("/api")) { init = { ...(init||{}) }; init.headers = { ...(init.headers||{}), Authorization: "Bearer " + TOKEN() }; }
+  return _fetch(input, init).then((r) => { if (r.status === 401) showLogin(); return r; });
+};
+const isMobile = () => matchMedia("(max-width:760px)").matches;
+const closeDrawer = () => document.querySelector("main")?.classList.remove("nav-open");
+let _landed = false;
+// Supervise-by-exception: on a phone, land straight on the attention queue when something is waiting.
+function maybeMobileLand() {
+  if (_landed || !isMobile() || location.hash) return;
+  if (waitingAgents().length) { _landed = true; openQueue(); }
+}
+let _loginShown = false;
+function showLogin() {
+  if (_loginShown || document.getElementById("loginOverlay")) return; _loginShown = true;
+  const el = document.createElement("div");
+  el.id = "loginOverlay";
+  el.style.cssText = "position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:#0b0d10;padding:24px";
+  el.innerHTML = `<div style="width:360px;max-width:92vw;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><img src="/icon.svg" width="28" height="28" alt=""/><strong style="font-size:15px"><span style="color:var(--accent)">omp</span>-squad</strong></div>
+    <div style="color:var(--mut);font-size:13px;margin-bottom:14px">Enter the access token printed when the daemon started.</div>
+    <input id="loginToken" type="password" inputmode="text" autocomplete="off" placeholder="access token" style="width:100%;box-sizing:border-box;background:var(--panel);border:1px solid var(--line);color:var(--ink);padding:11px 12px;border-radius:8px;font:inherit;outline:none" />
+    <div id="loginErr" style="color:var(--err);font-size:12px;height:16px;margin:6px 2px"></div>
+    <button id="loginGo" class="primary" style="width:100%;padding:11px">Sign in</button></div>`;
+  document.body.appendChild(el);
+  const input = el.querySelector("#loginToken"); const go = el.querySelector("#loginGo"); const err = el.querySelector("#loginErr");
+  input.focus();
+  const submit = async () => {
+    const t = input.value.trim(); if (!t) return;
+    go.disabled = true; err.textContent = "";
+    try {
+      const r = await _fetch("/api/auth/check", { headers: { Authorization: "Bearer " + t } });
+      if (r.ok) { localStorage.setItem("ompsq_token", t); location.reload(); return; }
+      err.textContent = "Invalid token."; go.disabled = false;
+    } catch { err.textContent = "Can't reach the daemon."; go.disabled = false; }
+  };
+  go.onclick = submit;
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+}
 const agents = new Map();        // id -> AgentDTO
 const transcripts = new Map();   // id -> TranscriptEntry[]
 const commandsByAgent = new Map();// id -> CommandInfo[] (slash commands + skills + extensions)
@@ -240,7 +324,7 @@ setInterval(() => {
 }, 120);
 
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${encodeURIComponent(TOKEN())}`);
   ws.onopen = () => { $("#conn").classList.add("up"); $("#connText").textContent = "live"; if (!routed) { routed = true; applyRoute(); } };
   ws.onclose = () => { $("#conn").classList.remove("up"); $("#connText").textContent = "reconnecting…"; setTimeout(connect, 1000); };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
@@ -400,7 +484,7 @@ function renderCounts() {
   const all = [...agents.values()]; const need = waitingAgents().length;
   $("#counts").textContent = `${projects().length} projects · ${all.length} agents`;
   updateBadge(need);
-  renderNav();
+  renderNav(); maybeMobileLand();
 }
 
 // Unified left nav — the single navigation surface (Overview / Features / Queue),
@@ -414,7 +498,7 @@ function renderNav() {
     { id:"queue", ico:"⛔", lbl:"Queue",    sel: view === "queue", ct: need, attn: need > 0, on: openQueue },
   ];
   nav.innerHTML = rows.map(r => `<div class="navrow${r.sel?" sel":""}${r.attn?" attn":""}" data-id="${r.id}" title="${r.lbl}"><span class="ico">${r.ico}</span><span class="lbl">${r.lbl}</span>${r.ct?`<span class="ct">${r.ct}</span>`:""}</div>`).join("");
-  for (const r of rows) { const el = nav.querySelector(`[data-id="${r.id}"]`); if (el) el.onclick = r.on; }
+  for (const r of rows) { const el = nav.querySelector(`[data-id="${r.id}"]`); if (el) el.onclick = () => { r.on(); closeDrawer(); }; }
 }
 
 function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="d ${s}" title="${counts[s]} ${s}"></span>`).join("")}</span>`; }
@@ -428,7 +512,7 @@ function renderSidebar() {
     div.className = "proj" + (p.id === selProject ? " sel" : "") + (p.pending ? " needs" : "");
     div.innerHTML = `<div class="pinitial">${esc((p.name[0]||"?").toUpperCase())}</div><div class="pn">${esc(p.name)}</div>
       <div class="pmeta">${dots(p.counts)} <span>${p.agents.length} agent${p.agents.length===1?"":"s"}</span>${p.pending?`<span style="color:var(--input)">⛔ ${p.pending}</span>`:""}</div>`;
-    div.onclick = () => { selProject = p.id; selAgent = null; view = "project"; renderAll(); };
+    div.onclick = () => { selProject = p.id; selAgent = null; view = "project"; renderAll(); closeDrawer(); };
     el.appendChild(div);
   }
 }
@@ -1301,18 +1385,46 @@ document.querySelector("#upgradeBtn").onclick = async () => {
     toast(res.pull?.detail ? `pull: ${res.pull.detail}` : "restarting…", res.pull?.ok===false ? "warn" : "info");
   } catch { toast("restarting…", "info"); }
 };
-refreshUpgrade(); setInterval(refreshUpgrade, 30000);
-const mainEl = document.querySelector("main");
-if (localStorage.getItem("squad.navCollapsed") === "1") mainEl.classList.add("nav-collapsed");
-$("#navToggle").onclick = () => { const c = mainEl.classList.toggle("nav-collapsed"); localStorage.setItem("squad.navCollapsed", c ? "1" : "0"); };
-const muteBtn = $("#muteBtn");
-const syncMute = () => { if (muteBtn) muteBtn.textContent = muted ? "🔕" : "🔔"; };
-const reqNotifyPerm = () => { try { if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission(); } catch {} };
-syncMute();
-if (muteBtn) muteBtn.onclick = () => { muted = !muted; localStorage.setItem("squad.mute", muted ? "1" : "0"); syncMute(); reqNotifyPerm(); };
-window.addEventListener("pointerdown", reqNotifyPerm, { once: true });
-window.addEventListener("focus", () => updateBadge(waitingAgents().length));
-connect();
+function urlB64ToUint8Array(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const base = (b64 + pad).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base); const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+// Subscribe this device for background push (best-effort: needs notification permission + a secure context).
+async function subscribePush() {
+  try {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const r = await fetch("/api/push/key"); if (!r.ok) return;
+    const { publicKey } = await r.json(); if (!publicKey) return;
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(publicKey) });
+    await fetch("/api/push/subscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sub) });
+  } catch {}
+}
+function boot() {
+  refreshUpgrade(); setInterval(refreshUpgrade, 30000);
+  const mainEl = document.querySelector("main");
+  if (localStorage.getItem("squad.navCollapsed") === "1") mainEl.classList.add("nav-collapsed");
+  $("#navToggle").onclick = () => {
+    if (isMobile()) { mainEl.classList.toggle("nav-open"); return; }
+    const c = mainEl.classList.toggle("nav-collapsed"); localStorage.setItem("squad.navCollapsed", c ? "1" : "0");
+  };
+  document.querySelector(".content").addEventListener("click", () => mainEl.classList.remove("nav-open"));
+  const muteBtn = $("#muteBtn");
+  const syncMute = () => { if (muteBtn) muteBtn.textContent = muted ? "🔕" : "🔔"; };
+  const reqNotifyPerm = () => { try { if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission().then((p) => { if (p === "granted") subscribePush(); }); } catch {} };
+  syncMute();
+  if (muteBtn) muteBtn.onclick = () => { muted = !muted; localStorage.setItem("squad.mute", muted ? "1" : "0"); syncMute(); reqNotifyPerm(); };
+  window.addEventListener("pointerdown", reqNotifyPerm, { once: true });
+  window.addEventListener("focus", () => updateBadge(waitingAgents().length));
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").then(() => { if (typeof Notification !== "undefined" && Notification.permission === "granted") subscribePush(); }).catch(() => {});
+  connect();
+}
+if (TOKEN()) boot(); else showLogin();
 </script>
 </body>
 </html>

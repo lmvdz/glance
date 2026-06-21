@@ -21,8 +21,21 @@ import { leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
+import { requestToken, tokenOk } from "./auth.ts";
+import type { PushPayload, PushService } from "./push.ts";
+import type { AgentDTO, AgentStatus } from "./types.ts";
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
+const WEB_DIR = path.join(import.meta.dir, "web");
+/** Files served without a token so the PWA can install + bootstrap before sign-in. */
+const PUBLIC_ASSETS: Record<string, string> = {
+	"/manifest.webmanifest": "application/manifest+json",
+	"/sw.js": "text/javascript; charset=utf-8",
+	"/icon.svg": "image/svg+xml",
+	"/icon-192.png": "image/png",
+	"/icon-512.png": "image/png",
+	"/icon-maskable-512.png": "image/png",
+};
 
 interface SocketData {
 	id: number;
@@ -31,6 +44,21 @@ interface SocketData {
 export interface SquadServerOptions {
 	port?: number;
 	hostname?: string;
+	/** Bearer secret required on every /api request + the WS handshake. Omit to disable auth (loopback unit tests). */
+	token?: string;
+	/** Terminate TLS in-process (paths to PEM files). Omit to serve plain HTTP (e.g. behind `tailscale serve`). */
+	tls?: { cert: string; key: string };
+	/** Background Web Push registry; alerts fire when an agent needs a human. */
+	push?: PushService;
+}
+
+/** Pure: does this status transition warrant a human-attention push, and with what payload? */
+export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
+	if (!seeded || prev === undefined || prev === a.status) return null;
+	if (a.status !== "input" && a.status !== "error") return null;
+	const title = a.status === "input" ? `⛔ ${a.name} needs you` : `⚠ ${a.name} errored`;
+	const body = a.status === "input" ? a.pending[0]?.title ?? "waiting for input" : a.error ?? "agent error";
+	return { title, body, url: `/#/agent/${a.id}`, tag: a.id };
 }
 
 export class SquadServer {
@@ -46,6 +74,12 @@ export class SquadServer {
 	private readonly claimed = new Map<string, string>();
 	/** Agent ids present when the server booted = survivors the daemon reattached to (vs spawned later). */
 	private readonly startupAgentIds = new Set<string>();
+	/** agentId → last status seen, so a push fires only on the transition into a blocking state. */
+	private readonly lastStatus = new Map<string, AgentStatus>();
+	/** agentId → last push epoch ms, throttling repeat alerts. */
+	private readonly lastPush = new Map<string, number>();
+	/** seeded after the first roster so a reconnect replay never alerts in bulk. */
+	private pushSeeded = false;
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
@@ -55,7 +89,8 @@ export class SquadServer {
 
 	get url(): string {
 		const host = this.opts.hostname ?? "127.0.0.1";
-		return `http://${host}:${this.server?.port ?? this.opts.port ?? 0}`;
+		const scheme = this.opts.tls ? "https" : "http";
+		return `${scheme}://${host}:${this.server?.port ?? this.opts.port ?? 0}`;
 	}
 
 	start(): string {
@@ -67,14 +102,34 @@ export class SquadServer {
 		this.server = Bun.serve<SocketData>({
 			port: this.opts.port ?? 7878,
 			hostname: this.opts.hostname ?? "127.0.0.1",
+			tls: this.opts.tls ? { cert: Bun.file(this.opts.tls.cert), key: Bun.file(this.opts.tls.key) } : undefined,
 			fetch: async (req, server) => {
 				const url = new URL(req.url);
 				if (url.pathname === "/ws") {
+					if (this.opts.token && !tokenOk(requestToken(req), this.opts.token)) return new Response("unauthorized", { status: 401 });
 					if (server.upgrade(req, { data: { id: ++this.sockSeq } })) return undefined;
 					return new Response("websocket upgrade failed", { status: 426 });
 				}
 				if (url.pathname === "/" || url.pathname === "/index.html") {
 					return new Response(indexFile, { headers: { "content-type": "text/html; charset=utf-8" } });
+				}
+				const asset = PUBLIC_ASSETS[url.pathname];
+				if (asset) return new Response(Bun.file(path.join(WEB_DIR, url.pathname.slice(1))), { headers: { "content-type": asset } });
+				// Auth gate. Public bootstrap surface (the SPA shell, plus the manifest / service
+				// worker / icons added just above this in the static block) loads without a token so
+				// the PWA can install and prompt for it; everything under /api requires the token.
+				if (this.opts.token && !tokenOk(requestToken(req), this.opts.token)) return new Response("unauthorized", { status: 401 });
+				if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
+				if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
+				if (url.pathname === "/api/push/subscribe" && req.method === "POST") {
+					if (!this.opts.push) return new Response("push unavailable", { status: 501 });
+					const sub: unknown = await req.json().catch(() => null);
+					if (!sub || typeof sub !== "object" || !("endpoint" in sub) || typeof sub.endpoint !== "string") return new Response("invalid subscription", { status: 400 });
+					if (!("keys" in sub) || typeof sub.keys !== "object" || !sub.keys) return new Response("invalid subscription", { status: 400 });
+					const keys = sub.keys;
+					if (!("p256dh" in keys) || typeof keys.p256dh !== "string" || !("auth" in keys) || typeof keys.auth !== "string") return new Response("invalid subscription", { status: 400 });
+					await this.opts.push.subscribe({ endpoint: sub.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } });
+					return Response.json({ ok: true });
 				}
 				if (url.pathname === "/api/agents") return Response.json(manager.list());
 				if (url.pathname === "/api/projects") return Response.json(manager.projects());
@@ -290,7 +345,30 @@ export class SquadServer {
 				/* dropped client */
 			}
 		}
+		this.maybePushAlert(e);
 		if (e.type === "agent" || e.type === "removed" || e.type === "roster") this.schedulePresence();
+	}
+
+	/** Fire a background push when an agent transitions into a state that needs a human. Mirrors the
+	 *  client's seed-then-notify guard so a reconnect/roster replay never alerts in bulk. */
+	private maybePushAlert(e: SquadEvent): void {
+		const push = this.opts.push;
+		if (!push) return;
+		if (e.type === "roster") {
+			for (const a of e.agents) this.lastStatus.set(a.id, a.status);
+			this.pushSeeded = true;
+			return;
+		}
+		if (e.type !== "agent") return;
+		const a = e.agent;
+		const prev = this.lastStatus.get(a.id);
+		this.lastStatus.set(a.id, a.status);
+		const payload = escalationPayload(prev, a, this.pushSeeded);
+		if (!payload) return;
+		const now = Date.now();
+		if (now - (this.lastPush.get(a.id) ?? 0) < 3000) return;
+		this.lastPush.set(a.id, now);
+		void push.notify(payload);
 	}
 
 	private schedulePresence(): void {

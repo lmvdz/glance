@@ -14,6 +14,10 @@
  */
 
 import * as os from "node:os";
+import * as path from "node:path";
+import { readFileSync } from "node:fs";
+import { loadOrCreateToken } from "./auth.ts";
+import { PushService } from "./push.ts";
 import { TailnetFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
 import { SquadServer } from "./server.ts";
@@ -57,6 +61,9 @@ COMMISSION FLAGS
 
 GLOBAL
   --port <N>        Daemon port (default: ${DEFAULT_PORT}, or $OMP_SQUAD_PORT)
+  --host <addr>     Bind address (default: 127.0.0.1; set 0.0.0.0 to reach it from your phone)
+                    Env: $OMP_SQUAD_HOST, $OMP_SQUAD_TLS_CERT/$OMP_SQUAD_TLS_KEY (in-process TLS).
+                    A bearer token is auto-generated in the state dir and printed on boot.
 `;
 
 interface ParsedArgs {
@@ -89,12 +96,37 @@ function base(flags: Record<string, string | boolean>): string {
 	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
 	return `http://127.0.0.1:${port}`;
 }
+function stateDirPath(): string {
+	return process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+}
+
+/** Authorization header for CLI→daemon calls, read from the persisted token (empty if the daemon has none). */
+function tokenHeader(): Record<string, string> {
+	try {
+		const t = readFileSync(path.join(stateDirPath(), "access-token"), "utf8").trim();
+		return t ? { Authorization: `Bearer ${t}` } : {};
+	} catch {
+		return {};
+	}
+}
+
+/** Every URL the dashboard is reachable on — loopback plus each non-internal IPv4 when bound to all interfaces. */
+function reachableUrls(host: string, port: number, scheme: string): string[] {
+	if (host !== "0.0.0.0" && host !== "::") return [`${scheme}://${host}:${port}`];
+	const urls = [`${scheme}://127.0.0.1:${port}`];
+	for (const list of Object.values(os.networkInterfaces())) {
+		for (const ni of list ?? []) {
+			if (ni.family === "IPv4" && !ni.internal) urls.push(`${scheme}://${ni.address}:${port}`);
+		}
+	}
+	return urls;
+}
 
 async function postCommand(flags: Record<string, string | boolean>, cmd: ClientCommand): Promise<Response> {
 	try {
 		return await fetch(`${base(flags)}/api/command`, {
 			method: "POST",
-			headers: { "content-type": "application/json" },
+			headers: { "content-type": "application/json", ...tokenHeader() },
 			body: JSON.stringify(cmd),
 		});
 	} catch {
@@ -105,17 +137,23 @@ async function postCommand(flags: Record<string, string | boolean>, cmd: ClientC
 async function cmdUp(args: string[]): Promise<void> {
 	const { flags } = parseArgs(args);
 	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
+	const host = process.env.OMP_SQUAD_HOST || (typeof flags.host === "string" ? flags.host : undefined) || "127.0.0.1";
+	const stateDir = stateDirPath();
+	const tls = process.env.OMP_SQUAD_TLS_CERT && process.env.OMP_SQUAD_TLS_KEY ? { cert: process.env.OMP_SQUAD_TLS_CERT, key: process.env.OMP_SQUAD_TLS_KEY } : undefined;
 	const coordinator = process.env.OMP_SQUAD_COORDINATOR;
 	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 	const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
-	const manager = new SquadManager({ bus, operator, stateDir: process.env.OMP_SQUAD_STATE_DIR || undefined });
+	const manager = new SquadManager({ bus, operator, stateDir });
 	await manager.start();
 	if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
 	if (flags.restore) {
 		const n = await manager.loadPersisted();
 		if (n) process.stderr.write(`restored ${n} agent(s)\n`);
 	}
-	const server = new SquadServer(manager, { port });
+	const token = await loadOrCreateToken(stateDir);
+	const push = new PushService(stateDir);
+	await push.init();
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push });
 	const url = server.start();
 
 	const shutdown = async () => {
@@ -127,13 +165,14 @@ async function cmdUp(args: string[]): Promise<void> {
 	process.on("SIGTERM", () => void shutdown());
 
 	const useTui = !flags["no-tui"] && process.stdin.isTTY;
+	const access = reachableUrls(host, port, tls ? "https" : "http").map((u) => `    ${u}/?token=${token}`).join("\n");
 	if (useTui) {
-		process.stdout.write(`omp-squad dashboard: ${url}\n`);
+		process.stdout.write(`omp-squad dashboard: ${url}\n  access token: ${token}\n`);
 		const tui = new SquadTui(manager);
 		await tui.run();
 		await shutdown();
 	} else {
-		process.stdout.write(`omp-squad daemon running\n  dashboard: ${url}\n  add an agent: omp-squad add <repo> --task "…"\n`);
+		process.stdout.write(`omp-squad daemon running\n  dashboard: ${url}\n  access token: ${token}\n  open from any device on this network (tap to sign in):\n${access}\n  add an agent: omp-squad add <repo> --task "…"\n`);
 		await new Promise<void>(() => {}); // run until signal
 	}
 }
@@ -173,7 +212,7 @@ async function cmdList(args: string[]): Promise<void> {
 	const { flags } = parseArgs(args);
 	let agents: AgentDTO[];
 	try {
-		const res = await fetch(`${base(flags)}/api/agents`);
+		const res = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() });
 		agents = (await res.json()) as AgentDTO[];
 	} catch {
 		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: omp-squad up\n`);
@@ -235,7 +274,7 @@ async function cmdLogs(args: string[]): Promise<void> {
 	const limit = flags.limit ? Number(flags.limit) : 40;
 	let entries: TranscriptEntry[];
 	try {
-		const res = await fetch(`${base(flags)}/api/agents/${encodeURIComponent(id)}/transcript`);
+		const res = await fetch(`${base(flags)}/api/agents/${encodeURIComponent(id)}/transcript`, { headers: tokenHeader() });
 		entries = (await res.json()) as TranscriptEntry[];
 	} catch {
 		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: omp-squad up\n`);

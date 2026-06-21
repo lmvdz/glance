@@ -196,6 +196,55 @@ so work starts with nobody typing. Bounded so a backlog can't storm:
 `OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
 (or your OS username) via `TailnetFederationBus`; unset → single-operator with `NullFederationBus`.
 
+## Remote access & mobile
+
+The dashboard is a PWA you can install on your phone and drive from anywhere — and it
+**pushes you a notification the moment an agent needs a human**, so you supervise by
+exception instead of watching a screen.
+
+**Access is token-gated.** The daemon generates a bearer token on first run
+(`~/.omp/squad/access-token`, mode 0600) and prints it on boot with one-tap sign-in links.
+Every `/api` request and the WebSocket carry it; the static shell is the only public
+surface. The token is required even on loopback (the control plane can spawn agents, land
+code, and re-exec the daemon — it must not be open).
+
+```
+omp-squad daemon running
+  dashboard: http://0.0.0.0:7878
+  access token: Bdnw7…IHo
+  open from any device on this network (tap to sign in):
+    http://192.168.1.20:7878/?token=Bdnw7…IHo
+```
+
+**Bind beyond loopback** to reach it from your phone:
+
+| Env / flag | Meaning | Default |
+|---|---|---|
+| `--host` / `$OMP_SQUAD_HOST` | Bind address; `0.0.0.0` exposes on the LAN/tailnet | `127.0.0.1` |
+| `$OMP_SQUAD_TLS_CERT` + `$OMP_SQUAD_TLS_KEY` | Terminate TLS in-process (PEM paths) | plain HTTP |
+| `$OMP_SQUAD_PUSH_SUBJECT` | VAPID `sub` contact (`mailto:`/`https:`) | `mailto:squad@localhost` |
+
+**HTTPS is required** to install the PWA and receive background push — browsers only allow
+service workers + Web Push in a secure context (`http://localhost` is exempt, a LAN IP is
+not). Two ways to get it:
+
+- **Tailscale (recommended)** — front the daemon with a real cert, no in-process TLS:
+  ```bash
+  omp-squad up --no-tui            # bound to localhost is fine
+  tailscale serve --bg 7878        # → https://<machine>.<tailnet>.ts.net
+  ```
+  Open that URL on your phone (same tailnet), append `?token=…` once, **Add to Home
+  Screen**, allow notifications. Tailnet ACLs gate who can reach it; the token gates the rest.
+- **In-process TLS** — point `OMP_SQUAD_TLS_CERT`/`KEY` at a cert and bind `--host 0.0.0.0`.
+  Self-signed works but browsers warn (and some refuse a service worker on an untrusted
+  cert), so a real cert / tailnet is smoother.
+
+**On the phone:** the unified nav collapses to a drawer; the **attention queue is the
+landing view** when something's waiting; one tap answers an approval or question. When an
+agent transitions to *needs-input* or *error*, a Web Push notification fires (even with the
+app closed) and tapping it deep-links to that agent. Push is RFC 8291 (`aes128gcm`) + RFC
+8292 VAPID, implemented dependency-free in `src/push.ts`.
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`
