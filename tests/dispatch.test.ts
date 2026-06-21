@@ -71,3 +71,25 @@ test("dispatcher: a single spawn failure doesn't abort the tick", async () => {
 	expect(await new Dispatcher(deps).tick()).toBe(2); // A failed; B, C spawned
 	expect(tried.sort()).toEqual(["A", "B", "C"]);
 });
+
+test("dispatcher: spawns nothing when already at the global WIP cap", async () => {
+	const { deps, spawned } = harness({ maxActive: 10, maxWip: 3, liveCount: () => 3 });
+	expect(await new Dispatcher(deps).tick()).toBe(0); // global cap bounds total live agents, not just dispatched ones
+	expect(spawned.length).toBe(0);
+});
+
+test("dispatcher: bounds total spawns by the global WIP cap as live agents accrue", async () => {
+	let live = 4;
+	const got: string[] = [];
+	const { deps } = harness({
+		maxActive: 10, // per-tick budget is wide; the global cap is the binding constraint
+		maxWip: 5,
+		liveCount: () => live,
+		spawn: async (_repo, iss) => {
+			got.push(iss.id);
+			live++; // each spawn becomes a live agent, like manager.create adding to the roster
+		},
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(1); // only 1 slot before live hits the cap of 5
+	expect(got.length).toBe(1);
+});

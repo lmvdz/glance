@@ -25,6 +25,10 @@ export interface DispatchDeps {
 	log: (msg: string) => void;
 	/** Max concurrent dispatched agents. Default 3. */
 	maxActive?: number;
+	/** Total live (non-terminal) agents across the whole roster — bounds dispatch by the global WIP cap. */
+	liveCount?: () => number;
+	/** Global live-agent WIP cap (OMP_SQUAD_MAX_WIP). When set, dispatch never pushes live agents past it. */
+	maxWip?: number;
 }
 
 export class Dispatcher {
@@ -49,11 +53,13 @@ export class Dispatcher {
 			const claimed = this.deps.claimed();
 			let budget = this.maxActive - this.deps.activeCount();
 			for (const repo of this.deps.repos()) {
+				if (this.atGlobalCap()) break; // global WIP ceiling reached — leave remaining issues for a later tick
 				if (budget <= 0) break;
 				const issues = await this.deps.listIssues(repo);
 				if (!issues) continue;
 				for (const issue of issues) {
 					if (budget <= 0) break;
+					if (this.atGlobalCap()) break; // recheck per spawn: each spawned agent counts toward the global cap
 					if (claimed.has(issue.id) || this.dispatched.has(issue.id)) continue;
 					this.dispatched.add(issue.id);
 					this.deps.log(`dispatch ${issue.identifier ?? issue.id} — ${issue.name}`);
@@ -70,6 +76,11 @@ export class Dispatcher {
 			this.running = false;
 		}
 		return spawned;
+	}
+
+	/** True when the roster is at/over the global live-agent WIP cap, so no further spawn should be attempted. */
+	private atGlobalCap(): boolean {
+		return this.deps.maxWip !== undefined && (this.deps.liveCount?.() ?? 0) >= this.deps.maxWip;
 	}
 
 	start(intervalMs: number): void {

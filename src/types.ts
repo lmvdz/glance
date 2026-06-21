@@ -305,6 +305,8 @@ export interface CreateAgentOptions {
 	owns?: string[];
 	/** Auto-create + attach a tracking Plane issue for this spawn (work→Plane). Set at human/dispatch spawn entry points; off for restore/fan-out. */
 	track?: boolean;
+	/** Skip the global live-agent WIP cap (restore / fan-out paths that recreate already-accounted-for agents). */
+	bypassCap?: boolean;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

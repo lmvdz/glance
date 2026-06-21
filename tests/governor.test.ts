@@ -1,0 +1,157 @@
+/**
+ * Squad governor — the WIP cap that bounds concurrent live agents (#3) and the
+ * close-on-land trigger that retires a tracking issue once its branch merges (#1).
+ *
+ * `liveAgents` is the pure count-vs-cap core. `create`'s throw is exercised by shadowing
+ * the public `list()` so the cap fires before any worktree/omp is touched. close-on-land
+ * runs against a stub Plane API (Bun.serve) so the PATCH count pins idempotency + retry.
+ */
+
+import { afterEach, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { liveAgents, SquadManager } from "../src/squad-manager.ts";
+import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
+
+const tmps: string[] = [];
+const PLANE_ENV = ["PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "PLANE_PROJECT_MAP", "OMP_SQUAD_MAX_WIP"] as const;
+const saved: Record<string, string | undefined> = {};
+for (const k of PLANE_ENV) saved[k] = process.env[k];
+
+afterEach(async () => {
+	for (const k of PLANE_ENV) {
+		if (saved[k] === undefined) delete process.env[k];
+		else process.env[k] = saved[k];
+	}
+	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
+});
+
+const dto = (status: AgentStatus): AgentDTO => ({
+	id: status,
+	name: status,
+	status,
+	kind: "omp-operator",
+	repo: "/r",
+	worktree: "/w",
+	approvalMode: "write",
+	pending: [],
+	lastActivity: 0,
+	messageCount: 0,
+});
+
+async function freshManager(planeBase?: string): Promise<SquadManager> {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "gov-"));
+	tmps.push(stateDir);
+	process.env.PLANE_API_KEY = "secret";
+	process.env.PLANE_WORKSPACE = "acme";
+	if (planeBase) process.env.PLANE_BASE_URL = planeBase;
+	return new SquadManager({ stateDir });
+}
+
+// ── #3 WIP cap ──────────────────────────────────────────────────────────────
+
+test("liveAgents counts non-terminal agents only (stopped/error free their slot)", () => {
+	const roster = [dto("working"), dto("idle"), dto("starting"), dto("input"), dto("stopped"), dto("error")];
+	expect(liveAgents(roster)).toBe(4); // the two terminal statuses don't occupy a slot
+	expect(liveAgents([])).toBe(0);
+	// the cap decision is liveAgents(roster) >= cap
+	expect(liveAgents(roster) >= 4).toBe(true);
+	expect(liveAgents(roster) >= 5).toBe(false);
+});
+
+test("create throws at the WIP cap before cutting a worktree", async () => {
+	const mgr = await freshManager();
+	// Shadow the public list() the cap reads, so the guard fires without spawning anything.
+	const overridable: { list: () => AgentDTO[] } = mgr;
+	overridable.list = () => [dto("working"), dto("idle")];
+	process.env.OMP_SQUAD_MAX_WIP = "2";
+	await expect(mgr.create({ repo: "/x/repo", name: "blocked" })).rejects.toThrow(/WIP cap reached \(2\/2\)/);
+});
+
+test("create stays under cap when a slot is free (no throw at the boundary)", async () => {
+	const mgr = await freshManager();
+	const overridable: { list: () => AgentDTO[] } = mgr;
+	overridable.list = () => [dto("working"), dto("stopped")]; // 1 live, cap 2 → headroom
+	process.env.OMP_SQUAD_MAX_WIP = "2";
+	// Past the cap guard it tries to spawn into a non-existent repo, which fails fast and resolves
+	// (create swallows spawn failures); the point is it does NOT reject with the cap error.
+	const result = await mgr.create({ repo: path.join(os.tmpdir(), "gov-nonexistent-repo"), name: "ok" });
+	expect(result.name).toBe("ok");
+});
+
+// ── #1 close-on-land ─────────────────────────────────────────────────────────
+
+function planeStub(opts: { completed: boolean; onPatch?: () => void }): { server: ReturnType<typeof Bun.serve>; patches: () => number } {
+	let patches = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch: (req) => {
+			const url = new URL(req.url);
+			if (req.method === "GET" && url.pathname.endsWith("/states/")) {
+				return Response.json({ results: opts.completed ? [{ id: "s-done", group: "completed" }] : [{ id: "s-todo", group: "backlog" }] });
+			}
+			if (req.method === "PATCH") {
+				patches++;
+				opts.onPatch?.();
+				return Response.json({ ok: true });
+			}
+			return new Response("no", { status: 404 });
+		},
+	});
+	return { server, patches: () => patches };
+}
+
+const trackedIssue: IssueRef = { id: "iss-1", name: "do the thing", projectId: "proj-9" };
+
+test("closeLandedIssue closes the issue once, then is idempotent", async () => {
+	const { server, patches } = planeStub({ completed: true });
+	try {
+		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
+		await mgr.closeLandedIssue(trackedIssue);
+		await mgr.closeLandedIssue(trackedIssue); // already closed → no second PATCH
+		expect(patches()).toBe(1);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("closeLandedIssue no-ops for an issue-less member (no Plane call)", async () => {
+	const { server, patches } = planeStub({ completed: true });
+	try {
+		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
+		await mgr.closeLandedIssue(undefined);
+		expect(patches()).toBe(0);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("closeLandedIssue retries after a failed close (id marked only on success)", async () => {
+	let completed = false;
+	let patches = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch: (req) => {
+			const url = new URL(req.url);
+			if (req.method === "GET" && url.pathname.endsWith("/states/")) {
+				return Response.json({ results: completed ? [{ id: "s-done", group: "completed" }] : [{ id: "s-todo", group: "backlog" }] });
+			}
+			if (req.method === "PATCH") {
+				patches++;
+				return Response.json({ ok: true });
+			}
+			return new Response("no", { status: 404 });
+		},
+	});
+	try {
+		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
+		await mgr.closeLandedIssue(trackedIssue); // no completed state → close fails, id left unmarked
+		expect(patches).toBe(0);
+		completed = true;
+		await mgr.closeLandedIssue(trackedIssue); // now there's a completed state → succeeds
+		expect(patches).toBe(1);
+	} finally {
+		server.stop(true);
+	}
+});

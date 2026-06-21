@@ -27,7 +27,7 @@ import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
-import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos } from "./plane.ts";
+import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent } from "./land.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -68,6 +68,14 @@ import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
+
+/** Terminal statuses — an agent here has finished and frees its WIP slot. */
+const TERMINAL_STATUSES: Record<string, true> = { stopped: true, error: true };
+
+/** Agents occupying a live WIP slot — everything not in a terminal state. The concurrency cap counts these. */
+export function liveAgents(dtos: AgentDTO[]): number {
+	return dtos.filter((d) => !TERMINAL_STATUSES[d.status]).length;
+}
 
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
@@ -163,6 +171,8 @@ export class SquadManager extends EventEmitter {
 				activeCount: () => [...this.agents.values()].filter((r) => !!r.dto.issue && (r.dto.status === "working" || r.dto.status === "starting" || r.dto.status === "input")).length,
 				log: (m) => this.log("info", `auto-dispatch: ${m}`),
 				maxActive,
+				liveCount: () => liveAgents(this.list()),
+				maxWip: Number(process.env.OMP_SQUAD_MAX_WIP) || 6,
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
@@ -403,6 +413,7 @@ export class SquadManager extends EventEmitter {
 			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			if (!res.ok) { this.emitFeaturesChanged(); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
+			void this.closeLandedIssue(rec?.dto.issue); // landed branch ⇒ close its tracking issue (idempotent)
 		}
 		this.emitFeaturesChanged();
 		return { ok: true, results };
@@ -438,6 +449,14 @@ export class SquadManager extends EventEmitter {
 			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
 			if (conflict) throw new Error(`path ownership conflict: ${conflict.paths.join(", ")} held by agent "${conflict.agent}" — narrow the scope or stop that agent`);
 		}
+		// ponytail: global concurrency ceiling. Bounds simultaneous live agents (worktrees, omp procs,
+		//   tokens). Ceiling = OMP_SQUAD_MAX_WIP (default 6); raise the env to lift it. Restore / fan-out
+		//   recreate already-counted agents, so they pass opts.bypassCap.
+		if (!opts.bypassCap) {
+			const cap = Number(process.env.OMP_SQUAD_MAX_WIP) || 6;
+			const live = liveAgents(this.list());
+			if (live >= cap) throw new Error(`WIP cap reached (${live}/${cap}) — finish or remove an agent before spawning`);
+		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
 		const id = `${name}-${Date.now().toString(36)}`;
 		const branch = opts.branch ?? `squad/${name}`;
@@ -454,6 +473,7 @@ export class SquadManager extends EventEmitter {
 			if (ref) {
 				opts = { ...opts, issue: ref };
 				this.log("info", `tracked "${name}" as Plane ${ref.identifier ?? ref.id}`);
+				void startPlaneIssue(ref); // backlog → started immediately; best-effort, never throws
 			}
 		}
 		const approvalMode = opts.approvalMode ?? "write";
@@ -564,7 +584,7 @@ export class SquadManager extends EventEmitter {
 
 	/** Spawn a real roster agent for a workflow's parallel branch, run the task, resolve with its result. The agent stays in the roster. */
 	private async spawnFleetBranch(repo: string, parentId: string, spec: BranchSpec): Promise<NodeResult> {
-		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false });
+		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false, bypassCap: true });
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", text: "branch agent not created" };
 		return this.runAgentTask(rec, spec.task);
@@ -885,6 +905,19 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Close an agent/member's Plane issue once its branch successfully lands. Independent of
+	 * auto-dispatch; idempotent via `closedIssues` (a successfully-closed id is never re-closed)
+	 * and best-effort (`closePlaneIssue` swallows transport errors). A failed close leaves the id
+	 * unmarked so a later land retries it.
+	 */
+	async closeLandedIssue(issue: IssueRef | undefined): Promise<void> {
+		if (!issue || this.closedIssues.has(issue.id)) return;
+		this.log("info", `closing ${issue.identifier ?? issue.id} (branch landed)`);
+		if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
+		else this.log("warn", `could not close ${issue.identifier ?? issue.id} (branch landed)`);
+	}
+
+	/**
 	 * Persist one JSONL receipt line for a completed/terminated run, then clear
 	 * the accumulator so the next turn starts fresh. Idempotent per run via the
 	 * accumulator's `finalized` flag (agent_end + exit can both fire).
@@ -1120,6 +1153,7 @@ export class SquadManager extends EventEmitter {
 				verify: p.workflow?.verify?.command,
 				sandbox: p.sandbox,
 				autoRoute: false,
+				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap
 			}).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
 		return list.length;

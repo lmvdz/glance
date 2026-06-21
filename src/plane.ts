@@ -28,8 +28,9 @@ interface PlaneConfig {
 }
 
 function readConfig(): PlaneConfig | null {
-	const apiKey = process.env.PLANE_API_KEY;
-	const workspace = process.env.PLANE_WORKSPACE;
+	// Accept the alternate secret names too, so the daemon reads ~/.claude/secrets/plane.env directly.
+	const apiKey = process.env.PLANE_API_KEY ?? process.env.PLANE_API_TOKEN;
+	const workspace = process.env.PLANE_WORKSPACE ?? process.env.PLANE_WORKSPACE_SLUG;
 	if (!apiKey || !workspace) return null;
 	let projectMap: Record<string, string> = {};
 	if (process.env.PLANE_PROJECT_MAP) {
@@ -42,7 +43,8 @@ function readConfig(): PlaneConfig | null {
 	return {
 		apiKey,
 		workspace,
-		baseUrl: process.env.PLANE_BASE_URL ?? "https://api.plane.so",
+		// A pasted base URL may already carry the /api/v1 suffix; strip it since every call appends it.
+		baseUrl: (process.env.PLANE_BASE_URL ?? "https://api.plane.so").replace(/\/api\/v1\/?$/, ""),
 		projectMap,
 		fallbackProjectId: process.env.PLANE_PROJECT_ID,
 	};
@@ -126,8 +128,8 @@ interface PlaneState {
 	group?: string;
 }
 
-/** Transition an issue to a completed-group state. Best-effort; true on success. */
-export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
+/** Move an issue to the first state in `group` (e.g. "completed"/"started"). Best-effort; true on success. */
+async function transitionTo(issue: IssueRef, group: string): Promise<boolean> {
 	const cfg = readConfig();
 	if (!cfg || !issue.projectId) return false;
 	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${issue.projectId}`;
@@ -136,10 +138,20 @@ export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
 	if (!statesRes || !statesRes.ok) return false;
 	const sdata = (await statesRes.json().catch(() => null)) as { results?: PlaneState[] } | PlaneState[] | null;
 	const states = Array.isArray(sdata) ? sdata : (sdata?.results ?? []);
-	const done = states.find((s) => s.group === "completed");
-	if (!done) return false;
-	const res = await fetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: done.id }) }).catch(() => null);
+	const target = states.find((s) => s.group === group);
+	if (!target) return false;
+	const res = await fetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: target.id }) }).catch(() => null);
 	return !!res && res.ok;
+}
+
+/** Transition an issue to a completed-group state. Best-effort; true on success. */
+export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
+	return transitionTo(issue, "completed");
+}
+
+/** Transition an issue to a started-group state (backlog → started when a spawn picks it up). Best-effort; true on success. */
+export async function startPlaneIssue(issue: IssueRef): Promise<boolean> {
+	return transitionTo(issue, "started");
 }
 
 /** Create an issue in the Plane project mapped to `repo`, returning its ref. `null` ⇒ not configured / no project / failed. */

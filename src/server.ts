@@ -278,6 +278,7 @@ export class SquadServer {
 					}
 					const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
 					const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message, commitWip: !busy });
+					if (result.ok) void manager.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
 					return Response.json(result);
 				}
 				const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
