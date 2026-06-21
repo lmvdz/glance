@@ -66,7 +66,7 @@ UI logic is DOM-coupled; "one runnable check" lives where pure logic is extracta
 
 ## Status
 
-0/6 closed. Plan only — no concern executed.
+6/6 closed (2026-06-21). All concerns shipped on branch `squad/make-the-omp-squad-ui-ux`; commits 41bb441, 67f42df, 78c4bba, 6859451, 8e36633 (web) + the TUI commit. Not pushed.
 
 ## Plane tracking
 - Project: omp-squad (`OMPSQ`)
@@ -77,4 +77,4 @@ UI logic is DOM-coupled; "one runnable check" lives where pure logic is extracta
   - [03-web-command-palette](https://app.plane.so/inkwell-finance/browse/OMPSQ-6/) — OMPSQ-6 ✅ done
   - [04-web-liveness-staleness](https://app.plane.so/inkwell-finance/browse/OMPSQ-7/) — OMPSQ-7 ✅ done
   - [05-web-dialogs](https://app.plane.so/inkwell-finance/browse/OMPSQ-2/) — OMPSQ-2 ✅ done
-  - [06-tui-parity](https://app.plane.so/inkwell-finance/browse/OMPSQ-5/) — OMPSQ-5 (Todo · high)
+  - [06-tui-parity](https://app.plane.so/inkwell-finance/browse/OMPSQ-5/) — OMPSQ-5 ✅ done
