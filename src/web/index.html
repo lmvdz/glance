@@ -96,6 +96,17 @@
   .landrow { display:flex; align-items:center; gap:10px; padding:5px 0; flex-wrap:wrap; }
   .landrow .branchmark { font-family:ui-monospace,monospace; }
   .rd-ahead{color:var(--work)} .rd-uncommitted{color:var(--input)} .rd-diverged{color:var(--err)} .rd-clean,.rd-merged,.rd-no-branch{color:var(--dim)}
+  /* race board (OMPSQ-8) — one lane per agent, segmented phase track */
+  .rlane { display:flex; align-items:center; gap:10px; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--panel); cursor:pointer; }
+  .rlane:hover { border-color:var(--accent); }
+  .rlane.child { margin-left:22px; border-left:2px solid var(--accent); }
+  .rhead { display:flex; align-items:center; gap:8px; min-width:220px; }
+  .rtrack { display:flex; gap:3px; flex:1; min-width:120px; }
+  .rc { flex:1; height:14px; border-radius:3px; background:var(--panel2); border:1px solid var(--line); }
+  .rc.f.working{background:var(--work)} .rc.f.input{background:var(--input)} .rc.f.idle{background:var(--ok)} .rc.f.error{background:var(--err)} .rc.f.stopped{background:var(--stop)} .rc.f.starting{background:var(--accent)}
+  .rc.c { outline:2px solid var(--accent); }
+  .rlabel { color:var(--mut); font-size:12px; min-width:130px; }
+  .rmeta { color:var(--dim); font-size:12px; white-space:nowrap; }
   /* agent view */
   .av { display:flex; flex-direction:column; height:100%; min-height:0; }
   .ahead { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; flex-direction:row; align-items:flex-start; justify-content:space-between; gap:12px; }
@@ -204,7 +215,7 @@ const agents = new Map();        // id -> AgentDTO
 const transcripts = new Map();   // id -> TranscriptEntry[]
 const commandsByAgent = new Map();// id -> CommandInfo[] (slash commands + skills + extensions)
 const composerDraft = new Map();  // id -> in-progress composer text (survives re-renders)
-let view = "project";            // "project" | "agent"
+let view = "project";            // "project" | "agent" | "board" | "feature" | "queue" | "race"
 let showChanges = localStorage.getItem("squad.showChanges") === "1";
 let selProject = null;           // repo path
 let selAgent = null;             // agent id
@@ -376,7 +387,8 @@ function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCount
 // URL routing: the hash mirrors the view so refresh / deep-link / back-forward all work.
 let routed = false;
 function pushRoute() {
-  const h = view === "queue" ? "#/queue"
+  const h = view === "race" ? "#/race"
+    : view === "queue" ? "#/queue"
     : view === "board" ? "#/board"
     : view === "feature" && selFeature ? `#/feature/${encodeURIComponent(selFeature)}`
     : view === "agent" && selAgent ? `#/agent/${encodeURIComponent(selAgent)}`
@@ -386,6 +398,7 @@ function pushRoute() {
 function applyRoute() {
   if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
   if (location.hash === "#/queue") { view = "queue"; selAgent = null; renderAll(); return; }
+  if (location.hash === "#/race") { view = "race"; selAgent = null; renderAll(); return; }
   const mf = location.hash.match(/^#\/feature\/(.+)$/);
   if (mf) { selFeature = decodeURIComponent(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
   const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
@@ -412,6 +425,7 @@ function renderNav() {
     { id:"home",  ico:"⌂",  lbl:"Overview", sel: view === "project" && !selProject, on: () => { selProject = null; selAgent = null; view = "project"; renderAll(); } },
     { id:"board", ico:"▦",  lbl:"Features", sel: view === "board" || view === "feature", on: openBoard },
     { id:"queue", ico:"⛔", lbl:"Queue",    sel: view === "queue", ct: need, attn: need > 0, on: openQueue },
+    { id:"race",  ico:"⇶",  lbl:"Race",     sel: view === "race", on: openRace },
   ];
   nav.innerHTML = rows.map(r => `<div class="navrow${r.sel?" sel":""}${r.attn?" attn":""}" data-id="${r.id}" title="${r.lbl}"><span class="ico">${r.ico}</span><span class="lbl">${r.lbl}</span>${r.ct?`<span class="ct">${r.ct}</span>`:""}</div>`).join("");
   for (const r of rows) { const el = nav.querySelector(`[data-id="${r.id}"]`); if (el) el.onclick = r.on; }
@@ -447,6 +461,7 @@ function renderBody() {
   const body = $("#body");
   if (view === "board") return renderBoard(body);
   if (view === "queue") return renderQueue(body);
+  if (view === "race") return renderRace(body);
   if (view === "feature") return renderFeature(body, features.get(selFeature));
   const p = projects().find(x => x.id === selProject);
   if (!p) return renderHome(body);
@@ -490,6 +505,48 @@ function renderQueue(body) {
   }
   const eb = $("#qerrs");
   if (eb) { eb.innerHTML = errs.map(a => `<div class="subnode" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-error">error</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.error||"")}</span></div>`).join(""); for (const el of eb.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid); }
+}
+
+// ── Race board (OMPSQ-8) ─────────────────────────────────────────────────────
+// One lane per agent; workflow phases are a segmented track filled from todo.done/total,
+// the current cell labelled todo.active. Pure client-side fold over fields already
+// broadcast (no server route, no poll, no new dep). Fan-out branches indent under parent.
+function openRace() { view = "race"; selAgent = null; renderAll(); }
+function raceTrack(a) {
+  const total = Math.max(1, a.todo.total);
+  const done = Math.min(a.todo.done, total);
+  const settled = a.status === "idle" || a.status === "error" || a.status === "stopped";
+  let cells = "";
+  for (let i = 0; i < total; i++) {
+    const fill = i < done || (settled && i === total - 1);   // settled runs land in the last cell
+    const cur = !settled && i === done && done < total;       // current phase = first unfinished cell
+    cells += `<span class="rc ${a.status}${fill ? " f" : ""}${cur ? " c" : ""}"></span>`;
+  }
+  const label = a.todo.active || (settled ? a.status : "");
+  return `<div class="rtrack">${cells}</div><span class="rlabel">${esc(label)} <span style="color:var(--dim)">${done}/${total}</span></span>`;
+}
+function renderRace(body) {
+  const all = [...agents.values()];
+  const live = new Set(all.map(a => a.id));
+  const byStatus = (x, y) => STATUSES.indexOf(x.status) - STATUSES.indexOf(y.status);
+  const roots = all.filter(a => !a.parentId || !live.has(a.parentId)).sort(byStatus);
+  const ordered = [];
+  for (const r of roots) { ordered.push([r, false]); for (const ch of all.filter(a => a.parentId === r.id).sort(byStatus)) ordered.push([ch, true]); }
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Race board</h2><div class="sub">${all.length} agent${all.length===1?"":"s"} · per-agent pipeline position — who's where, who's stalled</div></div><button id="rHome" class="navbtn" title="Back">← Back</button></div>
+    <div class="section"><div class="inner" id="rlanes" style="display:flex;flex-direction:column;gap:8px"></div></div></div>`;
+  $("#rHome").onclick = () => { view = "project"; renderAll(); };
+  const box = $("#rlanes");
+  if (!ordered.length) { box.innerHTML = `<span style="color:var(--dim)">No agents yet.</span>`; return; }
+  const now = Date.now();
+  box.innerHTML = ordered.map(([a, child]) => {
+    const spin = a.status === "working" ? `<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>` : "";
+    const stall = isStalled(a, now) ? `<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>` : "";
+    const head = `<div class="rhead"><span class="badge b-${a.status}">${esc(a.status)}</span>${spin}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${a.issue?`<span class="issue">${esc(a.issue.identifier||"")}</span>`:""}</div>`;
+    const mid = a.todo ? raceTrack(a) : `<span class="rlabel" style="flex:1">${esc(a.activity || "—")}</span>`;
+    return `<div class="rlane${child?" child":""}" data-aid="${esc(a.id)}">${head}${mid}${stall}<span class="rmeta agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
+  }).join("");
+  for (const el of box.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid);
 }
 
 // ── Feature board ─────────────────────────────────────────────────────────
@@ -820,6 +877,7 @@ function paletteItems() {
     { label: "Home", hint: "overview", run: () => { selProject = null; selAgent = null; view = "project"; renderAll(); } },
     { label: "Attention queue", hint: "blocked agents", run: openQueue },
     { label: "Feature board", hint: "", run: openBoard },
+    { label: "Race board", hint: "per-agent pipeline", run: openRace },
     { label: "New agent", hint: "spawn", run: () => $("#addBtn").click() },
     { label: "Upgrade daemon", hint: "pull + restart", run: () => $("#upgradeBtn").click() },
   ];
@@ -1007,7 +1065,7 @@ function patchAgentView(a) {
 
 function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
-  if (view === "queue") { renderBody(); return; }
+  if (view === "queue" || view === "race") { renderBody(); return; }
   if (view === "board" || view === "feature") { renderBody(); scheduleFeatures(); return; }
   if (view === "agent" && selAgent && agents.has(selAgent)) { patchAgentView(agents.get(selAgent)); return; }
   if (view === "project" && selProject) { const p = projects().find(x => x.id === selProject); if (p) { patchProjectView(p); return; } }
