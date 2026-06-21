@@ -199,6 +199,17 @@ function deriveStage(opts: { agents: AgentDTO[]; worktrees: FeatureWorktreeStatu
 	return "planned";
 }
 
+/** Map a research-plan-implement workflow node label to the coarse board stage (the granular node label rides FeatureDTO.workflowStage). */
+const WF_STAGE: Record<string, FeatureStage> = {
+	Research: "planned",
+	Plan: "planned",
+	"Approve plan": "planned",
+	"File to Plane": "issues-created",
+	Implement: "in-progress",
+	Verify: "review",
+	Fixup: "review",
+};
+
 /** Build the feature list for one repo: persisted features (explicit membership) + unadopted plan dirs + unassigned agents. */
 export async function buildFeatures(repo: string, agents: AgentDTO[], persisted: PersistedFeature[] = []): Promise<FeatureDTO[]> {
 	const features: FeatureDTO[] = [];
@@ -221,11 +232,15 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 		const liveIssueIds = pf.origin?.planDir ? await planeIdsIn(path.join(repo, pf.origin.planDir)) : [];
 		const issueIds = [...new Set([...(pf.plane?.issueIdentifiers ?? []), ...liveIssueIds])];
 		const hasIssues = issueIds.length > 0;
+		// When Fabro-driven, the live workflow node drives the stage (more granular than evidence while the run is active).
+		const wfAgent = pf.workflowAgentId ? members.find((a) => a.id === pf.workflowAgentId) : undefined;
+		const wfActive = wfAgent?.todo?.active;
+		const wfStage = wfActive ? WF_STAGE[wfActive] : undefined;
 		features.push({
 			id: pf.id,
 			title: pf.title,
 			repo,
-			stage: pf.stageOverride ?? deriveStage({ agents: members, worktrees, unlanded: unlandedFiles, planDir: pf.origin?.planDir, hasIssues }),
+			stage: pf.stageOverride ?? wfStage ?? deriveStage({ agents: members, worktrees, unlanded: unlandedFiles, planDir: pf.origin?.planDir, hasIssues }),
 			planDir: pf.origin?.planDir,
 			agentIds: members.map((a) => a.id),
 			worktrees,
@@ -236,6 +251,9 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			issueIdentifiers: hasIssues ? issueIds : undefined,
 			persisted: true,
 			stageOverride: pf.stageOverride,
+			workflowAgentId: pf.workflowAgentId,
+			workflowStage: wfActive,
+			workflowProgress: wfAgent?.todo ? { done: wfAgent.todo.done, total: wfAgent.todo.total } : undefined,
 		});
 	}
 

@@ -95,6 +95,15 @@ export class SquadServer {
 					const pf = manager.createFeature({ title, repo, planDir: body.planDir });
 					return Response.json(pf);
 				}
+				if (url.pathname === "/api/features/auto" && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => null);
+					if (!body || typeof body !== "object" || !("goal" in body) || typeof body.goal !== "string" || !body.goal.trim()) return new Response("goal required", { status: 400 });
+					const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+					const title = "title" in body && typeof body.title === "string" && body.title.trim() ? body.title.trim() : body.goal.trim().slice(0, 48);
+					const model = "model" in body && typeof body.model === "string" && body.model ? body.model : undefined;
+					const { feature, agent } = await manager.createAutoFeature({ title, repo, goal: body.goal.trim(), model });
+					return Response.json({ feature, agentId: agent.id });
+				}
 				const mfpatch = url.pathname.match(/^\/api\/features\/([^/]+)$/);
 				if (mfpatch && req.method === "PATCH") {
 					const body: unknown = await req.json().catch(() => null);

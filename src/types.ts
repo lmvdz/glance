@@ -127,6 +127,12 @@ export interface FeatureDTO {
 	/** Manual stage pin (persisted features only). */
 	stageOverride?: FeatureStage;
 	archived?: boolean;
+	/** When Fabro-driven: the research-plan-implement workflow agent running this feature. */
+	workflowAgentId?: string;
+	/** Live label of the workflow's active node (e.g. "Implement"), when workflow-driven. */
+	workflowStage?: string;
+	/** Workflow node rollup (completed/total) for a progress bar. */
+	workflowProgress?: { done: number; total: number };
 }
 
 /** Serializable per-agent snapshot sent to surfaces. */
@@ -212,6 +218,8 @@ export interface PersistedFeature {
 	createdAt: number;
 	updatedAt: number;
 	archived?: boolean;
+	/** When Fabro-driven: the research-plan-implement workflow agent running this feature. */
+	workflowAgentId?: string;
 }
 
 /** Options when adding an agent to the squad. */

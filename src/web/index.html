@@ -372,7 +372,7 @@ function featNeedsLand(f) { return f.unlandedFiles > 0 || (f.worktrees || []).so
 function renderBoard(body) {
   const fs = [...features.values()];
   body.innerHTML = `<div class="pv">
-    <div class="bvh"><div><h2>Features</h2><div class="sub">${fs.length} feature${fs.length===1?"":"s"} · in-flight work and what needs landing</div></div><div style="display:flex;gap:6px"><button id="featNew" class="primary">+ Feature</button><button id="featRefresh" class="navbtn" title="Refresh">↻</button></div></div>
+    <div class="bvh"><div><h2>Features</h2><div class="sub">${fs.length} feature${fs.length===1?"":"s"} · in-flight work and what needs landing</div></div><div style="display:flex;gap:6px"><button id="featAuto" class="primary" title="Type a goal — spawn a research → plan → file → implement workflow, tracked here as it moves">⚡ New (auto)</button><button id="featNew" class="navbtn">+ Feature</button><button id="featRefresh" class="navbtn" title="Refresh">↻</button></div></div>
     <div class="board" id="board"></div></div>`;
   const board = $("#board");
   if (!fs.length) { board.innerHTML = `<div class="nodetail" style="height:auto;padding:30px">No features yet — spawn an agent, or add a plans/&lt;name&gt;/ dir.</div>`; }
@@ -397,16 +397,18 @@ function renderBoard(body) {
   for (const el of board.querySelectorAll("[data-fid]")) el.onclick = () => openFeature(el.dataset.fid);
   const rf = $("#featRefresh"); if (rf) rf.onclick = loadFeatures;
   const nf = $("#featNew"); if (nf) nf.onclick = newFeature;
+  const na = $("#featAuto"); if (na) na.onclick = newAutoFeature;
 }
 
 function renderFeature(body, f) {
   if (!f) { body.innerHTML = `<div class="nodetail">Loading feature…</div>`; return; }
   const landable = (f.worktrees||[]).some(w => w.readiness === "ahead" || w.readiness === "uncommitted");
   body.innerHTML = `<div class="pv">
-    <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span>${f.persisted?"":` · <span style="color:var(--dim)">derived</span>`}</div></div>
+    <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span>${f.workflowStage?` · <span class="badge b-stage" title="live workflow node">⚙ ${esc(f.workflowStage)}${f.workflowProgress?` ${f.workflowProgress.done}/${f.workflowProgress.total}`:""}</span>`:""}${f.persisted?"":` · <span style="color:var(--dim)">derived</span>`}</div></div>
       <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>`:""}${!f.persisted&&f.planDir?`<button id="featAdopt" class="primary" title="Adopt this plan as a managed feature (then assign agents + Land)">＋ Adopt as feature</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
     <div class="section"><h3>Worktrees · Land</h3><div class="inner tree" id="featland"></div></div>
     <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner" id="featassign"></div>`:""}</div>
+    <div class="section" id="featgatewrap" style="display:none"><h3>Needs your input</h3><div class="inner" id="featgate"></div></div>
     ${f.planDir?`<div class="section"><h3>Pipeline · concerns</h3><div class="inner tree" id="featpipe"><span style="color:var(--dim)">loading…</span></div></div>`:""}</div>`;
   $("#featBack").onclick = openBoard;
   if (f.persisted && landable) { const la = $("#featLandAll"); if (la) la.onclick = () => landAll(f.id, la); }
@@ -440,6 +442,34 @@ function renderFeature(body, f) {
   }
   const ad = $("#featAdopt"); if (ad) ad.onclick = () => adoptFeature(f);
   if (f.planDir) loadPipeline(f);
+  renderFeatureGate(f);
+}
+
+function renderFeatureGate(f) {
+  const wrap = $("#featgatewrap"), box = $("#featgate");
+  if (!wrap || !box) return;
+  const mem = f.agentIds.map(id => agents.get(id)).filter(Boolean);
+  const reqs = mem.flatMap(a => (a.pending || []).map(p => ({ aid: a.id, p })));
+  if (!reqs.length) { wrap.style.display = "none"; box.innerHTML = ""; return; }
+  wrap.style.display = "";
+  box.innerHTML = reqs.map(r => preq(r.p)).join("");
+  for (const { aid, p } of reqs) {
+    const node = box.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (!node) continue;
+    if (p.kind === "confirm") { node.querySelector(".yes").onclick = () => send({type:"answer",id:aid,requestId:p.id,value:"yes"}); node.querySelector(".no").onclick = () => send({type:"answer",id:aid,requestId:p.id,value:"no"}); }
+    else if (p.kind === "select") node.querySelectorAll("button[data-opt]").forEach(b => b.onclick = () => send({type:"answer",id:aid,requestId:p.id,value:b.dataset.opt}));
+    else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({type:"answer",id:aid,requestId:p.id,value:i.value}); }
+  }
+}
+async function newAutoFeature() {
+  const goal = prompt("Goal for the auto feature (research → plan → file to Plane → implement):");
+  if (!goal || !goal.trim()) return;
+  try {
+    const r = await fetch("/api/features/auto", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ goal: goal.trim(), repo: spawnCwd }) });
+    if (!r.ok) { toast("auto feature failed: " + (await r.text()), "error"); return; }
+    const out = await r.json();
+    await loadFeatures();
+    if (out.feature && out.feature.id) openFeature(out.feature.id);
+  } catch { toast("auto feature failed", "error"); }
 }
 
 async function landFromFeature(agentId, btn) {

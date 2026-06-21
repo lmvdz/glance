@@ -287,6 +287,17 @@ export class SquadManager extends EventEmitter {
 		return pf;
 	}
 
+	/** Spawn a research-plan-implement workflow agent and wrap it in a feature whose stage tracks the live run. */
+	async createAutoFeature(opts: { title: string; repo: string; goal: string; model?: string }): Promise<{ feature: PersistedFeature; agent: AgentDTO }> {
+		const pf = this.createFeature({ title: opts.title, repo: opts.repo });
+		const name = opts.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || undefined;
+		const agent = await this.create({ repo: opts.repo, name, workflow: "research-plan-implement", task: opts.goal, featureId: pf.id, approvalMode: "yolo", model: opts.model });
+		pf.workflowAgentId = agent.id;
+		pf.updatedAt = Date.now();
+		this.emitFeaturesChanged();
+		return { feature: pf, agent };
+	}
+
 	updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean }): PersistedFeature | undefined {
 		const pf = this.featureStore.get(id);
 		if (!pf) return undefined;
