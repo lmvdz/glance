@@ -180,6 +180,17 @@ Set on the daemon to pull real work items into the command center:
 
 Unset → the issues panel shows "Plane not connected" and everything else works.
 
+**Auto-dispatch (opt-in)** — `OMP_SQUAD_AUTODISPATCH=1` makes the daemon poll the mapped
+repos and spawn a routed agent per new open issue (issue → routed run → verify → close),
+so work starts with nobody typing. Bounded so a backlog can't storm:
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_AUTODISPATCH` | Enable the issue → agent loop (off by default) |
+| `OMP_SQUAD_DISPATCH_INTERVAL_MS` | Poll interval (default `60000`) |
+| `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
+| `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate |
+
 ### Federation (opt-in)
 
 `OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
@@ -233,8 +244,14 @@ reads the task + repo and routes it:
 - nothing to verify → a plain agent.
 
 The choice is logged (`routed "<name>": <reason>`) so the operator sees the OS's reasoning;
-`--plain` (or an explicit `--workflow` / `--verify` / `--sandbox`) overrides it. Heuristics
-today; an LLM router drops in behind `routeIntake` without changing a single caller.
+`--plain` (or an explicit `--workflow` / `--verify` / `--sandbox`) overrides it. Routing is
+heuristic by default; set `OMP_SQUAD_LLM_ROUTER=1` to classify intent with a one-shot call on
+the fast/`smol` model instead (it falls back to heuristics on any failure) — same `routeIntake`
+seam, no caller changes.
+
+The same router powers **[auto-dispatch](#plane-integration)**: with `OMP_SQUAD_AUTODISPATCH`,
+open Plane issues are pulled in and routed to agents on a timer — the human stops typing the
+line at all, and supervises by exception.
 
 ## Workflows — process as a reviewable graph
 
@@ -358,6 +375,7 @@ Phase 2 — transport + policy, not surgery.
 | `src/workflow/verify-workflow.ts` | `buildVerifyWorkflow` — synthesizes the `--verify` implement → verify → fixup loop |
 | `src/workflow/stylesheet.ts` | CSS-like `model_stylesheet` parser + per-node model/effort resolver |
 | `src/intake.ts` | Intake router — turns a plain task into a process (verify / plan / fan-out) |
+| `src/dispatch.ts` | Auto-dispatch — polls Plane, routes new issues to agents (bounded, opt-in) |
 | `workflows/plan-implement/` | Bundled plan → approve → implement → verify → fixup graph |
 | `workflows/commission/` | Bundled author → validate → onboard graph (the commission loop) |
 | `workflows/fan-out/` | Bundled parallel fan-out → merge graph (one fleet agent per branch) |

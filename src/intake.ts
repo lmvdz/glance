@@ -32,14 +32,77 @@ const FANOUT_SIGNAL = /\b(in parallel|fan ?out|several approaches|multiple appro
 const HARD = /\b(complex|carefully|tricky|subtle|thorough|deep dive)\b/i;
 const TRIVIAL = /\b(typo|rename|comment|bump|whitespace|reformat|format)\b/i;
 
-/** Choose a process for `task` in `repo`. Pure of side effects beyond reading repo metadata. */
-export async function routeIntake(task: string, repo: string): Promise<IntakeDecision> {
+/** A one-shot LLM classification call (e.g. omp `-p --no-tools --smol`). Returns raw text. */
+export type Classify = (prompt: string) => Promise<string>;
+
+/**
+ * Choose a process for `task` in `repo`. With a `classify` fn, an LLM picks the process
+ * (falling back to heuristics on any failure); without one, pure heuristics. Side effects
+ * are limited to reading repo metadata + the (injected) classify call.
+ */
+export async function routeIntake(task: string, repo: string, classify?: Classify): Promise<IntakeDecision> {
+	if (classify) {
+		const llm = await llmRoute(task, repo, classify).catch(() => undefined);
+		if (llm) return llm;
+	}
+	return heuristicRoute(task, repo);
+}
+
+async function heuristicRoute(task: string, repo: string): Promise<IntakeDecision> {
 	if (FANOUT_SIGNAL.test(task)) return { workflow: FAN_OUT, reason: "several approaches requested → parallel fan-out" };
 	if (HIGH_RISK.test(task)) return { workflow: PLAN_IMPLEMENT, reason: "high-risk change → plan + human approval before implementing" };
 	const thinking: ThinkingLevel | undefined = HARD.test(task) ? "high" : TRIVIAL.test(task) ? "minimal" : undefined;
 	const verify = await detectVerify(repo);
 	if (verify) return { verify, thinking, reason: `code change → auto-verify with \`${verify}\`` };
 	return { thinking, reason: "no verification command detected → plain agent" };
+}
+
+const ROUTER_PROMPT = `Route a software task to ONE process. Respond with ONLY a JSON object, no prose:
+{"process":"verify|plan|fanout|plain","effort":"minimal|low|high"}
+- verify: an ordinary code change (implement, then run tests/typecheck).
+- plan: a high-risk or destructive change (migration, deletion, deploy, breaking API) that needs human approval first.
+- fanout: explore several competing approaches in parallel.
+- plain: no code verification needed (docs, copy, trivial, non-code).
+Task: `;
+
+async function llmRoute(task: string, repo: string, classify: Classify): Promise<IntakeDecision | undefined> {
+	const parsed = extractDecision(await classify(ROUTER_PROMPT + task));
+	if (!parsed) return undefined;
+	const effort = parsed.effort === "high" || parsed.effort === "minimal" || parsed.effort === "low" ? parsed.effort : undefined;
+	if (parsed.process === "fanout") return { workflow: FAN_OUT, thinking: effort, reason: "LLM router → parallel fan-out" };
+	if (parsed.process === "plan") return { workflow: PLAN_IMPLEMENT, thinking: effort, reason: "LLM router → plan + human approval (high-risk)" };
+	if (parsed.process === "verify") {
+		const verify = await detectVerify(repo);
+		return verify ? { verify, thinking: effort, reason: `LLM router → auto-verify with \`${verify}\`` } : { thinking: effort, reason: "LLM router → plain (no verify command)" };
+	}
+	return { thinking: effort, reason: "LLM router → plain agent" };
+}
+
+/** Extract the last balanced JSON object from model output and read its routing fields. */
+function extractDecision(text: string): { process?: string; effort?: string } | undefined {
+	const start = text.lastIndexOf("{");
+	const end = text.lastIndexOf("}");
+	if (start < 0 || end <= start) return undefined;
+	try {
+		const obj: unknown = JSON.parse(text.slice(start, end + 1));
+		if (!obj || typeof obj !== "object") return undefined;
+		const rec = obj as Record<string, unknown>; // guarded: a non-null object literal from the model
+		const process = typeof rec.process === "string" ? rec.process : undefined;
+		const effort = typeof rec.effort === "string" ? rec.effort : undefined;
+		return { process, effort };
+	} catch {
+		return undefined;
+	}
+}
+
+/** A `Classify` backed by a one-shot omp call on the fast/smol model (no tools). */
+export function ompClassify(bin = "omp"): Classify {
+	return async (prompt: string): Promise<string> => {
+		const proc = Bun.spawn([bin, "-p", "--no-tools", "--smol", "--hide-thinking", prompt], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+		const out = await new Response(proc.stdout).text();
+		await proc.exited;
+		return out;
+	};
 }
 
 /** Infer the repo's verification command from its toolchain manifests. */

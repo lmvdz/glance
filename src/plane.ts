@@ -81,16 +81,63 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 	const projectId = projectIdFor(repo, cfg);
 	if (!projectId) return [];
 
-	const url = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}/issues/?per_page=50`;
-	const res = await fetch(url, { headers: { "x-api-key": cfg.apiKey, "content-type": "application/json" } }).catch(() => null);
+	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
+	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
+	const res = await fetch(`${base}/issues/?per_page=50`, { headers }).catch(() => null);
 	if (!res || !res.ok) return [];
 	const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
 	const items = Array.isArray(data) ? data : (data?.results ?? []);
+	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so the
+	// completed/cancelled filter actually works (else finished issues get auto-dispatched).
+	const groups = await fetchStateGroups(base, headers);
 	return items
-		.map((raw) => toIssueRef(raw, cfg, projectId))
+		.map((raw) => {
+			const ref = toIssueRef(raw, cfg, projectId);
+			const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
+			if (group) ref.state = group;
+			return ref;
+		})
 		.filter((i) => i.state !== "completed" && i.state !== "cancelled");
+}
+
+/** Map a project's state ids → group (backlog/unstarted/started/completed/cancelled). */
+async function fetchStateGroups(projectBase: string, headers: Record<string, string>): Promise<Map<string, string>> {
+	const map = new Map<string, string>();
+	const res = await fetch(`${projectBase}/states/?per_page=100`, { headers }).catch(() => null);
+	if (!res || !res.ok) return map;
+	const data = (await res.json().catch(() => null)) as { results?: PlaneState[] } | PlaneState[] | null;
+	const states = Array.isArray(data) ? data : (data?.results ?? []);
+	for (const s of states) if (s.id && s.group) map.set(s.id, s.group);
+	return map;
 }
 
 export function planeConfigured(): boolean {
 	return readConfig() !== null;
+}
+
+/** Repos wired to a Plane project (the project-map keys) — the auto-dispatch targets. */
+export function planeRepos(): string[] {
+	const cfg = readConfig();
+	return cfg ? Object.keys(cfg.projectMap) : [];
+}
+
+interface PlaneState {
+	id: string;
+	group?: string;
+}
+
+/** Transition an issue to a completed-group state. Best-effort; true on success. */
+export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
+	const cfg = readConfig();
+	if (!cfg || !issue.projectId) return false;
+	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${issue.projectId}`;
+	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
+	const statesRes = await fetch(`${base}/states/?per_page=100`, { headers }).catch(() => null);
+	if (!statesRes || !statesRes.ok) return false;
+	const sdata = (await statesRes.json().catch(() => null)) as { results?: PlaneState[] } | PlaneState[] | null;
+	const states = Array.isArray(sdata) ? sdata : (sdata?.results ?? []);
+	const done = states.find((s) => s.group === "completed");
+	if (!done) return false;
+	const res = await fetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: done.id }) }).catch(() => null);
+	return !!res && res.ok;
 }

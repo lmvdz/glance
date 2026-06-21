@@ -165,7 +165,7 @@ export class SquadManager extends EventEmitter {
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
 	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
-		await this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true });
+		await this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true, approvalMode: "yolo" });
 	}
 
 	async stop(): Promise<void> {

@@ -67,3 +67,34 @@ test("routeIntake: 'carefully/subtle' bumps reasoning effort", async () => {
 	const r = await routeIntake("carefully implement the subtle ordering fix", await repo({}));
 	expect(r.thinking).toBe("high");
 });
+
+// ── LLM router (injected classify; no real model) ──────────────────────────────
+
+const classify = (json: string) => async () => json;
+
+test("routeIntake (LLM): 'verify' classification → auto-verify on a JS repo", async () => {
+	const d = await repo({ "package.json": JSON.stringify({ scripts: { test: "vitest" } }) });
+	const r = await routeIntake("do the thing", d, classify('{"process":"verify","effort":"low"}'));
+	expect(r.verify).toBe("npm run test");
+	expect(r.thinking).toBe("low");
+	expect(r.reason).toContain("LLM router");
+});
+
+test("routeIntake (LLM): 'plan' → plan-implement, 'fanout' → fan-out, 'plain' → plain", async () => {
+	expect((await routeIntake("x", await repo({}), classify('{"process":"plan"}'))).workflow).toContain("plan-implement");
+	expect((await routeIntake("x", await repo({}), classify('{"process":"fanout"}'))).workflow).toContain("fan-out");
+	const plain = await routeIntake("x", await repo({}), classify('{"process":"plain","effort":"high"}'));
+	expect(plain.workflow).toBeUndefined();
+	expect(plain.thinking).toBe("high");
+});
+
+test("routeIntake (LLM): tolerates surrounding prose, extracting the JSON object", async () => {
+	const r = await routeIntake("x", await repo({}), classify('Sure! Here is the routing:\n{"process":"plan"}\nHope that helps.'));
+	expect(r.workflow).toContain("plan-implement");
+});
+
+test("routeIntake (LLM): unparseable output falls back to heuristics", async () => {
+	const r = await routeIntake("migrate the production database", await repo({}), classify("I cannot help with that."));
+	expect(r.workflow).toContain("plan-implement"); // heuristic high-risk path
+	expect(r.reason).not.toContain("LLM router");
+});
