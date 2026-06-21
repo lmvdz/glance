@@ -404,9 +404,10 @@ function renderFeature(body, f) {
   const landable = (f.worktrees||[]).some(w => w.readiness === "ahead" || w.readiness === "uncommitted");
   body.innerHTML = `<div class="pv">
     <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span>${f.persisted?"":` · <span style="color:var(--dim)">derived</span>`}</div></div>
-      <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
+      <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>`:""}${!f.persisted&&f.planDir?`<button id="featAdopt" class="primary" title="Adopt this plan as a managed feature (then assign agents + Land)">＋ Adopt as feature</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
     <div class="section"><h3>Worktrees · Land</h3><div class="inner tree" id="featland"></div></div>
-    <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner" id="featassign"></div>`:""}</div></div>`;
+    <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner" id="featassign"></div>`:""}</div>
+    ${f.planDir?`<div class="section"><h3>Pipeline · concerns</h3><div class="inner tree" id="featpipe"><span style="color:var(--dim)">loading…</span></div></div>`:""}</div>`;
   $("#featBack").onclick = openBoard;
   if (f.persisted && landable) { const la = $("#featLandAll"); if (la) la.onclick = () => landAll(f.id, la); }
   const lt = $("#featland");
@@ -437,6 +438,8 @@ function renderFeature(body, f) {
       : `<span style="color:var(--dim)">no unassigned agents in this repo</span>`;
     const ab = $("#assignBtn"); if (ab) ab.onclick = () => linkAgentUI(f.id, $("#assignSel").value, false);
   }
+  const ad = $("#featAdopt"); if (ad) ad.onclick = () => adoptFeature(f);
+  if (f.planDir) loadPipeline(f);
 }
 
 async function landFromFeature(agentId, btn) {
@@ -469,6 +472,40 @@ async function landAll(id, btn) {
     const res = await r.json();
     toast(res.ok ? `landed ${res.results.length} branch(es)` : (res.stopped || "land stopped"), res.ok ? "info" : "error");
   } catch { toast("land failed", "error"); }
+  await loadFeatures();
+}
+
+async function adoptFeature(f) {
+  try {
+    const r = await fetch("/api/features/from-plan", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ repo: f.repo, planDir: f.planDir, title: f.title }) });
+    const pf = await r.json();
+    await loadFeatures();
+    if (pf && pf.id) openFeature(pf.id);
+  } catch { toast("adopt failed", "error"); }
+}
+async function loadPipeline(f) {
+  const box = $("#featpipe");
+  if (!box) return;
+  try {
+    const r = await fetch(`/api/features/${encodeURIComponent(f.id)}/pipeline?repo=${encodeURIComponent(f.repo)}`);
+    const p = await r.json();
+    const concerns = p.concerns || [];
+    if (!concerns.length) { box.innerHTML = `<span style="color:var(--dim)">no concern docs in ${esc(f.planDir||"")}</span>`; return; }
+    const issueState = {};
+    for (const i of (p.issues||[])) if (i.identifier) issueState[i.identifier] = i.state || "";
+    box.innerHTML = concerns.map(c => `<div class="landrow">
+      <span class="branchmark" style="color:${c.open?"var(--work)":"var(--ok)"}" title="concern status">${esc(c.status)}</span>
+      <span class="meta"><b>${esc(c.title)}</b> · ${esc(c.file)}${c.priority?` · ${esc(c.priority)}`:""}${c.planeId?` · ${esc(c.planeId)}${(c.planeId in issueState)?` (${esc(issueState[c.planeId]||"?")})`:""}`:""}</span>
+      ${f.persisted&&c.open?`<button class="sm implbtn" data-task="${esc(c.title)}" data-name="${esc(c.file.replace(/\.md$/,""))}">Implement</button>`:""}</div>`).join("");
+    for (const b of box.querySelectorAll(".implbtn")) b.onclick = () => implementConcern(f, b.dataset.task, b.dataset.name, b);
+  } catch { box.innerHTML = `<span style="color:var(--dim)">pipeline unavailable</span>`; }
+}
+async function implementConcern(f, task, name, btn) {
+  btn.disabled = true; btn.textContent = "Spawning…";
+  try {
+    await fetch(`/api/features/${encodeURIComponent(f.id)}/agents`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ task: `Implement: ${task} (see ${f.planDir}). Work in this worktree and commit when done.`, repo: f.repo, name }) });
+    toast("implement agent spawned", "info");
+  } catch { toast("spawn failed", "error"); btn.disabled = false; btn.textContent = "Implement"; }
   await loadFeatures();
 }
 

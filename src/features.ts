@@ -117,6 +117,72 @@ export async function listPlanDirs(repo: string): Promise<PlanDirInfo[]> {
 	return out;
 }
 
+/** PLANE: pointer identifiers found across all markdown in one plan dir. */
+async function planeIdsIn(dirAbs: string): Promise<string[]> {
+	let files: string[];
+	try {
+		files = (await fs.readdir(dirAbs)).filter((f) => f.endsWith(".md"));
+	} catch {
+		return [];
+	}
+	const ids = new Set<string>();
+	for (const f of files) {
+		const text = await fs.readFile(path.join(dirAbs, f), "utf8").catch(() => "");
+		for (const m of text.matchAll(PLANE_RE)) ids.add(m[1]);
+	}
+	return [...ids];
+}
+
+/** One concern doc inside a plan dir (a `plans/<x>/NN-*.md` with a STATUS frontmatter line). */
+export interface PlanConcern {
+	file: string;
+	title: string;
+	status: string;
+	priority?: string;
+	complexity?: string;
+	planeId?: string;
+	open: boolean;
+}
+
+const C_STATUS = /^STATUS:\s*([\w-]+)/im;
+const C_STATUS_BOLD = /^\*\*Status:\*\*\s*([\w-]+)/im;
+const C_STATUS_H2 = /^##\s*Status:\s*(?:[^\w\s]+\s*)?([\w-]+)/im;
+const C_PRIORITY = /^PRIORITY:\s*(p[0-3])/im;
+const C_COMPLEXITY = /^COMPLEXITY:\s*([\w-]+)/im;
+const C_PLANE_LINE = /^PLANE:\s*([A-Z0-9]+-\d+)/m;
+const C_TITLE = /^#\s+(.+?)\s*$/m;
+const CONCERN_SKIP = new Set(["00-overview.md", "overview.md", "design.md", "readme.md"]);
+const CLOSED_STATUS = new Set(["closed", "done", "complete", "completed", "cancelled", "canceled"]);
+
+/** Parse the concern docs in a plan dir (files carrying a STATUS line); skips overview/design docs. */
+export async function parsePlanConcerns(repo: string, planDir: string): Promise<PlanConcern[]> {
+	const dirAbs = path.join(repo, planDir);
+	let files: string[];
+	try {
+		files = (await fs.readdir(dirAbs)).filter((f) => f.endsWith(".md"));
+	} catch {
+		return [];
+	}
+	const out: PlanConcern[] = [];
+	for (const f of files.sort()) {
+		if (CONCERN_SKIP.has(f.toLowerCase())) continue;
+		const text = await fs.readFile(path.join(dirAbs, f), "utf8").catch(() => "");
+		const sm = C_STATUS.exec(text) ?? C_STATUS_BOLD.exec(text) ?? C_STATUS_H2.exec(text);
+		if (!sm) continue; // no STATUS ⇒ a doc, not a concern
+		const status = sm[1].toLowerCase().replace(/_/g, "-");
+		out.push({
+			file: f,
+			title: C_TITLE.exec(text)?.[1] ?? f.replace(/\.md$/, ""),
+			status,
+			priority: C_PRIORITY.exec(text)?.[1]?.toLowerCase(),
+			complexity: C_COMPLEXITY.exec(text)?.[1]?.toLowerCase(),
+			planeId: C_PLANE_LINE.exec(text)?.[1],
+			open: !CLOSED_STATUS.has(status),
+		});
+	}
+	return out;
+}
+
 function countStatuses(agents: AgentDTO[]): Partial<Record<AgentStatus, number>> {
 	const counts: Partial<Record<AgentStatus, number>> = {};
 	for (const a of agents) counts[a.status] = (counts[a.status] ?? 0) + 1;
@@ -151,7 +217,10 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 		}
 		const worktrees = await featureLandStatus(land);
 		const unlandedFiles = worktrees.reduce((s, w) => s + w.changedFiles, 0);
-		const hasIssues = (pf.plane?.issueIdentifiers?.length ?? 0) > 0;
+		// Issue links are derived live from the plan dir (so an adopted plan keeps its PLANE: pointers), merged with any persisted ones.
+		const liveIssueIds = pf.origin?.planDir ? await planeIdsIn(path.join(repo, pf.origin.planDir)) : [];
+		const issueIds = [...new Set([...(pf.plane?.issueIdentifiers ?? []), ...liveIssueIds])];
+		const hasIssues = issueIds.length > 0;
 		features.push({
 			id: pf.id,
 			title: pf.title,
@@ -164,7 +233,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			divergent: worktrees.some((w) => w.readiness === "diverged"),
 			blocked: members.some((a) => a.status === "input"),
 			statusCounts: countStatuses(members),
-			issueIdentifiers: hasIssues ? pf.plane?.issueIdentifiers : undefined,
+			issueIdentifiers: hasIssues ? issueIds : undefined,
 			persisted: true,
 			stageOverride: pf.stageOverride,
 		});

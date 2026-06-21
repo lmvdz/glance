@@ -11,8 +11,9 @@
 
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
-import type { ClientCommand, FeatureStage, SquadEvent } from "./types.ts";
+import type { ClientCommand, FeatureStage, IssueRef, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
+import { parsePlanConcerns } from "./features.ts";
 import { listPlaneIssues } from "./plane.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
@@ -86,6 +87,14 @@ export class SquadServer {
 					manager.createFeature({ title: body.title, repo, planDir });
 					return Response.json({ ok: true });
 				}
+				if (url.pathname === "/api/features/from-plan" && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => null);
+					if (!body || typeof body !== "object" || !("planDir" in body) || typeof body.planDir !== "string") return new Response("planDir required", { status: 400 });
+					const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+					const title = "title" in body && typeof body.title === "string" && body.title.trim() ? body.title.trim() : path.basename(body.planDir);
+					const pf = manager.createFeature({ title, repo, planDir: body.planDir });
+					return Response.json(pf);
+				}
 				const mfpatch = url.pathname.match(/^\/api\/features\/([^/]+)$/);
 				if (mfpatch && req.method === "PATCH") {
 					const body: unknown = await req.json().catch(() => null);
@@ -100,16 +109,39 @@ export class SquadServer {
 				}
 				const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
 				if (mflink && req.method === "POST") {
+					const id = decodeURIComponent(mflink[1]);
 					const body: unknown = await req.json().catch(() => null);
+					if (body && typeof body === "object" && "task" in body && typeof body.task === "string" && body.task.trim()) {
+						const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+						const name = "name" in body && typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
+						const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: id, approvalMode: "yolo" });
+						manager.linkAgent(id, dto.id);
+						return Response.json({ agent: dto });
+					}
 					if (!body || typeof body !== "object" || !("agentId" in body) || typeof body.agentId !== "string") return new Response("agentId required", { status: 400 });
 					const unlink = "unlink" in body && body.unlink === true;
-					return Response.json({ ok: manager.linkAgent(decodeURIComponent(mflink[1]), body.agentId, unlink) });
+					return Response.json({ ok: manager.linkAgent(id, body.agentId, unlink) });
 				}
 				const mfland = url.pathname.match(/^\/api\/features\/([^/]+)\/land$/);
 				if (mfland && req.method === "POST") {
 					const body: unknown = await req.json().catch(() => null);
 					const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
 					return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force));
+				}
+				const mfpipe = url.pathname.match(/^\/api\/features\/([^/]+)\/pipeline$/);
+				if (mfpipe && req.method === "GET") {
+					const repo = url.searchParams.get("repo") ?? process.cwd();
+					const list = await manager.features(repo);
+					const f = list.find((x) => x.id === decodeURIComponent(mfpipe[1]));
+					if (!f) return new Response("no such feature", { status: 404 });
+					const concerns = f.planDir ? await parsePlanConcerns(f.repo, f.planDir) : [];
+					const ids = f.issueIdentifiers;
+					let issues: IssueRef[] = [];
+					if (ids && ids.length) {
+						const planeIssues = await listPlaneIssues(f.repo);
+						if (planeIssues) issues = planeIssues.filter((i) => i.identifier !== undefined && ids.includes(i.identifier));
+					}
+					return Response.json({ concerns, issues, agentIds: f.agentIds });
 				}
 				if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 				if (url.pathname === "/api/health") return Response.json({ ok: true, agents: manager.list().length, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()) });
