@@ -74,7 +74,7 @@ UI logic is DOM-coupled; "one runnable check" lives where pure logic is extracta
 - Issues:
   - [01-web-attention-queue](https://app.plane.so/inkwell-finance/browse/OMPSQ-3/) — OMPSQ-3 ✅ done
   - [02-web-push-signals](https://app.plane.so/inkwell-finance/browse/OMPSQ-4/) — OMPSQ-4 ✅ done
-  - [03-web-command-palette](https://app.plane.so/inkwell-finance/browse/OMPSQ-6/) — OMPSQ-6 (Backlog · high)
+  - [03-web-command-palette](https://app.plane.so/inkwell-finance/browse/OMPSQ-6/) — OMPSQ-6 ✅ done
   - [04-web-liveness-staleness](https://app.plane.so/inkwell-finance/browse/OMPSQ-7/) — OMPSQ-7 (Backlog · high)
   - [05-web-dialogs](https://app.plane.so/inkwell-finance/browse/OMPSQ-2/) — OMPSQ-2 (Backlog · medium)
   - [06-tui-parity](https://app.plane.so/inkwell-finance/browse/OMPSQ-5/) — OMPSQ-5 (Todo · high)

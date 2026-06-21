@@ -159,6 +159,7 @@
   <span id="counts" class="conn"></span>
   <button id="waitingBtn" class="toggle attn" style="display:none" title="Everything waiting on you — open the attention queue">⛔ waiting</button>
   <button id="muteBtn" class="navbtn" title="Mute notification sound">🔔</button>
+  <button id="cmdkBtn" class="navbtn" title="Command palette (⌘K / Ctrl-K)">⌘K</button>
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
   <button id="featBtn" title="Feature board — what's in flight + what needs landing">▦ Features</button>
   <button class="primary" id="addBtn">+ New agent</button>
@@ -211,6 +212,7 @@ const prevStatus = new Map();   // id -> last seen status (transition detection)
 const lastNotify = new Map();   // id -> ms of last notification (per-agent throttle)
 let muted = localStorage.getItem("squad.mute") === "1";
 const baseTitle = document.title;
+let navSel = null;   // OMPSQ-6: keyboard-highlighted agent card id in the project view
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -251,9 +253,7 @@ function attachCompletion(input, getItems) {
     const all = getItems() || [];
     if (!tok || !all.length) return close();
     const q = tok.query;
-    items = all.filter(c => c.name.toLowerCase().includes(q) || (c.aliases||[]).some(a => a.toLowerCase().includes(q)))
-      .sort((a, b) => (a.name.toLowerCase().startsWith(q)?0:1) - (b.name.toLowerCase().startsWith(q)?0:1) || a.name.localeCompare(b.name))
-      .slice(0, 50);
+    items = fuzzyRank(all, q, c => c.name);
     sel = 0; open = true; menu.classList.add("open"); position(); render();
   };
   const accept = (c) => {
@@ -707,6 +707,8 @@ function fillAgentGrid(p) {
   for (const [a,child] of ordered) {
     const card = document.createElement("div");
     card.className = "acard" + (a.status==="input"?" needs":"") + (child?" child":"");
+    card.dataset.aid = a.id;
+    if (a.id === navSel) card.style.outline = "2px solid var(--accent)";
     const kindBadge = a.kind==="workflow" ? `<span class="badge b-kind">⚙ workflow</span>` : a.kind==="flue-service" ? `<span class="badge b-kind">⚒ service</span>` : "";
     card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span></div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
@@ -716,6 +718,104 @@ function fillAgentGrid(p) {
     grid.appendChild(card);
   }
 }
+
+// ── Command palette + keyboard nav (OMPSQ-6) ─────────────────────────────────
+// Shared fuzzy matcher: also backs the composer slash menu (attachCompletion). Matches
+// keyFn(item) by substring, ranks prefix hits first; tolerates an optional aliases[] array.
+function fuzzyRank(items, query, keyFn) {
+  const q = query.toLowerCase();
+  const hit = c => keyFn(c).toLowerCase().includes(q) || (c.aliases || []).some(a => a.toLowerCase().includes(q));
+  return items.filter(hit)
+    .sort((a, b) => (keyFn(a).toLowerCase().startsWith(q) ? 0 : 1) - (keyFn(b).toLowerCase().startsWith(q) ? 0 : 1) || keyFn(a).localeCompare(keyFn(b)))
+    .slice(0, 50);
+}
+
+// Live registry of destinations + actions, built from current state. Each item runs on accept.
+function paletteItems() {
+  const out = [
+    { label: "Home", hint: "overview", run: () => { selProject = null; selAgent = null; view = "project"; renderAll(); } },
+    { label: "Attention queue", hint: "blocked agents", run: openQueue },
+    { label: "Feature board", hint: "", run: openBoard },
+    { label: "New agent", hint: "spawn", run: () => $("#addBtn").click() },
+    { label: "Upgrade daemon", hint: "pull + restart", run: () => $("#upgradeBtn").click() },
+  ];
+  if (waitingAgents().length) out.splice(1, 0, { label: "Answer next blocked", hint: "queue", run: openQueue });
+  for (const p of projects()) out.push({ label: `Project: ${p.name}`, hint: `${p.agents.length} agent(s)`, run: () => { selProject = p.id; selAgent = null; view = "project"; renderAll(); } });
+  for (const a of agents.values()) out.push({ label: `Agent: ${a.name}`, hint: a.status, run: () => openAgent(a.id) });
+  if (view === "agent" && selAgent) {
+    out.push({ label: "Land this agent", hint: "merge", run: () => $("#landBtn")?.click() });
+    out.push({ label: "Interrupt this agent", hint: "", run: () => $("#intBtn")?.click() });
+    out.push({ label: "Restart this agent", hint: "", run: () => $("#rstBtn")?.click() });
+    out.push({ label: "Kill this agent", hint: "danger", run: () => $("#killBtn")?.click() });
+  }
+  return out;
+}
+
+const palette = (() => {
+  let el, input, list, items = [], sel = 0, prevFocus = null, open = false;
+  const build = () => {
+    el = document.createElement("div");
+    el.style.cssText = "position:fixed;inset:0;z-index:80;display:none;align-items:flex-start;justify-content:center;background:rgba(0,0,0,.45)";
+    el.innerHTML = `<div style="margin-top:12vh;width:560px;max-width:92vw;background:var(--panel2);border:1px solid var(--line);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.6);overflow:hidden">
+      <input id="palInput" placeholder="Jump to a project/agent or run a command…" autocomplete="off" style="width:100%;box-sizing:border-box;background:var(--panel);border:0;border-bottom:1px solid var(--line);color:var(--ink);padding:12px 14px;font:inherit;outline:none" />
+      <div id="palList" style="max-height:50vh;overflow-y:auto;padding:4px"></div></div>`;
+    document.body.appendChild(el);
+    input = el.querySelector("#palInput"); list = el.querySelector("#palList");
+    input.addEventListener("input", refresh);
+    input.addEventListener("keydown", onKey);
+    el.addEventListener("mousedown", e => { if (e.target === el) close(); });
+  };
+  const refresh = () => {
+    const q = input.value.trim(); const all = paletteItems();
+    items = q ? fuzzyRank(all, q, i => i.label) : all.slice(0, 50);
+    sel = 0; render();
+  };
+  const render = () => {
+    list.innerHTML = items.length
+      ? items.map((it, i) => `<div data-i="${i}" style="padding:7px 12px;border-radius:6px;cursor:pointer;${i===sel?'background:var(--panel);box-shadow:inset 2px 0 0 var(--accent)':''}"><span style="color:var(--accent);font-family:ui-monospace,monospace">${esc(it.label)}</span>${it.hint?` <span style="color:var(--dim);font-size:11px">${esc(it.hint)}</span>`:''}</div>`).join("")
+      : `<div style="padding:8px 12px;color:var(--dim);font-size:12px">no matches</div>`;
+    for (const n of list.querySelectorAll("[data-i]")) n.onmousedown = (e) => { e.preventDefault(); run(items[+n.dataset.i]); };
+  };
+  const run = (it) => { if (!it) return; close(); it.run(); };
+  const onKey = (e) => {
+    if (!items.length) { if (e.key === "Escape") { close(); e.preventDefault(); } return; }
+    if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) { sel = (sel + 1) % items.length; render(); e.preventDefault(); }
+    else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) { sel = (sel - 1 + items.length) % items.length; render(); e.preventDefault(); }
+    else if (e.key === "Enter") { run(items[sel]); e.preventDefault(); }
+    else if (e.key === "Escape") { close(); e.preventDefault(); }
+  };
+  const openIt = () => { if (!el) build(); prevFocus = document.activeElement; open = true; el.style.display = "flex"; input.value = ""; refresh(); input.focus(); };
+  const close = () => { if (!el) return; open = false; el.style.display = "none"; if (prevFocus && prevFocus.focus) prevFocus.focus(); };
+  return { toggle: () => open ? close() : openIt(), close, isOpen: () => open };
+})();
+
+// Move the keyboard highlight through the visible agent cards (DOM order).
+function moveNav(delta) {
+  const cards = [...document.querySelectorAll("#agrid .acard")];
+  if (!cards.length) return;
+  let idx = cards.findIndex(c => c.dataset.aid === navSel);
+  idx = idx < 0 ? 0 : Math.min(cards.length - 1, Math.max(0, idx + delta));
+  navSel = cards[idx].dataset.aid;
+  for (const c of cards) c.style.outline = c.dataset.aid === navSel ? "2px solid var(--accent)" : "";
+  cards[idx].scrollIntoView({ block: "nearest" });
+}
+
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); palette.toggle(); return; }
+  if (palette.isOpen()) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (view === "project" && selProject) {
+    if (e.key === "j" || e.key === "ArrowDown") { moveNav(1); e.preventDefault(); return; }
+    if (e.key === "k" || e.key === "ArrowUp") { moveNav(-1); e.preventDefault(); return; }
+    if ((e.key === "Enter" || e.key === "ArrowRight") && navSel) { openAgent(navSel); e.preventDefault(); return; }
+  }
+  if (e.key === "Escape" || e.key === "ArrowLeft") {
+    if (view === "agent") { selAgent = null; view = "project"; renderAll(); e.preventDefault(); }
+    else if (view === "queue" || view === "board" || view === "feature" || (view === "project" && selProject)) { selProject = null; selAgent = null; view = "project"; renderAll(); e.preventDefault(); }
+  }
+});
+const cmdkBtn = $("#cmdkBtn"); if (cmdkBtn) cmdkBtn.onclick = () => palette.toggle();
 
 // Live updates while viewing a project: refresh only the agent cards + side panels,
 // never the spawn box (#pspawn) — rebuilding it would drop focus mid-typing.

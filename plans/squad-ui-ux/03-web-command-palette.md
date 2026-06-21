@@ -1,5 +1,5 @@
 # Web command palette + keyboard navigation
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -53,3 +53,13 @@ regression-check it.)
 - On the project view, j/k moves the card highlight, Enter opens it, Esc backs out.
 - Type `/` in the composer → the slash menu still works exactly as before (no regression from the
   matcher extraction).
+
+## Resolution
+
+Closed 2026-06-21 via OMPSQ-6 (https://app.plane.so/inkwell-finance/browse/OMPSQ-6/).
+Extracted a shared `fuzzyRank()` and routed BOTH the composer slash menu and a new ⌘K/Ctrl-K
+command palette through it (no fork). Palette is a live `paletteItems()` registry over
+destinations (home/queue/board/projects/agents) + actions (new agent, answer-next-blocked,
+upgrade, and agent-context land/interrupt/restart/kill via the existing buttons), toggles on the
+same key, restores prior focus on close. Added j/k/↑/↓ card highlight + Enter/→ open + Esc/← back
+(skipped while focus is in a field). Gate green; `node --check` OK; slash menu unchanged.
