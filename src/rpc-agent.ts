@@ -276,6 +276,12 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		return this.send<RpcSessionState>({ type: "get_state" });
 	}
 
+	/** Fetch available slash commands (builtin + skills + extensions). Used on reattach,
+	 *  where omp's startup `available_commands_update` push may predate our reconnection. */
+	getAvailableCommands(): Promise<{ commands?: unknown[] }> {
+		return this.send<{ commands?: unknown[] }>({ type: "get_available_commands" });
+	}
+
 	async prompt(message: string): Promise<void> {
 		try {
 			await this.send({ type: "prompt", message });
@@ -302,6 +308,18 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 
 	bash(command: string): Promise<unknown> {
 		return this.send({ type: "bash", command });
+	}
+
+	/** Switch the session model to a fuzzy spec, resolved against omp's available models. */
+	async setModel(spec: string): Promise<unknown> {
+		const { models } = await this.send<{ models: ModelInfo[] }>({ type: "get_available_models" });
+		const m = pickModel(models, spec);
+		if (!m) throw new Error(`no available model matches "${spec}"`);
+		return this.send({ type: "set_model", provider: m.provider, modelId: m.id });
+	}
+
+	setThinkingLevel(level: string): Promise<unknown> {
+		return this.send({ type: "set_thinking_level", level });
 	}
 
 	respondUi(requestId: string, payload: { value?: string; confirmed?: boolean; cancelled?: true }): void {
@@ -340,3 +358,23 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 }
 
 export type { HostToolCallFrame };
+
+interface ModelInfo {
+	provider: string;
+	id: string;
+}
+
+/** Fuzzy-match a model spec ("opus", "claude-sonnet-4-5", "anthropic/claude-opus") to an available model. */
+export function pickModel(models: ModelInfo[], spec: string): ModelInfo | undefined {
+	const s = spec.trim().toLowerCase();
+	if (!s) return undefined;
+	const full = (m: ModelInfo): string => `${m.provider}/${m.id}`.toLowerCase();
+	const exact = models.find((m) => full(m) === s || m.id.toLowerCase() === s);
+	if (exact) return exact;
+	if (s.includes("/")) {
+		const [p, id] = s.split("/", 2);
+		const scoped = models.find((m) => m.provider.toLowerCase() === p && m.id.toLowerCase().includes(id ?? ""));
+		if (scoped) return scoped;
+	}
+	return models.find((m) => m.id.toLowerCase().includes(s)) ?? models.find((m) => full(m).includes(s));
+}

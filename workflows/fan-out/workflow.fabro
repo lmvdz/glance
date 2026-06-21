@@ -1,0 +1,26 @@
+// fan-out — explore a goal from several angles at once. The `component` fork spawns
+// one real, steerable roster agent per branch (each in its own worktree), runs them
+// concurrently (max_parallel), and the `tripleoctagon` merge joins them; a final review
+// node picks the winner. Each branch is a single agent node between fork and merge.
+digraph FanOut {
+    graph [ goal="Explore a change from multiple angles in parallel" ]
+
+    start  [shape=Mdiamond, label="Start"]
+    exit   [shape=Msquare,  label="Exit"]
+
+    fork   [shape=component, label="Fan out", join_policy="wait_all", max_parallel="3"]
+    simple [label="Simplicity",   prompt="Implement the goal, optimizing for the simplest, clearest solution."]
+    fast   [label="Performance",  prompt="Implement the goal, optimizing for runtime performance."]
+    lean   [label="Minimal deps", prompt="Implement the goal using the fewest external dependencies."]
+    merge  [shape=tripleoctagon, label="Merge"]
+    review [label="Review", prompt="Read parallel_results.json and compare the branch worktrees; pick the best approach and explain why."]
+
+    start -> fork
+    fork -> simple
+    fork -> fast
+    fork -> lean
+    simple -> merge
+    fast   -> merge
+    lean   -> merge
+    merge -> review -> exit
+}

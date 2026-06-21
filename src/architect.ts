@@ -19,13 +19,13 @@ import { generateWorkerFiles } from "./worker-template.ts";
 export interface Architect {
 	readonly kind: string;
 	/** Write a Flue worker project into `dir`. */
-	author(spec: CommissionSpec, dir: string): Promise<void>;
+	author(spec: CommissionSpec, dir: string, feedback?: string): Promise<void>;
 }
 
 export class TemplateArchitect implements Architect {
 	readonly kind = "template";
 
-	async author(spec: CommissionSpec, dir: string): Promise<void> {
+	async author(spec: CommissionSpec, dir: string, _feedback?: string): Promise<void> {
 		for (const file of generateWorkerFiles(spec)) {
 			const target = path.join(dir, file.path);
 			await fs.mkdir(path.dirname(target), { recursive: true });
@@ -51,7 +51,7 @@ export class OmpArchitect implements Architect {
 		this.opts = opts;
 	}
 
-	async author(spec: CommissionSpec, dir: string): Promise<void> {
+	async author(spec: CommissionSpec, dir: string, feedback?: string): Promise<void> {
 		// Seed everything except the workflow; the agent's job is to write the workflow.
 		const workflowRel = path.join(".flue", "workflows", `${spec.name}.ts`);
 		for (const file of generateWorkerFiles(spec)) {
@@ -62,10 +62,10 @@ export class OmpArchitect implements Architect {
 		}
 		await fs.mkdir(path.join(dir, ".flue", "workflows"), { recursive: true });
 
-		const agent = new RpcAgent({ cwd: dir, approvalMode: "yolo", thinking: "medium", model: this.opts.model, bin: this.opts.bin });
+		const agent = new RpcAgent({ id: `architect-${Date.now().toString(36)}`, cwd: dir, approvalMode: "yolo", thinking: "medium", model: this.opts.model, bin: this.opts.bin });
 		await agent.start();
 		try {
-			await this.runTurn(agent, buildTask(spec, workflowRel), this.opts.timeoutMs ?? 300_000);
+			await this.runTurn(agent, buildTask(spec, workflowRel, feedback), this.opts.timeoutMs ?? 300_000);
 		} finally {
 			await agent.stop();
 		}
@@ -92,7 +92,11 @@ export class OmpArchitect implements Architect {
 	}
 }
 
-const RECIPE = `You are authoring ONE Flue workflow module. Flue is a TypeScript agent framework.
+const RECIPE = `You are a lazy senior developer authoring ONE Flue workflow module. Lazy means efficient, not careless: write the minimum that satisfies the acceptance test, and never cut input validation, error handling, or security to get there.
+
+Before writing, stop at the first rung that holds: (1) does this need to exist? (2) does the stdlib do it? (3) native platform feature? (4) an already-installed dependency (@flue/runtime and valibot are already in package.json)? (5) can it be one line? (6) only then, the minimum that works. No abstractions, dependencies, or boilerplate nobody asked for. The skeleton (package.json, tsconfig.json, flue.worker.json) is fixed — do not edit it and do not install new packages; the acceptance gate rejects a worker that adds unrequested dependencies or over-builds.
+
+Flue is a TypeScript agent framework.
 
 Contract for the file you write:
 - Import from "@flue/runtime".
@@ -102,14 +106,15 @@ Contract for the file you write:
 - For a model-backed ability, create an agent with createAgent(() => ({ model, instructions })), then: const harness = await init(agent); const session = await harness.session(); const { data } = await session.prompt(text, { result: v.object({...}) }); return data; (import * as v from "valibot").
 - Read the input from \`payload\`. Return the result object directly.`;
 
-function buildTask(spec: CommissionSpec, workflowRel: string): string {
+function buildTask(spec: CommissionSpec, workflowRel: string, feedback?: string): string {
 	const accept = spec.accept ? `\nThe acceptance test will run the workflow with payload ${JSON.stringify(spec.accept.payload)} and expects the result to match ${JSON.stringify(spec.accept.expect ?? "(any success)")}.` : "";
 	const model = typeof spec.model === "string" ? `Use the model "${spec.model}".` : "This is a DETERMINISTIC worker — do not use any model.";
+	const retry = feedback ? `\n${feedback}` : "";
 	return `${RECIPE}
 
 Job: ${spec.purpose}
 ${model}
-Write the workflow to ${workflowRel} (the project skeleton, package.json, tsconfig.json and flue.worker.json already exist; do not change them).${accept}
+Write the workflow to ${workflowRel} (the project skeleton, package.json, tsconfig.json and flue.worker.json already exist; do not change them).${accept}${retry}
 
 Implement the workflow now, then stop.`;
 }

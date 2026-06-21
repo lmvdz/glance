@@ -42,6 +42,11 @@ export interface AgentDriver extends EventEmitter {
 	/** Label the session. Optional — no-op for drivers without a session name. */
 	setSessionName?(name: string): Promise<unknown>;
 
+	/** Switch the session model to a fuzzy spec (e.g. "opus", "claude-sonnet-4-5"). Optional. */
+	setModel?(spec: string): Promise<unknown>;
+	/** Switch the session reasoning effort (minimal|low|medium|high|xhigh). Optional. */
+	setThinkingLevel?(level: string): Promise<unknown>;
+
 	/** Answer an extension UI request. No-op for non-interactive drivers. */
 	respondUi(requestId: string, payload: { value?: string; confirmed?: boolean; cancelled?: true }): void;
 	/** Complete a host tool call. No-op for non-interactive drivers. */

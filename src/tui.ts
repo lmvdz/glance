@@ -47,6 +47,8 @@ const STATUS_DOT: Record<AgentStatus, string> = {
 	starting: "○",
 	stopped: "◌",
 };
+const KIND_GLYPH: Record<string, string> = { workflow: "⚙", "flue-service": "⚒" };
+const KIND_COLOR: Record<string, string> = { workflow: "cyan", "flue-service": "magenta" };
 
 export type TuiView = "list" | "agent";
 
@@ -72,6 +74,18 @@ function statusRank(s: AgentStatus): number {
 
 function sortAgents(agents: AgentDTO[]): AgentDTO[] {
 	return [...agents].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
+}
+
+/** Nest spawned fan-out branches under their parent workflow; everything else sorts as usual. */
+function orderedAgents(all: AgentDTO[]): { agent: AgentDTO; depth: number }[] {
+	const ids = new Set(all.map((a) => a.id));
+	const roots = sortAgents(all.filter((a) => !a.parentId || !ids.has(a.parentId)));
+	const out: { agent: AgentDTO; depth: number }[] = [];
+	for (const r of roots) {
+		out.push({ agent: r, depth: 0 });
+		for (const ch of sortAgents(all.filter((a) => a.parentId === r.id))) out.push({ agent: ch, depth: 1 });
+	}
+	return out;
 }
 
 function pad(s: string, w: number): string {
@@ -110,20 +124,21 @@ export function buildBoard(state: BoardState): string[] {
 		const nameW = 16;
 		const branchW = 18;
 		const metaW = 14;
-		const actW = Math.max(10, width - (3 + nameW + branchW + metaW + 4));
+		const actW = Math.max(10, width - (5 + nameW + branchW + metaW + 4));
 		const slots = Math.max(1, height - 4); // title, sep, hint, composer
-		const shown = agents.slice(0, slots);
-		for (const a of shown) {
+		for (const { agent: a, depth } of orderedAgents(state.agents).slice(0, slots)) {
 			const selRow = a.id === state.selectedId;
 			const dot = c(STATUS_COLOR[a.status], STATUS_DOT[a.status]);
-			const name = pad(a.name, nameW);
+			const g = KIND_GLYPH[a.kind];
+			const kindMark = g ? c(KIND_COLOR[a.kind] ?? "dim", g) : " ";
+			const name = pad((depth ? "└ " : "") + a.name, nameW);
 			const branch = c("dim", pad(a.branch ?? "—", branchW));
 			const act = pad(a.activity ?? a.todo?.active ?? (a.error ? `⚠ ${a.error}` : "—"), actW);
 			const meta = c("dim", pad(`${a.todo ? `${a.todo.done}/${a.todo.total}` : ""}  ${a.contextPct != null ? `${Math.round(a.contextPct * 100)}%` : ""}`, metaW));
-			const row = `${dot} ${selRow ? c("bold", name) : name} ${branch} ${act} ${meta}`;
+			const row = `${dot} ${kindMark} ${selRow ? c("bold", name) : name} ${branch} ${act} ${meta}`;
 			lines.push(selRow ? `${ESC}7m${pad(stripAnsi(row), width)}${RESET}` : pad(row, width));
 		}
-		if (!agents.length) lines.push(c("dim", "  No agents yet — type a task below and press Enter to spawn one."));
+		if (!state.agents.length) lines.push(c("dim", "  No agents yet — type a task below and press Enter to spawn one."));
 		while (lines.length < height - 2) lines.push("");
 		const short = state.cwd.length > 40 ? `…${state.cwd.slice(-39)}` : state.cwd;
 		lines.push(pad(c("dim", `↑/↓ select · → open · Enter = new agent in ${short} · Ctrl-C quit`), width));
@@ -280,7 +295,7 @@ export class SquadTui {
 		switch (e.type) {
 			case "roster":
 				this.state.agents = e.agents;
-				if (!this.state.selectedId) this.state.selectedId = sortAgents(e.agents)[0]?.id;
+				if (!this.state.selectedId) this.state.selectedId = orderedAgents(e.agents)[0]?.agent.id;
 				break;
 			case "agent": {
 				const i = this.state.agents.findIndex((a) => a.id === e.agent.id);
@@ -293,7 +308,7 @@ export class SquadTui {
 				this.state.agents = this.state.agents.filter((a) => a.id !== e.id);
 				this.transcripts.delete(e.id);
 				if (this.state.selectedId === e.id) {
-					this.state.selectedId = sortAgents(this.state.agents)[0]?.id;
+					this.state.selectedId = orderedAgents(this.state.agents)[0]?.agent.id;
 					this.state.view = "list";
 				}
 				break;
@@ -319,10 +334,10 @@ export class SquadTui {
 	}
 
 	private moveSelection(delta: number): void {
-		const sorted = sortAgents(this.state.agents);
-		if (!sorted.length) return;
-		const idx = Math.max(0, sorted.findIndex((a) => a.id === this.state.selectedId));
-		this.state.selectedId = sorted[Math.min(sorted.length - 1, Math.max(0, idx + delta))].id;
+		const ordered = orderedAgents(this.state.agents);
+		if (!ordered.length) return;
+		const idx = Math.max(0, ordered.findIndex((o) => o.agent.id === this.state.selectedId));
+		this.state.selectedId = ordered[Math.min(ordered.length - 1, Math.max(0, idx + delta))].agent.id;
 		this.syncTranscript();
 	}
 

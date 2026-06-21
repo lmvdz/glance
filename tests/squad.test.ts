@@ -150,6 +150,27 @@ test("agent view shows transcript, pending detail, and the draft", () => {
 	expect(plain).toContain("← back");
 });
 
+test("buildBoard nests fan-out branches under their workflow parent, with a kind glyph", () => {
+	const lines = buildBoard(
+		board({
+			view: "list",
+			selectedId: "wf",
+			agents: [
+				dto({ id: "wf", name: "feature", kind: "workflow", status: "working" }),
+				dto({ id: "c1", name: "branch-a", parentId: "wf", status: "working" }),
+				dto({ id: "c2", name: "branch-b", parentId: "wf", status: "idle" }),
+				dto({ id: "op", name: "solo", status: "idle" }),
+			],
+		}),
+	).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+	const wfLine = lines.findIndex((l) => l.includes("feature"));
+	expect(wfLine).toBeGreaterThanOrEqual(0);
+	expect(lines[wfLine + 1]).toContain("branch-a"); // children immediately follow the parent
+	expect(lines[wfLine + 2]).toContain("branch-b");
+	expect(lines[wfLine + 1]).toContain("└"); // and are indented
+	expect(lines.some((l) => l.includes("⚙"))).toBe(true); // workflow kind glyph rendered
+});
+
 // ── RPC transport (real omp, no model tokens) ────────────────────────────────
 
 test(

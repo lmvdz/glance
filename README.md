@@ -120,6 +120,9 @@ controls do everything the CLI does.
 | `--approval` | `always-ask` \| `write` \| `yolo` | `write` |
 | `--thinking` | `minimal` \| `low` \| `medium` \| `high` \| `xhigh` | `low` |
 | `--task` | Instruction sent once ready | — |
+| `--workflow` | Run a workflow graph (`.fabro`) as the process; `--task` is the goal | — |
+| `--verify` | Wrap `--task` in an implement → verify → fixup loop (gate = `<cmd>` exit 0) | — |
+| `--sandbox` | Run the agent inside a container from `<image>` (mounts the worktree) | — |
 
 > **Thinking defaults to `low`** so fleet agents stay responsive; bump it per-agent for
 > hard work. (Inheriting a global `high` default makes every agent grind — opt in
@@ -201,14 +204,109 @@ omp-squad commission extract-emails \
   deterministically. (`--model <spec>` makes the worker itself model-backed.)
 - **Acceptance gate** (`src/validate.ts`) — tiered + degrading: **lint** (always) →
   **typecheck** → **`flue run` acceptance** (when the worker's toolchain is installed),
-  deep-matching the result against `--accept-expect`. A failed gate onboards nothing.
+  deep-matching the result against `--accept-expect`. A failed gate **re-authors** (bounded),
+  feeding the failure forward; still failing → onboards nothing.
 - **Onboard** — a passing worker becomes a `flue-service` member via `FlueServiceDriver`,
   which adapts `flue run` into the same omp event frames the manager already derives
   status from. It shows in the roster (and federates) like any other agent.
 
+The loop is itself a [workflow](#workflows--process-as-a-reviewable-graph) now
+(`workflows/commission/workflow.fabro`, driven by `CommissionExecutor`) — not a hand-coded
+sequence — so `author → gate → onboard` runs on the same engine as plan-implement.
+
 Both classes implement one `AgentDriver` seam, so `kind` is the only thing surfaces
 need to tell an interactive operator from a commissioned worker. Design + rationale:
 [`docs/commission-loop.md`](docs/commission-loop.md).
+
+## Autonomous intake — describe intent, the OS picks the process
+
+The goal: a human **never has to do anything** but say what they want; the OS chooses
+*how*. Spawning takes one natural-language line (the per-project composer, a Plane issue,
+or `omp-squad add … --task`) — no forms, no flags. An **intake router** (`src/intake.ts`)
+reads the task + repo and routes it:
+
+- ordinary code change → an **autonomous verify loop** (implement → verify → fixup), using
+  the repo's own detected test/typecheck command;
+- genuinely high-risk change (migrations, deletions, deploys) → **plan + approval** — the
+  *only* routine human-in-the-loop gate, reserved for the extreme cases;
+- several approaches wanted → **parallel fan-out**;
+- nothing to verify → a plain agent.
+
+The choice is logged (`routed "<name>": <reason>`) so the operator sees the OS's reasoning;
+`--plain` (or an explicit `--workflow` / `--verify` / `--sandbox`) overrides it. Heuristics
+today; an LLM router drops in behind `routeIntake` without changing a single caller.
+
+## Workflows — process as a reviewable graph
+
+A third fleet class runs a **workflow**: a process authored as a graph (the same
+Graphviz/DOT dialect [fabro](https://github.com/fabro-sh/fabro) uses) — plan, a
+human-approval gate, implement, a verification gate, and a bounded fix-up loop —
+driven over one persistent omp thread. The agent's *process* becomes a diffable,
+version-controlled artifact instead of being implicit in a free-text task.
+
+```bash
+omp-squad add ~/code/myproject --name feature \
+  --workflow workflows/plan-implement/workflow.fabro \
+  --task "Add rate limiting to the public API."
+```
+
+- **One seam, again.** `WorkflowDriver implements AgentDriver`, so a graph-driven run
+  joins the same roster / TUI / web / federation as an omp operator — `kind` is the
+  only difference. (The move that added `flue-service`.)
+- **Pure engine, injected execution.** `src/workflow/engine.ts` walks the graph
+  (routing, edge conditions, `goal_gate`, `retry_target`, visit caps, human gates); a
+  `NodeExecutor` decides what a node *does*. `SingleAgentExecutor` binds sequential agent
+  nodes to one omp thread (a run is one steerable roster entry).
+- **Parallel fan-out = real fleet agents.** A `component` fork spawns one **real, steerable
+  roster agent per branch** (each in its own worktree), runs them concurrently (`max_parallel`),
+  and a `tripleoctagon` merge joins them (`join_policy: wait_all | first_success`). This is
+  omp-squad's headline — parallel agents you can watch and steer — expressed as graph nodes.
+  Branch agents **nest under their workflow** in the roster (TUI + web), and a kind glyph
+  (`⚙` workflow · `⚒` service) tags each row.
+- **Gates reuse needs-input.** A `hexagon` human node surfaces as the manager's ordinary
+  `input` request (a `select` of the edge labels), answerable in the TUI and web; the
+  inner agent's own approval prompts ride the same channel. Stages drive the dashboard's
+  todo rollup, so you see "stage 3/6" with no new UI.
+- **The commission loop is itself a workflow** (`JOB → AUTH → GATE{fail→AUTH}`); this
+  generalizes that one hard-coded pipeline into authorable graphs.
+- **Multi-model routing.** A graph-level `model_stylesheet` (CSS-like) routes each node to
+  a model + reasoning effort by `*` / `.class` / `#id` — `*  { model: haiku; reasoning_effort: low; }`
+  with `.coding { model: opus; reasoning_effort: high; }` — so the thread switches model before
+  the hard nodes. Cheap by default, frontier where it counts.
+
+**Just want a verify gate on a normal task?** `--verify "<cmd>"` synthesizes the
+implement → verify → fixup loop for you — no `.fabro` file needed — turning "the agent
+says it's done" into "done **and** the gate is green":
+
+```bash
+omp-squad add ~/code/myproject --task "Add rate limiting to the public API." \
+  --verify "bun run check && bun test"
+```
+
+Shapes: `Mdiamond` start · `Msquare` exit · `box` agent · `tab` prompt · `parallelogram`
+command · `hexagon` human gate · `diamond` conditional · `component` fork · `tripleoctagon`
+merge. Design + rationale:
+[`docs/workflow-runtime.md`](docs/workflow-runtime.md).
+
+## Sandboxed execution — agents off your laptop
+
+`--sandbox <image>` runs an agent's omp **inside a container** instead of locally — fabro's
+"keep untrusted code off your laptop" isolation. Same `AgentDriver` seam, so a sandboxed
+agent joins the roster / TUI / web / workflows like any other; only the transport (omp's
+JSONL RPC over `docker exec -i`) and execution location change.
+
+```bash
+omp-squad add ~/code/myproject --sandbox my-omp-image --approval yolo \
+  --task "Try the risky migration."
+```
+
+- **`SandboxAgentDriver`** launches a fresh `--name` container (`docker run`), bind-mounts the
+  worktree at `/work` (process + network isolation, files still reviewable on the host —
+  the Changes panel works), `docker exec -i`s `omp --mode rpc` inside it, and removes the
+  container on `stop()`. Add `runArgs: ["--network=none"]` for full network isolation.
+- The image must provide `omp`; point `--sandbox` at an omp-provisioned image. (The driver's
+  container transport + lifecycle are verified against a real `oven/bun` container in the test
+  suite using a fake-omp RPC server — no tokens; the real-omp path was proven live on the host.)
 
 ## Phase 2 — cross-operator federation
 
@@ -249,8 +347,20 @@ Phase 2 — transport + policy, not surgery.
 | `src/web/index.html` | Single-page web dashboard |
 | `src/tui.ts` | Terminal dashboard — `buildBoard` chrome + pi-tui `Editor` input, two-level nav |
 | `src/subagents.ts` | `SubagentTracker` — RPC subagent stream → live hierarchy tree |
-| `src/agent-driver.ts` | `AgentDriver` seam shared by `RpcAgent` + `FlueServiceDriver` |
+| `src/agent-driver.ts` | `AgentDriver` seam shared by `RpcAgent`, `FlueServiceDriver`, `WorkflowDriver` |
 | `src/flue-service-driver.ts` | Adapts a commissioned Flue worker (`flue run`) to `AgentDriver` |
+| `src/workflow-driver.ts` | Runs a workflow graph behind `AgentDriver` (one omp thread per run) |
+| `src/sandbox-agent-driver.ts` | Runs an agent inside a container (`docker exec` + omp RPC) behind `AgentDriver` |
+| `src/workflow/dot.ts` | DOT-subset parser → typed `Workflow` graph |
+| `src/workflow/engine.ts` | Pure graph walker — routing, conditions, gates, fix-up loops |
+| `src/workflow/executor.ts` | `SingleAgentExecutor` — binds nodes to an omp thread + shell |
+| `src/workflow/commission-executor.ts` | `CommissionExecutor` — runs the commission graph's action nodes |
+| `src/workflow/verify-workflow.ts` | `buildVerifyWorkflow` — synthesizes the `--verify` implement → verify → fixup loop |
+| `src/workflow/stylesheet.ts` | CSS-like `model_stylesheet` parser + per-node model/effort resolver |
+| `src/intake.ts` | Intake router — turns a plain task into a process (verify / plan / fan-out) |
+| `workflows/plan-implement/` | Bundled plan → approve → implement → verify → fixup graph |
+| `workflows/commission/` | Bundled author → validate → onboard graph (the commission loop) |
+| `workflows/fan-out/` | Bundled parallel fan-out → merge graph (one fleet agent per branch) |
 | `src/architect.ts` | `TemplateArchitect` (deterministic) + `OmpArchitect` (omp-authored) |
 | `src/worker-template.ts` | `CommissionSpec` → runnable Flue worker project files |
 | `src/validate.ts` | Acceptance gate — lint · typecheck · `flue run` |

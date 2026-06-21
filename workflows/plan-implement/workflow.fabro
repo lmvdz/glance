@@ -1,0 +1,27 @@
+// plan-implement — the canonical reviewable process: the agent plans, a human
+// approves the plan before any production code is written, the agent implements,
+// then a verification gate runs and loops back into a bounded fix-up cycle until
+// it passes. Edit the `verify` script for your stack (default targets a Bun/TS
+// repo). Run with: omp-squad add <repo> --workflow workflows/plan-implement/workflow.fabro --task "<goal>"
+digraph PlanImplement {
+    graph [
+        goal="Plan, get human approval, implement, and verify a change"
+    ]
+
+    start     [shape=Mdiamond, label="Start"]
+    exit      [shape=Msquare,  label="Exit"]
+
+    plan      [label="Plan", prompt="Analyze the goal and the codebase. Write a concise, numbered implementation plan to plan.md. Do NOT write production code yet — planning only."]
+    approve   [shape=hexagon, label="Approve plan"]
+    implement [label="Implement", prompt="Read plan.md and implement every step with small, focused edits. Keep the build green as you go."]
+    verify    [shape=parallelogram, label="Verify", script="bun run check 2>&1 && bun test 2>&1", goal_gate=true, retry_target="fixup"]
+    fixup     [label="Fixup", prompt="The verify step failed. Read the recent command output and fix every failure (types, tests, lint). Change only what the failures require.", max_visits=3]
+
+    start -> plan -> approve
+    approve -> implement [label="Approve"]
+    approve -> plan      [label="Revise"]
+    implement -> verify
+    verify -> exit  [condition="outcome=succeeded"]
+    verify -> fixup
+    fixup -> verify
+}

@@ -43,6 +43,10 @@ ADD FLAGS
   --approval <m>    always-ask | write | yolo (default: write)
   --thinking <l>    minimal | low | medium | high | xhigh (default: low)
   --task <s>        Initial instruction sent once the agent is ready
+  --workflow <name|path>  Run a bundled workflow by name (research-plan-implement, plan-implement, fan-out) or a .fabro path; --task is the goal
+  --verify <cmd>    Wrap --task in an implement → verify → fixup loop (gate = exit 0)
+  --sandbox <image> Run the agent inside a container from <image> (mounts the worktree)
+  --plain           Skip auto-routing; spawn a plain agent (no verify/plan/fan-out)
 
 COMMISSION FLAGS
   --purpose <s>            What the worker does (required)
@@ -144,6 +148,10 @@ async function cmdAdd(args: string[]): Promise<void> {
 	if (typeof flags.task === "string") options.task = flags.task;
 	if (typeof flags.approval === "string") options.approvalMode = flags.approval as ApprovalMode;
 	if (typeof flags.thinking === "string") options.thinking = flags.thinking as ThinkingLevel;
+	if (typeof flags.workflow === "string") options.workflow = flags.workflow;
+	if (typeof flags.verify === "string") options.verify = flags.verify;
+	if (typeof flags.sandbox === "string") options.sandbox = { image: flags.sandbox };
+	if (flags.plain === true) options.autoRoute = false;
 
 	// Discoverability: warn if anyone (squad agent or raw omp session) is already on this repo.
 	const present = await whoPresence(repo).catch(() => []);

@@ -1,0 +1,20 @@
+// commission — the hire-a-worker loop, expressed as a graph. Author a scoped Flue
+// worker, run the acceptance gate, and onboard it only if the gate passes; a failed
+// gate loops back to re-author (bounded by author's max_visits), feeding the failure
+// back as authoring guidance. Driven by CommissionExecutor's action nodes, on the same
+// pure engine as plan-implement — this is the formerly hand-coded commission() loop.
+digraph Commission {
+    graph [ goal="Author, validate, and onboard a scoped worker" ]
+
+    start    [shape=Mdiamond, label="Start"]
+    exit     [shape=Msquare,  label="Exit"]
+
+    author   [label="Author",          action="author",   max_visits=2]
+    gate     [label="Acceptance gate",  action="validate", goal_gate=true, retry_target="author"]
+    onboard  [label="Onboard",          action="onboard"]
+
+    start -> author -> gate
+    gate -> onboard [label="Pass", condition="outcome=succeeded"]
+    gate -> author  [label="Reject"]
+    onboard -> exit
+}

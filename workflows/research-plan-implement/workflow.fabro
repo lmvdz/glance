@@ -1,0 +1,52 @@
+// research-plan-implement — the full Plane pipeline as a fabro workflow, layered
+// on the same engine as plan-implement / commission / fan-out:
+//
+//   research → plan → (human approves the plan) → plan-to-plane →
+//   implement every filed issue end-to-end (promote-issue + claim-and-implement,
+//   one issue at a time) → verify → bounded fixup → exit
+//
+// One persistent omp thread carries context across phases, so the plan path, the
+// research brief, and the filed issue IDs flow forward without re-deriving them.
+// Each skill's own gates (WIP-check, design approval, plan-to-plane project pick,
+// claim-and-implement refusals) surface as the workflow agent's needs-input — the
+// reviewable process, intact. Implementation commits but does NOT push; you review
+// and push.
+//
+// Prerequisites for the spawned agents:
+//   - the `plane` MCP (tools prefixed mcp__plane__*) configured + connected;
+//   - the research / plan / plan-to-plane / promote-issue / claim-and-implement
+//     skills installed (they ship with the omp skill set).
+//
+// Run:
+//   omp-squad add <repo> --workflow research-plan-implement --task "<goal>"
+//   (omp-squad resolves the bare name to this bundled graph.)
+//
+// The verify step auto-detects the repo toolchain; edit `script` to match yours.
+digraph ResearchPlanImplement {
+    graph [ goal="Research, plan, file to Plane, and implement a goal end-to-end" ]
+
+    start     [shape=Mdiamond, label="Start"]
+    exit      [shape=Msquare,  label="Exit"]
+
+    research  [label="Research", timeout_ms="2400000", prompt="Use the research skill (skill://research) to gather what this goal needs: scout relevant prior art, libraries, and the existing code in this repo; distill the transferable patterns and the concrete files/modules here they apply to. Write a short brief to plans/<short-topic>/BRIEF.md. Do NOT write production code — intelligence only. End by stating the abstracted concepts that should drive the plan."]
+
+    plan      [label="Plan", timeout_ms="3600000", prompt="Use the plan skill (skill://plan) to decompose the goal, informed by the research brief above, into an executable plan. Write plans/<goal-name>/00-overview.md plus NN-concern.md files using the STATUS / PRIORITY / COMPLEXITY / TOUCHES frontmatter convention. PLAN ONLY: do not execute concerns or write production code. When done, state the exact plan directory path."]
+
+    approve   [shape=hexagon, label="Approve plan"]
+
+    to_plane  [label="File to Plane", timeout_ms="1800000", prompt="Use the plan-to-plane skill (skill://plan-to-plane) on the plan directory from the Plan step: create one Plane work item per concern via the plane MCP (mcp__plane__*), mapping priority / state / labels and grouping them under a module named for the plan. If the plane MCP is not connected, STOP and report it rather than falling back to REST. Report the module URL and the created issue identifiers."]
+
+    implement [label="Implement", timeout_ms="7200000", prompt="Implement the whole plan through the Plane pipeline, ONE issue at a time, until every issue created from this plan is Done. Loop over the plan module's issues: for each that is not yet Done, first run the promote-issue skill (skill://promote-issue) to upgrade it Backlog->Todo with the Tier-1 + Tier-2 schema, then run the claim-and-implement skill (skill://claim-and-implement) to execute it — baseline, implement within the declared scope, run its verification gate, accept, commit in logical groups, close the issue, and update the plan-doc STATUS. Honor each skill's gates and refusals (scope creep, design drift, SOUL conflict): if one issue refuses, surface why and move on to the next. Do NOT push. When no eligible issues remain, summarize what shipped and what was deferred."]
+
+    verify    [shape=parallelogram, label="Verify", goal_gate=true, retry_target="fixup", script="if test -f bun.lock; then bun run check 2>&1 && bun test 2>&1; elif test -f pnpm-lock.yaml; then pnpm -s check 2>&1 && pnpm -s test 2>&1; elif test -f package.json; then npm run check 2>&1 && npm test 2>&1; elif test -f Cargo.toml; then cargo check 2>&1 && cargo test 2>&1; else echo 'no known toolchain; skipping workflow-level verify (claim-and-implement already gated each issue)'; fi"]
+
+    fixup     [label="Fixup", max_visits=3, prompt="The verify command failed. Read the recent command output and fix every failure it reports (types, tests, lint). Change only what the failures require, then stop."]
+
+    start -> research -> plan -> approve
+    approve -> to_plane [label="Approve"]
+    approve -> plan     [label="Revise"]
+    to_plane -> implement -> verify
+    verify -> exit  [condition="outcome=succeeded"]
+    verify -> fixup
+    fixup -> verify
+}

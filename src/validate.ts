@@ -28,6 +28,9 @@ export async function validateWorker(dir: string, spec: CommissionSpec, opts: Ga
 	const acceptance = await acceptanceWorker(dir, spec);
 	checks.push(acceptance.check);
 
+	const ponytail = await ponytailWorker(dir, spec);
+	checks.push(ponytail);
+
 	const lintOk = lint.status === "pass";
 	const noFail = checks.every((c) => c.status !== "fail");
 	const acceptanceOk = !opts.requireAcceptance || acceptance.check.status === "pass";
@@ -108,6 +111,45 @@ async function acceptanceWorker(dir: string, spec: CommissionSpec): Promise<{ ch
 		return { check: { name: "acceptance", status: "fail", detail: `result did not match expectation: ${JSON.stringify(result)}` }, result };
 	}
 	return { check: { name: "acceptance", status: "pass" }, result };
+}
+
+/**
+ * ponytail gate — the lazy-senior-dev check. A commissioned worker should reach for
+ * the pinned skeleton, not install its way out of a problem or over-build. Fails when
+ * the worker declares a dependency outside the skeleton allowlist, or its workflow
+ * blows the size budget. Mechanizes the same ladder the OmpArchitect RECIPE instructs.
+ *
+ * ponytail: fixed allowlist + a flat LOC ceiling. Ceiling: a genuinely complex worker
+ * could legitimately exceed it; upgrade path is a per-spec override (e.g. spec.accept
+ * extended with a budget) when a worker earns the headroom.
+ */
+const PONYTAIL_DEP_ALLOWLIST = new Set(["@flue/runtime", "valibot", "@flue/cli", "typescript"]);
+const PONYTAIL_MAX_WORKFLOW_LOC = 80;
+
+async function ponytailWorker(dir: string, spec: CommissionSpec): Promise<GateCheck> {
+	const smells: string[] = [];
+
+	const pkgRaw = await read(path.join(dir, "package.json"));
+	if (pkgRaw !== undefined) {
+		try {
+			const pkg = JSON.parse(pkgRaw) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+			const declared = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
+			const extra = declared.filter((d) => !PONYTAIL_DEP_ALLOWLIST.has(d));
+			if (extra.length) smells.push(`unrequested dependencies: ${extra.join(", ")} (the skeleton already covers the worker contract)`);
+		} catch {
+			/* malformed package.json is the lint check's concern, not this one */
+		}
+	}
+
+	const workflow = await read(path.join(dir, ".flue", "workflows", `${spec.name}.ts`));
+	if (workflow !== undefined) {
+		const loc = workflow.split("\n").filter((l) => l.trim().length > 0).length;
+		if (loc > PONYTAIL_MAX_WORKFLOW_LOC) {
+			smells.push(`workflow is ${loc} non-blank lines (> ${PONYTAIL_MAX_WORKFLOW_LOC}); ship the minimum that passes acceptance`);
+		}
+	}
+
+	return smells.length ? { name: "ponytail", status: "fail", detail: smells.join("; ") } : { name: "ponytail", status: "pass" };
 }
 
 async function read(p: string): Promise<string | undefined> {

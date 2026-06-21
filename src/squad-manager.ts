@@ -9,19 +9,28 @@
 
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver } from "./agent-driver.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
-import { WorkflowDriver } from "./workflow-driver.ts";
+import { type BranchSpec, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
+import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
+import { CommissionExecutor } from "./workflow/commission-executor.ts";
+import { WorkflowEngine } from "./workflow/engine.ts";
+import { parseWorkflow } from "./workflow/dot.ts";
+import type { NodeResult, Workflow } from "./workflow/types.ts";
+import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
+import { routeIntake } from "./intake.ts";
 import type {
 	Actor,
 	AgentDTO,
 	AgentStatus,
+	CommandInfo,
 	ClientCommand,
 	CreateAgentOptions,
 	CommissionResult,
@@ -34,12 +43,13 @@ import type {
 	ProjectDTO,
 	RpcExtensionUIRequest,
 	RpcSessionState,
+	SandboxConfig,
 	SquadEvent,
 	TranscriptEntry,
 	TranscriptKind,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
-import { hostAlive, socketPathFor } from "./agent-host.ts";
+import { hostAlive, pruneStaleSockets, socketPathFor } from "./agent-host.ts";
 import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
 
 const MAX_TRANSCRIPT = 800;
@@ -64,6 +74,8 @@ interface AgentRecord {
 	streaming: boolean;
 	/** Live subagent (task-spawned children) tree for this agent. */
 	subs: SubagentTracker;
+	/** Available slash commands (builtin + skills + extensions) reported by the agent. */
+	commands?: CommandInfo[];
 }
 
 export interface SquadManagerOptions {
@@ -94,6 +106,8 @@ export class SquadManager extends EventEmitter {
 	private readonly stateFile: string;
 	private readonly bin?: string;
 	private pollTimer?: Timer;
+	/** Agent ids the daemon reattached to (surviving hosts) this run. */
+	private readonly reattached = new Set<string>();
 	private idSeq = 0;
 
 	constructor(opts: SquadManagerOptions = {}) {
@@ -106,7 +120,8 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async start(): Promise<void> {
-		await fs.mkdir(this.stateDir, { recursive: true });
+		await this.reconnectLive();
+		await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
 			// Phase 2 authorization (delegation / availability policy) hooks in here,
@@ -134,12 +149,12 @@ export class SquadManager extends EventEmitter {
 		} catch {
 			return 0;
 		}
-		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[] };
+		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[]; transcripts?: Record<string, TranscriptEntry[]> };
 		let n = 0;
 		for (const p of parsed.agents ?? []) {
 			if (p.kind === "flue-service" || p.kind === "workflow" || this.agents.has(p.id)) continue;
 			if (!(await hostAlive(socketPathFor(p.id)))) continue;
-			await this.attachExisting(p).catch((err) => this.log("warn", `reattach ${p.name} failed: ${String(err)}`));
+			await this.attachExisting(p, parsed.transcripts?.[p.id] ?? []).catch((err) => this.log("warn", `reattach ${p.name} failed: ${String(err)}`));
 			n++;
 		}
 		if (n) this.log("info", `reattached ${n} live agent(s)`);
@@ -147,7 +162,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
-	private async attachExisting(p: PersistedAgent): Promise<void> {
+	private async attachExisting(p: PersistedAgent, transcript: TranscriptEntry[] = []): Promise<void> {
 		const dto: AgentDTO = {
 			id: p.id,
 			name: p.name,
@@ -162,14 +177,17 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
+			parentId: p.parentId,
 		};
 		const agent = this.makeDriver(p);
-		const rec: AgentRecord = { dto, agent, options: p, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		dto.messageCount = transcript.length;
 		this.agents.set(p.id, rec);
 		this.wire(rec);
 		this.emitAgent(rec);
 		await agent.start();
 		rec.dto.status = this.derive(rec);
+		this.reattached.add(p.id);
 		this.emitAgent(rec);
 	}
 
@@ -187,6 +205,11 @@ export class SquadManager extends EventEmitter {
 
 	subagents(id: string): SubagentNode[] {
 		return this.agents.get(id)?.subs.list() ?? [];
+	}
+
+	/** True if this agent was reattached to a surviving host (vs freshly spawned this run). */
+	wasReattached(id: string): boolean {
+		return this.reattached.has(id);
 	}
 
 	/** Group agents into projects (by repo root) with status rollups — the command-center top level. */
@@ -212,9 +235,14 @@ export class SquadManager extends EventEmitter {
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
 		const id = `${name}-${Date.now().toString(36)}`;
 		const branch = opts.branch ?? `squad/${name}`;
+		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
+			const decision = await routeIntake(opts.task, opts.repo);
+			opts = { ...opts, workflow: decision.workflow, verify: decision.verify, thinking: decision.thinking ?? opts.thinking };
+			this.log("info", `routed "${name}": ${decision.reason}`);
+		}
 		const approvalMode = opts.approvalMode ?? "write";
 		const thinking = opts.thinking ?? "low";
-		const kind = opts.workflow ? "workflow" : "omp-operator";
+		const kind = opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
 		let cwd: string;
 		let resolvedBranch: string | undefined;
@@ -251,7 +279,9 @@ export class SquadManager extends EventEmitter {
 			thinking,
 			issue: opts.issue,
 			kind,
-			workflow: opts.workflow ? { path: opts.workflow } : undefined,
+			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify } } : undefined,
+			sandbox: opts.sandbox,
+			parentId: opts.parentId,
 		};
 
 		const dto: AgentDTO = {
@@ -268,6 +298,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 			issue: opts.issue,
 			kind,
+			parentId: opts.parentId,
 		};
 
 		const agent = this.makeDriver(persisted);
@@ -301,9 +332,48 @@ export class SquadManager extends EventEmitter {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
 		}
 		if (p.kind === "workflow" && p.workflow) {
-			return new WorkflowDriver({ id: p.id, workflowPath: p.workflow.path, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
+			const workflow = p.workflow.verify ? buildVerifyWorkflow(p.workflow.verify) : undefined;
+			const fleet: WorkflowFleet = { runBranch: (spec) => this.spawnFleetBranch(p.repo, p.id, spec) };
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet });
+		}
+		if (p.sandbox) {
+			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
 		}
 		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
+	}
+
+	/** Spawn a real roster agent for a workflow's parallel branch, run the task, resolve with its result. The agent stays in the roster. */
+	private async spawnFleetBranch(repo: string, parentId: string, spec: BranchSpec): Promise<NodeResult> {
+		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false });
+		const rec = this.agents.get(dto.id);
+		if (!rec) return { outcome: "failed", text: "branch agent not created" };
+		return this.runAgentTask(rec, spec.task);
+	}
+
+	/** Prompt an agent and resolve once its turn ends, collecting the assistant text. */
+	private runAgentTask(rec: AgentRecord, task: string): Promise<NodeResult> {
+		const { promise, resolve } = Promise.withResolvers<NodeResult>();
+		let buf = "";
+		const onEvent = (frame: { type?: string; assistantMessageEvent?: { type?: string; delta?: string } }) => {
+			if (frame.type === "message_update" && frame.assistantMessageEvent?.type === "text_delta") buf += frame.assistantMessageEvent.delta ?? "";
+			else if (frame.type === "agent_end") finish("succeeded");
+		};
+		const onExit = () => finish("failed");
+		const timer = setTimeout(() => finish("failed"), 30 * 60_000);
+		const finish = (outcome: "succeeded" | "failed"): void => {
+			clearTimeout(timer);
+			rec.agent.off("event", onEvent);
+			rec.agent.off("exit", onExit);
+			resolve({ outcome, text: buf.trim() });
+		};
+		rec.agent.on("event", onEvent);
+		rec.agent.once("exit", onExit);
+		this.append(rec, "user", task);
+		rec.streaming = true;
+		rec.dto.status = "working";
+		this.emitAgent(rec);
+		void rec.agent.prompt(task).catch(() => finish("failed"));
+		return promise;
 	}
 
 	/**
@@ -315,13 +385,19 @@ export class SquadManager extends EventEmitter {
 		await fs.mkdir(dir, { recursive: true });
 		this.log("info", `${actor.id} commissioning "${spec.name}" → ${truncate(spec.purpose, 80)}`);
 		const architect = opts.architect ?? new OmpArchitect({ bin: this.bin });
-		await architect.author(spec, dir);
-		if (opts.install) await this.installWorker(dir);
-		const report = await validateWorker(dir, spec, { requireAcceptance: opts.requireAcceptance });
-		this.log(report.ok ? "info" : "warn", `gate "${spec.name}": ${report.checks.map((c) => `${c.name}=${c.status}`).join(" ")}`);
-		if (!report.ok) return { ok: false, report, dir };
-		const member = await this.onboardFlueWorker(spec, dir, report);
-		return { ok: true, report, member, dir };
+		// The author → validate → onboard process is a workflow graph now, not an imperative
+		// sequence: a failed gate loops back to re-author (bounded), feeding the failure forward.
+		const executor = new CommissionExecutor({
+			author: (feedback) => architect.author(spec, dir, feedback),
+			install: opts.install ? () => this.installWorker(dir) : undefined,
+			validate: () => validateWorker(dir, spec, { requireAcceptance: opts.requireAcceptance }),
+			onboard: (report) => this.onboardFlueWorker(spec, dir, report),
+		});
+		await new WorkflowEngine(await loadCommissionWorkflow(), executor).run(spec.purpose);
+		const report = executor.report;
+		if (report) this.log(report.ok ? "info" : "warn", `gate "${spec.name}": ${report.checks.map((c) => `${c.name}=${c.status}`).join(" ")}`);
+		if (!executor.member || !report) return { ok: false, report: report ?? { ok: false, checks: [] }, dir };
+		return { ok: true, report, member: executor.member, dir };
 	}
 
 	private async installWorker(dir: string): Promise<void> {
@@ -490,6 +566,7 @@ export class SquadManager extends EventEmitter {
 		const a = rec.agent;
 		a.removeAllListeners();
 		a.on("event", (frame: { type?: string; [k: string]: unknown }) => this.onAgentEvent(rec, frame));
+		a.on("ready", () => this.refreshCommands(rec));
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
 		a.on("stderr", (line: string) => this.log("warn", `[${rec.dto.name}] ${line}`));
@@ -505,6 +582,10 @@ export class SquadManager extends EventEmitter {
 	private onAgentEvent(rec: AgentRecord, frame: { type?: string; [k: string]: unknown }): void {
 		if (frame.type?.startsWith("subagent_")) {
 			rec.subs.ingest(frame as { type: string; payload?: unknown });
+			return;
+		}
+		if (frame.type === "available_commands_update") {
+			this.storeCommands(rec, frame.commands);
 			return;
 		}
 		switch (frame.type) {
@@ -649,6 +730,33 @@ export class SquadManager extends EventEmitter {
 		this.publishPresence();
 	}
 
+	/** Available slash commands for an agent (builtin + skills + extensions), if known. */
+	commandsFor(id: string): CommandInfo[] | undefined {
+		return this.agents.get(id)?.commands;
+	}
+
+	/** Proactively pull commands on (re)connect — omp's startup push may predate our wiring. */
+	private refreshCommands(rec: AgentRecord): void {
+		const drv = rec.agent as { getAvailableCommands?: () => Promise<{ commands?: unknown[] }> };
+		if (typeof drv.getAvailableCommands !== "function") return;
+		void drv
+			.getAvailableCommands()
+			.then((res) => this.storeCommands(rec, res?.commands))
+			.catch(() => {
+				/* transient; the push frame or a later refresh will fill it in */
+			});
+	}
+
+	/** Normalize + store the agent's command list, emitting a `commands` event only on change. */
+	private storeCommands(rec: AgentRecord, raw: unknown): void {
+		const commands = normalizeCommands(raw);
+		if (commands.length === 0) return;
+		const prev = rec.commands;
+		if (prev && prev.length === commands.length && prev.every((c, i) => c.name === commands[i].name)) return;
+		rec.commands = commands;
+		this.emit("event", { type: "commands", id: rec.dto.id, commands } satisfies SquadEvent);
+	}
+
 	private log(level: "info" | "warn" | "error", text: string): void {
 		this.emit("event", { type: "log", level, text } satisfies SquadEvent);
 	}
@@ -673,7 +781,9 @@ export class SquadManager extends EventEmitter {
 
 	private async persist(): Promise<void> {
 		const agents = [...this.agents.values()].map((r) => r.options);
-		await fs.writeFile(this.stateFile, JSON.stringify({ version: 1, agents }, null, 2)).catch(() => {});
+		const transcripts: Record<string, TranscriptEntry[]> = {};
+		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
+		await fs.writeFile(this.stateFile, JSON.stringify({ version: 1, agents, transcripts }, null, 2)).catch(() => {});
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
@@ -700,7 +810,11 @@ export class SquadManager extends EventEmitter {
 				approvalMode: p.approvalMode,
 				thinking: p.thinking,
 				issue: p.issue,
+				parentId: p.parentId,
 				workflow: p.workflow?.path,
+				verify: p.workflow?.verify?.command,
+				sandbox: p.sandbox,
+				autoRoute: false,
 			}).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
 		return list.length;
@@ -710,4 +824,49 @@ export class SquadManager extends EventEmitter {
 function truncate(s: string, n: number): string {
 	const flat = s.replace(/\s+/g, " ").trim();
 	return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
+}
+
+/** Map omp's raw command metadata (from `available_commands_update` / `get_available_commands`) to CommandInfo. */
+function normalizeCommands(raw: unknown): CommandInfo[] {
+	if (!Array.isArray(raw)) return [];
+	const out: CommandInfo[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object") continue;
+		const c = item as { name?: unknown; description?: unknown; aliases?: unknown; source?: unknown; input?: unknown };
+		if (typeof c.name !== "string") continue;
+		const input = c.input && typeof c.input === "object" ? (c.input as { hint?: unknown }) : undefined;
+		out.push({
+			name: c.name,
+			description: typeof c.description === "string" ? c.description : undefined,
+			aliases: Array.isArray(c.aliases) ? c.aliases.filter((a): a is string => typeof a === "string") : undefined,
+			hint: input && typeof input.hint === "string" ? input.hint : undefined,
+			source: typeof c.source === "string" ? c.source : undefined,
+		});
+	}
+	return out;
+}
+
+/**
+ * Resolve a `--workflow` spec to a graph file: an existing path is used as-is;
+ * otherwise a bare name resolves to a bundled graph (`<pkg>/workflows/<name>/workflow.fabro`),
+ * making `--workflow research-plan-implement` (and plan-implement / fan-out) first-class.
+ */
+export function resolveWorkflowPath(spec: string): string {
+	if (existsSync(spec)) return spec;
+	const bundledDir = path.join(import.meta.dir, "..", "workflows", spec, "workflow.fabro");
+	if (existsSync(bundledDir)) return bundledDir;
+	const bundledFile = path.join(import.meta.dir, "..", "workflows", spec.endsWith(".fabro") ? spec : `${spec}.fabro`);
+	if (existsSync(bundledFile)) return bundledFile;
+	return spec;
+}
+
+let commissionWorkflow: Workflow | undefined;
+
+/** Parse (once) the bundled commission graph that drives author → validate → onboard. */
+async function loadCommissionWorkflow(): Promise<Workflow> {
+	if (!commissionWorkflow) {
+		const file = path.join(import.meta.dir, "..", "workflows", "commission", "workflow.fabro");
+		commissionWorkflow = parseWorkflow(await fs.readFile(file, "utf8"));
+	}
+	return commissionWorkflow;
 }

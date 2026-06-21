@@ -97,6 +97,8 @@ export class SquadServer {
 				if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
 				const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
 				if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
+				const mcmd = url.pathname.match(/^\/api\/agents\/([^/]+)\/commands$/);
+				if (mcmd) return Response.json(manager.commandsFor(decodeURIComponent(mcmd[1])) ?? []);
 				const mdiff = url.pathname.match(/^\/api\/agents\/([^/]+)\/(diff|tree)$/);
 				if (mdiff) {
 					const dto = manager.getAgent(decodeURIComponent(mdiff[1]));
@@ -161,6 +163,10 @@ export class SquadServer {
 				open: (ws) => {
 					clients.add(ws);
 					ws.send(JSON.stringify({ type: "roster", agents: manager.list() } satisfies SquadEvent));
+					for (const a of manager.list()) {
+						const commands = manager.commandsFor(a.id);
+						if (commands?.length) ws.send(JSON.stringify({ type: "commands", id: a.id, commands } satisfies SquadEvent));
+					}
 				},
 				close: (ws) => {
 					clients.delete(ws);

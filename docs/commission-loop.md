@@ -85,8 +85,15 @@ The manager builds the right driver from a member's `kind` via one factory, so
      then deep-subset match the result against `accept.expect`.
    - `ok` requires lint to pass and no tier to *fail*; a tier with no tooling is `skip`.
 4. **Onboard** — on `ok`, register a `flue-service` member (a `FlueServiceDriver`),
-   persist it, emit `roster`/`agent`, publish presence. On failure, return the report
-   and onboard nothing (the "candidate" is rejected).
+   persist it, emit `roster`/`agent`, publish presence. On a failed gate the run loops
+   back to **re-author** (bounded by author's `max_visits`), feeding the failure forward
+   as guidance; if it still fails, nothing is onboarded (the candidate is rejected).
+
+As of **Phase B** this sequence is no longer an imperative method body: it is a workflow
+graph (`workflows/commission/workflow.fabro`) driven by the pure
+[workflow engine](workflow-runtime.md) through a `CommissionExecutor` (action nodes
+`author` / `validate` / `onboard`). The `GATE → fail → AUTH` loop above is graph routing,
+not hand-coded — the same engine that runs plan-implement.
 
 ### Spec — the job description
 
@@ -123,9 +130,11 @@ scoped worker instead.
 
 ## What's prototype vs. production
 
-- **Real:** the loop, the seam, the gate (lint always; typecheck + `flue run` when the
-  toolchain is present), onboarding, persistence, the deterministic `TemplateArchitect`,
-  and the `OmpArchitect` driving a real omp agent.
+- **Real:** the loop (now a workflow graph driven by the engine via `CommissionExecutor`,
+  with a bounded re-author-on-failure cycle that feeds the gate report back as guidance),
+  the seam, the gate (lint always; typecheck + `flue run` when the toolchain is present),
+  onboarding, persistence, the deterministic `TemplateArchitect`, and the `OmpArchitect`
+  driving a real omp agent.
 - **Deferred:** deploy beyond local (`flue build` + host push), redeploy/versioning on
   `restart`, capability *enforcement* (today recorded, not sandboxed), and a
   `FlueServiceDriver` that targets a deployed HTTP route instead of local `flue run`.

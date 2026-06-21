@@ -21,8 +21,9 @@ export type AgentStatus =
  * Which runtime backs a managed agent.
  *  - "omp-operator": an `omp --mode rpc` child in a git worktree (interactive, steerable).
  *  - "flue-service": a Flue worker invoked via `flue run` (autonomous / bounded).
+ *  - "workflow": a graph-driven, gated, multi-stage run over a persistent omp thread.
  */
-export type AgentKind = "omp-operator" | "flue-service";
+export type AgentKind = "omp-operator" | "flue-service" | "workflow";
 
 /** A request from the agent that a human must answer before it can proceed. */
 export interface PendingRequest {
@@ -82,6 +83,8 @@ export interface AgentDTO {
 	status: AgentStatus;
 	/** Which runtime backs this agent. */
 	kind: AgentKind;
+	/** Parent workflow agent id, when this agent is a spawned fan-out branch. */
+	parentId?: string;
 	/** flue-service only: passed the acceptance gate at onboard time. */
 	verified?: boolean;
 	/** Repo root the worktree was cut from. */
@@ -130,6 +133,12 @@ export interface PersistedAgent {
 	kind?: AgentKind;
 	/** flue-service only: worker invocation config. */
 	flue?: FlueMemberConfig;
+	/** workflow only: graph file backing this run. */
+	workflow?: WorkflowMemberConfig;
+	/** Parent workflow agent id, when this is a spawned fan-out branch. */
+	parentId?: string;
+	/** When set, run this agent inside a container instead of locally. */
+	sandbox?: SandboxConfig;
 }
 
 /** Options when adding an agent to the squad. */
@@ -148,6 +157,28 @@ export interface CreateAgentOptions {
 	thinking?: ThinkingLevel;
 	/** Work item to advance (shown in the command center; e.g. a Plane issue). */
 	issue?: IssueRef;
+	/** Path to a workflow graph (`.fabro`) to run as the agent's process; `task` becomes the goal. */
+	workflow?: string;
+	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
+	verify?: string;
+	/** Parent workflow agent id, when spawning a fan-out branch. */
+	parentId?: string;
+	/** Run this agent inside a container (sandboxed execution); mounts the worktree by default. */
+	sandbox?: SandboxConfig;
+	/** Auto-pick a process (verify / plan-approve / fan-out) from the task. Default on; false = plain agent. */
+	autoRoute?: boolean;
+}
+
+/** Sandboxed execution: run the agent's omp inside a container. */
+export interface SandboxConfig {
+	/** Container image (an omp-provisioned image for real runs). */
+	image: string;
+	/** Working dir inside the container. Default `/work`. */
+	workdir?: string;
+	/** Bind-mount the worktree into the container (default true); false = fully isolated fs. */
+	mountWorktree?: boolean;
+	/** Extra `docker run` args, e.g. `["--network=none"]`. */
+	runArgs?: string[];
 }
 
 // ── Commissioning (agents that author agents) ────────────────────────────────
@@ -160,6 +191,22 @@ export interface FlueMemberConfig {
 	workflow: string;
 	/** Deploy/run target. */
 	target: "node" | "cloudflare";
+}
+
+/** A verification gate wrapped around a task: run `command`, loop into fixup on failure. */
+export interface VerifySpec {
+	/** Shell command whose exit code is the gate (0 = pass). */
+	command: string;
+	/** Max fix-up turns before giving up (default 3). */
+	maxFixups?: number;
+}
+
+/** workflow only: the graph backing a workflow run — an authored file or a synthesized verify loop. */
+export interface WorkflowMemberConfig {
+	/** Path to an authored workflow graph file (`.fabro` / `.dot`). */
+	path?: string;
+	/** Synthesized verify-loop spec (mutually exclusive with `path`). */
+	verify?: VerifySpec;
 }
 
 /** A job spec handed to the commissioning loop — the "job description". */
@@ -182,7 +229,7 @@ export interface CommissionSpec {
 
 /** One acceptance-gate check result. */
 export interface GateCheck {
-	name: "lint" | "typecheck" | "acceptance";
+	name: "lint" | "typecheck" | "acceptance" | "ponytail";
 	status: "pass" | "fail" | "skip";
 	detail?: string;
 }
@@ -205,6 +252,18 @@ export interface CommissionResult {
 	dir: string;
 }
 
+/** A slash command available to an omp-operator agent (builtin / skill / extension / custom). */
+export interface CommandInfo {
+	/** Command name without the leading slash (e.g. "plan", "skill:ponytail", "rtk"). */
+	name: string;
+	description?: string;
+	aliases?: string[];
+	/** Argument hint shown after the name (from the command's `input.hint`). */
+	hint?: string;
+	/** Where it comes from: "builtin" | "skill" | "extension" | "custom" | "file". */
+	source?: string;
+}
+
 // ── Manager → surface events ────────────────────────────────────────────────
 
 export type SquadEvent =
@@ -212,7 +271,8 @@ export type SquadEvent =
 	| { type: "agent"; agent: AgentDTO }
 	| { type: "removed"; id: string }
 	| { type: "transcript"; id: string; entry: TranscriptEntry }
-	| { type: "log"; level: "info" | "warn" | "error"; text: string };
+	| { type: "log"; level: "info" | "warn" | "error"; text: string }
+	| { type: "commands"; id: string; commands: CommandInfo[] };
 
 // ── Surface → manager commands ──────────────────────────────────────────────
 
