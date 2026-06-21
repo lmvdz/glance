@@ -17,7 +17,7 @@
  */
 
 import * as path from "node:path";
-import type { IssueRef } from "./types.ts";
+import type { IssueRef, PlaneTicket } from "./types.ts";
 
 interface PlaneConfig {
 	apiKey: string;
@@ -140,4 +140,82 @@ export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
 	if (!done) return false;
 	const res = await fetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: done.id }) }).catch(() => null);
 	return !!res && res.ok;
+}
+
+/** Web-app base for deep links — Plane cloud's app host differs from the API host. */
+function webBase(cfg: PlaneConfig): string {
+	if (process.env.PLANE_APP_URL) return process.env.PLANE_APP_URL.replace(/\/+$/, "");
+	if (cfg.baseUrl.includes("api.plane.so")) return "https://app.plane.so";
+	return cfg.baseUrl.replace(/\/api(\/v1)?\/?$/, "");
+}
+
+interface IssueRaw {
+	id: string;
+	name?: string;
+	sequence_id?: number;
+	state?: string;
+	state_detail?: { group?: string };
+}
+
+async function getJson(url: string, headers: Record<string, string>): Promise<unknown> {
+	const res = await fetch(url, { headers }).catch(() => null);
+	if (!res || !res.ok) return null;
+	return res.json().catch(() => null);
+}
+
+async function projectPrefix(base: string, headers: Record<string, string>): Promise<string | undefined> {
+	const data = await getJson(`${base}/`, headers);
+	if (data && typeof data === "object" && "identifier" in data && typeof data.identifier === "string") return data.identifier;
+	return undefined;
+}
+
+async function allIssues(base: string, headers: Record<string, string>): Promise<IssueRaw[]> {
+	const data = await getJson(`${base}/issues/?per_page=100`, headers);
+	if (Array.isArray(data)) return data as IssueRaw[];
+	if (data && typeof data === "object" && "results" in data && Array.isArray(data.results)) return data.results as IssueRaw[];
+	return [];
+}
+
+/** Resolve a feature's Plane issue identifiers → status group + web deep link. `null` ⇒ not configured. */
+export async function featureTickets(repo: string, identifiers: string[]): Promise<PlaneTicket[] | null> {
+	const cfg = readConfig();
+	if (!cfg) return null;
+	const projectId = projectIdFor(repo, cfg);
+	if (!projectId || !identifiers.length) return [];
+	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
+	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
+	const [prefix, groups, issues] = await Promise.all([projectPrefix(base, headers), fetchStateGroups(base, headers), allIssues(base, headers)]);
+	const want = new Set(identifiers.map((s) => s.toUpperCase()));
+	const app = webBase(cfg);
+	const tickets: PlaneTicket[] = [];
+	for (const raw of issues) {
+		const ident = prefix && raw.sequence_id != null ? `${prefix}-${raw.sequence_id}` : undefined;
+		if (!ident || !want.has(ident.toUpperCase())) continue;
+		const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
+		tickets.push({ identifier: ident, name: raw.name ?? "(untitled)", status: group ?? "unknown", url: `${app}/${cfg.workspace}/projects/${projectId}/issues/${raw.id}` });
+	}
+	tickets.sort((a, b) => identifiers.indexOf(a.identifier) - identifiers.indexOf(b.identifier));
+	return tickets;
+}
+
+/** Create a Plane module for a feature and group its issues under it. `null` ⇒ not configured / failed. */
+export async function ensureFeatureModule(repo: string, name: string, identifiers: string[]): Promise<{ moduleId: string; moduleUrl: string } | null> {
+	const cfg = readConfig();
+	if (!cfg) return null;
+	const projectId = projectIdFor(repo, cfg);
+	if (!projectId) return null;
+	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
+	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
+	const res = await fetch(`${base}/modules/`, { method: "POST", headers, body: JSON.stringify({ name }) }).catch(() => null);
+	if (!res || !res.ok) return null;
+	const mod: unknown = await res.json().catch(() => null);
+	if (!mod || typeof mod !== "object" || !("id" in mod) || typeof mod.id !== "string") return null;
+	const moduleId = mod.id;
+	if (identifiers.length) {
+		const [prefix, issues] = await Promise.all([projectPrefix(base, headers), allIssues(base, headers)]);
+		const want = new Set(identifiers.map((s) => s.toUpperCase()));
+		const ids = issues.filter((i) => prefix && i.sequence_id != null && want.has(`${prefix}-${i.sequence_id}`.toUpperCase())).map((i) => i.id);
+		if (ids.length) await fetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) }).catch(() => {});
+	}
+	return { moduleId, moduleUrl: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/modules/${moduleId}` };
 }

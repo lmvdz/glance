@@ -137,6 +137,13 @@ export class SquadServer {
 					const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
 					return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force));
 				}
+				const mftickets = url.pathname.match(/^\/api\/features\/([^/]+)\/tickets$/);
+				if (mftickets && req.method === "GET") return Response.json(await manager.featurePlaneTickets(decodeURIComponent(mftickets[1])));
+				const mfmodule = url.pathname.match(/^\/api\/features\/([^/]+)\/module$/);
+				if (mfmodule && req.method === "POST") {
+					const out = await manager.createFeatureModule(decodeURIComponent(mfmodule[1]));
+					return out ? Response.json(out) : new Response("module create failed (Plane not configured?)", { status: 501 });
+				}
 				const mfpipe = url.pathname.match(/^\/api\/features\/([^/]+)\/pipeline$/);
 				if (mfpipe && req.method === "GET") {
 					const repo = url.searchParams.get("repo") ?? process.cwd();

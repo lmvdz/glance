@@ -13,7 +13,7 @@
  * the run, it fails (this is what bounds fix-up loops).
  */
 
-import type { NodeExecutor, Outcome, RunContext, RunResult, StageEvent, Workflow, WorkflowNode } from "./types.ts";
+import type { EngineCheckpoint, NodeExecutor, Outcome, RunContext, RunResult, StageEvent, Workflow, WorkflowNode, WorkflowRunState } from "./types.ts";
 
 const DEFAULT_NODE_VISITS = 50;
 
@@ -45,24 +45,30 @@ export class WorkflowEngine {
 		this.cancelled = true;
 	}
 
-	async run(goal: string): Promise<RunResult> {
-		const ctx: RunContext = { goal, vars: {} };
-		const shared: Shared = { visits: {}, stages: [], cap: this.wf.maxNodeVisits ?? DEFAULT_NODE_VISITS, index: 0 };
+	async run(goal: string, opts?: { resume?: WorkflowRunState; checkpoint?: (c: EngineCheckpoint) => void }): Promise<RunResult> {
+		const resume = opts?.resume;
+		const ctx: RunContext = { goal, vars: resume ? { ...resume.vars } : {}, outcome: resume?.outcome, preferredLabel: resume?.preferredLabel };
+		const shared: Shared = { visits: resume ? { ...resume.visits } : {}, stages: [], cap: this.wf.maxNodeVisits ?? DEFAULT_NODE_VISITS, index: resume?.index ?? 0 };
 
-		let current: string | undefined = this.wf.start;
+		let current: string | undefined = resume?.currentNode ?? this.wf.start;
+		let resuming = resume !== undefined;
 		while (current) {
 			if (this.cancelled) throw new WorkflowCancelled();
 			const node = this.wf.nodes.get(current);
 			if (!node) return { outcome: "failed", reason: `dangling edge to unknown node "${current}"`, stages: shared.stages };
 			if (node.kind === "exit") return { outcome: "succeeded", reason: "reached exit", stages: shared.stages };
 
-			const limit = node.maxVisits ?? shared.cap;
-			if ((shared.visits[current] ?? 0) >= limit) {
-				return { outcome: "failed", reason: `node "${current}" exceeded its visit cap (${limit})`, stages: shared.stages };
+			// The resumed node was already counted before the restart — don't re-count or re-cap it.
+			if (!resuming) {
+				const limit = node.maxVisits ?? shared.cap;
+				if ((shared.visits[current] ?? 0) >= limit) {
+					return { outcome: "failed", reason: `node "${current}" exceeded its visit cap (${limit})`, stages: shared.stages };
+				}
+				shared.visits[current] = (shared.visits[current] ?? 0) + 1;
 			}
-			shared.visits[current] = (shared.visits[current] ?? 0) + 1;
 
 			const index = shared.index++;
+			opts?.checkpoint?.({ goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index });
 			this.stage(shared, index, node, "start", ctx);
 
 			let next: string | undefined;
@@ -70,9 +76,10 @@ export class WorkflowEngine {
 				ctx.outcome = await this.runParallel(node, ctx, shared);
 				next = this.findMerge(node);
 			} else {
-				await this.execute(node, ctx);
+				await this.execute(node, ctx, resuming);
 				next = this.route(node, ctx);
 			}
+			resuming = false;
 
 			this.stage(shared, index, node, "end", ctx);
 
@@ -142,7 +149,7 @@ export class WorkflowEngine {
 		this.executor.onStage?.(ev);
 	}
 
-	private async execute(node: WorkflowNode, ctx: RunContext): Promise<void> {
+	private async execute(node: WorkflowNode, ctx: RunContext, resume = false): Promise<void> {
 		if (node.attrs.action) {
 			if (!this.executor.runAction) throw new Error(`node "${node.id}" has action="${node.attrs.action}" but the executor has no runAction`);
 			const r = await this.executor.runAction(node, ctx);
@@ -157,7 +164,7 @@ export class WorkflowEngine {
 				return;
 			case "agent":
 			case "prompt": {
-				const r = await this.executor.runAgent(node, ctx);
+				const r = resume && this.executor.resumeAgent ? await this.executor.resumeAgent(node, ctx) : await this.executor.runAgent(node, ctx);
 				ctx.outcome = r.outcome;
 				if (r.text !== undefined) ctx.vars.lastText = r.text;
 				return;

@@ -113,6 +113,29 @@ export interface RunResult {
 	stages: StageEvent[];
 }
 
+/** A resumable snapshot of where a run is, captured at each node boundary. */
+export interface EngineCheckpoint {
+	/** The run goal (re-primed into the agent thread on resume). */
+	goal: string;
+	/** The node being executed (or about to) when this checkpoint was taken. */
+	currentNode: string;
+	/** Per-node visit counts, so fix-up loop caps survive a resume. */
+	visits: Record<string, number>;
+	/** Run variables threaded through routing conditions. */
+	vars: Record<string, string>;
+	/** Outcome of the last completed node (for routing on resume). */
+	outcome?: Outcome;
+	/** Label chosen at the most recent human gate. */
+	preferredLabel?: string;
+	/** Monotonic stage index. */
+	index: number;
+}
+
+/** Persisted run state — an engine checkpoint plus the executor's stage rollup (for the progress view). */
+export interface WorkflowRunState extends EngineCheckpoint {
+	rollup: { label: string; status: "in_progress" | "completed" }[];
+}
+
 /**
  * The seam the engine drives execution through. The engine stays pure (graph
  * walking, conditions, retries, gates); an executor decides what "run an agent
@@ -129,6 +152,8 @@ export interface NodeExecutor {
 	runAction?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
 	/** Run a parallel-branch node as an independent unit (e.g. a spawned fleet agent). Falls back to runAgent. */
 	runBranch?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
+	/** Resume an agent / prompt node whose turn may still be in flight from a prior daemon — MUST NOT re-prompt. */
+	resumeAgent?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
 	/** Optional: observe each stage as it starts / ends. */
 	onStage?(ev: StageEvent): void;
 }

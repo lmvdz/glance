@@ -23,16 +23,17 @@ import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
 import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
-import type { NodeResult, Workflow } from "./workflow/types.ts";
+import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
-import { closePlaneIssue, listPlaneIssues, planeRepos } from "./plane.ts";
+import { closePlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent } from "./land.ts";
 import type {
 	Actor,
 	IssueRef,
+	PlaneTicket,
 	AgentDTO,
 	FeatureDTO,
 	PersistedFeature,
@@ -190,7 +191,20 @@ export class SquadManager extends EventEmitter {
 		for (const f of parsed.features ?? []) this.featureStore.set(f.id, f);
 		let n = 0;
 		for (const p of parsed.agents ?? []) {
-			if (p.kind === "flue-service" || p.kind === "workflow" || this.agents.has(p.id)) continue;
+			if (this.agents.has(p.id)) continue;
+			if (p.kind === "flue-service") continue; // flue workers are not reattached
+			if (p.kind === "workflow") {
+				// A workflow run survives a restart only if its inner thread is still alive AND we have a
+				// checkpoint to resume the graph from; otherwise the orchestration is unrecoverable.
+				const innerAlive = await hostAlive(socketPathFor(`${p.id}-wf`));
+				if (innerAlive && p.workflowState) {
+					await this.attachExisting(p, parsed.transcripts?.[p.id] ?? []).catch((err) => this.log("warn", `resume ${p.name} failed: ${String(err)}`));
+					n++;
+				} else if (innerAlive) {
+					this.log("warn", `workflow ${p.name} has a live thread but no checkpoint — cannot resume the graph`);
+				}
+				continue;
+			}
 			if (!(await hostAlive(socketPathFor(p.id)))) continue;
 			await this.attachExisting(p, parsed.transcripts?.[p.id] ?? []).catch((err) => this.log("warn", `reattach ${p.name} failed: ${String(err)}`));
 			n++;
@@ -321,6 +335,35 @@ export class SquadManager extends EventEmitter {
 		this.emitAgent(rec);
 		this.emitFeaturesChanged();
 		return true;
+	}
+
+	/** Resolve a feature's associated Plane tickets (status + deep link) for display. */
+	async featurePlaneTickets(id: string): Promise<{ tickets: PlaneTicket[] | null; moduleUrl?: string }> {
+		const pf = this.featureStore.get(id);
+		let idents = pf?.plane?.issueIdentifiers ?? [];
+		let repo = pf?.repo;
+		if (!idents.length) {
+			// derived feature (identifiers live in plan docs) — fall back to the full build
+			const f = (await this.features()).find((x) => x.id === id);
+			idents = f?.issueIdentifiers ?? [];
+			repo = f?.repo ?? repo;
+		}
+		const tickets = idents.length && repo ? await featureTickets(repo, idents) : [];
+		return { tickets, moduleUrl: pf?.plane?.moduleUrl };
+	}
+
+	/** Create a Plane module for a feature and group its issues under it; persists the link. */
+	async createFeatureModule(id: string): Promise<{ moduleUrl: string } | null> {
+		const pf = this.featureStore.get(id);
+		if (!pf) return null;
+		const f = (await this.features(pf.repo)).find((x) => x.id === id);
+		const idents = f?.issueIdentifiers ?? pf.plane?.issueIdentifiers ?? [];
+		const mod = await ensureFeatureModule(pf.repo, pf.title, idents);
+		if (!mod) return null;
+		pf.plane = { ...(pf.plane ?? {}), moduleId: mod.moduleId, moduleUrl: mod.moduleUrl, issueIdentifiers: idents };
+		pf.updatedAt = Date.now();
+		this.emitFeaturesChanged();
+		return { moduleUrl: mod.moduleUrl };
 	}
 
 	/** Cache the current member branches so land status survives an agent being killed. */
@@ -463,7 +506,7 @@ export class SquadManager extends EventEmitter {
 		if (p.kind === "workflow" && p.workflow) {
 			const workflow = p.workflow.verify ? buildVerifyWorkflow(p.workflow.verify) : undefined;
 			const fleet: WorkflowFleet = { runBranch: (spec) => this.spawnFleetBranch(p.repo, p.id, spec) };
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet });
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
@@ -699,6 +742,10 @@ export class SquadManager extends EventEmitter {
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
 		a.on("stderr", (line: string) => this.log("warn", `[${rec.dto.name}] ${line}`));
+		a.on("checkpoint", (state: WorkflowRunState) => {
+			rec.options.workflowState = state;
+			void this.persist();
+		});
 		a.on("exit", ({ code }: { code: number }) => {
 			if (rec.dto.status !== "stopped") {
 				rec.dto.status = code === 0 ? "stopped" : "error";
@@ -922,12 +969,35 @@ export class SquadManager extends EventEmitter {
 
 	// ── Persistence ───────────────────────────────────────────────────────────
 
+	private writeChain: Promise<void> = Promise.resolve();
+
+	/**
+	 * Serialized + atomic writer. Each call chains its write after the previous one (so two writes
+	 * never interleave), and resolves only once ITS write completes — making `await persist()` a real
+	 * durability barrier that stop()/upgrade depend on. persistNow()'s temp+rename prevents partials.
+	 */
 	private async persist(): Promise<void> {
+		const next = this.writeChain.then(
+			() => this.persistNow(),
+			() => this.persistNow(),
+		);
+		this.writeChain = next.catch(() => {});
+		return next;
+	}
+
+	/** Atomic write: serialize into a temp file then rename, so a reader (or a restart) never sees a partial file. */
+	private async persistNow(): Promise<void> {
 		const agents = [...this.agents.values()].map((r) => r.options);
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
-		await fs.writeFile(this.stateFile, JSON.stringify({ version: 1, agents, transcripts, features }, null, 2)).catch(() => {});
+		const tmp = `${this.stateFile}.tmp`;
+		try {
+			await fs.writeFile(tmp, JSON.stringify({ version: 1, agents, transcripts, features }, null, 2));
+			await fs.rename(tmp, this.stateFile);
+		} catch {
+			await fs.rm(tmp, { force: true }).catch(() => {});
+		}
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */

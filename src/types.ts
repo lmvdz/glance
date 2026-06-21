@@ -7,6 +7,7 @@
  */
 
 import type { RpcExtensionUIRequest, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import type { WorkflowRunState } from "./workflow/types.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -62,6 +63,16 @@ export interface IssueRef {
 	url?: string;
 	/** Provider project id this issue belongs to. */
 	projectId?: string;
+}
+
+/** A feature's associated Plane issue, resolved for display: status group + deep link. */
+export interface PlaneTicket {
+	identifier: string;
+	name: string;
+	/** Plane state group: backlog | unstarted | started | completed | cancelled | unknown. */
+	status: string;
+	/** Deep link into the Plane web app. */
+	url: string;
 }
 
 /** A project / workstream — the top level of the command center. Derived from agents' repos. */
@@ -197,6 +208,8 @@ export interface PersistedAgent {
 	flue?: FlueMemberConfig;
 	/** workflow only: graph file backing this run. */
 	workflow?: WorkflowMemberConfig;
+	/** workflow only: resumable run position, persisted so a daemon restart can continue the graph. */
+	workflowState?: WorkflowRunState;
 	/** Parent workflow agent id, when this is a spawned fan-out branch. */
 	parentId?: string;
 	/** When set, run this agent inside a container instead of locally. */

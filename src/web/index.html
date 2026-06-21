@@ -544,6 +544,7 @@ function renderFeature(body, f) {
       <div style="display:flex;gap:6px;align-items:center">${f.persisted&&landable?`<button id="featLandAll" class="primary" title="Merge all landable branches into main (ff-first, stops on diverged)">⤳ Land all</button>`:""}${!f.persisted&&f.planDir?`<button id="featAdopt" class="primary" title="Adopt this plan as a managed feature (then assign agents + Land)">＋ Adopt as feature</button>`:""}<button id="featBack" class="navbtn" title="Back to board">← Board</button></div></div>
     <div class="section"><h3>Worktrees · Land</h3><div class="inner tree" id="featland"></div></div>
     <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div>${f.persisted?`<div class="inner"><div class="spawnrow"><input id="fspawnInput" placeholder="Describe a task — spawn an agent on this feature (Enter)" autocomplete="off" /><button id="fspawnBtn" class="sm primary">+ Agent</button></div></div><div class="inner" id="featassign"></div>`:""}</div>
+    <div class="section"><h3>Plane tickets</h3><div class="inner" id="featplane"><span style="color:var(--dim)">loading…</span></div></div>
     <div class="section" id="featgatewrap" style="display:none"><h3>Needs your input</h3><div class="inner" id="featgate"></div></div>
     ${f.planDir?`<div class="section"><h3>Pipeline · concerns</h3><div class="inner tree" id="featpipe"><span style="color:var(--dim)">loading…</span></div></div>`:""}</div>`;
   $("#featBack").onclick = openBoard;
@@ -590,6 +591,39 @@ function renderFeature(body, f) {
   }
   if (f.planDir) loadPipeline(f);
   renderFeatureGate(f);
+  loadFeatureTickets(f);
+}
+
+// Plane tickets for a feature: status group + deep link into the Plane web app, and a
+// one-click "group these issues under a Plane module" (each feature → its own module).
+const PLANE_BADGE = { completed:"idle", started:"working", cancelled:"stopped", backlog:"starting", unstarted:"starting", unknown:"stopped" };
+async function loadFeatureTickets(f) {
+  const box = $("#featplane"); if (!box) return;
+  try {
+    const r = await fetch(`/api/features/${encodeURIComponent(f.id)}/tickets`);
+    const data = r.ok ? await r.json() : null;
+    const tickets = data ? data.tickets : null;
+    if (tickets === null) { box.innerHTML = `<span style="color:var(--dim)">Plane not connected.</span>`; return; }
+    const moduleLink = data.moduleUrl
+      ? `<a href="${esc(data.moduleUrl)}" target="_blank" rel="noopener" title="Open the feature's Plane module">▦ Module ↗</a>`
+      : (f.persisted ? `<button id="featModuleBtn" class="sm" title="Create a Plane module for this feature and group its tickets under it">▦ Group in Plane</button>` : "");
+    if (!tickets.length) {
+      box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--dim)">No linked Plane tickets.</span>${moduleLink}</div>`;
+    } else {
+      box.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:8px">${moduleLink}</div>`
+        + `<div class="issuelist">${tickets.map(t => `<div class="issuerow"><span class="badge b-${PLANE_BADGE[t.status]||"starting"}" title="Plane status: ${esc(t.status)}">${esc(t.status)}</span><span class="iid">${esc(t.identifier)}</span><span class="inm">${esc(t.name)}</span><a href="${esc(t.url)}" target="_blank" rel="noopener" title="Open ${esc(t.identifier)} in Plane">↗</a></div>`).join("")}</div>`;
+    }
+    const mb = $("#featModuleBtn"); if (mb) mb.onclick = () => createFeatureModuleUI(f, mb);
+  } catch { box.innerHTML = `<span style="color:var(--dim)">—</span>`; }
+}
+async function createFeatureModuleUI(f, btn) {
+  btn.disabled = true; btn.textContent = "creating…";
+  try {
+    const r = await fetch(`/api/features/${encodeURIComponent(f.id)}/module`, { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
+    if (!r.ok) { toast("module create failed: " + (await r.text()), "error"); btn.disabled = false; btn.textContent = "▦ Group in Plane"; return; }
+    toast(`grouped “${f.title}” under a Plane module`, "info");
+    loadFeatureTickets(f);
+  } catch { toast("module create failed", "error"); btn.disabled = false; btn.textContent = "▦ Group in Plane"; }
 }
 
 // Attach a NEW agent to a feature: the server creates an auto-routed agent (intake picks

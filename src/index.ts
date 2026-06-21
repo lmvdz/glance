@@ -108,7 +108,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	const coordinator = process.env.OMP_SQUAD_COORDINATOR;
 	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 	const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
-	const manager = new SquadManager({ bus, operator });
+	const manager = new SquadManager({ bus, operator, stateDir: process.env.OMP_SQUAD_STATE_DIR || undefined });
 	await manager.start();
 	if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
 	if (flags.restore) {

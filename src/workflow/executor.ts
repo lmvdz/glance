@@ -49,6 +49,8 @@ export interface SingleAgentExecutorOptions {
 	spawnBranch?: (node: WorkflowNode, task: string) => Promise<NodeResult>;
 	/** Schedule the idle turn-end check (default: setInterval). Injected in tests to drive it deterministically. */
 	scheduleIdleCheck?: IdleScheduler;
+	/** Seed the stage rollup when resuming a run, so the progress view survives a restart. */
+	initialRollup?: { label: string; status: "in_progress" | "completed" }[];
 }
 
 const MAX_CONTEXT_OUTPUT = 4000;
@@ -67,6 +69,10 @@ export class SingleAgentExecutor implements NodeExecutor {
 
 	constructor(opts: SingleAgentExecutorOptions) {
 		this.opts = opts;
+		if (opts.initialRollup?.length) {
+			this.rollup.push(...opts.initialRollup);
+			this.primed = true; // resuming: the inner thread already carries the goal
+		}
 	}
 
 	onStage(ev: StageEvent): void {
@@ -114,6 +120,24 @@ export class SingleAgentExecutor implements NodeExecutor {
 		}
 	}
 
+	/**
+	 * Resume an in-flight agent node after a daemon restart: reattach the thread and wait for its
+	 * current turn to end WITHOUT re-prompting (re-prompting would duplicate work — e.g. re-file the
+	 * Plane issues). If the turn already finished while the daemon was down, advance immediately.
+	 */
+	async resumeAgent(node: WorkflowNode, _ctx: RunContext): Promise<NodeResult> {
+		try {
+			const agent = await this.opts.acquireAgent();
+			const st = await agent.getState();
+			if (!st.isStreaming) return { outcome: "succeeded", text: "" };
+			const timeoutMs = Number(node.attrs.timeout_ms) || this.opts.turnTimeoutMs || 600_000;
+			const text = await this.awaitTurn(agent, undefined, timeoutMs);
+			return { outcome: "succeeded", text };
+		} catch (err) {
+			return { outcome: "failed", text: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
 	async runCommand(node: WorkflowNode, _ctx: RunContext): Promise<NodeResult> {
 		const script = node.script ?? "";
 		if (!script.trim()) return { outcome: "failed", text: `command node "${node.id}" has no script` };
@@ -152,7 +176,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 	 * hang on its node until the hours-long turn timeout. isStreaming stays true through tool
 	 * calls, so a slow tool never trips the fallback.
 	 */
-	private awaitTurn(agent: AgentDriver, message: string, timeoutMs: number): Promise<string> {
+	private awaitTurn(agent: AgentDriver, message: string | undefined, timeoutMs: number): Promise<string> {
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		let buf = "";
 		let settled = false;
@@ -192,9 +216,11 @@ export class SingleAgentExecutor implements NodeExecutor {
 		};
 		agent.on("event", onEvent);
 		agent.once("exit", onExit);
-		agent.prompt(message).catch((err) => {
-			if (!settled) reject(err);
-		});
+		if (message !== undefined) {
+			agent.prompt(message).catch((err) => {
+				if (!settled) reject(err);
+			});
+		}
 		return promise;
 	}
 }

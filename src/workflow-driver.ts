@@ -28,7 +28,7 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
 import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
 import { parseStylesheet, resolveNodeStyle } from "./workflow/stylesheet.ts";
-import type { NodeResult, Workflow, WorkflowNode } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, Workflow, WorkflowNode, WorkflowRunState } from "./workflow/types.ts";
 
 /** A branch agent to spawn into the roster (one parallel branch = one fleet agent). */
 export interface BranchSpec {
@@ -61,6 +61,8 @@ export interface WorkflowDriverOptions {
 	execCommand?: (script: string, cwd: string) => Promise<CommandResult>;
 	/** Spawn parallel-branch nodes as real roster agents. Absent → branches run sequentially on the inner thread. */
 	fleet?: WorkflowFleet;
+	/** Resume an interrupted run from this persisted position (after a daemon restart). Absent → fresh run. */
+	resumeState?: WorkflowRunState;
 }
 
 interface PendingGate {
@@ -108,11 +110,16 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			readPromptRef: (ref) => fs.readFile(path.join(wfDir, ref.slice(1)), "utf8"),
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
 			spawnBranch: this.opts.fleet ? (node, task) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model }) : undefined,
+			initialRollup: this.opts.resumeState?.rollup,
 		});
 		this.engine = new WorkflowEngine(this.wf, this.executor);
 		this.ready = true;
 		this.alive = true;
 		this.emit("ready");
+		if (this.opts.resumeState) {
+			this.runActive = true;
+			void this.execRun(this.opts.resumeState.goal, this.opts.resumeState);
+		}
 	}
 
 	async stop(): Promise<void> {
@@ -183,12 +190,12 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 
 	// ── internals ──────────────────────────────────────────────────────────────
 
-	private async execRun(goal: string): Promise<void> {
+	private async execRun(goal: string, resume?: WorkflowRunState): Promise<void> {
 		this.emit("event", { type: "agent_start" });
 		try {
-			const result = await this.engine!.run(goal);
+			const result = await this.engine!.run(goal, { resume, checkpoint: (c) => this.onCheckpoint(c) });
 			const mark = result.outcome === "succeeded" ? "✓" : "✗";
-			this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `${mark} workflow ${this.wf?.name}: ${result.reason}` } });
+			this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `${mark} workflow ${this.wf?.name}${resume ? " (resumed)" : ""}: ${result.reason}` } });
 			this.emit("event", { type: "message_end" });
 		} catch (err) {
 			if (!(err instanceof WorkflowCancelled)) {
@@ -199,6 +206,11 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			this.runActive = false;
 			this.emit("event", { type: "agent_end" });
 		}
+	}
+
+	/** Forward an engine checkpoint (+ the executor's rollup) so the manager can persist the resumable run position. */
+	private onCheckpoint(c: EngineCheckpoint): void {
+		this.emit("checkpoint", { ...c, rollup: [...(this.executor?.rollup ?? [])] } satisfies WorkflowRunState);
 	}
 
 	private async acquireInner(): Promise<AgentDriver> {
