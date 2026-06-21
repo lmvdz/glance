@@ -26,9 +26,14 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import type { NodeResult, Workflow } from "./workflow/types.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { routeIntake } from "./intake.ts";
+import { Dispatcher } from "./dispatch.ts";
+import { closePlaneIssue, listPlaneIssues, planeRepos } from "./plane.ts";
+import { buildFeatures } from "./features.ts";
 import type {
 	Actor,
+	IssueRef,
 	AgentDTO,
+	FeatureDTO,
 	AgentStatus,
 	CommandInfo,
 	ClientCommand,
@@ -106,6 +111,9 @@ export class SquadManager extends EventEmitter {
 	private readonly stateFile: string;
 	private readonly bin?: string;
 	private pollTimer?: Timer;
+	private dispatcher?: Dispatcher;
+	private closeOnDone = false;
+	private readonly closedIssues = new Set<string>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
 	private idSeq = 0;
@@ -129,11 +137,34 @@ export class SquadManager extends EventEmitter {
 			void this.applyCommand(remote.cmd, remote.actor);
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
+		if (process.env.OMP_SQUAD_AUTODISPATCH) {
+			this.closeOnDone = !!process.env.OMP_SQUAD_AUTOCLOSE;
+			const interval = Number(process.env.OMP_SQUAD_DISPATCH_INTERVAL_MS) || 60_000;
+			const maxActive = Number(process.env.OMP_SQUAD_DISPATCH_MAX) || 3;
+			this.dispatcher = new Dispatcher({
+				repos: planeRepos,
+				listIssues: listPlaneIssues,
+				spawn: (repo, issue) => this.dispatchSpawn(repo, issue),
+				claimed: () => new Set([...this.agents.values()].map((r) => r.dto.issue?.id).filter((x): x is string => !!x)),
+				activeCount: () => [...this.agents.values()].filter((r) => !!r.dto.issue && (r.dto.status === "working" || r.dto.status === "starting" || r.dto.status === "input")).length,
+				log: (m) => this.log("info", `auto-dispatch: ${m}`),
+				maxActive,
+			});
+			this.dispatcher.start(interval);
+			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
+		}
 		await this.reconnectLive();
+	}
+
+	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
+	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
+		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
+		await this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true });
 	}
 
 	async stop(): Promise<void> {
 		clearInterval(this.pollTimer);
+		this.dispatcher?.stop();
 		await this.persist();
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
@@ -227,6 +258,15 @@ export class SquadManager extends EventEmitter {
 			p.lastActivity = Math.max(p.lastActivity, dto.lastActivity);
 		}
 		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity);
+	}
+
+	/** Derived feature view (Phase 1): plan-dir + per-agent features with live land status, per repo. */
+	async features(repo?: string): Promise<FeatureDTO[]> {
+		const list = this.list();
+		const repos = repo !== undefined ? [repo] : [...new Set(list.map((a) => a.repo))];
+		const out: FeatureDTO[] = [];
+		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r))));
+		return out;
 	}
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
@@ -619,12 +659,26 @@ export class SquadManager extends EventEmitter {
 				}
 				rec.streaming = false;
 				rec.dto.activity = undefined;
+				this.maybeCloseIssue(rec);
 				break;
 			}
 		}
 		rec.dto.status = this.derive(rec);
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
+	}
+
+	/** When auto-close is on, mark a dispatched issue done once its agent's run passed a verification gate. */
+	private maybeCloseIssue(rec: AgentRecord): void {
+		const issue = rec.dto.issue;
+		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;
+		const passed = rec.transcript.slice(-6).some((e) => e.kind === "assistant" && e.text.includes("✓ workflow"));
+		if (!passed) return;
+		this.closedIssues.add(issue.id);
+		this.log("info", `auto-dispatch: closing ${issue.identifier ?? issue.id} (verification passed)`);
+		void closePlaneIssue(issue).then((ok) => {
+			if (!ok) this.log("warn", `auto-dispatch: could not close ${issue.identifier ?? issue.id}`);
+		});
 	}
 
 	private onUi(rec: AgentRecord, req: RpcExtensionUIRequest): void {

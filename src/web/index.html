@@ -66,6 +66,24 @@
   .issuelist { display:flex; flex-direction:column; gap:6px; }
   .issuerow { display:flex; align-items:center; gap:8px; padding:6px 8px; border:1px solid var(--line); border-radius:6px; }
   .issuerow .iid { color:var(--dim); font-family:ui-monospace,monospace; font-size:12px; } .issuerow .inm { flex:1; }
+  /* feature board */
+  .bvh { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .board { display:flex; gap:12px; overflow-x:auto; padding-bottom:6px; align-items:flex-start; }
+  .lane { flex:0 0 260px; background:var(--bg); border:1px solid var(--line); border-radius:8px; display:flex; flex-direction:column; max-height:calc(100vh - 220px); }
+  .lane-h { padding:8px 12px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); border-bottom:1px solid var(--line); display:flex; justify-content:space-between; }
+  .lane-n { color:var(--dim); }
+  .lane-body { padding:8px; display:flex; flex-direction:column; gap:8px; overflow-y:auto; }
+  .lane-empty { color:var(--dim); font-size:12px; text-align:center; padding:6px; }
+  .fcard { border:1px solid var(--line); border-radius:8px; padding:8px 10px; cursor:pointer; background:var(--panel); display:flex; flex-direction:column; gap:5px; }
+  .fcard:hover { border-color:var(--accent); } .fcard.div { border-color:var(--err); } .fcard.needs { border-color:var(--input); }
+  .fcard .nm { font-weight:600; } .fcard .meta { font-size:12px; color:var(--mut); }
+  .pills { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+  .pill { font-size:11px; padding:1px 7px; border-radius:999px; border:1px solid var(--line); color:var(--mut); }
+  .pill.attn { border-color:var(--work); color:var(--work); } .pill.bad { border-color:var(--err); color:var(--err); }
+  .b-stage { background:var(--panel2); color:var(--accent); }
+  .landrow { display:flex; align-items:center; gap:10px; padding:5px 0; flex-wrap:wrap; }
+  .landrow .branchmark { font-family:ui-monospace,monospace; }
+  .rd-ahead{color:var(--work)} .rd-uncommitted{color:var(--input)} .rd-diverged{color:var(--err)} .rd-clean,.rd-merged,.rd-no-branch{color:var(--dim)}
   /* agent view */
   .av { display:flex; flex-direction:column; height:100%; min-height:0; }
   .ahead { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; flex-direction:row; align-items:flex-start; justify-content:space-between; gap:12px; }
@@ -140,6 +158,7 @@
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
+  <button id="featBtn" title="Feature board — what's in flight + what needs landing">▦ Features</button>
   <button class="primary" id="addBtn">+ New agent</button>
 </header>
 <main>
@@ -175,6 +194,8 @@ let view = "project";            // "project" | "agent"
 let showChanges = localStorage.getItem("squad.showChanges") === "1";
 let selProject = null;           // repo path
 let selAgent = null;             // agent id
+const features = new Map();       // id -> FeatureDTO
+let selFeature = null;            // feature id
 let spawnCwd = ".";
 let ws = null;
 
@@ -275,10 +296,16 @@ function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCount
 // URL routing: the hash mirrors the view so refresh / deep-link / back-forward all work.
 let routed = false;
 function pushRoute() {
-  const h = view === "agent" && selAgent ? `#/agent/${encodeURIComponent(selAgent)}` : selProject ? `#/project/${encodeURIComponent(selProject)}` : "#/";
+  const h = view === "board" ? "#/board"
+    : view === "feature" && selFeature ? `#/feature/${encodeURIComponent(selFeature)}`
+    : view === "agent" && selAgent ? `#/agent/${encodeURIComponent(selAgent)}`
+    : selProject ? `#/project/${encodeURIComponent(selProject)}` : "#/";
   if (location.hash !== h) history.pushState(null, "", h);
 }
 function applyRoute() {
+  if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
+  const mf = location.hash.match(/^#\/feature\/(.+)$/);
+  if (mf) { selFeature = decodeURIComponent(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
   const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
   if (m && m[1] === "agent") { openAgent(decodeURIComponent(m[2])); return; }
   if (m && m[1] === "project") { selProject = decodeURIComponent(m[2]); selAgent = null; view = "project"; renderAll(); return; }
@@ -320,10 +347,92 @@ function renderCrumb() {
 
 function renderBody() {
   const body = $("#body");
+  if (view === "board") return renderBoard(body);
+  if (view === "feature") return renderFeature(body, features.get(selFeature));
   const p = projects().find(x => x.id === selProject);
   if (!p) return renderHome(body);
   if (view === "agent" && selAgent && agents.has(selAgent)) return renderAgent(body, agents.get(selAgent));
   renderProject(body, p);
+}
+
+// ── Feature board ─────────────────────────────────────────────────────────
+const FSTAGES = ["planned", "issues-created", "in-progress", "review", "diverged", "landed", "done"];
+const FSTAGE_LABEL = { "planned": "Planned", "issues-created": "Issues filed", "in-progress": "In progress", "review": "Review · needs land", "diverged": "Diverged", "landed": "Landed", "done": "Done" };
+let featTimer = null;
+function scheduleFeatures() { if (featTimer) return; featTimer = setTimeout(() => { featTimer = null; loadFeatures(); }, 4000); }
+async function loadFeatures() {
+  try { const r = await fetch("/api/features"); if (r.ok) { const list = await r.json(); features.clear(); for (const f of list) features.set(f.id, f); } } catch {}
+  if (view === "board" || view === "feature") renderBody();
+}
+function openBoard() { view = "board"; selFeature = null; renderAll(); loadFeatures(); }
+function openFeature(id) { selFeature = id; view = "feature"; renderAll(); }
+function featNeedsLand(f) { return f.unlandedFiles > 0 || (f.worktrees || []).some(w => w.readiness === "ahead" || w.readiness === "uncommitted"); }
+
+function renderBoard(body) {
+  const fs = [...features.values()];
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Features</h2><div class="sub">${fs.length} feature${fs.length===1?"":"s"} · in-flight work and what needs landing</div></div><button id="featRefresh" class="navbtn" title="Refresh">↻</button></div>
+    <div class="board" id="board"></div></div>`;
+  const board = $("#board");
+  if (!fs.length) { board.innerHTML = `<div class="nodetail" style="height:auto;padding:30px">No features yet — spawn an agent, or add a plans/&lt;name&gt;/ dir.</div>`; }
+  else {
+    const lanes = FSTAGES.filter(s => fs.some(f => f.stage === s) || s === "in-progress" || s === "review");
+    board.innerHTML = lanes.map(s => {
+      const inLane = fs.filter(f => f.stage === s);
+      const cards = inLane.map(f => {
+        const nl = featNeedsLand(f);
+        return `<div class="fcard${f.divergent?" div":""}${f.blocked?" needs":""}" data-fid="${esc(f.id)}">
+          <div class="r1"><span class="nm">${esc(f.title)}</span></div>
+          <div class="meta">${esc(f.repo.split("/").filter(Boolean).pop()||f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""}</div>
+          <div class="pills">${dots(f.statusCounts||{})}
+            ${nl?`<span class="pill attn" title="not in your main checkout yet — Land to test">⊟ ${f.unlandedFiles||"unlanded"}</span>`:""}
+            ${f.divergent?`<span class="pill bad">⚠ diverged</span>`:""}
+            ${f.blocked?`<span class="pill bad">⛔ input</span>`:""}
+            ${f.issueIdentifiers&&f.issueIdentifiers.length?`<span class="pill">${f.issueIdentifiers.length} issue${f.issueIdentifiers.length>1?"s":""}</span>`:""}</div></div>`;
+      }).join("") || `<div class="lane-empty">—</div>`;
+      return `<div class="lane"><div class="lane-h">${FSTAGE_LABEL[s]||s} <span class="lane-n">${inLane.length}</span></div><div class="lane-body">${cards}</div></div>`;
+    }).join("");
+  }
+  for (const el of board.querySelectorAll("[data-fid]")) el.onclick = () => openFeature(el.dataset.fid);
+  const rf = $("#featRefresh"); if (rf) rf.onclick = loadFeatures;
+}
+
+function renderFeature(body, f) {
+  if (!f) { body.innerHTML = `<div class="nodetail">Loading feature…</div>`; return; }
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>${esc(f.title)}</h2><div class="sub">${esc(f.repo)}${f.planDir?` · ${esc(f.planDir)}`:""} · <span class="badge b-stage">${esc(f.stage)}</span></div></div><button id="featBack" class="navbtn" title="Back to board">← Board</button></div>
+    <div class="section"><h3>Worktrees · Land</h3><div class="inner tree" id="featland"></div></div>
+    <div class="section"><h3>Agents</h3><div class="inner" id="featagents"></div></div></div>`;
+  $("#featBack").onclick = openBoard;
+  const lt = $("#featland");
+  if (!f.worktrees || !f.worktrees.length) lt.innerHTML = `<span style="color:var(--dim)">no worktrees</span>`;
+  else {
+    lt.innerHTML = f.worktrees.map(w => {
+      const canLand = w.readiness === "ahead" || w.readiness === "uncommitted";
+      const note = w.readiness === "diverged" ? "diverged — resolve before landing" : w.readiness === "no-branch" ? "runs in place (no branch)" : "merge this branch into main";
+      return `<div class="landrow"><span class="branchmark">${esc(w.branch||"—")}</span>
+        <span class="meta">↑${w.ahead} ↓${w.behind} · ${w.changedFiles} changed · <b class="rd-${w.readiness}">${w.readiness}</b></span>
+        ${w.agentId?`<button class="sm landbtn" data-aid="${esc(w.agentId)}" ${canLand?"":"disabled"} title="${esc(note)}">⤳ Land</button>`:""}</div>`;
+    }).join("");
+    for (const btn of lt.querySelectorAll(".landbtn")) btn.onclick = () => landFromFeature(btn.dataset.aid, btn);
+  }
+  const fa = $("#featagents");
+  const mem = f.agentIds.map(id => agents.get(id)).filter(Boolean);
+  if (!mem.length) fa.innerHTML = `<span style="color:var(--dim)">no live agents</span>`;
+  else {
+    fa.innerHTML = mem.map(a => `<div class="n" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-${a.status}">${a.status}</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.activity||"—")}</span></div>`).join("");
+    for (const el of fa.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid);
+  }
+}
+
+async function landFromFeature(agentId, btn) {
+  btn.disabled = true; btn.textContent = "Landing…";
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/land`, { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
+    const res = await r.json();
+    toast(res.ok ? `landed: ${res.detail||"merged"}` : `land failed: ${res.detail||r.status}`, res.ok ? "info" : "error");
+  } catch { toast("land failed", "error"); }
+  await loadFeatures();
 }
 
 let homeMsg = "";
@@ -512,6 +621,7 @@ function patchAgentView(a) {
 
 function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
+  if (view === "board" || view === "feature") { renderBody(); scheduleFeatures(); return; }
   if (view === "agent" && selAgent && agents.has(selAgent)) { patchAgentView(agents.get(selAgent)); return; }
   if (view === "project" && selProject) { const p = projects().find(x => x.id === selProject); if (p) { patchProjectView(p); return; } }
   renderBody();
@@ -748,6 +858,7 @@ function toast(text, level) { const el = document.createElement("div"); el.class
 // add modal
 const dlg = $("#addDlg");
 $("#addBtn").onclick = () => { const repo = $("#addForm").repo; if (selProject) repo.value = selProject; dlg.showModal(); };
+$("#featBtn").onclick = openBoard;
 $("#addCancel").onclick = () => dlg.close();
 $("#addForm").onsubmit = (e) => {
   const f = new FormData(e.target); const options = { repo: f.get("repo").trim() };

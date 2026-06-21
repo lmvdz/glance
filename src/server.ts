@@ -77,6 +77,7 @@ export class SquadServer {
 				}
 				if (url.pathname === "/api/agents") return Response.json(manager.list());
 				if (url.pathname === "/api/projects") return Response.json(manager.projects());
+				if (url.pathname === "/api/features") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
 				if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 				if (url.pathname === "/api/health") return Response.json({ ok: true, agents: manager.list().length, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()) });
 				if (url.pathname === "/api/presence") {

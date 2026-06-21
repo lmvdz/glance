@@ -76,6 +76,54 @@ export interface ProjectDTO {
 	lastActivity: number;
 }
 
+/** Lifecycle stage of a feature — derived from observable evidence (plan dir, agents, land status). */
+export type FeatureStage = "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
+
+/** Per-branch land readiness — the heart of the "needs Land to test" / "can't cleanly land" signal. */
+export type LandReadiness = "clean" | "uncommitted" | "ahead" | "diverged" | "merged" | "no-branch";
+
+/** Live land status of one member worktree/branch vs. main. */
+export interface FeatureWorktreeStatus {
+	agentId?: string;
+	agentName?: string;
+	branch?: string;
+	worktree: string;
+	/** Unlanded changed files in the worktree (same count as /api/agents/:id/diff). */
+	changedFiles: number;
+	/** Commits on the branch not in main. */
+	ahead: number;
+	/** Commits on main not in the branch (divergence signal). */
+	behind: number;
+	readiness: LandReadiness;
+}
+
+/**
+ * A Feature — a cross-cutting unit of work spanning a plan dir and/or a set of agents/worktrees.
+ * Phase 1: fully DERIVED at read time (no persistence) from plan dirs + the roster + live git.
+ */
+export interface FeatureDTO {
+	/** Stable derived id: `plan:<repo>:<dir>` or `agent:<agentId>`. */
+	id: string;
+	title: string;
+	repo: string;
+	stage: FeatureStage;
+	/** Repo-relative plan dir this feature originated from, if any. */
+	planDir?: string;
+	/** Roster agent ids that belong to this feature. */
+	agentIds: string[];
+	/** Per-branch land status for member worktrees. */
+	worktrees: FeatureWorktreeStatus[];
+	/** Σ changedFiles across member worktrees — the board's amber "unlanded" number. */
+	unlandedFiles: number;
+	/** Any member worktree readiness === "diverged". */
+	divergent: boolean;
+	/** Any member agent is waiting on human input. */
+	blocked: boolean;
+	statusCounts: Partial<Record<AgentStatus, number>>;
+	/** Plane issue identifiers referenced by this feature's plan concerns, if any. */
+	issueIdentifiers?: string[];
+}
+
 /** Serializable per-agent snapshot sent to surfaces. */
 export interface AgentDTO {
 	id: string;
