@@ -15,6 +15,24 @@ export interface LandResult {
 	detail?: string;
 }
 
+/** Inputs to land one agent's worktree. */
+export interface LandOpts {
+	repo: string;
+	worktree: string;
+	branch?: string;
+	message: string;
+	commitWip: boolean;
+}
+
+/**
+ * Per-repo land serialization. Two lands racing the same main checkout interleave
+ * `git merge` and corrupt the index; chaining them also makes each land re-read
+ * HEAD when it runs, so it sees the commits prior lands just merged.
+ * ponytail: in-process map — one squad daemon owns a checkout. Add a file lock if
+ * lands ever race across processes/hosts.
+ */
+const repoLands = new Map<string, Promise<unknown>>();
+
 interface GitRun {
 	code: number;
 	stdout: string;
@@ -31,7 +49,14 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-export async function landAgent(opts: { repo: string; worktree: string; branch?: string; message: string; commitWip: boolean }): Promise<LandResult> {
+export function landAgent(opts: LandOpts): Promise<LandResult> {
+	const prev = repoLands.get(opts.repo) ?? Promise.resolve();
+	const run = prev.catch(() => {}).then(() => landAgentLocked(opts));
+	repoLands.set(opts.repo, run.catch(() => {}));
+	return run;
+}
+
+async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	const { repo, worktree, branch, message, commitWip } = opts;
 
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe

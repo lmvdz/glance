@@ -172,8 +172,12 @@ export class SquadServer {
 					if (prompt.length === 0) return new Response("empty prompt", { status: 400 });
 					const tracked = manager.projects().map((p) => p.repo);
 					const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
-					const dto = await manager.create(plan);
-					return Response.json({ agent: dto, plan });
+					try {
+						const dto = await manager.create(plan);
+						return Response.json({ agent: dto, plan });
+					} catch (err) {
+						return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
+					}
 				}
 				const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 				if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
