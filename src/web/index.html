@@ -157,6 +157,7 @@
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
+  <button id="waitingBtn" class="toggle attn" style="display:none" title="Everything waiting on you — open the attention queue">⛔ waiting</button>
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
   <button id="featBtn" title="Feature board — what's in flight + what needs landing">▦ Features</button>
   <button class="primary" id="addBtn">+ New agent</button>
@@ -297,7 +298,8 @@ function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCount
 // URL routing: the hash mirrors the view so refresh / deep-link / back-forward all work.
 let routed = false;
 function pushRoute() {
-  const h = view === "board" ? "#/board"
+  const h = view === "queue" ? "#/queue"
+    : view === "board" ? "#/board"
     : view === "feature" && selFeature ? `#/feature/${encodeURIComponent(selFeature)}`
     : view === "agent" && selAgent ? `#/agent/${encodeURIComponent(selAgent)}`
     : selProject ? `#/project/${encodeURIComponent(selProject)}` : "#/";
@@ -305,6 +307,7 @@ function pushRoute() {
 }
 function applyRoute() {
   if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
+  if (location.hash === "#/queue") { view = "queue"; selAgent = null; renderAll(); return; }
   const mf = location.hash.match(/^#\/feature\/(.+)$/);
   if (mf) { selFeature = decodeURIComponent(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
   const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
@@ -316,8 +319,10 @@ window.addEventListener("hashchange", applyRoute);
 window.addEventListener("popstate", applyRoute);
 
 function renderCounts() {
-  const all = [...agents.values()]; const need = all.filter(a => a.status === "input").length;
-  $("#counts").textContent = `${projects().length} projects · ${all.length} agents` + (need ? ` · ${need} need input` : "");
+  const all = [...agents.values()]; const need = waitingAgents().length;
+  $("#counts").textContent = `${projects().length} projects · ${all.length} agents`;
+  const wb = $("#waitingBtn");
+  if (wb) { wb.style.display = need ? "" : "none"; wb.textContent = `⛔ ${need} waiting`; }
 }
 
 function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="d ${s}" title="${counts[s]} ${s}"></span>`).join("")}</span>`; }
@@ -349,11 +354,50 @@ function renderCrumb() {
 function renderBody() {
   const body = $("#body");
   if (view === "board") return renderBoard(body);
+  if (view === "queue") return renderQueue(body);
   if (view === "feature") return renderFeature(body, features.get(selFeature));
   const p = projects().find(x => x.id === selProject);
   if (!p) return renderHome(body);
   if (view === "agent" && selAgent && agents.has(selAgent)) return renderAgent(body, agents.get(selAgent));
   renderProject(body, p);
+}
+
+// ── Attention queue ─────────────────────────────────────────────────────────
+// Fold every pending request across the whole roster into one supervise-by-exception
+// surface, oldest-waiting first. Pure read over data already broadcast (pending[]).
+function waitingAgents() {
+  const reqs = [];
+  for (const a of agents.values()) for (const p of (a.pending || [])) reqs.push({ agent: a, req: p });
+  return reqs.sort((x, y) => x.agent.lastActivity - y.agent.lastActivity);
+}
+function erroredAgents() { return [...agents.values()].filter(a => a.status === "error").sort((x, y) => x.lastActivity - y.lastActivity); }
+function openQueue() { view = "queue"; selAgent = null; renderAll(); }
+
+// Wire one rendered preq() node to the answer channel. Shared by the queue + renderPending.
+function wireReq(node, agentId, p) {
+  if (p.kind === "confirm") { node.querySelector(".yes").onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:"yes" }); node.querySelector(".no").onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:"no" }); }
+  else if (p.kind === "select") node.querySelectorAll("button[data-opt]").forEach(b => b.onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:b.dataset.opt }));
+  else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({ type:"answer", id:agentId, requestId:p.id, value:i.value }); }
+}
+
+function renderQueue(body) {
+  const reqs = waitingAgents(); const errs = erroredAgents();
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Attention queue</h2><div class="sub">${reqs.length} request${reqs.length===1?"":"s"} waiting${errs.length?` · ${errs.length} errored`:""} — answer in place, oldest first</div></div><button id="qHome" class="navbtn" title="Back">← Back</button></div>
+    <div class="section"><h3>Needs your input</h3><div class="inner" id="qreqs"></div></div>
+    ${errs.length?`<div class="section"><h3>Errored agents</h3><div class="inner" id="qerrs"></div></div>`:""}</div>`;
+  $("#qHome").onclick = () => { view = "project"; renderAll(); };
+  const box = $("#qreqs");
+  if (!reqs.length) box.innerHTML = `<span style="color:var(--dim)">Nothing waiting — all caught up.</span>`;
+  else {
+    box.innerHTML = reqs.map(({ agent:a, req:p }) => `<div style="margin-bottom:14px">
+      <div style="margin-bottom:4px"><span class="badge b-${a.status}">${esc(a.status)}</span> <strong>${esc(a.name)}</strong> <span style="color:var(--dim)">${esc(a.repo.split("/").filter(Boolean).pop()||a.repo)}</span> <a class="qopen" data-aid="${esc(a.id)}" style="color:var(--accent);cursor:pointer">open agent →</a></div>
+      ${preq(p)}</div>`).join("");
+    for (const { agent:a, req:p } of reqs) { const node = box.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (node) wireReq(node, a.id, p); }
+    for (const el of box.querySelectorAll(".qopen")) el.onclick = () => openAgent(el.dataset.aid);
+  }
+  const eb = $("#qerrs");
+  if (eb) { eb.innerHTML = errs.map(a => `<div class="subnode" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-error">error</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.error||"")}</span></div>`).join(""); for (const el of eb.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid); }
 }
 
 // ── Feature board ─────────────────────────────────────────────────────────
@@ -725,6 +769,7 @@ function patchAgentView(a) {
 
 function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
+  if (view === "queue") { renderBody(); return; }
   if (view === "board" || view === "feature") { renderBody(); scheduleFeatures(); return; }
   if (view === "agent" && selAgent && agents.has(selAgent)) { patchAgentView(agents.get(selAgent)); return; }
   if (view === "project" && selProject) { const p = projects().find(x => x.id === selProject); if (p) { patchProjectView(p); return; } }
@@ -826,12 +871,7 @@ function renderPending(a) {
   const wrap = $("#pendingWrap"); if (!wrap) return;
   if (!a.pending || !a.pending.length) { wrap.innerHTML = ""; return; }
   wrap.innerHTML = `<div class="pending"><h3>Needs your input</h3>${a.pending.map(preq).join("")}</div>`;
-  for (const p of a.pending) {
-    const node = wrap.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (!node) continue;
-    if (p.kind === "confirm") { node.querySelector(".yes").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:"yes"}); node.querySelector(".no").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:"no"}); }
-    else if (p.kind === "select") node.querySelectorAll("button[data-opt]").forEach(b => b.onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:b.dataset.opt}));
-    else { const i = node.querySelector("input"); node.querySelector(".submit").onclick = () => send({type:"answer",id:a.id,requestId:p.id,value:i.value}); }
-  }
+  for (const p of a.pending) { const node = wrap.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (node) wireReq(node, a.id, p); }
 }
 function preq(p) {
   let ctl = p.kind==="confirm" ? `<div class="ctl"><button class="yes primary">Yes</button><button class="no">No</button></div>`
@@ -963,6 +1003,7 @@ function toast(text, level) { const el = document.createElement("div"); el.class
 const dlg = $("#addDlg");
 $("#addBtn").onclick = () => { const repo = $("#addForm").repo; if (selProject) repo.value = selProject; dlg.showModal(); };
 $("#featBtn").onclick = openBoard;
+$("#waitingBtn").onclick = openQueue;
 $("#addCancel").onclick = () => dlg.close();
 $("#addForm").onsubmit = (e) => {
   const f = new FormData(e.target); const options = { repo: f.get("repo").trim() };
