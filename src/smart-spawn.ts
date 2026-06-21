@@ -125,7 +125,7 @@ const SYSTEM_PROMPT =
 	'"repo" (absolute path; MUST be exactly one of the candidate paths — pick the best fit for the task, else the first), ' +
 	'"name" (short kebab-case, 2-4 words, describing the task), ' +
 	'"model" (optional: "opus" for hard/architectural work, omit otherwise), ' +
-	'"approval" ("write" by default; "yolo" only if the task clearly wants no confirmation), ' +
+	'"approval" ("yolo" by default — squad agents run in isolated git worktrees, so auto-approve; use "write" or "always-ask" only if the task is risky and explicitly wants confirmation), ' +
 	'"thinking" ("low" default; "high" for complex reasoning; "minimal" for trivial), ' +
 	'"reason" (<=12 words explaining the repo+name choice).';
 
@@ -155,8 +155,8 @@ export async function planSpawn(prompt: string, opts: { cwd: string; candidates:
 
 	const plan: SpawnPlan = { repo, name: raw?.name ? slug(raw.name) : slug(prompt), task: prompt };
 	if (raw?.model !== undefined) plan.model = raw.model;
-	const approval = asApproval(raw?.approval);
-	if (approval !== undefined) plan.approvalMode = approval;
+	// Default to yolo: squad agents work in isolated worktrees and are reviewed via diff before Land, so prompting for every tool just gets in the way.
+	plan.approvalMode = asApproval(raw?.approval) ?? "yolo";
 	const thinking = asThinking(raw?.thinking);
 	if (thinking !== undefined) plan.thinking = thinking;
 	if (raw?.reason !== undefined) plan.reason = raw.reason;
