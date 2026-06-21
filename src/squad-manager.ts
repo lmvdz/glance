@@ -27,12 +27,13 @@ import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
-import { closePlaneIssue, listPlaneIssues, planeRepos } from "./plane.ts";
+import { closePlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent } from "./land.ts";
 import type {
 	Actor,
 	IssueRef,
+	PlaneTicket,
 	AgentDTO,
 	FeatureDTO,
 	PersistedFeature,
@@ -334,6 +335,35 @@ export class SquadManager extends EventEmitter {
 		this.emitAgent(rec);
 		this.emitFeaturesChanged();
 		return true;
+	}
+
+	/** Resolve a feature's associated Plane tickets (status + deep link) for display. */
+	async featurePlaneTickets(id: string): Promise<{ tickets: PlaneTicket[] | null; moduleUrl?: string }> {
+		const pf = this.featureStore.get(id);
+		let idents = pf?.plane?.issueIdentifiers ?? [];
+		let repo = pf?.repo;
+		if (!idents.length) {
+			// derived feature (identifiers live in plan docs) — fall back to the full build
+			const f = (await this.features()).find((x) => x.id === id);
+			idents = f?.issueIdentifiers ?? [];
+			repo = f?.repo ?? repo;
+		}
+		const tickets = idents.length && repo ? await featureTickets(repo, idents) : [];
+		return { tickets, moduleUrl: pf?.plane?.moduleUrl };
+	}
+
+	/** Create a Plane module for a feature and group its issues under it; persists the link. */
+	async createFeatureModule(id: string): Promise<{ moduleUrl: string } | null> {
+		const pf = this.featureStore.get(id);
+		if (!pf) return null;
+		const f = (await this.features(pf.repo)).find((x) => x.id === id);
+		const idents = f?.issueIdentifiers ?? pf.plane?.issueIdentifiers ?? [];
+		const mod = await ensureFeatureModule(pf.repo, pf.title, idents);
+		if (!mod) return null;
+		pf.plane = { ...(pf.plane ?? {}), moduleId: mod.moduleId, moduleUrl: mod.moduleUrl, issueIdentifiers: idents };
+		pf.updatedAt = Date.now();
+		this.emitFeaturesChanged();
+		return { moduleUrl: mod.moduleUrl };
 	}
 
 	/** Cache the current member branches so land status survives an agent being killed. */

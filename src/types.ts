@@ -65,6 +65,16 @@ export interface IssueRef {
 	projectId?: string;
 }
 
+/** A feature's associated Plane issue, resolved for display: status group + deep link. */
+export interface PlaneTicket {
+	identifier: string;
+	name: string;
+	/** Plane state group: backlog | unstarted | started | completed | cancelled | unknown. */
+	status: string;
+	/** Deep link into the Plane web app. */
+	url: string;
+}
+
 /** A project / workstream — the top level of the command center. Derived from agents' repos. */
 export interface ProjectDTO {
 	/** Stable id = repo root path. */
