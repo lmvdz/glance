@@ -341,7 +341,9 @@ export class SquadManager extends EventEmitter {
 		if (!force && wts.some((w) => w.readiness === "diverged")) return { ok: false, stopped: "a branch is diverged — resolve it (or force)", results: [] };
 		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] = [];
 		for (const w of landOrder(wts)) {
-			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}` });
+			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
+			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
+			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			if (!res.ok) { this.emitFeaturesChanged(); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
 		}

@@ -189,7 +189,8 @@ export class SquadServer {
 					if (body && typeof body === "object" && "message" in body && typeof body.message === "string" && body.message.trim()) {
 						message = body.message.trim();
 					}
-					const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message });
+					const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
+					const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message, commitWip: !busy });
 					return Response.json(result);
 				}
 				if (url.pathname === "/api/plane/issues") {

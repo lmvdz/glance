@@ -31,19 +31,22 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-export async function landAgent(opts: { repo: string; worktree: string; branch?: string; message: string }): Promise<LandResult> {
-	const { repo, worktree, branch, message } = opts;
+export async function landAgent(opts: { repo: string; worktree: string; branch?: string; message: string; commitWip: boolean }): Promise<LandResult> {
+	const { repo, worktree, branch, message, commitWip } = opts;
 
-	const status = await git(["status", "--porcelain"], worktree);
-	const hasChanges = status.code === 0 && status.stdout.length > 0;
-
+	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe
+	// (agent idle/stopped). For a LIVE agent (working/starting/input) commitWip is false: we merge
+	// only its committed history and never touch its in-progress edits.
 	let committed = false;
-	if (hasChanges) {
-		const add = await git(["add", "-A"], worktree);
-		if (add.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git add failed: ${add.stderr}` };
-		const commit = await git(["commit", "-m", message], worktree);
-		if (commit.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git commit failed: ${commit.stderr || commit.stdout}` };
-		committed = true;
+	if (commitWip) {
+		const status = await git(["status", "--porcelain"], worktree);
+		if (status.code === 0 && status.stdout.length > 0) {
+			const add = await git(["add", "-A"], worktree);
+			if (add.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git add failed: ${add.stderr}` };
+			const commit = await git(["commit", "-m", message], worktree);
+			if (commit.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git commit failed: ${commit.stderr || commit.stdout}` };
+			committed = true;
+		}
 	}
 
 	// In-place agent (no separate branch / worktree === repo): nothing to merge.
@@ -60,7 +63,7 @@ export async function landAgent(opts: { repo: string; worktree: string; branch?:
 	// Nothing committed and the branch has no commits ahead → nothing to land.
 	const ahead = await git(["rev-list", "--count", `HEAD..${branch}`], repo);
 	if (!committed && ahead.code === 0 && ahead.stdout === "0") {
-		return { ok: true, committed: false, merged: false, message, detail: "no changes to land" };
+		return { ok: true, committed: false, merged: false, message, detail: commitWip ? "no changes to land" : "no committed changes to land (agent still working — uncommitted edits left untouched)" };
 	}
 
 	const ff = await git(["merge", "--ff-only", branch], repo);
