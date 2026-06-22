@@ -6,7 +6,7 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
-import { createPlaneIssue, parseBlockedBy, planeConfigured, startPlaneIssue } from "../src/plane.ts";
+import { createPlaneIssue, listPlaneIssues, parseBlockedBy, planeConfigured, startPlaneIssue } from "../src/plane.ts";
 
 const PLANE_ENV = ["PLANE_API_KEY", "PLANE_API_TOKEN", "PLANE_WORKSPACE", "PLANE_WORKSPACE_SLUG", "PLANE_PROJECT_MAP", "PLANE_BASE_URL", "PLANE_PROJECT_ID", "PLANE_APP_URL"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -162,4 +162,29 @@ test("parseBlockedBy tolerates missing / odd shapes", () => {
 	expect(parseBlockedBy({ blocked_by: ["ok", 42, null] })).toEqual(["ok"]); // drops non-strings
 	expect(parseBlockedBy(null)).toEqual([]);
 	expect(parseBlockedBy("garbage")).toEqual([]);
+});
+
+test("listPlaneIssues builds identifier from the project prefix (list endpoint omits project_detail)", async () => {
+	const server = Bun.serve({
+		port: 0,
+		fetch: (req) => {
+			const p = new URL(req.url).pathname;
+			if (p.endsWith("/relations/")) return Response.json({ blocked_by: [], blocking: [], relates_to: [] });
+			if (p.endsWith("/issues/")) return Response.json({ results: [{ id: "u-35", sequence_id: 35, name: "DB foundation", state: "s1" }] });
+			if (p.endsWith("/states/")) return Response.json({ results: [{ id: "s1", group: "backlog" }] });
+			if (p.endsWith("/projects/proj-9/")) return Response.json({ identifier: "OMPSQ" });
+			return new Response("no", { status: 404 });
+		},
+	});
+	try {
+		process.env.PLANE_API_KEY = "secret";
+		process.env.PLANE_WORKSPACE = "acme";
+		process.env.PLANE_BASE_URL = `http://127.0.0.1:${server.port}`;
+		process.env.PLANE_PROJECT_MAP = JSON.stringify({ "/repo": "proj-9" });
+		const issues = await listPlaneIssues("/repo");
+		expect(issues?.length).toBe(1);
+		expect(issues?.[0]?.identifier).toBe("OMPSQ-35"); // prefix + sequence_id, despite no project_detail
+	} finally {
+		server.stop(true);
+	}
 });

@@ -85,8 +85,8 @@ interface PlaneIssue {
 	project_detail?: { identifier?: string };
 }
 
-function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string): IssueRef {
-	const ident = raw.project_detail?.identifier;
+function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string, prefix?: string): IssueRef {
+	const ident = raw.project_detail?.identifier ?? prefix;
 	return {
 		id: raw.id,
 		identifier: ident && raw.sequence_id != null ? `${ident}-${raw.sequence_id}` : undefined,
@@ -109,10 +109,12 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 	const items = Array.isArray(data) ? data : (data?.results ?? []);
 	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so the
 	// completed/cancelled filter actually works (else finished issues get auto-dispatched).
-	const groups = await fetchStateGroups(base, headers);
+	// The list endpoint omits project_detail, so fetch the project's identifier prefix to build human ids
+	// (e.g. OMPSQ-35) — without it dispatched agents fall back to agent-N and collide on names.
+	const [groups, prefix] = await Promise.all([fetchStateGroups(base, headers), projectPrefix(base, headers)]);
 	const open = items
 		.map((raw) => {
-			const ref = toIssueRef(raw, cfg, projectId);
+			const ref = toIssueRef(raw, cfg, projectId, prefix);
 			const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
 			if (group) ref.state = group;
 			return ref;
