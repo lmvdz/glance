@@ -66,6 +66,7 @@ import type {
 	TranscriptKind,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
+import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
 import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
 import { changedFiles } from "./explore.ts";
@@ -196,9 +197,12 @@ export class SquadManager extends EventEmitter {
 		await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
-			// Phase 2 authorization (delegation / availability policy) hooks in here,
-			// before the command reaches a live agent. v1's NullFederationBus never fires this.
-			void this.applyCommand(remote.cmd, remote.actor);
+			// RBAC authorization happens inside applyCommand against remote.actor's tier (a role-less
+			// peer is read-only). NullFederationBus never fires this; a denied command is logged there,
+			// so swallow the rejection here rather than crash the bus listener.
+			void this.applyCommand(remote.cmd, remote.actor).catch((err) => {
+				if (!(err instanceof RbacDenied)) this.log("error", `remote command failed: ${err instanceof Error ? err.message : String(err)}`);
+			});
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
 		if (process.env.OMP_SQUAD_AUTODISPATCH !== "0" && planeRepos().length > 0) {
@@ -881,6 +885,14 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async applyCommand(cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): Promise<void> {
+		// RBAC chokepoint: every surface (TUI, web, REST, future federation peers) routes through
+		// here, so the tier check lives here too — nothing can mutate state below its granted tier.
+		const need = commandRole(cmd);
+		const have = effectiveRole(actor);
+		if (!roleAtLeast(have, need)) {
+			this.log("warn", `rbac: ${actor.id} (${have}) denied "${cmd.type}" — needs ${need}`);
+			throw new RbacDenied(need, have, cmd.type);
+		}
 		if (cmd.type === "create") {
 			await this.create(cmd.options);
 			return;

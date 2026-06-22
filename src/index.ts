@@ -173,7 +173,8 @@ async function cmdUp(args: string[]): Promise<void> {
 	const token = await loadOrCreateToken(stateDir);
 	const push = new PushService(stateDir);
 	await push.init();
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push });
+	const roleTokens = { operator: process.env.OMP_SQUAD_OPERATOR_TOKEN || undefined, viewer: process.env.OMP_SQUAD_VIEWER_TOKEN || undefined };
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
