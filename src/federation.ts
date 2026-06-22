@@ -138,6 +138,69 @@ export function detectCollisions(presences: OperatorPresence[]): Collision[] {
 	return collisions;
 }
 
+/** TTL after which a peer that stopped gossiping presence drops off the roster-of-rosters. Matches the presence registry's 90s. */
+export const PEER_PRESENCE_TTL_MS = 90_000;
+
+/** The roster-of-rosters surfaced to a local command center: every operator's roster merged, with cross-operator branch collisions flagged. */
+export interface FederationView {
+	/** self (pinned head) + peers, deduped by operator id. */
+	operators: OperatorPresence[];
+	/** repos where agents owned by DIFFERENT operators share a branch. */
+	collisions: Collision[];
+}
+
+/** One host's federation snapshot for the `/api/federation` surface — the view plus the configured coordinator (null = federation off, panel stays hidden). */
+export interface FederationSnapshot extends FederationView {
+	coordinator: string | null;
+}
+
+/**
+ * Compose the two cross-operator primitives into the surface the UI/API wants:
+ * merge self + peer rosters, then flag the branches different operators share.
+ * ponytail: collisions key on `agent.repo` (a host-local path) via detectCollisions,
+ * so cross-host collisions only fire when two hosts use the same checkout path;
+ * full cross-host detection waits on a normalized `repoId` on AgentDTO (see docs/federation.md).
+ */
+export function federationView(self: OperatorPresence, peers: OperatorPresence[]): FederationView {
+	const operators = mergeRosters(self, peers);
+	return { operators, collisions: detectCollisions(operators) };
+}
+
+/**
+ * Pure collector of peer operator presence: keeps the newest frame per remote
+ * operator, drops our own echo (peers only), and prunes a peer once it stops
+ * gossiping past the TTL. Origin is remapped to "remote" — from this host's
+ * vantage every gossiped peer is a federation peer, whatever it labels itself.
+ */
+export class PeerRoster {
+	private readonly peers = new Map<string, OperatorPresence>();
+	constructor(
+		private readonly selfId: string,
+		private readonly ttlMs = PEER_PRESENCE_TTL_MS,
+	) {}
+
+	/** Record a presence frame from the coordinator; ignores our own echo, newest-per-operator wins. */
+	record(presence: OperatorPresence): void {
+		if (presence.operator.id === this.selfId) return;
+		const prev = this.peers.get(presence.operator.id);
+		if (prev !== undefined && presence.updatedAt < prev.updatedAt) return;
+		this.peers.set(presence.operator.id, { ...presence, operator: { ...presence.operator, origin: "remote" } });
+	}
+
+	/** Live peer rosters; prunes (and forgets) any peer past the TTL. */
+	live(now = Date.now()): OperatorPresence[] {
+		const out: OperatorPresence[] = [];
+		for (const [id, p] of this.peers) {
+			if (now - p.updatedAt > this.ttlMs) {
+				this.peers.delete(id);
+				continue;
+			}
+			out.push(p);
+		}
+		return out;
+	}
+}
+
 // ── Tailnet transport ────────────────────────────────────────────────────────
 
 const INITIAL_BACKOFF_MS = 500;
@@ -341,5 +404,38 @@ export class TailnetFederationBus implements FederationBus {
 		if (frame.ip === undefined) return frame.actor;
 		const verified = await this.whois(frame.ip).catch(() => undefined);
 		return verified ?? frame.actor;
+	}
+}
+
+/**
+ * Listener-only peer-presence feed for a local surface (the command center).
+ * Wraps a {@link TailnetFederationBus} purely to RECEIVE presence frames — it
+ * never publishes — collecting them into a {@link PeerRoster}. Best-effort: with
+ * no reachable coordinator it stays empty and never throws (the bus reconnects
+ * on backoff). The daemon's own bus already gossips this host's presence;
+ * ponytail: this is a second, read-only connection because the manager doesn't
+ * yet expose its peer-presence stream — collapse the two once it does.
+ */
+export class PeerPresenceTracker {
+	private readonly bus: TailnetFederationBus;
+	readonly roster: PeerRoster;
+
+	constructor(opts: { coordinatorUrl: string; operator: Actor; ttlMs?: number }) {
+		this.roster = new PeerRoster(opts.operator.id, opts.ttlMs);
+		this.bus = new TailnetFederationBus({ coordinatorUrl: opts.coordinatorUrl, operator: opts.operator });
+		this.bus.onPresence((p) => this.roster.record(p));
+	}
+
+	async start(): Promise<void> {
+		await this.bus.start();
+	}
+
+	async stop(): Promise<void> {
+		await this.bus.stop();
+	}
+
+	/** Live peer rosters (stale peers pruned). */
+	live(now?: number): OperatorPresence[] {
+		return this.roster.live(now);
 	}
 }

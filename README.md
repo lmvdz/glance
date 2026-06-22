@@ -200,6 +200,12 @@ so work starts with nobody typing. Bounded so a backlog can't storm:
 `OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
 (or your OS username) via `TailnetFederationBus`; unset → single-operator with `NullFederationBus`.
 
+When a coordinator is set, the command center surfaces who else is on the tailnet: a
+**Federation** panel (in each project view) lists peer operators, their live agents, and any
+**shared-branch collisions** — repos where agents owned by different operators sit on the same
+branch. It's backed by `GET /api/federation` (`{ coordinator, operators, collisions }`, bearer-gated).
+With no coordinator the panel stays hidden and the endpoint returns just your own roster.
+
 ## Remote access & mobile
 
 The dashboard is a PWA you can install on your phone and drive from anywhere — and it
