@@ -456,6 +456,9 @@ export type ClientCommand =
 /** Availability of a human operator, used for delegation / away-mode auto-grant. */
 export type Availability = "active" | "away" | "offline";
 
+/** RBAC capability tier. Ascending: `viewer` ⊂ `operator` ⊂ `admin`. */
+export type Role = "viewer" | "operator" | "admin";
+
 /** Verified actor that issued a command (identity from the federation transport). */
 export interface Actor {
 	/** Stable id, e.g. tailnet login "bob@company.com" or "local". */
@@ -463,6 +466,9 @@ export interface Actor {
 	displayName?: string;
 	/** "local" for same-machine surfaces, "remote" for federation peers. */
 	origin: "local" | "remote";
+	/** RBAC tier this actor holds. Absent ⇒ derived from origin: a local surface is
+	 *  trusted (admin), a remote peer is read-only (viewer) until a transport stamps a role. */
+	role?: Role;
 }
 
 /** One operator's published state in a team room. */

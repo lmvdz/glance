@@ -27,9 +27,9 @@ import { leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
-import { requestToken, tokenOk } from "./auth.ts";
+import { actorForRole, type AuthPolicy, RbacDenied, requiredRole, resolveRole, roleAtLeast } from "./auth.ts";
 import type { PushPayload, PushService } from "./push.ts";
-import type { Actor, AgentDTO, AgentStatus, OperatorPresence } from "./types.ts";
+import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role } from "./types.ts";
 import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./federation.ts";
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
@@ -46,12 +46,15 @@ const PUBLIC_ASSETS: Record<string, string> = {
 
 interface SocketData {
 	id: number;
+	/** RBAC tier granted by the token presented at the WS handshake; gates inbound commands. */
+	role: Role;
 }
 
 export interface SquadServerOptions {
 	port?: number;
 	hostname?: string;
-	/** Bearer secret required on every /api request + the WS handshake. Omit to disable auth (loopback unit tests). */
+	/** Bearer secret for the `admin` tier — full access, including `/api/upgrade`. Required on every
+	 *  /api request + the WS handshake. Omit (and omit `roleTokens`) to disable auth (loopback unit tests). */
 	token?: string;
 	/** Terminate TLS in-process (paths to PEM files). Omit to serve plain HTTP (e.g. behind `tailscale serve`). */
 	tls?: { cert: string; key: string };
@@ -59,6 +62,9 @@ export interface SquadServerOptions {
 	push?: PushService;
 	/** This host's operator identity, for labelling the local roster in the federation view. Defaults to OMP_SQUAD_OPERATOR / OS user. */
 	operator?: Actor;
+	/** Optional lower-tier tokens. `operator` grants every mutation except daemon upgrade; `viewer`
+	 *  grants reads + transcript subscription only. Unset tiers are simply unavailable. */
+	roleTokens?: { operator?: string; viewer?: string };
 	/** Coordinator URL to listen on for peer presence. Defaults to OMP_SQUAD_COORDINATOR; unset ⇒ federation surface stays inert. */
 	coordinator?: string;
 }
@@ -118,6 +124,8 @@ export class SquadServer {
 	private readonly coordinator: string | null;
 	/** Listener-only peer-presence feed; created on start() only when a coordinator is configured. */
 	private peerPresence?: PeerPresenceTracker;
+	/** Token → tier map gating every /api request + WS command. Empty ⇒ auth off (loopback test mode). */
+	private readonly authPolicy: AuthPolicy;
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
@@ -126,6 +134,7 @@ export class SquadServer {
 		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
 		this.operator = opts.operator ?? { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 		this.coordinator = opts.coordinator ?? process.env.OMP_SQUAD_COORDINATOR ?? null;
+		this.authPolicy = { admin: opts.token, operator: opts.roleTokens?.operator, viewer: opts.roleTokens?.viewer };
 	}
 
 	get url(): string {
@@ -175,8 +184,10 @@ export class SquadServer {
 						}
 						return;
 					}
-					// All surfaces today are local; federation peers carry their own actor.
-					void manager.applyCommand(cmd);
+					// Carry the socket's granted tier; applyCommand denies a command above it (logged there).
+					void manager.applyCommand(cmd, actorForRole(ws.data.role)).catch((err) => {
+						if (!(err instanceof RbacDenied)) throw err;
+					});
 				},
 			},
 		});
@@ -198,8 +209,11 @@ export class SquadServer {
 		const indexFile = Bun.file(INDEX_HTML);
 		const url = new URL(req.url);
 		if (url.pathname === "/ws") {
-			if (this.opts.token && !tokenOk(requestToken(req), this.opts.token)) return new Response("unauthorized", { status: 401 });
-			if (server.upgrade(req, { data: { id: ++this.sockSeq }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } })) return undefined;
+			// The handshake only authenticates; per-command tier checks happen in applyCommand,
+			// so a viewer may connect to read the roster + subscribe to transcripts.
+			const role = resolveRole(req, this.authPolicy);
+			if (role === null) return new Response("unauthorized", { status: 401 });
+			if (server.upgrade(req, { data: { id: ++this.sockSeq, role }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } })) return undefined;
 			return new Response("websocket upgrade failed", { status: 426 });
 		}
 		if (url.pathname === "/" || url.pathname === "/index.html") {
@@ -210,7 +224,9 @@ export class SquadServer {
 		// Auth gate. Public bootstrap surface (the SPA shell, plus the manifest / service
 		// worker / icons added just above this in the static block) loads without a token so
 		// the PWA can install and prompt for it; everything under /api requires the token.
-		if (this.opts.token && !tokenOk(requestToken(req), this.opts.token)) return new Response("unauthorized", { status: 401 });
+		const role = resolveRole(req, this.authPolicy);
+		if (role === null) return new Response("unauthorized", { status: 401 });
+		if (!roleAtLeast(role, requiredRole(req.method, url.pathname))) return new Response("forbidden", { status: 403 });
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
 		if (url.pathname === "/api/push/subscribe" && req.method === "POST") {
@@ -419,10 +435,10 @@ export class SquadServer {
 				return Response.json(dto);
 			}
 			if (cmd.type === "commission") {
-				const result = await manager.commission(cmd.spec, { install: true });
+				const result = await manager.commission(cmd.spec, { install: true }, actorForRole(role));
 				return Response.json(result);
 			}
-			await manager.applyCommand(cmd);
+			await manager.applyCommand(cmd, actorForRole(role));
 			return Response.json({ ok: true });
 		}
 		return new Response("not found", { status: 404 });
