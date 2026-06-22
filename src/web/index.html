@@ -310,7 +310,7 @@ let spawnCwd = ".";
 let ws = null;
 
 const $ = (s) => document.querySelector(s);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
 const STATUSES = ["working","input","idle","starting","error","stopped"];
 
 // ── Push signals (OMPSQ-4) ───────────────────────────────────────────────────
@@ -344,7 +344,7 @@ function connect() {
   ws.onclose = () => { $("#conn").classList.remove("up"); $("#connText").textContent = "reconnecting…"; setTimeout(connect, 1000); };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
-function send(cmd) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd)); }
+function send(cmd) { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(cmd)); return true; } toast("disconnected — not sent", "error"); return false; }
 
 // Slash-command / skill completion: when the token at the cursor starts with "/",
 // show a filtered menu over the agent's available commands. Returns { handleKey }
@@ -1270,7 +1270,7 @@ function renderAgent(body, a) {
   inp.value = composerDraft.get(a.id) || "";
   const comp = attachCompletion(inp, () => commandsByAgent.get(a.id) || []);
   inp.addEventListener("input", () => composerDraft.set(a.id, inp.value));
-  $("#sendBtn").onclick = () => { const v = inp.value.trim(); if (v) send({ type:"prompt", id:a.id, message:v }); composerDraft.delete(a.id); inp.value=""; };
+  $("#sendBtn").onclick = () => { const v = inp.value.trim(); if (v && send({ type:"prompt", id:a.id, message:v })) { composerDraft.delete(a.id); inp.value=""; } };
   inp.onkeydown = (e) => { if (comp.handleKey(e)) return; if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); $("#sendBtn").click(); } };
   $("#intBtn").onclick = () => send({ type:"interrupt", id:a.id });
   $("#rstBtn").onclick = () => send({ type:"restart", id:a.id });
@@ -1346,11 +1346,17 @@ function preq(p) {
 
 function mdEsc(s) { return String(s).replace(/[&<>]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;" }[c])); }
 
+// Allowlist URL schemes for rendered markdown — block javascript:/data: etc. that could run in the token-bearing origin. Relative + http(s)/mailto pass (quote-encoded for attribute safety).
+function mdUrl(u) {
+  const t = String(u).trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(t) && !/^(https?|mailto):/i.test(t)) return "#";
+  return t.replace(/"/g, "%22");
+}
 function mdInline(s) {
   const codes = [];
   s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, a, u) => `<img class="md-img" src="${u.replace(/"/g, "%22")}" alt="${a}" loading="lazy">`);
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => `<a href="${u.replace(/"/g, "%22")}" target="_blank" rel="noopener">${t}</a>`);
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, a, u) => `<img class="md-img" src="${mdUrl(u)}" alt="${a.replace(/"/g, "&quot;")}" loading="lazy">`);
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => `<a href="${mdUrl(u)}" target="_blank" rel="noopener noreferrer">${t}</a>`);
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+)__/g, "<strong>$1</strong>");
   s = s.replace(/(^|[^*\w])\*([^*\n]+)\*/g, "$1<em>$2</em>").replace(/(^|[^_\w])_([^_\n]+)_/g, "$1<em>$2</em>");
   s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
