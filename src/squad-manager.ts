@@ -160,7 +160,8 @@ export class SquadManager extends EventEmitter {
 	private dispatcher?: Dispatcher;
 	private readonly scheduler = new Scheduler();
 	private orchestrator?: Orchestrator;
-	private closeOnDone = false;
+	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
+	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
 	private readonly closedIssues = new Set<string>();
 	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
@@ -191,7 +192,6 @@ export class SquadManager extends EventEmitter {
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
 		if (process.env.OMP_SQUAD_AUTODISPATCH !== "0" && planeRepos().length > 0) {
-			this.closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 			const interval = Number(process.env.OMP_SQUAD_DISPATCH_INTERVAL_MS) || 60_000;
 			const maxActive = Number(process.env.OMP_SQUAD_DISPATCH_MAX) || 3;
 			this.dispatcher = new Dispatcher({
@@ -1093,7 +1093,6 @@ export class SquadManager extends EventEmitter {
 				}
 				rec.streaming = false;
 				rec.dto.activity = undefined;
-				this.maybeCloseIssue(rec);
 				void this.finalizeRun(rec);
 				break;
 			}
@@ -1108,27 +1107,14 @@ export class SquadManager extends EventEmitter {
 		this.emitAgent(rec);
 	}
 
-	/** When auto-close is on, mark a dispatched issue done once its agent's run passed a verification gate. */
-	private maybeCloseIssue(rec: AgentRecord): void {
-		const issue = rec.dto.issue;
-		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;
-		const passed = rec.transcript.slice(-6).some((e) => e.kind === "assistant" && e.text.includes("✓ workflow"));
-		if (!passed) return;
-		this.closedIssues.add(issue.id);
-		this.log("info", `auto-dispatch: closing ${issue.identifier ?? issue.id} (verification passed)`);
-		void closePlaneIssue(issue).then((ok) => {
-			if (!ok) this.log("warn", `auto-dispatch: could not close ${issue.identifier ?? issue.id}`);
-		});
-	}
-
 	/**
-	 * Close an agent/member's Plane issue once its branch successfully lands. Independent of
-	 * auto-dispatch; idempotent via `closedIssues` (a successfully-closed id is never re-closed)
-	 * and best-effort (`closePlaneIssue` swallows transport errors). A failed close leaves the id
-	 * unmarked so a later land retries it.
+	 * Close an agent/member's Plane issue once its branch successfully LANDS — the only close path now
+	 * (no premature close-on-gate-pass). Gated by OMP_SQUAD_AUTOCLOSE (closeOnDone). Idempotent via
+	 * `closedIssues` (a closed id is never re-closed) and best-effort (`closePlaneIssue` swallows
+	 * transport errors). A failed close leaves the id unmarked so a later land retries it.
 	 */
 	async closeLandedIssue(issue: IssueRef | undefined): Promise<void> {
-		if (!issue || this.closedIssues.has(issue.id)) return;
+		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;
 		this.log("info", `closing ${issue.identifier ?? issue.id} (branch landed)`);
 		if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
 		else this.log("warn", `could not close ${issue.identifier ?? issue.id} (branch landed)`);

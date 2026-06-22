@@ -15,7 +15,7 @@ import { liveAgents, SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const tmps: string[] = [];
-const PLANE_ENV = ["PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "PLANE_PROJECT_MAP", "OMP_SQUAD_MAX_WIP", "OMP_SQUAD_QUEUE_ON_FULL"] as const;
+const PLANE_ENV = ["PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "PLANE_PROJECT_MAP", "OMP_SQUAD_MAX_WIP", "OMP_SQUAD_QUEUE_ON_FULL", "OMP_SQUAD_AUTOCLOSE"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of PLANE_ENV) saved[k] = process.env[k];
 
@@ -112,6 +112,18 @@ test("closeLandedIssue closes the issue once, then is idempotent", async () => {
 		await mgr.closeLandedIssue(trackedIssue);
 		await mgr.closeLandedIssue(trackedIssue); // already closed → no second PATCH
 		expect(patches()).toBe(1);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("closeLandedIssue is gated by OMP_SQUAD_AUTOCLOSE (=0 ⇒ no close, even on land)", async () => {
+	const { server, patches } = planeStub({ completed: true });
+	try {
+		process.env.OMP_SQUAD_AUTOCLOSE = "0"; // read at construction → closeOnDone false
+		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
+		await mgr.closeLandedIssue(trackedIssue);
+		expect(patches()).toBe(0); // auto-close off ⇒ a land never touches Plane; you close manually
 	} finally {
 		server.stop(true);
 	}
