@@ -1,12 +1,24 @@
 /**
- * Orchestrator — control-loop skeleton for the self-healing fleet (#15).
+ * Orchestrator — self-healing control loop for the fleet (#15 + #14 + #13).
  *
- * A periodic loop that will drive spawn → verify → land through injected deps,
- * so the policy is testable headless. Inert by default: `tick()` no-ops and
- * `start()` arms no timer unless OMP_SQUAD_AUTODRIVE is set. SquadManager wires
- * it today purely as the seam #15 fills in.
+ * A periodic loop that drives spawn → verify → land through injected deps, so the
+ * policy is testable headless with no live daemon. Strictly opt-in: `tick()` returns
+ * immediately and `start()` arms no timer unless OMP_SQUAD_AUTODRIVE is set. Every
+ * effect goes through `deps`, so the loop unit-tests with fakes.
+ *
+ * Per tick:
+ *   1. AUTO-LAND (#15)   — idle agents with unlanded work are verified, then landed
+ *                          (the land path closes the tracking Plane issue).
+ *   2. SELF-HEAL (#11/#12) — a red gate routes through `routeFailure`: retry / hold /
+ *                          escalate, with per-agent attempts tracked in-memory.
+ *   3. CATASTROPHE (#14) — the ONLY place a human is summoned: a clear `CATASTROPHE:`
+ *                          log, then auto-action on that item stops. Never silent.
+ *   4. ADMISSION DRAIN (#13) — parked spawn requests are admitted while the WIP cap
+ *                          allows (the manager enqueues on cap-deny; the loop drains).
  */
 
+import { routeFailure, type FailureContext, type FailureKind, type FailureRoute } from "./resolver.ts";
+import { liveAgents, Scheduler } from "./scheduler.ts";
 import type { AgentDTO, CreateAgentOptions } from "./types.ts";
 
 /** External edges the loop drives the fleet through — all injected so the loop runs without a live daemon. */
@@ -19,6 +31,18 @@ export interface OrchestratorDeps {
 	verify: (featureId: string) => Promise<boolean>;
 	/** Land a feature's branches; true ⇒ merged. */
 	land: (featureId: string) => Promise<boolean>;
+	/**
+	 * Failure router. Defaults to the resolver's `routeFailure` seam (escalate-everything until
+	 * the ensemble #11/#12 lands); injectable so that ensemble — or a test — supplies the real
+	 * retry/hold/escalate policy and owns the repair budget.
+	 */
+	route?: (kind: FailureKind, ctx?: FailureContext) => FailureRoute;
+	/**
+	 * Optional catastrophe tripwire (#14): return true to summon a human immediately for this
+	 * agent, bypassing verify/land. Intended set: infra failure, safety violation, regression
+	 * oscillation — conditions no retry can fix.
+	 */
+	isCatastrophic?: (agent: AgentDTO) => boolean;
 	/** Log sink (defaults to no-op). */
 	log?: (msg: string) => void;
 }
@@ -31,6 +55,22 @@ function autodrive(): boolean {
 export class Orchestrator {
 	private readonly deps: OrchestratorDeps;
 	private timer?: Timer;
+
+	/** Per-agent red-gate retries, fed to `route` as the repair budget's `attempts`. */
+	private readonly attempts = new Map<string, number>();
+	/**
+	 * Work ids already merged — skip them so the loop never re-verifies/re-lands landed work each
+	 * tick. ponytail: in-memory, so a daemon restart costs at most one redundant verify per feature.
+	 */
+	private readonly landed = new Set<string>();
+	/** Agents handed to a human (catastrophe) — the auto-loop stops acting on them until restart. */
+	private readonly halted = new Set<string>();
+
+	/**
+	 * Admission queue the manager parks cap-denied spawns into; drained here under the WIP cap (#13).
+	 * Public so the manager (and tests) can `enqueue` into the same instance the loop drains.
+	 */
+	readonly scheduler = new Scheduler();
 
 	constructor(deps: OrchestratorDeps) {
 		this.deps = deps;
@@ -54,13 +94,71 @@ export class Orchestrator {
 	}
 
 	/**
-	 * One control-loop step. Inert until OMP_SQUAD_AUTODRIVE is set; the self-healing policy
-	 * (#15) lands here, reading `deps.listAgents()` then driving spawn/verify/land.
+	 * One control-loop step. Inert until OMP_SQUAD_AUTODRIVE is set; then drives the per-tick
+	 * policy (auto-land → self-heal → catastrophe → admission drain) entirely through `deps`.
 	 */
 	async tick(): Promise<void> {
 		if (!autodrive()) return;
-		// ponytail: loop body lands with #15. Deps are wired and ready; today we only mark the
-		//   tick so an opt-in run is observable, keeping the substrate shipped-but-inert.
-		this.deps.log?.("orchestrator tick (no-op until #15)");
+		const log = this.deps.log ?? (() => {});
+		const route = this.deps.route ?? routeFailure;
+
+		// ── Steps 1–3: each idle agent with unlanded work is verified, then landed, self-healed,
+		//    or escalated. featureId is the verify/land key + "has landable work" signal. ──
+		for (const a of this.deps.listAgents()) {
+			if (a.status !== "idle" || !a.featureId) continue;
+			const workId = a.featureId;
+			if (this.halted.has(a.id) || this.landed.has(workId)) continue; // already escalated, or merged
+
+			// Step 3 (guard): a tripwire fires ⇒ summon a human now, before touching verify/land.
+			if (this.deps.isCatastrophic?.(a)) {
+				this.catastrophe(log, `tripwire fired for ${a.id} (${workId})`, a.id);
+				continue;
+			}
+
+			if (await this.deps.verify(workId)) {
+				// Step 1: green gate → land (the land path closes the tracking Plane issue).
+				if (await this.deps.land(workId)) {
+					this.landed.add(workId);
+					this.attempts.delete(a.id);
+					log(`landed ${workId} (${a.id})`);
+				} else {
+					// Land blocked (diverged/conflict) — left for the conflict path; retried next tick.
+					log(`land blocked for ${workId} (${a.id}) — will retry`);
+				}
+				continue;
+			}
+
+			// Step 2: red gate → self-healing route, attempts tracked per agent.
+			const attempts = this.attempts.get(a.id) ?? 0;
+			const decision = route("red", { attempts, agentId: a.id });
+			if (decision === "retry") {
+				this.attempts.set(a.id, attempts + 1); // re-verify next tick under a higher attempt count
+				log(`retry ${a.id} (${workId}) attempt ${attempts + 1}`);
+			} else if (decision === "hold") {
+				log(`hold ${a.id} (${workId})`); // parked — no further auto-action this tick
+			} else {
+				// Step 3 (budget): repair budget exhausted → catastrophe.
+				this.catastrophe(log, `repair budget exhausted for ${a.id} (${workId}) after ${attempts} attempt(s)`, a.id);
+			}
+		}
+
+		// ── Step 4: admission drain (#13). Spawn parked requests while the WIP cap has headroom;
+		//    re-count live agents each pass so freshly spawned ones tighten the ceiling. ──
+		while (this.scheduler.queued > 0 && this.scheduler.canAdmit(liveAgents(this.deps.listAgents()))) {
+			const req = this.scheduler.dequeue();
+			if (!req) break;
+			await this.deps.spawn(req);
+			log(`admitted queued spawn ${req.name ?? req.repo}`);
+		}
+	}
+
+	/**
+	 * The ONLY place a human is summoned (#14): emit a clear `CATASTROPHE:` line and stop the
+	 * auto-loop from acting on this agent. Tripwires: repair budget exhausted, or `isCatastrophic`
+	 * (infra failure / safety violation / regression oscillation). Never a silent drop.
+	 */
+	private catastrophe(log: (m: string) => void, detail: string, agentId: string): void {
+		this.halted.add(agentId);
+		log(`CATASTROPHE: ${detail}`);
 	}
 }

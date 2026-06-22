@@ -30,16 +30,17 @@ const deps = (log: (m: string) => void): OrchestratorDeps => ({
 	log,
 });
 
-test("tick is inert (no log, no deps touched) unless OMP_SQUAD_AUTODRIVE is set", async () => {
+test("tick acts only when OMP_SQUAD_AUTODRIVE is set; with nothing to drive it stays silent", async () => {
 	delete process.env.OMP_SQUAD_AUTODRIVE;
 	const logs: string[] = [];
 	await new Orchestrator(deps((m) => logs.push(m))).tick();
-	expect(logs).toEqual([]); // off by default
+	expect(logs).toEqual([]); // gated off by default
 
+	// On, but the roster + admission queue are empty ⇒ no verify/land/spawn, so no effects.
 	process.env.OMP_SQUAD_AUTODRIVE = "1";
 	const onLogs: string[] = [];
 	await new Orchestrator(deps((m) => onLogs.push(m))).tick();
-	expect(onLogs.length).toBe(1); // opt-in: the inert tick marks itself
+	expect(onLogs).toEqual([]);
 });
 
 test("start arms no timer when autodrive is off (no daemon leak)", () => {
