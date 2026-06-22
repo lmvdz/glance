@@ -2,6 +2,51 @@
 @import 'fumadocs-ui/css/neutral.css';
 @import 'fumadocs-ui/css/preset.css';
 
+/* ──────────────────────────────────────────────────────────────────────────
+   Mastra brand palette — override fumadocs-ui design tokens.
+   Token names + dark/light scoping confirmed in
+   node_modules/fumadocs-ui/css/lib/default-colors.css (light = @theme/:root,
+   dark = .dark). Values mirror the product UI (src/web/index.html theme blocks).
+   :root must precede .dark so the dark class wins at equal specificity.
+   ────────────────────────────────────────────────────────────────────────── */
+:root {
+  --color-fd-background: #f6f7f9;
+  --color-fd-foreground: #11161c;
+  --color-fd-muted: #eef0f3;
+  --color-fd-muted-foreground: #566069;
+  --color-fd-popover: #ffffff;
+  --color-fd-popover-foreground: #11161c;
+  --color-fd-card: #ffffff;
+  --color-fd-card-foreground: #11161c;
+  --color-fd-border: #dde1e6;
+  --color-fd-primary: #0a8f4d;
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: #eef0f3;
+  --color-fd-secondary-foreground: #11161c;
+  --color-fd-accent: #eef0f3;
+  --color-fd-accent-foreground: #11161c;
+  --color-fd-ring: #0a8f4d;
+}
+
+.dark {
+  --color-fd-background: #060607;
+  --color-fd-foreground: #eceef0;
+  --color-fd-muted: #141518;
+  --color-fd-muted-foreground: #9a9ca1;
+  --color-fd-popover: #0d0e10;
+  --color-fd-popover-foreground: #eceef0;
+  --color-fd-card: #0d0e10;
+  --color-fd-card-foreground: #eceef0;
+  --color-fd-border: rgba(255, 255, 255, 0.08);
+  --color-fd-primary: #1fe070;
+  --color-fd-primary-foreground: #04140b;
+  --color-fd-secondary: #141518;
+  --color-fd-secondary-foreground: #eceef0;
+  --color-fd-accent: #141518;
+  --color-fd-accent-foreground: #eceef0;
+  --color-fd-ring: #1fe070;
+}
+
 html {
   scrollbar-gutter: stable;
 }
