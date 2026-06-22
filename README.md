@@ -393,9 +393,23 @@ omp-squad add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
 - Resolution lives **on the branch**, so the actual land stays a plain fast-forward and the
   resolved diff is reviewable in the Changes panel before `main` ever moves.
 
-It runs on the same `WorkflowEngine` as plan-implement, so it joins the roster / TUI / web
-like any other run. Firing it **automatically** from `landAgent`'s conflict path is the
-next step.
+It runs on the same `WorkflowEngine` as plan-implement, so it joins the roster / TUI / web like
+any other run.
+
+**Firing it automatically.** When `landAgent` itself hits a conflict it gives up by default, but
+setting **`OMP_SQUAD_AUTORESOLVE=1`** turns on an in-process resolver (`src/land.ts`, #12): it
+rebases the branch onto main, hands each conflicted file to a resolver (default: a one-shot
+`omp -p` agent), then **proves** the result — the full verify gate must pass **and** an independent
+reviewer pass must approve — before completing the land. Any failing step rolls `main` back to where
+it was; an unproven resolution is never kept. It only runs when the worktree is clean, so a live
+agent's uncommitted edits are never clobbered. The resolver/reviewer are injectable seams (tests use
+them; the defaults shell out to `omp`). Ceiling: a verify gate + reviewer can still miss a *semantic*
+conflict that is textually clean and compiles — see the `ponytail:` note on `attemptAutoResolve`.
+
+| Env var | Effect |
+|---|---|
+| `OMP_SQUAD_AUTORESOLVE` | Enable `landAgent`'s automated conflict resolver (off by default) |
+| `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 
 ## Sandboxed execution — agents off your laptop
 
