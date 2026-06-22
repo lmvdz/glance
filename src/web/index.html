@@ -428,6 +428,29 @@
   .stat .lbl { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.06em; display:flex; align-items:center; gap:7px; }
   .stat.attn { border-color:var(--input); } .stat.attn .num { color:var(--input); }
   @media (max-width:760px) { .statrow { grid-template-columns:repeat(2,1fr); } }
+  /* ── trust + observability (Phase 4): access chip · fleet health · coordination ── */
+  .access { padding:5px 11px; border:1px solid var(--border); border-radius:var(--r-full); background:var(--surface-2); color:var(--text-2); font-weight:var(--fw-medium); }
+  .access .axi { color:var(--success); margin-right:1px; }
+  .health .inner { display:grid; grid-template-columns:repeat(4,1fr); gap:var(--sp-3); }
+  .hcell { display:flex; flex-direction:column; gap:5px; min-width:0; }
+  .hcell .hk { font-size:var(--fs-11); text-transform:uppercase; letter-spacing:.06em; color:var(--text-3); font-weight:var(--fw-semibold); }
+  .hcell .hv { display:flex; align-items:center; gap:var(--sp-2); font-size:var(--fs-13); color:var(--text-1); font-variant-numeric:tabular-nums; line-height:var(--lh-base); min-width:0; }
+  .hcell .hv .hvt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hcell .hsub { font-size:var(--fs-11); color:var(--text-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hdot { width:9px; height:9px; border-radius:var(--r-full); flex:none; background:var(--neutral); }
+  .hdot.ok{ background:var(--success); } .hdot.warn{ background:var(--warning); } .hdot.bad{ background:var(--danger); } .hdot.info{ background:var(--accent); }
+  .verdict { margin-left:auto; display:inline-flex; align-items:center; gap:6px; font-size:var(--fs-11); font-weight:var(--fw-semibold); text-transform:none; letter-spacing:0; padding:2px 9px; border-radius:var(--r-full); border:1px solid transparent; color:var(--text-2); background:var(--surface-1); }
+  .verdict.ok { color:var(--success); background:var(--success-subtle); border-color:color-mix(in srgb,var(--success) 28%,transparent); }
+  .verdict.warn { color:var(--warning); background:var(--warning-subtle); border-color:color-mix(in srgb,var(--warning) 28%,transparent); }
+  .verdict.bad { color:var(--danger); background:var(--danger-subtle); border-color:color-mix(in srgb,var(--danger) 28%,transparent); }
+  .fedbadge { text-transform:none; letter-spacing:.02em; }
+  .fedcalm { display:flex; gap:var(--sp-3); align-items:flex-start; }
+  .fedcalm .hdot { margin-top:5px; }
+  .fedcalm .fedcalm-t { font-weight:var(--fw-semibold); color:var(--text-1); font-size:var(--fs-13); margin-bottom:2px; }
+  .fedcol { margin-top:var(--sp-3); padding:var(--sp-2) var(--sp-3); border:1px solid color-mix(in srgb,var(--danger) 40%,transparent); background:var(--danger-subtle); border-radius:var(--r-md); }
+  .fedcol .fedcol-h { color:var(--danger); font-weight:var(--fw-semibold); font-size:var(--fs-12); margin-bottom:var(--sp-1); display:flex; align-items:center; gap:6px; }
+  .fedcol .subnode { color:var(--text-1); }
+  @media (max-width:760px) { .health .inner { grid-template-columns:repeat(2,1fr); } }
 </style>
 </head>
 <body>
@@ -435,6 +458,7 @@
   <button id="navToggle" class="navbtn" title="Toggle projects sidebar" aria-label="Toggle projects sidebar">☰</button>
   <h1><span><span class="sq">omp</span>-squad</span> <span class="cc">command center</span></h1>
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
+  <span class="conn access" id="access" title="Access is token-gated — every request carries a bearer token. Loopback is exempt."><span class="axi" aria-hidden="true">🔒</span> token-gated</span>
   <div class="spacer"></div>
   <div class="hdr-tools">
     <span id="counts" class="conn"></span>
@@ -574,6 +598,7 @@ function setConn(up) {
   $("#conn").classList.toggle("up", up);
   $("#connText").textContent = up ? "live" : "reconnecting…";
   const off = $("#offline"); if (off) off.hidden = up;
+  paintFleetHealth();
 }
 function firstPaint(msg) { if (routed) return; const b = $("#body"); if (b) b.innerHTML = `<div class="nodetail">${esc(msg)}</div>`; }
 function connect() {
@@ -1240,6 +1265,7 @@ function renderHome(body) {
         <div class="stat" data-go="board"><span class="num">${features.size}</span><span class="lbl">Features</span></div>
         <div class="stat"><span class="num">${ps.length}</span><span class="lbl">Projects</span></div>
       </div>
+      <div class="section health"><h3>Health <span class="verdict" id="fhVerdict">Checking…</span></h3><div class="inner" id="fhInner">${hcellSkel("Connection")}${hcellSkel("Daemon")}${hcellSkel("UI build")}${hcellSkel("Fleet")}</div></div>
       <div class="section"><h3>Or jump to a project</h3><div class="inner" id="homeprojects"></div></div>
     </div>`;
   const input = $("#smartspawn"); const go = $("#smartgo");
@@ -1256,6 +1282,59 @@ function renderHome(body) {
   const hp = $("#homeprojects");
   hp.innerHTML = ps.length ? ps.map((p) => `<div class="n" data-pid="${esc(p.id)}">${dots(p.counts)} ${esc(p.name)} <span style="color:var(--dim)">${esc(p.repo)} · ${p.agents.length} agent(s)</span></div>`).join("") : `<span style="color:var(--dim)">none yet — type a task above to spawn your first agent</span>`;
   hp.querySelectorAll("[data-pid]").forEach((el) => { el.style.cursor = "pointer"; el.onclick = () => { selProject = el.getAttribute("data-pid"); view = "project"; renderAll(); }; });
+  paintFleetHealth(); loadFleetHealth();
+}
+
+// ── Fleet health (Phase 4 trust/observability) ───────────────────────────────
+// Compact system-posture strip on the Overview: connection (WS), daemon (/api/health),
+// served UI build (/api/version), and a fleet roll-up from local roster state. Daemon +
+// version are cached so a re-render or reconnect doesn't re-flash a skeleton.
+let fhHealth = null;    // null=loading | "error" | {ok,uptimeSec,agents,projects}
+let fhVersion = null;   // null=loading | "error" | {version}
+let fhFetchedAt = 0;
+function fmtUptime(s) { s = Math.max(0, Math.round(Number(s) || 0)); const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m` : `${s}s`; }
+function fhConnState() {
+  if (ws && ws.readyState === 1) return { cls:"ok", txt:"Live", sub:"realtime stream connected" };
+  if (!opened) return { cls:"warn", txt:"Connecting…", sub:"reaching the daemon" };
+  return { cls:"bad", txt:"Offline", sub:"reconnecting…" };
+}
+function hcell(key, dot, val, sub) {
+  return `<div class="hcell"><div class="hk">${esc(key)}</div><div class="hv"><span class="hdot ${dot}"></span><span class="hvt">${esc(val)}</span></div>${sub ? `<div class="hsub">${esc(sub)}</div>` : ""}</div>`;
+}
+function hcellSkel(key) {
+  return `<div class="hcell"><div class="hk">${esc(key)}</div><div class="hv"><span class="skel" style="width:96px;height:14px"></span></div></div>`;
+}
+function paintFleetHealth() {
+  const inner = $("#fhInner"); if (!inner) return;
+  const ags = [...agents.values()];
+  const active = ags.filter(a => a.status === "working").length;
+  const needs = waitingAgents().length;
+  const conn = fhConnState();
+  const cells = [ hcell("Connection", conn.cls, conn.txt, conn.sub) ];
+  if (fhHealth === null) cells.push(hcellSkel("Daemon"));
+  else if (fhHealth === "error") cells.push(hcell("Daemon", "bad", "Unreachable", "health check failed"));
+  else cells.push(hcell("Daemon", "ok", "Healthy", `up ${fmtUptime(fhHealth.uptimeSec)}`));
+  if (fhVersion === null) cells.push(hcellSkel("UI build"));
+  else if (fhVersion === "error" || !fhVersion.version) cells.push(hcell("UI build", "warn", "Unknown", "version unavailable"));
+  else { const v = String(fhVersion.version); cells.push(hcell("UI build", "info", v.length > 12 ? v.slice(0,12)+"…" : v, "auto-reloads on change")); }
+  cells.push(hcell("Fleet", needs > 0 ? "warn" : active > 0 ? "ok" : "", `${active} active`, `${needs} need you · ${features.size} feature${features.size===1?"":"s"}`));
+  inner.innerHTML = cells.join("");
+  const vb = $("#fhVerdict"); if (vb) {
+    let cls = "ok", txt = "All systems nominal";
+    if (conn.cls === "bad") { cls = "bad"; txt = "Offline"; }
+    else if (conn.cls === "warn" || fhHealth === "error") { cls = "warn"; txt = "Degraded"; }
+    else if (fhHealth === null) { cls = ""; txt = "Checking…"; }
+    vb.className = "verdict " + cls; vb.textContent = txt;
+  }
+}
+async function loadFleetHealth() {
+  if (fhHealth !== null && Date.now() - fhFetchedAt < 5000) { paintFleetHealth(); return; }
+  fhFetchedAt = Date.now();
+  await Promise.all([
+    fetch("/api/health").then(r => r.ok ? r.json() : Promise.reject()).then(h => { fhHealth = h; }).catch(() => { fhHealth = "error"; }),
+    fetch("/api/version").then(r => r.ok ? r.json() : Promise.reject()).then(v => { fhVersion = v; }).catch(() => { fhVersion = "error"; }),
+  ]);
+  paintFleetHealth();
 }
 
 async function smartSpawn(prompt) {
@@ -1424,7 +1503,7 @@ function renderProject(body, p) {
         <input id="pspawn" placeholder="Describe a task… (Enter to spawn an agent here)" autocomplete="off" />
       </div></div></div>
       <div class="section"><h3>Active on this repo</h3><div class="inner" id="presence">${skel(2)}</div></div>
-      <div class="section" id="fedSection" style="display:none"><h3>Federation <span style="color:var(--dim);font-weight:400">— peers on the tailnet</span></h3><div class="inner" id="federation"><span style="color:var(--dim)">…</span></div></div>
+      <div class="section" id="fedSection"><h3>Coordination <span class="badge fedbadge b-stopped" id="fedBadge">checking…</span></h3><div class="inner" id="federation">${skel(2)}</div></div>
       <div class="section"><h3>Files in flight</h3><div class="inner tree" id="leases">${skel(2)}</div></div>
       <div class="section"><h3>Plane issues</h3><div class="inner" id="issues">${skel(3)}</div></div>
     </div>`;
@@ -1456,26 +1535,37 @@ async function loadPresence(repo) {
 
 async function loadFederation() {
   const sec = $("#fedSection"); const box = $("#federation"); if (!sec || !box) return;
-  const hide = () => { sec.style.display = "none"; };
+  const setBadge = (cls, txt) => { const b = $("#fedBadge"); if (b) { b.className = "badge fedbadge " + cls; b.textContent = txt; } };
+  box.innerHTML = skel(2); setBadge("b-stopped", "checking…");
+  let fed;
   try {
     const r = await fetch("/api/federation");
     if (!r.ok) throw 0;
-    const fed = await r.json();
-    // Inert when no coordinator is configured, or nothing remote to show.
-    const peers = (fed.operators || []).filter(o => o.operator && o.operator.origin === "remote");
-    const collisions = fed.collisions || [];
-    if (!fed.coordinator || (!peers.length && !collisions.length)) { hide(); return; }
-    sec.style.display = "";
-    const av = a => a === "active" ? "working" : a === "away" ? "input" : "idle";
-    const base = p => String(p || "").split("/").filter(Boolean).pop() || p;
-    const peerHTML = peers.length ? peers.map(o => {
-      const who = esc(o.operator.displayName || o.operator.id) + (o.host ? `<span style="color:var(--dim)">@${esc(o.host)}</span>` : "");
-      const ags = (o.agents || []).map(a => `<div class="subnode" style="margin-left:14px"><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(base(a.repo))}${a.branch ? " · " + esc(a.branch) : ""}</span></div>`).join("");
-      return `<div class="subnode"><span class="badge b-${av(o.availability)}">${esc(o.availability)}</span> ${who} <span style="color:var(--dim)">· ${(o.agents||[]).length} agent${(o.agents||[]).length===1?"":"s"}</span></div>${ags}`;
-    }).join("") : `<div class="subnode" style="color:var(--dim)">no peer operators online.</div>`;
-    const colHTML = collisions.length ? `<div style="margin-top:8px"><div style="color:var(--dim);font-size:11px;margin-bottom:2px">SHARED BRANCHES</div>${collisions.map(c => `<div class="subnode" style="color:var(--work)">⚠ ${esc(base(c.repo))} <span style="color:var(--dim)">@ ${esc(c.ref)} — ${esc((c.operators||[]).join(", "))}</span></div>`).join("")}</div>` : "";
-    box.innerHTML = peerHTML + colHTML;
-  } catch { hide(); }
+    fed = await r.json();
+  } catch {
+    setBadge("b-stopped", "unavailable");
+    box.innerHTML = `<div class="subnode muted">Coordination status unavailable right now.</div>`;
+    return;
+  }
+  const peers = (fed.operators || []).filter(o => o.operator && o.operator.origin === "remote");
+  const collisions = fed.collisions || [];
+  const av = a => a === "active" ? "working" : a === "away" ? "input" : "idle";
+  const base = p => String(p || "").split("/").filter(Boolean).pop() || p;
+  // Common case: no coordinator configured — this host runs solo. Calm, not an error.
+  if (!fed.coordinator) {
+    setBadge("b-stopped", "Single-operator");
+    box.innerHTML = `<div class="fedcalm"><span class="hdot"></span><div><div class="fedcalm-t">Single-operator</div><div class="muted">No federation coordinator configured — agents, presence, and file leases stay on this host.</div></div></div>`;
+    return;
+  }
+  // Coordinator configured: show peer operators + any cross-operator branch collisions.
+  setBadge(peers.length ? "b-ready" : "b-stopped", peers.length ? "Connected" : "No peers online");
+  const peerHTML = peers.length ? peers.map(o => {
+    const who = esc(o.operator.displayName || o.operator.id) + (o.host ? `<span class="muted">@${esc(o.host)}</span>` : "");
+    const ags = (o.agents || []).map(a => `<div class="subnode" style="margin-left:14px"><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> ${esc(a.name)} <span class="muted">${esc(base(a.repo))}${a.branch ? " · " + esc(a.branch) : ""}</span></div>`).join("");
+    return `<div class="subnode"><span class="badge b-${av(o.availability)}">${esc(o.availability)}</span> ${who} <span class="muted">· ${(o.agents||[]).length} agent${(o.agents||[]).length===1?"":"s"}</span></div>${ags}`;
+  }).join("") : `<div class="subnode muted">Coordinator connected — no peer operators online right now.</div>`;
+  const colHTML = collisions.length ? `<div class="fedcol"><div class="fedcol-h"><span aria-hidden="true">⚠</span> Shared-branch collisions</div>${collisions.map(c => `<div class="subnode">${esc(base(c.repo))} <span class="muted">@ ${esc(c.ref)} — ${esc((c.operators||[]).join(", "))}</span></div>`).join("")}</div>` : "";
+  box.innerHTML = peerHTML + colHTML;
 }
 
 async function loadLeases(repo) {
@@ -1843,6 +1933,7 @@ function boot() {
   window.addEventListener("focus", () => updateBadge(waitingAgents().length));
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").then(() => { if (typeof Notification !== "undefined" && Notification.permission === "granted") subscribePush(); }).catch(() => {});
   firstPaint("Connecting to the daemon…");
+  const ax = $("#access"); if (ax) { const scheme = (location.protocol || "").replace(":", "").toUpperCase() || "HTTP"; ax.title = `Access is token-gated — every request carries a bearer token; loopback is exempt. Served over ${scheme}${location.protocol === "https:" ? " (encrypted)" : ""}.`; }
   connect();
 }
 // ── theme toggle ─────────────────────────────────────────────────────────────
