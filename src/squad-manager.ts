@@ -72,7 +72,8 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
-import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
+import { addWorktree, branchAhead, commitWorktreeWip, deleteBranchIfMerged, listWorktrees, primaryBranch, removeWorktree, repoRoot, worktreeStatus } from "./worktree.ts";
+import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
@@ -1319,6 +1320,7 @@ export class SquadManager extends EventEmitter {
 		if (++this.reapTicks % 12 === 0) {
 			void this.reapOrphans();
 			void this.sweepRegistries();
+			void this.reapDeadWorktrees();
 		}
 		void this.sampleHealth().then((h) => {
 			const key = h.warnings.join("|");
@@ -1356,6 +1358,55 @@ export class SquadManager extends EventEmitter {
 			if (l + p + pr > 0) this.log("info", `swept stale registry dirs — ${l} leases, ${p} presence, ${pr} proofs`);
 		} catch {
 			/* best-effort cleanup */
+		}
+	}
+
+	/** Free disk + git admin entries for squad worktrees whose agent is gone and whose work is safely in
+	 *  the base branch or whose Plane issue is closed — repeated re-dispatch otherwise leaks one worktree
+	 *  per attempt. Lossless (abandoned WIP committed to its branch; only merged+clean branches deleted)
+	 *  and never touches a live agent's worktree or one created within the spawn grace. Opt out with
+	 *  OMP_SQUAD_WORKTREE_REAP=0; tune the freshness window with OMP_SQUAD_WORKTREE_GRACE_MS. */
+	private async reapDeadWorktrees(): Promise<void> {
+		if (process.env.OMP_SQUAD_WORKTREE_REAP === "0") return;
+		const graceMs = Number(process.env.OMP_SQUAD_WORKTREE_GRACE_MS) || 120_000;
+		const owned = new Set([...this.agents.values()].map((r) => r.options.worktree).filter((w): w is string => !!w));
+		const repos = new Set<string>([...planeRepos(), ...[...this.agents.values()].map((r) => r.options.repo)]);
+		for (const repo of repos) {
+			if (!repo || repo.startsWith("(")) continue; // synthetic / no-repo agents have no worktrees to reap
+			try {
+				const root = await repoRoot(repo);
+				const base = await primaryBranch(root);
+				const wts = await listWorktrees(root);
+				const infos: WorktreeInfo[] = await Promise.all(
+					wts.map(async (w) => {
+						const stat = await fs.stat(w.worktree).catch(() => undefined);
+						return {
+							worktree: w.worktree,
+							branch: w.branch ?? "",
+							isPrimary: w.isPrimary,
+							aheadOfBase: w.isPrimary || !w.branch ? 0 : await branchAhead(root, w.branch, base),
+							dirty: !w.isPrimary && (await worktreeStatus(w.worktree)).dirtyFiles.length > 0,
+							mtimeMs: stat ? stat.mtimeMs : 0, // dir gone ⇒ ancient ⇒ eligible (removeWorktree prunes the stale entry)
+						};
+					}),
+				);
+				const issues = await listPlaneIssues(repo);
+				const openIdentifiers = issues
+					? new Set(issues.map((i) => i.identifier).filter((x): x is string => !!x).map((s) => s.toUpperCase()))
+					: null;
+				const decisions = selectReapable({ worktrees: infos, owned, openIdentifiers, now: Date.now(), graceMs });
+				for (const d of decisions) {
+					if (d.preserveWip) await commitWorktreeWip(d.worktree, "chore: preserve WIP before reaping dead worktree").catch(() => {});
+					await removeWorktree(root, d.worktree).catch(() => {});
+					if (d.deleteBranch) await deleteBranchIfMerged(root, d.branch).catch(() => {});
+				}
+				if (decisions.length) {
+					const merged = decisions.filter((d) => d.reason === "merged").length;
+					this.log("info", `reaped ${decisions.length} dead worktree(s) — ${merged} merged, ${decisions.length - merged} issue-closed`);
+				}
+			} catch {
+				/* best-effort cleanup */
+			}
 		}
 	}
 
