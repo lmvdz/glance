@@ -18,6 +18,7 @@ import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { parsePlanConcerns } from "./features.ts";
 import { listPlaneIssues } from "./plane.ts";
 import { proofGate, runProof } from "./proof.ts";
+import { runVisionPass } from "./vision.ts";
 import { detectVerify } from "./intake.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
@@ -289,6 +290,16 @@ export class SquadServer {
 					if (!command) return new Response("no acceptance command detected for this repo", { status: 422 });
 					const proof = await runProof({ repo: dto.repo, worktree: dto.worktree, command });
 					return Response.json(proof);
+				}
+				const mvision = url.pathname.match(/^\/api\/agents\/([^/]+)\/vision$/);
+				if (mvision && req.method === "POST") {
+					const dto = manager.getAgent(decodeURIComponent(mvision[1]));
+					if (!dto) return new Response("no such agent", { status: 404 });
+					const body: unknown = await req.json().catch(() => null);
+					const target = body && typeof body === "object" && "url" in body && typeof body.url === "string" && body.url.trim() ? body.url.trim() : process.env.OMP_SQUAD_APP_URL;
+					if (!target) return new Response("no url for vision — pass {url} or set OMP_SQUAD_APP_URL", { status: 422 });
+					// Evidence only: returns the artifact paths the pass captured; it never gates a land.
+					return Response.json({ artifacts: await runVisionPass({ worktree: dto.worktree, url: target }) });
 				}
 				const mfverify = url.pathname.match(/^\/api\/features\/([^/]+)\/verify$/);
 				if (mfverify && req.method === "POST") {

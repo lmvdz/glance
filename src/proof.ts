@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { runVisionPass, type VisionProducer } from "./vision.ts";
 
 const ROOT = path.join(os.homedir(), ".omp", "squad", "proof");
 
@@ -80,8 +81,14 @@ async function collectArtifacts(worktree: string): Promise<string[]> {
 	}
 }
 
-/** Run the acceptance command in the worktree, collect evidence, persist + return the proof. */
-export async function runProof(opts: { repo: string; worktree: string; command: string }): Promise<Proof> {
+/**
+ * Run the acceptance command in the worktree, collect evidence, persist + return the proof.
+ *
+ * `ok`/`commit` are the gate — derived solely from the deterministic command and HEAD. The
+ * optional browser-vision pass (off unless `visionUrl` or env `OMP_SQUAD_APP_URL` is set) only
+ * appends evidence to `artifacts`; it can never flip the gate.
+ */
+export async function runProof(opts: { repo: string; worktree: string; command: string; visionUrl?: string; producer?: VisionProducer }): Promise<Proof> {
 	const proc = Bun.spawn(["bash", "-lc", opts.command], { cwd: opts.worktree, stdout: "pipe", stderr: "pipe" });
 	const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 	const tail = `${out}\n${err}`.trim().split("\n").slice(-20).join("\n");
@@ -93,6 +100,14 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 		detail: tail.slice(0, 4000),
 		artifacts: await collectArtifacts(opts.worktree),
 	};
+	// Optional, evidence-only browser-vision pass. Never touches the gate fields above — it only
+	// merges its screenshots/notes into artifacts (deduped, since collectArtifacts may already
+	// hold screenshots a prior vision run left under .omp/proof/vision/).
+	const url = opts.visionUrl ?? process.env.OMP_SQUAD_APP_URL;
+	if (url) {
+		const shots = await runVisionPass({ worktree: opts.worktree, url, producer: opts.producer });
+		proof.artifacts = [...new Set([...proof.artifacts, ...shots])].sort();
+	}
 	const { dir, file } = fileFor(opts.repo, opts.worktree);
 	await fsp.mkdir(dir, { recursive: true });
 	await fsp.writeFile(file, JSON.stringify(proof));
