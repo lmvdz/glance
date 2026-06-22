@@ -11,9 +11,12 @@ import { liveAgents, Scheduler } from "../src/scheduler.ts";
 import type { AgentDTO, AgentStatus, CreateAgentOptions } from "../src/types.ts";
 
 const savedWip = process.env.OMP_SQUAD_MAX_WIP;
+const savedGate = process.env.OMP_SQUAD_RESOURCE_GATE;
 afterEach(() => {
 	if (savedWip === undefined) delete process.env.OMP_SQUAD_MAX_WIP;
 	else process.env.OMP_SQUAD_MAX_WIP = savedWip;
+	if (savedGate === undefined) delete process.env.OMP_SQUAD_RESOURCE_GATE;
+	else process.env.OMP_SQUAD_RESOURCE_GATE = savedGate;
 });
 
 const dto = (status: AgentStatus): AgentDTO => ({
@@ -44,7 +47,7 @@ test("cap reads OMP_SQUAD_MAX_WIP per call, defaulting to 6", () => {
 });
 
 test("canAdmit gates exactly at the ceiling (count >= cap is full)", () => {
-	const s = new Scheduler();
+	const s = new Scheduler(() => false); // no host pressure → isolate the count boundary
 	process.env.OMP_SQUAD_MAX_WIP = "2";
 	expect(s.canAdmit(1)).toBe(true); // headroom
 	expect(s.canAdmit(2)).toBe(false); // at the cap → blocked, matching create()'s throw boundary
@@ -64,4 +67,23 @@ test("admission queue is FIFO and reports its depth", () => {
 	expect(s.dequeue()).toBe(b);
 	expect(s.dequeue()).toBeUndefined();
 	expect(s.queued).toBe(0);
+});
+
+test("canAdmit blocks under host pressure even with count headroom", () => {
+	process.env.OMP_SQUAD_MAX_WIP = "6";
+	const s = new Scheduler(() => true); // host pressured
+	expect(s.pressured()).toBe(true);
+	expect(s.canAdmit(0)).toBe(false); // room on the count cap, but pressure blocks
+});
+
+test("canAdmit needs both count headroom and no pressure", () => {
+	process.env.OMP_SQUAD_MAX_WIP = "2";
+	expect(new Scheduler(() => false).canAdmit(1)).toBe(true); // headroom + calm
+	expect(new Scheduler(() => true).canAdmit(1)).toBe(false); // headroom but pressured
+	expect(new Scheduler(() => false).canAdmit(2)).toBe(false); // calm but at the cap
+});
+
+test("default probe gates host-pressure behind OMP_SQUAD_RESOURCE_GATE (off ⇒ never pressured)", () => {
+	delete process.env.OMP_SQUAD_RESOURCE_GATE;
+	expect(new Scheduler().pressured()).toBe(false); // gate off → admission ignores host load
 });

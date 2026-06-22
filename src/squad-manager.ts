@@ -599,16 +599,21 @@ export class SquadManager extends EventEmitter {
 		if (!opts.bypassCap) {
 			const live = liveAgents(this.list());
 			if (!this.scheduler.canAdmit(live)) {
-				// Backpressure (#13): with OMP_SQUAD_QUEUE_ON_FULL the denied spawn is parked instead of
-				// rejected — the orchestrator drains the queue when a slot frees. Flag off ⇒ the historical
-				// hard cap error, so default behavior is unchanged.
+				// Denied by the count ceiling OR by host resource pressure (CPU/RAM): the count cap
+				// bounds agents, but each is several processes, so admission also backs off when the
+				// host is actually loaded (Scheduler.canAdmit → resource.ts). With OMP_SQUAD_QUEUE_ON_FULL
+				// the spawn is parked and the orchestrator drains it once a slot frees AND pressure clears;
+				// flag off ⇒ the historical hard error. Count-path behaviour is unchanged.
+				const reason = this.scheduler.pressured()
+					? "host under resource pressure"
+					: `WIP cap reached (${live}/${this.scheduler.cap()})`;
 				if (process.env.OMP_SQUAD_QUEUE_ON_FULL) {
 					this.scheduler.enqueue(opts);
 					const qname = opts.name?.trim() || `agent-${++this.idSeq}`;
-					this.log("info", `WIP cap reached (${live}/${this.scheduler.cap()}) — queued "${qname}" (${this.scheduler.queued} waiting)`);
+					this.log("info", `${reason} — queued "${qname}" (${this.scheduler.queued} waiting)`);
 					return this.queuedDto(qname, opts);
 				}
-				throw new Error(`WIP cap reached (${live}/${this.scheduler.cap()}) — finish or remove an agent before spawning`);
+				throw new Error(`${reason} — finish or remove an agent before spawning`);
 			}
 		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
