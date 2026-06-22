@@ -52,6 +52,14 @@ export interface OrchestratorDeps {
 	 * oscillation — conditions no retry can fix.
 	 */
 	isCatastrophic?: (agent: AgentDTO) => boolean;
+	/**
+	 * Safety valve (OMP_SQUAD_LAND_CONFIRM): when true, a GREEN verify does NOT auto-merge.
+	 * The loop marks the agent ready-to-land and notifies, leaving the merge to the operator's
+	 * one-tap Land. When false (default), the loop auto-merges as before.
+	 */
+	holdForConfirm?: boolean;
+	/** Confirm-mode callback: the agent passed verify and is staged for a one-tap Land. */
+	notifyReady?: (agentId: string) => void;
 	/** Log sink (defaults to no-op). */
 	log?: (msg: string) => void;
 }
@@ -74,6 +82,8 @@ export class Orchestrator {
 	private readonly landed = new Set<string>();
 	/** Agents handed to a human (catastrophe) — the auto-loop stops acting on them until restart. */
 	private readonly halted = new Set<string>();
+	/** Confirm-mode: work ids verified GREEN but held for a one-tap Land — skipped so the loop never re-verifies. */
+	private readonly staged = new Set<string>();
 
 	/**
 	 * Admission queue the manager parks cap-denied spawns into; drained here under the WIP cap (#13).
@@ -123,7 +133,7 @@ export class Orchestrator {
 			const feat = a.featureId;
 			const plain = feat === undefined;
 			const workId = feat ?? `agent:${a.id}`;
-			if (this.landed.has(workId)) continue; // already merged
+			if (this.landed.has(workId) || this.staged.has(workId)) continue; // already merged, or held for one-tap Land
 			if (plain) {
 				if (!this.deps.verifyAgent || !this.deps.landAgentWork || !this.deps.agentHasWork) continue;
 				if (!(await this.deps.agentHasWork(a.id))) continue;
@@ -136,6 +146,14 @@ export class Orchestrator {
 			}
 
 			if (plain ? await this.deps.verifyAgent!(a.id) : await this.deps.verify(feat!)) {
+				// Safety valve: confirm mode holds a GREEN verify for the operator's one-tap Land.
+				if (this.deps.holdForConfirm) {
+					this.deps.notifyReady?.(a.id);
+					this.staged.add(workId);
+					this.attempts.delete(a.id);
+					log(`ready to land ${workId} (${a.id})`);
+					continue;
+				}
 				// Step 1: green gate → land (the land path closes the tracking Plane issue).
 				if (plain ? await this.deps.landAgentWork!(a.id) : await this.deps.land(feat!)) {
 					this.landed.add(workId);

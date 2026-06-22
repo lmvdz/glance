@@ -103,6 +103,49 @@ test("featureless idle agent with work is verified + landed via the agent path (
 	expect(landed).toEqual(["ag"]);
 });
 
+test("holdForConfirm: green plain agent is staged for one-tap Land, not auto-landed; staged work is not re-verified", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const verified: string[] = [];
+	const landed: string[] = [];
+	const ready: string[] = [];
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [agent("ag", "idle")], // plain (no featureId)
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => {
+			throw new Error("feature verify must not run for a plain agent");
+		},
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async () => true,
+		verifyAgent: async (id) => {
+			verified.push(id);
+			return true;
+		},
+		landAgentWork: async (id) => {
+			landed.push(id);
+			return true;
+		},
+		holdForConfirm: true,
+		notifyReady: (id) => ready.push(id),
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick();
+	expect(verified).toEqual(["ag"]); // gate ran
+	expect(ready).toEqual(["ag"]); // staged for a one-tap Land
+	expect(landed).toEqual([]); // NOT merged
+	expect(logs.some((l) => l.includes("ready to land agent:ag"))).toBe(true);
+
+	await orch.tick(); // staged ⇒ no re-verify, no land
+	expect(verified).toEqual(["ag"]);
+	expect(ready).toEqual(["ag"]);
+	expect(landed).toEqual([]);
+});
+
 test("featureless agent that fails its gate is parked, not escalated to a human", async () => {
 	process.env.OMP_SQUAD_AUTODRIVE = "1";
 	let verifyCalls = 0;

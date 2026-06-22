@@ -198,6 +198,8 @@ export interface AgentDTO {
 	featureId?: string;
 	/** Repo-relative path prefixes this agent owns — overlapping spawns are refused (partition). */
 	owns?: string[];
+	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
+	landReady?: boolean;
 	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
 	queued?: boolean;
 }

@@ -473,6 +473,7 @@ can't be proven.
 |---|---|
 | `OMP_SQUAD_AUTORESOLVE` | `landAgent`'s in-process rebase conflict resolver, distinct from the manual `resolve-conflict` workflow (on by default; `=0` to disable) |
 | `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (on by default; `=0` to disable) |
+| `OMP_SQUAD_LAND_CONFIRM` | Safety valve: the auto-land loop still verifies idle agents, but a GREEN verify only marks them **✓ ready to land** (no merge) — the operator merges via the existing one-tap Land (off by default) |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 
 ## Sandboxed execution — agents off your laptop

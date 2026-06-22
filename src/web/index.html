@@ -79,6 +79,7 @@
   .acard .r1 { display:flex; align-items:center; gap:8px; }
   .badge { font-size:11px; padding:1px 7px; border-radius:999px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
   .b-idle{background:#1d2a24;color:var(--ok)} .b-working{background:#2c2716;color:var(--work)} .b-input{background:#2e1a16;color:var(--input)} .b-error{background:#2e1614;color:var(--err)} .b-starting{background:#1a2230;color:var(--accent)} .b-stopped{background:#1c2228;color:var(--stop)}
+  .b-ready{background:#1d2a24;color:var(--ok)}
   .b-proof-fresh{background:#1d2a24;color:var(--ok)} .b-proof-stale{background:#2c2716;color:var(--work)} .b-proof-failed{background:#2e1614;color:var(--err)} .b-proof-none{background:#1c2228;color:var(--dim)}
   .acard .nm { font-weight:600; } .acard .meta { font-size:12px; color:var(--mut); }
   .acard.child { margin-left:20px; border-left:2px solid var(--accent); }
@@ -1099,7 +1100,7 @@ function fillAgentGrid(p) {
     if (a.id === navSel) card.style.outline = "2px solid var(--accent)";
     const kindBadge = a.kind==="workflow" ? `<span class="badge b-kind">⚙ workflow</span>` : a.kind==="flue-service" ? `<span class="badge b-kind">⚒ service</span>` : "";
     const stalled = isStalled(a, Date.now()); const pct = a.contextPct;
-    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?`<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""}${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${stalled?`<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
+    card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${a.landReady?`<span class="badge b-ready">✓ ready to land</span>`:""}${a.status==="working"?`<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""}${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${stalled?`<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
       <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span>${a.model?` · <span title="model" style="color:var(--dim)">${esc(a.model)}</span>`:""}${receiptSpan(a.receipt)}</div>`;

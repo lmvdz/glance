@@ -147,6 +147,8 @@ export class SquadManager extends EventEmitter {
 	private readonly featureStore = new Map<string, PersistedFeature>();
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
+	/** Safety valve (OMP_SQUAD_LAND_CONFIRM): GREEN verify stages a one-tap Land instead of auto-merging. */
+	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM === "1";
 	private pollTimer?: Timer;
 	private dispatcher?: Dispatcher;
 	private readonly scheduler = new Scheduler();
@@ -207,6 +209,8 @@ export class SquadManager extends EventEmitter {
 			verifyAgent: (id) => this.verifyAgentWork(id),
 			landAgentWork: async (id) => (await this.land(id)).ok,
 			agentHasWork: (id) => this.agentHasUnlandedWork(id),
+			holdForConfirm: this.landConfirm,
+			notifyReady: (id) => this.markLandReady(id),
 			log: (m) => this.log("info", `orchestrator: ${m}`),
 		});
 		this.orchestrator.start();
@@ -472,8 +476,24 @@ export class SquadManager extends EventEmitter {
 			message: message ?? `squad(${dto.name}): land ${dto.branch ?? "changes"}`,
 			commitWip: !busy,
 		});
-		if (result.ok) await this.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
+		if (result.ok) {
+			rec.dto.landReady = false; // merged ⇒ clear the confirm-mode staged flag
+			this.emitAgent(rec);
+			await this.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
+		}
 		return result;
+	}
+
+	/**
+	 * Confirm-mode (OMP_SQUAD_LAND_CONFIRM): the auto-land loop verified GREEN but is holding the
+	 * merge. Flag the agent ready-to-land so the UI surfaces a one-tap Land, and emit an update.
+	 */
+	private markLandReady(id: string): void {
+		const rec = this.agents.get(id);
+		if (!rec) return;
+		rec.dto.landReady = true;
+		this.emitAgent(rec);
+		this.log("info", `land-confirm: ${id} verified — ready to land`);
 	}
 
 	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
