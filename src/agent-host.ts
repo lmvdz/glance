@@ -84,6 +84,55 @@ export async function pruneStaleSockets(): Promise<string[]> {
 	return pruned;
 }
 
+/** Tell a host to terminate (kills its omp child; the host then exits and removes its own socket). */
+async function shutdownHost(socket: string): Promise<void> {
+	try {
+		const s = await Bun.connect<undefined>({ unix: socket, socket: { data: () => {}, close: () => {}, error: () => {} } });
+		s.write(`${SQ_SHUTDOWN}\n`);
+		await Bun.sleep(100); // let the host read the frame + kill omp before we drop the connection
+		s.end();
+	} catch {
+		/* host vanished between the liveness check and connect */
+	}
+}
+
+/**
+ * Reap agent-hosts no longer referenced by the live roster. A LIVE orphan (host still serving its
+ * socket but no daemon agent owns it — left by a crash, a re-exec, or a re-spawn under a fresh id)
+ * is shut down over the wire; a DEAD socket file is removed. Returns the reaped ids. Without this,
+ * detached hosts accumulate across cycles (observed: dozens of phantom omp processes at load 160).
+ *
+ * `liveIds` MUST contain every current/starting agent id — an agent is added to the roster before
+ * its host spawns, so a just-spawned agent is never reaped. A workflow run's inner thread lives at
+ * `<id>-wf`; it is kept iff its owner `<id>` is live.
+ * ponytail: graceful shutdown over the existing protocol — no SIGKILL / pid bookkeeping.
+ */
+export async function reapOrphanHosts(liveIds: Set<string>, dir = squadSocketDir()): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fsp.readdir(dir);
+	} catch {
+		return [];
+	}
+	const reaped: string[] = [];
+	await Promise.all(
+		entries.map(async (entry) => {
+			if (!entry.endsWith(".sock")) return;
+			const id = entry.slice(0, -".sock".length);
+			const owner = id.endsWith("-wf") ? id.slice(0, -"-wf".length) : id;
+			if (liveIds.has(owner)) return;
+			const p = path.join(dir, entry);
+			if (await hostAlive(p)) {
+				await shutdownHost(p);
+				reaped.push(id);
+			} else {
+				await fsp.rm(p, { force: true });
+			}
+		}),
+	);
+	return reaped;
+}
+
 /** Run the host until the omp child exits. Resolves on exit (process should then exit). */
 export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 	const args = ["--mode", "rpc", "--cwd", opts.cwd];

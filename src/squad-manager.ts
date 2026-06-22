@@ -66,7 +66,7 @@ import type {
 	TranscriptKind,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
-import { hostAlive, pruneStaleSockets, socketPathFor } from "./agent-host.ts";
+import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
 import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
@@ -155,6 +155,8 @@ export class SquadManager extends EventEmitter {
 	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. */
 	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM !== "0";
 	private pollTimer?: Timer;
+	/** Throttle counter for the periodic orphan-host reap in poll(). */
+	private reapTicks = 0;
 	private dispatcher?: Dispatcher;
 	private readonly scheduler = new Scheduler();
 	private orchestrator?: Orchestrator;
@@ -220,6 +222,9 @@ export class SquadManager extends EventEmitter {
 		});
 		this.orchestrator.start();
 		await this.reconnectLive();
+		// Kill any detached host left by a previous crash/re-exec/re-spawn that the roster no longer
+		// owns, so phantom omp processes don't accumulate across daemon lifetimes.
+		await this.reapOrphans();
 	}
 
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
@@ -1216,6 +1221,12 @@ export class SquadManager extends EventEmitter {
 
 	// ── Polling (todos / context / streaming truth) ───────────────────────────
 
+	/** Shut down agent-hosts no longer in the roster (orphans from a crash / re-exec / re-spawn). */
+	private async reapOrphans(): Promise<void> {
+		const reaped = await reapOrphanHosts(new Set(this.agents.keys())).catch(() => [] as string[]);
+		if (reaped.length) this.log("info", `reaped ${reaped.length} orphan agent host(s): ${reaped.join(", ")}`);
+	}
+
 	private async poll(): Promise<void> {
 		const live = [...this.agents.values()].filter((r) => (r.dto.kind === "omp-operator" || r.dto.kind === "workflow") && r.agent.isReady && r.agent.isAlive);
 		await Promise.all(
@@ -1229,6 +1240,9 @@ export class SquadManager extends EventEmitter {
 			}),
 		);
 		this.publishPresence();
+		// Periodically (~every 30s) reap detached hosts the roster no longer owns. Safe because an
+		// agent is in this.agents before its host spawns, so a just-spawned agent is never reaped.
+		if (++this.reapTicks % 12 === 0) void this.reapOrphans();
 	}
 
 	private applyState(rec: AgentRecord, state: RpcSessionState): void {
