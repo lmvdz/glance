@@ -227,6 +227,21 @@
     .flash { animation:flash 1.1s ease-out; }
   }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; } }
+  /* overview / home — the first thing you see; make it inviting + dense */
+  .home .hero { padding:6px 2px 2px; }
+  .home .hero h2 { font-size:23px; margin:0 0 4px; background:linear-gradient(90deg,var(--ink),var(--accent)); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+  .home .herobox { background:linear-gradient(180deg,var(--panel2),var(--panel)); border-color:#26303c; }
+  .home .herobox .spawnrow input { padding:11px 13px; font-size:15px; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:11px; }
+  .chip { font:inherit; font-size:12px; padding:5px 11px; border:1px solid var(--line); border-radius:999px; background:var(--panel2); color:var(--mut); cursor:pointer; }
+  .chip:hover { border-color:var(--accent); color:var(--ink); }
+  .statrow { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:2px 0 4px; }
+  .stat { border:1px solid var(--line); border-radius:10px; padding:13px 15px; background:linear-gradient(180deg,var(--panel2),var(--panel)); display:flex; flex-direction:column; gap:7px; }
+  .stat[data-go] { cursor:pointer; } .stat[data-go]:hover { border-color:var(--accent); }
+  .stat .num { font-size:26px; font-weight:700; line-height:1; }
+  .stat .lbl { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.06em; display:flex; align-items:center; gap:7px; }
+  .stat.attn { border-color:var(--input); } .stat.attn .num { color:var(--input); }
+  @media (max-width:760px) { .statrow { grid-template-columns:repeat(2,1fr); } }
 </style>
 </head>
 <body>
@@ -1000,16 +1015,32 @@ let spawning = false;
 function setHomeStatus(msg) { homeMsg = msg; const el = $("#smartstatus"); if (el) el.textContent = msg; }
 
 function renderHome(body) {
+  const examples = ["add rate limiting to the login route", "write tests for the auth module", "fix the failing CI build", "add a dark-mode toggle", "speed up the slowest endpoint"];
+  const ps = projects();
+  const ags = [...agents.values()];
+  const counts = {};
+  for (const s of STATUSES) counts[s] = ags.filter((a) => a.status === s).length;
+  const waiting = waitingAgents().length;
   body.innerHTML = `
-    <div class="pv">
-      <div><h2>What do you want done?</h2><div class="sub">Describe a task — squad picks the repo, names the agent, and runs it. No forms.</div></div>
-      <div class="section"><div class="inner">
+    <div class="pv home">
+      <div class="hero">
+        <h2>What do you want done?</h2>
+        <div class="sub">Describe a task in plain words — squad picks the repo, names the agent, runs it, and lands it once its tests pass. No forms. No git.</div>
+      </div>
+      <div class="section herobox"><div class="inner">
         <div class="spawnrow">
           <input id="smartspawn" placeholder="e.g. add rate limiting to the login route" autocomplete="off" />
-          <button class="primary" id="smartgo">Spawn</button>
+          <button class="primary" id="smartgo">Spawn ⏎</button>
         </div>
         <div id="smartstatus" class="sub" style="margin-top:8px;min-height:1.2em"></div>
+        <div class="chips" id="examplechips">${examples.map((x) => `<button type="button" class="chip" data-ex="${esc(x)}">${esc(x)}</button>`).join("")}</div>
       </div></div>
+      <div class="statrow">
+        <div class="stat${waiting ? " attn" : ""}" data-go="queue"><span class="num">${waiting}</span><span class="lbl">Need you</span></div>
+        <div class="stat" data-go="race"><span class="num">${ags.length}</span><span class="lbl">Agents ${ags.length ? dots(counts) : ""}</span></div>
+        <div class="stat" data-go="board"><span class="num">${features.size}</span><span class="lbl">Features</span></div>
+        <div class="stat"><span class="num">${ps.length}</span><span class="lbl">Projects</span></div>
+      </div>
       <div class="section"><h3>Or jump to a project</h3><div class="inner" id="homeprojects"></div></div>
     </div>`;
   const input = $("#smartspawn"); const go = $("#smartgo");
@@ -1021,10 +1052,11 @@ function renderHome(body) {
   input.oninput = () => { homeDraft = input.value; };
   input.onkeydown = (e) => { if (e.key === "Enter") run(); };
   if (!spawning) input.focus();
+  for (const c of body.querySelectorAll(".chip")) clickable(c, () => { input.value = c.dataset.ex; homeDraft = input.value; input.focus(); }, `use example: ${c.dataset.ex}`);
+  for (const s of body.querySelectorAll(".stat[data-go]")) clickable(s, () => { const g = s.dataset.go; if (g === "queue") openQueue(); else if (g === "board") openBoard(); else if (g === "race") openRace(); }, s.dataset.go);
   const hp = $("#homeprojects");
-  const ps = projects();
-  hp.innerHTML = ps.length ? ps.map(p => `<div class="n" data-pid="${esc(p.id)}">${esc(p.name)} <span style="color:var(--dim)">${esc(p.repo)} · ${p.agents.length} agent(s)</span></div>`).join("") : `<span style="color:var(--dim)">none yet — spawn one above</span>`;
-  hp.querySelectorAll("[data-pid]").forEach(el => { el.style.cursor = "pointer"; el.onclick = () => { selProject = el.getAttribute("data-pid"); view = "project"; renderAll(); }; });
+  hp.innerHTML = ps.length ? ps.map((p) => `<div class="n" data-pid="${esc(p.id)}">${dots(p.counts)} ${esc(p.name)} <span style="color:var(--dim)">${esc(p.repo)} · ${p.agents.length} agent(s)</span></div>`).join("") : `<span style="color:var(--dim)">none yet — type a task above to spawn your first agent</span>`;
+  hp.querySelectorAll("[data-pid]").forEach((el) => { el.style.cursor = "pointer"; el.onclick = () => { selProject = el.getAttribute("data-pid"); view = "project"; renderAll(); }; });
 }
 
 async function smartSpawn(prompt) {
