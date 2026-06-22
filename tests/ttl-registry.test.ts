@@ -56,3 +56,14 @@ test("repoKey is stable, path-resolved, and byte-compatible with the legacy form
 	expect(repoKey("/tmp/other")).not.toBe(expected); // distinct repos → distinct keys
 	expect(reg.dirFor(repo)).toBe(path.join(os.homedir(), ".omp", "squad", subdir, expected));
 });
+
+test("sweep removes repoKey dirs left with no live records, keeps live ones", async () => {
+	const live = "/tmp/ttl-sweep-live";
+	const dead = "/tmp/ttl-sweep-dead";
+	await reg.write(live, { id: "a", heartbeat: Date.now(), value: "fresh" });
+	await reg.write(dead, { id: "b", heartbeat: Date.now() - 120_000, value: "stale" }); // past the 60s TTL
+	const removed = await reg.sweep();
+	expect(removed).toBeGreaterThanOrEqual(1);
+	expect(await reg.readAll(live)).toHaveLength(1); // live record survives
+	expect(await fsp.stat(reg.dirFor(dead)).then(() => true, () => false)).toBe(false); // dead dir gone
+});

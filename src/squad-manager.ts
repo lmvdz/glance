@@ -36,7 +36,9 @@ import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./
 import { landAgent, type LandOpts, type LandResult } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
-import { proofGate, runProof } from "./proof.ts";
+import { proofGate, runProof, sweepProofs } from "./proof.ts";
+import { sweepLeases } from "./leases.ts";
+import { sweepPresence } from "./presence.ts";
 import { chooseFallback } from "./supervisor.ts";
 import type {
 	Actor,
@@ -1261,7 +1263,10 @@ export class SquadManager extends EventEmitter {
 		this.publishPresence();
 		// Periodically (~every 30s) reap detached hosts the roster no longer owns. Safe because an
 		// agent is in this.agents before its host spawns, so a just-spawned agent is never reaped.
-		if (++this.reapTicks % 12 === 0) void this.reapOrphans();
+		if (++this.reapTicks % 12 === 0) {
+			void this.reapOrphans();
+			void this.sweepRegistries();
+		}
 		void this.sampleHealth().then((h) => {
 			const key = h.warnings.join("|");
 			if (key && key !== this.lastWarnKey) this.log("warn", `watchdog: ${h.warnings.join("; ")}`);
@@ -1288,6 +1293,17 @@ export class SquadManager extends EventEmitter {
 		};
 		const warnings = assessHealth(sample, defaultHealthLimits(ncpu, hardAgentCeiling()));
 		return { sample, warnings, at: Date.now() };
+	}
+
+	/** Periodically remove stale per-repo/worktree dirs from the leases/presence/proof registries — each
+	 *  unique worktree mints a fresh key, so without this they accumulate one folder per agent forever. */
+	private async sweepRegistries(): Promise<void> {
+		try {
+			const [l, p, pr] = await Promise.all([sweepLeases(), sweepPresence(), sweepProofs()]);
+			if (l + p + pr > 0) this.log("info", `swept stale registry dirs — ${l} leases, ${p} presence, ${pr} proofs`);
+		} catch {
+			/* best-effort cleanup */
+		}
 	}
 
 	private applyState(rec: AgentRecord, state: RpcSessionState): void {

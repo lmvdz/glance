@@ -49,6 +49,11 @@ function isLease(value: unknown): value is LeaseEntry {
 
 const reg = ttlRegistry<LeaseEntry>({ subdir: "leases", ttlMs: LEASE_TTL_MS, isRecord: isLease });
 
+/** Remove leases dirs for repos/worktrees with no live lease (called periodically by the daemon). */
+export function sweepLeases(): Promise<number> {
+	return reg.sweep();
+}
+
 /** Claim or refresh a lease on a file. Returns the lease id. */
 export async function claimLease(input: LeaseInput): Promise<string> {
 	const id = leaseId(input.session, input.file);

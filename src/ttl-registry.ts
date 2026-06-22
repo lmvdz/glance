@@ -42,6 +42,8 @@ export interface TtlRegistry<T extends TtlRecord> {
 	readAll(repo: string, ttlMs?: number): Promise<T[]>;
 	/** Delete <repoDir>/<id>.json. Never throws. */
 	remove(repo: string, id: string): Promise<void>;
+	/** Remove repoKey dirs left with no live record (prunes stale files first). Returns dirs removed. */
+	sweep(ttl?: number): Promise<number>;
 }
 
 /** Stable 16-hex key for a repo path. Must match the old hand-rolled key byte-for-byte. */
@@ -84,6 +86,30 @@ export function ttlRegistry<T extends TtlRecord>({ subdir, ttlMs, isRecord }: Tt
 		return live;
 	}
 
+	/** Remove every repoKey dir under `root` with no live record (prune-on-read clears stale files first).
+	 *  Empty/all-stale dirs otherwise pile up forever — one per unique repo/worktree path. Best-effort. */
+	async function sweep(ttl: number = ttlMs): Promise<number> {
+		let names: string[];
+		try {
+			names = await fsp.readdir(root);
+		} catch {
+			return 0;
+		}
+		let removed = 0;
+		for (const name of names) {
+			const dir = path.join(root, name);
+			try {
+				if ((await read(dir, ttl)).length === 0) {
+					await fsp.rm(dir, { recursive: true, force: true });
+					removed++;
+				}
+			} catch {
+				/* skip unreadable */
+			}
+		}
+		return removed;
+	}
+
 	async function readOne(repo: string, id: string): Promise<T | undefined> {
 		try {
 			const parsed: unknown = JSON.parse(await fsp.readFile(path.join(dirFor(repo), `${id}.json`), "utf8"));
@@ -101,5 +127,6 @@ export function ttlRegistry<T extends TtlRecord>({ subdir, ttlMs, isRecord }: Tt
 		readOne,
 		readAll: (repo, ttl = ttlMs) => read(dirFor(repo), ttl),
 		remove: (repo, id) => fsp.rm(path.join(dirFor(repo), `${id}.json`), { force: true }).catch(() => {}),
+		sweep,
 	};
 }

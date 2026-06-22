@@ -66,6 +66,11 @@ function isEntry(value: unknown): value is PresenceEntry {
 
 const reg = ttlRegistry<PresenceEntry>({ subdir: "presence", ttlMs: PRESENCE_TTL_MS, isRecord: isEntry });
 
+/** Remove presence dirs for repos with no live claim (called periodically by the daemon). */
+export function sweepPresence(): Promise<number> {
+	return reg.sweep();
+}
+
 /** Create or refresh a claim. Returns the claim id (mint a new one if not given). */
 export async function claim(input: ClaimInput): Promise<string> {
 	const id = input.id ?? `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;

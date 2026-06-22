@@ -71,6 +71,45 @@ export function isFresh(proof: Proof | undefined, head: string): boolean {
 	return !!proof && proof.ok && head !== "" && proof.commit === head;
 }
 
+/** Proofs older than this are for a landed/abandoned worktree — swept so per-worktree dirs don't pile up. */
+const PROOF_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Remove proof records older than `maxAgeMs` and any now-empty repo dirs. Returns records removed. */
+export async function sweepProofs(maxAgeMs = PROOF_TTL_MS): Promise<number> {
+	let repoDirs: string[];
+	try {
+		repoDirs = await fsp.readdir(ROOT);
+	} catch {
+		return 0;
+	}
+	const cutoff = Date.now() - maxAgeMs;
+	let removed = 0;
+	for (const rd of repoDirs) {
+		const dir = path.join(ROOT, rd);
+		let files: string[];
+		try {
+			files = await fsp.readdir(dir);
+		} catch {
+			continue;
+		}
+		let live = 0;
+		for (const f of files) {
+			if (!f.endsWith(".json")) continue;
+			const file = path.join(dir, f);
+			try {
+				const p: unknown = JSON.parse(await fsp.readFile(file, "utf8"));
+				if (isProof(p) && p.ranAt >= cutoff) { live++; continue; }
+				await fsp.rm(file, { force: true });
+				removed++;
+			} catch {
+				/* skip unreadable */
+			}
+		}
+		if (live === 0) await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+	}
+	return removed;
+}
+
 /** Screenshots under <worktree>/.omp/proof/ — vision evidence attached to the proof. */
 async function collectArtifacts(worktree: string): Promise<string[]> {
 	const dir = path.join(worktree, ".omp", "proof");
