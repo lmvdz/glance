@@ -28,6 +28,7 @@ import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requiredRole, resolveRole, roleAtLeast } from "./auth.ts";
+import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role } from "./types.ts";
 import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./federation.ts";
@@ -50,6 +51,22 @@ interface SocketData {
 	role: Role;
 }
 
+/** Resolved better-auth session shape we read (subset; structural typing tolerates better-auth's wider type). */
+export interface AuthSession {
+	user: { id: string; name: string; email: string; image?: string | null };
+	session: { activeOrganizationId?: string | null };
+}
+
+/** Minimal structural view of a better-auth instance — enough to serve `/api/auth/*`, read the
+ *  session, and bridge the active-org role. Avoids depending on better-auth's full inferred type. */
+export interface AuthInstance {
+	handler(req: Request): Promise<Response>;
+	api: {
+		getSession(input: { headers: Headers }): Promise<AuthSession | null>;
+		getActiveMemberRole(input: { headers: Headers; query?: { organizationId?: string } }): Promise<{ role: string }>;
+	};
+}
+
 export interface SquadServerOptions {
 	port?: number;
 	hostname?: string;
@@ -67,6 +84,10 @@ export interface SquadServerOptions {
 	roleTokens?: { operator?: string; viewer?: string };
 	/** Coordinator URL to listen on for peer presence. Defaults to OMP_SQUAD_COORDINATOR; unset ⇒ federation surface stays inert. */
 	coordinator?: string;
+	/** DB-mode identity layer (better-auth). Set ⇒ DB mode: cookie sessions + orgs replace the bearer gate. Unset ⇒ FILE mode (today's bearer gate). */
+	auth?: AuthInstance;
+	/** The open DB handle backing DB mode; held so the server's lifetime owns it (closed by the daemon). */
+	db?: DbHandle;
 }
 
 /** Pure: a short, stable fingerprint of the served UI. Changes whenever index.html changes,
@@ -126,6 +147,10 @@ export class SquadServer {
 	private peerPresence?: PeerPresenceTracker;
 	/** Token → tier map gating every /api request + WS command. Empty ⇒ auth off (loopback test mode). */
 	private readonly authPolicy: AuthPolicy;
+	/** DB-mode identity layer; when set the bearer gate is replaced by better-auth cookie sessions. Undefined ⇒ FILE mode. */
+	private readonly auth: AuthInstance | undefined;
+	/** Open DB handle backing DB mode (owned by the daemon; held here for member/org reads). */
+	private readonly db: DbHandle | undefined;
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
@@ -135,12 +160,31 @@ export class SquadServer {
 		this.operator = opts.operator ?? { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 		this.coordinator = opts.coordinator ?? process.env.OMP_SQUAD_COORDINATOR ?? null;
 		this.authPolicy = { admin: opts.token, operator: opts.roleTokens?.operator, viewer: opts.roleTokens?.viewer };
+		this.auth = opts.auth;
+		this.db = opts.db;
 	}
 
 	get url(): string {
 		const host = this.opts.hostname ?? "127.0.0.1";
 		const scheme = this.opts.tls ? "https" : "http";
 		return `${scheme}://${host}:${this.server?.port ?? this.opts.port ?? 0}`;
+	}
+
+	/** True in DB mode (a better-auth instance is wired); false in FILE mode. */
+	private get dbMode(): boolean {
+		return !!this.auth;
+	}
+
+	/** Bridge identity → RBAC tier: active-org role owner|admin ⇒ admin; member ⇒ operator;
+	 *  authed but no active org (or the lookup fails) ⇒ operator. Only called in DB mode. */
+	private async bridgeRole(req: Request, activeOrgId: string | null | undefined): Promise<Role> {
+		if (!this.auth || !activeOrgId) return "operator";
+		try {
+			const { role } = await this.auth.api.getActiveMemberRole({ headers: req.headers });
+			return role === "owner" || role === "admin" ? "admin" : "operator";
+		} catch {
+			return "operator";
+		}
 	}
 
 	start(): string {
@@ -211,9 +255,19 @@ export class SquadServer {
 		if (url.pathname === "/ws") {
 			// The handshake only authenticates; per-command tier checks happen in applyCommand,
 			// so a viewer may connect to read the roster + subscribe to transcripts.
-			const role = resolveRole(req, this.authPolicy);
+			let role: Role | null;
+			if (this.auth) {
+				// DB mode: the session cookie rides the upgrade request headers — no token subprotocol.
+				const session = await this.auth.api.getSession({ headers: req.headers });
+				role = session ? await this.bridgeRole(req, session.session.activeOrganizationId) : null;
+			} else {
+				role = resolveRole(req, this.authPolicy);
+			}
 			if (role === null) return new Response("unauthorized", { status: 401 });
-			if (server.upgrade(req, { data: { id: ++this.sockSeq, role }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } })) return undefined;
+			const upgraded = this.auth
+				? server.upgrade(req, { data: { id: ++this.sockSeq, role } })
+				: server.upgrade(req, { data: { id: ++this.sockSeq, role }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
+			if (upgraded) return undefined;
 			return new Response("websocket upgrade failed", { status: 426 });
 		}
 		if (url.pathname === "/" || url.pathname === "/index.html") {
@@ -221,12 +275,33 @@ export class SquadServer {
 		}
 		const asset = PUBLIC_ASSETS[url.pathname];
 		if (asset) return new Response(Bun.file(path.join(WEB_DIR, url.pathname.slice(1))), { headers: { "content-type": asset } });
-		// Auth gate. Public bootstrap surface (the SPA shell, plus the manifest / service
-		// worker / icons added just above this in the static block) loads without a token so
-		// the PWA can install and prompt for it; everything under /api requires the token.
-		const role = resolveRole(req, this.authPolicy);
-		if (role === null) return new Response("unauthorized", { status: 401 });
+		// Public mode probe — lets the SPA pick its auth style before any login. No auth required.
+		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file" });
+		// DB mode: better-auth owns the rest of /api/auth/* (sign-in/up/out, org, members). Reachable
+		// unauthenticated so login works; /api/auth/check stays our own (excluded here), handled below.
+		if (this.auth && url.pathname.startsWith("/api/auth/") && url.pathname !== "/api/auth/check") {
+			return this.auth.handler(req);
+		}
+		// Auth gate. FILE mode: the bearer-token gate (unchanged) — public bootstrap (shell, manifest,
+		// service worker, icons handled above) loads tokenless so the PWA can install and prompt. DB
+		// mode: a valid better-auth cookie session, with the active-org role bridged to an RBAC tier.
+		let role: Role;
+		let session: AuthSession | null = null;
+		if (this.auth) {
+			session = await this.auth.api.getSession({ headers: req.headers });
+			if (session === null) return new Response("unauthorized", { status: 401 });
+			role = await this.bridgeRole(req, session.session.activeOrganizationId);
+		} else {
+			const resolved = resolveRole(req, this.authPolicy);
+			if (resolved === null) return new Response("unauthorized", { status: 401 });
+			role = resolved;
+		}
 		if (!roleAtLeast(role, requiredRole(req.method, url.pathname))) return new Response("forbidden", { status: 403 });
+		if (url.pathname === "/api/me") {
+			if (!this.auth || session === null) return Response.json({ mode: "file" });
+			const u = session.user;
+			return Response.json({ mode: "db", user: { id: u.id, name: u.name, email: u.email, image: u.image ?? null }, activeOrganizationId: session.session.activeOrganizationId ?? null, role });
+		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
 		if (url.pathname === "/api/push/subscribe" && req.method === "POST") {

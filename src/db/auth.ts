@@ -21,16 +21,21 @@ import type { DbKind } from "./index.ts";
 export interface AuthConfig {
 	dialect: Dialect;
 	type: DbKind;
+	/** Same-origin daemon origins the SPA fetches from (loopback/LAN/tailnet). Added to better-auth's origin allowlist. */
+	trustedOrigins?: string[];
+	/** Public base URL of the auth surface; overrides the BETTER_AUTH_URL/localhost default. */
+	baseURL?: string;
 }
 
 /** BetterAuth options over the shared dialect. Used both to migrate now and to instantiate auth in P1. */
-export function authOptions({ dialect, type }: AuthConfig) {
+export function authOptions({ dialect, type, trustedOrigins, baseURL }: AuthConfig) {
 	return {
 		database: { dialect, type },
 		secret: process.env.BETTER_AUTH_SECRET || "dev-insecure-secret-set-BETTER_AUTH_SECRET-in-prod",
-		baseURL: process.env.BETTER_AUTH_URL || "http://localhost:7878",
+		baseURL: baseURL || process.env.BETTER_AUTH_URL || "http://localhost:7878",
 		emailAndPassword: { enabled: true },
 		plugins: [organization()],
+		...(trustedOrigins && trustedOrigins.length ? { trustedOrigins } : {}),
 	};
 }
 

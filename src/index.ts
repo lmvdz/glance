@@ -20,13 +20,15 @@ import { loadOrCreateToken } from "./auth.ts";
 import { PushService } from "./push.ts";
 import { TailnetFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
-import { SquadServer } from "./server.ts";
+import { SquadServer, type AuthInstance } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
 import { SquadTui } from "./tui.ts";
 import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
 import { acquireStateLock, StateLockError } from "./state-lock.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
+import { openDatabase } from "./db/index.ts";
+import { makeAuth } from "./db/auth.ts";
 import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
@@ -176,6 +178,19 @@ async function cmdUp(args: string[]): Promise<void> {
 	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 	const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
 	const manager = new SquadManager({ bus, operator, stateDir, autoLand: process.env.OMP_SQUAD_AUTOLAND !== "0" });
+	// DB mode (DATABASE_URL set): open + migrate the shared DB (openDatabase migrates at boot) and
+	// build the live better-auth instance the server gates on. FILE mode (default): openDatabase()
+	// returns null, `auth` stays undefined, and nothing about today's behavior changes.
+	const dbHandle = await openDatabase();
+	const scheme = tls ? "https" : "http";
+	const auth: AuthInstance | undefined = dbHandle
+		? (makeAuth({
+				dialect: dbHandle.dialect,
+				type: dbHandle.type,
+				trustedOrigins: reachableUrls(host, port, scheme).map((u) => new URL(u).origin),
+				baseURL: process.env.BETTER_AUTH_URL || `${scheme}://${host}:${port}`,
+			}) as unknown as AuthInstance)
+		: undefined;
 	// Single-writer guard: refuse to boot if another daemon already owns this state dir.
 	let lock: Awaited<ReturnType<typeof acquireStateLock>>;
 	try {
@@ -197,7 +212,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	const push = new PushService(stateDir);
 	await push.init();
 	const roleTokens = { operator: process.env.OMP_SQUAD_OPERATOR_TOKEN || undefined, viewer: process.env.OMP_SQUAD_VIEWER_TOKEN || undefined };
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens });
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
@@ -211,6 +226,7 @@ async function cmdUp(args: string[]): Promise<void> {
 		stopTracker();
 		await manager.stop();
 		server.stop();
+		if (dbHandle) await dbHandle.close();
 		lock.release();
 		process.exit(0);
 	};
