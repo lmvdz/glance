@@ -72,7 +72,7 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
-import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
+import { resolveWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
@@ -719,18 +719,14 @@ export class SquadManager extends EventEmitter {
 			repo = opts.repo;
 			resolvedBranch = (await worktreeStatus(cwd).catch(() => ({ branch: undefined }))).branch;
 		} else {
-			try {
-				const wt = await addWorktree({ repo: opts.repo, branch });
-				cwd = wt.worktree;
-				repo = wt.repo;
-				resolvedBranch = wt.branch;
-			} catch (err) {
-				// Not a git repo (or worktree creation failed): run the agent directly in the
-				// target directory. No isolation, but "spawn anywhere" still works.
-				cwd = opts.repo;
-				repo = opts.repo;
-				resolvedBranch = undefined;
-				this.log("warn", `no worktree for ${opts.repo} (${err instanceof Error ? err.message : String(err)}); running in place`);
+			const wt = await resolveWorktree(opts.repo, branch);
+			cwd = wt.cwd;
+			repo = wt.repo;
+			resolvedBranch = wt.branch;
+			if (wt.inPlace) {
+				// Non-git target dir: no isolation, but "spawn anywhere" still works. A real git checkout
+				// that fails worktree creation now throws instead (OMPSQ-40) — never run on the shared tree.
+				this.log("warn", `${opts.repo} is not a git repo — running agent in place (no isolation)`);
 			}
 		}
 

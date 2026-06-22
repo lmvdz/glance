@@ -30,9 +30,12 @@ async function runGit(args: string[], cwd?: string): Promise<GitResult> {
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
+/** Injectable git runner — lets tests drive worktree logic without a real repo. Defaults to `runGit`. */
+export type GitRunner = (args: string[], cwd?: string) => Promise<GitResult>;
+
 /** Resolve the git repository root containing `cwd`, or throw. */
-export async function repoRoot(cwd: string): Promise<string> {
-	const r = await runGit(["rev-parse", "--show-toplevel"], cwd);
+export async function repoRoot(cwd: string, run: GitRunner = runGit): Promise<string> {
+	const r = await run(["rev-parse", "--show-toplevel"], cwd);
 	if (r.code !== 0) throw new Error(`not a git repository: ${cwd}${r.stderr ? ` (${r.stderr})` : ""}`);
 	return r.stdout;
 }
@@ -42,8 +45,8 @@ export function worktreeBase(): string {
 	return path.join(os.homedir(), ".omp", "squad", "worktrees");
 }
 
-async function branchExists(repo: string, branch: string): Promise<boolean> {
-	const r = await runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repo);
+async function branchExists(repo: string, branch: string, run: GitRunner = runGit): Promise<boolean> {
+	const r = await run(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repo);
 	return r.code === 0;
 }
 
@@ -53,6 +56,11 @@ export interface CreatedWorktree {
 	repo: string;
 }
 
+// Transient git contention — index.lock / ref lock / a concurrent `worktree add` racing under fleet
+// load. Safe to retry. A genuine failure (bad branch, path conflict, corruption) won't match → fails fast.
+const TRANSIENT_LOCK = /lock|unable to create|cannot lock|already (exists|locked)|another git process/i;
+const RETRY_DELAYS_MS = [100, 300]; // ponytail: 3 attempts (2 backoffs); fleet lock contention clears in ms
+
 /**
  * Create (or reuse) a worktree for `repo` checked out to `branch`.
  * If the branch exists it is checked out; otherwise it is created off HEAD.
@@ -61,22 +69,27 @@ export async function addWorktree(opts: {
 	repo: string;
 	branch: string;
 	dir?: string;
-}): Promise<CreatedWorktree> {
-	const repo = await repoRoot(opts.repo);
+}, run: GitRunner = runGit): Promise<CreatedWorktree> {
+	const repo = await repoRoot(opts.repo, run);
 	const safe = opts.branch.replace(/[^a-zA-Z0-9._-]/g, "-");
 	const dir = opts.dir ?? path.join(worktreeBase(), `${path.basename(repo)}-${safe}`);
 
 	// Already registered as a worktree at this path? Reuse it.
-	const list = await runGit(["worktree", "list", "--porcelain"], repo);
+	const list = await run(["worktree", "list", "--porcelain"], repo);
 	if (list.code === 0 && list.stdout.includes(`worktree ${dir}\n`)) {
 		return { worktree: dir, branch: opts.branch, repo };
 	}
 
-	const exists = await branchExists(repo, opts.branch);
+	const exists = await branchExists(repo, opts.branch, run);
 	const args = exists
 		? ["worktree", "add", dir, opts.branch]
 		: ["worktree", "add", "-b", opts.branch, dir];
-	const r = await runGit(args, repo);
+	// Retry transient lock contention (index/ref locks under fleet load); fail fast on anything else.
+	let r = await run(args, repo);
+	for (let attempt = 0; r.code !== 0 && attempt < RETRY_DELAYS_MS.length && TRANSIENT_LOCK.test(`${r.stderr}\n${r.stdout}`); attempt++) {
+		await Bun.sleep(RETRY_DELAYS_MS[attempt]);
+		r = await run(args, repo);
+	}
 	if (r.code !== 0) {
 		throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
 	}
@@ -87,6 +100,46 @@ export async function addWorktree(opts: {
 		try { symlinkSync(path.join(repo, "node_modules"), nm, "dir"); } catch {}
 	}
 	return { worktree: dir, branch: opts.branch, repo };
+}
+
+/** True when `dir` is inside a git repository. Decides whether a failed worktree creation may fall
+ *  back to running in-place: only a NON-git target dir is allowed to. */
+export async function isGitRepo(dir: string, run: GitRunner = runGit): Promise<boolean> {
+	try {
+		await repoRoot(dir, run);
+		return true;
+	} catch {
+		return existsSync(path.join(dir, ".git"));
+	}
+}
+
+export interface ResolvedWorktree {
+	cwd: string;
+	repo: string;
+	branch?: string;
+	/** true ⇒ no isolation: the agent runs in `repo` itself (only ever a non-git "spawn anywhere" dir). */
+	inPlace: boolean;
+}
+
+/**
+ * Resolve an agent's working dir. Normally an isolated worktree; if `addWorktree` fails, a NON-git
+ * target keeps the intentional "spawn anywhere" in-place fallback, but a real git checkout re-throws
+ * — running in-place there would mutate the shared working tree (OMPSQ-40). `add`/`gitProbe` are
+ * injectable so the policy is unit-testable without a real repo.
+ */
+export async function resolveWorktree(
+	repo: string,
+	branch: string,
+	add: typeof addWorktree = addWorktree,
+	gitProbe: typeof isGitRepo = isGitRepo,
+): Promise<ResolvedWorktree> {
+	try {
+		const wt = await add({ repo, branch });
+		return { cwd: wt.worktree, repo: wt.repo, branch: wt.branch, inPlace: false };
+	} catch (err) {
+		if (await gitProbe(repo)) throw err;
+		return { cwd: repo, repo, branch: undefined, inPlace: true };
+	}
 }
 
 /** Remove a worktree (and prune the admin entry). Best-effort. */
