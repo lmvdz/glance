@@ -42,6 +42,8 @@ export interface WorkflowNode {
 	retryTarget?: string;
 	/** Max executions of this node in one run (overrides the graph default). */
 	maxVisits?: number;
+	/** On visit-cap exhaustion, route here instead of hard-failing (e.g. fix-up → escalate). */
+	overflow?: string;
 	/** All raw DOT attributes, for forward-compatibility. */
 	attrs: Record<string, string>;
 }
