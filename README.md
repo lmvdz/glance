@@ -245,6 +245,13 @@ agent transitions to *needs-input* or *error*, a Web Push notification fires (ev
 app closed) and tapping it deep-links to that agent. Push is RFC 8291 (`aes128gcm`) + RFC
 8292 VAPID, implemented dependency-free in `src/push.ts`.
 
+**Live-reload on upgrade.** The daemon stamps a `uiVersion` (a hash of the served
+`index.html`, via `computeUiVersion`) onto every WS `roster` snapshot and `GET /api/version`.
+The dashboard pins the first version it sees; after an `⤴ Upgrade` (or any daemon restart
+with changed assets) the socket drops, the client auto-reconnects, sees a new version, and
+**refreshes itself** ("Updated — reloading…") — so an open tab or installed PWA never runs
+stale UI without anyone touching it.
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`
