@@ -269,6 +269,35 @@ omp-squad daemon running
     http://192.168.1.20:7878/?token=Bdnw7…IHo
 ```
 
+### Multi-tenant mode (`DATABASE_URL`) — opt-in
+
+By default the daemon runs in **file mode**: the token-gated, single-operator tool described
+above (state under `~/.omp/squad`, no accounts). Set **`DATABASE_URL`** and it boots in **DB
+mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-auth.com):
+
+- **Accounts + sessions** replace the bearer token. The dashboard shows a sign-in / sign-up
+  screen; auth is email + password with httpOnly cookie sessions (`/api/auth/*`).
+- **Organizations, members, roles.** A user creates orgs, invites members by email, and assigns
+  roles (`owner` > `admin` > `member`); the active-org role bridges to the fleet's RBAC tiers
+  (owner/admin → `admin`, member → `operator`).
+- **Settings surface** (gear in the nav): Account, Organization, Members, Roles & Permissions —
+  plus Appearance / Notifications / Daemon, which also show in file mode.
+- **Storage.** `postgres(ql)://…` ⇒ Postgres (with row-level-security backstops); anything else
+  (`sqlite:<path>` or a bare path) ⇒ SQLite. Auth + app tables migrate on boot.
+
+| Env | Meaning | Default |
+|---|---|---|
+| `DATABASE_URL` | Unset ⇒ file mode. `postgres://…` ⇒ Postgres; `sqlite:<path>`/path ⇒ SQLite. Enables DB mode. | _(unset)_ |
+| `BETTER_AUTH_SECRET` | Session-signing secret — **set a strong value in production** | dev-insecure default |
+| `BETTER_AUTH_URL` | Public base URL for auth origin checks | the daemon's bind URL |
+
+> **Maturity** (tracked in Plane → module *Multi-tenant SaaS*). Landed + verified: the DB
+> foundation (P0), the BetterAuth identity layer (P1, *pending human security review*), and the
+> web settings/org/member UI. **Not yet landed:** per-org runtime isolation (P2) and full RBAC
+> enforcement on every mutation (P3) — so today all authenticated users of a DB-mode daemon share
+> one fleet/state. DB mode previews the SaaS surface; it is **not** a tenant-isolated production
+> deployment yet. File mode is the default and unaffected.
+
 **Bind beyond loopback** to reach it from your phone:
 
 | Env / flag | Meaning | Default |
