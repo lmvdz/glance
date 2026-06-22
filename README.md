@@ -195,6 +195,14 @@ so work starts with nobody typing. Bounded so a backlog can't storm:
 | `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
 | `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate |
 
+**Self-healing control loop (opt-in)** — `OMP_SQUAD_AUTODRIVE=1` arms the orchestrator's
+periodic tick. Each pass it auto-lands idle agents whose work verifies green (closing the
+tracking Plane issue), self-heals red gates through the failure router (retry / hold /
+escalate by repair budget), trips a single human-summoning `CATASTROPHE:` log on budget
+exhaustion or a catastrophe tripwire (infra failure, safety violation, regression
+oscillation), and drains cap-parked spawns back in under the WIP ceiling. Off by default —
+the daemon arms no timer and the tick is fully inert until the flag is set.
+
 ### Federation (opt-in)
 
 `OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
