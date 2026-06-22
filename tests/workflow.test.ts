@@ -347,18 +347,22 @@ test("commission: a persistently failing gate exhausts the re-author cap and onb
 
 // ── verify loop (Phase C) ──────────────────────────────────────────────────────
 
-test("buildVerifyWorkflow: synthesizes implement → verify(goal_gate) → fixup", () => {
+test("buildVerifyWorkflow: synthesizes implement → verify(goal_gate) → codefix → fixup", () => {
 	const wf = buildVerifyWorkflow({ command: "cargo test 2>&1", maxFixups: 5 });
 	expect(wf.nodes.get("implement")?.kind).toBe("agent");
 	expect(wf.nodes.get("verify")?.kind).toBe("command");
 	expect(wf.nodes.get("verify")?.script).toBe("cargo test 2>&1");
 	expect(wf.nodes.get("verify")?.goalGate).toBe(true);
-	expect(wf.nodes.get("verify")?.retryTarget).toBe("fixup");
+	expect(wf.nodes.get("verify")?.retryTarget).toBe("codefix"); // failure routes to the deterministic pre-pass first
+	expect(wf.nodes.get("codefix")?.kind).toBe("command");
+	expect(wf.nodes.get("codefix")?.script).toContain("codefix");
+	expect(wf.nodes.get("codefix")?.maxVisits).toBe(1); // deterministic pre-pass runs once, then overflows to fixup
+	expect(wf.nodes.get("codefix")?.overflow).toBe("fixup");
 	expect(wf.nodes.get("fixup")?.maxVisits).toBe(5);
 	expect(wf.nodes.get("fixup")?.overflow).toBe("escalate"); // exhausted fixup routes to escalation
 	expect(wf.nodes.get("escalate")?.kind).toBe("agent");
 	expect(wf.nodes.get("escalate")?.maxVisits).toBe(2);
-	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify", "escalate->verify"]);
+	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->implement", "implement->verify", "verify->exit", "verify->fixup", "codefix->verify", "fixup->verify", "escalate->verify"]);
 });
 
 test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps the verify gate + fixup loop", () => {
@@ -368,27 +372,31 @@ test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps
 	expect(wf.nodes.get("write-test")?.prompt).toMatch(/FIRST/);
 	expect(wf.nodes.get("write-test")?.prompt).toMatch(/FAIL|red/i);
 	expect(wf.nodes.get("implement")?.kind).toBe("agent");
-	// the gate is unchanged: goal-gated command that retries into fixup
+	// the gate is unchanged otherwise: goal-gated command that retries into the codefix → fixup cascade
 	expect(wf.nodes.get("verify")?.kind).toBe("command");
 	expect(wf.nodes.get("verify")?.script).toBe("bun test 2>&1");
 	expect(wf.nodes.get("verify")?.goalGate).toBe(true);
-	expect(wf.nodes.get("verify")?.retryTarget).toBe("fixup");
+	expect(wf.nodes.get("verify")?.retryTarget).toBe("codefix");
+	expect(wf.nodes.get("codefix")?.kind).toBe("command");
+	expect(wf.nodes.get("codefix")?.maxVisits).toBe(1);
+	expect(wf.nodes.get("codefix")?.overflow).toBe("fixup");
 	expect(wf.nodes.get("fixup")?.maxVisits).toBe(4);
 	expect(wf.nodes.get("fixup")?.overflow).toBe("escalate");
 	expect(wf.nodes.get("escalate")?.kind).toBe("agent");
 	expect(wf.nodes.get("escalate")?.maxVisits).toBe(2);
-	// full path: start → write-test → implement → verify, pass→exit / fail→fixup→verify
-	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->write-test", "write-test->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify", "escalate->verify"]);
+	// full path: start → write-test → implement → verify, pass→exit / fail→codefix→fixup→verify
+	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->write-test", "write-test->implement", "implement->verify", "verify->exit", "verify->fixup", "codefix->verify", "fixup->verify", "escalate->verify"]);
 	expect(wf.edges.find((e) => e.from === "verify" && e.to === "exit")?.condition).toBe("outcome=succeeded");
 	expect(wf.start).toBe("start");
 	expect(wf.exit).toBe("exit");
 });
 
-test("verify loop: a failing gate drives fixup turns until it passes", async () => {
+test("verify loop: a failing gate routes through codefix, then a fixup turn, until it passes", async () => {
 	const wf = buildVerifyWorkflow({ command: "check" });
 	let verifyRuns = 0;
 	const exec = new FakeExecutor({
-		command: () => {
+		command: (node) => {
+			if (node.id === "codefix") return { outcome: "succeeded" }; // deterministic pre-pass: no-op success here
 			const n = verifyRuns++;
 			// distinct output per failing run ⇒ genuine progress, so the no-progress short-circuit does NOT fire
 			return n < 2 ? { outcome: "failed", text: `err ${n}` } : { outcome: "succeeded" };
@@ -396,22 +404,25 @@ test("verify loop: a failing gate drives fixup turns until it passes", async () 
 	});
 	const res = await new WorkflowEngine(wf, exec).run("add a feature");
 	expect(res.outcome).toBe("succeeded");
-	expect(exec.agentCalls).toEqual(["implement", "fixup", "fixup"]); // implemented once, fixed twice
-	expect(exec.commandCalls.length).toBe(3); // verify ran 3× (2 fail + 1 pass)
+	// 1st failure → codefix pre-pass; 2nd failure → codefix overflows (cap 1) into one fixup; then verify passes.
+	expect(exec.agentCalls).toEqual(["implement", "fixup"]);
+	expect(exec.commandCalls).toEqual(["verify", "codefix", "verify", "verify"]);
 });
 
-test("verify loop: a persistently failing gate exhausts fixup, then escalation, then fails", async () => {
+test("verify loop: a persistently failing gate runs codefix once, exhausts fixup, then escalation, then fails", async () => {
 	const wf = buildVerifyWorkflow({ command: "check", maxFixups: 2 });
 	let n = 0;
-	const exec = new FakeExecutor({ command: () => ({ outcome: "failed", text: `err ${n++}` }) });
+	// distinct error per verify ⇒ always "progress", so routing flows verify → codefix → (overflow) fixup → escalate.
+	const exec = new FakeExecutor({ command: (node) => (node.id === "codefix" ? { outcome: "succeeded" } : { outcome: "failed", text: `err ${n++}` }) });
 	const res = await new WorkflowEngine(wf, exec).run("doomed");
 	expect(res.outcome).toBe("failed");
 	expect(exec.agentCalls.filter((x) => x === "fixup").length).toBe(2); // fixup cap
 	expect(exec.agentCalls.filter((x) => x === "escalate").length).toBe(2); // then escalation, its own cap
-	expect(exec.commandCalls.length).toBe(5); // verify after each fixup + each escalate, then give up
+	expect(exec.commandCalls.filter((x) => x === "codefix").length).toBe(1); // deterministic pre-pass runs once, then overflows
+	expect(exec.commandCalls.filter((x) => x === "verify").length).toBe(6); // initial + after the pre-pass, each fixup, each escalate
 });
 
-test("WorkflowDriver: runs a synthesized verify loop (no file), fixing once then passing", async () => {
+test("WorkflowDriver: runs a synthesized verify loop (no file), codefix pre-pass clears the gate before any fixup", async () => {
 	let cmdRuns = 0;
 	const driver = new WorkflowDriver({
 		id: "v",
@@ -428,7 +439,7 @@ test("WorkflowDriver: runs a synthesized verify loop (no file), fixing once then
 	await done;
 
 	const stages = frames.filter((f) => f.type === "tool_execution_start" && f.toolName === "stage").map((f) => f.intent);
-	expect(stages).toEqual(["Implement", "Verify", "Fixup", "Verify"]); // failed once → fixup → re-verify
+	expect(stages).toEqual(["Implement", "Verify", "Codefix", "Verify"]); // failed once → deterministic codefix → re-verify passes, no agent fixup
 	expect((frames.findLast((f) => f.type === "message_update")?.assistantMessageEvent?.delta ?? "")).toContain("✓ workflow");
 	await driver.stop();
 });

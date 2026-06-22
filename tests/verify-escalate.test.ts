@@ -13,7 +13,7 @@ import { WorkflowEngine } from "../src/workflow/engine.ts";
 import type { NodeExecutor, NodeResult, RunContext, WorkflowNode } from "../src/workflow/types.ts";
 import { buildTddVerifyWorkflow, buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
 
-/** Agents always succeed; the verify command always fails, returning a scripted output per visit. */
+/** Agents always succeed; the codefix pre-pass is a no-op success; the verify command always fails with a scripted output per visit. */
 class ScriptedExecutor implements NodeExecutor {
 	readonly order: string[] = [];
 	private commandCalls = 0;
@@ -24,6 +24,7 @@ class ScriptedExecutor implements NodeExecutor {
 	}
 	async runCommand(node: WorkflowNode, _ctx: RunContext): Promise<NodeResult> {
 		this.order.push(node.id);
+		if (node.id === "codefix") return { outcome: "succeeded", text: "codefix noop" }; // deterministic pre-pass: nothing to fix here
 		return { outcome: "failed", text: this.output(this.commandCalls++) };
 	}
 	async humanGate(_node: WorkflowNode, options: string[], _ctx: RunContext): Promise<string> {
@@ -31,13 +32,13 @@ class ScriptedExecutor implements NodeExecutor {
 	}
 }
 
-// ── structure: both builders carry the grounded escalate tier ───────────────────
+// ── structure: both builders carry the codefix → fixup → escalate cascade ────────
 
 for (const [name, build] of [
 	["buildVerifyWorkflow", buildVerifyWorkflow],
 	["buildTddVerifyWorkflow", buildTddVerifyWorkflow],
 ] as const) {
-	test(`${name} wires fixup → escalate → verify with a grounded escalate node`, () => {
+	test(`${name} wires verify → codefix → fixup → escalate → verify with a grounded escalate node`, () => {
 		const wf = build({ command: "tsc --noEmit" });
 		const escalate = wf.nodes.get("escalate");
 		expect(escalate).toBeDefined();
@@ -45,26 +46,35 @@ for (const [name, build] of [
 		expect(escalate!.maxVisits).toBe(2);
 		expect(escalate!.prompt).toContain("node_modules"); // forces reading installed types, no guessing
 		expect(wf.nodes.get("fixup")!.overflow).toBe("escalate"); // exhausted fixup overflows to escalate
+		expect(wf.nodes.get("verify")!.retryTarget).toBe("codefix"); // a failed gate hits the deterministic pre-pass first
+		expect(wf.nodes.get("codefix")!.kind).toBe("command");
+		expect(wf.nodes.get("codefix")!.maxVisits).toBe(1); // runs once, then overflows to fixup
+		expect(wf.nodes.get("codefix")!.overflow).toBe("fixup"); // codefix → fixup is the first cascade hop
+		expect(wf.edges).toContainEqual({ from: "codefix", to: "verify" }); // codefix loops back to the gate
 		expect(wf.edges).toContainEqual({ from: "escalate", to: "verify" }); // escalate loops back to the gate
 	});
 }
 
 // ── engine: no-progress short-circuits, real progress spends the budget ─────────
 
-test("a goal-gate failing with identical output short-circuits the fixup budget into escalate", async () => {
+test("a goal-gate failing with identical output cascades codefix → fixup → escalate, skipping the wasted budget", async () => {
 	const wf = buildVerifyWorkflow({ command: "x", maxFixups: 3 });
 	const exec = new ScriptedExecutor(() => "SAME ERROR"); // every verify reproduces the identical error
 	const res = await new WorkflowEngine(wf, exec).run("g");
 	expect(res.outcome).toBe("failed");
 	expect(exec.order).toContain("escalate");
-	// No progress: the 2nd identical verify jumps to escalate instead of burning all 3 fixups.
+	// No progress: the deterministic codefix pre-pass runs once, then each identical verify walks the
+	// overflow chain one tier further (codefix → fixup → escalate) instead of burning the whole budget.
+	expect(exec.order.filter((x) => x === "codefix").length).toBe(1);
 	expect(exec.order.filter((x) => x === "fixup").length).toBe(1);
 	expect(exec.order.filter((x) => x === "escalate").length).toBe(1);
+	expect(exec.order.indexOf("codefix")).toBeLessThan(exec.order.indexOf("fixup")); // codefix is tried before fixup
+	expect(exec.order.indexOf("fixup")).toBeLessThan(exec.order.indexOf("escalate")); // fixup before escalate
 });
 
 test("a goal-gate failing with different output each pass spends the full fixup budget before escalate", async () => {
 	const wf = buildVerifyWorkflow({ command: "x", maxFixups: 3 });
-	const exec = new ScriptedExecutor((call) => `ERROR ${call}`); // a new error every verify → progress signal
+	const exec = new ScriptedExecutor((call) => `ERROR ${call}`); // a new error every verify → progress signal, codefix is a no-op
 	const res = await new WorkflowEngine(wf, exec).run("g");
 	expect(res.outcome).toBe("failed");
 	expect(exec.order.filter((x) => x === "fixup").length).toBe(3); // full fixup budget spent first

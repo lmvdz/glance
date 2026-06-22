@@ -9,7 +9,9 @@
  * quotes, newlines, `&&`, whatever — needs no escaping.
  *
  *   start → implement → verify ─(pass)→ exit
- *                          └────(fail)→ fixup → verify   (bounded by maxFixups)
+ *                          └────(fail)→ codefix → fixup → escalate → verify
+ * Cascade on failure: a deterministic codefix pre-pass (once), then bounded AI fixups, then a
+ * grounded escalate tier — each tier overflowing to the next as its budget exhausts.
  */
 
 import type { VerifySpec } from "../types.ts";
@@ -26,7 +28,8 @@ export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
 	const nodes = new Map<string, WorkflowNode>([
 		["start", { id: "start", kind: "start", label: "Start", attrs: {} }],
 		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
-		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "fixup", attrs: {} }],
+		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "codefix", attrs: {} }],
+		["codefix", { id: "codefix", kind: "command", label: "Codefix", script: "bun src/workflow/codefix.ts .", maxVisits: 1, overflow: "fixup", attrs: {} }],
 		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, overflow: "escalate", attrs: {} }],
 		["escalate", { id: "escalate", kind: "agent", label: "Escalate", prompt: ESCALATE_PROMPT, maxVisits: 2, attrs: {} }],
 		["exit", { id: "exit", kind: "exit", label: "Exit", attrs: {} }],
@@ -39,6 +42,7 @@ export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
 			{ from: "implement", to: "verify" },
 			{ from: "verify", to: "exit", label: "Pass", condition: "outcome=succeeded" },
 			{ from: "verify", to: "fixup", label: "Fix" },
+			{ from: "codefix", to: "verify" },
 			{ from: "fixup", to: "verify" },
 			{ from: "escalate", to: "verify" },
 		],
@@ -54,14 +58,15 @@ export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
  * `implement`, so a passing run proves the test was authored first.
  *
  *   start → write-test → implement → verify ─(pass)→ exit
- *                                       └────(fail)→ fixup → verify
+ *                                       └────(fail)→ codefix → fixup → escalate → verify
  */
 export function buildTddVerifyWorkflow(spec: VerifySpec): Workflow {
 	const nodes = new Map<string, WorkflowNode>([
 		["start", { id: "start", kind: "start", label: "Start", attrs: {} }],
 		["write-test", { id: "write-test", kind: "agent", label: "Write test", prompt: WRITE_TEST_PROMPT, attrs: {} }],
 		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
-		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "fixup", attrs: {} }],
+		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "codefix", attrs: {} }],
+		["codefix", { id: "codefix", kind: "command", label: "Codefix", script: "bun src/workflow/codefix.ts .", maxVisits: 1, overflow: "fixup", attrs: {} }],
 		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, overflow: "escalate", attrs: {} }],
 		["escalate", { id: "escalate", kind: "agent", label: "Escalate", prompt: ESCALATE_PROMPT, maxVisits: 2, attrs: {} }],
 		["exit", { id: "exit", kind: "exit", label: "Exit", attrs: {} }],
@@ -75,6 +80,7 @@ export function buildTddVerifyWorkflow(spec: VerifySpec): Workflow {
 			{ from: "implement", to: "verify" },
 			{ from: "verify", to: "exit", label: "Pass", condition: "outcome=succeeded" },
 			{ from: "verify", to: "fixup", label: "Fix" },
+			{ from: "codefix", to: "verify" },
 			{ from: "fixup", to: "verify" },
 			{ from: "escalate", to: "verify" },
 		],

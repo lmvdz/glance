@@ -227,8 +227,10 @@ export class WorkflowEngine {
 	/**
 	 * No-progress short-circuit. A goal-gate node that just FAILED with output identical to its
 	 * previous visit isn't advancing — the fix-up loop is reproducing the same error. Skip the
-	 * remaining retry budget and jump straight to the retry node's overflow (escalation) target;
-	 * if escalation has already run and we're still stuck, fail outright (return undefined).
+	 * remaining retry budget and cascade through the retry tier's overflow chain
+	 * (codefix → fixup → escalate), jumping to the FIRST tier that hasn't run yet. If every tier in
+	 * the chain has already been tried we're genuinely stuck, so fail outright (return undefined).
+	 * When the retry tier has no overflow chain at all, this is a no-op: the normal bounded loop stands.
 	 */
 	private noProgressRoute(node: WorkflowNode, ctx: RunContext, shared: Shared, next: string | undefined): string | undefined {
 		if (!node.goalGate || ctx.outcome !== "failed") return next;
@@ -238,10 +240,13 @@ export class WorkflowEngine {
 		const previous = shared.goalOutputs[node.id];
 		shared.goalOutputs[node.id] = current;
 		if (previous === undefined || previous !== current) return next; // first visit, or progress made
-		const escalate = node.retryTarget ? this.wf.nodes.get(node.retryTarget)?.overflow : undefined;
-		if (!escalate) return next; // no escalation target → keep normal bounded-loop routing (no-op without overflow)
-		if ((shared.visits[escalate] ?? 0) === 0) return escalate; // identical failure: skip the wasted retries, jump to escalation
-		return undefined; // escalation already ran and still no progress → terminal fail
+		const start = node.retryTarget ? this.wf.nodes.get(node.retryTarget)?.overflow : undefined;
+		if (!start) return next; // retry tier has no overflow chain → keep the normal bounded loop
+		// Identical failure: skip the wasted retries and walk the overflow chain to the first untried tier.
+		for (let tier: string | undefined = start; tier; tier = this.wf.nodes.get(tier)?.overflow) {
+			if ((shared.visits[tier] ?? 0) === 0) return tier;
+		}
+		return undefined; // every tier in the chain has run and we're still stuck → terminal fail
 	}
 }
 
