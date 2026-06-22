@@ -79,6 +79,11 @@ const POLL_MS = 2500;
 // liveAgents + the WIP cap live in ./scheduler.ts now; re-export keeps the public import path stable.
 export { liveAgents };
 
+/** Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway/looping fan-out can't melt the host. Default 2× the WIP cap, floor 12; override with OMP_SQUAD_MAX_AGENTS. */
+export function hardAgentCeiling(): number {
+	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max((Number(process.env.OMP_SQUAD_MAX_WIP) || 6) * 2, 12);
+}
+
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
 	confirm: true,
@@ -732,6 +737,14 @@ export class SquadManager extends EventEmitter {
 
 	/** Spawn a real roster agent for a workflow's parallel branch, run the task, resolve with its result. The agent stays in the roster. */
 	private async spawnFleetBranch(repo: string, parentId: string, spec: BranchSpec): Promise<NodeResult> {
+		// Hard ceiling even bypass-cap fan-out respects: a workflow may spawn its declared branches,
+		// but never past an absolute live-agent ceiling — runaway/looping fan-out otherwise melts the
+		// host (observed: 88 omp procs at load 160). ponytail: counts roster agents, not OS PIDs (each
+		// agent is several processes), so keep the ceiling conservative. Upgrade path: count host PIDs.
+		const live = liveAgents(this.list());
+		if (live >= hardAgentCeiling()) {
+			return { outcome: "failed", text: `agent ceiling reached (${live}/${hardAgentCeiling()}) — branch "${spec.name}" not spawned` };
+		}
 		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false, bypassCap: true });
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", text: "branch agent not created" };
