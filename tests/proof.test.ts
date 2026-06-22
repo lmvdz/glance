@@ -121,3 +121,18 @@ test("runProof: vision off ⇒ deterministic proof only; injected producer ⇒ a
 	expect(visioned.artifacts.some((a) => a.endsWith(`vision${path.sep}home.png`))).toBe(true);
 	expect(visioned.artifacts.some((a) => a.endsWith(`vision${path.sep}notes.md`))).toBe(true);
 });
+
+test("runProof on a MISSING worktree returns a failed proof and never throws (daemon-crash guard)", async () => {
+	// Regression: a reaped/never-created worktree made Bun.spawn throw ENOENT, which surfaced as an
+	// unhandled rejection from the orchestrator tick and crashed the whole daemon. runProof must be total.
+	const gone = path.join(os.tmpdir(), `proof-gone-${Date.now()}`);
+	const proof = await runProof({ repo: gone, worktree: gone, command: "true" });
+	expect(proof.ok).toBe(false);
+	expect(proof.detail).toContain("worktree missing");
+});
+
+test("runProof on a failing acceptance command returns ok:false without throwing", async () => {
+	const repo = await baseRepo();
+	const proof = await runProof({ repo, worktree: repo, command: "exit 3" });
+	expect(proof.ok).toBe(false);
+});

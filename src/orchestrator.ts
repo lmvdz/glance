@@ -106,7 +106,10 @@ export class Orchestrator {
 	 */
 	start(intervalMs = 30_000): void {
 		if (this.timer || !autodrive()) return;
-		this.timer = setInterval(() => void this.tick(), intervalMs);
+		// Contain a tick rejection: a throwing verify/land edge must be logged + retried next tick,
+		// never an unhandled rejection (that crashes the whole daemon). The root cause is also fixed
+		// at the source (runProof is total), but this guarantees no future throwing edge can take the fleet down.
+		this.timer = setInterval(() => void this.tick().catch((e) => (this.deps.log ?? (() => {}))(`tick error (contained): ${e instanceof Error ? e.message : String(e)}`)), intervalMs);
 		this.timer.unref?.();
 	}
 

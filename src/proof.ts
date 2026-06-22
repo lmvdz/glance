@@ -11,6 +11,7 @@
 
 import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
+import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
@@ -130,8 +131,22 @@ async function collectArtifacts(worktree: string): Promise<string[]> {
  * appends evidence to `artifacts`; it can never flip the gate.
  */
 export async function runProof(opts: { repo: string; worktree: string; command: string; visionUrl?: string; producer?: VisionProducer }): Promise<Proof> {
-	const proc = Bun.spawn(["bash", "-lc", opts.command], { cwd: opts.worktree, stdout: "pipe", stderr: "pipe" });
-	const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+	// Total by contract: a missing worktree (reaped / never created) or any spawn failure yields a
+	// FAILED proof, never a throw — an unhandled rejection here crashes the daemon's orchestrator tick.
+	let out = "";
+	let err = "";
+	let code = 1;
+	try {
+		if (!existsSync(opts.worktree)) throw new Error(`worktree missing: ${opts.worktree}`);
+		const proc = Bun.spawn(["bash", "-lc", opts.command], { cwd: opts.worktree, stdout: "pipe", stderr: "pipe" });
+		const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+		out = o;
+		err = e;
+		code = c;
+	} catch (spawnErr) {
+		err = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+		code = 1;
+	}
 	const tail = `${out}\n${err}`.trim().split("\n").slice(-20).join("\n");
 	const proof: Proof = {
 		ok: code === 0,
