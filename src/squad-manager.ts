@@ -147,8 +147,8 @@ export class SquadManager extends EventEmitter {
 	private readonly featureStore = new Map<string, PersistedFeature>();
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
-	/** Safety valve (OMP_SQUAD_LAND_CONFIRM): GREEN verify stages a one-tap Land instead of auto-merging. */
-	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM === "1";
+	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. */
+	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM !== "0";
 	private pollTimer?: Timer;
 	private dispatcher?: Dispatcher;
 	private readonly scheduler = new Scheduler();

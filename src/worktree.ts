@@ -6,6 +6,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
+import { existsSync, symlinkSync } from "node:fs";
 
 export interface GitResult {
 	code: number;
@@ -78,6 +79,12 @@ export async function addWorktree(opts: {
 	const r = await runGit(args, repo);
 	if (r.code !== 0) {
 		throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+	}
+	// Provision node_modules so the worktree can run the repo's verify gate (tsc/test). A symlink to
+	// the parent repo's install is gitignored, so it never lands in a commit.
+	const nm = path.join(dir, "node_modules");
+	if (existsSync(path.join(repo, "node_modules")) && !existsSync(nm)) {
+		try { symlinkSync(path.join(repo, "node_modules"), nm, "dir"); } catch {}
 	}
 	return { worktree: dir, branch: opts.branch, repo };
 }
