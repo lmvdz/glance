@@ -11,7 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { liveAgents, newAgentId, SquadManager } from "../src/squad-manager.ts";
+import { agentsToAdopt, liveAgents, newAgentId, SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -173,4 +173,17 @@ test("newAgentId never collides — unique branch/worktree per agent (same name,
 	const ids = Array.from({ length: 200 }, () => newAgentId("agent-1")); // worst case: the reused fallback name
 	expect(new Set(ids).size).toBe(200); // every id unique
 	expect(new Set(ids.map((id) => `squad/${id}`)).size).toBe(200); // ⇒ unique branches ⇒ no shared worktree
+});
+
+test("agentsToAdopt: take over dead-host agents with an on-disk worktree; skip reattached/flue/gone", () => {
+	const persisted = [
+		{ id: "live", worktree: "/w/live" }, // already reattached (in roster) → skip
+		{ id: "dead", worktree: "/w/dead" }, // host gone but worktree has context → adopt
+		{ id: "gone", worktree: "/w/gone" }, // worktree removed → nothing to take over → skip
+		{ id: "flue", kind: "flue-service", worktree: "/w/flue" }, // flue workers aren't restored → skip
+		{ id: "nowt" }, // never had a worktree → skip
+	];
+	const roster = new Set(["live"]);
+	const exists = (wt: string) => wt !== "/w/gone";
+	expect(agentsToAdopt(persisted, roster, exists).map((p) => p.id)).toEqual(["dead"]);
 });

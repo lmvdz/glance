@@ -89,6 +89,16 @@ export function hardAgentCeiling(): number {
 	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3);
 }
 
+/** Persisted agents to take over on restart: not already reattached (live), not flue, and whose worktree
+ *  still holds context on disk. Live hosts are reattached by reconnectLive; a gone worktree re-dispatches. */
+export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: string }>(
+	persisted: T[],
+	rosterIds: ReadonlySet<string>,
+	worktreeExists: (worktree: string) => boolean,
+): T[] {
+	return persisted.filter((p) => p.kind !== "flue-service" && !rosterIds.has(p.id) && !!p.worktree && worktreeExists(p.worktree));
+}
+
 /**
  * Unique agent id: name + time + random suffix. The branch and worktree derive from this id (NOT the
  * agent's display name), so two agents — even same name, even spawned in the same millisecond or across
@@ -200,6 +210,8 @@ export class SquadManager extends EventEmitter {
 
 	async start(): Promise<void> {
 		await this.reconnectLive();
+		await this.reapOrphans();
+		await this.adoptOrphanedAgents();
 		await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
@@ -241,10 +253,6 @@ export class SquadManager extends EventEmitter {
 			log: (m) => this.log("info", `orchestrator: ${m}`),
 		});
 		this.orchestrator.start();
-		await this.reconnectLive();
-		// Kill any detached host left by a previous crash/re-exec/re-spawn that the roster no longer
-		// owns, so phantom omp processes don't accumulate across daemon lifetimes.
-		await this.reapOrphans();
 	}
 
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
@@ -295,6 +303,43 @@ export class SquadManager extends EventEmitter {
 			n++;
 		}
 		if (n) this.log("info", `reattached ${n} live agent(s)`);
+		return n;
+	}
+
+	/** After live reattach + orphan reap: take over persisted agents whose host is gone but whose worktree
+	 *  still holds built-up context — re-create them in place (idle; the orchestrator then verifies/lands).
+	 *  So a restart RESUMES the issue with its context instead of re-dispatching a fresh worktree. */
+	private async adoptOrphanedAgents(): Promise<number> {
+		let raw: string;
+		try {
+			raw = await fs.readFile(this.stateFile, "utf8");
+		} catch {
+			return 0;
+		}
+		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[] };
+		const adopt = agentsToAdopt(parsed.agents ?? [], new Set(this.agents.keys()), (wt) => existsSync(wt));
+		let n = 0;
+		for (const p of adopt) {
+			await this.create({
+				name: p.name,
+				repo: p.repo,
+				existingPath: p.worktree,
+				branch: p.branch,
+				model: p.model,
+				approvalMode: p.approvalMode,
+				thinking: p.thinking,
+				issue: p.issue,
+				parentId: p.parentId,
+				featureId: p.featureId,
+				owns: p.owns,
+				workflow: p.workflow?.path,
+				verify: p.workflow?.verify?.command,
+				sandbox: p.sandbox,
+				autoRoute: false,
+				bypassCap: true,
+			}).then(() => { n++; }).catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
+		}
+		if (n) this.log("info", `took over ${n} orphaned worktree(s) with built-up context`);
 		return n;
 	}
 
