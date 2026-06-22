@@ -204,6 +204,9 @@ export class SquadManager extends EventEmitter {
 			spawn: (opts) => this.create(opts),
 			verify: async (id) => (await this.verifyFeature(id))?.ok ?? false,
 			land: async (id) => (await this.landFeature(id)).ok,
+			verifyAgent: (id) => this.verifyAgentWork(id),
+			landAgentWork: async (id) => (await this.land(id)).ok,
+			agentHasWork: (id) => this.agentHasUnlandedWork(id),
 			log: (m) => this.log("info", `orchestrator: ${m}`),
 		});
 		this.orchestrator.start();
@@ -521,6 +524,33 @@ export class SquadManager extends EventEmitter {
 		}
 		this.emitFeaturesChanged();
 		return { ok: results.every((r) => r.ok), command, results };
+	}
+
+	/**
+	 * Cheap "has unlanded work" probe for the auto-land loop — uncommitted edits, or commits ahead
+	 * of the repo's checked-out base. Gates the costly acceptance run so it never fires on an idle
+	 * agent with nothing to merge.
+	 */
+	private async agentHasUnlandedWork(id: string): Promise<boolean> {
+		const rec = this.agents.get(id);
+		if (!rec?.dto.branch) return false;
+		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
+		if (st.dirtyFiles.length > 0) return true;
+		const r = Bun.spawnSync(["git", "-C", rec.dto.repo, "rev-list", "--count", `HEAD..${rec.dto.branch}`], { stdout: "pipe", stderr: "ignore" });
+		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+	}
+
+	/**
+	 * Acceptance gate for a single agent's worktree — the featureless mirror of verifyFeature. No
+	 * acceptance command in the repo ⇒ false, so the loop never auto-merges unverified work.
+	 */
+	async verifyAgentWork(id: string): Promise<boolean> {
+		const rec = this.agents.get(id);
+		if (!rec) return false;
+		const command = await detectVerify(rec.dto.repo);
+		if (!command) return false;
+		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command });
+		return proof.ok;
 	}
 
 	private emitFeaturesChanged(): void {

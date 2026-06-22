@@ -65,6 +65,76 @@ test("idle agent that verifies green is landed once; non-idle peers and re-ticks
 	expect(landed).toEqual(["F1"]);
 });
 
+test("featureless idle agent with work is verified + landed via the agent path (typed-prompt auto-land)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const verified: string[] = [];
+	const landed: string[] = [];
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [agent("nowork", "idle"), agent("ag", "idle")], // both plain (no featureId)
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => {
+			throw new Error("feature verify must not run for a plain agent");
+		},
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async (id) => id === "ag", // only "ag" has unlanded work
+		verifyAgent: async (id) => {
+			verified.push(id);
+			return true;
+		},
+		landAgentWork: async (id) => {
+			landed.push(id);
+			return true;
+		},
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick();
+	expect(verified).toEqual(["ag"]); // "nowork" gated out before the costly acceptance run
+	expect(landed).toEqual(["ag"]);
+	expect(logs.some((l) => l.includes("landed agent:ag"))).toBe(true);
+
+	await orch.tick(); // already landed ⇒ no churn
+	expect(verified).toEqual(["ag"]);
+	expect(landed).toEqual(["ag"]);
+});
+
+test("featureless agent that fails its gate is parked, not escalated to a human", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	let verifyCalls = 0;
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [agent("red", "idle")], // plain agent whose gate is red
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => false,
+		land: async () => false,
+		agentHasWork: async () => true,
+		verifyAgent: async () => {
+			verifyCalls++;
+			return false;
+		},
+		landAgentWork: async () => {
+			throw new Error("a red agent must never be landed");
+		},
+		route: () => "escalate", // the escalate verdict becomes a park (not a catastrophe) for ad-hoc work
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick();
+	expect(verifyCalls).toBe(1);
+	expect(logs.some((l) => l.includes("parked red"))).toBe(true);
+	expect(logs.some((l) => l.startsWith("CATASTROPHE:"))).toBe(false);
+
+	await orch.tick(); // parked ⇒ halted ⇒ never re-verified
+	expect(verifyCalls).toBe(1);
+});
+
 test("red gate retries under budget, then escalates to CATASTROPHE at budget (#11/#12 → #14)", async () => {
 	process.env.OMP_SQUAD_AUTODRIVE = "1";
 	const budget = 2; // route retries while attempts < 2, escalates at 2
