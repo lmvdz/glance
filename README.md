@@ -365,6 +365,38 @@ command · `hexagon` human gate · `diamond` conditional · `component` fork · 
 merge. Design + rationale:
 [`docs/workflow-runtime.md`](docs/workflow-runtime.md).
 
+## Landing — getting work back to main
+
+A fleet only pays off when its branches **land**. `landAgent` (`src/land.ts`) commits an
+idle agent's worktree on its `squad/<name>` branch and merges it into the main checkout —
+fast-forward when it can, a merge commit when it diverged — serialized per-repo so two
+lands never corrupt the index. The web **Land** button and `landFeature` (multi-branch)
+drive the same path.
+
+When `main` has moved under a long-running branch, the merge **conflicts** — the point most
+fleet tools give up at. The bundled **`resolve-conflict`** workflow is omp-squad's answer,
+expressed as a reviewable graph rather than a black box:
+
+```bash
+omp-squad add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
+  --task "Make this branch land-able on main."
+```
+
+- **Merge main into the branch**, with `git rerere` replaying any resolution it has seen
+  before — so the same hot file conflicting twice resolves itself the second time.
+- **Resolve what's left with an intent-aware agent**, told to *combine both sides* (keep the
+  branch's feature **and** main's change, dedupe identical fixes) rather than pick one.
+- **A `goal_gate` verify step authorizes the commit** — `check && test`, not the absence of
+  conflict markers, because a textually-clean merge can still be semantically wrong. A
+  bounded fix-up loop retries; if it can't go green the run fails (escalate to a human)
+  instead of landing red.
+- Resolution lives **on the branch**, so the actual land stays a plain fast-forward and the
+  resolved diff is reviewable in the Changes panel before `main` ever moves.
+
+It runs on the same `WorkflowEngine` as plan-implement, so it joins the roster / TUI / web
+like any other run. Firing it **automatically** from `landAgent`'s conflict path is the
+next step.
+
 ## Sandboxed execution — agents off your laptop
 
 `--sandbox <image>` runs an agent's omp **inside a container** instead of locally — fabro's
@@ -439,10 +471,12 @@ Phase 2 — transport + policy, not surgery.
 | `workflows/plan-implement/` | Bundled plan → approve → implement → verify → fixup graph |
 | `workflows/commission/` | Bundled author → validate → onboard graph (the commission loop) |
 | `workflows/fan-out/` | Bundled parallel fan-out → merge graph (one fleet agent per branch) |
+| `workflows/resolve-conflict/` | Bundled merge → resolve → verify → fixup graph (auto-resolve a conflicting land) |
 | `src/architect.ts` | `TemplateArchitect` (deterministic) + `OmpArchitect` (omp-authored) |
 | `src/worker-template.ts` | `CommissionSpec` → runnable Flue worker project files |
 | `src/validate.ts` | Acceptance gate — lint · typecheck · `flue run` |
 | `src/explore.ts` | Worktree file tree + git diff (the Changes panel) |
+| `src/land.ts` | Landing — commit an agent's branch + merge it into main (ff / merge commit), serialized per-repo |
 | `src/plane.ts` | Plane issue client (env-configured) |
 | `src/federation.ts` | Federation seam + `TailnetFederationBus`, `mergeRosters`, `detectCollisions` |
 | `src/index.ts` | CLI |

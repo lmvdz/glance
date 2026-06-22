@@ -89,6 +89,12 @@ src/workflow-driver.ts — WorkflowDriver implements AgentDriver
   `create()` so each branch is an independent, steerable worktree agent — runs them
   concurrently (`max_parallel`), and a `tripleoctagon` merge joins them (`join_policy`).
   Branches are single agent nodes for now; multi-node branches stay deferred.
+- **Conflict resolution (bundled graph):** `workflows/resolve-conflict/workflow.fabro` is a
+  plain Phase-A graph (no new engine features) — `merge → resolve (agent) → verify → fixup
+  → commit` — that lands a branch whose merge into main conflicts. `git rerere` replay is
+  wired into the merge node, the agent is told to combine both sides, and the verify
+  `goal_gate` authorizes the commit so a textually-clean-but-broken merge can't land. It's
+  the integration layer expressed in the same vocabulary as everything else.
 
 ## Node types (Phase A)
 
