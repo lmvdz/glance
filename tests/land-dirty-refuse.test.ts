@@ -78,3 +78,14 @@ test("landAgent still lands cleanly when the main checkout is clean (guard does 
 	expect(res.merged).toBe(true);
 	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).toContain("y.txt");
 });
+
+test("landAgent lands despite an untracked file in main (untracked is not destroyed by reset --hard)", async () => {
+	const repo = await baseRepo("land-untracked-");
+	const wt = await branchWorktree(repo, "feat-z", "z.txt");
+	await fs.writeFile(path.join(repo, "scratch.txt"), "local scratch\n"); // untracked — a hard reset never removes it
+	const res = await landAgent({ repo, worktree: wt, branch: "feat-z", message: "land z", commitWip: false });
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).toContain("z.txt");
+	expect(await fs.readFile(path.join(repo, "scratch.txt"), "utf8")).toContain("local scratch");
+});

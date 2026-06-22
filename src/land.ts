@@ -139,13 +139,14 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 		return { ok: true, committed: false, merged: false, message, detail: commitWip ? "no changes to land" : "no committed changes to land (agent still working — uncommitted edits left untouched)" };
 	}
 
-	// Refuse to merge into a main checkout that already has uncommitted changes: the rollback path
-	// below (git reset --hard head0) would destroy them. A clean main checkout is the land's
+	// Refuse to merge into a main checkout that has TRACKED uncommitted changes: the rollback path
+	// below (git reset --hard head0) would destroy them. Untracked files (-uno) are excluded — a
+	// hard reset never removes them, so they don't block a land. A clean main checkout is the land's
 	// blast-radius contract. ponytail: in-place agents (worktree===repo) returned above; upgrade
 	// path: stash + restore around the land instead of refusing.
-	const mainStatus = await git(["status", "--porcelain"], repo);
+	const mainStatus = await git(["status", "--porcelain", "--untracked-files=no"], repo);
 	if (mainStatus.code === 0 && mainStatus.stdout.length > 0) {
-		return { ok: false, committed, merged: false, message, detail: `main checkout ${repo} has uncommitted changes — refusing to land ${branch} (a failed-gate rollback would discard them); commit or stash them first` };
+		return { ok: false, committed, merged: false, message, detail: `main checkout ${repo} has uncommitted tracked changes — refusing to land ${branch} (a failed-gate rollback would discard them); commit or stash them first` };
 	}
 
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the
