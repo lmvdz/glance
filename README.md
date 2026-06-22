@@ -89,6 +89,12 @@ omp-squad up
 omp-squad up --no-tui
 ```
 
+> One daemon per state dir. `up` takes a single-writer lock (`daemon.lock` in the state dir,
+> default `~/.omp/squad`) before touching disk; a second `up` against the same dir refuses to
+> start (exit 1) rather than race on `state.json`, receipts, and agent sockets. A self-upgrade
+> hands the lock off cleanly, and a crashed daemon's stale lock is reclaimed automatically. To
+> run a second, isolated daemon, point it at another dir with `OMP_SQUAD_STATE_DIR`.
+
 > Running it on a server / leaving it up? See [`docs/operations.md`](docs/operations.md) — how to
 > run the daemon so it survives (don't `&` it from an ephemeral shell), and why intermittent
 > health-check timeouts under heavy fan-out are transient event-loop stalls, not crashes.
