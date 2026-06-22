@@ -4,8 +4,9 @@
  * The control plane can spawn agents, land code, and re-exec the daemon
  * (`/api/upgrade`), so the moment it binds anywhere but loopback it MUST require
  * a secret. The token persists in the state dir (mode 0600) and is printed once
- * on boot. A request carries it as `Authorization: Bearer <t>` (fetch) or
- * `?token=<t>` (WebSocket — browsers can't set custom headers on a WS handshake).
+ * on boot. A request carries it as `Authorization: Bearer <t>` (REST/CLI) or, for
+ * the WebSocket handshake (browsers can't set custom WS headers), as a
+ * `Sec-WebSocket-Protocol: ompsq-token, <t>` subprotocol pair.
  * Comparison is constant-time. Auth is enforced only when a token is configured,
  * so unit tests that construct a tokenless server stay unauthenticated.
  */
@@ -31,15 +32,21 @@ export async function loadOrCreateToken(stateDir: string): Promise<string> {
 	return token;
 }
 
-/** Pull the presented token from the Authorization header (preferred) or the `token` query param (WS). */
+/** Pull the presented token from the Authorization header (REST/CLI) or, for the WS handshake, the `Sec-WebSocket-Protocol` subprotocol (the offered entry that is not the `ompsq-token` sentinel). */
 export function requestToken(req: Request): string | undefined {
 	const auth = req.headers.get("authorization");
 	if (auth && auth.startsWith("Bearer ")) {
 		const t = auth.slice("Bearer ".length).trim();
 		if (t) return t;
 	}
-	const q = new URL(req.url).searchParams.get("token");
-	return q ?? undefined;
+	const proto = req.headers.get("sec-websocket-protocol");
+	if (proto) {
+		for (const p of proto.split(",")) {
+			const t = p.trim();
+			if (t && t !== "ompsq-token") return t;
+		}
+	}
+	return undefined;
 }
 
 /** Constant-time token check. Unequal lengths short-circuit (token length is not secret). */

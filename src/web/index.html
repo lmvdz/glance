@@ -515,7 +515,7 @@
 // ── Access token + authed transport ──────────────────────────────────────────
 // One-tap sign-in: a ?token= in the URL (printed by the daemon) is captured into
 // localStorage then stripped. Every /api call carries it as a Bearer header; the
-// WebSocket carries it as a query param (browsers can't set WS request headers).
+// WebSocket carries it as the `ompsq-token` subprotocol (browsers can't set WS request headers).
 (function captureToken(){ try {
   const u = new URL(location.href);
   const t = u.searchParams.get("token");
@@ -619,7 +619,7 @@ function setConn(up) {
 }
 function firstPaint(msg) { if (routed) return; const b = $("#body"); if (b) b.innerHTML = `<div class="nodetail">${esc(msg)}</div>`; }
 function connect() {
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${encodeURIComponent(TOKEN())}`);
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`, ["ompsq-token", TOKEN()]);
   ws.onopen = () => {
     reconnects = 0; opened = true; setConn(true);
     if (!routed) { routed = true; applyRoute(); }

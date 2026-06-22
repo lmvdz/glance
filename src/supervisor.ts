@@ -247,7 +247,7 @@ export function startSupervisor(opts: { port?: number; dryRun?: boolean; model?:
 	const dryRun = opts.dryRun ?? false;
 	const token = readToken();
 	const base = `http://127.0.0.1:${port}`;
-	const wsUrl = `ws://127.0.0.1:${port}/ws${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+	const wsUrl = `ws://127.0.0.1:${port}/ws`;
 
 	// ponytail: `answered` grows by one entry per request handled (requestIds are
 	// unique and never reappear once answered). Low-volume for a control plane;
@@ -308,11 +308,11 @@ export function startSupervisor(opts: { port?: number; dryRun?: boolean; model?:
 
 	const connect = (): void => {
 		if (stopped) return;
-		const sock = new WebSocket(wsUrl);
+		const sock = new WebSocket(wsUrl, token ? ["ompsq-token", token] : []);
 		ws = sock;
 		sock.addEventListener("open", () => {
 			backoff = 500;
-			log(`auto-supervisor connected to ${wsUrl.replace(/\?token=.*/, "")}`);
+			log(`auto-supervisor connected to ${wsUrl}`);
 		});
 		sock.addEventListener("message", (ev: MessageEvent) => onMessage(ev.data));
 		sock.addEventListener("error", () => {

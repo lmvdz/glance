@@ -2,3 +2,10 @@ node_modules
 *.log
 .DS_Store
 .codegraph/
+.env
+.env.*
+*.pem
+*.key
+access-token
+vapid.json
+push-subs.json

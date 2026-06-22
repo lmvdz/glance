@@ -66,7 +66,9 @@ COMMISSION FLAGS
 
 GLOBAL
   --port <N>        Daemon port (default: ${DEFAULT_PORT}, or $OMP_SQUAD_PORT)
-  --host <addr>     Bind address (default: 127.0.0.1; set 0.0.0.0 to reach it from your phone)
+  --host <addr>     Bind address (default: 127.0.0.1). A non-loopback bind (e.g. 0.0.0.0)
+                    requires TLS ($OMP_SQUAD_TLS_CERT/$OMP_SQUAD_TLS_KEY) or a TLS tunnel
+                    (tailscale serve / cloudflared); override with OMP_SQUAD_INSECURE=1.
                     Env: $OMP_SQUAD_HOST, $OMP_SQUAD_TLS_CERT/$OMP_SQUAD_TLS_KEY (in-process TLS).
                     A bearer token is auto-generated in the state dir and printed on boot.
   --no-supervise    Don't auto-answer agent prompts (default on; or OMP_SQUAD_AUTO_SUPERVISE=0)
@@ -140,6 +142,15 @@ async function postCommand(flags: Record<string, string | boolean>, cmd: ClientC
 	}
 }
 
+/**
+ * True iff binding `host` without TLS would put the bearer token on the wire in
+ * cleartext: a non-loopback bind (anything but 127.0.0.1 / ::1 / localhost) with hasTls false.
+ */
+export function bindIsInsecure(host: string, hasTls: boolean): boolean {
+	const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
+	return !loopback && !hasTls;
+}
+
 async function cmdUp(args: string[]): Promise<void> {
 	const { flags } = parseArgs(args);
 	// Configure Plane from the shared secret so the squad runs Plane-connected with no manual sourcing.
@@ -149,6 +160,18 @@ async function cmdUp(args: string[]): Promise<void> {
 	const host = process.env.OMP_SQUAD_HOST || (typeof flags.host === "string" ? flags.host : undefined) || "127.0.0.1";
 	const stateDir = stateDirPath();
 	const tls = process.env.OMP_SQUAD_TLS_CERT && process.env.OMP_SQUAD_TLS_KEY ? { cert: process.env.OMP_SQUAD_TLS_CERT, key: process.env.OMP_SQUAD_TLS_KEY } : undefined;
+	if (bindIsInsecure(host, Boolean(tls)) && process.env.OMP_SQUAD_INSECURE !== "1") {
+		process.stderr.write(
+			`refusing to bind ${host} over plaintext HTTP.\n` +
+				`The bearer token and all dashboard traffic would cross the network in cleartext,\n` +
+				`letting an on-path attacker capture the token and gain host code execution.\n` +
+				`Fix with one of:\n` +
+				`  (a) set OMP_SQUAD_TLS_CERT + OMP_SQUAD_TLS_KEY for in-process TLS;\n` +
+				`  (b) front the daemon with a TLS tunnel such as \`tailscale serve\` or \`cloudflared\`;\n` +
+				`  (c) set OMP_SQUAD_INSECURE=1 to override deliberately.\n`,
+		);
+		process.exit(1);
+	}
 	const coordinator = process.env.OMP_SQUAD_COORDINATOR;
 	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 	const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
@@ -435,4 +458,4 @@ async function main(): Promise<void> {
 	}
 }
 
-void main();
+if (import.meta.main) void main();

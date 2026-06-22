@@ -23,11 +23,11 @@ test("tokenOk is exact + rejects mismatches, lengths, and missing", () => {
 	expect(tokenOk("", "x")).toBe(false);
 });
 
-test("requestToken reads Bearer header then ?token=", () => {
+test("requestToken reads Bearer header then WS subprotocol", () => {
 	const hdr = new Request("http://x/api/agents", { headers: { authorization: "Bearer abc" } });
 	expect(requestToken(hdr)).toBe("abc");
-	const q = new Request("http://x/ws?token=def");
-	expect(requestToken(q)).toBe("def");
+	const sub = new Request("http://x/ws", { headers: { "sec-websocket-protocol": "ompsq-token, def" } });
+	expect(requestToken(sub)).toBe("def");
 	expect(requestToken(new Request("http://x/api/agents"))).toBeUndefined();
 });
 
@@ -62,15 +62,15 @@ test("a tokened server gates /api + WS but serves the shell publicly", async () 
 	expect((await fetch(`${url}/api/agents`)).status).toBe(401);
 	expect((await fetch(`${url}/api/auth/check`)).status).toBe(401);
 
-	// with the token (header), and via ?token= → 200
+	// with the token (Bearer header) → 200; missing or wrong token → 401
 	expect((await fetch(`${url}/api/agents`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(200);
-	expect((await fetch(`${url}/api/auth/check?token=${token}`)).status).toBe(200);
-	expect((await fetch(`${url}/api/agents?token=wrong`)).status).toBe(401);
+	expect((await fetch(`${url}/api/auth/check`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(200);
+	expect((await fetch(`${url}/api/agents`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
 
 	// WS handshake: opens with the token, rejected without
 	const wsUrl = url.replace("http", "ws");
 	const opened = await new Promise<boolean>((res) => {
-		const ws = new WebSocket(`${wsUrl}/ws?token=${token}`);
+		const ws = new WebSocket(`${wsUrl}/ws`, ["ompsq-token", token]);
 		ws.onopen = () => {
 			ws.close();
 			res(true);
