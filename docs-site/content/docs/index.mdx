@@ -1,0 +1,44 @@
+---
+title: omp-squad
+description: Manage a fleet of Oh My Pi agents running in parallel — one per git worktree — from a terminal TUI and a web dashboard.
+---
+
+**omp-squad** is a control plane for a fleet of [Oh My Pi](https://omp.sh) agents. Each agent
+runs in its own `git worktree` as a real `omp --mode rpc` child process; you see at a glance what
+every agent is doing and which ones need you, and you can steer any of them from the TUI or the
+browser — both thin clients of the same event stream.
+
+## Why
+
+With several coding agents running at once, the bottleneck is *your attention*, not the agents.
+omp-squad routes it:
+
+- **Isolation by default** — one worktree per agent, so parallel agents never clobber each other.
+- **One glance** — a live board: `working / idle / needs-input / error`, current activity, todo
+  progress, context usage. The **race-board** shows each agent's position in its workflow pipeline.
+- **Never miss a blocked agent** — approvals, the `ask` tool, and host-tool calls surface as
+  **needs-input** with inline answer controls, aggregated in a fleet-wide attention queue.
+- **Steer from anywhere** — prompt, answer, interrupt, restart, or kill any agent from either surface.
+
+## Quickstart
+
+```bash
+# Start the daemon — opens the TUI and serves the web dashboard (default :7878)
+omp-squad up
+
+# Spawn an agent in a fresh worktree, with an initial task
+omp-squad add ~/code/myproject --name auth-refactor \
+  --task "Refactor the auth module to use the new session API."
+
+# See the roster, then open the dashboard
+omp-squad list
+omp-squad open
+```
+
+## Deep dives
+
+<Cards>
+  <Card title="Workflow runtime" href="/docs/workflow-runtime" description="Process as a reviewable graph — plan, gates, implement, verify, fan-out." />
+  <Card title="Commissioning loop" href="/docs/commission-loop" description="Agents that author, gate, and onboard their own specialized workers." />
+  <Card title="Federation" href="/docs/federation" description="Cross-operator coordination across hosts over the tailnet." />
+</Cards>

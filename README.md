@@ -287,7 +287,7 @@ sequence — so `author → gate → onboard` runs on the same engine as plan-im
 
 Both classes implement one `AgentDriver` seam, so `kind` is the only thing surfaces
 need to tell an interactive operator from a commissioned worker. Design + rationale:
-[`docs/commission-loop.md`](docs/commission-loop.md).
+[`docs/commission-loop`](docs-site/content/docs/commission-loop.md) (rendered in the docs site).
 
 ## Autonomous intake — describe intent, the OS picks the process
 
@@ -363,7 +363,23 @@ omp-squad add ~/code/myproject --task "Add rate limiting to the public API." \
 Shapes: `Mdiamond` start · `Msquare` exit · `box` agent · `tab` prompt · `parallelogram`
 command · `hexagon` human gate · `diamond` conditional · `component` fork · `tripleoctagon`
 merge. Design + rationale:
-[`docs/workflow-runtime.md`](docs/workflow-runtime.md).
+[`docs/workflow-runtime`](docs-site/content/docs/workflow-runtime.md) (rendered in the docs site).
+
+## Documentation
+
+Full docs live in a self-contained [Fumadocs](https://fumadocs.dev) site under [`docs-site/`](docs-site/)
+— MDX pages, ⌘K search, an **Ask-AI** chat, and machine-readable `llms.txt` / `llms-full.txt` endpoints
+for LLMs. It's a separate Next.js app with its own `node_modules`, so the core package stays
+dependency-free.
+
+```bash
+cd docs-site
+bun install        # first run only
+bun run dev        # http://localhost:3000/docs
+```
+
+Content is authored in `docs-site/content/docs/*`. Set `OPENROUTER_API_KEY` in `docs-site/.env.local`
+to enable the Ask-AI chat.
 
 ## Landing — getting work back to main
 
