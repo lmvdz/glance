@@ -181,8 +181,8 @@ export class SquadManager extends EventEmitter {
 			void this.applyCommand(remote.cmd, remote.actor);
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
-		if (process.env.OMP_SQUAD_AUTODISPATCH) {
-			this.closeOnDone = !!process.env.OMP_SQUAD_AUTOCLOSE;
+		if (process.env.OMP_SQUAD_AUTODISPATCH !== "0" && planeRepos().length > 0) {
+			this.closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 			const interval = Number(process.env.OMP_SQUAD_DISPATCH_INTERVAL_MS) || 60_000;
 			const maxActive = Number(process.env.OMP_SQUAD_DISPATCH_MAX) || 3;
 			this.dispatcher = new Dispatcher({
@@ -910,7 +910,7 @@ export class SquadManager extends EventEmitter {
 	 * supervisor (`decide` in supervisor.ts) for nuanced calls if the deterministic gate proves too blunt.
 	 */
 	private maybeAutoSupervise(rec: AgentRecord, req: PendingRequest): void {
-		if (!process.env.OMP_SQUAD_AUTOSUPERVISE) return;
+		if (process.env.OMP_SQUAD_AUTOSUPERVISE === "0") return;
 		const value = chooseFallback(req);
 		if (!value) return; // nothing safe + deterministic to answer (e.g. a host-tool call) → leave for a human
 		if (this.isRiskyRequest(req)) {

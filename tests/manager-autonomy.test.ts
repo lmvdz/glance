@@ -216,8 +216,8 @@ test("autosupervise NEVER answers a destructive request — it is left for a hum
 	expect(mgr.getAgent("a1")?.pending.map((p) => p.id)).toEqual(["r1"]);
 });
 
-test("autosupervise is off by default — every request waits for a human", async () => {
-	delete process.env.OMP_SQUAD_AUTOSUPERVISE;
+test("autosupervise OFF (opt-out): every request waits for a human", async () => {
+	process.env.OMP_SQUAD_AUTOSUPERVISE = "0"; // now opt-OUT: autosupervise is on by default, so disable it explicitly
 	const mgr = await freshManager();
 	const drv = seed(mgr, "a1");
 	mgr.fireUi("a1", confirmReq("r1", "Run tests?", "bun test"));

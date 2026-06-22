@@ -185,40 +185,41 @@ Set on the daemon to pull real work items into the command center:
 
 Unset → the issues panel shows "Plane not connected" and everything else works.
 
-**Auto-dispatch (opt-in)** — `OMP_SQUAD_AUTODISPATCH=1` makes the daemon poll the mapped
-repos and spawn a routed agent per new open issue (issue → routed run → verify → close),
-so work starts with nobody typing. Bounded so a backlog can't storm:
+**Auto-dispatch (on by default when Plane is configured)** — the daemon polls the mapped repos
+and spawns a routed agent per new open issue (issue → routed run → verify → land → close), so work
+starts with nobody typing. Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so a backlog can't storm:
 
 | Env | Meaning |
 |---|---|
-| `OMP_SQUAD_AUTODISPATCH` | Enable the issue → agent loop (off by default) |
+| `OMP_SQUAD_AUTODISPATCH` | Issue → agent loop — **on** when Plane is configured (`=0` to disable) |
 | `OMP_SQUAD_DISPATCH_INTERVAL_MS` | Poll interval (default `60000`) |
 | `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
-| `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate |
+| `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate (on by default; `=0` to disable) |
 
-### Concurrency & autonomy (opt-in)
+### Concurrency & autonomy
 
 The daemon caps concurrent **live** agents (everything not `stopped`/`error`) at a global WIP
 ceiling, and can optionally queue spawns past it and auto-answer routine prompts so a fleet keeps
-moving without a human. All bounded; the last two are off by default.
+moving without a human. All bounded and **on by default** — set the matching `OMP_SQUAD_*=0` to opt out of any one.
 
 | Env | Meaning |
 |---|---|
 | `OMP_SQUAD_MAX_WIP` | Global live-agent WIP ceiling (default `6`); a spawn past it is refused |
 | `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
-| `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates), so blocked agents advance without you. Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
+| `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates) so blocked agents advance without you — **on by default** (`=0` to disable). Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
 | `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
 
-Auto-supervision is safe only because each agent works in an isolated, reviewed-before-merge
-worktree — the worktree is the blast radius. Anything that escapes it is left for a human.
+With auto-land on, work merges without a human in the loop, so the safety net is the **verify gate**
+(build + tests) plus the resolver's reviewer pass — and the risk gate that leaves every destructive
+request (force-push, delete, deploy, prod, …) and host-tool call for a human. The worktree is still the blast radius.
 
-**Self-healing control loop (opt-in)** — `OMP_SQUAD_AUTODRIVE=1` arms the orchestrator's
-periodic tick. Each pass it auto-lands idle agents whose work verifies green (closing the
+**Self-healing control loop (on by default)** — the orchestrator's periodic tick is armed unless
+`OMP_SQUAD_AUTODRIVE=0`. Each pass it auto-lands idle agents whose work verifies green (closing the
 tracking Plane issue), self-heals red gates through the failure router (retry / hold /
 escalate by repair budget), trips a single human-summoning `CATASTROPHE:` log on budget
 exhaustion or a catastrophe tripwire (infra failure, safety violation, regression
-oscillation), and drains cap-parked spawns back in under the WIP ceiling. Off by default —
-the daemon arms no timer and the tick is fully inert until the flag is set.
+oscillation), and drains cap-parked spawns back in under the WIP ceiling. On by default; set
+`OMP_SQUAD_AUTODRIVE=0` to disable — then the daemon arms no timer and the tick is fully inert.
 
 ### Federation (opt-in)
 
@@ -301,9 +302,11 @@ omp-squad commission extract-emails \
   --accept-payload '{"text":"a@x.io b@y.org"}' --accept-expect '{"count":2}'
 ```
 
-- **Author** — an `Architect` writes the worker. `OmpArchitect` (default) drives a real
-  `omp --mode rpc` agent to write the workflow; `TemplateArchitect` renders it
-  deterministically. (`--model <spec>` makes the worker itself model-backed.)
+- **Author** — an `Architect` writes the worker. The running daemon always uses
+  `OmpArchitect`, which drives a real `omp --mode rpc` agent to write the workflow.
+  `TemplateArchitect` (deterministic, no model) renders it straight from the spec, but it is
+  wired only in the test suite — there is **no offline-architect fallback in the live daemon**.
+  (`--model <spec>` makes the worker itself model-backed.)
 - **Acceptance gate** (`src/validate.ts`) — tiered + degrading: **lint** (always) →
   **typecheck** → **`flue run` acceptance** (when the worker's toolchain is installed),
   deep-matching the result against `--accept-expect`. A failed gate **re-authors** (bounded),
@@ -447,15 +450,17 @@ omp-squad add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
 It runs on the same `WorkflowEngine` as plan-implement, so it joins the roster / TUI / web like
 any other run.
 
-**Firing it automatically.** When `landAgent` itself hits a conflict it gives up by default, but
-setting **`OMP_SQUAD_AUTORESOLVE=1`** turns on an in-process resolver (`src/land.ts`, #12): it
-rebases the branch onto main, hands each conflicted file to a resolver (default: a one-shot
-`omp -p` agent), then **proves** the result — the full verify gate must pass **and** an independent
-reviewer pass must approve — before completing the land. Any failing step rolls `main` back to where
-it was; an unproven resolution is never kept. It only runs when the worktree is clean, so a live
-agent's uncommitted edits are never clobbered. The resolver/reviewer are injectable seams (tests use
-them; the defaults shell out to `omp`). Ceiling: a verify gate + reviewer can still miss a *semantic*
-conflict that is textually clean and compiles — see the `ponytail:` note on `attemptAutoResolve`.
+**The workflow above is run manually** — the land flow never auto-invokes it; you launch it
+with `--workflow resolve-conflict` as shown. Automatic resolution *at land time* is a
+**separate path**: `landAgent` carries its OWN rebase-based resolver (`src/land.ts`, #12),
+gated behind **`OMP_SQUAD_AUTORESOLVE`**. It rebases the branch onto main, hands each conflicted
+file to a resolver (default: a one-shot `omp -p` agent), then **proves** the result — the full
+verify gate must pass **and** an independent reviewer pass must approve — before completing the
+land. Any failing step rolls `main` back to where it was; an unproven resolution is never kept.
+It only runs when the worktree is clean, so a live agent's uncommitted edits are never clobbered.
+The resolver/reviewer are injectable seams (tests use them; the defaults shell out to `omp`).
+Ceiling: a verify gate + reviewer can still miss a *semantic* conflict that is textually clean
+and compiles — see the `ponytail:` note on `attemptAutoResolve`.
 
 **Landing it automatically, too.** `OMP_SQUAD_AUTORESOLVE` decides what happens *when* a land
 conflicts; **`OMP_SQUAD_AUTOLAND=1`** decides *that a land happens at all* with no operator: a
@@ -466,8 +471,8 @@ can't be proven.
 
 | Env var | Effect |
 |---|---|
-| `OMP_SQUAD_AUTORESOLVE` | Enable `landAgent`'s automated conflict resolver (off by default) |
-| `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (off by default) |
+| `OMP_SQUAD_AUTORESOLVE` | `landAgent`'s in-process rebase conflict resolver, distinct from the manual `resolve-conflict` workflow (on by default; `=0` to disable) |
+| `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (on by default; `=0` to disable) |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 
 ## Sandboxed execution — agents off your laptop
@@ -528,47 +533,134 @@ already has the fresh context.
 - **What flows:** lightweight **presence** (operator, availability, agents, repos/branches/
   files-in-flight) by default — not transcripts. Deep view stays opt-in, reusing `/collab`'s
   view-link vs full-link split.
-- **Remote steering:** a peer's `{command, actor}` rides the bus to the owning squad, which
-  authorizes it against the operator's **delegation/availability policy** (away/ill can
-  auto-grant to delegates) before applying — and **audits** every cross-operator action.
-- **Collision avoidance:** overlapping repo+path across operators → a warning, so two people
-  don't have agents editing the same file.
+- **Remote steering** *(not yet implemented)* — the design: a peer's `{command, actor}` rides
+  the bus to the owning squad, which authorizes it against the operator's **delegation/availability
+  policy** (away/ill can auto-grant to delegates) before applying — and **audits** every
+  cross-operator action. Today only the *receive* side exists (`onRemoteCommand` +
+  `applyCommand(cmd, actor)`); no code yet *sends* a command frame, so driving a teammate's live
+  agent is the remaining Phase-2 work.
+- **Collision avoidance** *(live)* — overlapping repo+path across operators surfaces as a
+  warning, so two people don't have agents editing the same file.
 
-`src/federation.ts` defines the seam; implementing `TailnetFederationBus` is the bulk of
-Phase 2 — transport + policy, not surgery.
+`src/federation.ts` defines the seam. `TailnetFederationBus` is implemented for **presence** and
+**cross-host leases / collision detection** (live today); **remote steering** — the
+delegation/availability policy plus the outbound command frame — is the rest of Phase 2.
 
 ## Layout
 
+### Core
+
 | File | Role |
 |---|---|
-| `src/rpc-agent.ts` | Spawns + drives one `omp --mode rpc` child (JSONL transport) |
-| `src/worktree.ts` | `git worktree` add / remove / status |
+| `src/types.ts` | Shared domain + wire types — `AgentRecord`/`AgentDTO`, `SquadEvent`, `ClientCommand` |
 | `src/squad-manager.ts` | Roster, status derivation, transcript, persistence, `applyCommand` |
 | `src/server.ts` | HTTP + WebSocket bridge (web dashboard + REST) |
+| `src/auth.ts` | Bearer-token gate for the HTTP + WS surface (constant-time, persisted mode 0600) |
+
+### Web & CLI
+
+| File | Role |
+|---|---|
 | `src/web/index.html` | Single-page web dashboard |
 | `src/tui.ts` | Terminal dashboard — `buildBoard` chrome + pi-tui `Editor` input, two-level nav |
-| `src/subagents.ts` | `SubagentTracker` — RPC subagent stream → live hierarchy tree |
+| `src/index.ts` | CLI |
+
+### Drivers & transport
+
+| File | Role |
+|---|---|
 | `src/agent-driver.ts` | `AgentDriver` seam shared by `RpcAgent`, `FlueServiceDriver`, `WorkflowDriver` |
+| `src/rpc-agent.ts` | Spawns + drives one `omp --mode rpc` child (JSONL transport) |
+| `src/agent-host.ts` | Detached per-agent supervisor over a UDS — owns the omp child, survives a daemon restart |
+| `src/agent-host-main.ts` | Thin entry for a detached `agent-host` process |
+| `src/acp-agent-driver.ts` | Runs an ACP runtime (`auggie --acp`, Claude Code / Codex) behind `AgentDriver` |
+| `src/sandbox-agent-driver.ts` | Runs an agent inside a container (`docker exec` + omp RPC) behind `AgentDriver` |
 | `src/flue-service-driver.ts` | Adapts a commissioned Flue worker (`flue run`) to `AgentDriver` |
 | `src/workflow-driver.ts` | Runs a workflow graph behind `AgentDriver` (one omp thread per run) |
-| `src/sandbox-agent-driver.ts` | Runs an agent inside a container (`docker exec` + omp RPC) behind `AgentDriver` |
+| `src/subagents.ts` | `SubagentTracker` — RPC subagent stream → live hierarchy tree |
+| `src/worktree.ts` | `git worktree` add / remove / status |
+
+### Workflow engine
+
+| File | Role |
+|---|---|
+| `src/workflow/types.ts` | Workflow graph domain model — nodes, stages, run state |
 | `src/workflow/dot.ts` | DOT-subset parser → typed `Workflow` graph |
 | `src/workflow/engine.ts` | Pure graph walker — routing, conditions, gates, fix-up loops |
 | `src/workflow/executor.ts` | `SingleAgentExecutor` — binds nodes to an omp thread + shell |
 | `src/workflow/commission-executor.ts` | `CommissionExecutor` — runs the commission graph's action nodes |
 | `src/workflow/verify-workflow.ts` | `buildVerifyWorkflow` — synthesizes the `--verify` implement → verify → fixup loop |
 | `src/workflow/stylesheet.ts` | CSS-like `model_stylesheet` parser + per-node model/effort resolver |
+
+### Autonomy & orchestration
+
+| File | Role |
+|---|---|
 | `src/intake.ts` | Intake router — turns a plain task into a process (verify / plan / fan-out) |
-| `src/dispatch.ts` | Auto-dispatch — polls Plane, routes new issues to agents (bounded, opt-in) |
+| `src/smart-spawn.ts` | Turns one free-text line into a ready-to-run spawn plan (fast model + heuristic fallback) |
+| `src/dispatch.ts` | Auto-dispatch — polls Plane, routes new issues to agents (bounded; on by default when Plane is set) |
+| `src/orchestrator.ts` | Self-healing control loop — auto-land → self-heal → catastrophe → admission drain (on by default) |
+| `src/scheduler.ts` | Admission + global WIP ceiling, with a FIFO park queue for spawns past the cap |
+| `src/resolver.ts` | Failure-routing policy — retry / hold / escalate by a bounded repair budget |
+| `src/supervisor.ts` | Auto-supervisor — answers low-risk pending requests via a one-shot omp agent |
+| `src/autoland.ts` | Auto-land policy — a successful workflow run lands its own branch (pure decision) |
+
+### Landing & git
+
+| File | Role |
+|---|---|
+| `src/land.ts` | Landing — commit a branch + merge into main (ff / merge commit), serialized per-repo; opt-in rebase auto-resolve |
+| `src/proof.ts` | Land proof — deterministic acceptance command keyed to HEAD; the gate refuses a stale proof |
+| `src/vision.ts` | Optional browser-vision evidence pass (screenshots + notes) — evidence only, never gates |
+| `src/explore.ts` | Worktree file tree + git diff (the Changes panel) |
+| `src/git-harden.ts` | Hardening args/env for read-only git on untrusted repos (no hooks / pager / prompt) |
+
+### Commissioning
+
+| File | Role |
+|---|---|
+| `src/architect.ts` | `OmpArchitect` (omp-authored — the daemon default) + `TemplateArchitect` (deterministic, test-only) |
+| `src/worker-template.ts` | `CommissionSpec` → runnable Flue worker project files |
+| `src/validate.ts` | Acceptance gate — lint · typecheck · `flue run` |
+
+### Federation & presence
+
+| File | Role |
+|---|---|
+| `src/federation.ts` | Federation seam + `NullFederationBus` / `TailnetFederationBus`, `mergeRosters`, `detectCollisions` |
+| `src/coordinator.ts` | Protocol-agnostic WebSocket relay/hub every `TailnetFederationBus` connects to |
+| `src/coordinator-main.ts` | CLI entry for the federation coordinator |
+| `src/federation-sync.ts` | Cross-host file leasing over the tailnet — publishes/mirrors local leases by repo identity |
+| `src/federation-sync-main.ts` | CLI entry for the cross-host lease-sync process |
+| `src/repo-identity.ts` | Cross-host repo identity — normalize a git origin URL to `host/owner/repo` |
+| `src/ttl-registry.ts` | Generic file-per-record heartbeat-TTL registry — the shared spine behind `presence.ts` + `leases.ts` |
+| `src/presence.ts` | Presence/claim registry — who or what is working a repo now (heartbeat-TTL, file-per-claim) |
+| `src/presence-hook.ts` | omp hook — a raw `omp` session announces its repo to the squad |
+| `src/sessions.ts` | Discovers raw (non-squad) omp sessions from the OS process table into presence |
+| `src/leases.ts` | Soft advisory file leases — "I'm editing this file" claims (heartbeat-TTL, file-per-lease) |
+| `src/lease-hook.ts` | omp edit hook — soft-block-with-override when another session holds the file |
+| `src/ownership.ts` | Path-ownership partition — refuse a spawn whose paths overlap a live agent's |
+| `src/install-hooks.ts` | Installs the presence + lease hooks as an omp-discovered extension |
+
+### Supporting services
+
+| File | Role |
+|---|---|
+| `src/plane.ts` | Plane issue client (env-configured) |
+| `src/features.ts` | Feature derivation (plans + roster agents) with live land status |
+| `src/receipts.ts` | Per-run receipt ledger (tokens / cost / files) — accumulator + JSONL persistence |
+| `src/digest.ts` | Zero-token transcript digests for cold-start resume |
+| `src/summarizer.ts` | Local extractive TF-IDF + TextRank summarizer (vendored, zero-token) |
+| `src/redact.ts` | Best-effort secret-shape redaction before anything is persisted or displayed |
+| `src/push.ts` | Dependency-free Web Push (RFC 8291 / 8188 / 8292) for escalation alerts |
+| `src/upgrade.ts` | Self-upgrade — git state · fast-forward pull · re-exec the daemon |
+| `src/omp-oneshot.ts` | Shared one-shot `omp` call — spawn + JSON-extraction for smart-spawn / intake / supervisor |
+
+### Bundled workflows
+
+| Path | Role |
+|---|---|
 | `workflows/plan-implement/` | Bundled plan → approve → implement → verify → fixup graph |
 | `workflows/commission/` | Bundled author → validate → onboard graph (the commission loop) |
 | `workflows/fan-out/` | Bundled parallel fan-out → merge graph (one fleet agent per branch) |
-| `workflows/resolve-conflict/` | Bundled merge → resolve → verify → fixup graph (auto-resolve a conflicting land) |
-| `src/architect.ts` | `TemplateArchitect` (deterministic) + `OmpArchitect` (omp-authored) |
-| `src/worker-template.ts` | `CommissionSpec` → runnable Flue worker project files |
-| `src/validate.ts` | Acceptance gate — lint · typecheck · `flue run` |
-| `src/explore.ts` | Worktree file tree + git diff (the Changes panel) |
-| `src/land.ts` | Landing — commit an agent's branch + merge it into main (ff / merge commit), serialized per-repo |
-| `src/plane.ts` | Plane issue client (env-configured) |
-| `src/federation.ts` | Federation seam + `TailnetFederationBus`, `mergeRosters`, `detectCollisions` |
-| `src/index.ts` | CLI |
+| `workflows/resolve-conflict/` | Bundled merge → resolve → verify → fixup graph (run manually via `--workflow resolve-conflict`) |

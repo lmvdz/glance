@@ -183,9 +183,9 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	return { ok: false, committed, merged: false, message, detail: `merge failed: ${merge.stderr || merge.stdout}` };
 }
 
-/** Opt-in switch (default off): automated conflict resolution runs only when OMP_SQUAD_AUTORESOLVE is set. */
+/** On by default; set OMP_SQUAD_AUTORESOLVE=0 to disable automated conflict resolution during a land. */
 function autoresolve(): boolean {
-	return !!process.env.OMP_SQUAD_AUTORESOLVE;
+	return process.env.OMP_SQUAD_AUTORESOLVE !== "0";
 }
 
 /** Bound the rebase resolve loop so a pathological branch can't spin forever. */

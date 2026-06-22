@@ -56,9 +56,9 @@ export interface OrchestratorDeps {
 	log?: (msg: string) => void;
 }
 
-/** Opt-in switch (default off): the fleet self-drives only when OMP_SQUAD_AUTODRIVE is set. */
+/** On by default; set OMP_SQUAD_AUTODRIVE=0 to disable the self-driving control loop. */
 function autodrive(): boolean {
-	return !!process.env.OMP_SQUAD_AUTODRIVE;
+	return process.env.OMP_SQUAD_AUTODRIVE !== "0";
 }
 
 export class Orchestrator {

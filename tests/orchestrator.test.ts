@@ -237,7 +237,7 @@ test("queued spawns are admitted only while under the WIP cap, draining as slots
 });
 
 test("tick is fully inert when OMP_SQUAD_AUTODRIVE is unset (gate precedes every dep)", async () => {
-	delete process.env.OMP_SQUAD_AUTODRIVE;
+	process.env.OMP_SQUAD_AUTODRIVE = "0"; // now opt-OUT: self-drive is on by default, so disable it explicitly
 	const logs: string[] = [];
 	const orch = new Orchestrator({
 		listAgents: () => {

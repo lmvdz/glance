@@ -68,7 +68,7 @@ const approve: ResolutionReviewer = async () => true;
 const reject: ResolutionReviewer = async () => false;
 
 test("autoresolve OFF: conflicting land fails and leaves main untouched", async () => {
-	delete process.env.OMP_SQUAD_AUTORESOLVE;
+	process.env.OMP_SQUAD_AUTORESOLVE = "0"; // now opt-OUT: autoresolve is on by default, so disable it explicitly
 	const { repo, wt } = await conflictRepo();
 	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, resolver: writeResolution, reviewer: approve });
 	expect(res.ok).toBe(false);
