@@ -1097,8 +1097,10 @@ export class SquadManager extends EventEmitter {
 				break;
 			}
 			case "workflow_done":
-				// Autonomous loop closer: a successful workflow lands its own branch (no operator).
-				void autoLandOnSuccess(this.autoLand, frame.outcome as string | undefined, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
+				// Autonomous loop closer: a successful workflow auto-lands its own branch (no operator) —
+				// UNLESS the LAND_CONFIRM valve is on, where the orchestrator stages a one-tap Land instead.
+				// The valve gates EVERY autonomous land path, not just the orchestrator tick.
+				void autoLandOnSuccess(this.autoLand && !this.landConfirm, frame.outcome as string | undefined, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
 				break;
 		}
 		rec.dto.receipt = rec.run?.rollup();
