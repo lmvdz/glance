@@ -10,13 +10,11 @@
  */
 
 import { createHash } from "node:crypto";
-import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ttlRegistry } from "./ttl-registry.ts";
 
 export const LEASE_TTL_MS = 120_000;
-
-const ROOT = path.join(os.homedir(), ".omp", "squad", "leases");
 
 export interface LeaseEntry {
 	id: string;
@@ -38,14 +36,6 @@ export interface LeaseInput {
 	session: string;
 }
 
-function repoKey(repo: string): string {
-	return createHash("sha1").update(path.resolve(repo)).digest("hex").slice(0, 16);
-}
-
-function dirFor(repo: string): string {
-	return path.join(ROOT, repoKey(repo));
-}
-
 /** Stable lease id per (session, file) so re-editing the same file refreshes one entry. */
 function leaseId(session: string, file: string): string {
 	return createHash("sha1").update(`${session}\0${file}`).digest("hex").slice(0, 20);
@@ -57,20 +47,13 @@ function isLease(value: unknown): value is LeaseEntry {
 	return typeof v.id === "string" && typeof v.file === "string" && typeof v.session === "string" && typeof v.heartbeat === "number";
 }
 
+const reg = ttlRegistry<LeaseEntry>({ subdir: "leases", ttlMs: LEASE_TTL_MS, isRecord: isLease });
+
 /** Claim or refresh a lease on a file. Returns the lease id. */
 export async function claimLease(input: LeaseInput): Promise<string> {
 	const id = leaseId(input.session, input.file);
 	const now = Date.now();
-	const dir = dirFor(input.repo);
-	await fsp.mkdir(dir, { recursive: true });
-	const file = path.join(dir, `${id}.json`);
-	let since = now;
-	try {
-		const prev: unknown = JSON.parse(await fsp.readFile(file, "utf8"));
-		if (isLease(prev)) since = prev.since;
-	} catch {
-		/* new lease */
-	}
+	const prev = await reg.readOne(input.repo, id);
 	const entry: LeaseEntry = {
 		id,
 		repo: path.resolve(input.repo),
@@ -78,39 +61,16 @@ export async function claimLease(input: LeaseInput): Promise<string> {
 		operator: input.operator ?? process.env.OMP_SQUAD_OPERATOR ?? os.userInfo().username ?? "unknown",
 		session: input.session,
 		host: os.hostname(),
-		since,
+		since: prev?.since ?? now,
 		heartbeat: now,
 	};
-	await fsp.writeFile(file, JSON.stringify(entry));
+	await reg.write(input.repo, entry);
 	return id;
-}
-
-async function readDir(dir: string, ttlMs: number): Promise<LeaseEntry[]> {
-	let names: string[];
-	try {
-		names = await fsp.readdir(dir);
-	} catch {
-		return [];
-	}
-	const cutoff = Date.now() - ttlMs;
-	const live: LeaseEntry[] = [];
-	for (const name of names) {
-		if (!name.endsWith(".json")) continue;
-		const f = path.join(dir, name);
-		try {
-			const parsed: unknown = JSON.parse(await fsp.readFile(f, "utf8"));
-			if (isLease(parsed) && parsed.heartbeat >= cutoff) live.push(parsed);
-			else if (isLease(parsed)) await fsp.rm(f, { force: true }).catch(() => {});
-		} catch {
-			/* skip */
-		}
-	}
-	return live;
 }
 
 /** Live leases on a repo. */
 export async function leasesFor(repo: string, ttlMs = LEASE_TTL_MS): Promise<LeaseEntry[]> {
-	return (await readDir(dirFor(repo), ttlMs)).sort((a, b) => a.file.localeCompare(b.file));
+	return (await reg.readAll(repo, ttlMs)).sort((a, b) => a.file.localeCompare(b.file));
 }
 
 /** Other sessions currently leasing a specific file. */
@@ -123,14 +83,14 @@ export async function heartbeatSession(session: string, repo: string): Promise<v
 	for (const l of await leasesFor(repo, LEASE_TTL_MS * 4)) {
 		if (l.session !== session) continue;
 		l.heartbeat = now;
-		await fsp.writeFile(path.join(dirFor(repo), `${l.id}.json`), JSON.stringify(l)).catch(() => {});
+		await reg.write(repo, l).catch(() => {});
 	}
 }
 
 /** Release every lease held by a session (on shutdown). */
 export async function releaseSession(session: string, repo: string): Promise<void> {
 	for (const l of await leasesFor(repo, LEASE_TTL_MS * 8)) {
-		if (l.session === session) await fsp.rm(path.join(dirFor(repo), `${l.id}.json`), { force: true }).catch(() => {});
+		if (l.session === session) await reg.remove(repo, l.id);
 	}
 }
 
@@ -143,9 +103,7 @@ export async function releaseSession(session: string, repo: string): Promise<voi
  * own once the peer stops gossiping.
  */
 export async function mirrorLease(targetRepo: string, entry: LeaseEntry): Promise<void> {
-	const dir = dirFor(targetRepo);
-	await fsp.mkdir(dir, { recursive: true });
 	const id = createHash("sha1").update(`mirror\0${entry.host}\0${entry.session}\0${entry.file}`).digest("hex").slice(0, 24);
 	const mirrored: LeaseEntry = { ...entry, id, repo: path.resolve(targetRepo) };
-	await fsp.writeFile(path.join(dir, `${id}.json`), JSON.stringify(mirrored)).catch(() => {});
+	await reg.write(targetRepo, mirrored).catch(() => {});
 }

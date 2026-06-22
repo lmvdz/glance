@@ -17,15 +17,12 @@
  *   bun src/presence.ts list         list every live claim, grouped by repo
  */
 
-import { createHash } from "node:crypto";
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ttlRegistry } from "./ttl-registry.ts";
 
 export const PRESENCE_TTL_MS = 90_000;
-
-const ROOT = path.join(os.homedir(), ".omp", "squad", "presence");
 
 export interface PresenceEntry {
 	/** Unique claim id (one file). */
@@ -61,34 +58,19 @@ export interface ClaimInput {
 	id?: string;
 }
 
-function repoKey(repo: string): string {
-	return createHash("sha1").update(path.resolve(repo)).digest("hex").slice(0, 16);
-}
-
-function dirFor(repo: string): string {
-	return path.join(ROOT, repoKey(repo));
-}
-
 function isEntry(value: unknown): value is PresenceEntry {
 	if (!value || typeof value !== "object") return false;
 	const v = value as Record<string, unknown>;
 	return typeof v.id === "string" && typeof v.repo === "string" && typeof v.heartbeat === "number" && typeof v.pid === "number";
 }
 
+const reg = ttlRegistry<PresenceEntry>({ subdir: "presence", ttlMs: PRESENCE_TTL_MS, isRecord: isEntry });
+
 /** Create or refresh a claim. Returns the claim id (mint a new one if not given). */
 export async function claim(input: ClaimInput): Promise<string> {
 	const id = input.id ?? `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 	const now = Date.now();
-	const dir = dirFor(input.repo);
-	await fsp.mkdir(dir, { recursive: true });
-	const file = path.join(dir, `${id}.json`);
-	let startedAt = now;
-	try {
-		const prev: unknown = JSON.parse(await fsp.readFile(file, "utf8"));
-		if (isEntry(prev)) startedAt = prev.startedAt;
-	} catch {
-		/* new claim */
-	}
+	const prev = await reg.readOne(input.repo, id);
 	const entry: PresenceEntry = {
 		id,
 		repo: path.resolve(input.repo),
@@ -101,67 +83,39 @@ export async function claim(input: ClaimInput): Promise<string> {
 		task: input.task,
 		source: input.source ?? "other",
 		reattached: input.reattached,
-		startedAt,
+		startedAt: prev?.startedAt ?? now,
 		heartbeat: now,
 	};
-	await fsp.writeFile(file, JSON.stringify(entry));
+	await reg.write(input.repo, entry);
 	return id;
 }
 
 export async function heartbeat(id: string, repo: string): Promise<void> {
-	const file = path.join(dirFor(repo), `${id}.json`);
-	try {
-		const cur: unknown = JSON.parse(await fsp.readFile(file, "utf8"));
-		if (!isEntry(cur)) return;
-		cur.heartbeat = Date.now();
-		await fsp.writeFile(file, JSON.stringify(cur));
-	} catch {
-		/* claim gone — caller may re-claim */
-	}
+	const cur = await reg.readOne(repo, id);
+	if (!cur) return;
+	cur.heartbeat = Date.now();
+	await reg.write(repo, cur).catch(() => {});
 }
 
 export async function release(id: string, repo: string): Promise<void> {
-	await fsp.rm(path.join(dirFor(repo), `${id}.json`), { force: true }).catch(() => {});
-}
-
-async function readDir(dir: string, ttlMs: number): Promise<PresenceEntry[]> {
-	let names: string[];
-	try {
-		names = await fsp.readdir(dir);
-	} catch {
-		return [];
-	}
-	const cutoff = Date.now() - ttlMs;
-	const live: PresenceEntry[] = [];
-	for (const name of names) {
-		if (!name.endsWith(".json")) continue;
-		const file = path.join(dir, name);
-		try {
-			const parsed: unknown = JSON.parse(await fsp.readFile(file, "utf8"));
-			if (isEntry(parsed) && parsed.heartbeat >= cutoff) live.push(parsed);
-			else if (isEntry(parsed)) await fsp.rm(file, { force: true }).catch(() => {});
-		} catch {
-			/* skip unreadable */
-		}
-	}
-	return live.sort((a, b) => b.heartbeat - a.heartbeat);
+	await reg.remove(repo, id);
 }
 
 /** Live claims for one repo. */
 export async function who(repo: string, ttlMs = PRESENCE_TTL_MS): Promise<PresenceEntry[]> {
-	return readDir(dirFor(repo), ttlMs);
+	return (await reg.readAll(repo, ttlMs)).sort((a, b) => b.heartbeat - a.heartbeat);
 }
 
 /** Every live claim across all repos. */
 export async function all(ttlMs = PRESENCE_TTL_MS): Promise<PresenceEntry[]> {
 	let keys: string[];
 	try {
-		keys = await fsp.readdir(ROOT);
+		keys = await fsp.readdir(reg.root);
 	} catch {
 		return [];
 	}
 	const out: PresenceEntry[] = [];
-	for (const key of keys) out.push(...(await readDir(path.join(ROOT, key), ttlMs)));
+	for (const key of keys) out.push(...(await reg.read(path.join(reg.root, key), ttlMs)));
 	return out.sort((a, b) => b.heartbeat - a.heartbeat);
 }
 
