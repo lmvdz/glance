@@ -11,7 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { liveAgents, SquadManager } from "../src/squad-manager.ts";
+import { liveAgents, newAgentId, SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -167,4 +167,10 @@ test("closeLandedIssue retries after a failed close (id marked only on success)"
 	} finally {
 		server.stop(true);
 	}
+});
+
+test("newAgentId never collides — unique branch/worktree per agent (same name, rapid spawns)", () => {
+	const ids = Array.from({ length: 200 }, () => newAgentId("agent-1")); // worst case: the reused fallback name
+	expect(new Set(ids).size).toBe(200); // every id unique
+	expect(new Set(ids.map((id) => `squad/${id}`)).size).toBe(200); // ⇒ unique branches ⇒ no shared worktree
 });

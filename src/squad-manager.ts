@@ -84,6 +84,16 @@ export function hardAgentCeiling(): number {
 	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max((Number(process.env.OMP_SQUAD_MAX_WIP) || 6) * 2, 12);
 }
 
+/**
+ * Unique agent id: name + time + random suffix. The branch and worktree derive from this id (NOT the
+ * agent's display name), so two agents — even same name, even spawned in the same millisecond or across
+ * a daemon restart — never share a branch or worktree. (The name alone collides: dispatched agents fall
+ * back to `agent-N` whose counter resets every restart, so "agent-1" gets reused.)
+ */
+export function newAgentId(name: string): string {
+	return `${name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
 	confirm: true,
@@ -617,8 +627,8 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
-		const id = `${name}-${Date.now().toString(36)}`;
-		const branch = opts.branch ?? `squad/${name}`;
+		const id = newAgentId(name);
+		const branch = opts.branch ?? `squad/${id}`;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
 			opts = { ...opts, workflow: decision.workflow, verify: decision.verify, thinking: decision.thinking ?? opts.thinking };
