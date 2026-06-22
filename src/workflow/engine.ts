@@ -238,10 +238,10 @@ export class WorkflowEngine {
 		const previous = shared.goalOutputs[node.id];
 		shared.goalOutputs[node.id] = current;
 		if (previous === undefined || previous !== current) return next; // first visit, or progress made
-		const retry = node.retryTarget ? this.wf.nodes.get(node.retryTarget) : undefined;
-		const escalate = retry?.overflow;
-		if (escalate && (shared.visits[escalate] ?? 0) === 0) return escalate; // jump past the wasted retries
-		return undefined; // escalation already ran (or none) and still no progress → terminal fail
+		const escalate = node.retryTarget ? this.wf.nodes.get(node.retryTarget)?.overflow : undefined;
+		if (!escalate) return next; // no escalation target → keep normal bounded-loop routing (no-op without overflow)
+		if ((shared.visits[escalate] ?? 0) === 0) return escalate; // identical failure: skip the wasted retries, jump to escalation
+		return undefined; // escalation already ran and still no progress → terminal fail
 	}
 }
 

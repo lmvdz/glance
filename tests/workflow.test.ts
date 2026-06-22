@@ -355,7 +355,10 @@ test("buildVerifyWorkflow: synthesizes implement → verify(goal_gate) → fixup
 	expect(wf.nodes.get("verify")?.goalGate).toBe(true);
 	expect(wf.nodes.get("verify")?.retryTarget).toBe("fixup");
 	expect(wf.nodes.get("fixup")?.maxVisits).toBe(5);
-	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify"]);
+	expect(wf.nodes.get("fixup")?.overflow).toBe("escalate"); // exhausted fixup routes to escalation
+	expect(wf.nodes.get("escalate")?.kind).toBe("agent");
+	expect(wf.nodes.get("escalate")?.maxVisits).toBe(2);
+	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify", "escalate->verify"]);
 });
 
 test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps the verify gate + fixup loop", () => {
@@ -371,8 +374,11 @@ test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps
 	expect(wf.nodes.get("verify")?.goalGate).toBe(true);
 	expect(wf.nodes.get("verify")?.retryTarget).toBe("fixup");
 	expect(wf.nodes.get("fixup")?.maxVisits).toBe(4);
+	expect(wf.nodes.get("fixup")?.overflow).toBe("escalate");
+	expect(wf.nodes.get("escalate")?.kind).toBe("agent");
+	expect(wf.nodes.get("escalate")?.maxVisits).toBe(2);
 	// full path: start → write-test → implement → verify, pass→exit / fail→fixup→verify
-	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->write-test", "write-test->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify"]);
+	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->write-test", "write-test->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify", "escalate->verify"]);
 	expect(wf.edges.find((e) => e.from === "verify" && e.to === "exit")?.condition).toBe("outcome=succeeded");
 	expect(wf.start).toBe("start");
 	expect(wf.exit).toBe("exit");
@@ -381,20 +387,28 @@ test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps
 test("verify loop: a failing gate drives fixup turns until it passes", async () => {
 	const wf = buildVerifyWorkflow({ command: "check" });
 	let verifyRuns = 0;
-	const exec = new FakeExecutor({ command: () => ({ outcome: verifyRuns++ < 2 ? "failed" : "succeeded" }) });
+	const exec = new FakeExecutor({
+		command: () => {
+			const n = verifyRuns++;
+			// distinct output per failing run ⇒ genuine progress, so the no-progress short-circuit does NOT fire
+			return n < 2 ? { outcome: "failed", text: `err ${n}` } : { outcome: "succeeded" };
+		},
+	});
 	const res = await new WorkflowEngine(wf, exec).run("add a feature");
 	expect(res.outcome).toBe("succeeded");
 	expect(exec.agentCalls).toEqual(["implement", "fixup", "fixup"]); // implemented once, fixed twice
 	expect(exec.commandCalls.length).toBe(3); // verify ran 3× (2 fail + 1 pass)
 });
 
-test("verify loop: a persistently failing gate gives up after the fixup cap", async () => {
+test("verify loop: a persistently failing gate exhausts fixup, then escalation, then fails", async () => {
 	const wf = buildVerifyWorkflow({ command: "check", maxFixups: 2 });
-	const exec = new FakeExecutor({ command: () => ({ outcome: "failed" }) });
+	let n = 0;
+	const exec = new FakeExecutor({ command: () => ({ outcome: "failed", text: `err ${n++}` }) });
 	const res = await new WorkflowEngine(wf, exec).run("doomed");
 	expect(res.outcome).toBe("failed");
-	expect(exec.agentCalls.filter((n) => n === "fixup").length).toBe(2); // maxFixups
-	expect(exec.commandCalls.length).toBe(3); // initial verify + one per fixup
+	expect(exec.agentCalls.filter((x) => x === "fixup").length).toBe(2); // fixup cap
+	expect(exec.agentCalls.filter((x) => x === "escalate").length).toBe(2); // then escalation, its own cap
+	expect(exec.commandCalls.length).toBe(5); // verify after each fixup + each escalate, then give up
 });
 
 test("WorkflowDriver: runs a synthesized verify loop (no file), fixing once then passing", async () => {
