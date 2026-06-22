@@ -145,6 +145,7 @@
   .navbtn { min-width:40px; min-height:40px; display:inline-flex; align-items:center; justify-content:center; padding:6px 10px; font-size:14px; line-height:1; }
   button.toggle.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; }
   button.toggle.attn { border-color:var(--input); color:var(--input); font-weight:600; }
+  button.toggle { min-height:40px; }
   /* sidebar */
   .sidebar { border-right:1px solid var(--border); display:flex; flex-direction:column; min-height:0; background:var(--surface-0); }
   .side-h { padding:var(--sp-4) var(--sp-4) var(--sp-2); font-size:var(--fs-11); text-transform:uppercase; letter-spacing:.08em; font-weight:var(--fw-semibold); color:var(--text-3); }
@@ -172,7 +173,7 @@
   .navrow .ct { background:var(--attention); color:var(--on-accent); border-radius:var(--r-full); font-size:var(--fs-11); font-weight:var(--fw-bold); padding:0 7px; line-height:18px; min-width:18px; text-align:center; }
   .pinitial { display:none; }
   /* content */
-  .content { display:flex; flex-direction:column; min-height:0; }
+  .content { display:flex; flex-direction:column; min-height:0; min-width:0; }
   .crumb { padding:var(--sp-3) var(--sp-4); border-bottom:1px solid var(--border); background:var(--surface-1); display:flex; align-items:center; gap:var(--sp-2); font-size:var(--fs-13); color:var(--text-2); }
   .crumb .seg { color:var(--text-2); cursor:pointer; padding:2px 6px; margin:0 -2px; border-radius:var(--r-sm); } .crumb .seg:hover { color:var(--text-1); background:var(--surface-2); } .crumb .cur { color:var(--text-1); font-weight:var(--fw-semibold); }
   .body { flex:1; overflow-y:auto; min-height:0; }
@@ -382,10 +383,12 @@
     button { padding:9px 13px; }
     .navbtn { padding:9px 12px; }
     .navrow { padding:12px 14px; }
+    button.sm { min-height:36px; padding:7px 12px; }
+    .modal .actions::before { display:none; }   /* phones have no Esc key */
     body { padding-bottom:env(safe-area-inset-bottom); }
   }
   /* ── a11y + polish foundations ─────────────────────────────────────────────── */
-  :focus-visible { outline:2px solid var(--ring); outline-offset:2px; border-radius:var(--r-sm); }
+  :focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
   button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
   .navrow:focus-visible, .proj:focus-visible, .acard:focus-visible, .fcard:focus-visible, .rlane:focus-visible, .issuerow:focus-visible, .chip:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
   /* JS-built inputs ship an inline outline:none — restore a keyboard focus ring (CSS-only, overrides inline) */
@@ -403,7 +406,7 @@
   .acard .nm, .fcard .nm, .proj .pn, .rlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
   .ahead .sub { overflow-wrap:anywhere; }
   @media (prefers-reduced-motion: no-preference) {
-    button, .navrow, .proj, .acard, .fcard, .rlane, .issuerow { transition:border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
+    button, .navrow, .proj, .acard, .fcard, .rlane, .issuerow, .chip, .stat[data-go], .crumb .seg { transition:border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
     button:active, .acard:active, .fcard:active, .rlane:active { transform:translateY(1px); }
     @keyframes attnPulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
     .navrow.attn .ico, .toggle.attn { animation:attnPulse 1.6s ease-in-out infinite; }
@@ -451,13 +454,24 @@
   .fedcol .fedcol-h { color:var(--danger); font-weight:var(--fw-semibold); font-size:var(--fs-12); margin-bottom:var(--sp-1); display:flex; align-items:center; gap:6px; }
   .fedcol .subnode { color:var(--text-1); }
   @media (max-width:760px) { .health .inner { grid-template-columns:repeat(2,1fr); } }
+  /* tablet (no drawer yet): keep the two-pane shell but trim header + relax dense rows so nothing overflows.
+     placed last so these overrides win over the base .statrow / .health rules above. */
+  @media (min-width:761px) and (max-width:1024px) {
+    header h1 .cc { display:none; }
+    #counts, #upgradeBtn { display:none; }            /* both reachable via ⌘K */
+    .statrow, .health .inner { grid-template-columns:repeat(2,1fr); }
+    .rhead, .rtrack, .rlabel { min-width:0; }
+    .rlane { flex-wrap:wrap; }
+    .avmain, .av.show-changes .avmain { grid-template-columns:1fr; }
+    .av.show-changes .aside { display:none; }          /* changes panel is desktop-only */
+  }
 </style>
 </head>
 <body>
 <header>
   <button id="navToggle" class="navbtn" title="Toggle projects sidebar" aria-label="Toggle projects sidebar">☰</button>
   <h1><span><span class="sq">omp</span>-squad</span> <span class="cc">command center</span></h1>
-  <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
+  <span class="conn" id="conn"><span class="dot" aria-hidden="true"></span><span id="connText">connecting…</span></span>
   <span class="conn access" id="access" title="Access is token-gated — every request carries a bearer token. Loopback is exempt."><span class="axi" aria-hidden="true">🔒</span> token-gated</span>
   <div class="spacer"></div>
   <div class="hdr-tools">
@@ -594,10 +608,13 @@ setInterval(() => {
 }, 120);
 
 let reconnects = 0, opened = false;
+let _connWasUp = null;   // null until first open — no "reconnected" toast on the very first connect
 function setConn(up) {
   $("#conn").classList.toggle("up", up);
   $("#connText").textContent = up ? "live" : "reconnecting…";
   const off = $("#offline"); if (off) off.hidden = up;
+  if (_connWasUp !== null && _connWasUp !== up) announce(up ? "Reconnected to the daemon" : "Connection lost — reconnecting");
+  _connWasUp = up;
   paintFleetHealth();
 }
 function firstPaint(msg) { if (routed) return; const b = $("#body"); if (b) b.innerHTML = `<div class="nodetail">${esc(msg)}</div>`; }
@@ -804,7 +821,7 @@ function renderNav() {
   for (const r of rows) { const el = nav.querySelector(`[data-id="${r.id}"]`); if (el) { const act = () => { r.on(); closeDrawer(); }; el.onclick = act; el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } }; } }
 }
 
-function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="dseg" title="${counts[s]} ${s}"><span class="d ${s}"></span>${counts[s]}</span>`).join("")}</span>`; }
+function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="dseg" title="${counts[s]} ${s}" aria-label="${counts[s]} ${s}"><span class="d ${s}" aria-hidden="true"></span>${counts[s]}</span>`).join("")}</span>`; }
 
 // Shared loading / empty / error primitives for the data views (skeleton, empty-with-action, error-with-retry).
 function skel(n = 3, cls = "skelrow") { let s = ""; for (let i = 0; i < n; i++) s += `<div class="skel ${cls}"></div>`; return s; }
@@ -1299,7 +1316,7 @@ function fhConnState() {
   return { cls:"bad", txt:"Offline", sub:"reconnecting…" };
 }
 function hcell(key, dot, val, sub) {
-  return `<div class="hcell"><div class="hk">${esc(key)}</div><div class="hv"><span class="hdot ${dot}"></span><span class="hvt">${esc(val)}</span></div>${sub ? `<div class="hsub">${esc(sub)}</div>` : ""}</div>`;
+  return `<div class="hcell"><div class="hk">${esc(key)}</div><div class="hv"><span class="hdot ${dot}" aria-hidden="true"></span><span class="hvt">${esc(val)}</span></div>${sub ? `<div class="hsub">${esc(sub)}</div>` : ""}</div>`;
 }
 function hcellSkel(key) {
   return `<div class="hcell"><div class="hk">${esc(key)}</div><div class="hv"><span class="skel" style="width:96px;height:14px"></span></div></div>`;
@@ -1446,6 +1463,7 @@ const palette = (() => {
   };
   const run = (it) => { if (!it) return; close(); it.run(); };
   const onKey = (e) => {
+    if (e.key === "Tab") { e.preventDefault(); if (items.length) { sel = (sel + (e.shiftKey ? -1 : 1) + items.length) % items.length; render(); } return; }
     if (!items.length) { if (e.key === "Escape") { close(); e.preventDefault(); } return; }
     if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) { sel = (sel + 1) % items.length; render(); e.preventDefault(); }
     else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) { sel = (sel - 1 + items.length) % items.length; render(); e.preventDefault(); }
@@ -1471,6 +1489,9 @@ function moveNav(delta) {
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); palette.toggle(); return; }
   if (palette.isOpen()) return;
+  if (document.querySelector("dialog[open]")) return;   // an open modal dialog owns the keyboard
+  const drawerMain = document.querySelector("main");
+  if (e.key === "Escape" && drawerMain && drawerMain.classList.contains("nav-open")) { closeDrawer(); e.preventDefault(); return; }
   const t = e.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
   if (view === "project" && selProject) {
