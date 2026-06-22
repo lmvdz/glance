@@ -10,7 +10,10 @@ import { expect, test } from "bun:test";
 import {
 	type Collision,
 	detectCollisions,
+	federationView,
 	mergeRosters,
+	PEER_PRESENCE_TTL_MS,
+	PeerRoster,
 	TailnetFederationBus,
 } from "../src/federation.ts";
 import type { Actor, AgentDTO, Availability, OperatorPresence } from "../src/types.ts";
@@ -196,4 +199,60 @@ test("TailnetFederationBus is inert and non-throwing without a reachable coordin
 
 	// whois was injected but never exercised (no inbound command frames arrived).
 	expect(calls).toHaveLength(0);
+});
+
+// ── federationView (the /api/federation surface) ──────────────────────────────
+
+test("federationView merges self + peers and flags a cross-operator shared branch", () => {
+	const self = presence({
+		operator: { id: "me", origin: "local" },
+		updatedAt: 10,
+		agents: [agent({ id: "a1", repo: "/r", branch: "feat" })],
+	});
+	const peer = presence({
+		operator: op("you"),
+		updatedAt: 5,
+		agents: [agent({ id: "b1", repo: "/r", branch: "feat" })],
+	});
+	const view = federationView(self, [peer]);
+	expect(view.operators.map((o) => o.operator.id)).toEqual(["me", "you"]); // self pinned head
+	expect(view.collisions).toHaveLength(1);
+	expect(view.collisions[0].ref).toBe("feat");
+	expect(new Set(view.collisions[0].operators)).toEqual(new Set(["me", "you"]));
+});
+
+test("federationView with no peers returns just self and no collisions", () => {
+	const self = presence({ operator: { id: "me", origin: "local" }, updatedAt: 1, agents: [agent({ branch: "feat" })] });
+	const view = federationView(self, []);
+	expect(view.operators).toEqual([self]);
+	expect(view.collisions).toEqual([]);
+});
+
+// ── PeerRoster (the listener-only peer-presence collector) ────────────────────
+
+test("PeerRoster drops our own echo and remaps peers to remote origin", () => {
+	const roster = new PeerRoster("me");
+	roster.record(presence({ operator: { id: "me", origin: "local" }, updatedAt: 5 })); // our own echo
+	roster.record(presence({ operator: { id: "you", origin: "local" }, updatedAt: 5 })); // a peer labelling itself local
+	const live = roster.live(5);
+	expect(live.map((p) => p.operator.id)).toEqual(["you"]);
+	expect(live[0].operator.origin).toBe("remote");
+});
+
+test("PeerRoster keeps the newest frame per operator", () => {
+	const roster = new PeerRoster("me");
+	roster.record(presence({ operator: op("you"), updatedAt: 1, agents: [agent({ id: "old" })] }));
+	roster.record(presence({ operator: op("you"), updatedAt: 3, agents: [agent({ id: "new" })] }));
+	roster.record(presence({ operator: op("you"), updatedAt: 2, agents: [agent({ id: "stale" })] })); // older than current → ignored
+	const live = roster.live(3);
+	expect(live).toHaveLength(1);
+	expect(live[0].agents.map((a) => a.id)).toEqual(["new"]);
+});
+
+test("PeerRoster prunes a peer once it goes quiet past the TTL", () => {
+	const roster = new PeerRoster("me");
+	roster.record(presence({ operator: op("you"), updatedAt: 1000 }));
+	expect(roster.live(1000 + PEER_PRESENCE_TTL_MS)).toHaveLength(1); // still within TTL
+	expect(roster.live(1000 + PEER_PRESENCE_TTL_MS + 1)).toHaveLength(0); // past TTL → pruned
+	expect(roster.live(1000)).toHaveLength(0); // and forgotten (not just hidden)
 });

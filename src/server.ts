@@ -11,6 +11,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import type { ClientCommand, FeatureStage, IssueRef, SquadEvent } from "./types.ts";
@@ -28,7 +29,8 @@ import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import { requestToken, tokenOk } from "./auth.ts";
 import type { PushPayload, PushService } from "./push.ts";
-import type { AgentDTO, AgentStatus } from "./types.ts";
+import type { Actor, AgentDTO, AgentStatus, OperatorPresence } from "./types.ts";
+import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./federation.ts";
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
 const WEB_DIR = path.join(import.meta.dir, "web");
@@ -55,6 +57,10 @@ export interface SquadServerOptions {
 	tls?: { cert: string; key: string };
 	/** Background Web Push registry; alerts fire when an agent needs a human. */
 	push?: PushService;
+	/** This host's operator identity, for labelling the local roster in the federation view. Defaults to OMP_SQUAD_OPERATOR / OS user. */
+	operator?: Actor;
+	/** Coordinator URL to listen on for peer presence. Defaults to OMP_SQUAD_COORDINATOR; unset ⇒ federation surface stays inert. */
+	coordinator?: string;
 }
 
 /** Pure: a short, stable fingerprint of the served UI. Changes whenever index.html changes,
@@ -93,11 +99,20 @@ export class SquadServer {
 	private pushSeeded = false;
 	/** Fingerprint of the served UI at boot; sent on every roster so stale tabs self-refresh after an upgrade. */
 	private uiVersion = "";
+	/** This host's operator identity (labels the local roster in the federation view). */
+	private readonly operator: Actor;
+	/** Coordinator URL backing the peer-presence feed; null ⇒ federation surface inert. */
+	private readonly coordinator: string | null;
+	/** Listener-only peer-presence feed; created on start() only when a coordinator is configured. */
+	private peerPresence?: PeerPresenceTracker;
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
 		this.opts = opts;
 		this.onEvent = (e: SquadEvent) => this.broadcast(e);
+		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
+		this.operator = opts.operator ?? { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
+		this.coordinator = opts.coordinator ?? process.env.OMP_SQUAD_COORDINATOR ?? null;
 	}
 
 	get url(): string {
@@ -236,6 +251,7 @@ export class SquadServer {
 					return Response.json(repo ? await who(repo) : await all());
 				}
 				if (url.pathname === "/api/leases") return Response.json(await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
+				if (url.pathname === "/api/federation") return Response.json(this.federationSnapshot());
 				if (url.pathname === "/api/spawn" && req.method === "POST") {
 					const body: unknown = await req.json().catch(() => null);
 					const prompt = body && typeof body === "object" && "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";
@@ -384,6 +400,11 @@ export class SquadServer {
 		void this.syncPresence();
 		this.presenceTimer = setInterval(() => void this.syncPresence(), 25_000);
 		this.presenceTimer.unref?.();
+		// Best-effort: only when a coordinator is configured do we open a read-only feed for peer presence.
+		if (this.coordinator) {
+			this.peerPresence = new PeerPresenceTracker({ coordinatorUrl: this.coordinator, operator: this.operator });
+			void this.peerPresence.start();
+		}
 		return this.url;
 	}
 
@@ -448,12 +469,31 @@ export class SquadServer {
 		}
 	}
 
+	/**
+	 * Roster-of-rosters for the command center: this host's live roster merged
+	 * with any peer rosters gathered off the coordinator, plus cross-operator
+	 * branch collisions. Best-effort — with no coordinator the feed is absent, so
+	 * only self appears (no peers, no collisions) and the panel stays hidden.
+	 */
+	private federationSnapshot(): FederationSnapshot {
+		const self: OperatorPresence = {
+			operator: this.operator,
+			availability: "active",
+			host: os.hostname(),
+			agents: this.manager.list(),
+			updatedAt: Date.now(),
+		};
+		const peers = this.peerPresence?.live() ?? [];
+		return { coordinator: this.coordinator, ...federationView(self, peers) };
+	}
+
 	stop(): void {
 		this.manager.off("event", this.onEvent);
 		clearInterval(this.presenceTimer);
 		clearTimeout(this.presenceDebounce);
 		for (const [id, repo] of this.claimed) void release(id, repo);
 		this.claimed.clear();
+		void this.peerPresence?.stop();
 		this.server?.stop(true);
 	}
 }
