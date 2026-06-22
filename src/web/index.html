@@ -202,23 +202,42 @@
     .agrid { grid-template-columns:1fr; }
     .avmain, .av.show-changes .avmain { grid-template-columns:1fr; }
     .av.show-changes .aside { display:none; }   /* phone keeps the transcript in focus; diff stays on desktop */
+    .rhead, .rtrack, .rlabel { min-width:0; }
+    .rlane { flex-wrap:wrap; }
     button { padding:9px 13px; }
     .navbtn { padding:9px 12px; }
     .navrow { padding:12px 14px; }
     body { padding-bottom:env(safe-area-inset-bottom); }
   }
+  /* ── a11y + polish foundations ─────────────────────────────────────────────── */
+  :root { --dim:#7e8a96; }                       /* was #5c6873 — failed WCAG AA as body text */
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
+  .b-stopped, .b-proof-none { color:var(--mut); } /* were ~2.8:1, illegible */
+  .bvh { flex-wrap:wrap; }
+  /* truncate arbitrary names/paths/titles instead of blowing out layout / widening lanes */
+  .acard .nm, .fcard .nm, .proj .pn, .rlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .ahead .sub { overflow-wrap:anywhere; }
+  @media (prefers-reduced-motion: no-preference) {
+    button, .navrow, .proj, .acard, .fcard, .rlane, .issuerow { transition:border-color .12s ease, background-color .12s ease, color .12s ease, box-shadow .12s ease; }
+    button:active, .acard:active, .fcard:active, .rlane:active { transform:translateY(1px); }
+    @keyframes attnPulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
+    .navrow.attn .ico, .toggle.attn { animation:attnPulse 1.6s ease-in-out infinite; }
+    @keyframes flash { from { background:rgba(110,168,254,.18) } to { background:transparent } }
+    .flash { animation:flash 1.1s ease-out; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; } }
 </style>
 </head>
 <body>
 <header>
-  <button id="navToggle" class="navbtn" title="Toggle projects sidebar">☰</button>
+  <button id="navToggle" class="navbtn" title="Toggle projects sidebar" aria-label="Toggle projects sidebar">☰</button>
   <h1><span class="sq">omp</span>-squad <span style="color:var(--dim);font-weight:400">command center</span></h1>
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
   <div class="spacer"></div>
   <span id="counts" class="conn"></span>
-  <button id="muteBtn" class="navbtn" title="Mute notification sound">🔔</button>
-  <button id="cmdkBtn" class="navbtn" title="Command palette (⌘K / Ctrl-K)">⌘K</button>
-  <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
+  <button id="muteBtn" class="navbtn" title="Mute notification sound" aria-label="Mute notification sound">🔔</button>
+  <button id="cmdkBtn" class="navbtn" title="Command palette (⌘K / Ctrl-K)" aria-label="Open command palette">⌘K</button>
+  <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)" aria-label="Upgrade daemon">⤴ Upgrade</button>
   <button class="primary" id="addBtn">+ New agent</button>
 </header>
 <div id="offline" class="offline" role="alert" hidden>Disconnected — reconnecting to the daemon…</div>
@@ -329,7 +348,7 @@ let navSel = null;   // OMPSQ-6: keyboard-highlighted agent card id in the proje
 const STALL_MS = 120000;   // working but silent longer than this = stalled (matches TUI / OMPSQ-5)
 const SPIN = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
 let spinFrame = 0;
-function ago(ms) { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
+function ago(ms) { if (!Number.isFinite(ms)) return "—"; const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
 function isStalled(a, now) { return a.status === "working" && now - a.lastActivity > STALL_MS; }
 function ctxColor(p) { return p == null ? "var(--mut)" : p > 0.9 ? "var(--err)" : p > 0.7 ? "var(--work)" : "var(--mut)"; }
 function fmtDur(ms) { if (ms == null) return ""; const s = ms / 1000; return s < 60 ? `${s.toFixed(1)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`; }
@@ -430,7 +449,7 @@ function handle(ev) {
     case "agent": { const prev = prevStatus.get(ev.agent.id); agents.set(ev.agent.id, ev.agent); signalTransition(prev, ev.agent); prevStatus.set(ev.agent.id, ev.agent.status); refreshShell(); break; }
     case "commands": commandsByAgent.set(ev.id, ev.commands); break;
     case "features-changed": if (view === "board" || view === "feature") loadFeatures(); break;
-    case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
+    case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); lastNotify.delete(ev.id); commandsByAgent.delete(ev.id); composerDraft.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
     default: console.warn("unknown event type:", ev && ev.type); break;
@@ -452,8 +471,8 @@ function seedStatus() { prevStatus.clear(); for (const a of agents.values()) pre
 
 function signalTransition(prev, a) {
   if (prev === undefined || prev === a.status) return;   // brand-new agent or no change
-  if (a.status === "input") { const p = (a.pending || [])[0]; notify(a.id, `⛔ ${a.name} needs you`, p ? p.title : "waiting for input", true); }
-  else if (a.status === "error") notify(a.id, `⚠ ${a.name} errored`, a.error || "agent error", true);
+  if (a.status === "input") { const p = (a.pending || [])[0]; announce(`${a.name} needs your input`); notify(a.id, `⛔ ${a.name} needs you`, p ? p.title : "waiting for input", true); }
+  else if (a.status === "error") { announce(`${a.name} errored`); notify(a.id, `⚠ ${a.name} errored`, a.error || "agent error", true); }
   else if (a.status === "idle" && prev === "working") notify(a.id, `✓ ${a.name} finished`, a.activity || "turn complete", false);
 }
 
@@ -515,15 +534,16 @@ function pushRoute() {
     : selProject ? `#/project/${encodeURIComponent(selProject)}` : "#/";
   if (location.hash !== h) history.pushState(null, "", h);
 }
+function safeDecode(s) { try { return decodeURIComponent(s); } catch { return s; } }
 function applyRoute() {
   if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
   if (location.hash === "#/queue") { view = "queue"; selAgent = null; renderAll(); return; }
   if (location.hash === "#/race") { view = "race"; selAgent = null; renderAll(); return; }
   const mf = location.hash.match(/^#\/feature\/(.+)$/);
-  if (mf) { selFeature = decodeURIComponent(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
+  if (mf) { selFeature = safeDecode(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
   const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
-  if (m && m[1] === "agent") { openAgent(decodeURIComponent(m[2])); return; }
-  if (m && m[1] === "project") { selProject = decodeURIComponent(m[2]); selAgent = null; view = "project"; renderAll(); return; }
+  if (m && m[1] === "agent") { openAgent(safeDecode(m[2])); return; }
+  if (m && m[1] === "project") { selProject = safeDecode(m[2]); selAgent = null; view = "project"; renderAll(); return; }
   selProject = null; selAgent = null; view = "project"; renderAll();
 }
 window.addEventListener("hashchange", applyRoute);
@@ -1490,7 +1510,8 @@ function appendTranscript(e) {
   const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60; t.appendChild(div); if (atBottom) t.scrollTop = t.scrollHeight;
 }
 
-function toast(text, level) { const el = document.createElement("div"); el.className = "toast " + (level||"info"); el.textContent = text; $("#log").appendChild(el); setTimeout(()=>el.remove(), 5000); }
+function announce(m) { const el = $("#srlive"); if (el) el.textContent = String(m || ""); }
+function toast(text, level) { const el = document.createElement("div"); el.className = "toast " + (level||"info"); el.textContent = text; $("#log").appendChild(el); announce(text); setTimeout(()=>el.remove(), 5000); }
 
 // add modal
 const dlg = $("#addDlg");
