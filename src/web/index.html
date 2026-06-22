@@ -697,8 +697,9 @@ const FSTAGES = ["planned", "issues-created", "in-progress", "review", "diverged
 const FSTAGE_LABEL = { "planned": "Planned", "issues-created": "Issues filed", "in-progress": "In progress", "review": "Review · needs land", "diverged": "Diverged", "landed": "Landed", "done": "Done" };
 let featTimer = null;
 function scheduleFeatures() { if (featTimer) return; featTimer = setTimeout(() => { featTimer = null; loadFeatures(); }, 4000); }
+let featuresError = "";   // last /api/features failure, surfaced on the board when it would otherwise be blank
 async function loadFeatures() {
-  try { const r = await fetch("/api/features"); if (r.ok) { const list = await r.json(); features.clear(); for (const f of list) features.set(f.id, f); } } catch {}
+  try { const r = await fetch("/api/features"); if (r.ok) { const list = await r.json(); features.clear(); for (const f of list) features.set(f.id, f); featuresError = ""; } else featuresError = `couldn't load features (${r.status})`; } catch { featuresError = "couldn't reach the daemon for features"; }
   if (view === "board" || view === "feature") renderBody();
 }
 function openBoard() { view = "board"; selFeature = null; renderAll(); loadFeatures(); }
@@ -716,7 +717,8 @@ function renderBoard(body) {
     <div class="bvh"><div><h2>Features</h2><div class="sub">${fs.length} feature${fs.length===1?"":"s"} · in-flight work and what needs landing</div></div><div style="display:flex;gap:6px"><button id="featAuto" class="primary" title="Type a goal — spawn a research → plan → file → implement workflow, tracked here as it moves">⚡ New (auto)</button><button id="featNew" class="navbtn">+ Feature</button><button id="featRefresh" class="navbtn" title="Refresh">↻</button></div></div>
     <div class="board" id="board"></div></div>`;
   const board = $("#board");
-  if (!fs.length) { board.innerHTML = `<div class="nodetail" style="height:auto;padding:30px">No features yet — spawn an agent, or add a plans/&lt;name&gt;/ dir.</div>`; }
+  if (!fs.length && featuresError) { board.innerHTML = `<div class="nodetail" style="height:auto;padding:30px;color:var(--err)">${esc(featuresError)} · <span id="featRetry" style="text-decoration:underline;cursor:pointer">retry</span></div>`; const rt = $("#featRetry"); if (rt) clickable(rt, () => loadFeatures(), "retry loading features"); }
+  else if (!fs.length) { board.innerHTML = `<div class="nodetail" style="height:auto;padding:30px">No features yet — spawn an agent, or add a plans/&lt;name&gt;/ dir.</div>`; }
   else {
     const lanes = FSTAGES.filter(s => fs.some(f => f.stage === s) || s === "in-progress" || s === "review");
     board.innerHTML = lanes.map(s => {
@@ -1068,7 +1070,7 @@ function fillAgentGrid(p) {
     card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${a.status==="working"?`<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""}${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${stalled?`<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
-      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span>${receiptSpan(a.receipt)}</div>`;
+      <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span>${a.model?` · <span title="model" style="color:var(--dim)">${esc(a.model)}</span>`:""}${receiptSpan(a.receipt)}</div>`;
     clickable(card, () => openAgent(a.id), `${a.name} — ${a.status}`);
     grid.appendChild(card);
   }
