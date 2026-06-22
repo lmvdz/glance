@@ -1,0 +1,447 @@
+/**
+ * AcpAgentDriver — runs an ACP-speaking coding-agent runtime (`auggie --acp`, and
+ * Claude Code / Codex via ACP) behind the same `AgentDriver` seam that `RpcAgent`
+ * uses for `omp --mode rpc`. The runtime is a child process; the driver is the ACP
+ * *client* (editor side) and speaks newline-delimited JSON-RPC 2.0 over the child's
+ * stdio. It is bidirectional: the driver SENDS requests (initialize, session/new,
+ * session/prompt) and RECEIVES notifications (session/update) and requests
+ * (session/request_permission, fs/*, terminal/*) it must answer.
+ *
+ * The transport mirrors SandboxAgentDriver's spawn / pump / line / write scaffolding
+ * verbatim; only the wire protocol differs (ACP JSON-RPC vs omp's newline-JSON). It
+ * emits the SAME normalized frames the SquadManager already consumes, so an ACP
+ * runtime joins the roster / TUI / web / status / receipts unchanged — only the
+ * transport and the agent runtime differ.
+ *
+ * The child command is injectable so tests drive a fake in-process ACP agent without
+ * a real auggie / account / tokens; the default targets `auggie --acp`.
+ *
+ * ponytail: every ACP detail not confirmable against a live `auggie --acp` carries a
+ * `ponytail:` comment naming what to verify — framing (newline vs Content-Length),
+ * permission-option kinds, ignored update kinds, declined client fs/terminal, and the
+ * usage_update / plan field names.
+ */
+
+import { EventEmitter } from "node:events";
+import type { Subprocess } from "bun";
+import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { AgentDriver } from "./agent-driver.ts";
+import type { RpcSessionState } from "./types.ts";
+
+export interface AcpAgentDriverOptions {
+	/** Roster id (identity only; the transport needs no name). */
+	id?: string;
+	/** Working dir handed to the ACP runtime as the session cwd. */
+	cwd: string;
+	/** Model spec passed through to the runtime's CLI (e.g. "opus"). */
+	model?: string;
+	/** Injectable child argv. Default: `buildAcpCommand(model)`. Tests inject a fake ACP agent. */
+	command?: string[];
+}
+
+type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
+
+/** ACP PermissionOption (subset we use). `kind` ∈ {allow_once,allow_always,reject_once,reject_always}. */
+interface PermissionOption {
+	optionId: string;
+	name?: string;
+	kind?: string;
+}
+
+/** Best-effort token usage, shaped for the manager's RunAccumulator (`message_end.usage`). */
+interface Usage {
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	totalTokens?: number;
+}
+
+/** Default child argv: `auggie --acp [--model <m>]`.
+ * ponytail: auggie's ACP entrypoint is `auggie --acp` (+ optional `--model`), per Augment docs;
+ * not exercised against a live binary here — swap if the real CLI differs. */
+export function buildAcpCommand(model?: string): string[] {
+	return ["auggie", "--acp", ...(model ? ["--model", model] : [])];
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null;
+}
+
+function asString(v: unknown): string | undefined {
+	return typeof v === "string" ? v : undefined;
+}
+
+function asNumber(v: unknown): number | undefined {
+	return typeof v === "number" ? v : undefined;
+}
+
+/** ACP plan entries → one synthetic TodoPhase (ACP has no phase concept).
+ * ponytail: plan entry field names (`content`/`title`, `status`) inferred from the schema;
+ * verify against a live `auggie --acp`. */
+function parsePlan(entries: unknown): TodoPhase[] {
+	if (!Array.isArray(entries)) return [];
+	const tasks = entries.flatMap((e): { content: string; status: TodoStatus }[] => {
+		if (!isObj(e)) return [];
+		const content = asString(e.content) ?? asString(e.title);
+		if (!content) return [];
+		const s = asString(e.status);
+		const status: TodoStatus = s === "in_progress" || s === "completed" ? s : "pending";
+		return [{ content, status }];
+	});
+	return tasks.length ? [{ name: "plan", tasks }] : [];
+}
+
+/** ACP usage_update → manager-shaped Usage, best-effort.
+ * ponytail: ACP usage_update field names unconfirmed against a live auggie; map the common
+ * token counters under both camelCase variants and leave the rest undefined. */
+function parseUsage(update: Record<string, unknown>): Usage {
+	return {
+		input: asNumber(update.inputTokens) ?? asNumber(update.input),
+		output: asNumber(update.outputTokens) ?? asNumber(update.output),
+		cacheRead: asNumber(update.cacheReadTokens) ?? asNumber(update.cacheRead),
+		cacheWrite: asNumber(update.cacheWriteTokens) ?? asNumber(update.cacheWrite),
+		totalTokens: asNumber(update.totalTokens),
+	};
+}
+
+/** Pick an option id matching the allow/reject decision by `kind` prefix; fall back to the first. */
+function pickOption(options: PermissionOption[], allow: boolean): string | undefined {
+	const prefix = allow ? "allow" : "reject";
+	const match = options.find((o) => o.kind?.startsWith(prefix));
+	return (match ?? options[0])?.optionId;
+}
+
+function parseOptions(v: unknown): PermissionOption[] {
+	if (!Array.isArray(v)) return [];
+	const out: PermissionOption[] = [];
+	for (const o of v) {
+		if (isObj(o) && typeof o.optionId === "string") {
+			out.push({ optionId: o.optionId, name: asString(o.name), kind: asString(o.kind) });
+		}
+	}
+	return out;
+}
+
+function summarize(toolCall: Record<string, unknown>): string {
+	const title = asString(toolCall.title);
+	const kind = asString(toolCall.kind);
+	if (!title) return "Allow this action?";
+	return kind ? `${kind}: ${title}` : title;
+}
+
+export class AcpAgentDriver extends EventEmitter implements AgentDriver {
+	private readonly opts: AcpAgentDriverOptions;
+	private proc?: Subprocess<"pipe", "pipe", "pipe">;
+	private buf = "";
+	private seq = 0;
+	/** Outbound JSON-RPC requests awaiting a response, keyed by stringified id. */
+	private readonly pending = new Map<string, Pending>();
+	/** Inbound permission requests awaiting a `respondUi`, keyed by the minted UI id. */
+	private readonly permits = new Map<string, { jsonrpcId: string | number; options: PermissionOption[] }>();
+	private sessionId?: string;
+	private ready = false;
+	private exited = false;
+	private detaching = false;
+	private streaming = false;
+	private lastUsage?: Usage;
+	private todoPhases: TodoPhase[] = [];
+
+	constructor(opts: AcpAgentDriverOptions) {
+		super();
+		this.opts = opts;
+	}
+
+	get isReady(): boolean {
+		return this.ready;
+	}
+	get isAlive(): boolean {
+		return !!this.proc && !this.exited;
+	}
+
+	async start(timeoutMs = 60_000): Promise<void> {
+		const cmd = this.opts.command ?? buildAcpCommand(this.opts.model);
+		const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+		this.proc = proc;
+		void this.pumpStdout(proc.stdout);
+		void this.pumpStderr(proc.stderr);
+		void proc.exited.then((code) => {
+			this.exited = true;
+			for (const [, p] of this.pending) p.reject(new Error("acp agent exited"));
+			this.pending.clear();
+			if (!this.detaching) this.emit("exit", { code });
+		});
+
+		// JSON-RPC handshake: initialize → session/new. send() rejects on timeout / early exit,
+		// so a failed handshake surfaces as a rejected start() just like the sandbox driver.
+		await this.send(
+			"initialize",
+			{
+				protocolVersion: 1,
+				// ponytail: we decline client-side fs/terminal (auggie uses its own fs); flip + implement
+				// fs/read_text_file etc. in handleRequest if a runtime needs editor-mediated fs.
+				clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+				clientInfo: { name: "omp-squad", version: "1" },
+			},
+			timeoutMs,
+		);
+		const sess = await this.send("session/new", { cwd: this.opts.cwd, mcpServers: [] }, timeoutMs);
+		this.sessionId = isObj(sess) ? asString(sess.sessionId) : undefined;
+		this.ready = true;
+		this.emit("ready");
+	}
+
+	private async pumpStdout(stream: ReadableStream<Uint8Array>): Promise<void> {
+		const decoder = new TextDecoder();
+		try {
+			for await (const chunk of stream) {
+				this.buf += decoder.decode(chunk, { stream: true });
+				let nl: number;
+				while ((nl = this.buf.indexOf("\n")) >= 0) {
+					const line = this.buf.slice(0, nl).trim();
+					this.buf = this.buf.slice(nl + 1);
+					if (line) this.handleLine(line);
+				}
+			}
+		} catch (err) {
+			this.emit("rawerror", err instanceof Error ? err : new Error(String(err)));
+		}
+	}
+
+	private async pumpStderr(stream: ReadableStream<Uint8Array>): Promise<void> {
+		const decoder = new TextDecoder();
+		let acc = "";
+		try {
+			for await (const chunk of stream) {
+				acc += decoder.decode(chunk, { stream: true });
+				let nl: number;
+				while ((nl = acc.indexOf("\n")) >= 0) {
+					const line = acc.slice(0, nl);
+					acc = acc.slice(nl + 1);
+					if (line.trim()) this.emit("stderr", line);
+				}
+			}
+		} catch {
+			/* stderr best-effort */
+		}
+	}
+
+	// ponytail: ACP/Zed convention is newline-delimited JSON-RPC. If a real auggie --acp uses
+	// Content-Length headers, swap the splitter in pumpStdout — verify against a live binary.
+	private handleLine(line: string): void {
+		let msg: unknown;
+		try {
+			msg = JSON.parse(line);
+		} catch {
+			this.emit("stderr", line);
+			return;
+		}
+		if (!isObj(msg)) {
+			this.emit("stderr", line);
+			return;
+		}
+		const id = msg.id;
+		const method = asString(msg.method);
+		const hasId = id !== undefined && id !== null;
+		if (hasId && method) {
+			// Inbound request (agent → client): we must reply.
+			if (typeof id === "string" || typeof id === "number") this.handleRequest(id, method, msg.params);
+			return;
+		}
+		if (hasId) {
+			// Response to one of our outbound requests.
+			this.resolvePending(id, msg);
+			return;
+		}
+		if (method) {
+			// Notification (no reply expected).
+			this.handleNotification(method, msg.params);
+		}
+	}
+
+	private resolvePending(id: unknown, msg: Record<string, unknown>): void {
+		const key = String(id);
+		const p = this.pending.get(key);
+		if (!p) return;
+		this.pending.delete(key);
+		const err = msg.error;
+		if (err !== undefined) {
+			const message = isObj(err) ? (asString(err.message) ?? "ACP request failed") : "ACP request failed";
+			p.reject(new Error(message));
+			return;
+		}
+		p.resolve(msg.result);
+	}
+
+	private handleNotification(method: string, params: unknown): void {
+		if (method !== "session/update" || !isObj(params)) return;
+		const update = params.update;
+		if (!isObj(update)) return;
+		switch (asString(update.sessionUpdate)) {
+			case "agent_message_chunk": {
+				const content = update.content;
+				if (isObj(content) && content.type === "text") {
+					const text = asString(content.text);
+					if (text !== undefined) {
+						this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+					}
+				}
+				return;
+			}
+			case "tool_call": {
+				const title = asString(update.title);
+				const kind = asString(update.kind);
+				this.emit("event", { type: "tool_execution_start", toolName: kind ?? title ?? "tool", intent: title });
+				return;
+			}
+			case "plan":
+				this.todoPhases = parsePlan(update.entries);
+				return;
+			case "usage_update":
+				this.lastUsage = parseUsage(update);
+				return;
+			default:
+				// ponytail: agent_thought_chunk / tool_call_update / current_mode_update streamed but
+				// unused by the manager; map them when the UI needs thoughts or live tool status.
+				return;
+		}
+	}
+
+	private handleRequest(id: string | number, method: string, params: unknown): void {
+		if (method === "session/request_permission") {
+			const p = isObj(params) ? params : {};
+			const toolCall = isObj(p.toolCall) ? p.toolCall : {};
+			const options = parseOptions(p.options);
+			const uiId = `acpui_${++this.seq}`;
+			this.permits.set(uiId, { jsonrpcId: id, options });
+			this.emit("ui", {
+				type: "extension_ui_request",
+				id: uiId,
+				method: "confirm",
+				title: asString(toolCall.title) ?? "Permission requested",
+				message: summarize(toolCall),
+			});
+			return;
+		}
+		// fs/read_text_file | fs/write_text_file | terminal/* | unknown → not supported.
+		// ponytail: we advertised fs:false / terminal:false, so auggie uses its own fs; reply the
+		// JSON-RPC "method not found" error. Implement these if a runtime needs editor-mediated fs.
+		this.writeError(id, -32601, "method not supported");
+	}
+
+	private write(obj: unknown): void {
+		if (!this.proc || this.exited) return;
+		this.proc.stdin.write(`${JSON.stringify(obj)}\n`);
+		this.proc.stdin.flush();
+	}
+
+	private notify(method: string, params: unknown): void {
+		this.write({ jsonrpc: "2.0", method, params });
+	}
+
+	private writeError(id: string | number, code: number, message: string): void {
+		this.write({ jsonrpc: "2.0", id, error: { code, message } });
+	}
+
+	send<T = unknown>(method: string, params: unknown, timeoutMs = 60_000): Promise<T> {
+		if (!this.proc || this.exited) return Promise.reject(new Error("acp agent not running"));
+		const id = ++this.seq;
+		const key = String(id);
+		return new Promise<T>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				this.pending.delete(key);
+				reject(new Error(`acp request ${method} timed out`));
+			}, timeoutMs);
+			this.pending.set(key, {
+				resolve: (d) => {
+					clearTimeout(timer);
+					resolve(d as T);
+				},
+				reject: (e) => {
+					clearTimeout(timer);
+					reject(e);
+				},
+			});
+			this.write({ jsonrpc: "2.0", id, method, params });
+		});
+	}
+
+	async prompt(message: string): Promise<void> {
+		this.streaming = true;
+		this.emit("event", { type: "agent_start" });
+		try {
+			// Resolves with { stopReason } on turn end; session/cancel makes it resolve "cancelled".
+			await this.send("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: message }] });
+			this.emit("event", { type: "message_end", message: { role: "assistant", usage: this.lastUsage } });
+		} finally {
+			// agent_end always fires — end_turn, cancel, refusal, and error all terminate the turn.
+			this.streaming = false;
+			this.emit("event", { type: "agent_end" });
+		}
+	}
+
+	abort(): Promise<unknown> {
+		if (this.sessionId) this.notify("session/cancel", { sessionId: this.sessionId });
+		return Promise.resolve();
+	}
+
+	getState(): Promise<RpcSessionState> {
+		// ponytail: synthetic snapshot — ACP exposes no full session state; streaming/todos are
+		// best-effort and model is omitted (we hold only a string spec, not a Model<Api>).
+		return Promise.resolve({
+			thinkingLevel: undefined,
+			isStreaming: this.streaming,
+			isCompacting: false,
+			steeringMode: "all",
+			followUpMode: "all",
+			interruptMode: "immediate",
+			sessionId: this.sessionId ?? "",
+			autoCompactionEnabled: false,
+			messageCount: 0,
+			queuedMessageCount: 0,
+			todoPhases: this.todoPhases,
+		});
+	}
+
+	respondUi(requestId: string, payload: { value?: string; confirmed?: boolean; cancelled?: true }): void {
+		const permit = this.permits.get(requestId);
+		if (!permit) return;
+		this.permits.delete(requestId);
+		// ponytail: confirm → allow_* / reject_* chosen by option `kind` prefix; verify auggie's
+		// actual PermissionOption kinds against a live --acp.
+		let reply: unknown;
+		if (payload.cancelled) {
+			reply = { outcome: { outcome: "cancelled" } };
+		} else {
+			const allow = payload.confirmed ?? (payload.value === "yes" || payload.value === "true");
+			const optionId = pickOption(permit.options, allow);
+			reply = optionId !== undefined ? { outcome: { outcome: "selected", optionId } } : { outcome: { outcome: "cancelled" } };
+		}
+		this.write({ jsonrpc: "2.0", id: permit.jsonrpcId, result: reply });
+	}
+
+	respondHostTool(): void {
+		// ACP has no host-tool channel here; no-op.
+	}
+
+	detach(): void {
+		this.detaching = true;
+		try {
+			this.proc?.kill();
+		} catch {
+			/* ignore */
+		}
+		this.proc = undefined;
+	}
+
+	async stop(): Promise<void> {
+		if (this.streaming && this.sessionId) this.notify("session/cancel", { sessionId: this.sessionId });
+		try {
+			this.proc?.kill();
+		} catch {
+			/* ignore */
+		}
+		this.proc = undefined;
+		this.exited = true;
+	}
+}

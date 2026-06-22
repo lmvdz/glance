@@ -1,0 +1,69 @@
+---
+title: Verify Loops
+description: Wrap a task in an implement → verify → fixup loop, so the gate command must exit 0 before an agent counts as done.
+---
+
+`--verify "<cmd>"` wraps an ordinary task in an **implement → verify → fixup loop** — the
+cheapest, highest-leverage borrow from [fabro](/docs/workflows). Instead of trusting the agent's
+"I'm done", the agent's work must make your gate command **exit 0**:
+
+```bash
+omp-squad add ~/code/myproject --task "Add rate limiting to the public API." \
+  --verify "bun run check && bun test"
+```
+
+No `.fabro` file is needed. `buildVerifyWorkflow` (`src/workflow/verify-workflow.ts`) synthesizes
+the graph directly in memory from your `--task` (the goal) and `--verify` (the gate).
+
+## The synthesized graph
+
+```text
+start → implement → verify ──(pass)──→ exit
+                       └────(fail)──→ fixup → verify   (bounded by maxFixups, default 3)
+```
+
+| Node | Kind | What it does |
+|---|---|---|
+| `implement` | agent | _"Complete the goal above. Implement it fully, then stop."_ |
+| `verify` | command | Runs your `<cmd>`; it's a **goal gate** (pass = exit 0), with `fixup` as its retry target |
+| `fixup` | agent | _"The verify command failed. Read the recent command output and fix every failure it reports. Change only what the failures require, then stop."_ — capped at `maxFixups` visits (default **3**) |
+
+The gate is the command's **exit code**, nothing else — so a passing run means the work
+genuinely satisfies your check, not that the agent claimed success. Because the graph is built
+in code rather than parsed from DOT, your command can contain quotes, newlines, `&&`, pipes —
+whatever — with **no escaping**.
+
+<Callout type="info">
+A verify run is wired internally as a `workflow`-kind agent
+(`workflow: { verify: { command } }`), so in the TUI and web dashboard it shows the `⚙` workflow
+glyph and its `implement` / `verify` / `fixup` stages drive the dashboard's todo rollup and the
+[Race board](/docs/guides/web-dashboard#race--the-pipeline-race-board).
+</Callout>
+
+## Relationship to workflows
+
+`--verify` is the same machinery as an authored workflow, minus the file. Both run on the pure
+`WorkflowEngine` via `WorkflowDriver`, so a verify loop joins the roster / TUI / web / federation
+exactly like any other run — `kind` is the only difference. The inner agent's own approval
+prompts and any human gate ride the manager's ordinary needs-input channel.
+
+When you need more than a single linear gate — a plan-and-approve step, parallel fan-out, model
+routing per node — author a graph and pass `--workflow` instead:
+
+```bash
+omp-squad add ~/code/myproject --name feature \
+  --workflow workflows/plan-implement/workflow.fabro \
+  --task "Add rate limiting to the public API."
+```
+
+The intake router will also **choose** a verify loop for you automatically for ordinary code
+changes when you spawn with just a `--task` — see
+[Auto-dispatch & intake](/docs/integrations/intake).
+
+---
+
+<Cards>
+<Card title="Workflows" href="/docs/workflows" description="Process as a reviewable graph — gates, fan-out, model routing." />
+<Card title="Workflow gates" href="/docs/workflows/gates" description="goal_gate, retry targets, and bounded fix-up loops in depth." />
+<Card title="Spawning agents" href="/docs/guides/spawning" description="Every add flag, including --workflow and --verify." />
+</Cards>

@@ -1,0 +1,211 @@
+---
+title: Federation
+description: Coordinate omp-squad operators across machines over a Tailscale tailnet — shared presence and cross-host file leases.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+omp-squad coordinates agents on **one** machine through the shared registries under
+`~/.omp/squad` (presence + leases, one file per claim, heartbeat-TTL). Federation promotes
+that coordination **across machines** over a Tailscale tailnet, so two operators working the
+same repo from different hosts see each other's agents and file leases.
+
+```text
+ host A                         coordinator                    host B
+ ┌───────────────┐    ws        ┌───────────┐      ws       ┌───────────────┐
+ │ omp-squad up  │─presence────▶│  relay    │◀────presence──│ omp-squad up  │
+ │ federation-   │─leases──────▶│ (fan-out) │─────leases───▶│ federation-   │
+ │   sync        │◀─leases──────│           │◀────leases────│   sync        │
+ └───────────────┘              └───────────┘               └───────────────┘
+```
+
+<Callout type="info">
+Federation is **opt-in and off by default**. With no coordinator set the manager uses a
+`NullFederationBus` — every federation path stays live but inert, and everything works as a
+single operator. Setting `OMP_SQUAD_COORDINATOR` swaps in the `TailnetFederationBus`.
+</Callout>
+
+## Joining a team room
+
+The daemon joins a team room when `OMP_SQUAD_COORDINATOR` points at a coordinator WebSocket:
+
+<TypeTable
+  type={{
+    OMP_SQUAD_COORDINATOR: {
+      type: 'ws url',
+      description: 'Coordinator WebSocket URL. Unset → NullFederationBus (single operator). Set → TailnetFederationBus joins the room.',
+    },
+    OMP_SQUAD_OPERATOR: {
+      type: 'string',
+      description: 'This operator identity (Actor id) in the room. Defaults to the OS username, then "local".',
+    },
+  }}
+/>
+
+```sh title="join a team room"
+OMP_SQUAD_COORDINATOR=ws://coordinator-host:7900 \
+OMP_SQUAD_OPERATOR=alice \
+omp-squad up
+# → federation: joined ws://coordinator-host:7900 as alice
+```
+
+The operator identity is `OMP_SQUAD_OPERATOR || os.userInfo().username || "local"`, with
+`origin: "local"`. The same resolution is mirrored in the server (for labelling the local
+roster) and in `federation-sync`, so every surface agrees on who "self" is.
+
+## The coordinator
+
+`src/coordinator.ts` is a **dumb, protocol-agnostic WebSocket relay**: every frame received
+from one client is rebroadcast verbatim to every *other* client. It never parses frames, so
+the wire protocol stays owned entirely by the buses (`TailnetFederationBus`). A plain `GET`
+gets a tiny `omp-squad coordinator` health body; the upgrade is accepted on any path.
+
+Run one anywhere on the tailnet via `src/coordinator-main.ts`:
+
+```sh title="run a coordinator"
+OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
+# → omp-squad coordinator listening on ws://127.0.0.1:7900
+```
+
+<TypeTable
+  type={{
+    OMP_SQUAD_COORDINATOR_PORT: {
+      type: 'number',
+      default: '7900',
+      description: 'Port the relay binds (0.0.0.0). A positional CLI arg (bun src/coordinator-main.ts 7901) overrides it.',
+    },
+  }}
+/>
+
+Put it on a Tailscale node and point every operator at its tailnet address. WireGuard
+encrypts the wire; Tailscale ACLs gate who can reach it; identity is the tailnet SSO login,
+resolved via `tailscale whois --json <ip>` (`tailscaleWhois` in `federation.ts`). The bus
+auto-reconnects with capped backoff (500 ms → 30 s) and **never throws a transport error** to
+the caller — an unreachable coordinator simply means an empty, silent room.
+
+## Presence
+
+The squad daemon publishes its `OperatorPresence` to the coordinator through its bus, on every
+roster change. A presence frame is the operator's `Actor`, an `Availability`, the host, the
+live `AgentDTO[]`, and a timestamp.
+
+```ts title="src/types.ts"
+export type Availability = "active" | "away" | "offline";
+
+export interface Actor {
+  id: string;            // tailnet login "bob@company.com" or "local"
+  displayName?: string;
+  origin: "local" | "remote";
+}
+
+export interface OperatorPresence {
+  operator: Actor;
+  availability: Availability;
+  host?: string;
+  agents: AgentDTO[];
+  updatedAt: number;
+}
+```
+
+Two pure primitives fold peer rosters together:
+
+- `mergeRosters(self, peers)` — dedupes by `operator.id`, newest `updatedAt` wins, and pins
+  `self` to the head of the list.
+- `detectCollisions(presences)` — flags repos where agents owned by **different** operators
+  share the same branch.
+
+`federationView` composes them; `PeerRoster` collects the newest presence frame per remote
+operator and prunes any peer that stops gossiping past the 90-second TTL
+(`PEER_PRESENCE_TTL_MS`).
+
+### Surfacing remote presence
+
+The server exposes `GET /api/federation` (bearer-gated like the rest), returning a
+`FederationSnapshot`:
+
+```ts
+{ coordinator: string | null, operators: OperatorPresence[], collisions: Collision[] }
+```
+
+`self` (this host's live roster) is merged with peers reached through a **listener-only**
+`PeerPresenceTracker` — a second, read-only `TailnetFederationBus` connection that never
+publishes — created in `server.start()` only when `OMP_SQUAD_COORDINATOR` is set. The web
+dashboard renders this as the **Federation** panel: peer operators, their agents, and any
+shared-branch collisions. With no coordinator the `coordinator` field is `null` and the panel
+stays hidden; the endpoint still returns just `self` (no peers, no collisions) and nothing
+errors.
+
+<Callout type="warn">
+Collision detection keys on `AgentDTO.repo`, a **host-local path** — so cross-operator branch
+collisions fire reliably only when both hosts use the same checkout path. Full cross-host
+collision matching wants a normalized `repoId` on `AgentDTO`; until then, cross-host
+coordination leans on the lease layer below, which already keys on a normalized repo identity.
+</Callout>
+
+## Cross-host file leasing
+
+Leasing already prevents two agents on **one** host from clobbering the same file (advisory
+soft-block-with-override; `LEASE_TTL_MS` = 120 s). The `federation-sync` companion
+(`src/federation-sync.ts`) extends that across hosts — **decoupled from the daemon**, working
+purely off the on-disk registries under `~/.omp/squad`:
+
+<Steps>
+<Step>
+**Publish** — every tick (`PUBLISH_INTERVAL_MS` = 15 s) it reads *this operator's own* live
+leases per repo and gossips them, keyed by the repo's **cross-host identity**. It never
+re-broadcasts leases it mirrored from a peer.
+</Step>
+<Step>
+**Mirror** — a peer's leases for a repo you *also* have locally are written into your local
+lease registry (`mirrorLease`, preserving the remote operator/host). From there everything
+just works: the lease-hook's `holdersOf` warns when you edit a file a remote teammate holds,
+and the command center's **Files in flight** panel shows it. The TTL prunes a mirrored lease
+once the peer stops gossiping.
+</Step>
+</Steps>
+
+Run it as its own process:
+
+```sh title="run federation-sync"
+OMP_SQUAD_COORDINATOR=ws://coordinator-host:7900 \
+OMP_SQUAD_OPERATOR=alice \
+OMP_SQUAD_FED_REPOS=/home/alice/app,/home/alice/infra \
+bun src/federation-sync-main.ts
+```
+
+<TypeTable
+  type={{
+    OMP_SQUAD_FED_REPOS: {
+      type: 'comma-separated paths',
+      description: 'Extra repo paths to always gossip leases for, beyond the cwd repo and any repo discovered in the local presence registry.',
+    },
+  }}
+/>
+
+It watches the current working directory plus `OMP_SQUAD_FED_REPOS`, plus every repo
+discovered in the local presence registry. `OMP_SQUAD_COORDINATOR` is **required** — without
+it the process prints a hint and exits.
+
+### Cross-host repo identity
+
+`repoIdentity()` keys federation on the **normalized git origin URL**, not a host-local path,
+so two hosts that cloned the same origin agree:
+
+```text
+git@github.com:acme/app.git
+https://github.com/acme/app          ─▶  github.com/acme/app
+ssh://git@github.com/acme/app.git
+```
+
+It reads `git config --get remote.origin.url` (the raw configured URL, **not**
+`git remote get-url`, which expands per-machine `insteadOf` rewrites). A repo with no origin
+falls back to `name:<basename>` — best-effort, advisory only.
+
+## Related
+
+<Cards>
+  <Card title="Remote access" href="/docs/guides/remote-access" description="Reaching the dashboard over the tailnet, TLS, and bearer tokens." />
+  <Card title="State & events" href="/docs/architecture/state-and-events" description="The presence and lease registries the local manager already keeps." />
+  <Card title="Configuration" href="/docs/reference/configuration" description="Every environment variable, in one place." />
+</Cards>

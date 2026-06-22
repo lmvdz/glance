@@ -15,7 +15,7 @@ import { liveAgents, SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const tmps: string[] = [];
-const PLANE_ENV = ["PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "PLANE_PROJECT_MAP", "OMP_SQUAD_MAX_WIP"] as const;
+const PLANE_ENV = ["PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "PLANE_PROJECT_MAP", "OMP_SQUAD_MAX_WIP", "OMP_SQUAD_QUEUE_ON_FULL"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of PLANE_ENV) saved[k] = process.env[k];
 
@@ -66,6 +66,7 @@ test("create throws at the WIP cap before cutting a worktree", async () => {
 	const overridable: { list: () => AgentDTO[] } = mgr;
 	overridable.list = () => [dto("working"), dto("idle")];
 	process.env.OMP_SQUAD_MAX_WIP = "2";
+	delete process.env.OMP_SQUAD_QUEUE_ON_FULL; // hermetic: this test asserts the hard-cap throw, not the backpressure enqueue path
 	await expect(mgr.create({ repo: "/x/repo", name: "blocked" })).rejects.toThrow(/WIP cap reached \(2\/2\)/);
 });
 

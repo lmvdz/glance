@@ -1,0 +1,134 @@
+---
+title: The Acceptance Gate
+description: A tiered, degrading interview — lint, typecheck, flue run, ponytail — that a commissioned worker must pass before onboarding.
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+The acceptance gate is the interview a [commissioned worker](/docs/commissioning) must pass
+before it's onboarded. `validateWorker(dir, spec, opts)` (`src/validate.ts`) runs four checks
+and returns a `GateReport`. It is **tiered and degrading**: lint is mandatory and pure;
+the heavier tiers run only when the worker's toolchain is installed, otherwise they report
+`skip` rather than blocking the loop offline.
+
+## The tiers
+
+<Steps>
+
+<Step>
+### lint — always, pure
+
+Static checks over the files on disk, no toolchain needed. The tier fails (collecting every
+reason) when:
+
+- the workflow `.flue/workflows/<name>.ts` is missing, or doesn't `export … run` (`function run` or `const run`);
+- `spec.model` is a string but isn't a `provider/model` specifier, or the model agent module `.flue/agents/<name>.ts` is missing / doesn't `export default createAgent`;
+- `flue.worker.json` is missing, isn't valid JSON, lacks a `capabilities` array, or lacks a string `workflow` name.
+
+Lint passing is a precondition for `ok` — see [the verdict](#the-verdict).
+</Step>
+
+<Step>
+### typecheck — if `tsc` is installed in the worker
+
+Looks for `node_modules/.bin/tsc` in the worker dir. Absent → `skip`
+("typescript not installed in worker"). Present → runs `tsc -p tsconfig.json --noEmit`;
+exit `0` is `pass`, otherwise `fail` with the first 8 lines of output as `detail`.
+</Step>
+
+<Step>
+### acceptance — if `flue` is installed and `spec.accept` is set
+
+No `spec.accept` → `skip`. No `node_modules/.bin/flue` → `skip`. Otherwise it runs:
+
+```bash
+flue run <name> --target <node|cloudflare> --payload <accept.payload-as-json>
+```
+
+A non-zero exit is `fail`. On success it extracts the workflow result from stdout
+(`extractLastJsonObject`) and, when `accept.expect` is present, **deep-subset matches** the
+result against it (`deepSubset`): every key/value in `expect` must be present and deep-equal
+in the result; arrays must match element-for-element by length. A mismatch is `fail` with the
+actual result in `detail`.
+</Step>
+
+<Step>
+### ponytail — rejects an over-built worker
+
+The lazy-senior-dev check (`src/validate.ts`). It mechanizes the same ladder the
+[OmpArchitect recipe](/docs/commissioning/architects) instructs, and fails when:
+
+- `package.json` declares a dependency outside the skeleton allowlist (`@flue/runtime`, `valibot`, `@flue/cli`, `typescript`) — the worker tried to install its way out of a problem;
+- the workflow exceeds **80** non-blank lines — it over-built instead of shipping the minimum that passes acceptance.
+
+</Step>
+
+</Steps>
+
+<Callout type="info">
+`opts.requireAcceptance` (the `requireAcceptance` commission option) turns a *skipped*
+acceptance check into a hard fail of the gate — use it to refuse a worker that can't actually
+be exercised because the Flue toolchain isn't installed.
+</Callout>
+
+## The verdict
+
+```ts title="src/validate.ts"
+const lintOk = lint.status === "pass";
+const noFail = checks.every((c) => c.status !== "fail");
+const acceptanceOk = !opts.requireAcceptance || acceptance.check.status === "pass";
+return { ok: lintOk && noFail && acceptanceOk, checks, result: acceptance.result };
+```
+
+So `ok` requires lint to pass, **no** tier to `fail`, and — under `requireAcceptance` — the
+acceptance tier to actually `pass`. A tier with no tooling is `skip`, which doesn't block
+`ok` on its own.
+
+## Fail → re-author (bounded)
+
+A failed gate doesn't end the commission — it loops. `CommissionExecutor` turns the prior
+`GateReport` into authoring feedback before the next `author` pass:
+
+```ts title="src/workflow/commission-executor.ts"
+const feedback =
+  prior && !prior.ok
+    ? `A previous attempt failed the acceptance gate: ${prior.checks.map((c) => `${c.name}=${c.status}`).join(", ")}. … Fix these issues.`
+    : undefined;
+await this.hooks.author(feedback);
+```
+
+The failing tier's `detail` is folded into the feedback, so the architect knows *what* broke.
+The loop is bounded by the graph (`author` carries `max_visits=2`); exhausting it onboards
+nothing. See [the loop](/docs/commissioning) and [gates & loops](/docs/workflows/gates).
+
+## Shapes
+
+<TypeTable
+  type={{
+    name: { description: 'Which tier this check is.', type: '"lint" | "typecheck" | "acceptance" | "ponytail"' },
+    status: { description: 'Outcome of the tier.', type: '"pass" | "fail" | "skip"' },
+    detail: { description: 'Human-readable reason (failures) or why a tier was skipped.', type: 'string', default: '(none)' },
+  }}
+/>
+
+`GateReport` wraps the checks:
+
+<TypeTable
+  type={{
+    ok: { description: 'lint passed, no tier failed, and acceptance passed if required.', type: 'boolean' },
+    checks: { description: 'One GateCheck per tier, in run order.', type: 'GateCheck[]' },
+    result: { description: 'The acceptance run result payload, when the acceptance tier ran.', type: 'unknown', default: '(none)' },
+  }}
+/>
+
+These flow back to the operator as the per-check lines the [`commission` CLI](/docs/reference/cli)
+prints and, on success, into `CommissionResult.report`. The full type definitions live in
+[reference / types](/docs/reference/types).
+
+## Next
+
+<Cards>
+  <Card title="The architect seam" href="/docs/commissioning/architects" description="Who writes the worker the gate interviews." />
+  <Card title="Onboarding" href="/docs/commissioning/flue-service" description="What a passing worker becomes in the fleet." />
+</Cards>

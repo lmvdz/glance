@@ -198,6 +198,8 @@ export interface AgentDTO {
 	featureId?: string;
 	/** Repo-relative path prefixes this agent owns — overlapping spawns are refused (partition). */
 	owns?: string[];
+	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
+	queued?: boolean;
 }
 
 /**
@@ -250,6 +252,8 @@ export interface PersistedAgent {
 	featureId?: string;
 	/** Runtime class; defaults to "omp-operator" when absent (back-compat). */
 	kind?: AgentKind;
+	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
+	runtime?: "omp" | "acp";
 	/** flue-service only: worker invocation config. */
 	flue?: FlueMemberConfig;
 	/** workflow only: graph file backing this run. */
@@ -289,6 +293,8 @@ export interface PersistedFeature {
 export interface CreateAgentOptions {
 	name?: string;
 	repo: string;
+	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
+	runtime?: "omp" | "acp";
 	/** Branch to create/checkout for the worktree. Defaults to `squad/<name>`. */
 	branch?: string;
 	/** Reuse an existing path as the cwd instead of cutting a worktree. */

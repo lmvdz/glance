@@ -1,0 +1,161 @@
+---
+title: HTTP & WebSocket API
+description: Every route and the WebSocket protocol served by SquadServer, the daemon both the TUI and web dashboard are thin clients of.
+---
+
+`src/server.ts` (`SquadServer.start`) serves one Bun server: a static SPA shell, a token-gated REST surface under `/api`, and a `/ws` WebSocket carrying the live `SquadEvent` stream. Every shape below is traced to the `fetch`/`websocket` handlers.
+
+## Authentication
+
+When the daemon was started with a token (always, in normal operation — it auto-generates one), every `/api/*` request and the `/ws` handshake must present it, either as `Authorization: Bearer <token>` or a `?token=<token>` query parameter. Missing or wrong ⇒ `401 unauthorized`.
+
+The bootstrap surface loads **without** a token so the PWA can install before sign-in:
+
+- `GET /` and `GET /index.html` — the SPA shell.
+- `GET /manifest.webmanifest`, `/sw.js`, `/icon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png` — the public PWA assets.
+
+Any other unmatched path returns `404 not found`.
+
+## Auth & push
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| GET | `/api/auth/check` | Token probe (only reachable past the gate). | `{ ok: true }` |
+| GET | `/api/push/key` | VAPID public key for Web Push, or empty string. | `{ publicKey }` |
+| POST | `/api/push/subscribe` | Register a browser push subscription. | `{ ok: true }`; `501` if push unavailable, `400` on a malformed `{ endpoint, keys: { p256dh, auth } }`. |
+
+## Roster & projects
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| GET | `/api/agents` | The live roster. | [`AgentDTO[]`](/docs/reference/types) |
+| GET | `/api/projects` | Repos with agent/status rollups. | [`ProjectDTO[]`](/docs/reference/types) |
+| GET | `/api/info` | Daemon working directory. | `{ cwd }` |
+| GET | `/api/version` | Served-UI fingerprint (drives stale-tab self-refresh). | `{ version }` |
+| GET | `/api/health` | Liveness + counts. | `{ ok: true, agents, projects, uptimeSec }` |
+
+## Per-agent
+
+`:id` is URL-encoded. Routes that resolve an agent return `404 no such agent` when it is missing.
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| GET | `/api/agents/:id/transcript` | Full transcript. | [`TranscriptEntry[]`](/docs/reference/types) |
+| GET | `/api/agents/:id/subagents` | Spawned fan-out children. | subagent list |
+| GET | `/api/agents/:id/receipts` | Per-run receipts. | `RunReceipt[]` |
+| GET | `/api/agents/:id/commands` | Slash commands available to the agent. | `CommandInfo[]` (or `[]`) |
+| GET | `/api/agents/:id/diff` | Unlanded worktree diff. | diff payload |
+| GET | `/api/agents/:id/tree` | Worktree file tree. | tree payload |
+| POST | `/api/agents/:id/land` | Commit + merge the branch to main. | land result; see below |
+| POST | `/api/agents/:id/verify` | Run the repo's detected acceptance command as a land-proof. | proof result; `422` if none detected |
+| POST | `/api/agents/:id/vision` | Capture screenshot evidence (never gates a land). | `{ artifacts }`; `422` if no URL |
+
+**`/land`** accepts an optional JSON body `{ message?, force? }`. Unless `force` is `true`, a proof gate runs first; if it fails the route returns `409` with `{ ok: false, committed: false, merged: false, message, detail }`. Work-in-progress is committed only when the agent is not busy (`working`/`starting`/`input`). On a successful land the agent's tracking Plane issue is closed (best-effort, idempotent).
+
+**`/vision`** takes `{ url? }`; absent that it falls back to `$OMP_SQUAD_APP_URL`. With neither it returns `422`.
+
+## Features
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| GET | `/api/features?repo=` | Derived + persisted features for a repo. | [`FeatureDTO[]`](/docs/reference/types) |
+| POST | `/api/features` | Create a feature `{ title, repo?, planDir? }`. | `{ ok: true }`; `400` if no `title` |
+| POST | `/api/features/from-plan` | Create from a plan dir `{ planDir, repo?, title? }`. | the `PersistedFeature`; `400` if no `planDir` |
+| POST | `/api/features/auto` | Spawn a research-plan-implement workflow for `{ goal, repo?, title?, model? }`. | `{ feature, agentId }`; `400` if no `goal` |
+| PATCH | `/api/features/:id` | Patch `{ title?, stageOverride?, archived? }`. | the `PersistedFeature`; `404` if missing |
+| POST | `/api/features/:id/agents` | Spawn-and-link `{ task, repo?, name? }`, or link/unlink `{ agentId, unlink? }`. | `{ agent }` or `{ ok }`; `400` if neither |
+| POST | `/api/features/:id/land` | Land all member worktrees `{ force? }`. | land rollup |
+| GET | `/api/features/:id/tickets` | Resolved Plane tickets. | [`PlaneTicket[]`](/docs/reference/types) |
+| POST | `/api/features/:id/module` | Create a Plane module for the feature. | module; `501` if Plane not configured |
+| POST | `/api/features/:id/verify` | Run the feature's verification. | verify result; `404` if missing |
+| GET | `/api/features/:id/pipeline?repo=` | Plan concerns + linked issues + agent ids. | `{ concerns, issues, agentIds }`; `404` if missing |
+
+The spawn-and-link branch of `/api/features/:id/agents` creates the agent with `approvalMode: "yolo"` and `track: true` and links it to the feature.
+
+## Presence, leases & federation
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| GET | `/api/presence?repo=` | Presence for one repo, or all active agents. | presence entries |
+| GET | `/api/leases?repo=` | File leases for a repo (defaults to the daemon cwd). | lease list |
+| GET | `/api/federation` | Roster-of-rosters: self + peers + branch collisions. | `FederationSnapshot` |
+
+## Plane
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| GET | `/api/plane/issues?project=` | Issues for a project (or the mapped default). | `IssueRef[]`; `501` if Plane not configured |
+
+## Smart spawn & upgrade
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| POST | `/api/spawn` | Plan a spawn from a free-text `{ prompt }` and create it. | `{ agent, plan }`; `400` empty prompt, `409` on a spawn conflict |
+| GET | `/api/upgrade/status` | Git state of the daemon's repo. | git state |
+| POST | `/api/upgrade` | Pull latest, detach agents, and re-exec the daemon. | `{ ok: true, pull, git, restarting: true }` |
+
+<Callout type="warn">
+`POST /api/upgrade` stops the manager, frees the port, and re-execs the daemon ~300ms after responding. Agents' host processes survive and the relaunched daemon reconnects to them.
+</Callout>
+
+## Commands
+
+`POST /api/command` is the single mutation endpoint the CLI and surfaces post to. The body is a [`ClientCommand`](/docs/reference/types).
+
+| `cmd.type` | Result |
+| --- | --- |
+| `create` | Creates the agent with `track: true`; returns the new [`AgentDTO`](/docs/reference/types). |
+| `commission` | Runs the commissioning loop with `{ install: true }`; returns a `CommissionResult`. |
+| anything else | `manager.applyCommand(cmd)`; returns `{ ok: true }`. |
+
+Malformed JSON returns `400 bad json`.
+
+## WebSocket protocol
+
+Connect to `/ws` (token-gated). The protocol is JSON frames in both directions, typed by [`SquadEvent`](/docs/reference/types) (server→client) and [`ClientCommand`](/docs/reference/types) (client→server).
+
+### On connect
+
+The server immediately sends the initial snapshot:
+
+```ts
+// 1. a full roster snapshot, stamped with the served-UI version
+{ type: "roster", agents: AgentDTO[], version: string }
+// 2. then one per agent that has slash commands available
+{ type: "commands", id: string, commands: CommandInfo[] }
+```
+
+### Server → client
+
+Every `SquadEvent` is broadcast to all connected sockets; `roster` events are re-stamped with the live `uiVersion` so tabs can self-refresh after an upgrade:
+
+```ts
+type SquadEvent =
+	| { type: "roster"; agents: AgentDTO[]; version: string }
+	| { type: "agent"; agent: AgentDTO }
+	| { type: "removed"; id: string }
+	| { type: "transcript"; id: string; entry: TranscriptEntry }
+	| { type: "log"; level: "info" | "warn" | "error"; text: string }
+	| { type: "commands"; id: string; commands: CommandInfo[] }
+	| { type: "features-changed" };
+```
+
+### Client → server
+
+Send a `ClientCommand`. `subscribe` is special: it triggers a **unicast** replay of that agent's transcript (one `transcript` event per entry) to the requesting socket only. Every other command is applied via `manager.applyCommand`. Unparseable frames are silently dropped.
+
+```ts
+type ClientCommand =
+	| { type: "prompt"; id: string; message: string }
+	| { type: "answer"; id: string; requestId: string; value: string }
+	| { type: "interrupt"; id: string }
+	| { type: "kill"; id: string }
+	| { type: "restart"; id: string }
+	| { type: "remove"; id: string; deleteWorktree?: boolean }
+	| { type: "create"; options: CreateAgentOptions }
+	| { type: "snapshot" }
+	| { type: "subscribe"; id: string }
+	| { type: "commission"; spec: CommissionSpec };
+```
+
+See [Types](/docs/reference/types) for the field-level definitions of every payload above.

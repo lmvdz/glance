@@ -1,0 +1,172 @@
+---
+title: Concepts
+description: The omp-squad vocabulary — agent kinds and statuses, worktrees and branches, projects, features, pending requests, and the one-core/two-clients design.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+Every term below is defined exactly as the code uses it (`src/types.ts`). The
+dashboard, TUI, and CLI all speak this vocabulary, so it's worth ten minutes.
+
+## Agent
+
+A managed agent is one unit of work the squad owns: a process, a worktree, a
+transcript, and a derived status. Surfaces see it as an `AgentDTO` snapshot —
+`id`, `name`, `status`, `kind`, `repo`, `worktree`, `branch`, `model`, the current
+`activity`, a `todo` rollup, `contextPct` (context-window usage 0..1), and its
+list of `pending` requests.
+
+## Agent status
+
+`AgentStatus` is the **derived**, human-meaningful lifecycle state of one agent —
+computed from its RPC event stream, never declared by the agent itself.
+
+<TypeTable
+  type={{
+    starting: {
+      type: 'AgentStatus',
+      description: 'Process spawned, awaiting the RPC `ready` frame.',
+    },
+    working: {
+      type: 'AgentStatus',
+      description: 'An agent turn is actively streaming.',
+    },
+    idle: {
+      type: 'AgentStatus',
+      description: 'Ready — the turn finished; awaiting the next instruction.',
+    },
+    input: {
+      type: 'AgentStatus',
+      description: 'BLOCKED on a human decision (approval / question / tool input). Surfaced as "needs-input".',
+    },
+    error: {
+      type: 'AgentStatus',
+      description: 'Spawn failed, child crashed, or a fatal RPC error.',
+    },
+    stopped: {
+      type: 'AgentStatus',
+      description: 'Intentionally terminated.',
+    },
+  }}
+/>
+
+The mapping is mechanical: `agent_start` → `working`, `agent_end` → `idle`, a
+blocking `extension_ui_request` or `host_tool_call` → `input`, a crash → `error`.
+
+## Agent kind
+
+`AgentKind` records which runtime backs an agent. Most are `omp-operator`; the
+others appear when you run a [workflow](/docs/workflows) or
+[commission](/docs/commissioning) a worker.
+
+<TypeTable
+  type={{
+    'omp-operator': {
+      type: 'AgentKind',
+      description: 'An `omp --mode rpc` child in a git worktree — interactive and steerable.',
+    },
+    'flue-service': {
+      type: 'AgentKind',
+      description: 'A Flue worker invoked via `flue run` — autonomous and bounded.',
+    },
+    workflow: {
+      type: 'AgentKind',
+      description: 'A graph-driven, gated, multi-stage run over a persistent omp thread.',
+    },
+  }}
+/>
+
+## Worktree and branch
+
+Each agent works in its own **git worktree** — a checkout of the repo on its own
+branch, so parallel agents never touch each other's files. The branch defaults to
+`squad/<name>` (override with `--branch`). The worktree path is the agent's `cwd`
+and the unit you review before merging; worktrees live under
+`~/.omp/squad/worktrees/`. When the launch directory isn't a git repo, the agent
+runs in place instead of cutting a worktree.
+
+## Project
+
+A **Project** (`ProjectDTO`) is the top level of the command center: agents grouped
+by the repo they were cut from. It's fully *derived* from the roster — there's no
+separate project registry. Each carries an `agentCount`, a `statusCounts` rollup
+(how many agents are `working` / `idle` / `input` / …), a `pendingCount`, and
+`lastActivity`, so a project shows its health at a glance.
+
+## Feature
+
+A **Feature** (`FeatureDTO`) is a cross-cutting unit of work spanning a plan
+directory and/or a set of agents and worktrees — the kanban card on the dashboard.
+In Phase 1 it is fully derived at read time from plan dirs, the roster, and live
+git (no persistence). Its `stage` (`FeatureStage`) tracks lifecycle:
+
+`planned` → `issues-created` → `in-progress` → `review` → `landed` → `done`
+(with `diverged` for a branch that can't cleanly land). A feature also rolls up
+`unlandedFiles`, whether it's `blocked` (any member waiting on input), and per-branch
+land status. See [Workflows](/docs/workflows) for the runtime that drives one.
+
+## Pending request
+
+A `PendingRequest` is a question the agent must have answered before it can
+proceed — the thing that puts an agent into the `input` status. Each agent's
+`pending` array holds zero or more; **an agent is `needs-input` exactly when that
+array is non-empty.**
+
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Correlates with the answer the surface sends back.',
+    },
+    source: {
+      type: '"ui" | "tool"',
+      description: 'Where it came from — an extension UI request or a host tool call.',
+    },
+    kind: {
+      type: 'string',
+      description: 'UI method (confirm / input / select / editor) or the host tool name.',
+    },
+    title: {
+      type: 'string',
+      description: 'Short headline for the request.',
+    },
+    message: {
+      type: 'string',
+      description: 'Confirm message or tool-argument summary (optional).',
+    },
+    options: {
+      type: 'string[]',
+      description: 'Select options, when the request is a choice (optional).',
+    },
+    placeholder: {
+      type: 'string',
+      description: 'Input placeholder or editor prefill (optional).',
+    },
+    createdAt: {
+      type: 'number',
+      description: 'ms-epoch the request was raised — drives oldest-first queue order.',
+    },
+  }}
+/>
+
+You answer one from any surface; the manager routes the `value` back to the agent
+by `id`. The fleet-wide [attention queue](/docs/guides/web-dashboard) is just every
+pending request across every agent, oldest first.
+
+## One core, two thin clients
+
+The architectural spine: a single `SquadManager` is the authoritative core. It
+owns every agent, derives status, buffers transcripts, persists roster config to
+`~/.omp/squad/state.json`, and exposes one `applyCommand(cmd, actor)` entry point.
+Both surfaces are thin clients of it:
+
+- the **TUI** (`src/tui.ts`) consumes the manager in-process;
+- the **web dashboard** (`src/web/index.html`, a zero-dependency SPA) is a
+  WebSocket client of the same `SquadEvent` stream served by `SquadServer`.
+
+Because there is one source of truth and one event stream, anything you do in one
+surface shows up in the other. The events flowing out (`roster`, `agent`,
+`transcript`, `removed`, `log`, …) and the commands flowing in (`prompt`,
+`answer`, `interrupt`, `kill`, `restart`, `remove`, `create`, …) are the
+`SquadEvent` / `ClientCommand` contract — detailed in
+[State and events](/docs/architecture/state-and-events).

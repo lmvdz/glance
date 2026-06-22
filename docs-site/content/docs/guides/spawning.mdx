@@ -1,0 +1,131 @@
+---
+title: Spawning Agents
+description: omp-squad add in depth — every flag, what happens when an agent spawns, and the verbs that steer it afterward.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+`omp-squad add <repo> [flags]` spawns one agent in a fresh git worktree of `<repo>` and routes
+the daemon to manage it. `<repo>` defaults to the current directory. Everything the **+ New
+agent** dialog and the dashboard composers do, this command does — with the full flag surface.
+
+```bash
+omp-squad add ~/code/myproject --name auth-refactor \
+  --task "Refactor the auth module to use the new session API."
+```
+
+## Flags
+
+Defined in `src/index.ts` (`HELP` + `cmdAdd`) and `CreateAgentOptions` in `src/types.ts`.
+
+<TypeTable
+  type={{
+    "--name": { description: "Agent name (also seeds the branch and id).", type: "string", default: "agent-N" },
+    "--branch": { description: "Worktree branch to create or check out.", type: "string", default: "squad/<name>" },
+    "--model": { description: "Model — fuzzy-matched (e.g. opus, gpt-5.2).", type: "string", default: "omp default" },
+    "--approval": { description: "Approval mode for the agent's tools.", type: "always-ask | write | yolo", default: "write" },
+    "--thinking": { description: "Reasoning effort — kept low so fleet agents stay responsive.", type: "minimal | low | medium | high | xhigh", default: "low" },
+    "--task": { description: "Instruction sent once the agent reports ready. Also the goal for --workflow / --verify.", type: "string", default: "—" },
+    "--workflow": { description: "Run a bundled workflow by name (research-plan-implement, plan-implement, fan-out) or a .fabro path as the agent's process.", type: "name | path", default: "—" },
+    "--verify": { description: "Wrap --task in an implement → verify → fixup loop; the gate is <cmd> exiting 0.", type: "string", default: "—" },
+    "--sandbox": { description: "Run the agent's omp inside a container built from <image> (mounts the worktree).", type: "image", default: "—" },
+    "--plain": { description: "Skip auto-routing and spawn a plain agent (no verify / plan / fan-out).", type: "boolean", default: "false" },
+  }}
+/>
+
+<Callout type="info">
+**Thinking defaults to `low`** so a fleet of agents stays responsive — bump it per-agent for
+hard work rather than inheriting a global `high` default that makes every agent grind.
+</Callout>
+
+The global `--port` / `--host` flags and bind/TLS env vars are documented in
+[Remote access](/docs/guides/remote-access) and the [CLI reference](/docs/reference/cli).
+
+## What happens on spawn
+
+<Steps>
+
+<Step>
+### Pre-flight presence check
+`add` first asks who is already on the repo (squad agents **and** raw `omp` sessions) and prints
+a warning if anyone is, so two people don't put agents on the same code unknowingly.
+</Step>
+
+<Step>
+### Name, id, branch
+The name defaults to `agent-N`; the agent id is `<name>-<base36 timestamp>`; the branch defaults
+to `squad/<name>` (override with `--branch`).
+</Step>
+
+<Step>
+### Routing (unless overridden)
+If there's a `--task` and none of `--workflow` / `--verify` / `--sandbox` / `--plain` is set, the
+**intake router** classifies the task and may wrap it in a verify loop, a plan-and-approve
+workflow, or a parallel fan-out — logging `routed "<name>": <reason>`. `--plain` (or any
+explicit process flag) skips this. See [Auto-dispatch & intake](/docs/integrations/intake).
+</Step>
+
+<Step>
+### Worktree cut off HEAD
+`addWorktree` runs `git worktree add` in the repo, creating branch `squad/<name>` **off the
+repo's current HEAD** under `~/.omp/squad/worktrees/<repo>-<branch>/`. An existing branch is
+checked out instead of created; an existing worktree path is reused. If the target isn't a git
+repo, the agent **runs in place** in that directory (no isolation) so "spawn anywhere" still
+works.
+</Step>
+
+<Step>
+### Process + management
+The daemon launches an `omp --mode rpc` child with the worktree as its cwd (model, approval, and
+thinking applied), and derives the agent's status from omp's event stream. `add` prints the
+spawned name, status, id, and worktree path.
+</Step>
+
+</Steps>
+
+<Callout type="warn">
+The daemon enforces a global **live-agent WIP cap** (`OMP_SQUAD_MAX_WIP`, default 6). Past it a
+spawn is refused — or, with `OMP_SQUAD_QUEUE_ON_FULL`, **parked** (FIFO) and returned as a
+`queued` signal for the orchestrator to drain later. See
+[Configuration](/docs/reference/configuration).
+</Callout>
+
+Picking the right process per task is the [Workflows](/docs/workflows) story; the cheapest one —
+`--verify` — has its own page: [Verify loops](/docs/guides/verify-loops). Containerized runs are
+[Sandboxing](/docs/guides/sandboxing).
+
+## Steering an agent
+
+Once an agent is running you steer it with these verbs. The CLI surfaces some directly; the rest
+are `ClientCommand`s wired to the TUI slash-commands and the web buttons (all of them ride the
+same `applyCommand` path on the manager).
+
+| Verb | CLI | TUI | Web |
+|---|---|---|---|
+| **prompt** / **say** — send a follow-up instruction (mid-turn it steers) | `omp-squad prompt <id> <msg…>` | type + `Enter` | composer / **Send** |
+| **interrupt** — abort the current turn | — | `/stop` or `/interrupt` | **Interrupt** |
+| **restart** — restart the agent process | — | `/restart` | **Restart** |
+| **kill** — kill the agent process | — | `/kill` | **Kill** |
+| **remove** — drop the agent from the roster | `omp-squad rm <id>` | `/rm` | (palette) |
+
+```bash
+# Follow-up instruction (alias: `say`)
+omp-squad prompt auth-refactor-<id> "Also update the tests."
+
+# Remove the agent and delete its worktree
+omp-squad rm auth-refactor-<id> --delete-worktree
+```
+
+`omp-squad rm` removes the agent; add **`--delete-worktree`** to also tear down its git worktree
+(otherwise the worktree and its branch are left on disk for you to inspect or land). To get an
+agent's work into `main`, see [Landing](/docs/guides/landing).
+
+---
+
+<Cards>
+<Card title="Verify loops" href="/docs/guides/verify-loops" description="--verify turns 'the agent says it's done' into 'done and the gate is green'." />
+<Card title="Sandboxing" href="/docs/guides/sandboxing" description="--sandbox runs the agent inside a container." />
+<Card title="Landing" href="/docs/guides/landing" description="Merge an agent's branch back into main." />
+<Card title="CLI reference" href="/docs/reference/cli" description="Every command and flag, exhaustively." />
+</Cards>

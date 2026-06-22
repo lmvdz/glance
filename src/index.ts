@@ -52,6 +52,7 @@ ADD FLAGS
   --workflow <name|path>  Run a bundled workflow by name (research-plan-implement, plan-implement, fan-out) or a .fabro path; --task is the goal
   --verify <cmd>    Wrap --task in an implement → verify → fixup loop (gate = exit 0)
   --sandbox <image> Run the agent inside a container from <image> (mounts the worktree)
+  --acp             Run an ACP runtime (auggie --acp) instead of omp --mode rpc
   --plain           Skip auto-routing; spawn a plain agent (no verify/plan/fan-out)
 
 COMMISSION FLAGS
@@ -203,6 +204,7 @@ async function cmdAdd(args: string[]): Promise<void> {
 	if (typeof flags.workflow === "string") options.workflow = flags.workflow;
 	if (typeof flags.verify === "string") options.verify = flags.verify;
 	if (typeof flags.sandbox === "string") options.sandbox = { image: flags.sandbox };
+	if (flags.acp === true || flags.runtime === "acp") options.runtime = "acp";
 	if (flags.plain === true) options.autoRoute = false;
 
 	// Discoverability: warn if anyone (squad agent or raw omp session) is already on this repo.

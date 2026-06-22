@@ -1,0 +1,163 @@
+---
+title: CLI
+description: Every omp-squad command, its positional arguments, flags, and the defaults applied by the daemon.
+---
+
+The `omp-squad` binary is a thin client over a running daemon. `up` starts that daemon; every other command (except `open` and `help`) reaches it over HTTP at `http://127.0.0.1:<port>`, sending the bearer token read from `<state-dir>/access-token` (see [Configuration](/docs/reference/configuration)). If no daemon is listening they print `No squad daemon on <base>. Start one with: omp-squad up` and exit non-zero.
+
+## Argument grammar
+
+`src/index.ts` parses `argv` with one rule (`parseArgs`):
+
+- `--key value` — a flag whose next token does not start with `--` takes that token as its string value.
+- `--key` — a flag followed by another `--flag` (or end of args) becomes the boolean `true`.
+- anything not starting with `--` is a positional, in order.
+
+So `--limit 10` sets `limit="10"` while a bare `--no-tui` sets `no-tui=true`. Values are always strings; numeric flags (`--port`, `--limit`) are coerced with `Number()`.
+
+<Callout type="info">
+Running `omp-squad` with no command is identical to `omp-squad up` — the daemon is the default.
+</Callout>
+
+## Command summary
+
+| Command | Aliases | Purpose |
+| --- | --- | --- |
+| `up [flags]` | _(default)_ | Start the daemon (web dashboard + TUI). |
+| `add <repo> [flags]` | | Spawn an agent in a new worktree. |
+| `list` | `ls` | Print the roster. |
+| `prompt <id> <message...>` | `say` | Send an instruction to an agent. |
+| `rm <id> [--delete-worktree]` | `remove` | Remove an agent. |
+| `who [repo]` | | Show who/what is working a repo (any omp agent). |
+| `logs <id> [--limit N]` | | Print an agent's recent transcript. |
+| `open` | | Print the dashboard base URL. |
+| `commission <name> --purpose <s> [flags]` | `hire` | Author + validate a Flue worker; onboard it if it passes the gate. |
+| `help` | `-h`, `--help` | Print usage. |
+
+An unknown command prints `unknown command: <cmd>` followed by the usage text and exits `1`.
+
+## `up`
+
+```bash
+omp-squad up [--port N] [--no-tui] [--restore] [--host <addr>] [--no-supervise]
+```
+
+Starts a `SquadManager`, a `SquadServer` (HTTP + WebSocket), the external-session tracker, and — unless opted out — the standing auto-supervisor. Prints the dashboard URL and access token; on a TTY it then runs the terminal TUI, otherwise it stays headless and prints every reachable URL with a `?token=` query so you can sign in from another device.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--port N` | `7878` (or `$OMP_SQUAD_PORT`) | Port the daemon binds. |
+| `--no-tui` | TUI on if `stdin` is a TTY | Run headless; never launch the TUI. Headless is also forced automatically when `stdin` is not a TTY. |
+| `--restore` | off | Reattach to persisted agents from `state.json`; prints `restored N agent(s)`. |
+| `--host <addr>` | `127.0.0.1` (or `$OMP_SQUAD_HOST`) | Bind address. Set `0.0.0.0` to reach it across your LAN. |
+| `--no-supervise` | supervisor on | Don't start the auto-supervisor loop. Equivalent to `OMP_SQUAD_AUTO_SUPERVISE=0`. |
+
+TLS is enabled in-process only when both `$OMP_SQUAD_TLS_CERT` and `$OMP_SQUAD_TLS_KEY` are set; the scheme then becomes `https`. Federation joins a coordinator when `$OMP_SQUAD_COORDINATOR` is set. See [Configuration](/docs/reference/configuration) for all of these.
+
+<Callout type="warn">
+A bearer token is auto-generated in the state dir on first boot and printed on every start. It guards `/ws` and everything under `/api`. The static SPA shell loads without it so the PWA can install before sign-in.
+</Callout>
+
+## `add`
+
+```bash
+omp-squad add [<repo>] [flags]
+```
+
+Spawns one agent. The `<repo>` positional defaults to the current working directory (`process.cwd()`). Before spawning, the CLI checks presence and warns on stderr if any agent (squad or raw omp session) is already active on that repo. On success it prints the new agent's name, status, id, and worktree path. The flags below map onto `CreateAgentOptions` and are sent as a `create` command; the defaults shown are applied by the daemon (`SquadManager.create`), not the CLI.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--name <s>` | `agent-N` (incrementing) | Agent name. |
+| `--branch <s>` | `squad/<name>` | Worktree branch to create/checkout. |
+| `--model <s>` | omp default | Model, fuzzy-matched (e.g. `opus`, `gpt-5.2`). |
+| `--approval <m>` | `write` | One of `always-ask`, `write`, `yolo`. |
+| `--thinking <l>` | `low` | One of `minimal`, `low`, `medium`, `high`, `xhigh`. |
+| `--task <s>` | none | Instruction sent once the agent is ready. |
+| `--workflow <name\|path>` | none | Run a bundled workflow (`research-plan-implement`, `plan-implement`, `fan-out`) or a `.fabro` path; `--task` becomes the goal. |
+| `--verify <cmd>` | none | Wrap `--task` in an implement → verify → fixup loop; the gate passes on exit code `0`. |
+| `--sandbox <image>` | none | Run the agent inside a container from `<image>` (mounts the worktree). |
+| `--plain` | off | Skip auto-routing; spawn a plain agent with no verify/plan/fan-out inference. |
+
+<Callout type="info">
+With a `--task` and no `--plain`/`--workflow`/`--verify`/`--sandbox`, the daemon auto-routes the task — it may pick a workflow, a verify loop, or a thinking level for you. `--plain` (which sets `autoRoute=false`) turns that off.
+</Callout>
+
+## `list` (`ls`)
+
+```bash
+omp-squad list
+```
+
+Fetches `GET /api/agents` and prints an aligned table: `status`, `name`, `branch` (or `—`), a `⛔N` pending-count badge, and the current `activity` (falling back to the active todo). Prints `no agents` when the roster is empty.
+
+## `prompt` (`say`)
+
+```bash
+omp-squad prompt <id> <message...>
+```
+
+Sends a `prompt` command to agent `<id>`; all positionals after the id are joined with spaces into the message. Both `<id>` and a non-empty message are required (else it prints `usage:` and exits `1`). Prints `sent` on success.
+
+## `rm` (`remove`)
+
+```bash
+omp-squad rm <id> [--delete-worktree]
+```
+
+Sends a `remove` command. `--delete-worktree` (boolean) also tears down the agent's git worktree; omit it to keep the worktree on disk. Prints `removed` on success.
+
+## `who`
+
+```bash
+omp-squad who [repo]
+```
+
+Reads the shared presence registry. With a `repo` it lists agents working that repo; with no argument it lists all active agents (squad members **and** raw omp sessions). Each row shows source, `operator/agent`, repo name, optional branch, and a humanized "N ago" since the last heartbeat. Prints `nobody is working on <repo>` / `no active agents` when empty.
+
+## `logs`
+
+```bash
+omp-squad logs <id> [--limit N]
+```
+
+Fetches `GET /api/agents/<id>/transcript` and prints the last `N` entries (kind in upper case, then text). `<id>` is required.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--limit N` | `40` | How many trailing transcript entries to print. |
+
+## `open`
+
+```bash
+omp-squad open
+```
+
+Prints the daemon base URL `http://127.0.0.1:<port>` (honoring `--port`) and nothing else — no token, no path. Useful for piping into a browser launcher.
+
+## `commission` (`hire`)
+
+```bash
+omp-squad commission <name> --purpose <s> [flags]
+```
+
+Authors and validates a Flue worker, then onboards it as a `flue-service` member if it passes the acceptance gate. Both the `<name>` positional and `--purpose` are required (else it prints `usage:` and exits `1`). It prints each gate check (`✓` / `✗` / `·`) and, on success, the onboarded member's name (with `verified` when the acceptance gate ran), id, and directory. A failed gate prints `rejected — gate failed; worker left at <dir>` and exits `1`.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--purpose <s>` | required | What the worker does. |
+| `--model <spec>` | `false` | Model specifier, or the literal `false` for a deterministic (no-LLM) worker. |
+| `--target <t>` | `node` | Deploy target: `node` or `cloudflare` (anything else falls back to `node`). |
+| `--capabilities <a,b>` | none | Comma-separated least-privilege tool allowlist, recorded in the manifest. |
+| `--accept-payload <json>` | none | Acceptance input (parsed as JSON). |
+| `--accept-expect <json>` | none | Expected-result subset (parsed JSON object); only honored alongside `--accept-payload`. |
+
+See [Commissioning](/docs/commissioning) for the full authoring loop.
+
+## `help`
+
+```bash
+omp-squad help        # also: -h, --help
+```
+
+Prints the usage banner.

@@ -1,0 +1,135 @@
+---
+title: The RPC protocol
+description: The omp --mode rpc newline-JSON wire, the detached agent-host, how AgentStatus is derived from the event stream, and the subagent feed.
+---
+
+An `omp-operator` agent is a real `omp --mode rpc` process. omp-squad speaks omp's
+documented **newline-delimited JSON** RPC protocol: commands go in, an event stream
+comes out, and the manager *derives* each agent's status from that stream. The daemon
+never parses a terminal — it consumes structured frames.
+
+## Commands in
+
+`RpcAgent` (`src/rpc-agent.ts`) sends a JSON object per line. Request/response commands
+carry an `id` and resolve against a correlated `response` frame; UI and host-tool
+answers are fire-and-forget. The core four:
+
+| Command | Method | Purpose |
+|---|---|---|
+| `prompt` | `prompt(message)` | Begin an agent turn. Retries with `streamingBehavior: "steer"` if omp reports it is mid-stream. |
+| `steer` | `steer(message)` | Inject guidance into a running turn. |
+| `abort` | `abort()` | Interrupt the in-flight turn. |
+| `get_state` | `getState()` | Fetch the `RpcSessionState` snapshot (todos, context usage, model, streaming). |
+
+The same transport carries the rest of the convenience surface: `set_model` (resolved
+against `get_available_models`), `set_thinking_level`, `set_session_name`, `bash`,
+`get_available_commands`, and the two answer frames `extension_ui_response` /
+`host_tool_result`.
+
+```ts title="src/rpc-agent.ts — the wire is one JSON object per line"
+this.sock.write(`${JSON.stringify({ ...cmd, id })}\n`);
+```
+
+## The event stream out
+
+Every non-control frame is re-emitted as an `"event"` and folded into status +
+transcript by `onAgentEvent` (`src/squad-manager.ts`). The frames the manager acts on:
+
+| Frame | Effect |
+|---|---|
+| `agent_start` / `turn_start` | `streaming = true`; starts a run accumulator (receipt). |
+| `message_update` | An `assistantMessageEvent.text_delta` appends to the live assistant buffer. |
+| `message_end` | Flushes the buffered assistant text; records token usage from `message.usage`. |
+| `tool_execution_start` | Sets `activity` to `toolName: intent`; appends a `▸` transcript line. |
+| `agent_end` | `streaming = false`; finalizes the run receipt; may close a tracking issue. |
+| `available_commands_update` | Updates the agent's slash-command list. |
+| `extension_ui_request` | Emitted as `"ui"` → a pending request (status → `input`). |
+| `host_tool_call` | Emitted as `"hosttool"` → a pending request (status → `input`). |
+| `subagent_*` | Routed to the agent's `SubagentTracker` (see below). |
+
+## How AgentStatus is derived
+
+There is no status field on the wire — the manager computes it. `derive()` is the
+whole policy, and it runs after every frame:
+
+```ts title="src/squad-manager.ts"
+private derive(rec: AgentRecord): AgentStatus {
+  if (rec.dto.status === "stopped" || rec.dto.status === "error") return rec.dto.status;
+  if (rec.dto.pending.length > 0) return "input";
+  if (rec.streaming) return "working";
+  return "idle";
+}
+```
+
+So the stream maps to lifecycle like this:
+
+- `agent_start` → **working**; `agent_end` → **idle**;
+- a blocking `extension_ui_request` or `host_tool_call` → **input** (it wins over
+  streaming — a turn waiting on a human is blocked, not working);
+- a crash / fatal RPC error → **error**; an explicit `kill` → **stopped** (both are
+  terminal and `derive()` leaves them untouched).
+
+Polling reconciles the truth: `poll()` calls `getState()` on each live
+`omp-operator`/`workflow` agent and `applyState()` updates todos, context %, model,
+and `streaming` — but only when no request is pending, so a poll can never clobber an
+`input` state.
+
+<Callout type="info">
+  `RpcSessionState.contextUsage.percent` is a 0–100 percentage; the manager stores
+  `AgentDTO.contextPct` as a 0–1 fraction (`percent / 100`).
+</Callout>
+
+## The agent-host subprocess
+
+`RpcAgent` does **not** spawn omp directly. Each agent gets a detached
+**`agent-host`** (`src/agent-host.ts`) — a per-agent supervisor that owns the
+`omp --mode rpc` child's stdio and exposes a **Unix domain socket**. The daemon's
+`RpcAgent` connects to that socket as a client.
+
+```text title="transport"
+ SquadManager ──RpcAgent──▶ UDS (~/.omp/squad/sockets/<id>.sock) ──agent-host──▶ omp --mode rpc
+```
+
+This indirection is what lets agents survive a daemon restart/upgrade. The host is
+spawned detached (`setsid` + `unref`), so it outlives the daemon with full in-flight
+context. The bidirectional socket protocol is itself newline-JSON:
+
+- **host → client:** omp's stdout frames forwarded verbatim, plus control frames
+  `{"__sq":"meta", ready, pid, exited}`. On connect, the host sends a meta frame then
+  **replays its ring buffer** (`RING_MAX = 4000`), so a reconnecting daemon rebuilds
+  the agent's state.
+- **client → host:** omp RPC commands forwarded verbatim to omp's stdin, plus the
+  control frame `{"__sq":"shutdown"}` that terminates omp and the host.
+
+`start()` reflects this: it tries to `connect()` to an existing live socket first
+(reattach), and only `spawnHost()`s a fresh detached host if none answers. A clean
+daemon shutdown calls `detach()` (close the socket, leave omp running); a real
+teardown calls `stop()` (send `__sq:shutdown`).
+
+<Callout type="warn">
+  UDS was chosen over TCP loopback (~3× lower local latency, bidirectional) and over
+  tmux pane-scraping — the point is to keep omp's structured JSON-RPC frames, not
+  scrape a screen.
+</Callout>
+
+## The subagents stream
+
+An omp agent can spawn its own children with the `task` tool. omp surfaces them over
+the same RPC session as three frame kinds, which the manager hands to a per-agent
+`SubagentTracker` (`src/subagents.ts`):
+
+| Frame | Payload | Tracker effect |
+|---|---|---|
+| `subagent_lifecycle` | spawn started / completed / failed / aborted | Create or update a node's status. |
+| `subagent_progress` | a periodic `AgentProgress` (status, tool, …) | Update the node's live activity. |
+| `subagent_event` | a forwarded child `AgentSessionEvent` | Heartbeat / detail. |
+
+The tracker keeps an in-memory `Map` keyed by subagent id (nothing persisted) and
+projects a live tree of `SubagentNode`s — what the dashboard's **Subagents** panel
+renders. It also reconciles against the full `get_subagents` response so the tree
+stays correct even if a streamed frame is missed.
+
+<Cards>
+  <Card title="State & events" href="/docs/architecture/state-and-events" description="The SquadEvent / ClientCommand unions the derived state flows into." />
+  <Card title="The AgentDriver seam" href="/docs/architecture/agent-driver" description="The contract RpcAgent implements alongside the other runtimes." />
+</Cards>

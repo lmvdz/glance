@@ -1,0 +1,163 @@
+---
+title: Autonomy
+description: The opt-in self-driving layer — orchestrator, scheduler, supervisors, and escalation — every switch and its default, grounded in source.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+<Callout type="warn">
+  **The self-driving control loop is off by default.** The orchestrator arms no timer,
+  cap-parking is disabled, in-manager auto-answering is disabled, and the repair-budget
+  escalation only runs once you set the flags below. The one exception is the
+  **standing supervisor loop**, which runs by default (and is disabled with
+  `--no-supervise`); it is called out explicitly under *Supervision*. Everything stays
+  safe because each agent works in an isolated, reviewed-before-merge git worktree —
+  the worktree is the blast radius.
+</Callout>
+
+Four cooperating pieces let a fleet keep moving without a human. Each is independent,
+bounded, and gated by an environment variable.
+
+<TypeTable
+  type={{
+    OMP_SQUAD_AUTODRIVE: { type: 'flag', default: 'off', description: 'Arm the orchestrator tick (auto-land → self-heal → catastrophe → admission-drain).' },
+    OMP_SQUAD_MAX_WIP: { type: 'number', default: '6', description: 'Global live-agent WIP ceiling; a spawn past it is refused.' },
+    OMP_SQUAD_QUEUE_ON_FULL: { type: 'flag', default: 'off', description: 'At the cap, park the spawn (FIFO) and return a queued signal instead of erroring.' },
+    OMP_SQUAD_AUTO_SUPERVISE: { type: 'flag', default: 'on', description: 'Standing model-backed supervisor loop. Set to 0 (or pass --no-supervise) to disable.' },
+    OMP_SQUAD_SUPERVISE_MODEL: { type: 'string', default: '--smol', description: 'Model the supervisor answerer uses; falls back to the fast/smol model.' },
+    OMP_SQUAD_AUTOSUPERVISE: { type: 'flag', default: 'off', description: 'In-manager deterministic auto-answer of low-risk routine prompts.' },
+    OMP_SQUAD_AUTOSUPERVISE_BUDGET: { type: 'number', default: '5', description: 'Per-agent cap on in-manager auto-answers before requests fall back to a human.' },
+    OMP_SQUAD_REPAIR_BUDGET: { type: 'number', default: '3', description: 'Red-gate retry budget before the failure router escalates.' },
+  }}
+/>
+
+## Orchestrator — the self-healing loop
+
+`Orchestrator` (`src/orchestrator.ts`) is a periodic control loop. It is strictly
+opt-in: `start()` arms no timer and `tick()` returns immediately unless
+`OMP_SQUAD_AUTODRIVE` is set, so the daemon leaks no timer and the loop is fully inert
+when off. When armed, it runs every 30s (default `intervalMs`), driving the fleet
+through **injected dependencies** (`spawn` / `verify` / `land` / `route`), so the
+policy is testable headless with no live daemon.
+
+Each tick applies one policy in order:
+
+1. **Auto-land** — for every idle agent with unlanded work (`featureId`), run the
+   acceptance gate; a green gate lands the branches (and the land path closes the
+   tracking Plane issue). A land blocked by divergence/conflict is left for the
+   conflict path and retried next tick.
+2. **Self-heal** — a red gate routes through `routeFailure`: `retry` re-verifies next
+   tick under a higher attempt count, `hold` parks it, `escalate` summons a human.
+   Attempts are tracked per agent.
+3. **Catastrophe** — the *only* place a human is summoned. A clear `CATASTROPHE:` log
+   fires on repair-budget exhaustion or an `isCatastrophic` tripwire (infra failure,
+   safety violation, regression oscillation), and the loop stops acting on that agent
+   until restart. Never a silent drop.
+4. **Admission drain** — parked spawn requests are admitted while the WIP cap has
+   headroom, re-counting live agents each pass so freshly spawned ones tighten the
+   ceiling.
+
+```ts title="src/orchestrator.ts — opt-in arming"
+start(intervalMs = 30_000): void {
+  if (this.timer || !autodrive()) return;   // autodrive() === !!process.env.OMP_SQUAD_AUTODRIVE
+  this.timer = setInterval(() => void this.tick(), intervalMs);
+  this.timer.unref?.();
+}
+```
+
+## Scheduler — WIP cap and FIFO park
+
+`Scheduler` (`src/scheduler.ts`) owns the global concurrency ceiling. The cap counts
+**live** agents — everything not `stopped` or `error` (`liveAgents`) — against
+`OMP_SQUAD_MAX_WIP` (default 6), read per call so an ops/test change takes effect
+without a restart.
+
+When a spawn would exceed the cap, behavior depends on one flag:
+
+- **default** — the historical hard-cap error: the spawn is rejected.
+- **`OMP_SQUAD_QUEUE_ON_FULL`** — the spawn is **parked** in a FIFO queue and `create()`
+  returns a synthetic DTO with `queued: true` (the signal to the caller) instead of
+  erroring. That DTO is never added to the roster; the orchestrator's admission-drain
+  step dequeues and spawns the real agent once a slot frees.
+
+```ts title="src/scheduler.ts"
+cap(): number { return Number(process.env.OMP_SQUAD_MAX_WIP) || 6; }
+canAdmit(liveCount: number): boolean { return liveCount < this.cap(); }
+```
+
+## Supervision — answering prompts without a human
+
+There are **two distinct supervisors** with opposite defaults. Knowing which is which
+matters.
+
+### Standing supervisor loop — default on
+
+`startSupervisor` (`src/supervisor.ts`) is a standing loop the daemon starts on boot.
+It is gated by `OMP_SQUAD_AUTO_SUPERVISE` and runs **unless** you set that to `0` or
+pass `--no-supervise`:
+
+```ts title="src/index.ts"
+const supervise = process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
+const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
+```
+
+It opens the daemon WebSocket and, for every agent reporting status `input`, consults a
+**one-shot model** for a decision: `decide()` spawns `omp -p --mode json --smol`
+(or `--model OMP_SQUAD_SUPERVISE_MODEL`) with the `SUPERVISOR_SYSTEM` prompt, then
+submits the answer as an `answer` `ClientCommand`. The system prompt biases toward
+**approve / advance** but denies anything destructive or blast-radius-escaping. It is
+robust by construction: a non-zero exit, timeout, empty output, or parse failure all
+degrade to `chooseFallback(req)` (a deterministic approve/continue).
+
+### In-manager auto-supervise — default off
+
+`maybeAutoSupervise` (`src/squad-manager.ts`) is a separate, **off-by-default**,
+deterministic layer gated by `OMP_SQUAD_AUTOSUPERVISE` (note: no underscore). It runs
+inside the manager when a request is first registered and answers only what
+`chooseFallback` can decide with no model. It is bounded three ways:
+
+- a **risk filter** — `isRiskyRequest` leaves anything matching a destructive pattern
+  (`force-push`, `delete`, `deploy`, `prod`, `mainnet`, `secret`, `push…main`, …) for
+  a human, and **every host-tool call** is always left for a human (it runs real side
+  effects);
+- a **per-agent budget** — `OMP_SQUAD_AUTOSUPERVISE_BUDGET` (default 5); past it, that
+  agent's requests fall back to the human queue;
+- an **audit trail** — every auto-answer (and every skip, with a reason) is logged, and
+  the answer is stamped with an `auto-supervise` actor so the transcript shows it
+  wasn't a human.
+
+<Callout type="info">
+  Both supervisors auto-approve safely *only* because squad agents live in isolated git
+  worktrees reviewed before merge. If non-worktree (in-place / production) agents were
+  ever supervised, the policy would need tightening — see the `ponytail:` ceiling note
+  on `chooseFallback`.
+</Callout>
+
+## Resolver — bounded escalation
+
+`routeFailure` (`src/resolver.ts`) is the pure, deterministic decision the orchestrator
+reads when a run fails. It maps a failure kind to `retry` / `hold` / `escalate`:
+
+- **`red`** (a gate failed) — retry while attempts are under the repair budget
+  (`OMP_SQUAD_REPAIR_BUDGET`, default 3), then escalate;
+- **`conflict`** (a land conflicted) — retry exactly once (the automated
+  conflict-resolver's single shot), then escalate.
+
+```ts title="src/resolver.ts"
+export function routeFailure(kind: FailureKind, ctx?: FailureContext): FailureRoute {
+  const attempts = ctx?.attempts ?? 0;
+  if (kind === "conflict") return attempts < 1 ? "retry" : "escalate";
+  const budget = Number(process.env.OMP_SQUAD_REPAIR_BUDGET) || 3;
+  return attempts < budget ? "retry" : "escalate";
+}
+```
+
+It is only the decision — the orchestrator drives the actual re-attempt, and an
+`escalate` becomes the human-summoning `CATASTROPHE:` log. The budget is re-read per
+call, so ops can retune it live.
+
+<Cards>
+  <Card title="State & events" href="/docs/architecture/state-and-events" description="The `queued` DTO flag and the command path the loop drives." />
+  <Card title="Verify loops" href="/docs/guides/verify-loops" description="The acceptance gate the orchestrator verifies against." />
+  <Card title="Landing" href="/docs/guides/landing" description="The land path auto-land calls, and how conflicts route." />
+</Cards>

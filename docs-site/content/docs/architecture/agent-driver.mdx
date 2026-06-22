@@ -1,0 +1,137 @@
+---
+title: The AgentDriver seam
+description: One EventEmitter contract that every agent runtime implements, so `kind` is the only thing surfaces must distinguish.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+Every managed agent — an interactive omp operator, a graph-driven workflow run, or a
+commissioned Flue worker — sits behind one interface: `AgentDriver`
+(`src/agent-driver.ts`). The `SquadManager` programs against this seam only, so its
+status derivation, transcript buffering, and federation never branch on which runtime
+backs an agent. Adding a new runtime is a `kind`, a `makeDriver` branch, and a
+poll-filter widen — not surgery on the core.
+
+## The contract
+
+`AgentDriver extends EventEmitter`. Drivers expose two liveness flags and a small set
+of lifecycle + command methods; the optional ones are no-ops on runtimes that do not
+need them.
+
+<TypeTable
+  type={{
+    isReady: { type: 'boolean (readonly)', description: 'True once the driver has emitted "ready".' },
+    isAlive: { type: 'boolean (readonly)', description: 'True while the backing process/worker is usable.' },
+    'start(timeoutMs?)': { type: 'Promise<void>', description: 'Bring the driver live; resolve on "ready", reject on early failure/timeout.' },
+    'stop()': { type: 'Promise<void>', description: 'Tear down. Never throws.' },
+    'detach?()': { type: 'void', description: 'Optional. Disconnect but leave the backing process running (daemon restart/upgrade).' },
+    'prompt(message)': { type: 'Promise<void>', description: 'Begin a unit of work. omp: an agent turn. flue: invoke the worker workflow. workflow: start (or steer) the run.' },
+    'abort()': { type: 'Promise<unknown>', description: 'Interrupt in-flight work.' },
+    'getState()': { type: 'Promise<RpcSessionState>', description: 'Current session snapshot (todos / context / model / streaming). Synthetic for non-omp drivers.' },
+    'setSessionName?(name)': { type: 'Promise<unknown>', description: 'Optional. Label the session; no-op without one.' },
+    'setModel?(spec)': { type: 'Promise<unknown>', description: 'Optional. Switch the model to a fuzzy spec, e.g. "opus".' },
+    'setThinkingLevel?(level)': { type: 'Promise<unknown>', description: 'Optional. Switch reasoning effort (minimal|low|medium|high|xhigh).' },
+    'respondUi(requestId, payload)': { type: 'void', description: 'Answer an extension UI request. No-op for non-interactive drivers.' },
+    'respondHostTool(callId, text, isError?)': { type: 'void', description: 'Complete a host tool call. No-op for non-interactive drivers.' },
+  }}
+/>
+
+### Emitted events
+
+All drivers speak the same omp-shaped event vocabulary. The manager wires these in
+`wire(rec)` and folds them into status + transcript.
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `ready` | — | Driver is live and accepting commands. |
+| `event` | a frame | An `AgentSessionEvent`-ish frame: `agent_start`, `message_update`, `message_end`, `tool_execution_start`, `agent_end`, `subagent_*`, … |
+| `ui` | `RpcExtensionUIRequest` | An interactive request needing a human answer → the manager's `input` state. |
+| `hosttool` | call frame | A host tool call needing a result → `input`. |
+| `exit` | `{ code, signal }` | The backing process/worker ended. |
+| `stderr` | text | A diagnostic line. |
+
+<Callout type="info">
+  The contract was extracted verbatim from what `RpcAgent` already exposed, so a second
+  fleet class could drop in without touching the manager. That is why the events are
+  named for omp frames even on drivers that only synthesize them.
+</Callout>
+
+## Three implementations, keyed by `kind`
+
+`AgentKind` (`src/types.ts`) is the discriminator the whole system carries:
+
+```ts title="src/types.ts"
+export type AgentKind = "omp-operator" | "flue-service" | "workflow";
+```
+
+| `kind` | Driver | What it runs |
+|---|---|---|
+| `omp-operator` | `RpcAgent` | An `omp --mode rpc` child in a git worktree — interactive, steerable. |
+| `workflow` | `WorkflowDriver` | A graph-driven, gated, multi-stage run over one persistent omp thread. |
+| `flue-service` | `FlueServiceDriver` | A commissioned [Flue](https://flueframework.com) worker invoked via `flue run` — autonomous, bounded. |
+
+**`RpcAgent`** (`src/rpc-agent.ts`) is the real fleet workhorse: it connects to a
+detached `agent-host` over a Unix socket and forwards omp's RPC commands and frames.
+A variant, `SandboxAgentDriver` (`src/sandbox-agent-driver.ts`), runs the same omp
+inside a container — same seam, only the transport (`docker exec -i`) and execution
+location change, so the manager still treats it as an `omp-operator`.
+
+**`WorkflowDriver`** (`src/workflow-driver.ts`) runs a `.fabro` graph behind the seam.
+It wraps the whole run in one `agent_start … agent_end` pair (inner per-turn frames
+are swallowed so status stays `working` between stages), surfaces a human gate as an
+`extension_ui_request{select}`, and reports stage progress via a synthetic `getState()`
+whose `todoPhases` are the graph's stages. The first `prompt` starts the run with the
+goal; later prompts steer the live inner agent.
+
+**`FlueServiceDriver`** (`src/flue-service-driver.ts`) treats one `prompt(msg)` as a
+single bounded workflow invocation: it runs `flue run` with the parsed payload and
+emits `agent_start → tool_execution_start → message_update → message_end → agent_end`
+around it. It surfaces no interactive UI or host-tool requests (`respondUi` /
+`respondHostTool` are no-ops) and returns a synthetic `getState()` with no todos or
+context window.
+
+## The `makeDriver` branch
+
+One private factory in `SquadManager` maps a `PersistedAgent` to its driver. It is the
+only place runtime is chosen:
+
+```ts title="src/squad-manager.ts"
+private makeDriver(p: PersistedAgent): AgentDriver {
+  if (p.kind === "flue-service" && p.flue) {
+    return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
+  }
+  if (p.kind === "workflow" && p.workflow) {
+    const workflow = p.workflow.verify ? buildVerifyWorkflow(p.workflow.verify) : undefined;
+    const fleet: WorkflowFleet = { runBranch: (spec) => this.spawnFleetBranch(p.repo, p.id, spec) };
+    return new WorkflowDriver({ id: p.id, workflow, workflowPath: …, cwd: p.worktree, model: p.model, … });
+  }
+  // default: an omp-operator (RpcAgent / SandboxAgentDriver)
+  …
+}
+```
+
+The agent's `kind` is set at creation time — `opts.workflow || opts.verify ? "workflow" : "omp-operator"` — and persisted, so the same branch reconstructs the right driver on restart.
+
+## Why `kind` is the only distinguisher
+
+Because every runtime emits the same frames, the manager's hot paths are
+runtime-blind:
+
+- **Status** comes from `derive()` over `pending` + `streaming`, which are driven by
+  the shared event/`ui`/`hosttool` channels — identical for all three kinds.
+- **Transcript** is appended from `message_*` / `tool_execution_start` frames, the
+  same for all three.
+- **Polling** is the one place the manager filters by kind: `getState()` is polled
+  only for `omp-operator` and `workflow` agents (a `flue-service` has nothing live to
+  poll between invocations).
+
+Surfaces read `dto.kind` purely for presentation — a glyph in the roster (`⚙` for a
+workflow, `⚒` for a service) so an operator can tell an interactive agent from a
+commissioned worker at a glance. Nothing in the command, answer, land, or federation
+paths cares which runtime it is.
+
+<Cards>
+  <Card title="The RPC protocol" href="/docs/architecture/rpc-protocol" description="What the omp-operator driver actually speaks on the wire." />
+  <Card title="Workflows" href="/docs/workflows" description="The graph runtime behind the `workflow` kind." />
+  <Card title="Commissioning" href="/docs/commissioning/flue-service" description="How a `flue-service` worker is authored and onboarded." />
+</Cards>

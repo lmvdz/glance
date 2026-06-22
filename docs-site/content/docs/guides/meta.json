@@ -1,0 +1,12 @@
+{
+  "title": "Guides",
+  "pages": [
+    "tui",
+    "web-dashboard",
+    "spawning",
+    "verify-loops",
+    "landing",
+    "sandboxing",
+    "remote-access"
+  ]
+}

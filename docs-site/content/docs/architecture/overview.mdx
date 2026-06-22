@@ -1,0 +1,104 @@
+---
+title: Overview
+description: One core, two thin clients — how SquadManager, SquadServer, and SquadTui live in a single process around one event stream.
+---
+
+import { File, Folder, Files } from 'fumadocs-ui/components/files';
+
+omp-squad runs as **one process**. A single `SquadManager` owns the fleet — the
+roster, every agent's derived status, and the transcript — and spawns each agent as
+a driver child. Two surfaces render that state: a terminal **TUI** (`src/tui.ts`)
+that consumes the manager in-process, and a web **dashboard** (`src/web/index.html`)
+that is a WebSocket client of the same stream, bridged by `SquadServer`
+(`src/server.ts`). Both are thin clients of one core.
+
+```text title="How it works"
+        omp-squad (one process)
+        ┌─────────────────────────────────────────────┐
+        │  SquadManager  ── roster, status, transcript │
+        │     │                                        │
+        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #1) │   each agent =
+        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #2) │   its own worktree
+        │     └── RpcAgent ──▶ omp --mode rpc  (wt #3) │   + RPC child process
+        │     │                                        │
+        │     ├── SquadServer (HTTP + WS) ──▶ browser  │
+        │     └── SquadTui    (terminal)               │
+        └─────────────────────────────────────────────┘
+```
+
+## One core
+
+`SquadManager` extends `EventEmitter` and is the single source of truth. It:
+
+- **owns the roster** — a `Map` of agent records, each pairing an `AgentDTO`
+  snapshot with its live `AgentDriver` and persisted options;
+- **derives status** centrally — `working / idle / input / error / stopped` come out
+  of one `derive()` method, fed by each driver's event stream (see
+  [RPC protocol](/docs/architecture/rpc-protocol));
+- **buffers a transcript** per agent and persists roster config to
+  `~/.omp/squad/state.json` (see [State & events](/docs/architecture/state-and-events));
+- **accepts every mutation through one entry point** — `applyCommand(cmd, actor)`.
+  The TUI, the web server, the auto-supervisor, and (in Phase 2) federation peers
+  all call the same method, so there is no second code path that can drift.
+
+Every change the manager makes is published as a `SquadEvent` via `emit("event", …)`.
+There is exactly one event vocabulary, and both surfaces speak it.
+
+## Two thin clients
+
+<Callout type="info">
+  Anything you do in one surface shows up in the other, because neither surface holds
+  authoritative state — they both render the manager's `SquadEvent` stream and send
+  `ClientCommand`s back through `applyCommand`.
+</Callout>
+
+**TUI** — `SquadTui` subscribes to the manager's events directly (no socket, no
+serialization). It renders a two-level board (`buildBoard`) and feeds keystrokes back
+as commands. It is optional: `omp-squad up --no-tui` runs headless (web only).
+
+**Web** — `SquadServer` wraps the same manager with `Bun.serve`. On the manager's
+`event`, `broadcast()` JSON-stringifies the `SquadEvent` to every connected WebSocket
+client; inbound WS frames and `POST /api/command` are parsed as `ClientCommand`s and
+forwarded to `manager.applyCommand`. A new socket gets a full `roster` snapshot on
+`open`, so a fresh tab is immediately in sync. The server also exposes a REST surface
+(`/api/agents`, `/api/features`, transcript/diff/land endpoints, …) over the same
+manager.
+
+```text title="event flow"
+ keystroke / click  ──▶  ClientCommand  ──▶  manager.applyCommand(cmd, actor)
+                                                    │ mutates state
+                                                    ▼
+                            emit("event", SquadEvent)
+                              │                    │
+                      SquadTui (in-process)   SquadServer.broadcast ──▶ browser(s)
+```
+
+## What the manager spawns
+
+Each agent is a driver child behind the `AgentDriver` seam. The default kind,
+`omp-operator`, is an `RpcAgent` driving a real `omp --mode rpc` process inside a git
+worktree. Two more kinds (`workflow`, `flue-service`) implement the same seam, so the
+manager's status derivation, transcript, and federation never branch on runtime —
+only `kind` distinguishes them. See [The AgentDriver seam](/docs/architecture/agent-driver).
+
+<Files>
+  <Folder name="src" defaultOpen>
+    <File name="squad-manager.ts" annotation="the core: roster, status, transcript, persistence, applyCommand" />
+    <File name="server.ts" annotation="HTTP + WebSocket bridge (web dashboard + REST)" />
+    <File name="tui.ts" annotation="terminal dashboard, in-process manager client" />
+    <File name="agent-driver.ts" annotation="the AgentDriver seam every agent kind implements" />
+    <File name="types.ts" annotation="SquadEvent / ClientCommand / AgentDTO and the domain types" />
+    <Folder name="web">
+      <File name="index.html" annotation="zero-dependency single-page dashboard" />
+    </Folder>
+  </Folder>
+</Files>
+
+## Read next
+
+<Cards>
+  <Card title="The AgentDriver seam" href="/docs/architecture/agent-driver" description="One EventEmitter contract, three runtimes keyed by `kind`." />
+  <Card title="The RPC protocol" href="/docs/architecture/rpc-protocol" description="The omp newline-JSON wire, the agent-host, and how status is derived." />
+  <Card title="State & events" href="/docs/architecture/state-and-events" description="Persistence, the SquadEvent / ClientCommand unions, and the AgentDTO snapshot." />
+  <Card title="Autonomy" href="/docs/architecture/autonomy" description="The opt-in self-driving layer: orchestrator, scheduler, supervisors, escalation." />
+</Cards>

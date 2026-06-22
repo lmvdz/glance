@@ -1,0 +1,98 @@
+---
+title: Auto-dispatch
+description: Poll mapped Plane repos and spawn a routed agent per new open issue — work starts with nobody typing a line.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+Auto-dispatch closes the autonomous-org loop: the daemon polls the Plane repos you've mapped
+and spawns a [routed](/docs/integrations/intake) agent for each new open issue, so work starts
+without anyone typing a line. Each issue flows **issue → routed run → verify → close**, and
+the operator supervises by exception. The loop is the `Dispatcher` in `src/dispatch.ts`, wired
+into `SquadManager` on start.
+
+<Callout type="warn">
+Off by default — the daemon **never** auto-spawns unless `OMP_SQUAD_AUTODISPATCH` is set. It
+also requires a working [Plane](/docs/integrations/plane) configuration; with Plane unset
+there are no repos to poll.
+</Callout>
+
+## Configuration
+
+Set these on the daemon:
+
+<TypeTable
+  type={{
+    OMP_SQUAD_AUTODISPATCH: {
+      type: 'flag',
+      description: 'Enable the issue → agent loop. Off by default.',
+    },
+    OMP_SQUAD_DISPATCH_INTERVAL_MS: {
+      type: 'number',
+      default: '60000',
+      description: 'Poll interval in milliseconds — how often mapped repos are checked for new open issues.',
+    },
+    OMP_SQUAD_DISPATCH_MAX: {
+      type: 'number',
+      default: '3',
+      description: 'Max concurrent dispatched agents (those currently busy on an issue). Caps how many spawn before earlier ones finish.',
+    },
+    OMP_SQUAD_AUTOCLOSE: {
+      type: 'flag',
+      description: 'Mark an issue done (transition to the completed group) once its agent passes a verification gate. Off by default.',
+    },
+  }}
+/>
+
+```sh title="enable auto-dispatch"
+OMP_SQUAD_AUTODISPATCH=1 \
+OMP_SQUAD_DISPATCH_INTERVAL_MS=30000 \
+OMP_SQUAD_DISPATCH_MAX=2 \
+OMP_SQUAD_AUTOCLOSE=1 \
+omp-squad up
+# → auto-dispatch on (every 30s, max 2, auto-close)
+```
+
+## How a poll works
+
+`Dispatcher.tick()` runs immediately on start and then every interval. Each pass:
+
+1. Walks `planeRepos()` — the `PLANE_PROJECT_MAP` keys.
+2. Calls `listPlaneIssues(repo)`. A `null` result (Plane not configured / unreachable) skips
+   that repo; the list is already filtered to open issues (completed/cancelled excluded).
+3. For each issue not already represented, spawns a routed agent via `dispatchSpawn` →
+   `SquadManager.create({ … autoRoute: true, approvalMode: "yolo" })`. The task is
+   `"<identifier>: <name>"`, so [intake](/docs/integrations/intake) picks the process per
+   issue — verify loop, plan+approval, or fan-out.
+
+The spawned agent carries the issue as its tracking ref, and a successful
+[land](/docs/guides/landing) closes that issue — the same `closePlaneIssue` path every landed
+branch uses.
+
+## Bounding the spawn storm
+
+A backlog must never trigger a flood, so the dispatcher is bounded several ways:
+
+- **`maxActive`** (`OMP_SQUAD_DISPATCH_MAX`) — the per-tick budget is `maxActive` minus the
+  count of dispatched agents currently busy (`working` / `starting` / `input`). At the cap, no
+  new spawn this tick.
+- **Never double-dispatch** — an issue id already in the roster (any state) or already
+  dispatched **this session** is skipped, so a slow issue isn't re-spawned on the next poll.
+- **Global WIP cap** — dispatch also respects the fleet-wide live-agent ceiling
+  (`OMP_SQUAD_MAX_WIP`, via the scheduler). It's rechecked before every spawn; at the ceiling
+  the tick stops and leaves the rest for later.
+- **No overlapping polls** — a tick that's still running causes the next one to no-op.
+
+<Callout type="info">
+`OMP_SQUAD_AUTOCLOSE` is what turns "verify" into "close": with it set, an agent that lands a
+green gate transitions its issue to the completed group automatically. Without it, dispatch
+still spawns and verifies, but closing the issue stays a human (or land) action.
+</Callout>
+
+## Related
+
+<Cards>
+  <Card title="Plane integration" href="/docs/integrations/plane" description="Configure the workspace, project map, and issue client dispatch polls." />
+  <Card title="Intake routing" href="/docs/integrations/intake" description="How each dispatched issue becomes a verify loop, plan, or fan-out." />
+  <Card title="Autonomy" href="/docs/architecture/autonomy" description="The orchestrator, WIP cap, and self-healing the dispatcher feeds into." />
+</Cards>

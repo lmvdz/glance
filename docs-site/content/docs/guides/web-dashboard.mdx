@@ -1,0 +1,242 @@
+---
+title: Web Dashboard
+description: The browser command center — projects, agent sessions, the Features/Queue/Race global views, the Cmd-K palette, deep links, and notifications.
+---
+
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+The web dashboard (`src/web/index.html`) is a **zero-dependency vanilla SPA** served by
+`SquadServer` (`src/server.ts`) and driven entirely by the `SquadEvent` WebSocket stream — the
+same stream the [TUI](/docs/guides/tui) consumes. It is an **organizational command center**,
+not a flat list: agents are grouped into projects, and three fleet-wide views let you supervise
+a whole squad by exception. `omp-squad open` prints its URL.
+
+Everything is reactive: a `roster` snapshot on connect, then `agent` / `transcript` /
+`removed` / `commands` / `log` / `features-changed` deltas. Your commands ride the same socket
+back (`prompt`, `answer`, `interrupt`, `restart`, `kill`, `remove`, `create`, `subscribe`).
+
+<Callout type="info">
+Access is token-gated. A `?token=…` in the URL (printed by the daemon) is captured into
+`localStorage` and stripped from the address bar; every `/api` call then carries it as a Bearer
+header and the WebSocket as a `?token=` query param. Without one you get a sign-in overlay. See
+[Remote access](/docs/guides/remote-access).
+</Callout>
+
+## Layout
+
+```text
+┌─ header ── ☰  omp-squad command center   live   N projects · N agents   🔔 ⌘K ⤴Upgrade +New ─┐
+├─ sidebar ─────────────────┬─ content ──────────────────────────────────────────────────────┤
+│ ⌂ Overview                │ Projects / <project> / <agent>          ← breadcrumb            │
+│ ▦ Features                │                                                                  │
+│ ⛔ Queue  (N)             │  <the selected view: project · agent · board · queue · race>     │
+│ ⇶ Race                    │                                                                  │
+│ ── Projects ──            │                                                                  │
+│  ▸ myproject  ●◐⛔ 3      │                                                                  │
+└───────────────────────────┴──────────────────────────────────────────────────────────────┘
+```
+
+### The header
+
+A single global toolbar: the `☰` sidebar toggle, a live connection indicator
+(`live` / `reconnecting…`), the `N projects · N agents` rollup, a **mute** toggle (`🔔`/`🔕`)
+for notification sound, the **⌘K** palette button, an **⤴ Upgrade** button (which shows how
+many commits the daemon is behind upstream), and **+ New agent**.
+
+### The sidebar
+
+Two stacked sections. The top is the unified nav — the **four destinations** every view can be
+reached from:
+
+<Cards>
+<Card title="Overview (⌂)" description="The home grid — pick a project to drill into." />
+<Card title="Features (▦)" description="The lifecycle kanban of in-flight features." />
+<Card title="Queue (⛔)" description="The fleet-wide attention inbox; carries a live count badge." />
+<Card title="Race (⇶)" description="The per-agent pipeline race board." />
+</Cards>
+
+Below it is the **Projects** list. Projects are derived client-side from the roster — agents
+grouped by their repo — so there is no project registry to manage. Each entry shows the repo's
+initial, name, a row of status dots, the agent count, and a `⛔ N` badge when any of its agents
+need input. The list is ordered by most-recent activity.
+
+## Project view
+
+Selecting a project shows the agents advancing it plus everything you need to start and
+coordinate work on that repo:
+
+- **Agent grid** — a card per agent with its live status, activity, and metrics.
+- **Spawn composer** — a single input: _"Describe a task… (Enter to spawn an agent here)"_.
+  Type a line and press `Enter` to spawn a `yolo`-approval agent on this repo. It supports
+  `/`-command completion against the agent's available slash commands/skills.
+- **Active on this repo** — presence: every squad agent **and** raw `omp` session claiming the
+  repo, so you never double-up. Reattached survivors are flagged `↻ reattached`.
+- **Federation** — peer operators on the tailnet and any shared-branch collisions. Hidden
+  unless a coordinator is configured and there is something remote to show.
+- **Files in flight** — active edit leases; files held by more than one holder are flagged
+  contended.
+- **Plane issues** — open issues for the repo, each with a **Spawn** button that launches an
+  agent on that issue. Shows _"Plane not connected"_ until `PLANE_API_KEY` + `PLANE_WORKSPACE`
+  are set on the daemon. See [Plane integration](/docs/integrations/plane).
+
+Keyboard: `j`/`↓` and `k`/`↑` move the card highlight, `Enter`/`→` opens the highlighted agent,
+`Esc`/`←` backs out to the overview.
+
+## Agent view
+
+The session view for one agent.
+
+- **Header** — status badge (with a working spinner and a `⏳ idle` stall pill), name, the
+  Plane issue it's advancing, then a metadata line: model, branch, worktree path, context-window
+  `%`, time since last activity, and a run receipt (`🔧 tool-calls · cost · duration`).
+- **Transcript** — the live message stream. Assistant / user / thinking / system entries render
+  through a compact dependency-free Markdown renderer (fenced + inline code with syntax
+  highlighting, tables, lists, links, images); tool lines render plain. New entries arrive over
+  the socket and auto-scroll only when you're already at the bottom.
+- **Composer** — a multiline textarea (_"Instruct this agent…"_, `Enter` sends, `Shift+Enter`
+  newline) with the same `/`-command completion as the project composer. Drafts are kept
+  per-agent so switching agents never loses what you typed.
+- **Pending-answer controls** — when the agent blocks, a _"Needs your input"_ block renders the
+  request inline: **Yes/No** buttons for a confirm, one button per option for a select, or an
+  input + **Submit** for free text. Answered straight from the agent view (or the Queue).
+- **Controls** — **Send**, **Interrupt**, **Restart**, **Kill** (behind a confirm dialog), and
+  **⤳ Land** (merge this agent's work into main — see [Landing](/docs/guides/landing)).
+
+Two side panels sit beside the transcript, toggled by the **⊟ Changes** button (which shows a
+count badge of unlanded files and highlights when work is waiting to land):
+
+<Tabs items={['Subagents', 'Changes']}>
+<Tab value="Subagents">
+
+The live tree of `task`-spawned children, read from omp's RPC subagent stream
+(`GET /api/agents/<id>/subagents`). Each node shows the child's status and description, so a
+parallel fan-out is visible from the parent's session.
+
+</Tab>
+<Tab value="Changes">
+
+The agent's **worktree git diff** (`GET /api/agents/<id>/diff`) — a per-file collapsible diff
+with added / removed / hunk lines highlighted. This is your review surface **before** you Land:
+the changes live in the agent's isolated worktree, not your main checkout, until you merge them.
+
+</Tab>
+</Tabs>
+
+## The global views
+
+Three fleet-wide surfaces, each deep-linkable and reachable from the nav or the ⌘K palette.
+
+### Features — the lifecycle kanban
+
+A kanban of in-flight features by **lifecycle stage**: `planned` → `issues-created` →
+`in-progress` → `review` → `diverged` → `landed` → `done`. The stage is **derived** from
+observable evidence (a plan dir, the live roster, git land status), not hand-set. Cards show the
+title, repo, plan dir, a status-dot rollup, an "unlanded files" pill, and diverged / blocked /
+issue-count flags.
+
+**⚡ New (auto)** spawns a research → plan → file → implement workflow that **tracks itself**
+across the columns as it progresses. Opening a card drills into the feature detail: per-worktree
+land readiness, the **land-proof** state, member agents (with a spawn-on-this-feature composer),
+Plane tickets, the plan pipeline/concerns, and **Land all** / **Force land**.
+
+### Queue — the attention inbox
+
+Every pending request across the **whole fleet**, folded into one supervise-by-exception
+surface, **oldest-waiting first**. Each row names the agent, its repo, and the request — and you
+**answer it in place** with the same controls as the agent view. Errored agents get their own
+section below. This is the landing view on mobile when something is waiting.
+
+### Race — the pipeline race board
+
+One **lane per agent**; a workflow's phases become a segmented track filled from `todo.done` /
+`todo.total`, with the current cell labelled by `todo.active`. You see who's where in the
+pipeline and who's stalled at a glance (a `⏳ idle` pill marks a stalled lane). Fan-out branches
+indent under their parent. It's a pure client-side fold over fields already broadcast — no extra
+server route, no polling.
+
+## The ⌘K command palette
+
+`⌘K` (or `Ctrl-K`, or the header button) opens a fuzzy command palette — a live registry of
+**destinations and actions** built from current state:
+
+- Jump to any view: Home, Attention queue, Feature board, Race board.
+- Jump to any **project** or any **agent** by name.
+- Run an action: New agent, Upgrade daemon — plus **Answer next blocked** when something's
+  waiting, and, while you're in an agent view, **Land / Interrupt / Restart / Kill this agent**.
+
+Navigate with `↑`/`↓` (or `Ctrl-n`/`Ctrl-p`), `Enter` to run, `Esc` to close.
+
+## Notifications
+
+The dashboard signals out-of-band so you can look away:
+
+- **In-app** — on a status transition the SPA fires a desktop `Notification` (lazy permission)
+  plus an optional beep, throttled per agent: `⛔ <name> needs you` on `input`,
+  `⚠ <name> errored` on `error`, and `✓ <name> finished` when a working agent goes idle. The
+  `🔔`/`🔕` header toggle mutes the sound.
+- **Title + favicon badge** — the browser tab shows `(N)` and a red dot with the count of
+  requests waiting on you.
+- **Background Web Push** — with notifications granted and a secure context, the device
+  registers a service worker and subscribes for push, so the phone buzzes even with the app
+  closed. Covered in [Remote access](/docs/guides/remote-access).
+
+<Callout type="info">
+**Live-reload on upgrade.** The first roster after page load pins the served UI version; if a
+later reconnect reports a different version (the daemon upgraded its assets), the tab toasts
+_"Updated — reloading…"_ and refreshes itself — so an open tab or installed PWA never runs stale
+UI.
+</Callout>
+
+## In-app dialogs
+
+- **New agent** — the header's `+ New agent` opens a modal with repo, name, **approval**
+  (`yolo` / `write` / `always-ask`), **thinking** (`low` / `minimal` / `medium` / `high` /
+  `xhigh`), and task. (For the full flag surface, use the [CLI](/docs/guides/spawning).)
+- **Confirm dialogs** gate destructive actions — **Kill** and **Upgrade daemon**.
+- **Toasts** surface `log` events and the result of actions (e.g. a Land's detail).
+
+## Deep-link routes
+
+The URL hash mirrors the current view, so refresh, bookmarks, deep links, and browser
+back/forward all work (`pushRoute` writes it, `applyRoute` reads it on `hashchange`/`popstate`):
+
+| Hash | View |
+|---|---|
+| `#/` | Overview |
+| `#/board` | Features board |
+| `#/queue` | Attention queue |
+| `#/race` | Race board |
+| `#/feature/<id>` | Feature detail |
+| `#/agent/<id>` | Agent session |
+| `#/project/<id>` | Project view (`<id>` is the repo path) |
+
+A push notification's tap target is exactly one of these `#/agent/<id>` links.
+
+## HTTP surface behind it
+
+The SPA talks to a small REST + WebSocket surface on `SquadServer`. The static shell, manifest,
+service worker, and icons are public so the PWA can bootstrap; **everything under `/api` and the
+`/ws` upgrade require the token**.
+
+| Route | Purpose |
+|---|---|
+| `GET /ws` | The `SquadEvent` stream + `ClientCommand` sink |
+| `GET /api/agents` · `/api/projects` | Roster and derived projects |
+| `GET /api/agents/<id>/transcript` · `/subagents` · `/diff` · `/tree` · `/receipts` · `/commands` | Per-agent detail |
+| `POST /api/agents/<id>/land` · `/verify` · `/vision` | Land, run a proof, capture vision evidence |
+| `GET`/`POST` `/api/features…` | Feature board CRUD + `land` / `verify` / `module` |
+| `POST /api/command` · `/api/spawn` | Create / commission / steer; smart-spawn |
+| `GET /api/presence` · `/api/leases` · `/api/federation` | Coordination surfaces |
+| `GET /api/plane/issues` | Open Plane issues for a repo |
+| `GET /api/upgrade/status` · `POST /api/upgrade` | Self-upgrade (pull + re-exec) |
+| `GET /api/push/key` · `POST /api/push/subscribe` | Web Push enrollment |
+
+The full route reference lives in [HTTP API](/docs/reference/http-api).
+
+---
+
+<Cards>
+<Card title="Terminal UI" href="/docs/guides/tui" description="The same control plane in your terminal." />
+<Card title="Spawning agents" href="/docs/guides/spawning" description="Every add flag and steering verb." />
+<Card title="Remote access & mobile" href="/docs/guides/remote-access" description="Reach the dashboard from your phone, with push." />
+</Cards>

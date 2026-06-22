@@ -1,3 +1,13 @@
 {
-  "pages": ["index", "workflow-runtime", "commission-loop", "federation"]
+  "pages": [
+    "index",
+    "getting-started",
+    "guides",
+    "architecture",
+    "workflows",
+    "commissioning",
+    "integrations",
+    "reference",
+    "contributing"
+  ]
 }

@@ -1,0 +1,74 @@
+---
+title: Introduction
+description: omp-squad is a control plane for a fleet of Oh My Pi agents — each in its own git worktree, steered from a terminal TUI and a web dashboard over one event stream.
+---
+
+omp-squad manages a fleet of [Oh My Pi](https://omp.sh) (`omp`) coding agents
+running in parallel — **one per git worktree** — from a terminal TUI *and* a web
+dashboard. Think `claude agents`, but for the omp harness, and built to go
+further: a single control plane you run wherever development happens, where you
+coordinate your own agents and (in [federation](/docs/integrations/federation))
+any linked agents across your organization.
+
+## The problem
+
+You're running several coding agents at once — a refactor in one repo, a bug hunt
+in another, a spike in a third. The agents scale fine. **You** don't: once more
+than a couple are live, the scarce resource is your attention. Without a control
+plane you lose track of which agent is busy, which finished, and — the expensive
+one — **which is blocked waiting for you**. A blocked agent you don't notice is
+just wasted wall-clock.
+
+omp-squad makes that legible. Every agent is an isolated worktree process, so
+parallel agents never clobber each other's files. A live board shows what each is
+doing and which need input, and you can dive into any one and steer it — answer a
+prompt, send a follow-up, interrupt, restart, or kill it. You supervise by
+exception instead of watching a screen.
+
+## The mental model
+
+Four ideas carry the whole system:
+
+- **One worktree per agent.** Each agent runs in its own `git worktree` (branch
+  `squad/<name>`), so the worktree is both the isolation boundary and the blast
+  radius — you review its diff before merging.
+- **Each agent is a real `omp --mode rpc` child.** omp-squad doesn't reimplement
+  the agent; it spawns the real `omp` harness in RPC mode and speaks omp's
+  newline-JSON protocol to it (`prompt` / `steer` / `abort` / `get_state`).
+- **Status is derived, not declared.** An agent's lifecycle state
+  (`working` / `idle` / `needs-input` / `error`) is computed from its RPC event
+  stream — `agent_start` means working, `agent_end` means idle, a blocking
+  approval or tool request means needs-input, a crash means error.
+- **Two surfaces over one event stream.** A single `SquadManager` is the core; the
+  TUI consumes it in-process and the web dashboard is a WebSocket client of the
+  same `SquadEvent` stream. Anything you do in one shows up in the other.
+
+## How it works
+
+```text
+        omp-squad (one process)
+        ┌─────────────────────────────────────────────┐
+        │  SquadManager  ── roster, status, transcript │
+        │     │                                        │
+        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #1) │   each agent =
+        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #2) │   its own worktree
+        │     └── RpcAgent ──▶ omp --mode rpc  (wt #3) │   + RPC child process
+        │     │                                        │
+        │     ├── SquadServer (HTTP + WS) ──▶ browser  │
+        │     └── SquadTui    (terminal)               │
+        └─────────────────────────────────────────────┘
+```
+
+`SquadManager` owns each `RpcAgent`, derives status from its stream, buffers a
+transcript, and persists roster config to `~/.omp/squad/state.json` (worktrees
+live under `~/.omp/squad/worktrees/`). `SquadServer` serves the dashboard over
+HTTP + WebSocket; `SquadTui` drives the terminal. Both are thin clients of the
+manager.
+
+## Next steps
+
+<Cards>
+  <Card title="Installation" href="/docs/getting-started/installation" description="Requirements, install via Bun, and how to verify the setup." />
+  <Card title="Quickstart" href="/docs/getting-started/quickstart" description="Start the daemon, spawn an agent, and run the end-to-end smoke test." />
+  <Card title="Concepts" href="/docs/getting-started/concepts" description="The vocabulary: agent kinds, statuses, worktrees, projects, features, and pending requests." />
+</Cards>

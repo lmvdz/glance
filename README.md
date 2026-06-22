@@ -123,6 +123,7 @@ controls do everything the CLI does.
 | `--workflow` | Run a workflow graph (`.fabro`) as the process; `--task` is the goal | — |
 | `--verify` | Wrap `--task` in an implement → verify → fixup loop (gate = `<cmd>` exit 0) | — |
 | `--sandbox` | Run the agent inside a container from `<image>` (mounts the worktree) | — |
+| `--acp` | Run an ACP runtime (`auggie --acp`) instead of `omp --mode rpc` | — |
 
 > **Thinking defaults to `low`** so fleet agents stay responsive; bump it per-agent for
 > hard work. (Inheriting a global `high` default makes every agent grind — opt in
@@ -194,6 +195,22 @@ so work starts with nobody typing. Bounded so a backlog can't storm:
 | `OMP_SQUAD_DISPATCH_INTERVAL_MS` | Poll interval (default `60000`) |
 | `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
 | `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate |
+
+### Concurrency & autonomy (opt-in)
+
+The daemon caps concurrent **live** agents (everything not `stopped`/`error`) at a global WIP
+ceiling, and can optionally queue spawns past it and auto-answer routine prompts so a fleet keeps
+moving without a human. All bounded; the last two are off by default.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_MAX_WIP` | Global live-agent WIP ceiling (default `6`); a spawn past it is refused |
+| `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
+| `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates), so blocked agents advance without you. Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
+| `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
+
+Auto-supervision is safe only because each agent works in an isolated, reviewed-before-merge
+worktree — the worktree is the blast radius. Anything that escapes it is left for a human.
 
 **Self-healing control loop (opt-in)** — `OMP_SQUAD_AUTODRIVE=1` arms the orchestrator's
 periodic tick. Each pass it auto-lands idle agents whose work verifies green (closing the
@@ -301,7 +318,7 @@ sequence — so `author → gate → onboard` runs on the same engine as plan-im
 
 Both classes implement one `AgentDriver` seam, so `kind` is the only thing surfaces
 need to tell an interactive operator from a commissioned worker. Design + rationale:
-[`docs/commission-loop`](docs-site/content/docs/commission-loop.md) (rendered in the docs site).
+[the Commissioning docs](docs-site/content/docs/commissioning/index.mdx) (rendered in the docs site).
 
 ## Autonomous intake — describe intent, the OS picks the process
 
@@ -377,7 +394,7 @@ omp-squad add ~/code/myproject --task "Add rate limiting to the public API." \
 Shapes: `Mdiamond` start · `Msquare` exit · `box` agent · `tab` prompt · `parallelogram`
 command · `hexagon` human gate · `diamond` conditional · `component` fork · `tripleoctagon`
 merge. Design + rationale:
-[`docs/workflow-runtime`](docs-site/content/docs/workflow-runtime.md) (rendered in the docs site).
+[the Workflows docs](docs-site/content/docs/workflows/index.mdx) (rendered in the docs site).
 
 ## Documentation
 
@@ -402,6 +419,10 @@ idle agent's worktree on its `squad/<name>` branch and merges it into the main c
 fast-forward when it can, a merge commit when it diverged — serialized per-repo so two
 lands never corrupt the index. The web **Land** button and `landFeature` (multi-branch)
 drive the same path.
+
+A successful land **closes the agent's tracking Plane issue** (idempotent, best-effort) — on both
+the single-agent `land(id)` path and the multi-branch `landFeature` path — so a shipped branch
+leaves no stale open issue behind.
 
 When `main` has moved under a long-running branch, the merge **conflicts** — the point most
 fleet tools give up at. The bundled **`resolve-conflict`** workflow is omp-squad's answer,
@@ -460,6 +481,25 @@ omp-squad add ~/code/myproject --sandbox my-omp-image --approval yolo \
 - The image must provide `omp`; point `--sandbox` at an omp-provisioned image. (The driver's
   container transport + lifecycle are verified against a real `oven/bun` container in the test
   suite using a fake-omp RPC server — no tokens; the real-omp path was proven live on the host.)
+
+## ACP runtimes — a non-omp agent in the roster
+
+`--acp` runs an **ACP-speaking runtime** (`auggie --acp`, and Claude Code / Codex via ACP)
+behind the same `AgentDriver` seam that `RpcAgent` uses for `omp --mode rpc`. Same seam, so
+an ACP runtime joins the roster / TUI / web / status / receipts **identically** — only the
+transport (hand-rolled ACP JSON-RPC 2.0 over the child's stdio) and the agent runtime change.
+
+```bash
+omp-squad add ~/code/myproject --acp --task "Add rate limiting to the public API."
+```
+
+- **`AcpAgentDriver`** spawns the runtime as a child, handshakes (`initialize` → `session/new`),
+  maps `session/update` (message chunks, tool calls, plan, usage) and the turn lifecycle to the
+  same normalized frames the manager already derives, and bridges `session/request_permission`
+  to the squad's confirm-UI (the human answer routes back as the ACP `{outcome}` reply).
+- The child command is injectable; the default is `auggie --acp`. The driver's ACP transport +
+  mappings are verified in the test suite against a fake in-process ACP agent — no auggie, no
+  account, no tokens.
 
 ## Phase 2 — cross-operator federation
 
