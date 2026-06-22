@@ -6,14 +6,14 @@
  *
  * Routing per node:
  *   - human node     → take the edge whose label equals the chosen option;
- *   - everything else→ first edge whose `condition` is true, else the first
- *                      unconditioned edge (the fallback);
- *   - goal-gate node that failed with no matching edge → its `retry_target`.
+ *   - everything else→ first edge whose `condition` is true; else a goal-gate
+ *                      node that failed routes to its `retry_target`; else the
+ *                      first unconditioned edge (the fallback).
  * A node that would exceed its visit cap cannot run again; if nothing else routes
  * the run, it fails (this is what bounds fix-up loops).
  */
 
-import type { EngineCheckpoint, NodeExecutor, Outcome, RunContext, RunResult, StageEvent, Workflow, WorkflowNode, WorkflowRunState } from "./types.ts";
+import type { EngineCheckpoint, NodeExecutor, NodeResult, Outcome, RunContext, RunResult, StageEvent, Workflow, WorkflowNode, WorkflowRunState } from "./types.ts";
 
 const DEFAULT_NODE_VISITS = 50;
 
@@ -98,11 +98,11 @@ export class WorkflowEngine {
 		const policy = fork.attrs.join_policy === "first_success" ? "first_success" : "wait_all";
 		const maxParallel = fork.attrs.max_parallel ? Math.max(1, Number.parseInt(fork.attrs.max_parallel, 10) || 4) : 4;
 
-		const runOne = async (bid: string): Promise<Outcome> => {
+		const runOne = async (bid: string): Promise<NodeResult> => {
 			const bn = this.wf.nodes.get(bid);
-			if (!bn) return "failed";
+			if (!bn) return { outcome: "failed" };
 			const limit = bn.maxVisits ?? shared.cap;
-			if ((shared.visits[bid] ?? 0) >= limit) return "failed";
+			if ((shared.visits[bid] ?? 0) >= limit) return { outcome: "failed" };
 			shared.visits[bid] = (shared.visits[bid] ?? 0) + 1;
 			const index = shared.index++;
 			this.stage(shared, index, bn, "start", ctx);
@@ -112,14 +112,14 @@ export class WorkflowEngine {
 			branchCtx.outcome = r.outcome;
 			if (r.text !== undefined) branchCtx.vars.lastText = r.text;
 			this.stage(shared, index, bn, "end", branchCtx);
-			return r.outcome;
+			return r;
 		};
 
-		const outcomes = await this.runBounded(branchIds, maxParallel, runOne);
-		ctx.vars.parallelResults = JSON.stringify(branchIds.map((id, i) => ({ branch: id, outcome: outcomes[i] })));
-		const succeeded = outcomes.filter((o) => o === "succeeded").length;
+		const results = await this.runBounded(branchIds, maxParallel, runOne);
+		ctx.vars.parallelResults = JSON.stringify(branchIds.map((id, i) => ({ branch: id, outcome: results[i]!.outcome, text: results[i]!.text })));
+		const succeeded = results.filter((r) => r.outcome === "succeeded").length;
 		if (policy === "first_success") return succeeded > 0 ? "succeeded" : "failed";
-		return outcomes.length > 0 && succeeded === outcomes.length ? "succeeded" : "failed";
+		return results.length > 0 && succeeded === results.length ? "succeeded" : "failed";
 	}
 
 	/** The single merge node that parallel branches converge on. */
@@ -211,8 +211,8 @@ export class WorkflowEngine {
 			}
 			if (evalCondition(e.condition, ctx)) return e.to;
 		}
-		if (fallback !== undefined) return fallback;
 		if (node.goalGate && node.retryTarget && ctx.outcome === "failed") return node.retryTarget;
+		if (fallback !== undefined) return fallback;
 		return undefined;
 	}
 }

@@ -13,7 +13,7 @@ digraph FanOut {
     fast   [label="Performance",  prompt="Implement the goal, optimizing for runtime performance."]
     lean   [label="Minimal deps", prompt="Implement the goal using the fewest external dependencies."]
     merge  [shape=tripleoctagon, label="Merge"]
-    review [label="Review", prompt="Read parallel_results.json and compare the branch worktrees; pick the best approach and explain why."]
+    review [label="Review", prompt="Read parallel_results.json (each branch's outcome and summary) and compare the branch worktrees; pick the best approach and explain why."]
 
     start -> fork
     fork -> simple

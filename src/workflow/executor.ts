@@ -90,6 +90,11 @@ export class SingleAgentExecutor implements NodeExecutor {
 		let body = node.prompt ?? node.label ?? "Continue toward the goal.";
 		if (body.startsWith("@")) body = await this.resolvePromptRef(body);
 
+		// ponytail: idempotent rewrite — a fan-out's branch results land in cwd for the review node to read.
+		if (ctx.vars.parallelResults) {
+			await fs.writeFile(path.join(this.opts.cwd, "parallel_results.json"), ctx.vars.parallelResults);
+		}
+
 		const parts: string[] = [];
 		if (!this.primed) {
 			parts.push(`Goal: ${ctx.goal}`);
