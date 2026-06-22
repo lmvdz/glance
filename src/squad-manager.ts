@@ -210,9 +210,14 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async start(): Promise<void> {
-		await this.reconnectLive();
-		await this.reapOrphans();
-		await this.adoptOrphanedAgents();
+		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
+		// reap, or adopt — and a fresh-state manager must NOT reap the shared sockets dir out from under
+		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
+		if (existsSync(this.stateFile)) {
+			await this.reconnectLive();
+			await this.reapOrphans();
+			await this.adoptOrphanedAgents();
+		}
 		await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
