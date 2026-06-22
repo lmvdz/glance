@@ -17,6 +17,8 @@ import type { Workflow, WorkflowNode } from "./types.ts";
 
 const IMPLEMENT_PROMPT = "Complete the goal above. Implement it fully, then stop.";
 const FIXUP_PROMPT = "The verify command failed. Read the recent command output and fix every failure it reports. Change only what the failures require, then stop.";
+const WRITE_TEST_PROMPT =
+	"Author the acceptance test(s) for the goal above FIRST. Cover the behaviour the goal specifies, then RUN them and confirm they FAIL (red) — proving they exercise code that does not exist yet. Do not implement the feature. Stop once the tests are written and confirmed failing.";
 
 export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
 	const nodes = new Map<string, WorkflowNode>([
@@ -31,6 +33,40 @@ export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
 		nodes,
 		edges: [
 			{ from: "start", to: "implement" },
+			{ from: "implement", to: "verify" },
+			{ from: "verify", to: "exit", label: "Pass", condition: "outcome=succeeded" },
+			{ from: "verify", to: "fixup", label: "Fix" },
+			{ from: "fixup", to: "verify" },
+		],
+		start: "start",
+		exit: "exit",
+	};
+}
+
+/**
+ * buildTddVerifyWorkflow — the TDD-first variant: write the acceptance test(s)
+ * (red) BEFORE implementing, then verify against the same gate. Identical to
+ * buildVerifyWorkflow except for a `write-test` agent node prepended ahead of
+ * `implement`, so a passing run proves the test was authored first.
+ *
+ *   start → write-test → implement → verify ─(pass)→ exit
+ *                                       └────(fail)→ fixup → verify
+ */
+export function buildTddVerifyWorkflow(spec: VerifySpec): Workflow {
+	const nodes = new Map<string, WorkflowNode>([
+		["start", { id: "start", kind: "start", label: "Start", attrs: {} }],
+		["write-test", { id: "write-test", kind: "agent", label: "Write test", prompt: WRITE_TEST_PROMPT, attrs: {} }],
+		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
+		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "fixup", attrs: {} }],
+		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, attrs: {} }],
+		["exit", { id: "exit", kind: "exit", label: "Exit", attrs: {} }],
+	]);
+	return {
+		name: "tdd-verify",
+		nodes,
+		edges: [
+			{ from: "start", to: "write-test" },
+			{ from: "write-test", to: "implement" },
 			{ from: "implement", to: "verify" },
 			{ from: "verify", to: "exit", label: "Pass", condition: "outcome=succeeded" },
 			{ from: "verify", to: "fixup", label: "Fix" },

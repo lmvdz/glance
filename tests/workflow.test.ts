@@ -19,7 +19,7 @@ import { evalCondition, WorkflowEngine } from "../src/workflow/engine.ts";
 import type { NodeExecutor, NodeResult, RunContext, WorkflowNode } from "../src/workflow/types.ts";
 import { CommissionExecutor } from "../src/workflow/commission-executor.ts";
 import type { AgentDTO, GateReport } from "../src/types.ts";
-import { buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
+import { buildTddVerifyWorkflow, buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
 import { parseStylesheet, resolveNodeStyle } from "../src/workflow/stylesheet.ts";
 import { pickModel } from "../src/rpc-agent.ts";
 
@@ -356,6 +356,26 @@ test("buildVerifyWorkflow: synthesizes implement → verify(goal_gate) → fixup
 	expect(wf.nodes.get("verify")?.retryTarget).toBe("fixup");
 	expect(wf.nodes.get("fixup")?.maxVisits).toBe(5);
 	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify"]);
+});
+
+test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps the verify gate + fixup loop", () => {
+	const wf = buildTddVerifyWorkflow({ command: "bun test 2>&1", maxFixups: 4 });
+	// write-test is an agent turn that comes before implement
+	expect(wf.nodes.get("write-test")?.kind).toBe("agent");
+	expect(wf.nodes.get("write-test")?.prompt).toMatch(/FIRST/);
+	expect(wf.nodes.get("write-test")?.prompt).toMatch(/FAIL|red/i);
+	expect(wf.nodes.get("implement")?.kind).toBe("agent");
+	// the gate is unchanged: goal-gated command that retries into fixup
+	expect(wf.nodes.get("verify")?.kind).toBe("command");
+	expect(wf.nodes.get("verify")?.script).toBe("bun test 2>&1");
+	expect(wf.nodes.get("verify")?.goalGate).toBe(true);
+	expect(wf.nodes.get("verify")?.retryTarget).toBe("fixup");
+	expect(wf.nodes.get("fixup")?.maxVisits).toBe(4);
+	// full path: start → write-test → implement → verify, pass→exit / fail→fixup→verify
+	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->write-test", "write-test->implement", "implement->verify", "verify->exit", "verify->fixup", "fixup->verify"]);
+	expect(wf.edges.find((e) => e.from === "verify" && e.to === "exit")?.condition).toBe("outcome=succeeded");
+	expect(wf.start).toBe("start");
+	expect(wf.exit).toBe("exit");
 });
 
 test("verify loop: a failing gate drives fixup turns until it passes", async () => {
