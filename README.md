@@ -161,6 +161,10 @@ cat ~/.omp/squad/worktrees/<repo>-squad-demo/proof.txt   # → OK
 The web UI is an **organizational command center**, not a flat list:
 
 - **Projects** (sidebar) — agents grouped by repo, each with a live status rollup and a needs-input badge.
+- **Global views** (sidebar) — three fleet-wide surfaces, each deep-linkable and reachable via the ⌘K command palette:
+  - **Features** — a kanban of in-flight features by lifecycle stage (planned → review → landed → done); spawn a research→plan→implement workflow that tracks itself across the columns.
+  - **Queue** — an attention inbox of every agent blocked on input (and errored) across the whole fleet, answerable in place, oldest-first, so you supervise by exception.
+  - **Race** — a race-board: one lane per agent with the workflow's phases as a segmented track, filled by stage progress and labelled with the current phase, so you see who's where in the pipeline and who's stalled at a glance. Fan-out branches nest under their parent.
 - **Project view** — the agents advancing that project, a *spawn-in-this-project* composer (type a task → agent), and a **Plane issues** panel (open issues; click to spawn an agent on one).
 - **Agent view** — transcript + composer + pending-answer controls, plus side panels:
   - **Subagents** — the live tree of `task`-spawned children (via omp's RPC subagent stream).
