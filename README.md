@@ -195,6 +195,22 @@ so work starts with nobody typing. Bounded so a backlog can't storm:
 | `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
 | `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate |
 
+### Concurrency & autonomy (opt-in)
+
+The daemon caps concurrent **live** agents (everything not `stopped`/`error`) at a global WIP
+ceiling, and can optionally queue spawns past it and auto-answer routine prompts so a fleet keeps
+moving without a human. All bounded; the last two are off by default.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_MAX_WIP` | Global live-agent WIP ceiling (default `6`); a spawn past it is refused |
+| `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
+| `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates), so blocked agents advance without you. Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
+| `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
+
+Auto-supervision is safe only because each agent works in an isolated, reviewed-before-merge
+worktree — the worktree is the blast radius. Anything that escapes it is left for a human.
+
 **Self-healing control loop (opt-in)** — `OMP_SQUAD_AUTODRIVE=1` arms the orchestrator's
 periodic tick. Each pass it auto-lands idle agents whose work verifies green (closing the
 tracking Plane issue), self-heals red gates through the failure router (retry / hold /
@@ -402,6 +418,10 @@ idle agent's worktree on its `squad/<name>` branch and merges it into the main c
 fast-forward when it can, a merge commit when it diverged — serialized per-repo so two
 lands never corrupt the index. The web **Land** button and `landFeature` (multi-branch)
 drive the same path.
+
+A successful land **closes the agent's tracking Plane issue** (idempotent, best-effort) — on both
+the single-agent `land(id)` path and the multi-branch `landFeature` path — so a shipped branch
+leaves no stale open issue behind.
 
 When `main` has moved under a long-running branch, the merge **conflicts** — the point most
 fleet tools give up at. The bundled **`resolve-conflict`** workflow is omp-squad's answer,

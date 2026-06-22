@@ -31,9 +31,10 @@ import { Orchestrator } from "./orchestrator.ts";
 import { Scheduler, liveAgents } from "./scheduler.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
-import { landAgent } from "./land.ts";
+import { landAgent, type LandOpts, type LandResult } from "./land.ts";
 import { ownershipConflict } from "./ownership.ts";
 import { proofGate, runProof } from "./proof.ts";
+import { chooseFallback } from "./supervisor.ts";
 import type {
 	Actor,
 	IssueRef,
@@ -83,6 +84,18 @@ const BLOCKING_UI_METHODS: Record<string, true> = {
 	select: true,
 	editor: true,
 };
+
+/** Actor stamped on auto-supervised answers so the transcript/audit log shows they weren't human. */
+const AUTO_ACTOR: Actor = { id: "auto-supervise", displayName: "auto-supervise", origin: "local" };
+
+/**
+ * Destructive / irreversible / blast-radius-escaping signals that must NEVER be auto-answered
+ * (OMP_SQUAD_AUTOSUPERVISE). Matched case-insensitively against a request's title + message +
+ * options; any hit leaves the request for a human. Intentionally broad — false positives only
+ * cost a human glance, false negatives can wreck main / prod.
+ */
+const RISKY_RE =
+	/force[- ]?push|--force\b|reset --hard|\bdelete\b|\bdestroy\b|\bdrop\b|rm\s+-rf|\bpublish\b|\bdeploy\b|\brelease\b|\bproduction\b|\bprod\b|\bmainnet\b|\bsecret\b|\bcredential\b|\bpassword\b|\bwipe\b|\btruncate\b|\boverwrite\b|push.*\bmain\b|merge.*\bmain\b/i;
 
 interface AgentRecord {
 	dto: AgentDTO;
@@ -136,6 +149,8 @@ export class SquadManager extends EventEmitter {
 	private closeOnDone = false;
 	private llmClassify?: Classify;
 	private readonly closedIssues = new Set<string>();
+	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
+	private readonly superviseBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
 	private idSeq = 0;
@@ -429,6 +444,61 @@ export class SquadManager extends EventEmitter {
 		return { ok: true, results };
 	}
 
+	/**
+	 * Single-agent land path: commit + merge ONE agent's branch, then close its tracking issue on
+	 * success. The web Land button / server `/api/agents/:id/land` land via the same land.ts primitive
+	 * and already call `closeLandedIssue`; this method owns BOTH steps in the manager so close-on-land
+	 * is guaranteed for the single-agent path too — not only the multi-branch `landFeature`. Close is
+	 * idempotent (`closedIssues`) and best-effort. Busy-aware `commitWip` mirrors the feature path.
+	 */
+	async land(id: string, message?: string): Promise<LandResult> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
+		const dto = rec.dto;
+		const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
+		const result = await this.landBranch({
+			repo: dto.repo,
+			worktree: dto.worktree,
+			branch: dto.branch,
+			message: message ?? `squad(${dto.name}): land ${dto.branch ?? "changes"}`,
+			commitWip: !busy,
+		});
+		if (result.ok) await this.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
+		return result;
+	}
+
+	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
+	protected landBranch(opts: LandOpts): Promise<LandResult> {
+		return landAgent(opts);
+	}
+
+	/**
+	 * Synthetic DTO returned when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). It is
+	 * NOT added to the roster — the `queued: true` flag is the signal to the caller (status is a
+	 * placeholder); the orchestrator drains the scheduler queue and spawns the real agent once a
+	 * slot frees.
+	 */
+	private queuedDto(name: string, opts: CreateAgentOptions): AgentDTO {
+		return {
+			id: `queued-${name}-${Date.now().toString(36)}`,
+			name,
+			status: "starting",
+			queued: true,
+			kind: opts.workflow || opts.verify ? "workflow" : "omp-operator",
+			repo: opts.repo,
+			worktree: opts.existingPath ?? opts.repo,
+			branch: opts.branch ?? `squad/${name}`,
+			model: opts.model,
+			approvalMode: opts.approvalMode ?? "write",
+			pending: [],
+			lastActivity: Date.now(),
+			messageCount: 0,
+			issue: opts.issue,
+			featureId: opts.featureId,
+			owns: opts.owns,
+		};
+	}
+
 	/** Run the feature's acceptance command in each member worktree, recording a land proof per branch. */
 	async verifyFeature(id: string): Promise<{ ok: boolean; command?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string; artifacts: number }[] } | null> {
 		const pf = this.featureStore.get(id);
@@ -462,7 +532,18 @@ export class SquadManager extends EventEmitter {
 		// Global concurrency ceiling (see Scheduler). Restore / fan-out recreate already-counted agents → bypassCap.
 		if (!opts.bypassCap) {
 			const live = liveAgents(this.list());
-			if (!this.scheduler.canAdmit(live)) throw new Error(`WIP cap reached (${live}/${this.scheduler.cap()}) — finish or remove an agent before spawning`);
+			if (!this.scheduler.canAdmit(live)) {
+				// Backpressure (#13): with OMP_SQUAD_QUEUE_ON_FULL the denied spawn is parked instead of
+				// rejected — the orchestrator drains the queue when a slot frees. Flag off ⇒ the historical
+				// hard cap error, so default behavior is unchanged.
+				if (process.env.OMP_SQUAD_QUEUE_ON_FULL) {
+					this.scheduler.enqueue(opts);
+					const qname = opts.name?.trim() || `agent-${++this.idSeq}`;
+					this.log("info", `WIP cap reached (${live}/${this.scheduler.cap()}) — queued "${qname}" (${this.scheduler.queued} waiting)`);
+					return this.queuedDto(qname, opts);
+				}
+				throw new Error(`WIP cap reached (${live}/${this.scheduler.cap()}) — finish or remove an agent before spawning`);
+			}
 		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
 		const id = `${name}-${Date.now().toString(36)}`;
@@ -776,6 +857,43 @@ export class SquadManager extends EventEmitter {
 		this.emitAgent(rec);
 	}
 
+	/**
+	 * Bounded, opt-in auto-answer for a freshly-added pending request (OMP_SQUAD_AUTOSUPERVISE).
+	 * Resolves only LOW-RISK routine approvals so the fleet keeps moving without a human, but:
+	 *   - NEVER answers a request flagged risky/destructive (see `isRiskyRequest`) — left for a human;
+	 *   - stops once an agent spends its per-agent attempt budget (OMP_SQUAD_AUTOSUPERVISE_BUDGET, default 5);
+	 *   - only answers what `chooseFallback` can decide deterministically (host-tool calls yield "" → skipped).
+	 * Every auto-answer (and every skip with a reason) is logged for audit.
+	 *
+	 * ponytail: deterministic risk gate + chooseFallback, no LLM. Auto-approval is safe ONLY because
+	 * squad agents live in reviewed-before-merge worktrees. Upgrade path: route to the model-backed
+	 * supervisor (`decide` in supervisor.ts) for nuanced calls if the deterministic gate proves too blunt.
+	 */
+	private maybeAutoSupervise(rec: AgentRecord, req: PendingRequest): void {
+		if (!process.env.OMP_SQUAD_AUTOSUPERVISE) return;
+		const value = chooseFallback(req);
+		if (!value) return; // nothing safe + deterministic to answer (e.g. a host-tool call) → leave for a human
+		if (this.isRiskyRequest(req)) {
+			this.log("info", `autosupervise: SKIP risky "${req.title}" on ${rec.dto.name} (left for human)`);
+			return;
+		}
+		const budget = Number(process.env.OMP_SQUAD_AUTOSUPERVISE_BUDGET) || 5;
+		const used = this.superviseBudget.get(rec.dto.id) ?? 0;
+		if (used >= budget) {
+			this.log("info", `autosupervise: budget ${budget} spent for ${rec.dto.name} — "${req.title}" left for human`);
+			return;
+		}
+		this.superviseBudget.set(rec.dto.id, used + 1);
+		this.log("info", `autosupervise: auto-answered ${rec.dto.name} [${req.kind}] "${req.title}" -> ${value} (${used + 1}/${budget})`);
+		this.answerPending(rec, req, value, AUTO_ACTOR);
+	}
+
+	/** True if a pending request must NEVER be auto-answered: a host-tool side-effect, or text matching RISKY_RE. */
+	private isRiskyRequest(req: PendingRequest): boolean {
+		if (req.source === "tool") return true; // host-tool calls run real side effects — only a human/agent answers
+		return RISKY_RE.test(`${req.title} ${req.message ?? ""} ${(req.options ?? []).join(" ")}`);
+	}
+
 	private async restart(rec: AgentRecord): Promise<void> {
 		await rec.agent.stop();
 		const fresh = this.makeDriver(rec.options);
@@ -962,13 +1080,15 @@ export class SquadManager extends EventEmitter {
 		return readDigest(this.stateDir, id);
 	}
 
-	private onUi(rec: AgentRecord, req: RpcExtensionUIRequest): void {
+	/** Route an extension UI request to a pending entry (and opt-in auto-answer). Protected so a test can drive it. */
+	protected onUi(rec: AgentRecord, req: RpcExtensionUIRequest): void {
+		let added: PendingRequest | undefined;
 		if (req.method === "cancel") {
 			rec.dto.pending = rec.dto.pending.filter((p) => p.id !== req.targetId);
 		} else if (req.method === "notify") {
 			this.append(rec, "system", `(${req.notifyType ?? "info"}) ${req.message}`);
 		} else if (BLOCKING_UI_METHODS[req.method]) {
-			const pending: PendingRequest = {
+			added = {
 				id: req.id,
 				source: "ui",
 				kind: req.method,
@@ -978,12 +1098,13 @@ export class SquadManager extends EventEmitter {
 				placeholder: req.method === "input" ? req.placeholder : req.method === "editor" ? req.prefill : undefined,
 				createdAt: Date.now(),
 			};
-			rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== req.id), pending];
-			this.append(rec, "system", `⛔ needs input: ${pending.title}`);
+			rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== req.id), added];
+			this.append(rec, "system", `⛔ needs input: ${added.title}`);
 		}
 		rec.dto.status = this.derive(rec);
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
+		if (added) this.maybeAutoSupervise(rec, added); // opt-in bounded auto-answer (registers the request first, above)
 	}
 
 	private onHostTool(rec: AgentRecord, call: { id: string; toolName: string; arguments: unknown }): void {
