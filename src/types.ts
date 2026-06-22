@@ -182,6 +182,10 @@ export interface AgentDTO {
 	activity?: string;
 	/** Latest todo summary "done/total" + active task text. */
 	todo?: { done: number; total: number; active?: string };
+	/** ms epoch when this agent began working — the anchor for the completion estimate. */
+	startedAt?: number;
+	/** Rough estimated completion time (ms epoch) from progress rate; absent until there's progress. A hint, not a deadline. */
+	etaAt?: number;
 	/** Context window usage 0..1. */
 	contextPct?: number;
 	/** Compact rollup of the latest/in-flight run (tools, cost, duration); live/derived. */

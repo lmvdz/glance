@@ -16,6 +16,7 @@ import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand 
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
+import { estimateEta } from "./eta.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
@@ -349,6 +350,7 @@ export class SquadManager extends EventEmitter {
 			id: p.id,
 			name: p.name,
 			status: "starting",
+			startedAt: Date.now(),
 			repo: p.repo,
 			worktree: p.worktree,
 			branch: p.branch,
@@ -751,6 +753,7 @@ export class SquadManager extends EventEmitter {
 			id,
 			name,
 			status: "starting",
+			startedAt: Date.now(),
 			repo,
 			worktree: cwd,
 			branch: resolvedBranch,
@@ -1357,6 +1360,10 @@ export class SquadManager extends EventEmitter {
 		const active = tasks.find((t) => t.status === "in_progress")?.content;
 		const next: AgentDTO["todo"] = tasks.length ? { done, total: tasks.length, active } : undefined;
 		rec.dto.todo = next;
+		// Rough completion estimate from progress rate (tasks done/total over elapsed). A hint, not a deadline.
+		const elapsed = rec.dto.startedAt ? Date.now() - rec.dto.startedAt : 0;
+		const remaining = next ? estimateEta(next.done, next.total, elapsed) : undefined;
+		rec.dto.etaAt = remaining !== undefined ? Date.now() + remaining : undefined;
 		// RpcSessionState.contextUsage.percent is a 0..100 percentage; AgentDTO.contextPct is a 0..1 fraction.
 		rec.dto.contextPct = state.contextUsage ? state.contextUsage.percent / 100 : rec.dto.contextPct;
 		if (state.model) rec.dto.model = `${state.model.provider}/${state.model.id}`;
