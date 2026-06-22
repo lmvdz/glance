@@ -23,6 +23,8 @@ interface Shared {
 	stages: StageEvent[];
 	cap: number;
 	index: number;
+	/** Last normalized (trimmed) output of each goal-gate node, to detect a zero-progress retry loop. */
+	goalOutputs: Record<string, string>;
 }
 
 export class WorkflowCancelled extends Error {
@@ -48,7 +50,7 @@ export class WorkflowEngine {
 	async run(goal: string, opts?: { resume?: WorkflowRunState; checkpoint?: (c: EngineCheckpoint) => void }): Promise<RunResult> {
 		const resume = opts?.resume;
 		const ctx: RunContext = { goal, vars: resume ? { ...resume.vars } : {}, outcome: resume?.outcome, preferredLabel: resume?.preferredLabel };
-		const shared: Shared = { visits: resume ? { ...resume.visits } : {}, stages: [], cap: this.wf.maxNodeVisits ?? DEFAULT_NODE_VISITS, index: resume?.index ?? 0 };
+		const shared: Shared = { visits: resume ? { ...resume.visits } : {}, stages: [], cap: this.wf.maxNodeVisits ?? DEFAULT_NODE_VISITS, index: resume?.index ?? 0, goalOutputs: {} };
 
 		let current: string | undefined = resume?.currentNode ?? this.wf.start;
 		let resuming = resume !== undefined;
@@ -62,6 +64,12 @@ export class WorkflowEngine {
 			if (!resuming) {
 				const limit = node.maxVisits ?? shared.cap;
 				if ((shared.visits[current] ?? 0) >= limit) {
+					// Visit cap hit: route to a declared overflow target (e.g. fix-up → escalate) instead
+					// of hard-failing; with no overflow this is the original loop-bounding failure.
+					if (node.overflow) {
+						current = node.overflow;
+						continue;
+					}
 					return { outcome: "failed", reason: `node "${current}" exceeded its visit cap (${limit})`, stages: shared.stages };
 				}
 				shared.visits[current] = (shared.visits[current] ?? 0) + 1;
@@ -77,7 +85,7 @@ export class WorkflowEngine {
 				next = this.findMerge(node);
 			} else {
 				await this.execute(node, ctx, resuming);
-				next = this.route(node, ctx);
+				next = this.noProgressRoute(node, ctx, shared, this.route(node, ctx));
 			}
 			resuming = false;
 
@@ -214,6 +222,26 @@ export class WorkflowEngine {
 		if (node.goalGate && node.retryTarget && ctx.outcome === "failed") return node.retryTarget;
 		if (fallback !== undefined) return fallback;
 		return undefined;
+	}
+
+	/**
+	 * No-progress short-circuit. A goal-gate node that just FAILED with output identical to its
+	 * previous visit isn't advancing — the fix-up loop is reproducing the same error. Skip the
+	 * remaining retry budget and jump straight to the retry node's overflow (escalation) target;
+	 * if escalation has already run and we're still stuck, fail outright (return undefined).
+	 */
+	private noProgressRoute(node: WorkflowNode, ctx: RunContext, shared: Shared, next: string | undefined): string | undefined {
+		if (!node.goalGate || ctx.outcome !== "failed") return next;
+		// Normalize by trimming only — exact equality on the trimmed gate output is enough to catch
+		// a loop reproducing the identical error (e.g. the same tsc message run after run).
+		const current = (ctx.vars.lastOutput ?? "").trim();
+		const previous = shared.goalOutputs[node.id];
+		shared.goalOutputs[node.id] = current;
+		if (previous === undefined || previous !== current) return next; // first visit, or progress made
+		const escalate = node.retryTarget ? this.wf.nodes.get(node.retryTarget)?.overflow : undefined;
+		if (!escalate) return next; // no escalation target → keep normal bounded-loop routing (no-op without overflow)
+		if ((shared.visits[escalate] ?? 0) === 0) return escalate; // identical failure: skip the wasted retries, jump to escalation
+		return undefined; // escalation already ran and still no progress → terminal fail
 	}
 }
 

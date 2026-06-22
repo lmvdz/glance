@@ -19,13 +19,16 @@ const IMPLEMENT_PROMPT = "Complete the goal above. Implement it fully, then stop
 const FIXUP_PROMPT = "The verify command failed. Read the recent command output and fix every failure it reports. Change only what the failures require, then stop.";
 const WRITE_TEST_PROMPT =
 	"Author the acceptance test(s) for the goal above FIRST. Cover the behaviour the goal specifies, then RUN them and confirm they FAIL (red) — proving they exercise code that does not exist yet. Do not implement the feature. Stop once the tests are written and confirmed failing.";
+const ESCALATE_PROMPT =
+	'The verify gate still fails after repeated fixups. Do NOT guess any library or framework API. For each error, READ the installed package under node_modules — its package.json "exports" map and its .d.ts type declarations — to find the correct import path and exact signature, then fix the usage to match the installed types. Confirm against the installed types before editing, then stop.';
 
 export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
 	const nodes = new Map<string, WorkflowNode>([
 		["start", { id: "start", kind: "start", label: "Start", attrs: {} }],
 		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
 		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "fixup", attrs: {} }],
-		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, attrs: {} }],
+		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, overflow: "escalate", attrs: {} }],
+		["escalate", { id: "escalate", kind: "agent", label: "Escalate", prompt: ESCALATE_PROMPT, maxVisits: 2, attrs: {} }],
 		["exit", { id: "exit", kind: "exit", label: "Exit", attrs: {} }],
 	]);
 	return {
@@ -37,6 +40,7 @@ export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
 			{ from: "verify", to: "exit", label: "Pass", condition: "outcome=succeeded" },
 			{ from: "verify", to: "fixup", label: "Fix" },
 			{ from: "fixup", to: "verify" },
+			{ from: "escalate", to: "verify" },
 		],
 		start: "start",
 		exit: "exit",
@@ -58,7 +62,8 @@ export function buildTddVerifyWorkflow(spec: VerifySpec): Workflow {
 		["write-test", { id: "write-test", kind: "agent", label: "Write test", prompt: WRITE_TEST_PROMPT, attrs: {} }],
 		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
 		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "fixup", attrs: {} }],
-		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, attrs: {} }],
+		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, overflow: "escalate", attrs: {} }],
+		["escalate", { id: "escalate", kind: "agent", label: "Escalate", prompt: ESCALATE_PROMPT, maxVisits: 2, attrs: {} }],
 		["exit", { id: "exit", kind: "exit", label: "Exit", attrs: {} }],
 	]);
 	return {
@@ -71,6 +76,7 @@ export function buildTddVerifyWorkflow(spec: VerifySpec): Workflow {
 			{ from: "verify", to: "exit", label: "Pass", condition: "outcome=succeeded" },
 			{ from: "verify", to: "fixup", label: "Fix" },
 			{ from: "fixup", to: "verify" },
+			{ from: "escalate", to: "verify" },
 		],
 		start: "start",
 		exit: "exit",
