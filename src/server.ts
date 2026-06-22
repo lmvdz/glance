@@ -324,7 +324,10 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
-		if (url.pathname === "/api/health") return Response.json({ ok: true, agents: manager.list().length, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()) });
+		if (url.pathname === "/api/health") {
+			const h = await manager.sampleHealth();
+			return Response.json({ ok: h.warnings.length === 0, warnings: h.warnings, ...h.sample, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()), at: h.at });
+		}
 		if (url.pathname === "/api/presence") {
 			const repo = url.searchParams.get("repo");
 			return Response.json(repo ? await who(repo) : await all());

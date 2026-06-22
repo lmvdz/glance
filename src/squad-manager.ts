@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver } from "./agent-driver.ts";
+import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
@@ -169,6 +170,8 @@ export class SquadManager extends EventEmitter {
 	private pollTimer?: Timer;
 	/** Throttle counter for the periodic orphan-host reap in poll(). */
 	private reapTicks = 0;
+	/** Last logged warning set, so a persistent warning logs once (on change), not every poll. */
+	private lastWarnKey = "";
 	private dispatcher?: Dispatcher;
 	private readonly scheduler = new Scheduler();
 	private orchestrator?: Orchestrator;
@@ -1259,6 +1262,32 @@ export class SquadManager extends EventEmitter {
 		// Periodically (~every 30s) reap detached hosts the roster no longer owns. Safe because an
 		// agent is in this.agents before its host spawns, so a just-spawned agent is never reaped.
 		if (++this.reapTicks % 12 === 0) void this.reapOrphans();
+		void this.sampleHealth().then((h) => {
+			const key = h.warnings.join("|");
+			if (key && key !== this.lastWarnKey) this.log("warn", `watchdog: ${h.warnings.join("; ")}`);
+			this.lastWarnKey = key;
+		});
+	}
+
+	/** Snapshot daemon health (memory/load/agents/detached hosts) and judge it. Polled + served at /api/health. */
+	async sampleHealth(): Promise<{ sample: HealthSample; warnings: string[]; at: number }> {
+		const ncpu = os.cpus().length || 1;
+		let hosts = 0;
+		try {
+			hosts = (await fs.readdir(path.dirname(socketPathFor("_")))).filter((f) => f.endsWith(".sock")).length;
+		} catch {
+			/* sockets dir absent ⇒ no hosts */
+		}
+		const sample: HealthSample = {
+			rssMb: process.memoryUsage().rss / 1e6,
+			load1: os.loadavg()[0] ?? 0,
+			ncpu,
+			freeRatio: os.totalmem() > 0 ? os.freemem() / os.totalmem() : 1,
+			agents: liveAgents(this.list()),
+			hosts,
+		};
+		const warnings = assessHealth(sample, defaultHealthLimits(ncpu, hardAgentCeiling()));
+		return { sample, warnings, at: Date.now() };
 	}
 
 	private applyState(rec: AgentRecord, state: RpcSessionState): void {
