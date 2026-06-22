@@ -9,6 +9,8 @@
  * is lost — so this never drains or stops agents.
  */
 
+import { hardenedGit } from "./git-harden.ts";
+
 interface GitRun {
 	code: number;
 	stdout: string;
@@ -17,14 +19,8 @@ interface GitRun {
 
 // Raw run: stdout/stderr are returned VERBATIM so SHAs / branch names survive
 // untouched. Call sites trim only where trimming is safe (single-token output).
-async function git(args: string[], cwd: string): Promise<GitRun> {
-	const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
-	const [stdout, stderr, code] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	return { code, stdout, stderr };
+function git(args: string[], cwd: string): Promise<GitRun> {
+	return hardenedGit(args, { cwd });
 }
 
 export interface GitState {

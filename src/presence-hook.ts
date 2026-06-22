@@ -14,12 +14,13 @@
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { claim, heartbeat, PRESENCE_TTL_MS, release } from "./presence.ts";
+import { hardenedGitSync } from "./git-harden.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
 	try {
-		const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "ignore" });
-		if (r.exitCode !== 0) return undefined;
-		const out = r.stdout.toString().trim();
+		const r = hardenedGitSync(["-C", cwd, ...args]);
+		if (r.code !== 0) return undefined;
+		const out = r.stdout.trim();
 		return out.length ? out : undefined;
 	} catch {
 		return undefined;

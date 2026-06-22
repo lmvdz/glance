@@ -5,6 +5,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { hardenedGit } from "./git-harden.ts";
 
 interface GitResult {
 	code: number;
@@ -13,18 +14,10 @@ interface GitResult {
 }
 
 async function runGit(args: string[]): Promise<GitResult> {
-	const proc = Bun.spawn(["git", ...args], {
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [stdout, stderr, code] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
+	const r = await hardenedGit(args);
 	// stdout is returned verbatim: porcelain status is whitespace-significant
 	// (leading status column) and unified diffs are newline-significant.
-	return { code, stdout, stderr: stderr.trim() };
+	return { code: r.code, stdout: r.stdout, stderr: r.stderr.trim() };
 }
 
 const SKIP_DIRS: ReadonlySet<string> = new Set(["node_modules", ".git"]);
@@ -102,8 +95,8 @@ export async function worktreeDiff(dir: string): Promise<FileDiff[]> {
 		const file = rest.startsWith('"') && rest.endsWith('"') ? (JSON.parse(rest) as string) : rest;
 		const untracked = code[0] === "?";
 		const r = untracked
-			? await runGit(["-C", dir, "diff", "--no-index", "--", "/dev/null", file])
-			: await runGit(["-C", dir, "diff", "HEAD", "--", file]);
+			? await runGit(["-C", dir, "diff", "--no-ext-diff", "--no-index", "--", "/dev/null", file])
+			: await runGit(["-C", dir, "diff", "--no-ext-diff", "HEAD", "--", file]);
 		diffs.push({ file, status: code, diff: r.stdout });
 	}
 	return diffs;

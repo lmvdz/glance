@@ -12,6 +12,7 @@
  */
 
 import * as path from "node:path";
+import { hardenedGitSync } from "./git-harden.ts";
 
 /** Collapse any git remote URL form to `host/owner/repo` (lowercased, no scheme/credentials/.git). */
 export function normalizeGitUrl(url: string): string {
@@ -30,9 +31,9 @@ export function normalizeGitUrl(url: string): string {
 export function repoIdentity(repoPath: string): string {
 	try {
 		// `config --get` returns the raw configured URL (no insteadOf rewrite), so two hosts that cloned the same origin agree on identity.
-		const r = Bun.spawnSync(["git", "-C", repoPath, "config", "--get", "remote.origin.url"], { stdout: "pipe", stderr: "ignore" });
-		if (r.exitCode === 0) {
-			const out = r.stdout.toString().trim();
+		const r = hardenedGitSync(["-C", repoPath, "config", "--get", "remote.origin.url"]);
+		if (r.code === 0) {
+			const out = r.stdout.trim();
 			if (out.length > 0) return normalizeGitUrl(out);
 		}
 	} catch {

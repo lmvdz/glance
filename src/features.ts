@@ -13,15 +13,16 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { hardenedGitSync } from "./git-harden.ts";
 import { worktreeDiff } from "./explore.ts";
 import { headCommit, isFresh, proofFor } from "./proof.ts";
 import type { AgentDTO, AgentStatus, FeatureDTO, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
 	try {
-		const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "ignore" });
-		if (r.exitCode !== 0) return undefined;
-		return r.stdout.toString().trim();
+		const r = hardenedGitSync(["-C", cwd, ...args]);
+		if (r.code !== 0) return undefined;
+		return r.stdout.trim();
 	} catch {
 		return undefined;
 	}
@@ -38,9 +39,9 @@ function aheadBehind(repo: string, branch: string): { ahead: number; behind: num
 /** True if merging `branch` into main would conflict (git >= 2.38 merge-tree); undefined if unsupported. */
 function predictsConflict(repo: string, branch: string): boolean | undefined {
 	try {
-		const r = Bun.spawnSync(["git", "-C", repo, "merge-tree", "--write-tree", "HEAD", branch], { stdout: "pipe", stderr: "pipe" });
-		if (r.exitCode === 128) return undefined; // merge-tree unsupported / bad ref
-		return r.exitCode !== 0 || r.stdout.toString().includes("CONFLICT");
+		const r = hardenedGitSync(["-C", repo, "merge-tree", "--write-tree", "HEAD", branch]);
+		if (r.code === 128) return undefined; // merge-tree unsupported / bad ref
+		return r.code !== 0 || r.stdout.includes("CONFLICT");
 	} catch {
 		return undefined;
 	}

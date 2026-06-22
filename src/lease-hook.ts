@@ -18,6 +18,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { claimLease, heartbeatSession, holdersOf, LEASE_TTL_MS, releaseSession } from "./leases.ts";
 import type { LeaseEntry } from "./leases.ts";
+import { hardenedGitSync } from "./git-harden.ts";
 
 interface ToolCallEvent {
 	toolName: string;
@@ -31,9 +32,9 @@ interface ContestedFile {
 
 function git(cwd: string, args: string[]): string | undefined {
 	try {
-		const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "ignore" });
-		if (r.exitCode !== 0) return undefined;
-		const out = r.stdout.toString().trim();
+		const r = hardenedGitSync(["-C", cwd, ...args]);
+		if (r.code !== 0) return undefined;
+		const out = r.stdout.trim();
 		return out.length ? out : undefined;
 	} catch {
 		return undefined;
