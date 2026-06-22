@@ -23,6 +23,8 @@ import { all as allPresence, who as whoPresence } from "./presence.ts";
 import { SquadServer } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
 import { SquadTui } from "./tui.ts";
+import { startExternalSessionTracker } from "./sessions.ts";
+import { startSupervisor } from "./supervisor.ts";
 import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
@@ -64,6 +66,7 @@ GLOBAL
   --host <addr>     Bind address (default: 127.0.0.1; set 0.0.0.0 to reach it from your phone)
                     Env: $OMP_SQUAD_HOST, $OMP_SQUAD_TLS_CERT/$OMP_SQUAD_TLS_KEY (in-process TLS).
                     A bearer token is auto-generated in the state dir and printed on boot.
+  --no-supervise    Don't auto-answer agent prompts (default on; or OMP_SQUAD_AUTO_SUPERVISE=0)
 `;
 
 interface ParsedArgs {
@@ -156,7 +159,15 @@ async function cmdUp(args: string[]): Promise<void> {
 	const server = new SquadServer(manager, { port, hostname: host, token, tls, push });
 	const url = server.start();
 
+	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
+	// pending agent prompts hands-free — both started by the daemon so they live and die with it.
+	const stopTracker = startExternalSessionTracker();
+	const supervise = process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
+	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
+
 	const shutdown = async () => {
+		stopSupervisor?.();
+		stopTracker();
 		await manager.stop();
 		server.stop();
 		process.exit(0);
@@ -168,11 +179,13 @@ async function cmdUp(args: string[]): Promise<void> {
 	const access = reachableUrls(host, port, tls ? "https" : "http").map((u) => `    ${u}/?token=${token}`).join("\n");
 	if (useTui) {
 		process.stdout.write(`omp-squad dashboard: ${url}\n  access token: ${token}\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
 		const tui = new SquadTui(manager);
 		await tui.run();
 		await shutdown();
 	} else {
 		process.stdout.write(`omp-squad daemon running\n  dashboard: ${url}\n  access token: ${token}\n  open from any device on this network (tap to sign in):\n${access}\n  add an agent: omp-squad add <repo> --task "…"\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
 		await new Promise<void>(() => {}); // run until signal
 	}
 }
