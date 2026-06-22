@@ -304,3 +304,44 @@ test("tick is fully inert when OMP_SQUAD_AUTODRIVE is unset (gate precedes every
 	expect(logs).toEqual([]);
 	expect(orch.scheduler.queued).toBe(1); // admission queue untouched
 });
+
+test("blocked land is retried under a cap, then parked — never an infinite merge/reset loop", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	let verifyCalls = 0;
+	let landCalls = 0;
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [agent("blk", "idle")], // plain agent; gate green but land always blocked
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => {
+			throw new Error("feature verify must not run for a plain agent");
+		},
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async () => true,
+		verifyAgent: async () => {
+			verifyCalls++;
+			return true;
+		},
+		landAgentWork: async () => {
+			landCalls++;
+			return false; // diverged / conflict / dirty main — never merges
+		},
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick(); // blocks=1 → will retry (1/3)
+	await orch.tick(); // blocks=2 → will retry (2/3)
+	await orch.tick(); // blocks=3 → parked
+	expect(verifyCalls).toBe(3);
+	expect(landCalls).toBe(3);
+	expect(logs.some((l) => l.includes("will retry (1/3)"))).toBe(true);
+	expect(logs.some((l) => l.includes("parked") && l.includes("blk"))).toBe(true);
+
+	await orch.tick(); // parked ⇒ halted ⇒ no further verify/land
+	expect(verifyCalls).toBe(3);
+	expect(landCalls).toBe(3);
+});

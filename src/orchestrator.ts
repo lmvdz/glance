@@ -69,6 +69,9 @@ function autodrive(): boolean {
 	return process.env.OMP_SQUAD_AUTODRIVE !== "0";
 }
 
+/** Cap identical blocked-land retries before parking — a blocked land won't unblock by re-merging the same refs. */
+const LAND_RETRY_CAP = 3;
+
 export class Orchestrator {
 	private readonly deps: OrchestratorDeps;
 	private timer?: Timer;
@@ -84,6 +87,8 @@ export class Orchestrator {
 	private readonly halted = new Set<string>();
 	/** Confirm-mode: work ids verified GREEN but held for a one-tap Land — skipped so the loop never re-verifies. */
 	private readonly staged = new Set<string>();
+	/** Per-agent blocked-land retries; parked after LAND_RETRY_CAP so a failing land never loops forever. */
+	private readonly landBlocks = new Map<string, number>();
 
 	/**
 	 * Admission queue the manager parks cap-denied spawns into; drained here under the WIP cap (#13).
@@ -158,10 +163,20 @@ export class Orchestrator {
 				if (plain ? await this.deps.landAgentWork!(a.id) : await this.deps.land(feat!)) {
 					this.landed.add(workId);
 					this.attempts.delete(a.id);
+					this.landBlocks.delete(a.id);
 					log(`landed ${workId} (${a.id})`);
 				} else {
-					// Land blocked (diverged/conflict) — left for the conflict path; retried next tick.
-					log(`land blocked for ${workId} (${a.id}) — will retry`);
+					// Land blocked (diverged / conflict / dirty main). Retrying the identical merge won't
+					// help until main or the branch changes — cap retries then park, never an infinite
+					// merge→reset loop. ponytail: in-memory; a daemon restart resets the counter.
+					const blocks = (this.landBlocks.get(a.id) ?? 0) + 1;
+					this.landBlocks.set(a.id, blocks);
+					if (blocks >= LAND_RETRY_CAP) {
+						this.halted.add(a.id);
+						log(`land blocked for ${workId} (${a.id}) ${blocks}× — parked; resolve/land manually`);
+					} else {
+						log(`land blocked for ${workId} (${a.id}) — will retry (${blocks}/${LAND_RETRY_CAP})`);
+					}
 				}
 				continue;
 			}
