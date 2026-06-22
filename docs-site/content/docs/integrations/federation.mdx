@@ -84,6 +84,43 @@ resolved via `tailscale whois --json <ip>` (`tailscaleWhois` in `federation.ts`)
 auto-reconnects with capped backoff (500 ms → 30 s) and **never throws a transport error** to
 the caller — an unreachable coordinator simply means an empty, silent room.
 
+## Transport rationale: why a relay, not a P2P stack like iroh
+
+The transport is deliberately minimal: **Tailscale provides the secure network, identity, and
+NAT traversal; the coordinator provides fan-out.** Everything sensitive — encryption, who-is-who,
+reaching a host behind NAT — is delegated to the tailnet, leaving omp-squad with the ~85-line
+opaque relay above plus a gossip bus.
+
+A natural question is whether to replace this with a peer-to-peer networking stack such as
+[iroh](https://github.com/n0-computer/iroh) — "dial by public key", QUIC with hole-punching and
+public-relay fallback, plus `iroh-gossip` (pub/sub) and `iroh-docs` (an eventually-consistent
+key-value store). The conceptual fit is real: `iroh-gossip` maps onto the presence/lease gossip,
+and `iroh-docs` onto the lease registry.
+
+<Callout type="info">
+**Decision (2026-06): stay on Tailscale + the WS relay; do not adopt iroh.** iroh would *replace*
+the things the tailnet already provides, not add a missing capability — and it is a Rust library.
+Pulling it into this TS/Bun, zero-native-dependency codebase (see the [Contributing](/docs/contributing)
+ponytail mandate) means an FFI addon (`iroh-ffi`) or a Rust sidecar: a large footprint for a
+transport that already works and is opt-in.
+</Callout>
+
+What each layer would map to, if the substitution were ever made:
+
+| omp-squad today | iroh equivalent |
+|---|---|
+| Tailscale tailnet (encryption, NAT traversal, identity) | iroh endpoint — public-key identity, hole-punch + relay fallback, QUIC encryption |
+| `coordinator.ts` WS relay (central fan-out) | `iroh-gossip` (serverless pub/sub overlay) |
+| `presence` / `leases` gossip frames | `iroh-gossip` topics, or `iroh-docs` for lease/presence state |
+| `tailscale whois` → `Actor` | iroh `EndpointId` (public key) — no tailnet SSO |
+
+**When to revisit:** only if the tailnet requirement itself becomes the limitation — i.e. you need
+to federate operators who are *not* on a shared tailnet, with zero infrastructure (no coordinator to
+host) and zero-config NAT traversal. Even then the clean integration is a **sidecar** (an `iroh`
+process the daemon speaks to) behind the existing `FederationBus` seam in `src/federation.ts` — not
+an in-process native dependency — so `NullFederationBus` / `TailnetFederationBus` would simply gain
+an `IrohFederationBus` sibling.
+
 ## Presence
 
 The squad daemon publishes its `OperatorPresence` to the coordinator through its bus, on every
