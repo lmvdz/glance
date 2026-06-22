@@ -18,6 +18,7 @@ import type { AgentDriver } from "./agent-driver.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
+import { AcpAgentDriver } from "./acp-agent-driver.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
@@ -603,6 +604,7 @@ export class SquadManager extends EventEmitter {
 			thinking,
 			issue: opts.issue,
 			kind,
+			runtime: opts.runtime,
 			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify } } : undefined,
 			sandbox: opts.sandbox,
 			parentId: opts.parentId,
@@ -666,6 +668,9 @@ export class SquadManager extends EventEmitter {
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
+		}
+		if (p.runtime === "acp") {
+			return new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model });
 		}
 		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
 	}
