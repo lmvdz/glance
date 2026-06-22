@@ -54,6 +54,27 @@ function projectIdFor(repo: string, cfg: PlaneConfig): string | undefined {
 	return cfg.projectMap[repo] ?? cfg.projectMap[path.basename(repo)] ?? cfg.fallbackProjectId;
 }
 
+interface PlaneContext {
+	cfg: PlaneConfig;
+	headers: Record<string, string>;
+	projectId?: string;
+	base: string;
+}
+
+function projectBase(cfg: PlaneConfig, projectId: string): string {
+	return `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
+}
+
+/** Shared preamble: config + auth headers + (repo→)project id + project base URL. `undefined` ⇒ Plane not configured. */
+function planeContext(repo?: string): PlaneContext | undefined {
+	const cfg = readConfig();
+	if (!cfg) return undefined;
+	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
+	const projectId = repo != null ? projectIdFor(repo, cfg) : undefined;
+	// ponytail: base is only valid with a projectId; every caller gates on projectId before using it.
+	return { cfg, headers, projectId, base: projectId ? projectBase(cfg, projectId) : "" };
+}
+
 interface PlaneIssue {
 	id: string;
 	name?: string;
@@ -71,20 +92,17 @@ function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string): Issue
 		identifier: ident && raw.sequence_id != null ? `${ident}-${raw.sequence_id}` : undefined,
 		name: raw.name ?? "(untitled)",
 		state: raw.state_detail?.group ?? raw.state,
-		url: `${cfg.baseUrl.replace(/\/api.*/, "")}/${cfg.workspace}/projects/${projectId}/issues/${raw.id}`,
+		url: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/issues/${raw.id}`,
 		projectId,
 	};
 }
 
 /** Open issues for the Plane project mapped to `repo`. `null` ⇒ Plane not configured. */
 export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> {
-	const cfg = readConfig();
-	if (!cfg) return null;
-	const projectId = projectIdFor(repo, cfg);
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId) return [];
-
-	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
-	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
 	const res = await fetch(`${base}/issues/?per_page=50`, { headers }).catch(() => null);
 	if (!res || !res.ok) return [];
 	const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
@@ -103,14 +121,16 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 }
 
 /** Map a project's state ids → group (backlog/unstarted/started/completed/cancelled). */
-async function fetchStateGroups(projectBase: string, headers: Record<string, string>): Promise<Map<string, string>> {
+async function fetchStateGroups(base: string, headers: Record<string, string>): Promise<Map<string, string>> {
 	const map = new Map<string, string>();
-	const res = await fetch(`${projectBase}/states/?per_page=100`, { headers }).catch(() => null);
-	if (!res || !res.ok) return map;
-	const data = (await res.json().catch(() => null)) as { results?: PlaneState[] } | PlaneState[] | null;
-	const states = Array.isArray(data) ? data : (data?.results ?? []);
-	for (const s of states) if (s.id && s.group) map.set(s.id, s.group);
+	for (const s of await fetchStates(base, headers)) if (s.id && s.group) map.set(s.id, s.group);
 	return map;
+}
+
+/** Fetch a project's workflow states — the single source for the /states call. */
+async function fetchStates(base: string, headers: Record<string, string>): Promise<PlaneState[]> {
+	const data = (await getJson(`${base}/states/?per_page=100`, headers)) as { results?: PlaneState[] } | PlaneState[] | null;
+	return Array.isArray(data) ? data : (data?.results ?? []);
 }
 
 export function planeConfigured(): boolean {
@@ -130,15 +150,11 @@ interface PlaneState {
 
 /** Move an issue to the first state in `group` (e.g. "completed"/"started"). Best-effort; true on success. */
 async function transitionTo(issue: IssueRef, group: string): Promise<boolean> {
-	const cfg = readConfig();
-	if (!cfg || !issue.projectId) return false;
-	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${issue.projectId}`;
-	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
-	const statesRes = await fetch(`${base}/states/?per_page=100`, { headers }).catch(() => null);
-	if (!statesRes || !statesRes.ok) return false;
-	const sdata = (await statesRes.json().catch(() => null)) as { results?: PlaneState[] } | PlaneState[] | null;
-	const states = Array.isArray(sdata) ? sdata : (sdata?.results ?? []);
-	const target = states.find((s) => s.group === group);
+	const ctx = planeContext();
+	if (!ctx || !issue.projectId) return false;
+	const { cfg, headers } = ctx;
+	const base = projectBase(cfg, issue.projectId);
+	const target = (await fetchStates(base, headers)).find((s) => s.group === group);
 	if (!target) return false;
 	const res = await fetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: target.id }) }).catch(() => null);
 	return !!res && res.ok;
@@ -156,12 +172,10 @@ export async function startPlaneIssue(issue: IssueRef): Promise<boolean> {
 
 /** Create an issue in the Plane project mapped to `repo`, returning its ref. `null` ⇒ not configured / no project / failed. */
 export async function createPlaneIssue(repo: string, name: string): Promise<IssueRef | null> {
-	const cfg = readConfig();
-	if (!cfg) return null;
-	const projectId = projectIdFor(repo, cfg);
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId) return null;
-	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
-	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
 	const res = await fetch(`${base}/issues/`, { method: "POST", headers, body: JSON.stringify({ name }) }).catch(() => null);
 	if (!res || !res.ok) return null;
 	const raw = (await res.json().catch(() => null)) as PlaneIssue | null;
@@ -204,12 +218,10 @@ async function allIssues(base: string, headers: Record<string, string>): Promise
 
 /** Resolve a feature's Plane issue identifiers → status group + web deep link. `null` ⇒ not configured. */
 export async function featureTickets(repo: string, identifiers: string[]): Promise<PlaneTicket[] | null> {
-	const cfg = readConfig();
-	if (!cfg) return null;
-	const projectId = projectIdFor(repo, cfg);
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId || !identifiers.length) return [];
-	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
-	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
 	const [prefix, groups, issues] = await Promise.all([projectPrefix(base, headers), fetchStateGroups(base, headers), allIssues(base, headers)]);
 	const want = new Set(identifiers.map((s) => s.toUpperCase()));
 	const app = webBase(cfg);
@@ -226,12 +238,10 @@ export async function featureTickets(repo: string, identifiers: string[]): Promi
 
 /** Create a Plane module for a feature and group its issues under it. `null` ⇒ not configured / failed. */
 export async function ensureFeatureModule(repo: string, name: string, identifiers: string[]): Promise<{ moduleId: string; moduleUrl: string } | null> {
-	const cfg = readConfig();
-	if (!cfg) return null;
-	const projectId = projectIdFor(repo, cfg);
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId) return null;
-	const headers = { "x-api-key": cfg.apiKey, "content-type": "application/json" };
-	const base = `${cfg.baseUrl}/api/v1/workspaces/${cfg.workspace}/projects/${projectId}`;
 	const res = await fetch(`${base}/modules/`, { method: "POST", headers, body: JSON.stringify({ name }) }).catch(() => null);
 	if (!res || !res.ok) return null;
 	const mod: unknown = await res.json().catch(() => null);

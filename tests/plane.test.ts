@@ -8,7 +8,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { createPlaneIssue, planeConfigured, startPlaneIssue } from "../src/plane.ts";
 
-const PLANE_ENV = ["PLANE_API_KEY", "PLANE_API_TOKEN", "PLANE_WORKSPACE", "PLANE_WORKSPACE_SLUG", "PLANE_PROJECT_MAP", "PLANE_BASE_URL", "PLANE_PROJECT_ID"] as const;
+const PLANE_ENV = ["PLANE_API_KEY", "PLANE_API_TOKEN", "PLANE_WORKSPACE", "PLANE_WORKSPACE_SLUG", "PLANE_PROJECT_MAP", "PLANE_BASE_URL", "PLANE_PROJECT_ID", "PLANE_APP_URL"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of PLANE_ENV) saved[k] = process.env[k];
 
@@ -128,4 +128,26 @@ test("startPlaneIssue no-ops (false) when the issue carries no projectId", async
 	process.env.PLANE_API_KEY = "secret";
 	process.env.PLANE_WORKSPACE = "acme";
 	expect(await startPlaneIssue({ id: "iss-1", name: "x" })).toBe(false);
+});
+
+test("createPlaneIssue deep-links to the app host, not the API base host", async () => {
+	const server = Bun.serve({
+		port: 0,
+		fetch: async () => Response.json({ id: "iss-1", name: "x", sequence_id: 7, project_detail: { identifier: "OMPSQ" } }, { status: 201 }),
+	});
+	try {
+		process.env.PLANE_API_KEY = "secret";
+		process.env.PLANE_WORKSPACE = "acme";
+		process.env.PLANE_BASE_URL = `http://127.0.0.1:${server.port}`; // API host issues are fetched from
+		process.env.PLANE_APP_URL = "https://app.acme.test"; // distinct app host deep links must use
+		process.env.PLANE_PROJECT_MAP = JSON.stringify({ "/repo/app": "proj-9" });
+
+		const ref = await createPlaneIssue("/repo/app", "x");
+
+		// OMPSQ-31: the deep link points at the app host, never the API base host.
+		expect(ref?.url).toBe("https://app.acme.test/acme/projects/proj-9/issues/iss-1");
+		expect(ref?.url.includes(`127.0.0.1:${server.port}`)).toBe(false);
+	} finally {
+		server.stop(true);
+	}
 });
