@@ -27,14 +27,27 @@ export interface AuthConfig {
 	baseURL?: string;
 }
 
+/** The placeholder session-signing secret. Used ONLY as a loopback-dev fallback when
+ *  BETTER_AUTH_SECRET is unset; boot refuses it on a non-loopback bind (see secretBootDecision in index.ts). */
+export const DEV_INSECURE_SECRET = "dev-insecure-secret-set-BETTER_AUTH_SECRET-in-prod";
+
 /** BetterAuth options over the shared dialect. Used both to migrate now and to instantiate auth in P1. */
 export function authOptions({ dialect, type, trustedOrigins, baseURL }: AuthConfig) {
+	const resolvedBase = baseURL || process.env.BETTER_AUTH_URL || "http://localhost:7878";
 	return {
 		database: { dialect, type },
-		secret: process.env.BETTER_AUTH_SECRET || "dev-insecure-secret-set-BETTER_AUTH_SECRET-in-prod",
-		baseURL: baseURL || process.env.BETTER_AUTH_URL || "http://localhost:7878",
-		emailAndPassword: { enabled: true },
-		plugins: [organization()],
+		secret: process.env.BETTER_AUTH_SECRET || DEV_INSECURE_SECRET,
+		baseURL: resolvedBase,
+		// Sign-up is CLOSED by default (no open registration on a shared fleet); set OMP_SQUAD_ALLOW_SIGNUP=1
+		// to open it. New/no-org users bridge to `viewer` (read-only) until an admin adds them to an org.
+		emailAndPassword: { enabled: true, disableSignUp: process.env.OMP_SQUAD_ALLOW_SIGNUP !== "1" },
+		// allowUserToCreateOrganization:false ⇒ org ownership (→ admin tier) can't be self-minted;
+		// the loopback bootstrap admin provisions the first org/members out-of-band.
+		plugins: [organization({ allowUserToCreateOrganization: false })],
+		// Throttle sign-in/up regardless of NODE_ENV (better-auth only rate-limits in production by default).
+		rateLimit: { enabled: true, window: 60, max: 30 },
+		// Secure cookies when the public origin is https (e.g. behind a TLS tunnel); plain http for loopback dev.
+		advanced: { useSecureCookies: resolvedBase.startsWith("https://") },
 		...(trustedOrigins && trustedOrigins.length ? { trustedOrigins } : {}),
 	};
 }

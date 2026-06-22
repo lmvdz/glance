@@ -16,6 +16,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { PushService } from "./push.ts";
 import { TailnetFederationBus } from "./federation.ts";
@@ -28,7 +29,7 @@ import { startSupervisor } from "./supervisor.ts";
 import { acquireStateLock, StateLockError } from "./state-lock.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
 import { openDatabase } from "./db/index.ts";
-import { makeAuth } from "./db/auth.ts";
+import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
 import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
@@ -144,13 +145,28 @@ async function postCommand(flags: Record<string, string | boolean>, cmd: ClientC
 	}
 }
 
+/** Whether a host binds only the loopback interface (local-only). */
+export function isLoopbackHost(host: string): boolean {
+	return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
 /**
  * True iff binding `host` without TLS would put the bearer token on the wire in
  * cleartext: a non-loopback bind (anything but 127.0.0.1 / ::1 / localhost) with hasTls false.
  */
 export function bindIsInsecure(host: string, hasTls: boolean): boolean {
-	const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
-	return !loopback && !hasTls;
+	return !isLoopbackHost(host) && !hasTls;
+}
+
+/**
+ * DB-mode boot decision for the session-signing secret. A missing or dev-default BETTER_AUTH_SECRET
+ * makes every session forgeable (total auth bypass). Refuse to boot when bound non-loopback;
+ * warn-but-allow on loopback (local dev only).
+ */
+export function secretBootDecision(secret: string | undefined, host: string): "ok" | "warn" | "refuse" {
+	const weak = !secret || secret === DEV_INSECURE_SECRET;
+	if (!weak) return "ok";
+	return isLoopbackHost(host) ? "warn" : "refuse";
 }
 
 async function cmdUp(args: string[]): Promise<void> {
@@ -182,12 +198,38 @@ async function cmdUp(args: string[]): Promise<void> {
 	// build the live better-auth instance the server gates on. FILE mode (default): openDatabase()
 	// returns null, `auth` stays undefined, and nothing about today's behavior changes.
 	const dbHandle = await openDatabase();
+	// F1: DB mode signs sessions with BETTER_AUTH_SECRET. A missing/default secret lets anyone forge
+	// any user's session — refuse to boot when exposed (non-loopback); warn loudly on loopback dev.
+	if (dbHandle) {
+		const decision = secretBootDecision(process.env.BETTER_AUTH_SECRET, host);
+		if (decision !== "ok") {
+			const suggestion = randomBytes(32).toString("hex");
+			if (decision === "refuse") {
+				process.stderr.write(
+					`refusing to boot DB mode on ${host} without a strong BETTER_AUTH_SECRET.\n` +
+						`Sessions are signed with this secret; a missing or default value lets anyone forge any\n` +
+						`user's session — a total auth bypass. Set a strong secret and restart:\n` +
+						`  export BETTER_AUTH_SECRET=${suggestion}\n`,
+				);
+				process.exit(1);
+			}
+			process.stderr.write(
+				`WARNING: DB mode on loopback with a missing/default BETTER_AUTH_SECRET — sessions are forgeable.\n` +
+					`OK for local dev only. Before exposing this daemon, set a strong secret:\n` +
+					`  export BETTER_AUTH_SECRET=${suggestion}\n`,
+			);
+		}
+	}
 	const scheme = tls ? "https" : "http";
+	// F4/F5: trust the reachable daemon origins plus the external BETTER_AUTH_URL origin (TLS tunnel).
+	// The same set gates better-auth's origin check AND the squad's own cross-site mutation defense.
+	const externalOrigin = process.env.BETTER_AUTH_URL ? new URL(process.env.BETTER_AUTH_URL).origin : undefined;
+	const trustedOrigins = [...new Set([...reachableUrls(host, port, scheme).map((u) => new URL(u).origin), ...(externalOrigin ? [externalOrigin] : [])])];
 	const auth: AuthInstance | undefined = dbHandle
 		? (makeAuth({
 				dialect: dbHandle.dialect,
 				type: dbHandle.type,
-				trustedOrigins: reachableUrls(host, port, scheme).map((u) => new URL(u).origin),
+				trustedOrigins,
 				baseURL: process.env.BETTER_AUTH_URL || `${scheme}://${host}:${port}`,
 			}) as unknown as AuthInstance)
 		: undefined;
@@ -212,7 +254,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	const push = new PushService(stateDir);
 	await push.init();
 	const roleTokens = { operator: process.env.OMP_SQUAD_OPERATOR_TOKEN || undefined, viewer: process.env.OMP_SQUAD_VIEWER_TOKEN || undefined };
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined });
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer

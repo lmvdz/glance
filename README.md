@@ -276,10 +276,20 @@ above (state under `~/.omp/squad`, no accounts). Set **`DATABASE_URL`** and it b
 mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-auth.com):
 
 - **Accounts + sessions** replace the bearer token. The dashboard shows a sign-in / sign-up
-  screen; auth is email + password with httpOnly cookie sessions (`/api/auth/*`).
-- **Organizations, members, roles.** A user creates orgs, invites members by email, and assigns
-  roles (`owner` > `admin` > `member`); the active-org role bridges to the fleet's RBAC tiers
-  (owner/admin → `admin`, member → `operator`).
+  screen; auth is email + password with httpOnly, `SameSite=Lax` cookie sessions (`/api/auth/*`),
+  rate-limited against brute force. **Sign-up is closed by default** — set `OMP_SQUAD_ALLOW_SIGNUP=1`
+  to open self-service registration; otherwise users are provisioned by the bootstrap admin.
+- **Least privilege by default.** A signed-in user with **no active org is `viewer`** (read-only).
+  Operator/admin tiers come only from an org membership — the active-org role bridges to the
+  fleet's RBAC tiers (owner/admin → `admin`, member → `operator`). Self-minting an org is
+  disabled (`allowUserToCreateOrganization: false`), so a remote user can't escalate to admin.
+- **Bootstrap (break-glass).** Provisioning the first org/members needs an admin, so a request
+  **from loopback carrying the daemon's bearer token** (the access token printed at boot, used by
+  the `omp-squad` CLI on the same box) resolves to `admin` even in DB mode. Off-box requests get
+  no token shortcut — they must use sessions. The operator on the machine bootstraps; attackers
+  off-box cannot.
+- **Organizations, members, roles.** The bootstrap admin creates orgs, invites members by email,
+  and assigns roles (`owner` > `admin` > `member`).
 - **Settings surface** (gear in the nav): Account, Organization, Members, Roles & Permissions —
   plus Appearance / Notifications / Daemon, which also show in file mode.
 - **Storage.** `postgres(ql)://…` ⇒ Postgres (with row-level-security backstops); anything else
@@ -288,15 +298,18 @@ mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-a
 | Env | Meaning | Default |
 |---|---|---|
 | `DATABASE_URL` | Unset ⇒ file mode. `postgres://…` ⇒ Postgres; `sqlite:<path>`/path ⇒ SQLite. Enables DB mode. | _(unset)_ |
-| `BETTER_AUTH_SECRET` | Session-signing secret — **set a strong value in production** | dev-insecure default |
-| `BETTER_AUTH_URL` | Public base URL for auth origin checks | the daemon's bind URL |
+| `BETTER_AUTH_SECRET` | Session-signing secret. **Required** in DB mode on a non-loopback bind — the daemon **refuses to boot** without a strong value (a missing/default secret lets anyone forge sessions); on loopback it warns and falls back to a dev default. Generate with `openssl rand -hex 32`. | _(none; dev default on loopback only)_ |
+| `BETTER_AUTH_URL` | Public base URL for origin checks + cookie `Secure`. **Behind a TLS tunnel you MUST set this** to the external `https://…` origin, so logins pass the origin check and the session cookie is marked `Secure`. | the daemon's bind URL |
+| `OMP_SQUAD_ALLOW_SIGNUP` | `1` opens self-service sign-up; otherwise sign-up is closed (bootstrap/invite only). | _(unset ⇒ closed)_ |
 
 > **Maturity** (tracked in Plane → module *Multi-tenant SaaS*). Landed + verified: the DB
-> foundation (P0), the BetterAuth identity layer (P1, *pending human security review*), and the
-> web settings/org/member UI. **Not yet landed:** per-org runtime isolation (P2) and full RBAC
-> enforcement on every mutation (P3) — so today all authenticated users of a DB-mode daemon share
-> one fleet/state. DB mode previews the SaaS surface; it is **not** a tenant-isolated production
-> deployment yet. File mode is the default and unaffected.
+> foundation (P0), the BetterAuth identity layer + security hardening (P1: secret boot guard,
+> closed sign-up, viewer-by-default, no self-minted admin, rate limiting, cross-site Origin
+> defense, loopback bootstrap admin), and the web settings/org/member UI. **Not yet landed:**
+> per-org runtime isolation (P2) and full RBAC enforcement on every mutation (P3) — so today all
+> **org members** of a DB-mode daemon still share one fleet/state. DB mode previews the SaaS
+> surface; it is **not** a tenant-isolated production deployment yet. File mode is the default and
+> unaffected.
 
 **Bind beyond loopback** to reach it from your phone:
 

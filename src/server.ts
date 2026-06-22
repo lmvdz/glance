@@ -27,7 +27,7 @@ import { leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
-import { actorForRole, type AuthPolicy, RbacDenied, requiredRole, resolveRole, roleAtLeast } from "./auth.ts";
+import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role } from "./types.ts";
@@ -88,6 +88,9 @@ export interface SquadServerOptions {
 	auth?: AuthInstance;
 	/** The open DB handle backing DB mode; held so the server's lifetime owns it (closed by the daemon). */
 	db?: DbHandle;
+	/** Origins trusted for the squad's own cross-site mutation defense (DB mode). Same list the
+	 *  better-auth instance gets (reachable daemon origins + BETTER_AUTH_URL). FILE mode ignores it. */
+	trustedOrigins?: string[];
 }
 
 /** Pure: a short, stable fingerprint of the served UI. Changes whenever index.html changes,
@@ -116,6 +119,11 @@ export function securityHeaders(): Record<string, string> {
 		"X-Frame-Options": "DENY",
 		"Referrer-Policy": "no-referrer",
 	};
+}
+
+/** True if a socket peer address is loopback (IPv4, IPv6, or IPv4-mapped). */
+function isLoopbackAddr(ip: string): boolean {
+	return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 
 export class SquadServer {
@@ -151,6 +159,8 @@ export class SquadServer {
 	private readonly auth: AuthInstance | undefined;
 	/** Open DB handle backing DB mode (owned by the daemon; held here for member/org reads). */
 	private readonly db: DbHandle | undefined;
+	/** Origins allowed to mutate the squad's own routes in DB mode (cross-site defense). */
+	private readonly trustedOrigins: Set<string>;
 
 	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
 		this.manager = manager;
@@ -162,6 +172,7 @@ export class SquadServer {
 		this.authPolicy = { admin: opts.token, operator: opts.roleTokens?.operator, viewer: opts.roleTokens?.viewer };
 		this.auth = opts.auth;
 		this.db = opts.db;
+		this.trustedOrigins = new Set(opts.trustedOrigins ?? []);
 	}
 
 	get url(): string {
@@ -176,15 +187,35 @@ export class SquadServer {
 	}
 
 	/** Bridge identity → RBAC tier: active-org role owner|admin ⇒ admin; member ⇒ operator;
-	 *  authed but no active org (or the lookup fails) ⇒ operator. Only called in DB mode. */
+	 *  authed but with NO active org (or the lookup fails) ⇒ viewer (read-only, never operator).
+	 *  Only called in DB mode. */
 	private async bridgeRole(req: Request, activeOrgId: string | null | undefined): Promise<Role> {
-		if (!this.auth || !activeOrgId) return "operator";
+		if (!this.auth || !activeOrgId) return "viewer";
 		try {
 			const { role } = await this.auth.api.getActiveMemberRole({ headers: req.headers });
 			return role === "owner" || role === "admin" ? "admin" : "operator";
 		} catch {
-			return "operator";
+			return "viewer";
 		}
+	}
+
+	/** DB-mode break-glass: a loopback request carrying the daemon's admin bearer token resolves to
+	 *  admin without a session, so the operator on the box can provision the first org/members.
+	 *  Off-box requests get no token shortcut — they must authenticate with a session. */
+	private loopbackBootstrapAdmin(req: Request, server: Server<SocketData>): boolean {
+		const token = this.opts.token;
+		if (!token) return false;
+		const ip = server.requestIP(req)?.address;
+		if (!ip || !isLoopbackAddr(ip)) return false;
+		return tokenOk(requestToken(req), token);
+	}
+
+	/** DB-mode cross-site mutation defense: a present Origin must be in trustedOrigins. Same-origin
+	 *  and Origin-less requests (CLI, server-to-server) pass; cross-site is rejected (beyond SameSite=Lax). */
+	private originAllowed(req: Request): boolean {
+		const origin = req.headers.get("origin");
+		if (!origin) return true;
+		return this.trustedOrigins.has(origin);
 	}
 
 	start(): string {
@@ -255,11 +286,16 @@ export class SquadServer {
 		if (url.pathname === "/ws") {
 			// The handshake only authenticates; per-command tier checks happen in applyCommand,
 			// so a viewer may connect to read the roster + subscribe to transcripts.
+			if (this.dbMode && !this.originAllowed(req)) return new Response("forbidden origin", { status: 403 });
 			let role: Role | null;
 			if (this.auth) {
-				// DB mode: the session cookie rides the upgrade request headers — no token subprotocol.
-				const session = await this.auth.api.getSession({ headers: req.headers });
-				role = session ? await this.bridgeRole(req, session.session.activeOrganizationId) : null;
+				// DB mode: loopback admin token bootstraps; otherwise the session cookie rides the upgrade headers.
+				if (this.loopbackBootstrapAdmin(req, server)) {
+					role = "admin";
+				} else {
+					const session = await this.auth.api.getSession({ headers: req.headers });
+					role = session ? await this.bridgeRole(req, session.session.activeOrganizationId) : null;
+				}
 			} else {
 				role = resolveRole(req, this.authPolicy);
 			}
@@ -282,15 +318,23 @@ export class SquadServer {
 		if (this.auth && url.pathname.startsWith("/api/auth/") && url.pathname !== "/api/auth/check") {
 			return this.auth.handler(req);
 		}
+		// F4 (DB mode): reject cross-site mutations of our OWN routes as defense-in-depth (beyond
+		// SameSite=Lax). Better-auth's /api/auth/* routes already returned above with their own check.
+		if (this.dbMode && req.method !== "GET" && !this.originAllowed(req)) return new Response("forbidden origin", { status: 403 });
 		// Auth gate. FILE mode: the bearer-token gate (unchanged) — public bootstrap (shell, manifest,
 		// service worker, icons handled above) loads tokenless so the PWA can install and prompt. DB
 		// mode: a valid better-auth cookie session, with the active-org role bridged to an RBAC tier.
 		let role: Role;
 		let session: AuthSession | null = null;
 		if (this.auth) {
-			session = await this.auth.api.getSession({ headers: req.headers });
-			if (session === null) return new Response("unauthorized", { status: 401 });
-			role = await this.bridgeRole(req, session.session.activeOrganizationId);
+			// Break-glass: a loopback admin token bootstraps before any org/session exists.
+			if (this.loopbackBootstrapAdmin(req, server)) {
+				role = "admin";
+			} else {
+				session = await this.auth.api.getSession({ headers: req.headers });
+				if (session === null) return new Response("unauthorized", { status: 401 });
+				role = await this.bridgeRole(req, session.session.activeOrganizationId);
+			}
 		} else {
 			const resolved = resolveRole(req, this.authPolicy);
 			if (resolved === null) return new Response("unauthorized", { status: 401 });
