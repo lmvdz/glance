@@ -27,6 +27,8 @@ import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
+import { Orchestrator } from "./orchestrator.ts";
+import { Scheduler, liveAgents } from "./scheduler.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent } from "./land.ts";
@@ -69,13 +71,8 @@ import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
 
-/** Terminal statuses — an agent here has finished and frees its WIP slot. */
-const TERMINAL_STATUSES: Record<string, true> = { stopped: true, error: true };
-
-/** Agents occupying a live WIP slot — everything not in a terminal state. The concurrency cap counts these. */
-export function liveAgents(dtos: AgentDTO[]): number {
-	return dtos.filter((d) => !TERMINAL_STATUSES[d.status]).length;
-}
+// liveAgents + the WIP cap live in ./scheduler.ts now; re-export keeps the public import path stable.
+export { liveAgents };
 
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
@@ -132,6 +129,8 @@ export class SquadManager extends EventEmitter {
 	private readonly bin?: string;
 	private pollTimer?: Timer;
 	private dispatcher?: Dispatcher;
+	private readonly scheduler = new Scheduler();
+	private orchestrator?: Orchestrator;
 	private closeOnDone = false;
 	private llmClassify?: Classify;
 	private readonly closedIssues = new Set<string>();
@@ -172,11 +171,19 @@ export class SquadManager extends EventEmitter {
 				log: (m) => this.log("info", `auto-dispatch: ${m}`),
 				maxActive,
 				liveCount: () => liveAgents(this.list()),
-				maxWip: Number(process.env.OMP_SQUAD_MAX_WIP) || 6,
+				maxWip: this.scheduler.cap(),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
 		}
+		this.orchestrator = new Orchestrator({
+			listAgents: () => this.list(),
+			spawn: (opts) => this.create(opts),
+			verify: async (id) => (await this.verifyFeature(id))?.ok ?? false,
+			land: async (id) => (await this.landFeature(id)).ok,
+			log: (m) => this.log("info", `orchestrator: ${m}`),
+		});
+		this.orchestrator.start();
 		await this.reconnectLive();
 	}
 
@@ -189,6 +196,7 @@ export class SquadManager extends EventEmitter {
 	async stop(): Promise<void> {
 		clearInterval(this.pollTimer);
 		this.dispatcher?.stop();
+		this.orchestrator?.stop();
 		await this.persist();
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
@@ -449,13 +457,10 @@ export class SquadManager extends EventEmitter {
 			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
 			if (conflict) throw new Error(`path ownership conflict: ${conflict.paths.join(", ")} held by agent "${conflict.agent}" — narrow the scope or stop that agent`);
 		}
-		// ponytail: global concurrency ceiling. Bounds simultaneous live agents (worktrees, omp procs,
-		//   tokens). Ceiling = OMP_SQUAD_MAX_WIP (default 6); raise the env to lift it. Restore / fan-out
-		//   recreate already-counted agents, so they pass opts.bypassCap.
+		// Global concurrency ceiling (see Scheduler). Restore / fan-out recreate already-counted agents → bypassCap.
 		if (!opts.bypassCap) {
-			const cap = Number(process.env.OMP_SQUAD_MAX_WIP) || 6;
 			const live = liveAgents(this.list());
-			if (live >= cap) throw new Error(`WIP cap reached (${live}/${cap}) — finish or remove an agent before spawning`);
+			if (!this.scheduler.canAdmit(live)) throw new Error(`WIP cap reached (${live}/${this.scheduler.cap()}) — finish or remove an agent before spawning`);
 		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
 		const id = `${name}-${Date.now().toString(36)}`;
