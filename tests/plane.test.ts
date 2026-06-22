@@ -6,7 +6,7 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
-import { createPlaneIssue, planeConfigured, startPlaneIssue } from "../src/plane.ts";
+import { createPlaneIssue, parseBlockedBy, planeConfigured, startPlaneIssue } from "../src/plane.ts";
 
 const PLANE_ENV = ["PLANE_API_KEY", "PLANE_API_TOKEN", "PLANE_WORKSPACE", "PLANE_WORKSPACE_SLUG", "PLANE_PROJECT_MAP", "PLANE_BASE_URL", "PLANE_PROJECT_ID", "PLANE_APP_URL"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -150,4 +150,16 @@ test("createPlaneIssue deep-links to the app host, not the API base host", async
 	} finally {
 		server.stop(true);
 	}
+});
+
+test("parseBlockedBy extracts blocker ids from a /relations/ response", () => {
+	expect(parseBlockedBy({ blocked_by: ["id-a", "id-b"], blocking: [], relates_to: [] })).toEqual(["id-a", "id-b"]);
+});
+
+test("parseBlockedBy tolerates missing / odd shapes", () => {
+	expect(parseBlockedBy({ blocking: ["x"] })).toEqual([]); // no blocked_by key
+	expect(parseBlockedBy({ blocked_by: "nope" })).toEqual([]); // not an array
+	expect(parseBlockedBy({ blocked_by: ["ok", 42, null] })).toEqual(["ok"]); // drops non-strings
+	expect(parseBlockedBy(null)).toEqual([]);
+	expect(parseBlockedBy("garbage")).toEqual([]);
 });

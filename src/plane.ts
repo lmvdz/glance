@@ -110,7 +110,7 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so the
 	// completed/cancelled filter actually works (else finished issues get auto-dispatched).
 	const groups = await fetchStateGroups(base, headers);
-	return items
+	const open = items
 		.map((raw) => {
 			const ref = toIssueRef(raw, cfg, projectId);
 			const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
@@ -118,6 +118,42 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 			return ref;
 		})
 		.filter((i) => i.state !== "completed" && i.state !== "cancelled");
+	// Populate blocked_by relations so the dispatcher can defer an issue while a blocker is still open.
+	// Sequential (not concurrent): Plane rate-limits, and a burst of N /relations/ calls trips 429 —
+	// which would silently empty blockedBy and let a blocked issue dispatch. Ceiling: O(open) serial
+	// requests per poll; fine for a normal backlog, add bounded concurrency if one ever runs large.
+	for (const ref of open) ref.blockedBy = await fetchBlockedBy(base, headers, ref.id);
+	return open;
+}
+
+/** Issue ids blocking `issueId` (Plane `blocked_by`). Retries on 429 (Plane rate limit); `[]` when none,
+ *  unreachable, or still rate-limited after retries — the proof gate still catches any premature work. */
+async function fetchBlockedBy(base: string, headers: Record<string, string>, issueId: string): Promise<string[]> {
+	const url = `${base}/issues/${issueId}/relations/`;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const res = await fetch(url, { headers }).catch(() => null);
+		if (res?.ok) return parseBlockedBy(await res.json().catch(() => null));
+		if (res?.status !== 429) return []; // 404 / 5xx / network — not retryable here
+		await sleep(retryAfterMs(res, attempt));
+	}
+	return [];
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Backoff for a 429: honour Retry-After (seconds) when present, else exponential. Capped at 5s. */
+function retryAfterMs(res: Response, attempt: number): number {
+	const ra = Number(res.headers.get("retry-after"));
+	if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 5000);
+	return Math.min(500 * 2 ** attempt, 5000);
+}
+
+/** Extract `blocked_by` issue ids from a Plane `/relations/` response. Tolerant of missing / odd shapes. */
+export function parseBlockedBy(data: unknown): string[] {
+	if (!data || typeof data !== "object") return [];
+	const rel = data as { blocked_by?: unknown };
+	if (!Array.isArray(rel.blocked_by)) return [];
+	return rel.blocked_by.filter((x): x is string => typeof x === "string");
 }
 
 /** Map a project's state ids → group (backlog/unstarted/started/completed/cancelled). */

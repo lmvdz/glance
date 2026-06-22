@@ -36,6 +36,8 @@ export class Dispatcher {
 	private readonly maxActive: number;
 	/** Issue ids dispatched this session — don't re-spawn a finished/failed one. */
 	private readonly dispatched = new Set<string>();
+	/** Issue ids deferred because a blocker is still open — tracked only to log the deferral once per episode. */
+	private readonly blockedLogged = new Set<string>();
 	private timer?: Timer;
 	private running = false;
 
@@ -57,11 +59,25 @@ export class Dispatcher {
 				if (budget <= 0) break;
 				const issues = await this.deps.listIssues(repo);
 				if (!issues) continue;
+				// Issue ids still open in THIS project this tick. A blocker absent here is completed/cancelled
+				// (or gone), so it no longer blocks. Cross-project blockers aren't visible — see ceiling note.
+				const openIds = new Set(issues.map((i) => i.id));
 				for (const issue of issues) {
 					if (budget <= 0) break;
 					if (this.atGlobalCap()) break; // recheck per spawn: each spawned agent counts toward the global cap
 					if (claimed.has(issue.id) || this.dispatched.has(issue.id)) continue;
+					// Dependency gate: defer while any blocked_by issue is still open. Not added to `dispatched`,
+					// so it's reconsidered each tick and dispatches once its blockers land/close.
+					const blockers = issue.blockedBy?.filter((b) => openIds.has(b)) ?? [];
+					if (blockers.length > 0) {
+						if (!this.blockedLogged.has(issue.id)) {
+							this.blockedLogged.add(issue.id);
+							this.deps.log(`defer ${issue.identifier ?? issue.id} — blocked by ${blockers.length} open issue(s)`);
+						}
+						continue;
+					}
 					this.dispatched.add(issue.id);
+					this.blockedLogged.delete(issue.id); // dispatching ⇒ no longer deferred
 					this.deps.log(`dispatch ${issue.identifier ?? issue.id} — ${issue.name}`);
 					try {
 						await this.deps.spawn(repo, issue);

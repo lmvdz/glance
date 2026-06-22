@@ -63,6 +63,8 @@ export interface IssueRef {
 	url?: string;
 	/** Provider project id this issue belongs to. */
 	projectId?: string;
+	/** Issue ids that block this one (Plane `blocked_by` relations). Dispatch defers the issue while any blocker is still open. */
+	blockedBy?: string[];
 }
 
 /** A feature's associated Plane issue, resolved for display: status group + deep link. */

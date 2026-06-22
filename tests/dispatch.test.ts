@@ -93,3 +93,29 @@ test("dispatcher: bounds total spawns by the global WIP cap as live agents accru
 	expect(await new Dispatcher(deps).tick()).toBe(1); // only 1 slot before live hits the cap of 5
 	expect(got.length).toBe(1);
 });
+
+test("dispatcher: defers an issue while a blocker is still open, then dispatches once it clears", async () => {
+	let issues: IssueRef[] = [{ id: "A", name: "a" }, { id: "B", name: "b", blockedBy: ["A"] }];
+	const spawned: string[] = [];
+	const deps: DispatchDeps = {
+		repos: () => ["/r"],
+		listIssues: async () => issues,
+		spawn: async (_r, i) => { spawned.push(i.id); },
+		claimed: () => new Set(),
+		activeCount: () => 0,
+		log: () => {},
+		maxActive: 10,
+	};
+	const d = new Dispatcher(deps);
+	await d.tick();
+	expect(spawned).toEqual(["A"]); // B deferred — its blocker A is still open
+	issues = [{ id: "B", name: "b", blockedBy: ["A"] }]; // A done → leaves the open list
+	await d.tick();
+	expect(spawned.sort()).toEqual(["A", "B"]); // B now unblocked and dispatched
+});
+
+test("dispatcher: a blocker not in the open list (done / other project) does not defer", async () => {
+	const { deps, spawned } = harness({ listIssues: async () => [{ id: "C", name: "c", blockedBy: ["Z"] }] });
+	await new Dispatcher(deps).tick();
+	expect(spawned).toEqual(["C"]); // Z absent from the open list ⇒ not blocking
+});
