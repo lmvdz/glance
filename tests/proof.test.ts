@@ -99,3 +99,25 @@ test("runProof collects screenshots under .omp/proof as vision evidence", async 
 	const proof = await runProof({ repo, worktree: repo, command: "true" });
 	expect(proof.artifacts.some((a) => a.endsWith("shot.png"))).toBe(true);
 });
+
+test("runProof: vision off ⇒ deterministic proof only; injected producer ⇒ artifacts merge but gate is untouched", async () => {
+	const repo = await baseRepo();
+
+	// Vision off (no url, no producer): a correct deterministic proof, no vision artifacts.
+	const plain = await runProof({ repo, worktree: repo, command: "true" });
+	expect(plain.ok).toBe(true);
+	expect(plain.commit).toBe(await headCommit(repo));
+	expect(plain.artifacts.some((a) => a.includes(`${path.sep}vision${path.sep}`))).toBe(false);
+
+	// Vision on with an injected fake producer, against a FAILING command. The producer "succeeds"
+	// (writes a screenshot + notes.md), but the gate must still reflect only the command: ok=false.
+	const fake = async ({ dir }: { worktree: string; url: string; dir: string }) => {
+		await fs.writeFile(path.join(dir, "home.png"), "img");
+		await fs.writeFile(path.join(dir, "notes.md"), "- page loads\n");
+	};
+	const visioned = await runProof({ repo, worktree: repo, command: "exit 1", visionUrl: "http://127.0.0.1:7777", producer: fake });
+	expect(visioned.ok).toBe(false); // gate unaffected by a passing vision pass
+	expect(visioned.commit).toBe(await headCommit(repo));
+	expect(visioned.artifacts.some((a) => a.endsWith(`vision${path.sep}home.png`))).toBe(true);
+	expect(visioned.artifacts.some((a) => a.endsWith(`vision${path.sep}notes.md`))).toBe(true);
+});
