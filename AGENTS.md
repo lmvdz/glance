@@ -23,4 +23,6 @@ Rules:
 
 Not lazy about: input validation at trust boundaries, error handling that prevents data loss, security, accessibility, the calibration real hardware needs (the platform is never the spec ideal, a clock drifts, a sensor reads off), anything explicitly requested. Lazy code without its check is unfinished: non-trivial logic leaves ONE runnable check behind, the smallest thing that fails if the logic breaks (an assert-based demo/self-check or one small test file; no frameworks, no fixtures). Trivial one-liners need no test.
 
+A user-facing change is unfinished without its docs. When you change behavior, flags, env vars, endpoints, or the UI, update the README (and any relevant `docs/`) in the same change — same rule as the runnable check: ship the behavior and its documentation together, or it is not done.
+
 (This applies to omp-squad itself, to every `omp --mode rpc` fleet agent spawned in a worktree of this repo, and to every Flue worker commissioned through the factory. The factory enforces the same standard mechanically — `OmpArchitect` instructs authored workers to follow this ladder, and the acceptance gate's `ponytail` check rejects over-built workers before onboarding.)
