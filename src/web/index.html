@@ -27,6 +27,8 @@
   .spacer { flex:1; }
   .conn { font-size:12px; color:var(--mut); display:flex; align-items:center; gap:6px; }
   .conn .dot { width:8px; height:8px; border-radius:50%; background:var(--err); } .conn.up .dot { background:var(--ok); }
+  .offline { background:var(--err); color:#fff; text-align:center; padding:6px 10px; font-size:13px; font-weight:600; }
+  .visually-hidden { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
   button { font:inherit; background:var(--panel2); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
   button:hover { border-color:var(--accent); } button.primary { background:var(--accent); color:#0b0d10; border-color:var(--accent); font-weight:600; }
   button.danger:hover { border-color:var(--err); color:var(--err); } button.sm { padding:3px 8px; font-size:12px; }
@@ -219,6 +221,8 @@
   <button id="upgradeBtn" title="Pull latest + restart the daemon (agents survive)">⤴ Upgrade</button>
   <button class="primary" id="addBtn">+ New agent</button>
 </header>
+<div id="offline" class="offline" role="alert" hidden>Disconnected — reconnecting to the daemon…</div>
+<div id="srlive" class="visually-hidden" role="status" aria-live="polite"></div>
 <main>
   <div class="sidebar">
     <nav class="navmain" id="navMain"></nav>
@@ -338,11 +342,29 @@ setInterval(() => {
   for (const el of document.querySelectorAll(".agotime")) { const ts = +el.dataset.ts; if (ts) el.textContent = ago(ts) + " ago"; }
 }, 120);
 
+let reconnects = 0, opened = false;
+function setConn(up) {
+  $("#conn").classList.toggle("up", up);
+  $("#connText").textContent = up ? "live" : "reconnecting…";
+  const off = $("#offline"); if (off) off.hidden = up;
+}
+function firstPaint(msg) { if (routed) return; const b = $("#body"); if (b) b.innerHTML = `<div class="nodetail">${esc(msg)}</div>`; }
 function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${encodeURIComponent(TOKEN())}`);
-  ws.onopen = () => { $("#conn").classList.add("up"); $("#connText").textContent = "live"; if (!routed) { routed = true; applyRoute(); } };
-  ws.onclose = () => { $("#conn").classList.remove("up"); $("#connText").textContent = "reconnecting…"; setTimeout(connect, 1000); };
-  ws.onmessage = (e) => handle(JSON.parse(e.data));
+  ws.onopen = () => {
+    reconnects = 0; opened = true; setConn(true);
+    if (!routed) { routed = true; applyRoute(); }
+    else if (view === "agent" && selAgent) { transcripts.delete(selAgent); const t = $("#transcript"); if (t) t.innerHTML = ""; send({ type:"subscribe", id:selAgent }); }
+  };
+  ws.onmessage = (e) => { let d; try { d = JSON.parse(e.data); } catch { return; } handle(d); };
+  ws.onerror = () => {};
+  ws.onclose = () => {
+    setConn(false);
+    if (!opened) firstPaint("Can't reach the daemon — retrying…");
+    if (++reconnects === 3) fetch("/api/auth/check").catch(() => {});
+    const delay = Math.min(20000, 500 * 2 ** Math.min(reconnects, 5)) + Math.random() * 400;
+    setTimeout(connect, delay);
+  };
 }
 function send(cmd) { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(cmd)); return true; } toast("disconnected — not sent", "error"); return false; }
 
@@ -411,6 +433,7 @@ function handle(ev) {
     case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
+    default: console.warn("unknown event type:", ev && ev.type); break;
   }
 }
 
@@ -1536,6 +1559,7 @@ function boot() {
   window.addEventListener("pointerdown", reqNotifyPerm, { once: true });
   window.addEventListener("focus", () => updateBadge(waitingAgents().length));
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").then(() => { if (typeof Notification !== "undefined" && Notification.permission === "granted") subscribePush(); }).catch(() => {});
+  firstPaint("Connecting to the daemon…");
   connect();
 }
 if (TOKEN()) boot(); else showLogin();
