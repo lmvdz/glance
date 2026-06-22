@@ -162,3 +162,50 @@ export async function worktreeStatus(worktree: string): Promise<{ branch?: strin
 			: [];
 	return { branch: branchR.code === 0 ? branchR.stdout : undefined, dirtyFiles };
 }
+
+/** Every worktree of `repo` (porcelain). The first entry git lists is always the primary checkout. */
+export async function listWorktrees(repo: string): Promise<{ worktree: string; branch?: string; isPrimary: boolean }[]> {
+	const root = await repoRoot(repo).catch(() => repo);
+	const r = await runGit(["worktree", "list", "--porcelain"], root);
+	if (r.code !== 0) return [];
+	const out: { worktree: string; branch?: string; isPrimary: boolean }[] = [];
+	let cur: { worktree?: string; branch?: string } = {};
+	const flush = (): void => {
+		if (cur.worktree) out.push({ worktree: cur.worktree, branch: cur.branch, isPrimary: out.length === 0 });
+		cur = {};
+	};
+	for (const line of r.stdout.split("\n")) {
+		if (line.startsWith("worktree ")) {
+			flush();
+			cur.worktree = line.slice("worktree ".length).trim();
+		} else if (line.startsWith("branch ")) {
+			cur.branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+		}
+	}
+	flush();
+	return out;
+}
+
+/** Commits on `branch` not reachable from `base` (0 ⇒ fully merged/empty; -1 ⇒ couldn't determine). */
+export async function branchAhead(repo: string, branch: string, base: string): Promise<number> {
+	const r = await runGit(["rev-list", "--count", `${base}..${branch}`], repo);
+	return r.code === 0 ? Number(r.stdout) || 0 : -1;
+}
+
+/** The repo's primary branch (the main checkout's current branch); falls back to "main". */
+export async function primaryBranch(repo: string): Promise<string> {
+	const r = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], repo);
+	return r.code === 0 && r.stdout && r.stdout !== "HEAD" ? r.stdout : "main";
+}
+
+/** Commit all changes in a worktree to its current branch (preserve abandoned WIP). Best-effort; true on commit. */
+export async function commitWorktreeWip(worktree: string, message: string): Promise<boolean> {
+	if ((await runGit(["add", "-A"], worktree)).code !== 0) return false;
+	return (await runGit(["commit", "--no-verify", "-m", message], worktree)).code === 0;
+}
+
+/** Delete a branch only if it is fully merged — git's `-d` refuses an unmerged branch. Best-effort; true on delete. */
+export async function deleteBranchIfMerged(repo: string, branch: string): Promise<boolean> {
+	const root = await repoRoot(repo).catch(() => repo);
+	return (await runGit(["branch", "-d", branch], root)).code === 0;
+}
