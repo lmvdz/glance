@@ -470,6 +470,26 @@
     .avmain, .av.show-changes .avmain { grid-template-columns:1fr; }
     .av.show-changes .aside { display:none; }          /* changes panel is desktop-only */
   }
+  /* ── settings + auth ─────────────────────────────────────────────────────── */
+  .setstack { display:flex; flex-direction:column; gap:var(--sp-3); }
+  .setrow { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; }
+  .setrow + .setrow { border-top:1px solid var(--border); padding-top:var(--sp-3); }
+  .setname { font-weight:var(--fw-semibold); color:var(--text-1); font-size:var(--fs-13); }
+  .subhd { font-size:var(--fs-11); text-transform:uppercase; letter-spacing:.05em; color:var(--text-3); font-weight:var(--fw-semibold); margin:0 0 var(--sp-2); }
+  .mtable { width:100%; border-collapse:collapse; font-size:var(--fs-13); }
+  .mtable th { text-align:left; font-size:var(--fs-11); text-transform:uppercase; letter-spacing:.05em; color:var(--text-3); font-weight:var(--fw-semibold); padding:6px 8px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  .mtable td { padding:9px 8px; border-bottom:1px solid var(--border); vertical-align:middle; color:var(--text-1); }
+  .mtable tr:last-child td { border-bottom:0; }
+  .mtable td.sub { color:var(--text-2); }
+  .rolesel { background:var(--surface-2); border:1px solid var(--border); color:var(--text-1); border-radius:var(--r-sm); padding:3px 7px; font:inherit; font-size:var(--fs-12); }
+  .rolesel:focus { border-color:var(--accent); outline:none; }
+  .b-role { background:var(--accent-subtle); color:var(--accent); border-color:color-mix(in srgb,var(--accent) 24%,transparent); }
+  .roles { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:var(--sp-3); }
+  .rolecard { border:1px solid var(--border); border-radius:var(--r-md); padding:var(--sp-3); background:var(--surface-2); }
+  .rolecard .rolehd { display:flex; align-items:center; gap:var(--sp-2); margin-bottom:var(--sp-1); }
+  .rolecard ul { margin:var(--sp-2) 0 0; padding-left:18px; color:var(--text-2); font-size:var(--fs-12); line-height:1.65; }
+  .authcard .tabs { display:flex; gap:var(--sp-2); margin-bottom:var(--sp-4); }
+  .authcard .tabs button { flex:1; min-height:38px; }
 </style>
 </head>
 <body>
@@ -527,12 +547,28 @@
   if (t) { localStorage.setItem("ompsq_token", t); u.searchParams.delete("token"); history.replaceState(null, "", u.pathname + u.hash); }
 } catch {} })();
 const TOKEN = () => localStorage.getItem("ompsq_token") || "";
+// MODE is set once at bootstrap from GET /api/auth/mode. "file" = today's bearer-token
+// single-operator flow; "db" = better-auth cookie sessions (orgs/members/roles).
+let MODE = "file";   // "file" | "db"
+let ME = null;       // db mode: { user, activeOrganizationId, role } from /api/me
 const _fetch = window.fetch.bind(window);
 window.fetch = (input, init) => {
   const url = typeof input === "string" ? input : (input && input.url) || "";
-  if (url.startsWith("/api")) { init = { ...(init||{}) }; init.headers = { ...(init.headers||{}), Authorization: "Bearer " + TOKEN() }; }
-  return _fetch(input, init).then((r) => { if (r.status === 401) showLogin(); return r; });
+  if (url.startsWith("/api")) {
+    init = { ...(init||{}) };
+    if (MODE === "db") init.credentials = "include";              // session cookie rides same-origin
+    else init.headers = { ...(init.headers||{}), Authorization: "Bearer " + TOKEN() };
+  }
+  return _fetch(input, init).then((r) => { if (r.status === 401) onUnauthorized(); return r; });
 };
+function onUnauthorized() { if (MODE === "db") showAuth(); else showLogin(); }
+// better-auth REST helpers (DB mode). Paths are relative to /api/auth/; the wrapper above adds credentials.
+async function authGet(path) { const r = await fetch("/api/auth/" + path); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+async function authPost(path, body) {
+  const r = await fetch("/api/auth/" + path, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(body || {}) });
+  if (!r.ok) { let m = "Request failed"; try { const j = await r.json(); if (j && (j.message || j.error)) m = j.message || j.error; } catch {} throw new Error(m); }
+  try { return await r.json(); } catch { return {}; }
+}
 const isMobile = () => matchMedia("(max-width:760px)").matches;
 const closeDrawer = () => document.querySelector("main")?.classList.remove("nav-open");
 let _landed = false;
@@ -568,11 +604,59 @@ function showLogin() {
   go.onclick = submit;
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
 }
+// DB mode: no session -> a premium sign-in / sign-up card (mirrors the token login overlay).
+let _authShown = false;
+function showAuth() {
+  if (_authShown || document.getElementById("authOverlay")) return; _authShown = true;
+  const el = document.createElement("div");
+  el.id = "authOverlay";
+  el.style.cssText = "position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:radial-gradient(900px 520px at 50% -12%, var(--glow,transparent), transparent 60%), var(--bg);padding:24px";
+  el.innerHTML = `<div class="authcard" style="width:400px;max-width:92vw;background:var(--surface-1);border:1px solid var(--border-strong);border-radius:var(--r-lg);padding:24px;box-shadow:var(--shadow-3)">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><img src="/icon.svg" width="28" height="28" alt=""/><strong style="font-size:16px;letter-spacing:-.01em"><span style="color:var(--accent)">omp</span>-squad</strong></div>
+    <div class="tabs"><button id="tabIn" class="primary" type="button">Sign in</button><button id="tabUp" type="button">Sign up</button></div>
+    <form id="authForm" style="display:flex;flex-direction:column;gap:12px">
+      <div class="field" id="fName" hidden><label>Name</label><input name="name" autocomplete="name" /></div>
+      <div class="field"><label>Email</label><input name="email" type="email" autocomplete="email" required /></div>
+      <div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password" required /></div>
+      <div id="authErr" style="color:var(--err);font-size:12px;min-height:16px"></div>
+      <button id="authGo" class="primary" type="submit" style="width:100%;padding:11px;border-radius:var(--r-sm)">Sign in</button>
+    </form></div>`;
+  document.body.appendChild(el);
+  let mode = "in";
+  const form = el.querySelector("#authForm"), errEl = el.querySelector("#authErr"), go = el.querySelector("#authGo");
+  const tabIn = el.querySelector("#tabIn"), tabUp = el.querySelector("#tabUp"), fName = el.querySelector("#fName");
+  const setMode = (m) => {
+    mode = m; errEl.textContent = "";
+    tabIn.classList.toggle("primary", m === "in");
+    tabUp.classList.toggle("primary", m === "up");
+    fName.hidden = m !== "up";
+    go.textContent = m === "in" ? "Sign in" : "Create account";
+    form.querySelector('[name="password"]').setAttribute("autocomplete", m === "in" ? "current-password" : "new-password");
+  };
+  tabIn.onclick = () => setMode("in"); tabUp.onclick = () => setMode("up");
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const email = String(fd.get("email")||"").trim(), password = String(fd.get("password")||""), name = String(fd.get("name")||"").trim();
+    if (!email || !password || (mode === "up" && !name)) { errEl.textContent = "Please fill in every field."; return; }
+    go.disabled = true; errEl.textContent = "";
+    const path = mode === "in" ? "/api/auth/sign-in/email" : "/api/auth/sign-up/email";
+    const body = mode === "in" ? { email, password } : { name, email, password };
+    try {
+      const r = await _fetch(path, { method:"POST", headers:{"content-type":"application/json"}, credentials:"include", body: JSON.stringify(body) });
+      if (r.ok) { location.reload(); return; }
+      let msg = mode === "in" ? "Invalid email or password." : "Couldn't create that account.";
+      try { const j = await r.json(); if (j && (j.message || j.error)) msg = j.message || j.error; } catch {}
+      errEl.textContent = msg; go.disabled = false;
+    } catch { errEl.textContent = "Can't reach the daemon."; go.disabled = false; }
+  };
+  el.querySelector('[name="email"]').focus();
+}
 const agents = new Map();        // id -> AgentDTO
 const transcripts = new Map();   // id -> TranscriptEntry[]
 const commandsByAgent = new Map();// id -> CommandInfo[] (slash commands + skills + extensions)
 const composerDraft = new Map();  // id -> in-progress composer text (survives re-renders)
-let view = "project";            // "project" | "agent" | "board" | "feature" | "queue" | "race"
+let view = "project";            // "project" | "agent" | "board" | "feature" | "queue" | "race" | "settings"
 let showChanges = localStorage.getItem("squad.showChanges") === "1";
 let selProject = null;           // repo path
 let selAgent = null;             // agent id
@@ -624,7 +708,8 @@ function setConn(up) {
 }
 function firstPaint(msg) { if (routed) return; const b = $("#body"); if (b) b.innerHTML = `<div class="nodetail">${esc(msg)}</div>`; }
 function connect() {
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`, ["ompsq-token", TOKEN()]);
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+  ws = MODE === "db" ? new WebSocket(wsUrl) : new WebSocket(wsUrl, ["ompsq-token", TOKEN()]);
   ws.onopen = () => {
     reconnects = 0; opened = true; setConn(true);
     if (!routed) { routed = true; applyRoute(); }
@@ -781,7 +866,8 @@ function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCount
 // URL routing: the hash mirrors the view so refresh / deep-link / back-forward all work.
 let routed = false;
 function pushRoute() {
-  const h = view === "race" ? "#/race"
+  const h = view === "settings" ? "#/settings"
+    : view === "race" ? "#/race"
     : view === "queue" ? "#/queue"
     : view === "board" ? "#/board"
     : view === "feature" && selFeature ? `#/feature/${encodeURIComponent(selFeature)}`
@@ -794,6 +880,7 @@ function applyRoute() {
   if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
   if (location.hash === "#/queue") { view = "queue"; selAgent = null; renderAll(); return; }
   if (location.hash === "#/race") { view = "race"; selAgent = null; renderAll(); return; }
+  if (location.hash === "#/settings") { view = "settings"; selAgent = null; renderAll(); return; }
   const mf = location.hash.match(/^#\/feature\/(.+)$/);
   if (mf) { selFeature = safeDecode(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
   const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
@@ -821,6 +908,7 @@ function renderNav() {
     { id:"board", ico:"▦",  lbl:"Features", sel: view === "board" || view === "feature", on: openBoard },
     { id:"queue", ico:"⛔", lbl:"Queue",    sel: view === "queue", ct: need, attn: need > 0, on: openQueue },
     { id:"race",  ico:"⇶",  lbl:"Race",     sel: view === "race", on: openRace },
+    { id:"settings", ico:"⚙", lbl:"Settings", sel: view === "settings", on: openSettings },
   ];
   nav.innerHTML = rows.map(r => `<div class="navrow${r.sel?" sel":""}${r.attn?" attn":""}" data-id="${r.id}" role="button" tabindex="0" aria-label="${r.lbl}" title="${r.lbl}"><span class="ico">${r.ico}</span><span class="lbl">${r.lbl}</span>${r.ct?`<span class="ct">${r.ct}</span>`:""}</div>`).join("");
   for (const r of rows) { const el = nav.querySelector(`[data-id="${r.id}"]`); if (el) { const act = () => { r.on(); closeDrawer(); }; el.onclick = act; el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } }; } }
@@ -849,6 +937,7 @@ function renderSidebar() {
 
 function renderCrumb() {
   const c = $("#crumb"); const p = projects().find(x => x.id === selProject);
+  if (view === "settings") { c.innerHTML = `<span class="cur">Settings</span>`; return; }
   if (!p) { c.innerHTML = `<span class="cur">Overview</span>`; return; }
   const a = selAgent ? agents.get(selAgent) : null;
   c.innerHTML = `<span class="seg" id="cbProj">Projects</span> <span style="color:var(--dim)">/</span> `
@@ -860,6 +949,7 @@ function renderCrumb() {
 
 function renderBody() {
   const body = $("#body");
+  if (view === "settings") return renderSettings(body);
   if (view === "board") return renderBoard(body);
   if (view === "queue") return renderQueue(body);
   if (view === "race") return renderRace(body);
@@ -868,6 +958,231 @@ function renderBody() {
   if (!p) return renderHome(body);
   if (view === "agent" && selAgent && agents.has(selAgent)) return renderAgent(body, agents.get(selAgent));
   renderProject(body, p);
+}
+
+// ── Settings (account · org · members · roles · appearance · notifications · daemon) ──
+// One surface, mode-aware: DB mode adds Account/Organization/Members/Roles on top of the
+// Appearance/Notifications/Daemon controls that exist in both modes (and consolidate the header).
+function openSettings() { view = "settings"; selAgent = null; renderAll(); }
+let orgRole = null;   // db mode: active-org role (owner|admin|member) — drives the badge + gating
+function fmtJoined(d) { const t = Date.parse(d); return Number.isFinite(t) ? new Date(t).toLocaleDateString() : "—"; }
+
+function renderSettings(body) {
+  const db = MODE === "db";
+  const u = db && ME ? (ME.user || {}) : {};
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Settings</h2><div class="sub">${db ? "Your account, organization, members, and workspace preferences" : "Appearance, notifications, and daemon controls"}</div></div></div>
+    ${db ? `<div class="section"><h3>Account</h3><div class="inner"><div class="setstack">
+      <div class="setrow"><div><div class="setname">${esc(u.name || "—")}</div><div class="sub">${esc(u.email || "")}</div></div><button id="signOutBtn">Sign out</button></div>
+      <form id="pwForm" class="setstack">
+        <div class="field"><label>Current password</label><input name="current" type="password" autocomplete="current-password" /></div>
+        <div class="field"><label>New password</label><input name="next" type="password" autocomplete="new-password" /></div>
+        <div><button class="primary" id="pwBtn" type="submit">Change password</button></div>
+      </form>
+    </div></div></div>` : ""}
+    ${db ? `<div class="section"><h3>Organization</h3><div class="inner" id="setOrgInner">${skel(2)}</div></div>` : ""}
+    ${db ? `<div class="section"><h3>Members</h3><div class="inner" id="setMembersInner">${skel(3)}</div></div>` : ""}
+    ${db ? `<div class="section"><h3>Roles &amp; permissions</h3><div class="inner"><div class="setstack">
+      <div class="sub">Your role: <span class="badge b-role" id="myRole">…</span></div>
+      <div class="roles">
+        <div class="rolecard"><div class="rolehd"><span class="badge b-role">owner</span></div><ul><li>Full control of the organization</li><li>Manage members, roles &amp; invitations</li><li>Rename or delete the organization</li></ul></div>
+        <div class="rolecard"><div class="rolehd"><span class="badge b-role">admin</span></div><ul><li>Invite &amp; remove members</li><li>Change member roles (except owner)</li><li>Edit organization settings</li></ul></div>
+        <div class="rolecard"><div class="rolehd"><span class="badge b-role">member</span></div><ul><li>Access the workspace &amp; agents</li><li>View the member list</li><li>Leave the organization</li></ul></div>
+      </div>
+    </div></div></div>` : ""}
+    ${db ? "" : `<div class="section"><h3>Workspace access</h3><div class="inner"><div class="sub">Single-operator, token-gated. Set <code>DATABASE_URL</code> on the daemon to enable organizations, members, and roles.</div></div></div>`}
+    <div class="section"><h3>Appearance</h3><div class="inner"><div class="setstack">
+      <div class="setrow"><div><div class="setname">Theme</div><div class="sub">Light or dark — applies instantly, remembered on this device.</div></div><button id="setTheme" class="toggle"></button></div>
+      <div class="setrow"><div><div class="setname">Density</div><div class="sub">Comfortable by default; the layout adapts to your viewport.</div></div></div>
+    </div></div></div>
+    <div class="section"><h3>Notifications</h3><div class="inner"><div class="setstack">
+      <div class="setrow"><div><div class="setname">Sound alerts</div><div class="sub">Play a sound when an agent needs you.</div></div><button id="setMute" class="toggle"></button></div>
+      <div class="setrow"><div><div class="setname">Background push</div><div class="sub">Get notified even when this tab is in the background.</div></div><button id="setPush">Enable push</button></div>
+    </div></div></div>
+    <div class="section"><h3>Daemon</h3><div class="inner"><div class="setstack">
+      <div class="setrow"><div><div class="setname">UI build</div><div class="sub" id="setVer">…</div></div></div>
+      <div class="setrow"><div><div class="setname">Access</div><div class="sub" id="setAccess">…</div></div></div>
+      <div class="setrow" id="setUpgradeRow"${db ? ` style="display:none"` : ""}><div><div class="setname">Updates</div><div class="sub">Pull latest + restart. Agents keep running.</div></div><button id="setUpgrade">⤴ Upgrade</button></div>
+    </div></div></div>
+  </div>`;
+
+  // Account (db only)
+  const so = $("#signOutBtn");
+  if (so) so.onclick = async () => {
+    if (!(await confirmModal({ title:"Sign out?", body:"You'll need to sign in again to reach the workspace." }))) return;
+    try { await authPost("sign-out", {}); } catch {} location.reload();
+  };
+  const pwForm = $("#pwForm");
+  if (pwForm) pwForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(pwForm);
+    const currentPassword = String(fd.get("current") || ""), newPassword = String(fd.get("next") || "");
+    if (!currentPassword || !newPassword) { toast("Enter your current and new password", "warn"); return; }
+    const btn = $("#pwBtn"); btn.disabled = true;
+    try { await authPost("change-password", { currentPassword, newPassword }); toast("Password changed", "success"); pwForm.reset(); }
+    catch (err) { toast(err.message || "Couldn't change password", "error"); }
+    finally { btn.disabled = false; }
+  };
+
+  // Appearance — reuse the header theme toggle so both stay in sync
+  const themeBtn = $("#setTheme");
+  const effTheme = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  const syncTheme = () => { themeBtn.textContent = effTheme() === "light" ? "☀ Light" : "☾ Dark"; };
+  syncTheme();
+  themeBtn.onclick = () => { $("#themeBtn").click(); syncTheme(); };
+
+  // Notifications — reuse the header mute button + subscribePush()
+  const muteBtn = $("#setMute");
+  const syncMute = () => { muteBtn.textContent = muted ? "🔕 Muted" : "🔔 On"; muteBtn.classList.toggle("active", !muted); };
+  syncMute();
+  muteBtn.onclick = () => { $("#muteBtn").click(); syncMute(); };
+  $("#setPush").onclick = async () => {
+    try {
+      if (typeof Notification === "undefined") { toast("Notifications aren't supported here", "warn"); return; }
+      if (Notification.permission === "denied") { toast("Notifications are blocked in your browser settings", "warn"); return; }
+      if (Notification.permission === "default") { const p = await Notification.requestPermission(); if (p !== "granted") { toast("Notification permission denied", "warn"); return; } }
+      await subscribePush(); toast("Background push enabled", "success");
+    } catch { toast("Couldn't enable push", "error"); }
+  };
+
+  // Daemon
+  const ver = $("#setVer");
+  if (ver) { if (uiVersion) ver.textContent = uiVersion; else fetch("/api/version").then(r => r.ok ? r.json() : null).then(v => { ver.textContent = v && v.version ? v.version : "—"; }).catch(() => { ver.textContent = "—"; }); }
+  const acc = $("#setAccess");
+  if (acc && !db) acc.textContent = "Token-gated · single operator";
+  const up = $("#setUpgrade"); if (up) up.onclick = () => $("#upgradeBtn").click();
+
+  if (db) loadOrgSettings();
+}
+
+async function loadOrgSettings() {
+  const orgInner = $("#setOrgInner"), memInner = $("#setMembersInner");
+  if (!orgInner || !memInner) return;   // navigated away
+  const activeId = (ME && ME.activeOrganizationId) || null;
+  try {
+    const [orgsRaw, roleRaw] = await Promise.all([
+      authGet("organization/list").catch(() => []),
+      authGet("organization/get-active-member-role").catch(() => null),
+    ]);
+    const orgs = Array.isArray(orgsRaw) ? orgsRaw : (orgsRaw && orgsRaw.data) || [];
+    orgRole = (roleRaw && (roleRaw.role || (roleRaw.data && roleRaw.data.role))) || null;
+    const canManage = orgRole === "owner" || orgRole === "admin";
+    const rb = $("#myRole"); if (rb) rb.textContent = orgRole || "none";
+
+    if (!activeId || !orgs.length) {
+      orgInner.innerHTML = `<div class="setstack"><div class="sub">You're not part of an organization yet — create one to invite teammates.</div>
+        <form id="orgCreateForm" class="spawnrow"><input name="name" placeholder="Organization name" required /><input name="slug" placeholder="slug" required /><button class="primary" type="submit">Create</button></form></div>`;
+      memInner.innerHTML = `<div class="sub">Create an organization to manage members and roles.</div>`;
+      const acc = $("#setAccess"); if (acc) acc.textContent = "Signed in · no organization";
+      wireOrgCreate(orgInner);
+      return;
+    }
+
+    const full = await authGet(`organization/get-full-organization?organizationId=${encodeURIComponent(activeId)}`).catch(() => null);
+    const activeName = (full && full.name) || (orgs.find(o => o.id === activeId) || {}).name || "Organization";
+    const acc = $("#setAccess"); if (acc) acc.textContent = `${orgRole || "member"} · ${activeName}`;
+    const upRow = $("#setUpgradeRow"); if (upRow && canManage) upRow.style.display = "";
+
+    const [memRaw, invRaw] = await Promise.all([
+      authGet(`organization/list-members?organizationId=${encodeURIComponent(activeId)}`).catch(() => null),
+      authGet(`organization/list-invitations?organizationId=${encodeURIComponent(activeId)}`).catch(() => null),
+    ]);
+    const members = (memRaw && (memRaw.members || memRaw.data)) || (full && full.members) || [];
+    const invAll = Array.isArray(invRaw) ? invRaw : (invRaw && (invRaw.invitations || invRaw.data)) || (full && full.invitations) || [];
+    const invites = invAll.filter(i => (i.status || "pending") === "pending");
+
+    const roleOpts = (cur) => ["owner","admin","member"].map(r => `<option value="${r}"${r === cur ? " selected" : ""}>${r}</option>`).join("");
+    orgInner.innerHTML = `<div class="setstack">
+      <div class="field"><label>Active organization</label>${orgs.length > 1
+        ? `<select id="orgSwitch">${orgs.map(o => `<option value="${esc(o.id)}"${o.id === activeId ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select>`
+        : `<div class="setname">${esc(activeName)}</div>`}</div>
+      ${canManage ? `<form id="orgRenameForm" class="spawnrow"><input name="name" value="${esc(activeName)}" placeholder="Organization name" /><button class="primary" type="submit">Rename</button></form>` : ""}
+      ${canManage ? `<div><div class="subhd">Create organization</div><form id="orgCreateForm" class="spawnrow"><input name="name" placeholder="New org name" required /><input name="slug" placeholder="slug" required /><button class="primary" type="submit">Create</button></form></div>` : ""}
+    </div>`;
+    wireOrgSwitch(orgInner, activeId);
+
+    memInner.innerHTML = `<div class="setstack">
+      ${canManage ? `<form id="inviteForm" class="spawnrow"><input name="email" type="email" placeholder="teammate@company.com" autocomplete="off" required /><select name="role"><option value="member">member</option><option value="admin">admin</option><option value="owner">owner</option></select><button class="primary" type="submit">Invite</button></form>` : ""}
+      <div style="overflow-x:auto"><table class="mtable"><thead><tr><th>Member</th><th>Email</th><th>Role</th><th>Joined</th>${canManage ? "<th></th>" : ""}</tr></thead><tbody>
+        ${members.length ? members.map(m => `<tr>
+          <td>${esc((m.user && m.user.name) || "—")}</td>
+          <td class="sub">${esc((m.user && m.user.email) || "")}</td>
+          <td>${canManage && m.role !== "owner" ? `<select class="rolesel" data-role="${esc(m.id)}">${roleOpts(m.role)}</select>` : `<span class="badge b-role">${esc(m.role)}</span>`}</td>
+          <td class="sub">${fmtJoined(m.createdAt)}</td>
+          ${canManage ? `<td>${m.role !== "owner" ? `<button class="sm danger" data-rm="${esc(m.id)}">Remove</button>` : ""}</td>` : ""}
+        </tr>`).join("") : `<tr><td colspan="5" class="sub">No members yet.</td></tr>`}
+      </tbody></table></div>
+      ${invites.length ? `<div><div class="subhd">Pending invitations</div>${invites.map(i => `<div class="subnode"><span class="badge b-role">${esc(i.role)}</span> <span>${esc(i.email)}</span> <span class="sub">${esc(i.status || "pending")}</span>${canManage ? `<button class="sm" data-cancel="${esc(i.id)}">Cancel</button>` : ""}</div>`).join("")}</div>` : ""}
+      <div><button id="leaveOrgBtn" class="danger sm">Leave organization</button></div>
+    </div>`;
+    wireMembers(memInner, activeId);
+  } catch {
+    orgInner.innerHTML = errstate("Couldn't load organization settings", "orgRetry");
+    const rt = $("#orgRetry"); if (rt) rt.onclick = loadOrgSettings;
+  }
+}
+
+function wireOrgCreate(scope) {
+  const cf = scope.querySelector("#orgCreateForm");
+  if (cf) cf.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(cf);
+    const name = String(fd.get("name") || "").trim(), slug = String(fd.get("slug") || "").trim();
+    if (!name || !slug) return;
+    try {
+      const r = await authPost("organization/create", { name, slug });
+      const id = (r && (r.id || (r.data && r.data.id))) || null;
+      if (id) { try { await authPost("organization/set-active", { organizationId: id }); } catch {} }
+      toast("Organization created", "success"); location.reload();
+    } catch (err) { toast(err.message || "Couldn't create organization", "error"); }
+  };
+}
+
+function wireOrgSwitch(scope, activeId) {
+  const sw = scope.querySelector("#orgSwitch");
+  if (sw) sw.onchange = async () => {
+    try { await authPost("organization/set-active", { organizationId: sw.value }); location.reload(); }
+    catch (err) { toast(err.message || "Couldn't switch organization", "error"); }
+  };
+  const rf = scope.querySelector("#orgRenameForm");
+  if (rf) rf.onsubmit = async (e) => {
+    e.preventDefault();
+    const name = String(new FormData(rf).get("name") || "").trim(); if (!name) return;
+    try { await authPost("organization/update", { data:{ name }, organizationId: activeId }); toast("Organization renamed", "success"); loadOrgSettings(); }
+    catch (err) { toast(err.message || "Couldn't rename organization", "error"); }
+  };
+  wireOrgCreate(scope);
+}
+
+function wireMembers(scope, activeId) {
+  const inv = scope.querySelector("#inviteForm");
+  if (inv) inv.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(inv);
+    const email = String(fd.get("email") || "").trim(), role = String(fd.get("role") || "member");
+    if (!email) return;
+    try { await authPost("organization/invite-member", { email, role, organizationId: activeId }); toast("Invitation sent", "success"); loadOrgSettings(); }
+    catch (err) { toast(err.message || "Couldn't send invitation", "error"); }
+  };
+  for (const sel of scope.querySelectorAll("select[data-role]")) sel.onchange = async () => {
+    try { await authPost("organization/update-member-role", { role: sel.value, memberId: sel.dataset.role, organizationId: activeId }); toast("Role updated", "success"); loadOrgSettings(); }
+    catch (err) { toast(err.message || "Couldn't update role", "error"); loadOrgSettings(); }
+  };
+  for (const b of scope.querySelectorAll("[data-rm]")) b.onclick = async () => {
+    if (!(await confirmModal({ title:"Remove member?", body:"They'll immediately lose access to this organization.", danger:true, okText:"Remove" }))) return;
+    try { await authPost("organization/remove-member", { memberIdOrEmail: b.dataset.rm, organizationId: activeId }); toast("Member removed", "success"); loadOrgSettings(); }
+    catch (err) { toast(err.message || "Couldn't remove member", "error"); }
+  };
+  for (const b of scope.querySelectorAll("[data-cancel]")) b.onclick = async () => {
+    try { await authPost("organization/cancel-invitation", { invitationId: b.dataset.cancel }); toast("Invitation cancelled", "success"); loadOrgSettings(); }
+    catch (err) { toast(err.message || "Couldn't cancel invitation", "error"); }
+  };
+  const leave = scope.querySelector("#leaveOrgBtn");
+  if (leave) leave.onclick = async () => {
+    if (!(await confirmModal({ title:"Leave organization?", body:"You'll lose access until you're invited back.", danger:true, okText:"Leave" }))) return;
+    try { await authPost("organization/leave", { organizationId: activeId }); location.reload(); }
+    catch (err) { toast(err.message || "Couldn't leave organization", "error"); }
+  };
 }
 
 // ── Attention queue ─────────────────────────────────────────────────────────
@@ -1428,6 +1743,7 @@ function paletteItems() {
     { label: "Race board", hint: "per-agent pipeline", run: openRace },
     { label: "New agent", hint: "spawn", run: () => $("#addBtn").click() },
     { label: "Upgrade daemon", hint: "pull + restart", run: () => $("#upgradeBtn").click() },
+    { label: "Settings", hint: "account · org · appearance", run: openSettings },
   ];
   if (waitingAgents().length) out.splice(1, 0, { label: "Answer next blocked", hint: "queue", run: openQueue });
   for (const p of projects()) out.push({ label: `Project: ${p.name}`, hint: `${p.agents.length} agent(s)`, run: () => { selProject = p.id; selAgent = null; view = "project"; renderAll(); } });
@@ -1506,7 +1822,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "Escape" || e.key === "ArrowLeft") {
     if (view === "agent") { selAgent = null; view = "project"; renderAll(); e.preventDefault(); }
-    else if (view === "queue" || view === "board" || view === "feature" || (view === "project" && selProject)) { selProject = null; selAgent = null; view = "project"; renderAll(); e.preventDefault(); }
+    else if (view === "queue" || view === "board" || view === "feature" || view === "settings" || (view === "project" && selProject)) { selProject = null; selAgent = null; view = "project"; renderAll(); e.preventDefault(); }
   }
 });
 const cmdkBtn = $("#cmdkBtn"); if (cmdkBtn) cmdkBtn.onclick = () => palette.toggle();
@@ -1654,6 +1970,7 @@ function patchAgentView(a) {
 
 function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
+  if (view === "settings") return;   // settings is fetch-driven; don't rebuild it on live roster events
   if (view === "queue" || view === "race") { renderBody(); return; }
   if (view === "board" || view === "feature") { renderBody(); scheduleFeatures(); return; }
   if (view === "agent" && selAgent && agents.has(selAgent)) { patchAgentView(agents.get(selAgent)); return; }
@@ -1960,6 +2277,7 @@ function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").then(() => { if (typeof Notification !== "undefined" && Notification.permission === "granted") subscribePush(); }).catch(() => {});
   firstPaint("Connecting to the daemon…");
   const ax = $("#access"); if (ax) { const scheme = (location.protocol || "").replace(":", "").toUpperCase() || "HTTP"; ax.title = `Access is token-gated — every request carries a bearer token; loopback is exempt. Served over ${scheme}${location.protocol === "https:" ? " (encrypted)" : ""}.`; }
+  if (MODE === "db") { const a2 = $("#access"); if (a2) { a2.innerHTML = `<span class="axi" aria-hidden="true">🔒</span> session`; a2.title = "Signed in via session cookie — multi-tenant mode."; } }
   connect();
 }
 // ── theme toggle ─────────────────────────────────────────────────────────────
@@ -1986,7 +2304,18 @@ function boot() {
   };
 })();
 
-if (TOKEN()) boot(); else showLogin();
+// Boot path: ask the daemon which auth mode it runs, then branch.
+//   file -> today's bearer-token flow (token card).   db -> better-auth cookie session (auth screen).
+(async function bootstrap() {
+  try { const r = await _fetch("/api/auth/mode"); const j = await r.json(); MODE = j && j.mode === "db" ? "db" : "file"; }
+  catch { MODE = "file"; }
+  if (MODE !== "db") { if (TOKEN()) boot(); else showLogin(); return; }
+  try {
+    const r = await _fetch("/api/me", { credentials:"include" });
+    if (r.ok) { ME = await r.json(); boot(); return; }
+  } catch {}
+  showAuth();
+})();
 </script>
 </body>
 </html>
