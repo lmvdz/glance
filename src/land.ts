@@ -11,6 +11,7 @@
  */
 
 import { detectVerify } from "./intake.ts";
+import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 export interface LandResult {
 	ok: boolean;
@@ -65,7 +66,8 @@ interface GitRun {
 }
 
 async function git(args: string[], cwd: string): Promise<GitRun> {
-	const proc = Bun.spawn(["git", "-c", "commit.gpgsign=false", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	// ponytail: untrusted repo config can exec code via core.fsmonitor/diff.external/hooks/pager — these neutralize it.
+	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, "-c", "commit.gpgsign=false", ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "pipe" });
 	const [stdout, stderr, code] = await Promise.all([
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
