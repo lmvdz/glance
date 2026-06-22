@@ -49,9 +49,10 @@
   .proj.needs { box-shadow:inset 3px 0 0 var(--input); }
   .proj .pn { font-weight:600; display:flex; align-items:center; gap:8px; }
   .proj .pmeta { font-size:12px; color:var(--mut); margin-top:3px; display:flex; gap:8px; flex-wrap:wrap; }
-  .dots { display:inline-flex; gap:3px; }
+  .dots { display:inline-flex; gap:8px; align-items:center; }
   .d { width:8px; height:8px; border-radius:50%; display:inline-block; }
   .d.working{background:var(--work)} .d.idle{background:var(--ok)} .d.input{background:var(--input)} .d.error{background:var(--err)} .d.starting{background:var(--accent)} .d.stopped{background:var(--stop)}
+  .dseg { display:inline-flex; align-items:center; gap:3px; font-size:11px; color:var(--mut); line-height:1; }
   .empty { color:var(--dim); padding:24px; text-align:center; font-size:13px; }
   /* unified left nav */
   .navmain { padding:6px; display:flex; flex-direction:column; gap:2px; border-bottom:1px solid var(--line); }
@@ -335,6 +336,8 @@ let ws = null;
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
 const STATUSES = ["working","input","idle","starting","error","stopped"];
+// Make a non-button surface keyboard-operable: focusable, announced as a button, Enter/Space activates.
+function clickable(el, fn, label) { el.tabIndex = 0; el.setAttribute("role", "button"); if (label) el.setAttribute("aria-label", label); el.onclick = fn; el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(e); } }); }
 
 // ── Push signals (OMPSQ-4) ───────────────────────────────────────────────────
 // Notify out-of-band on status transitions so the operator can look away.
@@ -571,7 +574,7 @@ function renderNav() {
   for (const r of rows) { const el = nav.querySelector(`[data-id="${r.id}"]`); if (el) el.onclick = () => { r.on(); closeDrawer(); }; }
 }
 
-function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="d ${s}" title="${counts[s]} ${s}"></span>`).join("")}</span>`; }
+function dots(counts) { return `<span class="dots">${STATUSES.filter(s=>counts[s]).map(s=>`<span class="dseg" title="${counts[s]} ${s}"><span class="d ${s}"></span>${counts[s]}</span>`).join("")}</span>`; }
 
 function renderSidebar() {
   const ps = projects(); const el = $("#projects");
@@ -641,10 +644,10 @@ function renderQueue(body) {
       <div style="margin-bottom:4px"><span class="badge b-${a.status}">${esc(a.status)}</span> <strong>${esc(a.name)}</strong> <span style="color:var(--dim)">${esc(a.repo.split("/").filter(Boolean).pop()||a.repo)}</span> <a class="qopen" data-aid="${esc(a.id)}" style="color:var(--accent);cursor:pointer">open agent →</a></div>
       ${preq(p)}</div>`).join("");
     for (const { agent:a, req:p } of reqs) { const node = box.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (node) wireReq(node, a.id, p); }
-    for (const el of box.querySelectorAll(".qopen")) el.onclick = () => openAgent(el.dataset.aid);
+    for (const el of box.querySelectorAll(".qopen")) clickable(el, () => openAgent(el.dataset.aid), "open agent");
   }
   const eb = $("#qerrs");
-  if (eb) { eb.innerHTML = errs.map(a => `<div class="subnode" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-error">error</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.error||"")}</span></div>`).join(""); for (const el of eb.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid); }
+  if (eb) { eb.innerHTML = errs.map(a => `<div class="subnode" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-error">error</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.error||"")}</span></div>`).join(""); for (const el of eb.querySelectorAll("[data-aid]")) clickable(el, () => openAgent(el.dataset.aid), "open agent"); }
 }
 
 // ── Race board (OMPSQ-8) ─────────────────────────────────────────────────────
@@ -686,7 +689,7 @@ function renderRace(body) {
     const mid = a.todo ? raceTrack(a) : `<span class="rlabel" style="flex:1">${esc(a.activity || "—")}</span>`;
     return `<div class="rlane${child?" child":""}" data-aid="${esc(a.id)}">${head}${mid}${stall}<span class="rmeta agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span></div>`;
   }).join("");
-  for (const el of box.querySelectorAll("[data-aid]")) el.onclick = () => openAgent(el.dataset.aid);
+  for (const el of box.querySelectorAll("[data-aid]")) clickable(el, () => openAgent(el.dataset.aid), `open ${agents.get(el.dataset.aid)?.name || "agent"}`);
 }
 
 // ── Feature board ─────────────────────────────────────────────────────────
@@ -1066,7 +1069,7 @@ function fillAgentGrid(p) {
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
       <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span>${receiptSpan(a.receipt)}</div>`;
-    card.onclick = () => openAgent(a.id);
+    clickable(card, () => openAgent(a.id), `${a.name} — ${a.status}`);
     grid.appendChild(card);
   }
 }
