@@ -68,6 +68,19 @@ its own bus (`TailnetFederationBus`, wired in `squad-manager`); `mergeRosters` /
 `detectCollisions` (in `federation.ts`) fold peer rosters into a roster-of-rosters
 and flag repos where agents owned by different operators share a branch.
 
+The local command center surfaces this through **`GET /api/federation`** (bearer-gated
+like the rest), which returns `{ coordinator, operators, collisions }` —
+`federationView` (self + peers merged via `mergeRosters`, branches shared across
+operators flagged via `detectCollisions`). The server reaches peer rosters with a
+listener-only `PeerPresenceTracker` (a second, read-only `TailnetFederationBus`
+connection that never publishes), created in `server.start()` only when
+`OMP_SQUAD_COORDINATOR` is set; stale peers prune at the 90s presence TTL. The web
+dashboard renders it as the **Federation** panel — peer operators + their agents
+plus any shared-branch collisions — hidden whenever no coordinator is configured
+or there is nothing remote to show. Best-effort throughout: with the coordinator
+unset the feed is absent, the endpoint returns just `self` (no peers, no
+collisions), and nothing errors.
+
 ## Status
 
 - ✅ Coordinator relay — built, tested.
@@ -75,9 +88,10 @@ and flag repos where agents owned by different operators share a branch.
 - ✅ Cross-host repo identity — built, tested.
 - ✅ `federation-sync` publish + mirror — built, tested end to end (a peer's
   lease blocks a local omp agent's edit, which overrides on re-issue).
-- ⏳ Surfacing **remote presence** in the local command center needs an `repoId`
-  on `AgentDTO` (or a `/api/federation` endpoint); deferred until those files
-  (`types.ts` / `server.ts`) are free of in-flight work. The building blocks
-  (`mergeRosters`, `detectCollisions`, the presence bus) are already in place.
+- ✅ Surfacing **remote presence** in the local command center — `GET /api/federation`
+  + the Federation panel, fed by the listener-only `PeerPresenceTracker`. Cross-operator
+  branch collisions key on the host-local repo path (`detectCollisions` over `AgentDTO.repo`),
+  so they fire reliably for same-path checkouts; full cross-host collision matching still
+  wants a normalized `repoId` on `AgentDTO`.
 - ⏳ Daemon auto-start of `federation-sync` is a one-liner in `server.start()`
   once the daemon entry settles; today run it as the companion process above.
