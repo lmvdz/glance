@@ -25,6 +25,7 @@ import { SquadManager } from "./squad-manager.ts";
 import { SquadTui } from "./tui.ts";
 import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
+import { acquireStateLock, StateLockError } from "./state-lock.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
 import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
@@ -152,6 +153,17 @@ async function cmdUp(args: string[]): Promise<void> {
 	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 	const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
 	const manager = new SquadManager({ bus, operator, stateDir, autoLand: process.env.OMP_SQUAD_AUTOLAND !== "0" });
+	// Single-writer guard: refuse to boot if another daemon already owns this state dir.
+	let lock: Awaited<ReturnType<typeof acquireStateLock>>;
+	try {
+		lock = await acquireStateLock(stateDir);
+	} catch (err) {
+		if (err instanceof StateLockError) {
+			process.stderr.write(`${err.message}\n`);
+			process.exit(1);
+		}
+		throw err;
+	}
 	await manager.start();
 	if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
 	if (flags.restore) {
@@ -175,6 +187,7 @@ async function cmdUp(args: string[]): Promise<void> {
 		stopTracker();
 		await manager.stop();
 		server.stop();
+		lock.release();
 		process.exit(0);
 	};
 	process.on("SIGINT", () => void shutdown());
