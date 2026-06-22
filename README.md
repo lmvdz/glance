@@ -123,6 +123,7 @@ controls do everything the CLI does.
 | `--workflow` | Run a workflow graph (`.fabro`) as the process; `--task` is the goal | — |
 | `--verify` | Wrap `--task` in an implement → verify → fixup loop (gate = `<cmd>` exit 0) | — |
 | `--sandbox` | Run the agent inside a container from `<image>` (mounts the worktree) | — |
+| `--acp` | Run an ACP runtime (`auggie --acp`) instead of `omp --mode rpc` | — |
 
 > **Thinking defaults to `low`** so fleet agents stay responsive; bump it per-agent for
 > hard work. (Inheriting a global `high` default makes every agent grind — opt in
@@ -480,6 +481,25 @@ omp-squad add ~/code/myproject --sandbox my-omp-image --approval yolo \
 - The image must provide `omp`; point `--sandbox` at an omp-provisioned image. (The driver's
   container transport + lifecycle are verified against a real `oven/bun` container in the test
   suite using a fake-omp RPC server — no tokens; the real-omp path was proven live on the host.)
+
+## ACP runtimes — a non-omp agent in the roster
+
+`--acp` runs an **ACP-speaking runtime** (`auggie --acp`, and Claude Code / Codex via ACP)
+behind the same `AgentDriver` seam that `RpcAgent` uses for `omp --mode rpc`. Same seam, so
+an ACP runtime joins the roster / TUI / web / status / receipts **identically** — only the
+transport (hand-rolled ACP JSON-RPC 2.0 over the child's stdio) and the agent runtime change.
+
+```bash
+omp-squad add ~/code/myproject --acp --task "Add rate limiting to the public API."
+```
+
+- **`AcpAgentDriver`** spawns the runtime as a child, handshakes (`initialize` → `session/new`),
+  maps `session/update` (message chunks, tool calls, plan, usage) and the turn lifecycle to the
+  same normalized frames the manager already derives, and bridges `session/request_permission`
+  to the squad's confirm-UI (the human answer routes back as the ACP `{outcome}` reply).
+- The child command is injectable; the default is `auggie --acp`. The driver's ACP transport +
+  mappings are verified in the test suite against a fake in-process ACP agent — no auggie, no
+  account, no tokens.
 
 ## Phase 2 — cross-operator federation
 
