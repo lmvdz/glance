@@ -33,6 +33,7 @@ import { Scheduler, liveAgents } from "./scheduler.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent, type LandOpts, type LandResult } from "./land.ts";
+import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
 import { proofGate, runProof } from "./proof.ts";
 import { chooseFallback } from "./supervisor.ts";
@@ -121,6 +122,8 @@ export interface SquadManagerOptions {
 	stateDir?: string;
 	/** omp binary override (passed to each RpcAgent). */
 	bin?: string;
+	/** Autonomous-land mode: a workflow run that succeeds lands its own branch (OMP_SQUAD_AUTOLAND). */
+	autoLand?: boolean;
 }
 
 export interface CommissionOptions {
@@ -143,6 +146,7 @@ export class SquadManager extends EventEmitter {
 	private readonly stateFile: string;
 	private readonly featureStore = new Map<string, PersistedFeature>();
 	private readonly bin?: string;
+	private readonly autoLand: boolean;
 	private pollTimer?: Timer;
 	private dispatcher?: Dispatcher;
 	private readonly scheduler = new Scheduler();
@@ -163,6 +167,7 @@ export class SquadManager extends EventEmitter {
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
 		this.stateFile = path.join(this.stateDir, "state.json");
 		this.bin = opts.bin;
+		this.autoLand = opts.autoLand ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 	}
 
@@ -1019,6 +1024,10 @@ export class SquadManager extends EventEmitter {
 				void this.finalizeRun(rec);
 				break;
 			}
+			case "workflow_done":
+				// Autonomous loop closer: a successful workflow lands its own branch (no operator).
+				void autoLandOnSuccess(this.autoLand, frame.outcome as string | undefined, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
+				break;
 		}
 		rec.dto.receipt = rec.run?.rollup();
 		rec.dto.status = this.derive(rec);

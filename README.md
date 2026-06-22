@@ -457,9 +457,17 @@ agent's uncommitted edits are never clobbered. The resolver/reviewer are injecta
 them; the defaults shell out to `omp`). Ceiling: a verify gate + reviewer can still miss a *semantic*
 conflict that is textually clean and compiles — see the `ponytail:` note on `attemptAutoResolve`.
 
+**Landing it automatically, too.** `OMP_SQUAD_AUTORESOLVE` decides what happens *when* a land
+conflicts; **`OMP_SQUAD_AUTOLAND=1`** decides *that a land happens at all* with no operator: a
+workflow run that finishes successfully (`--verify`, plan-implement, an auto-dispatched issue)
+lands its own branch the moment it goes green. With both on, the loop closes end to end — intake →
+build → verify → **land** → resolve-on-conflict — and a human is needed only when a resolution
+can't be proven.
+
 | Env var | Effect |
 |---|---|
 | `OMP_SQUAD_AUTORESOLVE` | Enable `landAgent`'s automated conflict resolver (off by default) |
+| `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (off by default) |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 
 ## Sandboxed execution — agents off your laptop

@@ -192,8 +192,10 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 
 	private async execRun(goal: string, resume?: WorkflowRunState): Promise<void> {
 		this.emit("event", { type: "agent_start" });
+		let outcome: "succeeded" | "failed" = "failed";
 		try {
 			const result = await this.engine!.run(goal, { resume, checkpoint: (c) => this.onCheckpoint(c) });
+			outcome = result.outcome;
 			const mark = result.outcome === "succeeded" ? "✓" : "✗";
 			this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `${mark} workflow ${this.wf?.name}${resume ? " (resumed)" : ""}: ${result.reason}` } });
 			this.emit("event", { type: "message_end" });
@@ -204,6 +206,8 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			}
 		} finally {
 			this.runActive = false;
+			// Structured terminal outcome so the manager can auto-land a successful run (no operator).
+			this.emit("event", { type: "workflow_done", outcome });
 			this.emit("event", { type: "agent_end" });
 		}
 	}
