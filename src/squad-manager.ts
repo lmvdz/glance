@@ -80,9 +80,10 @@ const POLL_MS = 2500;
 // liveAgents + the WIP cap live in ./scheduler.ts now; re-export keeps the public import path stable.
 export { liveAgents };
 
-/** Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway/looping fan-out can't melt the host. Default 2× the WIP cap, floor 12; override with OMP_SQUAD_MAX_AGENTS. */
+/** Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway fan-out can't
+ *  melt the host. Default ≈ the host's CPU count (min 3) so a bare launch is bounded; override with OMP_SQUAD_MAX_AGENTS. */
 export function hardAgentCeiling(): number {
-	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max((Number(process.env.OMP_SQUAD_MAX_WIP) || 6) * 2, 12);
+	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3);
 }
 
 /**

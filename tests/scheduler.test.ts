@@ -7,7 +7,7 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
-import { liveAgents, Scheduler } from "../src/scheduler.ts";
+import { defaultWipCap, liveAgents, Scheduler } from "../src/scheduler.ts";
 import type { AgentDTO, AgentStatus, CreateAgentOptions } from "../src/types.ts";
 
 const savedWip = process.env.OMP_SQUAD_MAX_WIP;
@@ -38,12 +38,13 @@ test("liveAgents counts non-terminal agents only (stopped/error free their slot)
 	expect(liveAgents([])).toBe(0);
 });
 
-test("cap reads OMP_SQUAD_MAX_WIP per call, defaulting to 6", () => {
-	const s = new Scheduler();
+test("cap reads OMP_SQUAD_MAX_WIP per call, defaulting to the safe host-derived cap", () => {
+	const s = new Scheduler(() => false);
 	delete process.env.OMP_SQUAD_MAX_WIP;
-	expect(s.cap()).toBe(6);
+	expect(s.cap()).toBe(defaultWipCap()); // safe default (~half the host CPUs), not a fixed 6
+	expect(defaultWipCap()).toBeGreaterThanOrEqual(2);
 	process.env.OMP_SQUAD_MAX_WIP = "2";
-	expect(s.cap()).toBe(2); // live env change takes effect without a fresh Scheduler
+	expect(s.cap()).toBe(2); // explicit env still wins
 });
 
 test("canAdmit gates exactly at the ceiling (count >= cap is full)", () => {

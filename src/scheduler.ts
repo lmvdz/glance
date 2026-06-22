@@ -11,6 +11,7 @@
 
 import type { AgentDTO, CreateAgentOptions } from "./types.ts";
 import { readHost, underPressure } from "./resource.ts";
+import * as os from "node:os";
 
 /** Terminal statuses — an agent here has finished and frees its WIP slot. */
 const TERMINAL_STATUSES: Record<string, true> = { stopped: true, error: true };
@@ -20,10 +21,16 @@ export function liveAgents(dtos: AgentDTO[]): number {
 	return dtos.filter((d) => !TERMINAL_STATUSES[d.status]).length;
 }
 
+/** Safe default WIP cap when OMP_SQUAD_MAX_WIP is unset: ~half the host's CPUs (min 2), so a launch is
+ *  bounded even without up.sh's env. */
+export function defaultWipCap(): number {
+	return Math.max(2, Math.floor((os.cpus().length || 2) / 2));
+}
+
 /**
- * Default host-pressure probe. Gating is opt-in (OMP_SQUAD_RESOURCE_GATE) so admission is
- * unchanged unless an operator turns it on; read per call so it flips live. An injected probe
- * (tests) bypasses the flag.
+ * Default host-pressure probe. Gating is opt-in (OMP_SQUAD_RESOURCE_GATE; up.sh sets it). The safe count
+ * caps (defaultWipCap / hardAgentCeiling) already bound a bare launch on their own — this adds load-aware
+ * backoff on top. Read per call; an injected probe (tests) bypasses the flag.
  */
 function hostPressureProbe(): boolean {
 	return process.env.OMP_SQUAD_RESOURCE_GATE ? underPressure(readHost()) : false;
@@ -40,11 +47,11 @@ export class Scheduler {
 	}
 
 	/**
-	 * Global live-agent WIP ceiling: OMP_SQUAD_MAX_WIP (default 6). Read per call so an
+	 * Global live-agent WIP ceiling: OMP_SQUAD_MAX_WIP (default ~half the host CPUs). Read per call so an
 	 * env change (tests, ops) takes effect without a restart — matching the prior inline read.
 	 */
 	cap(): number {
-		return Number(process.env.OMP_SQUAD_MAX_WIP) || 6;
+		return Number(process.env.OMP_SQUAD_MAX_WIP) || defaultWipCap();
 	}
 
 	/** True when the host is too loaded to admit another agent, independent of the count cap. */

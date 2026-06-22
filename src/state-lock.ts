@@ -34,6 +34,9 @@ interface LockRecord {
 	pid: number;
 	host: string;
 	startedAt: number;
+	/** Launcher pid + command line, so a daemon started outside up.sh (a rogue) is traceable. */
+	ppid?: number;
+	argv?: string;
 }
 
 export interface StateLock {
@@ -62,7 +65,7 @@ function lockPath(stateDir: string): string {
 }
 
 function selfRecord(): LockRecord {
-	return { pid: process.pid, host: os.hostname(), startedAt: Date.now() };
+	return { pid: process.pid, ppid: process.ppid, host: os.hostname(), startedAt: Date.now(), argv: process.argv.slice(1).join(" ") };
 }
 
 function readRecord(file: string): LockRecord | null {
