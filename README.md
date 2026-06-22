@@ -89,6 +89,10 @@ omp-squad up
 omp-squad up --no-tui
 ```
 
+> Running it on a server / leaving it up? See [`docs/operations.md`](docs/operations.md) — how to
+> run the daemon so it survives (don't `&` it from an ephemeral shell), and why intermittent
+> health-check timeouts under heavy fan-out are transient event-loop stalls, not crashes.
+
 From another shell (talks to the running daemon):
 
 ```bash
