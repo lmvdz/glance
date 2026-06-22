@@ -209,6 +209,7 @@ moving without a human. All bounded and **on by default** — set the matching `
 | Env | Meaning |
 |---|---|
 | `OMP_SQUAD_MAX_WIP` | Global live-agent WIP ceiling (default `6`); a spawn past it is refused |
+| `OMP_SQUAD_MAX_AGENTS` | Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway/looping fan-out can't over-spawn the host (default `2×` the WIP cap, floor `12`) |
 | `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
 | `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates) so blocked agents advance without you — **on by default** (`=0` to disable). Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
 | `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
@@ -224,6 +225,12 @@ escalate by repair budget), trips a single human-summoning `CATASTROPHE:` log on
 exhaustion or a catastrophe tripwire (infra failure, safety violation, regression
 oscillation), and drains cap-parked spawns back in under the WIP ceiling. On by default; set
 `OMP_SQUAD_AUTODRIVE=0` to disable — then the daemon arms no timer and the tick is fully inert.
+
+**Orphan-host reaping.** Each agent runs in a detached `agent-host` process that outlives the daemon
+(so a restart/upgrade reconnects to live agents with full context). A host left behind by a crash,
+re-exec, or a re-spawn under a fresh id — one the roster no longer owns — is shut down (over the host
+protocol) on daemon startup and on a periodic poll tick, so phantom `omp` processes can't accumulate.
+Together with `OMP_SQUAD_MAX_AGENTS`, the fleet's process count stays bounded across daemon lifetimes.
 
 ### Federation (opt-in)
 
