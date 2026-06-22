@@ -22,6 +22,10 @@ import { validateWorker } from "../src/validate.ts";
 import { generateWorkerFiles } from "../src/worker-template.ts";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 
+// Deterministic suite: opt out of Plane auto-dispatch so an ambient ~/.claude plane.env
+// can't race a real issue-routed agent into the roster mid-test (would make list() flaky).
+process.env.OMP_SQUAD_AUTODISPATCH = "0";
+
 const tmps: string[] = [];
 
 async function makeRepo(): Promise<string> {

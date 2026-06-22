@@ -12,6 +12,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ApprovalMode, CreateAgentOptions, ThinkingLevel } from "./types.ts";
+import { extractJsonObject, ompOneShot } from "./omp-call.ts";
 
 const INFER_TIMEOUT_MS = 20_000;
 
@@ -105,17 +106,8 @@ export function pickRepoHeuristic(prompt: string, candidates: string[], cwd: str
 
 /** Extract a single JSON object from model output and coerce its fields to strings. */
 export function parsePlanJson(text: string): RawPlan | undefined {
-	const start = text.indexOf("{");
-	const end = text.lastIndexOf("}");
-	if (start < 0 || end <= start) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text.slice(start, end + 1));
-	} catch {
-		return undefined;
-	}
-	if (typeof parsed !== "object" || parsed === null) return undefined;
-	const r = parsed as Record<string, unknown>;
+	const r = extractJsonObject(text);
+	if (!r) return undefined;
 	const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined);
 	return { repo: str(r.repo), name: str(r.name), model: str(r.model), approval: str(r.approval), thinking: str(r.thinking), reason: str(r.reason), owns: Array.isArray(r.owns) ? r.owns.filter((s): s is string => typeof s === "string" && s.trim().length > 0).map((s) => s.trim()) : undefined };
 }
@@ -133,18 +125,9 @@ const SYSTEM_PROMPT =
 
 async function infer(prompt: string, candidates: string[]): Promise<RawPlan | undefined> {
 	const user = `Candidate repos:\n${candidates.map((c) => `- ${c}`).join("\n")}\n\nTask: ${prompt}\n\nJSON:`;
-	try {
-		const proc = Bun.spawn(["omp", "-p", "--smol", "--system-prompt", SYSTEM_PROMPT, user], {
-			stdout: "pipe",
-			stderr: "ignore",
-			signal: AbortSignal.timeout(INFER_TIMEOUT_MS),
-		});
-		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-		if (code !== 0) return undefined;
-		return parsePlanJson(out);
-	} catch {
-		return undefined;
-	}
+	const { out, code } = await ompOneShot(["-p", "--smol", "--system-prompt", SYSTEM_PROMPT, user], { timeoutMs: INFER_TIMEOUT_MS });
+	if (code !== 0) return undefined;
+	return parsePlanJson(out);
 }
 
 /** Resolve a free-text task into a complete, valid spawn plan. Never throws; always returns a usable plan. */

@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDTO, ClientCommand, PendingRequest, SquadEvent, TranscriptEntry } from "./types.ts";
+import { extractJsonObject, ompOneShot } from "./omp-call.ts";
 
 /** Options that escape the worktree and are clearly destructive should be denied; everything else advances. */
 export const SUPERVISOR_SYSTEM = [
@@ -69,19 +70,6 @@ export function chooseFallback(req: PendingRequest): string {
 		default:
 			// Host-tool requests (source === "tool", kind === tool name) and anything unknown.
 			return "";
-	}
-}
-
-/** Extract the first balanced-ish JSON object from noisy model output (handles ```json fences and stray prose). */
-function extractJsonObject(raw: string): Record<string, unknown> | undefined {
-	const start = raw.indexOf("{");
-	const end = raw.lastIndexOf("}");
-	if (start < 0 || end <= start) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
-		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
-	} catch {
-		return undefined;
 	}
 }
 
@@ -210,12 +198,7 @@ export async function decide(req: PendingRequest, context: string, opts?: { mode
 		if (opts?.model) args.push("--model", opts.model);
 		else args.push("--smol");
 		args.push("--system-prompt", SUPERVISOR_SYSTEM, prompt);
-		const proc = Bun.spawn(["omp", ...args], {
-			stdout: "pipe",
-			stderr: "ignore",
-			signal: AbortSignal.timeout(DECIDE_TIMEOUT_MS),
-		});
-		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		const { out, code } = await ompOneShot(args, { timeoutMs: DECIDE_TIMEOUT_MS });
 		if (code !== 0) return chooseFallback(req);
 		const text = extractAssistantText(out);
 		if (!text.trim()) return chooseFallback(req);

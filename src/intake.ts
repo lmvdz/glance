@@ -12,6 +12,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "./types.ts";
+import { extractJsonObject, ompOneShot } from "./omp-call.ts";
 
 export interface IntakeDecision {
 	/** Bundled workflow graph to run as the process. */
@@ -80,29 +81,16 @@ async function llmRoute(task: string, repo: string, classify: Classify): Promise
 
 /** Extract the last balanced JSON object from model output and read its routing fields. */
 function extractDecision(text: string): { process?: string; effort?: string } | undefined {
-	const start = text.lastIndexOf("{");
-	const end = text.lastIndexOf("}");
-	if (start < 0 || end <= start) return undefined;
-	try {
-		const obj: unknown = JSON.parse(text.slice(start, end + 1));
-		if (!obj || typeof obj !== "object") return undefined;
-		const rec = obj as Record<string, unknown>; // guarded: a non-null object literal from the model
-		const process = typeof rec.process === "string" ? rec.process : undefined;
-		const effort = typeof rec.effort === "string" ? rec.effort : undefined;
-		return { process, effort };
-	} catch {
-		return undefined;
-	}
+	const rec = extractJsonObject(text);
+	if (!rec) return undefined;
+	const process = typeof rec.process === "string" ? rec.process : undefined;
+	const effort = typeof rec.effort === "string" ? rec.effort : undefined;
+	return { process, effort };
 }
 
 /** A `Classify` backed by a one-shot omp call on the fast/smol model (no tools). */
 export function ompClassify(bin = "omp"): Classify {
-	return async (prompt: string): Promise<string> => {
-		const proc = Bun.spawn([bin, "-p", "--no-tools", "--smol", "--hide-thinking", prompt], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env } });
-		const out = await new Response(proc.stdout).text();
-		await proc.exited;
-		return out;
-	};
+	return async (prompt: string): Promise<string> => (await ompOneShot(["-p", "--no-tools", "--smol", "--hide-thinking", prompt], { bin })).out;
 }
 
 /** Infer the repo's verification command from its toolchain manifests. */
