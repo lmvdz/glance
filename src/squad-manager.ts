@@ -67,6 +67,8 @@ import { hostAlive, pruneStaleSockets, socketPathFor } from "./agent-host.ts";
 import { addWorktree, removeWorktree, worktreeStatus } from "./worktree.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
+import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { redact } from "./redact.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -784,6 +786,11 @@ export class SquadManager extends EventEmitter {
 		rec.streaming = false;
 		rec.subs.clear();
 		this.wire(rec);
+		// Surface the prior session's digest, fenced as untrusted data, so the operator immediately
+		// sees where they left off. Surfacing only — never auto-prompt the live agent (no silent spend).
+		// ponytail: no dedicated TUI/web treatment yet (YAGNI) — getDigest() + this entry suffice.
+		const digest = await readDigest(this.stateDir, rec.dto.id);
+		if (digest) this.append(rec, "system", "📒 Resume digest — prior session memory:\n" + fenceUntrusted("resume digest", digest));
 		this.emitAgent(rec);
 		try {
 			await fresh.start();
@@ -933,6 +940,13 @@ export class SquadManager extends EventEmitter {
 		run.finalized = true;
 		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
 		await appendReceipt(this.stateDir, run.snapshot());
+		// Best-effort cold-start digest: a failure here must never break run completion.
+		try {
+			const md = buildDigest({ transcript: rec.transcript, receipts: await readReceipts(this.stateDir, rec.dto.id) });
+			await writeDigest(this.stateDir, rec.dto.id, md);
+		} catch (err) {
+			this.log("warn", `digest failed for ${rec.dto.name}: ${err}`);
+		}
 		rec.dto.receipt = run.rollup();
 		rec.run = undefined;
 		this.emitAgent(rec);
@@ -941,6 +955,11 @@ export class SquadManager extends EventEmitter {
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
 	async receipts(id: string): Promise<RunReceipt[]> {
 		return readReceipts(this.stateDir, id);
+	}
+
+	/** Saved cold-start resume digest for an agent ("" if none yet). */
+	async getDigest(id: string): Promise<string> {
+		return readDigest(this.stateDir, id);
 	}
 
 	private onUi(rec: AgentRecord, req: RpcExtensionUIRequest): void {
@@ -1034,7 +1053,10 @@ export class SquadManager extends EventEmitter {
 	// ── Transcript + emission ─────────────────────────────────────────────────
 
 	private append(rec: AgentRecord, kind: TranscriptKind, text: string): void {
-		const entry: TranscriptEntry = { kind, text, ts: Date.now() };
+		// ponytail: append() is the single transcript chokepoint — redact here so secrets reach
+		// neither the in-memory buffer, persisted state.json, nor the emitted transcript event.
+		// Receipt fields carry paths/tallies (not free text), so they need no separate redaction.
+		const entry: TranscriptEntry = { kind, text: redact(text), ts: Date.now() };
 		rec.transcript.push(entry);
 		if (rec.transcript.length > MAX_TRANSCRIPT) rec.transcript.shift();
 		rec.dto.messageCount = rec.transcript.length;

@@ -1,15 +1,26 @@
 /**
- * Git invocation hardening — shared `-c` args + env overlaid on every squad git
- * call so plumbing behaves deterministically regardless of the operator's global
- * config: never GPG-sign (would block/fail on a box with commit.gpgsign=true),
- * never fire repo hooks on our own plumbing, never block on an interactive prompt.
+ * Git supply-chain hardening for read-only git invocations.
  *
- * Extracted because land.ts, proof.ts, and worktree.ts each spawn git and must
- * agree on this; previously only land.ts forced `commit.gpgsign=false` inline.
+ * A repo's own config can hijack plain git to run arbitrary code
+ * (core.fsmonitor, diff.external, hooks, a pager). When we only ever read an
+ * untrusted clone, spread these args/env onto every `git` call to neutralize
+ * those vectors and never prompt or page. Ported from recall's _GIT_HARDENING /
+ * _GIT_ENV.
  */
 
-/** `-c` overrides prepended to every `git` invocation: `git ...GIT_HARDEN_ARGS <cmd>`. */
-export const GIT_HARDEN_ARGS: readonly string[] = ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+export const GIT_HARDEN_ARGS: string[] = [
+	"-c",
+	"core.fsmonitor=",
+	"-c",
+	"diff.external=",
+	"-c",
+	"core.hooksPath=/dev/null",
+	"-c",
+	"core.pager=cat",
+];
 
-/** Environment overlaid on every `git` invocation. */
-export const GIT_HARDEN_ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" };
+export const GIT_HARDEN_ENV: Record<string, string> = {
+	GIT_TERMINAL_PROMPT: "0",
+	GIT_PAGER: "cat",
+	PAGER: "cat",
+};

@@ -14,6 +14,7 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
+import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 const ROOT = path.join(os.homedir(), ".omp", "squad", "proof");
 
@@ -38,7 +39,8 @@ function fileFor(repo: string, worktree: string): { dir: string; file: string } 
 }
 
 async function gitOut(args: string[], cwd: string): Promise<string> {
-	const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "ignore" });
+	// ponytail: untrusted repo config can exec code via core.fsmonitor/diff.external/hooks/pager — these neutralize it.
+	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "ignore" });
 	const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 	return out.trim();
 }

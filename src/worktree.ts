@@ -5,6 +5,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 export interface GitResult {
 	code: number;
@@ -13,8 +14,10 @@ export interface GitResult {
 }
 
 async function runGit(args: string[], cwd?: string): Promise<GitResult> {
-	const proc = Bun.spawn(["git", ...args], {
+	// ponytail: untrusted repo config can exec code via core.fsmonitor/diff.external/hooks/pager — these neutralize it.
+	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], {
 		cwd,
+		env: { ...process.env, ...GIT_HARDEN_ENV },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
