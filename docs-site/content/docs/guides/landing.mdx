@@ -1,0 +1,113 @@
+---
+title: Landing
+description: Getting an agent's work back to main — commit, merge (ff or merge commit), verify-on-merge, proof gating, and opt-in conflict auto-resolution.
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+A fleet only pays off when its branches **land**. Each agent works on its own `squad/<name>`
+branch in an isolated worktree; landing commits that work and merges it into your main checkout.
+`landAgent` (`src/land.ts`) is the single path, driven by the web **⤳ Land** button and by
+`landFeature` for multi-branch features.
+
+## What `landAgent` does
+
+<Steps>
+
+<Step>
+### Commit the worktree (when safe)
+For an **idle / stopped** agent, any uncommitted edits are swept into a commit on its branch
+(`git add -A` + `git commit`). For a **live** agent (working / starting / input), only its
+**already-committed** history is merged — its in-progress edits are never touched. (The server
+sets this `commitWip` flag from the agent's status.)
+</Step>
+
+<Step>
+### Merge into main
+A **fast-forward** when the branch is a clean descendant of main (`git merge --ff-only`); a
+**merge commit** when main has diverged (`git merge --no-ff`). Nothing to merge (in-place agent,
+or zero commits ahead) returns cleanly with no-op detail.
+</Step>
+
+<Step>
+### Verify on merge, roll back on red
+After the merge, a gate runs against main — your `verify` override, else the repo's auto-detected
+acceptance command (empty string skips it). If it **exits non-zero, main is reset to its
+pre-merge HEAD** so it stays green; the branch keeps its commit so you can fix and re-land.
+</Step>
+
+</Steps>
+
+Lands are **serialized per repo** (an in-process promise chain keyed by repo path): two lands
+racing the same main checkout would interleave `git merge` and corrupt the index, so they queue —
+and each land re-reads HEAD when it runs, seeing commits prior lands just merged.
+
+A successful land also **closes the agent's tracking Plane issue** (idempotent, best-effort), on
+both the single-agent and `landFeature` paths, so a shipped branch leaves no stale issue behind.
+
+## From the dashboard
+
+In an agent's [Changes panel](/docs/guides/web-dashboard#agent-view) you review the worktree diff,
+then press **⤳ Land**. Before merging, the server runs a **proof gate**: a landable branch must
+have a **fresh land-proof** — an acceptance run (`runProof` / `src/proof.ts`) that exited 0
+**against the branch's current HEAD**. If the proof is missing, failed, or stale (HEAD moved
+since it ran), the Land is blocked with a reason; press **Verify** to record a fresh proof, or
+**Force** to skip the gate.
+
+`landFeature` powers the feature board's **Land all** (and **Force land**): it lands every
+member branch of a feature, fast-forward-first.
+
+<Callout type="info">
+A proof's gate fields (`ok`, `commit`) come solely from the deterministic acceptance command and
+HEAD. An optional browser-vision pass (only when a URL or `OMP_SQUAD_APP_URL` is set) just
+appends screenshots as evidence — it can never flip the gate.
+</Callout>
+
+## Conflicts
+
+When `main` has moved under a long-running branch, the merge **conflicts**. `landAgent` aborts
+the merge (leaving main clean) and, by default, **gives up** — landing a conflicting branch is a
+deliberate decision. You have two ways forward.
+
+### The resolve-conflict workflow (reviewable)
+
+The bundled **`resolve-conflict`** workflow resolves the conflict as a diffable graph rather than
+a black box:
+
+```bash
+omp-squad add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
+  --task "Make this branch land-able on main."
+```
+
+It merges main into the branch (with `git rerere` replaying prior resolutions), resolves what's
+left with an intent-aware agent told to **combine both sides**, and a `goal_gate` verify step
+(`check && test`, not the mere absence of conflict markers) authorizes the commit. The resolution
+lives **on the branch**, so the eventual land stays a plain fast-forward and the resolved diff is
+reviewable in the Changes panel before main moves. See [Workflows](/docs/workflows).
+
+### `OMP_SQUAD_AUTORESOLVE` (in-process)
+
+<Callout type="warn">
+**Off by default — opt in with `OMP_SQUAD_AUTORESOLVE=1`.** When set, a conflicting `landAgent`
+rebases the branch onto main, hands each conflicted file to a resolver (default: a one-shot
+`omp -p` agent), then **proves** the result — the full verify gate **and** an independent
+reviewer pass must both approve — before completing the land. **Any failing step rolls `main`
+back** to where it was; an unproven resolution is never kept. It runs only when the worktree is
+clean, so a live agent's uncommitted edits are never clobbered.
+</Callout>
+
+This carries a real ceiling: a verify gate plus reviewer can still miss a *semantic* conflict
+that is textually clean and compiles — which is why it's opt-in.
+
+| Env var | Effect |
+|---|---|
+| `OMP_SQUAD_AUTORESOLVE` | Enable `landAgent`'s automated conflict resolver (off by default) |
+| `OMP_SQUAD_REPAIR_BUDGET` | Red-gate retry budget before escalating (default `3`) — see [Autonomy](/docs/architecture/autonomy) |
+
+---
+
+<Cards>
+<Card title="Web dashboard" href="/docs/guides/web-dashboard" description="Review changes and land from the browser." />
+<Card title="Workflows" href="/docs/workflows" description="The resolve-conflict graph and the engine behind it." />
+<Card title="Autonomy" href="/docs/architecture/autonomy" description="Auto-land, the failure router, and the self-healing tick." />
+</Cards>

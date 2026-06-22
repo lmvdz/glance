@@ -1,0 +1,100 @@
+---
+title: Workflow runtime
+description: Process as a reviewable graph — a workflow run is one steerable roster agent driven by a pure engine plus an injected executor.
+---
+
+import { File, Folder, Files } from 'fumadocs-ui/components/files';
+
+A workflow turns an agent's *process* into a reviewable artifact. Instead of handing one
+free-text task to a model and trusting whatever it decides, you author the process as a
+directed graph — plan, human-approval gate, implement, verify, bounded fix-up loop — in the
+Graphviz/DOT subset that [fabro](https://github.com/fabro-sh/fabro) uses. The graph is a
+diffable, version-controlled file (`.fabro`). You review the *plan* before the diff and
+intervene only at the gates.
+
+```text
+start ──▶ plan ──▶ approve ──┬─(Approve)─▶ implement ──▶ verify ──(succeeded)─▶ exit
+                             │                              │
+                             └─(Revise)──▶ plan             └─(failed)─▶ fixup ─▶ verify
+```
+
+That graph is `workflows/plan-implement/workflow.fabro`, the canonical reviewable process.
+
+## A workflow is just another agent
+
+omp-squad's architecture is "anything implementing `AgentDriver` joins the roster, status
+derivation, transcript, TUI, web, federation, and Plane spawn" — the same contract that
+`RpcAgent` and `FlueServiceDriver` satisfy. `WorkflowDriver` (`src/workflow-driver.ts`) is
+that contract again, so `kind: "workflow"` lands a graph-driven, gated, multi-model-ready run
+in exactly the same surfaces as an omp operator. See [the driver seam](/docs/architecture/agent-driver).
+
+| `AgentDriver` member | Workflow meaning |
+|---|---|
+| `start()` | Parse the graph (`workflowPath`) or take a pre-built one (`workflow`); build the engine + executor. |
+| `prompt(goal)` | The **first** prompt starts the run with that goal; later prompts steer the live inner agent. |
+| `abort()` | Stop the engine at the next node boundary and abort the inner turn. |
+| `getState()` | Synthetic — the executor's stage rollup becomes `todoPhases` (the dashboard's done/total). |
+| `respondUi()` | Answer a human gate, or pass through the inner agent's own approval request. |
+| `detach()` | Leave the inner host running across a daemon restart. |
+| `event` frames | One `agent_start … agent_end` around the whole run; stage transitions + command output between. |
+
+The manager footprint is tiny: a `kind`, one `makeDriver` branch, one poll-filter widen
+(`src/squad-manager.ts`) — identical to how `flue-service` dropped in.
+
+## Pure engine, injected execution
+
+The engine is **pure orchestration** and execution is an injected seam. This is the decision
+that lets a fan-out spawn *real roster agents* instead of hiding branches inside one row.
+
+<Files>
+  <Folder name="src/workflow" defaultOpen>
+    <File name="types.ts" annotation="Workflow / WorkflowNode / WorkflowEdge + the NodeExecutor seam" />
+    <File name="dot.ts" annotation="parse the DOT subset → typed graph" />
+    <File name="engine.ts" annotation="WorkflowEngine.run(goal): routing, conditions, goal_gate, retry_target, visit caps, gates, stages" />
+    <File name="executor.ts" annotation="SingleAgentExecutor — the Phase-A NodeExecutor" />
+    <File name="stylesheet.ts" annotation="per-node model routing (model_stylesheet)" />
+    <File name="verify-workflow.ts" annotation="buildVerifyWorkflow — the synthesized --verify loop" />
+    <File name="commission-executor.ts" annotation="CommissionExecutor — drives the commission graph's action nodes" />
+  </Folder>
+  <File name="src/workflow-driver.ts" annotation="WorkflowDriver implements AgentDriver" />
+</Files>
+
+- **`WorkflowEngine`** (`engine.ts`) knows nothing about omp, processes, or the fleet. It
+  walks the graph: routing, edge conditions, visit caps, goal-gate failure handling,
+  human-gate pausing, and stage emission. It is unit-tested against a fake executor (no tokens).
+- **`NodeExecutor`** (the seam in `types.ts`) decides what "run an agent node", "run a
+  command", or "raise a human gate" concretely *means*. The engine drives it.
+- **`SingleAgentExecutor`** (`executor.ts`) is the Phase-A executor. It binds **every agent
+  node to one persistent omp thread**, so a whole `plan → implement → verify` run is *one
+  steerable roster entry*. Command nodes shell out in the worktree; human gates raise a
+  callback; agent/prompt nodes share that single thread (the goal is primed once, command
+  output is fed forward).
+
+Because the engine is pure, a later executor can fan agent nodes out to real fleet agents
+without touching the driver or the engine — which is exactly what [fan-out](/docs/workflows/fan-out) does.
+
+## Stages drive the dashboard todo rollup
+
+Each node execution is a **stage**. The engine emits a `StageEvent` at every node's start and
+end; the executor's `onStage` keeps a `rollup` array (`{ label, status }`, `in_progress` →
+`completed`). `WorkflowDriver.getState()` maps that rollup into `todoPhases`, so the run shows
+a live done/total exactly like an omp operator's todo list — no special workflow UI. The
+inner agent's per-turn `agent_start`/`agent_end` frames are swallowed so the run reads as one
+continuous working session.
+
+<Callout type="info">
+Workflow runs persist a resumable checkpoint at every node boundary (`WorkflowRunState` =
+engine checkpoint + rollup). After a daemon restart a run resumes **only** if its inner thread
+is still alive *and* a checkpoint exists; otherwise the orchestration is unrecoverable and the
+manager logs a warning.
+</Callout>
+
+## Read next
+
+<Cards>
+  <Card title="Authoring" href="/docs/workflows/authoring" description="The Graphviz/DOT (fabro) dialect: node shapes, attributes, edges, and condition syntax." />
+  <Card title="Fan-out" href="/docs/workflows/fan-out" description="A component fork spawns one real roster agent per branch; a tripleoctagon merge joins them." />
+  <Card title="Human gates" href="/docs/workflows/gates" description="A hexagon node pauses on the needs-input path; goal_gate + retry_target is the bounded fix-up loop." />
+  <Card title="Model routing" href="/docs/workflows/model-routing" description="A CSS-like model_stylesheet switches the thread's model per node — cheap by default, frontier where it counts." />
+  <Card title="Bundled workflows" href="/docs/workflows/bundled" description="The shipped graphs and when to use each, plus how --workflow resolves bundled names." />
+</Cards>

@@ -1,0 +1,63 @@
+---
+title: Sandboxing
+description: Run an agent's omp inside a container that mounts the worktree — process and network isolation, files still reviewable on the host.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+`--sandbox <image>` runs an agent's `omp` **inside a container** instead of on your laptop —
+fabro's "keep untrusted code off your machine" isolation. It's the same `AgentDriver` seam, so a
+sandboxed agent joins the roster / TUI / web / workflows like any other; only the **transport**
+(omp's JSONL RPC over `docker exec -i`) and the **execution location** change. The agent's `kind`
+stays `omp-operator`.
+
+```bash
+omp-squad add ~/code/myproject --sandbox my-omp-image --approval yolo \
+  --task "Try the risky migration."
+```
+
+<Callout type="warn">
+The image must provide `omp` on its `PATH` — point `--sandbox` at an **omp-provisioned image**.
+</Callout>
+
+## How `SandboxAgentDriver` works
+
+`src/sandbox-agent-driver.ts` owns the container lifecycle:
+
+1. **Launch** — `docker run -d --name omp-sbx-<id> -w /work [-v <worktree>:/work] [runArgs] <image> sleep infinity`. A stale container of the same name is force-removed first.
+2. **Attach** — `docker exec -i <container> omp --mode rpc --cwd /work …`, speaking omp's
+   newline-JSON RPC over the exec's stdio (model / approval / thinking passed as flags). The
+   driver waits for omp's `ready` frame (60s).
+3. **Teardown** — `stop()` kills the exec and removes the container; `detach()` leaves the
+   container running so it can be reattached.
+
+The agent's host **worktree is bind-mounted** into the container, so you get process + network
+isolation while the files stay reviewable **on the host** — the dashboard's
+[Changes panel](/docs/guides/web-dashboard#agent-view) and [Landing](/docs/guides/landing) work
+exactly as for a local agent.
+
+## `SandboxConfig`
+
+`--sandbox <image>` sets only the image; the rest of `SandboxConfig` (`src/types.ts`) takes
+defaults, and is fully settable through the create API.
+
+<TypeTable
+  type={{
+    image: { description: "Container image to run the agent in (an omp-provisioned image).", type: "string" },
+    workdir: { description: "Working dir inside the container — the agent's cwd.", type: "string", default: "/work" },
+    mountWorktree: { description: "Bind-mount the worktree at workdir; false = fully isolated filesystem (no host mount).", type: "boolean", default: "true" },
+    runArgs: { description: 'Extra docker run args, e.g. ["--network=none"] for full network isolation.', type: "string[]", default: "—" },
+  }}
+/>
+
+For a fully network-isolated run, add `runArgs: ["--network=none"]` via the API. Setting
+`mountWorktree: false` drops the host mount entirely (nothing to review on the host, nothing to
+land) — use it only for throwaway, fully-isolated experiments.
+
+---
+
+<Cards>
+<Card title="Spawning agents" href="/docs/guides/spawning" description="Every add flag, including --sandbox." />
+<Card title="Agent driver seam" href="/docs/architecture/agent-driver" description="The one interface RpcAgent, WorkflowDriver, and SandboxAgentDriver share." />
+<Card title="Types reference" href="/docs/reference/types" description="SandboxConfig and the rest of the wire types." />
+</Cards>

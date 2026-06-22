@@ -1,0 +1,91 @@
+---
+title: Installation
+description: Install omp-squad with Bun, optionally link the global omp-squad binary, and verify the setup with the deterministic test suite and typecheck.
+---
+
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+## Requirements
+
+- **[Bun](https://bun.sh) ≥ 1.3.14** — omp-squad runs directly on Bun (no build
+  step; `src/index.ts` is the entrypoint). The version floor is enforced by the
+  `engines.bun` field in `package.json`.
+- **`omp` on your `PATH`** — each agent is a real `omp --mode rpc` child process,
+  so the [Oh My Pi](https://omp.sh) harness must be installed and runnable.
+
+## Install
+
+<Steps>
+<Step>
+### Install dependencies
+
+```bash
+cd omp-squad
+bun install
+```
+</Step>
+
+<Step>
+### (Optional) Link the global binary
+
+`bun link` registers the `omp-squad` command on your `PATH` so you can call it
+from anywhere. Skip it and run through Bun directly instead.
+
+```bash
+bun link    # optional: makes `omp-squad` global
+```
+</Step>
+
+<Step>
+### Verify
+
+```bash
+bun test       # deterministic suite — no model tokens spent
+bun run check  # typecheck (tsc --noEmit)
+```
+
+The suite covers worktree ops, the pure board renderer, the RPC transport
+(`get_state` + `bash`), and the manager lifecycle — all deterministic, so no model
+tokens are spent. `bun run check` runs `tsc --noEmit`.
+</Step>
+</Steps>
+
+<Callout type="info">
+For an end-to-end check that actually drives a model — spawn an agent, watch it
+work, and confirm it wrote a file — see the smoke test in the
+[Quickstart](/docs/getting-started/quickstart).
+</Callout>
+
+## Running commands
+
+Whether you linked the binary changes only how you invoke it — the commands and
+flags are identical.
+
+<Tabs items={['Linked', 'Unlinked']}>
+<Tab value="Linked">
+
+After `bun link`, the global command is available everywhere:
+
+```bash
+omp-squad up
+omp-squad add ~/code/myproject --task "Refactor the auth module."
+omp-squad list
+```
+
+</Tab>
+<Tab value="Unlinked">
+
+Without linking, run the entrypoint through Bun from the repo:
+
+```bash
+bun src/index.ts up
+bun src/index.ts add ~/code/myproject --task "Refactor the auth module."
+bun src/index.ts list
+```
+
+</Tab>
+</Tabs>
+
+The rest of these docs write `omp-squad <cmd>` for brevity — read it as
+`bun src/index.ts <cmd>` if you didn't link.

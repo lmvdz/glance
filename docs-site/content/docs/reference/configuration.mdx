@@ -1,0 +1,126 @@
+---
+title: Configuration
+description: Every environment variable omp-squad reads, with verified defaults, plus the on-disk state directory and its files.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { File, Folder, Files } from 'fumadocs-ui/components/files';
+
+omp-squad takes no config file — everything is environment variables plus a small on-disk state directory. Every variable and default below is traced to its read site in `src/`. Variables with no default are simply unset (the feature stays off or falls back as noted).
+
+## Daemon
+
+Read by `src/index.ts` (`cmdUp`) and `src/server.ts` when starting the daemon.
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_PORT': { type: 'number', default: '7878', description: 'Port the daemon binds. Backs the --port flag.' },
+		'OMP_SQUAD_HOST': { type: 'string', default: '127.0.0.1', description: 'Bind address. Set 0.0.0.0 to reach the dashboard across your LAN. Backs the --host flag.' },
+		'OMP_SQUAD_TLS_CERT': { type: 'path', default: 'unset', description: 'PEM cert path. TLS is enabled in-process only when both CERT and KEY are set; the scheme becomes https.' },
+		'OMP_SQUAD_TLS_KEY': { type: 'path', default: 'unset', description: 'PEM key path. Required together with OMP_SQUAD_TLS_CERT.' },
+		'OMP_SQUAD_STATE_DIR': { type: 'path', default: '~/.omp/squad', description: 'Directory for state.json, the access token, and push keys.' },
+		'OMP_SQUAD_AUTO_SUPERVISE': { type: 'flag', default: 'on', description: 'The standing auto-supervisor loop. On unless set to 0 (or the --no-supervise flag is passed).' },
+		'OMP_SQUAD_SUPERVISE_MODEL': { type: 'string', default: 'omp default', description: 'Model the auto-supervisor answerer runs as. Unset uses the omp default.' },
+	}}
+/>
+
+<Callout type="warn">
+`OMP_SQUAD_AUTO_SUPERVISE` (with the underscore) gates the standing supervisor process started by `up`. It is **not** the same variable as `OMP_SQUAD_AUTOSUPERVISE` (no underscore) below, which controls the manager's per-request deterministic auto-answer. They are independent switches.
+</Callout>
+
+## Autonomy
+
+Drive how hands-free the fleet runs — the orchestrator, the WIP cap, repair/resolve budgets, and the manager-side auto-answer.
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_AUTODRIVE': { type: 'flag', default: 'off', description: 'Enables the Orchestrator autonomy loop (src/orchestrator.ts). On when set to any value.' },
+		'OMP_SQUAD_MAX_WIP': { type: 'number', default: '6', description: 'Ceiling on simultaneously live agents (src/scheduler.ts). Spawns past it are refused unless queued.' },
+		'OMP_SQUAD_REPAIR_BUDGET': { type: 'number', default: '3', description: 'Retry attempts the resolver allows before escalating a failed gate to a human (src/resolver.ts).' },
+		'OMP_SQUAD_AUTORESOLVE': { type: 'flag', default: 'off', description: 'Auto-resolve rebase conflicts during land instead of escalating (src/land.ts). On when set to any value.' },
+		'OMP_SQUAD_QUEUE_ON_FULL': { type: 'flag', default: 'off', description: 'When the WIP cap is hit, queue the spawn (returning a synthetic queued DTO) instead of throwing (src/squad-manager.ts).' },
+		'OMP_SQUAD_AUTOSUPERVISE': { type: 'flag', default: 'off', description: 'Manager-side deterministic auto-answer of safe pending requests (src/squad-manager.ts). On when set to any value.' },
+		'OMP_SQUAD_AUTOSUPERVISE_BUDGET': { type: 'number', default: '5', description: 'Per-agent cap on those auto-answers before a request is left for a human.' },
+	}}
+/>
+
+## Dispatch
+
+Read by `src/squad-manager.ts` at start when auto-dispatch is on; routing assist is read in the constructor.
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_AUTODISPATCH': { type: 'flag', default: 'off', description: 'Enables the Plane-issue Dispatcher loop. On when set to any value.' },
+		'OMP_SQUAD_AUTOCLOSE': { type: 'flag', default: 'off', description: 'Close the tracking Plane issue when a dispatched agent finishes (closeOnDone). On when set to any value.' },
+		'OMP_SQUAD_DISPATCH_INTERVAL_MS': { type: 'number', default: '60000', description: 'Milliseconds between dispatch sweeps.' },
+		'OMP_SQUAD_DISPATCH_MAX': { type: 'number', default: '3', description: 'Max agents the dispatcher keeps active at once.' },
+		'OMP_SQUAD_LLM_ROUTER': { type: 'flag', default: 'off', description: 'Use an LLM to classify/route intake tasks instead of heuristics (src/squad-manager.ts). On when set to any value.' },
+	}}
+/>
+
+See [Auto-dispatch](/docs/integrations/auto-dispatch) for the loop itself.
+
+## Federation
+
+Cross-operator coordination. Read by `src/index.ts`, `src/server.ts`, `src/coordinator-main.ts`, and `src/federation-sync-main.ts`.
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_COORDINATOR': { type: 'ws url', default: 'unset', description: 'Coordinator WebSocket URL (ws://host:port). Set ⇒ this daemon joins federation and opens a peer-presence feed; unset ⇒ the federation surface stays inert.' },
+		'OMP_SQUAD_OPERATOR': { type: 'string', default: 'OS username, else "local"', description: 'This host operator identity, used in presence, leases, and the federation roster.' },
+		'OMP_SQUAD_COORDINATOR_PORT': { type: 'number', default: '7900', description: 'Port the standalone coordinator (coordinator-main.ts) listens on, when no port arg is passed.' },
+		'OMP_SQUAD_FED_REPOS': { type: 'csv', default: 'unset', description: 'Extra repo paths the federation-sync worker advertises, comma-separated.' },
+	}}
+/>
+
+See [Federation](/docs/integrations/federation) for the topology.
+
+## Discovery & misc
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_REPO_ROOTS': { type: 'csv', default: 'parent of cwd, $HOME/sui, $HOME/src, $HOME/code', description: 'Comma-separated roots scanned to discover candidate repos for smart spawn (src/smart-spawn.ts).' },
+		'OMP_SQUAD_APP_URL': { type: 'url', default: 'unset', description: 'Default URL for the vision pass (screenshot evidence) when a land/verify run captures one (src/proof.ts, src/server.ts).' },
+		'OMP_SQUAD_PUSH_SUBJECT': { type: 'string', default: 'mailto:squad@localhost', description: 'VAPID subject for Web Push notifications (src/push.ts).' },
+		'OMP_EXT_DIR': { type: 'path', default: '~/.omp/agent/extensions', description: 'Where the omp extension hooks are installed (src/install-hooks.ts).' },
+	}}
+/>
+
+## Plane
+
+Read by `src/plane.ts`; if neither an API key nor a workspace is set, Plane integration is disabled (issue routes return `501`). Alternate secret names are accepted so the daemon can read a pasted `plane.env` directly.
+
+<TypeTable
+	type={{
+		'PLANE_API_KEY': { type: 'string', default: 'unset', description: 'API key. PLANE_API_TOKEN is accepted as an alias.' },
+		'PLANE_WORKSPACE': { type: 'string', default: 'unset', description: 'Workspace slug. PLANE_WORKSPACE_SLUG is accepted as an alias.' },
+		'PLANE_BASE_URL': { type: 'url', default: 'https://api.plane.so', description: 'API base. A trailing /api/v1 is stripped since every call appends it.' },
+		'PLANE_PROJECT_ID': { type: 'string', default: 'unset', description: 'Fallback project id when a repo is not in PLANE_PROJECT_MAP.' },
+		'PLANE_PROJECT_MAP': { type: 'json', default: 'unset', description: 'JSON object mapping repo path → Plane project id. Invalid JSON is ignored (treated as empty).' },
+		'PLANE_APP_URL': { type: 'url', default: 'derived', description: 'Web app base for deep links. When unset it is derived from PLANE_BASE_URL (app.plane.so for the hosted API).' },
+	}}
+/>
+
+See [Plane integration](/docs/integrations/plane).
+
+## State directory
+
+The state directory (`$OMP_SQUAD_STATE_DIR`, default `~/.omp/squad`) holds everything the daemon persists across restarts.
+
+<Files>
+	<Folder name="~/.omp/squad" defaultOpen>
+		<File name="state.json" />
+		<File name="access-token" />
+		<File name="vapid.json" />
+		<File name="push-subs.json" />
+	</Folder>
+</Files>
+
+<TypeTable
+	type={{
+		'state.json': { type: 'JSON', description: 'Persisted roster (PersistedAgent[]) and features (PersistedFeature[]), restored by up --restore (src/squad-manager.ts). Transcript text is redacted before it is written here.' },
+		'access-token': { type: 'text', description: 'Auto-generated bearer token, created on first boot. The CLI and the supervisor read it to authenticate to the daemon (src/auth.ts).' },
+		'vapid.json': { type: 'JSON', description: 'VAPID keypair for Web Push, generated on first push init (src/push.ts).' },
+		'push-subs.json': { type: 'JSON', description: 'Persisted browser push subscriptions (src/push.ts).' },
+	}}
+/>

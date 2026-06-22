@@ -1,0 +1,152 @@
+---
+title: Plane
+description: Wire omp-squad to a Plane workspace to pull real issues into the command center, spawn agents on them, and close them on land.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+omp-squad reads work items straight from [Plane](https://plane.so). When configured, the
+**Plane issues** panel in each project view lists the project's open issues; clicking one
+spawns a [routed](/docs/integrations/intake) agent on it. A successful
+[land](/docs/guides/landing) closes the agent's tracking issue. The whole client lives in
+`src/plane.ts` — a thin REST wrapper, configured entirely by environment variables, with no
+new dependency.
+
+## Configuration
+
+Set these on the **daemon** (the `omp-squad up` process). The client is enabled the moment
+both an API key and a workspace are present — `readConfig()` returns `null` (Plane disabled)
+otherwise.
+
+<TypeTable
+  type={{
+    PLANE_API_KEY: {
+      type: 'string',
+      description: 'Plane API token. Sent as the x-api-key header. PLANE_API_TOKEN is accepted as an alias. Required.',
+    },
+    PLANE_WORKSPACE: {
+      type: 'string',
+      description: 'Workspace slug. PLANE_WORKSPACE_SLUG is accepted as an alias. Required.',
+    },
+    PLANE_BASE_URL: {
+      type: 'string',
+      default: 'https://api.plane.so',
+      description: 'API base URL. A trailing /api/v1 is stripped automatically, since every call appends it.',
+    },
+    PLANE_PROJECT_ID: {
+      type: 'string',
+      description: 'Fallback Plane project id, used for any repo not found in PLANE_PROJECT_MAP.',
+    },
+    PLANE_PROJECT_MAP: {
+      type: 'JSON string',
+      description: 'JSON object mapping a repo path or basename to a Plane project id. Its keys are the auto-dispatch targets.',
+    },
+    PLANE_APP_URL: {
+      type: 'string',
+      description: 'Web-app host for deep links, when it differs from the API host. Defaults to app.plane.so on Plane cloud.',
+    },
+  }}
+/>
+
+<Callout type="info">
+Both names are read for the secrets: `PLANE_API_KEY` **or** `PLANE_API_TOKEN`, and
+`PLANE_WORKSPACE` **or** `PLANE_WORKSPACE_SLUG`. This lets the daemon source
+`~/.claude/secrets/plane.env` directly without renaming anything.
+</Callout>
+
+### Mapping repos to projects
+
+A repo resolves to a Plane project id in this order (`projectIdFor`):
+
+1. `PLANE_PROJECT_MAP[<full repo path>]`
+2. `PLANE_PROJECT_MAP[<repo basename>]`
+3. `PLANE_PROJECT_ID` (the fallback)
+
+```sh title="daemon env"
+PLANE_API_KEY=plane_api_xxx
+PLANE_WORKSPACE=acme
+PLANE_PROJECT_MAP='{"/home/me/app":"5f3c…","infra":"a91b…"}'
+PLANE_PROJECT_ID=7d2e…   # used for any repo not listed above
+```
+
+`planeRepos()` returns the `PLANE_PROJECT_MAP` keys — those are exactly the repos
+[auto-dispatch](/docs/integrations/auto-dispatch) polls.
+
+## What it pulls
+
+`listPlaneIssues(repo)` is the read path. Its return value drives the whole UI contract:
+
+- `null` — Plane is **not configured**. The HTTP route `GET /api/plane/issues` returns
+  **`501`**, and the web panel renders *"Plane not connected. Set PLANE_API_KEY +
+  PLANE_WORKSPACE on the daemon to pull issues here."*
+- `[]` — configured, but the repo maps to no project (or the API call failed). The panel
+  shows *"No open issues."*
+- a list of `IssueRef` — open issues only. The list endpoint returns `state` as an id, so
+  the client resolves state ids to **groups** via `/states/` and filters out anything in the
+  `completed` or `cancelled` group — finished issues never reappear (and never get
+  auto-dispatched).
+
+It fetches up to 50 issues (`/issues/?per_page=50`) for the resolved project.
+
+## The issues panel & spawn-from-issue
+
+The project view (`src/web/index.html`) renders each open issue with its identifier, name,
+and a **Spawn** button. Clicking it sends a `create` command over the WebSocket:
+
+```js title="src/web/index.html"
+send({ type:"create", options:{ repo, task:`Work on ${i.identifier||i.id}: ${i.name}`, issue:i, approvalMode:"yolo" } });
+```
+
+The new agent carries the issue as its tracking ref (shown as a badge in the roster) and is
+spawned in `yolo` approval mode — autonomous, no per-step gate. Because the spawn goes
+through the normal `create` path, intake [routing](/docs/integrations/intake) still picks the
+process for it.
+
+## Closing & transitioning issues
+
+Transitions are best-effort (`true` on success, never throwing) and move an issue to the
+**first state** in a target group:
+
+| Function | Group | When |
+|---|---|---|
+| `closePlaneIssue(issue)` | `completed` | A branch lands — its tracking issue is closed (idempotent). |
+| `startPlaneIssue(issue)` | `started` | A spawn picks up a backlog issue. |
+| `createPlaneIssue(repo, name)` | — | A spawned, issue-less task self-registers as a tracked issue (work → Plane). |
+
+<Callout type="info">
+Landing closes the issue on both paths — the single-agent `land(id)` and the multi-branch
+`landFeature` — so a shipped branch leaves no stale open issue behind.
+</Callout>
+
+## Per-feature modules & tickets
+
+[Features](/docs/workflows) (multi-agent plans) get richer Plane surfacing in the web UI:
+
+<Steps>
+<Step>
+**Resolve tickets** — `featureTickets(repo, identifiers)` looks up a feature's issue
+identifiers and returns each one's status group plus a deep link into the Plane web app.
+Served at `GET /api/features/:id/tickets`; the feature view's **Plane tickets** panel
+renders status badges + links, or *"Plane not connected."* when the result is `null`.
+</Step>
+<Step>
+**Group under a module** — the **Group in Plane** button calls
+`POST /api/features/:id/module`, which runs `ensureFeatureModule(repo, name, identifiers)`:
+it creates a Plane module named after the feature and attaches the feature's issues to it,
+then returns the module's deep link. Returns `501` when Plane is not configured or the
+create fails.
+</Step>
+</Steps>
+
+Deep links honor `PLANE_APP_URL`. Plane cloud serves its API at `api.plane.so` but its app at
+`app.plane.so`, so `webBase()` rewrites the host: it uses `PLANE_APP_URL` if set, falls back
+to `https://app.plane.so` on cloud, and otherwise derives the app host from `PLANE_BASE_URL`.
+
+## Related
+
+<Cards>
+  <Card title="Auto-dispatch" href="/docs/integrations/auto-dispatch" description="Poll mapped Plane repos and spawn a routed agent per new open issue." />
+  <Card title="Intake routing" href="/docs/integrations/intake" description="How a spawned issue becomes a verify loop, plan+approval, or fan-out." />
+  <Card title="Landing" href="/docs/guides/landing" description="Merging an agent's branch — and closing its tracking issue." />
+</Cards>

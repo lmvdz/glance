@@ -1,0 +1,135 @@
+---
+title: The Architect Seam
+description: OmpArchitect drives a real omp agent to author the worker workflow; TemplateArchitect renders it deterministically.
+---
+
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
+The **author** step of the [commission loop](/docs/commissioning) is pluggable behind one
+interface (`src/architect.ts`). An architect writes a Flue worker project into a directory;
+it does **not** validate — that's the [acceptance gate's](/docs/commissioning/acceptance-gate)
+job.
+
+```ts title="src/architect.ts"
+export interface Architect {
+  readonly kind: string;
+  /** Write a Flue worker project into `dir`. */
+  author(spec: CommissionSpec, dir: string, feedback?: string): Promise<void>;
+}
+```
+
+The `feedback` argument carries the prior gate failure on a re-author pass, so a second
+attempt can fix what the gate flagged.
+
+## OmpArchitect — agents build agents (default)
+
+`OmpArchitect` is the default: `SquadManager.commission()` constructs
+`new OmpArchitect({ bin: this.bin })` when no architect is supplied. It drives a **real**
+`omp --mode rpc` agent to write the worker's workflow itself.
+
+It first seeds the fixed skeleton (everything *except* the workflow file) by writing the
+files from `generateWorkerFiles(spec)`, skipping `.flue/workflows/<name>.ts`. Then it
+spawns an `RpcAgent` and prompts it once:
+
+```ts title="src/architect.ts"
+const agent = new RpcAgent({
+  id: `architect-${Date.now().toString(36)}`,
+  cwd: dir,
+  approvalMode: "yolo",
+  thinking: "medium",
+  model: this.opts.model,
+  bin: this.opts.bin,
+});
+await agent.start();
+await this.runTurn(agent, buildTask(spec, workflowRel, feedback), this.opts.timeoutMs ?? 300_000);
+```
+
+`runTurn` resolves when the agent emits an `agent_end` frame, rejects if the child exits
+early, and times out after `timeoutMs` (default **300_000 ms** / 5 min). The agent runs with
+`approvalMode: "yolo"` and `thinking: "medium"` so it can write files unattended.
+
+The prompt is a compact Flue **recipe** plus the job. The recipe is a lazy-senior-dev brief —
+stop at the first rung that holds, don't add unrequested dependencies or over-build, and the
+acceptance gate rejects a worker that does (this is the [ponytail check](/docs/commissioning/acceptance-gate)).
+It states the file contract: import from `@flue/runtime`, export a `route` Hono middleware
+and an async `run({ payload })` (add `init` for a model-backed worker), read input from
+`payload`, and return the result object directly. `buildTask` appends the purpose, the
+model directive, the acceptance payload + expectation (when `spec.accept` is set), and — on a
+retry — the `feedback` string.
+
+<Callout type="info">
+`OmpArchitectOptions.model` is the **architect agent's own** model (omp's default when omitted),
+not the worker's. The worker's model is `spec.model` — see below.
+</Callout>
+
+## TemplateArchitect — deterministic
+
+`TemplateArchitect` renders a known-good worker from the spec with no LLM in the loop. It
+writes every file from `generateWorkerFiles(spec)` verbatim:
+
+```ts title="src/architect.ts"
+async author(spec: CommissionSpec, dir: string, _feedback?: string): Promise<void> {
+  for (const file of generateWorkerFiles(spec)) {
+    const target = path.join(dir, file.path);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, file.content);
+  }
+}
+```
+
+It ignores `feedback` (a deterministic render doesn't learn from a failed gate) and splices
+`spec.workflowBody` into the workflow's `run()` body — the default body is `return { ...payload };`.
+It's used by the test suite and as an offline fallback when you don't want to spend an agent
+turn.
+
+## `--model <spec>` makes the *worker* model-backed
+
+`spec.model` (set by the `--model` commission flag) controls whether the **worker** carries a
+model, independent of which architect authored it:
+
+<Tabs items={['Deterministic (model: false)', 'Model-backed (model: provider/model)']}>
+  <Tab>
+Plain TypeScript: `worker-template.ts` emits a `deterministicWorkflow` whose `run({ payload })`
+does the work and returns a JSON-serializable object — no agent, no `init`/`session`.
+  </Tab>
+  <Tab>
+The skeleton additionally gets `.flue/agents/<name>.ts` (default-exporting `createAgent`) and
+`.env.example`, and the workflow is the `llmWorkflow`: it calls `init(worker)`, opens a
+`session`, prompts with `payload.text`, and returns the structured `data`. The
+[lint tier](/docs/commissioning/acceptance-gate) enforces that a `provider/model` specifier
+is well-formed and the agent module is present.
+  </Tab>
+</Tabs>
+
+## The worker skeleton
+
+Both architects start from the same pinned skeleton (`src/worker-template.ts`). The Flue
+versions are pinned to what this repo verified against (`@flue/runtime`, `@flue/cli`,
+`valibot`, `typescript`).
+
+<Files>
+  <File name="package.json" annotation="pinned deps: @flue/runtime, valibot (+ dev @flue/cli, typescript)" />
+  <File name="tsconfig.json" annotation="strict, noEmit; include .flue/**/*.ts" />
+  <File name="flue.worker.json" annotation="manifest: name, purpose, model, capabilities, workflow, target, accept" />
+  <File name=".gitignore" />
+  <Folder name=".flue" defaultOpen>
+    <Folder name="workflows">
+      <File name="<name>.ts" annotation="deterministic or model-backed run()" />
+    </Folder>
+    <Folder name="agents">
+      <File name="<name>.ts" annotation="model workers only: default-exports createAgent" />
+    </Folder>
+  </Folder>
+  <File name=".env.example" annotation="model workers only" />
+</Files>
+
+The `flue.worker.json` manifest records `capabilities` (the recorded allowlist — auditable,
+not yet enforced) and the `accept` block, so a worker's contract is inspectable on disk.
+
+## Next
+
+<Cards>
+  <Card title="The acceptance gate" href="/docs/commissioning/acceptance-gate" description="How an authored worker is interviewed before onboarding." />
+  <Card title="Onboarding" href="/docs/commissioning/flue-service" description="What a passing worker becomes." />
+</Cards>

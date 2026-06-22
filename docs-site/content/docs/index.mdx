@@ -1,44 +1,48 @@
 ---
 title: omp-squad
-description: Manage a fleet of Oh My Pi agents running in parallel — one per git worktree — from a terminal TUI and a web dashboard.
+description: A control plane for a fleet of Oh My Pi coding agents — one per git worktree — driven from a terminal TUI and a web dashboard.
 ---
 
-**omp-squad** is a control plane for a fleet of [Oh My Pi](https://omp.sh) agents. Each agent
-runs in its own `git worktree` as a real `omp --mode rpc` child process; you see at a glance what
-every agent is doing and which ones need you, and you can steer any of them from the TUI or the
-browser — both thin clients of the same event stream.
+**omp-squad** runs many [Oh My Pi](https://omp.sh) (`omp`) coding agents in parallel and gives you
+one place to watch and steer them. Each agent works in its own `git worktree` as a real
+`omp --mode rpc` child process; a single `SquadManager` derives every agent's live status from its
+event stream and broadcasts it to two interchangeable surfaces — a terminal **TUI** and a **web
+dashboard**.
 
-## Why
+The bottleneck of N parallel agents isn't the agents — it's *your attention*. omp-squad is built to
+route it: see at a glance who is working, who is idle, and **who is blocked waiting for you**, then
+drop into any agent and steer it.
 
-With several coding agents running at once, the bottleneck is *your attention*, not the agents.
-omp-squad routes it:
-
-- **Isolation by default** — one worktree per agent, so parallel agents never clobber each other.
-- **One glance** — a live board: `working / idle / needs-input / error`, current activity, todo
-  progress, context usage. The **race-board** shows each agent's position in its workflow pipeline.
-- **Never miss a blocked agent** — approvals, the `ask` tool, and host-tool calls surface as
-  **needs-input** with inline answer controls, aggregated in a fleet-wide attention queue.
-- **Steer from anywhere** — prompt, answer, interrupt, restart, or kill any agent from either surface.
-
-## Quickstart
-
-```bash
-# Start the daemon — opens the TUI and serves the web dashboard (default :7878)
-omp-squad up
-
-# Spawn an agent in a fresh worktree, with an initial task
-omp-squad add ~/code/myproject --name auth-refactor \
-  --task "Refactor the auth module to use the new session API."
-
-# See the roster, then open the dashboard
-omp-squad list
-omp-squad open
+```text
+        omp-squad (one process)
+        ┌─────────────────────────────────────────────┐
+        │  SquadManager  ── roster, status, transcript │
+        │     │                                        │
+        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #1) │   each agent =
+        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #2) │   its own worktree
+        │     └── RpcAgent ──▶ omp --mode rpc  (wt #3) │   + RPC child process
+        │     │                                        │
+        │     ├── SquadServer (HTTP + WS) ──▶ browser  │
+        │     └── SquadTui    (terminal)               │
+        └─────────────────────────────────────────────┘
 ```
 
-## Deep dives
+## Start here
 
 <Cards>
-  <Card title="Workflow runtime" href="/docs/workflow-runtime" description="Process as a reviewable graph — plan, gates, implement, verify, fan-out." />
-  <Card title="Commissioning loop" href="/docs/commission-loop" description="Agents that author, gate, and onboard their own specialized workers." />
-  <Card title="Federation" href="/docs/federation" description="Cross-operator coordination across hosts over the tailnet." />
+  <Card title="Introduction" href="/docs/getting-started" description="What omp-squad is and the mental model behind it." />
+  <Card title="Installation" href="/docs/getting-started/installation" description="Requirements and setup in under a minute." />
+  <Card title="Quickstart" href="/docs/getting-started/quickstart" description="Spawn, watch, steer, and land your first agent." />
+  <Card title="Core concepts" href="/docs/getting-started/concepts" description="Agents, kinds, status, worktrees, surfaces." />
+</Cards>
+
+## Explore
+
+<Cards>
+  <Card title="Guides" href="/docs/guides/web-dashboard" description="The TUI, the web command center, spawning, verifying, and landing work." />
+  <Card title="Architecture" href="/docs/architecture/overview" description="The single-process model, the AgentDriver seam, the RPC protocol, and the opt-in autonomy layer." />
+  <Card title="Workflows" href="/docs/workflows" description="Author a process as a reviewable graph — gates, parallel fan-out, and per-node model routing." />
+  <Card title="Commissioning" href="/docs/commissioning" description="Agents that author, gate, and onboard their own specialized workers." />
+  <Card title="Integrations" href="/docs/integrations/plane" description="Plane issue tracking, cross-host federation, the intake router, and auto-dispatch." />
+  <Card title="Reference" href="/docs/reference/cli" description="Every command, flag, environment variable, HTTP route, and type." />
 </Cards>

@@ -1,0 +1,116 @@
+---
+title: Human gates & fix-up loops
+description: A hexagon node pauses on the existing needs-input path; goal_gate plus retry_target is the bounded fix-up loop.
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+Workflows have two ways to stop and correct course: a **human gate** (a `hexagon` node that
+pauses for a person to choose a branch) and a **goal gate** (`goal_gate` + `retry_target`, a
+bounded fix-up loop). Neither needs new UI — both reuse machinery the manager already has.
+
+## Human gates reuse needs-input
+
+A `hexagon` node pauses the run and asks a person which outgoing edge to take. It rides the
+**same `extension_ui_request` channel** the manager already uses for any agent that needs
+input — there is no bespoke gate UI.
+
+```text
+hexagon node ──▶ extension_ui_request{select, options}
+                      │
+                 driver emits "ui" ──▶ manager onUi ──▶ status="input" + PendingRequest
+                      │                                         │
+                 TUI / web prompt ◀───────────────────────────┘
+                      │
+                 respondUi(value) ──▶ gate resolves ──▶ route by matching label
+```
+
+Step by step, grounded in `workflow-driver.ts` and `engine.ts`:
+
+<Steps>
+<Step>
+**Collect the options.** When the engine executes a `human` node it gathers the **labels of
+its outgoing edges** as the choices. A human node with no labeled outgoing edges throws — the
+labels *are* the menu.
+</Step>
+<Step>
+**Raise the gate.** The executor calls back into the driver's `raiseGate`, which emits a
+synthetic `extension_ui_request` with `method: "select"`, the node's label as `title`, and the
+edge labels as `options`. The driver remembers it as the `pendingGate`.
+</Step>
+<Step>
+**Surface as needs-input.** The manager's existing `onUi` turns that request into an `input`
+status plus a `PendingRequest`, exactly like an omp operator asking a question. It shows up in
+the [TUI](/docs/guides/tui) and the [web dashboard](/docs/guides/web-dashboard).
+</Step>
+<Step>
+**Answer it.** `respondUi(requestId, { value })` from either surface resolves the gate with the
+chosen label. (`{ cancelled: true }` rejects it and cancels the run.)
+</Step>
+<Step>
+**Route by label.** The engine sets `preferredLabel` to the chosen value and routes the human
+node to the **edge whose `label` equals it**.
+</Step>
+</Steps>
+
+```dot
+approve   [shape=hexagon, label="Approve plan"]
+approve -> implement [label="Approve"]
+approve -> plan      [label="Revise"]
+```
+
+Choosing `Approve` advances to `implement`; choosing `Revise` loops back to `plan`. You can
+also branch a `condition` on the choice elsewhere with `preferred_label=<label>` — see the
+[condition grammar](/docs/workflows/authoring).
+
+<Callout type="info">
+The **inner agent's own** approval prompts (a tool wanting permission, an `ask` from a skill)
+ride the very same channel: the driver forwards the inner thread's `ui` events upward, and
+`respondUi` routes a reply back to the inner agent whenever the `requestId` is not the pending
+gate's. One surface, one mechanism, whether the question comes from the graph or the agent
+inside it.
+</Callout>
+
+## Goal gates and bounded fix-up loops
+
+A goal gate is a node marked `goal_gate=true`: a step the run **must eventually pass**. Pair it
+with `retry_target` (and a `max_visits` cap on the fix-up node) to get a self-correcting loop
+that can't spin forever.
+
+```dot
+verify [shape=parallelogram, label="Verify", script="bun run check 2>&1 && bun test 2>&1",
+        goal_gate=true, retry_target="fixup"]
+fixup  [label="Fixup", max_visits=3,
+        prompt="The verify step failed. Read the recent command output and fix every failure. Change only what the failures require."]
+
+verify -> exit  [condition="outcome=succeeded"]
+verify -> fixup
+fixup  -> verify
+```
+
+How the engine routes a failed gate (`route` in `engine.ts`), in order:
+
+1. The **first conditioned edge** that holds. On success, `outcome=succeeded` → `exit`.
+2. Else the **first unconditioned edge** (the fallback). On failure, `verify -> fixup`.
+3. Else, if the node is a `goal_gate` that just failed, its **`retry_target`**.
+
+So an explicit unconditioned edge to the fix-up node *is* the loop; `retry_target` is the
+safety net the engine falls back to when a graph draws no such edge. `goal_gate=true` also
+documents intent: this node gates the goal, and the failure path is its recovery route, not the
+end of the run.
+
+The loop is **bounded by `max_visits`** on the fix-up node (overriding the graph-wide
+`max_node_visits`, default 50). Once a node would exceed its cap it cannot run again; if
+nothing else routes the run, it fails with `node "<id>" exceeded its visit cap`. That is what
+turns "agent says it's done" into "done **and** the gate is green" without risking an endless
+retry.
+
+<Callout type="warn">
+The run reaches success only by hitting the `exit` node. A goal gate that never passes —
+because the fix-up cap is exhausted — fails the whole run, which is the point: a red gate must
+not be reported as a green run.
+</Callout>
+
+This goal-gate loop is exactly what `omp-squad add --verify "<cmd>"` synthesizes around an
+ordinary task (`implement → verify → fixup`). See [verify loops](/docs/guides/verify-loops) and
+the [bundled workflows](/docs/workflows/bundled).

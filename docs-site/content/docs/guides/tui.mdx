@@ -1,0 +1,147 @@
+---
+title: Terminal UI
+description: The two-level, arrow-driven terminal dashboard — navigation, keys, status glyphs, and spawn-by-typing.
+---
+
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+`omp-squad up` opens a terminal dashboard (`src/tui.ts`) alongside the web server. It is a
+thin client of the same `SquadManager` the web dashboard uses, so anything you do in one
+shows up in the other. The TUI is **two-level and arrow-driven**, modelled on `claude agents`:
+a **dashboard list** of every agent, and a **session view** for the one you open.
+
+```text
+omp-squad  3 agents · 1 need input
+────────────────────────────────────────────────────────
+⛔ ⚙ feature       squad/feature   stage 3/6      3/6  41%
+◐    alpha         squad/alpha     edit src/a.ts       12%
+●    charlie       squad/charlie   —
+⛔ 1 waiting · press a to answer    ↑/↓ select · → open …
+new› _
+```
+
+The board is produced by the pure `buildBoard` renderer — given the roster + terminal size it
+returns exactly the right number of width-safe lines, so it is fully testable without a TTY.
+
+## Two levels
+
+<Tabs items={['Dashboard (list)', 'Agent (session)']}>
+<Tab value="Dashboard (list)">
+
+One row per agent, sorted by how much they need you: `input` first, then `working`, `idle`,
+`starting`, `error`, `stopped` — ties broken by name. Each row shows a **status dot**, an
+optional **kind glyph**, the name, branch, current activity, and a meta column with todo
+progress (`done/total`) and context-window usage (`%`).
+
+The selected row is highlighted (reverse video). Fan-out branches spawned by a workflow
+**nest under their parent** with a `└ ` prefix.
+
+</Tab>
+<Tab value="Agent (session)">
+
+The header is `name [status] model  worktree`. Below it the transcript scrolls (each entry
+prefixed by its kind — `USER`, `ASSISTANT`, `TOOL`, `SYSTEM`, `THINKING`). Any pending
+human-input request renders as a red `⛔ title — message` line with an inline hint of what to
+type. The composer at the bottom sends your next instruction (or answers the request).
+
+</Tab>
+</Tabs>
+
+## Keys
+
+| Key | Dashboard (list) | Agent (session) |
+|---|---|---|
+| `↑` / `↓` | Move the selection | Scroll the transcript (up = older, down = newer) |
+| `→` | Open the selected agent | Move the composer cursor right |
+| `Enter` | **Type a task first** → spawn a new agent; empty → open the selected agent | Send the composed text (or answer a pending request) |
+| `←` | Move the composer cursor left | Back to the list **when the composer is empty**, else cursor left |
+| `Esc` | Quit | Back to the list |
+| `Ctrl-C` | Quit | Quit |
+| `a` | Jump to the next blocked agent and open it (only when the composer is empty and something is waiting) | — |
+| typing | Compose a task to spawn | Compose an instruction / answer |
+
+`Esc` backs out one level at a time: agent → list → quit. `Ctrl-C` quits from anywhere.
+
+### Slash commands (agent view)
+
+Type these into the composer and press `Enter`:
+
+| Command | Effect |
+|---|---|
+| `/stop` or `/interrupt` | Interrupt the current turn |
+| `/restart` | Restart the agent process |
+| `/kill` | Kill the agent process |
+| `/rm` | Remove the agent and return to the list |
+| `/back` | Return to the list |
+
+## Spawn by typing a task
+
+From the dashboard, **type a task and press `Enter`** to spawn a new agent — no flags, no
+form. It runs `manager.create({ repo: <launch cwd>, task })` in the directory the daemon was
+started in (a git worktree is cut when that directory is a repo), then drops you straight into
+the new agent's session view. The hint line shows the exact target directory:
+`Enter = new agent in <cwd>`.
+
+Pressing `Enter` on an **empty** composer opens the currently selected agent instead.
+
+## Answering blocked agents
+
+When an agent blocks on a human decision its status becomes `input` and the title bar turns
+red: `· N need input`. Press `a` from the dashboard to jump to the oldest-waiting blocked
+agent and open it; the composer prompt switches to `answer›`. The inline hint tells you the
+shape of the answer:
+
+- `[y/n]` — a confirm; anything starting with `y` (case-insensitive) is sent as `yes`, otherwise `no`.
+- `[opt-a/opt-b]` — a select; type one of the offered options.
+- `[type an answer]` — free text.
+
+<Callout type="info">
+On any transition **into** `input` or `error`, the TUI rings the terminal bell and emits an
+OSC&nbsp;9 desktop notification (`name needs input` / `name errored`), throttled to once every
+2&nbsp;seconds per agent and suppressed during the initial roster seed so a reconnect never
+rings a storm.
+</Callout>
+
+## Status dots & kind glyphs
+
+The leading glyph encodes status; a second glyph (when present) encodes the runtime kind.
+
+| Status | Dot | Color |
+|---|---|---|
+| `idle` | `●` | green |
+| `working` | animated spinner (`⠋⠙⠹⠸…`) | yellow |
+| `input` | `⛔` | red |
+| `error` | `✖` | red |
+| `starting` | `○` | blue |
+| `stopped` | `◌` | gray |
+
+| Kind | Glyph | Color |
+|---|---|---|
+| `workflow` | `⚙` | cyan |
+| `flue-service` | `⚒` | magenta |
+| `omp-operator` | _(none)_ | — |
+
+The working spinner only animates while at least one agent is working (a 120&nbsp;ms tick that
+stops when nothing is working — no idle CPU burn).
+
+## Stall badge
+
+An agent that is `working` but has been **silent for more than 2 minutes** (`STALL_MS = 120000`)
+gets a `⏳` prefix on its activity column — a stuck-or-thinking-hard signal you can scan for at
+a glance. The web dashboard uses the identical threshold so both surfaces agree.
+
+## The composer
+
+The input row is a real [pi-tui](https://omp.sh) `Editor`, not a raw line reader — so it is
+**multiline**, with a cursor, bracketed paste, a kill-ring, undo, and `PageUp`/`PageDown`
+history of what you have sent. It is rendered borderless and grows up to 8 visual rows (or a
+third of the terminal height, whichever is smaller) before scrolling internally. Submitted
+text is added to the history ring so you can recall it later.
+
+---
+
+<Cards>
+<Card title="Web dashboard" href="/docs/guides/web-dashboard" description="The browser command center — projects, queue, race board, and the ⌘K palette." />
+<Card title="Spawning agents" href="/docs/guides/spawning" description="omp-squad add in depth — every flag, what happens on spawn, and the steering verbs." />
+<Card title="Landing work" href="/docs/guides/landing" description="Merge an agent's branch back into main." />
+</Cards>

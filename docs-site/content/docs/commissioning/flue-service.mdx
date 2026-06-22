@@ -1,0 +1,98 @@
+---
+title: Onboarding (flue-service)
+description: A passing worker becomes a flue-service roster member via FlueServiceDriver, which adapts flue run into the omp event frames the manager derives status from.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+When the [acceptance gate](/docs/commissioning/acceptance-gate) returns `ok`, the
+[commission loop](/docs/commissioning) onboards the worker as a `flue-service` fleet member.
+`SquadManager.onboardFlueWorker(spec, dir, report)` registers it, persists it, emits a
+roster update, and publishes presence — so a commissioned worker becomes a first-class
+roster entry with **no new manager status code**.
+
+```ts title="src/squad-manager.ts (onboardFlueWorker)"
+const id = `${spec.name}-${Date.now().toString(36)}`;
+const verified = report.checks.some((c) => c.name === "acceptance" && c.status === "pass");
+const flue: FlueMemberConfig = { dir, workflow: spec.name, target };
+// → PersistedAgent { kind: "flue-service", flue, … } and AgentDTO { kind: "flue-service", verified, … }
+```
+
+The DTO is `kind: "flue-service"`, `status: "idle"`, `approvalMode: "yolo"`, with
+`verified` set **only** when the acceptance tier actually passed (a worker onboarded with a
+skipped acceptance check is unverified). The member is persisted as a `PersistedAgent`
+carrying its `FlueMemberConfig`, so it's restored on restart (`restoreFlueMember`).
+
+## FlueServiceDriver — `flue run` as an agent
+
+The member's driver is a `FlueServiceDriver` (`src/flue-service-driver.ts`), built by the
+manager's driver factory from the persisted `kind` + `flue` config. It implements the one
+[`AgentDriver`](/docs/architecture/agent-driver) contract by adapting a `flue run` invocation
+into the omp-shaped event frames the manager's `onAgentEvent` already understands.
+
+A "turn" is one bounded workflow invocation. `prompt(message)` parses the message into a
+payload (`parsePayload`: JSON-looking text is parsed, anything else becomes `{ text: message }`),
+runs the worker, and emits frames around it:
+
+```ts title="src/flue-service-driver.ts (prompt)"
+this.emit("event", { type: "agent_start" });
+this.emit("event", { type: "tool_execution_start", toolName: `flue:${this.workflow}`, … });
+const { stdout, stderr, code } = await this.exec(inv);
+// … extractLastJsonObject(stdout) → result
+this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+this.emit("event", { type: "message_end" });
+this.emit("event", { type: "agent_end" });
+```
+
+That `agent_start → message_update → message_end → agent_end` sequence is exactly what an
+`omp --mode rpc` agent emits, so the manager derives `working → idle` with zero new code. The
+parsed result is kept on `lastResult` for inspection. A non-zero exit throws, still emitting
+`agent_end` so the agent doesn't hang as `working`.
+
+### The invocation
+
+`defaultInvocation` prefers the worker-local binary and falls back to `npx`:
+
+```ts title="src/flue-service-driver.ts"
+const args = ["run", this.workflow, "--target", this.target, "--payload", JSON.stringify(payload)];
+const localBin = path.join(this.dir, "node_modules", ".bin", "flue");
+return existsSync(localBin) ? { bin: localBin, args } : { bin: "npx", args: ["flue", ...args] };
+```
+
+`buildInvocation` is injectable, so tests drive a fixture worker without the Flue toolchain.
+
+### Lifecycle & the rest of the seam
+
+- `start()` flips `ready`/`alive` and emits `ready` — there's no persistent process to spawn.
+- `stop()` clears the flags and kills any in-flight child; it deliberately emits **no** `exit` (a flue-service has no long-lived process; removal is manager-driven).
+- `abort()` kills the running child.
+- `getState()` returns a **synthetic** `RpcSessionState` — no todos, no context window, `sessionId` = the workflow name, `isStreaming` reflecting an in-flight run.
+- `respondUi()` / `respondHostTool()` are no-ops: a `flue run` invocation surfaces no interactive requests to us.
+
+## In the roster, and federated
+
+Because the member is just another `AgentDTO`, it appears in the [TUI](/docs/guides/tui) and
+[web dashboard](/docs/guides/web-dashboard) like any agent, and federates through the same
+presence path — a `flue-service` worker is an entry in an operator's published roster, so it
+shows up in the [roster-of-rosters](/docs/integrations/federation) for free. The DTO's
+`kind` is the only thing a surface uses to render it as a commissioned worker rather than an
+interactive operator (a `verified` badge marks one that passed acceptance).
+
+## FlueMemberConfig
+
+The persisted config that lets the manager rebuild the driver after a restart:
+
+<TypeTable
+  type={{
+    dir: { description: "Worker project directory — the invocation cwd.", type: 'string' },
+    workflow: { description: 'Flue workflow module name to invoke (e.g. "extract-emails").', type: 'string' },
+    target: { description: 'Deploy/run target passed to flue run.', type: '"node" | "cloudflare"' },
+  }}
+/>
+
+## Next
+
+<Cards>
+  <Card title="The commission loop" href="/docs/commissioning" description="How a worker gets to onboarding in the first place." />
+  <Card title="The AgentDriver seam" href="/docs/architecture/agent-driver" description="The contract FlueServiceDriver implements alongside RpcAgent." />
+</Cards>

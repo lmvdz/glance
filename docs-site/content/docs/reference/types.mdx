@@ -1,0 +1,232 @@
+---
+title: Types
+description: The key domain and wire types from src/types.ts — agent status, DTOs, the SquadEvent stream, and ClientCommand.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+Every shape here is defined in `src/types.ts` — the single source of truth shared by the manager, the server, the TUI, and the web dashboard.
+
+## Enums
+
+### AgentStatus
+
+The derived, human-meaningful lifecycle state of one managed agent.
+
+| Value | Meaning |
+| --- | --- |
+| `starting` | Process spawned, awaiting the RPC `ready` frame. |
+| `working` | An agent turn is actively streaming. |
+| `idle` | Ready, turn finished, awaiting the next instruction. |
+| `input` | Blocked on a human decision (approval / question / tool input). |
+| `error` | Spawn failed, child crashed, or fatal RPC error. |
+| `stopped` | Intentionally terminated. |
+
+### AgentKind
+
+Which runtime backs a managed agent.
+
+| Value | Meaning |
+| --- | --- |
+| `omp-operator` | A standard `omp --mode rpc` child in a worktree. |
+| `flue-service` | A commissioned worker invoked through its Flue workflow. |
+| `workflow` | A `.fabro` workflow graph (or a synthesized verify loop) driving the run. |
+
+### ApprovalMode
+
+| Value | Meaning |
+| --- | --- |
+| `always-ask` | Confirm every tool action. |
+| `write` | Auto-approve reads/writes; the default for fleet agents. |
+| `yolo` | Auto-approve everything. |
+
+### ThinkingLevel
+
+Reasoning effort, ordered low → high: `minimal`, `low`, `medium`, `high`, `xhigh`. Fleet agents default to `low` so they stay responsive.
+
+## PendingRequest
+
+A request from the agent that a human must answer before it can proceed. When an agent's `pending[]` is non-empty its status is `input`.
+
+<TypeTable
+	type={{
+		id: { type: 'string', required: true, description: 'Correlates with the answer the surface sends back.' },
+		source: { type: '"ui" | "tool"', required: true, description: 'Where it came from.' },
+		kind: { type: 'string', required: true, description: 'UI method (confirm/input/select/editor) or the host tool name.' },
+		title: { type: 'string', required: true, description: 'Short headline shown to the operator.' },
+		message: { type: 'string', description: 'Confirm message or tool-argument summary.' },
+		options: { type: 'string[]', description: 'Select options, when kind is select.' },
+		placeholder: { type: 'string', description: 'Input placeholder or editor prefill.' },
+		createdAt: { type: 'number', required: true, description: 'ms epoch when the request was raised.' },
+	}}
+/>
+
+## TranscriptEntry
+
+One line of an agent's transcript. `kind` is a `TranscriptKind`: `user`, `assistant`, `thinking`, `tool`, or `system`.
+
+<TypeTable
+	type={{
+		kind: { type: 'TranscriptKind', required: true, description: 'user | assistant | thinking | tool | system.' },
+		text: { type: 'string', required: true, description: 'Entry text (secrets are redacted before storage/emit).' },
+		ts: { type: 'number', required: true, description: 'ms epoch.' },
+	}}
+/>
+
+## AgentDTO
+
+The serializable per-agent snapshot sent to every surface (over `/api/agents` and the `agent`/`roster` events).
+
+<TypeTable
+	type={{
+		id: { type: 'string', required: true },
+		name: { type: 'string', required: true },
+		status: { type: 'AgentStatus', required: true },
+		kind: { type: 'AgentKind', required: true, description: 'Which runtime backs this agent.' },
+		parentId: { type: 'string', description: 'Parent workflow agent id, when this is a spawned fan-out branch.' },
+		verified: { type: 'boolean', description: 'flue-service only: passed the acceptance gate at onboard time.' },
+		repo: { type: 'string', required: true, description: 'Repo root the worktree was cut from.' },
+		worktree: { type: 'string', required: true, description: 'Absolute path of the git worktree (the agent cwd).' },
+		branch: { type: 'string' },
+		model: { type: 'string' },
+		approvalMode: { type: 'ApprovalMode', required: true },
+		activity: { type: 'string', description: 'One-line description of what it is doing right now.' },
+		todo: { type: '{ done: number; total: number; active?: string }', description: 'Latest todo summary.' },
+		contextPct: { type: 'number', description: 'Context window usage, 0..1.' },
+		receipt: { type: 'ReceiptRollup', description: 'Compact rollup of the latest/in-flight run (tools, cost, duration).' },
+		pending: { type: 'PendingRequest[]', required: true, description: 'Pending human-input requests; status is input when non-empty.' },
+		lastActivity: { type: 'number', required: true, description: 'ms epoch of the last activity of any kind.' },
+		messageCount: { type: 'number', required: true, description: 'Transcript entry count, for cheap change detection.' },
+		error: { type: 'string', description: 'Last error string, when status is error.' },
+		issue: { type: 'IssueRef', description: 'Work item this agent is advancing (e.g. a Plane issue).' },
+		featureId: { type: 'string', description: 'Feature this agent belongs to.' },
+		owns: { type: 'string[]', description: 'Repo-relative path prefixes this agent owns; overlapping spawns are refused.' },
+		queued: { type: 'boolean', description: 'Only on the synthetic DTO create() returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent.' },
+	}}
+/>
+
+## ProjectDTO
+
+A project / workstream — the top level of the command center, derived from agents' repos.
+
+<TypeTable
+	type={{
+		id: { type: 'string', required: true, description: 'Stable id = repo root path.' },
+		name: { type: 'string', required: true },
+		repo: { type: 'string', required: true },
+		agentCount: { type: 'number', required: true },
+		statusCounts: { type: 'Partial<Record<AgentStatus, number>>', required: true },
+		pendingCount: { type: 'number', required: true },
+		lastActivity: { type: 'number', required: true },
+	}}
+/>
+
+## FeatureDTO
+
+A cross-cutting unit of work spanning a plan dir and/or a set of agents/worktrees. Fully derived at read time from plan dirs + the roster + live git (a persisted envelope can override stage/title).
+
+<TypeTable
+	type={{
+		id: { type: 'string', required: true, description: 'Derived id: plan:<repo>:<dir> or agent:<agentId>.' },
+		title: { type: 'string', required: true },
+		repo: { type: 'string', required: true },
+		stage: { type: 'FeatureStage', required: true, description: 'planned | issues-created | in-progress | review | diverged | landed | done.' },
+		planDir: { type: 'string', description: 'Repo-relative plan dir this feature originated from.' },
+		agentIds: { type: 'string[]', required: true, description: 'Roster agent ids belonging to this feature.' },
+		worktrees: { type: 'FeatureWorktreeStatus[]', required: true, description: 'Per-branch land status for member worktrees.' },
+		unlandedFiles: { type: 'number', required: true, description: 'Sum of changed files across member worktrees.' },
+		divergent: { type: 'boolean', required: true, description: 'Any member worktree readiness is diverged.' },
+		blocked: { type: 'boolean', required: true, description: 'Any member agent is waiting on human input.' },
+		statusCounts: { type: 'Partial<Record<AgentStatus, number>>', required: true },
+		issueIdentifiers: { type: 'string[]', description: 'Plane issue identifiers referenced by the plan concerns.' },
+		persisted: { type: 'boolean', description: 'True for a real persisted Feature (vs a derived one).' },
+		stageOverride: { type: 'FeatureStage', description: 'Manual stage pin (persisted features only).' },
+		archived: { type: 'boolean' },
+		workflowAgentId: { type: 'string', description: 'The research-plan-implement workflow agent running this feature, when Fabro-driven.' },
+		workflowStage: { type: 'string', description: 'Live label of the workflow active node.' },
+		workflowProgress: { type: '{ done: number; total: number }', description: 'Workflow node rollup for a progress bar.' },
+	}}
+/>
+
+## CreateAgentOptions
+
+Options when adding an agent. Only `repo` is required; the daemon fills the rest (see the [`add`](/docs/reference/cli) defaults).
+
+<TypeTable
+	type={{
+		repo: { type: 'string', required: true, description: 'Repo root to cut the worktree from.' },
+		name: { type: 'string', description: 'Defaults to agent-N.' },
+		branch: { type: 'string', description: 'Branch to create/checkout. Defaults to squad/<name>.' },
+		existingPath: { type: 'string', description: 'Reuse an existing path as the cwd instead of cutting a worktree.' },
+		model: { type: 'string' },
+		approvalMode: { type: 'ApprovalMode', description: 'Defaults to write.' },
+		task: { type: 'string', description: 'Prompt to send immediately once the agent is ready.' },
+		thinking: { type: 'ThinkingLevel', description: 'Defaults to low.' },
+		issue: { type: 'IssueRef', description: 'Work item to advance.' },
+		featureId: { type: 'string', description: 'Feature to attach this agent to on creation.' },
+		workflow: { type: 'string', description: 'Path to a .fabro graph to run as the process; task becomes the goal.' },
+		verify: { type: 'string', description: 'Verification command: wrap task in an implement → verify → fixup loop.' },
+		parentId: { type: 'string', description: 'Parent workflow agent id, when spawning a fan-out branch.' },
+		sandbox: { type: 'SandboxConfig', description: 'Run the agent inside a container; mounts the worktree by default.' },
+		autoRoute: { type: 'boolean', description: 'Auto-pick a process from the task. Default on; false = plain agent.' },
+		owns: { type: 'string[]', description: 'Repo-relative path prefixes this agent will edit; overlapping spawns are refused.' },
+		track: { type: 'boolean', description: 'Auto-create + attach a tracking Plane issue for this spawn.' },
+		bypassCap: { type: 'boolean', description: 'Skip the global live-agent WIP cap (restore / fan-out paths).' },
+	}}
+/>
+
+## SquadEvent
+
+The manager → surface event union, broadcast over the WebSocket. See the [WS protocol](/docs/reference/http-api).
+
+```ts title="src/types.ts"
+type SquadEvent =
+	| { type: "roster"; agents: AgentDTO[]; version: string }
+	| { type: "agent"; agent: AgentDTO }
+	| { type: "removed"; id: string }
+	| { type: "transcript"; id: string; entry: TranscriptEntry }
+	| { type: "log"; level: "info" | "warn" | "error"; text: string }
+	| { type: "commands"; id: string; commands: CommandInfo[] }
+	| { type: "features-changed" };
+```
+
+| Variant | Meaning |
+| --- | --- |
+| `roster` | Full roster snapshot; `version` is the served-UI fingerprint. |
+| `agent` | One agent's DTO changed. |
+| `removed` | An agent left the roster. |
+| `transcript` | One new transcript entry for an agent. |
+| `log` | A daemon log line. |
+| `commands` | The slash commands available to an agent changed. |
+| `features-changed` | The feature set changed; refetch `/api/features`. |
+
+## ClientCommand
+
+The surface → manager command union, posted to `/api/command` or sent over the WebSocket.
+
+```ts title="src/types.ts"
+type ClientCommand =
+	| { type: "prompt"; id: string; message: string }
+	| { type: "answer"; id: string; requestId: string; value: string }
+	| { type: "interrupt"; id: string }
+	| { type: "kill"; id: string }
+	| { type: "restart"; id: string }
+	| { type: "remove"; id: string; deleteWorktree?: boolean }
+	| { type: "create"; options: CreateAgentOptions }
+	| { type: "snapshot" }
+	| { type: "subscribe"; id: string }
+	| { type: "commission"; spec: CommissionSpec };
+```
+
+| Variant | Meaning |
+| --- | --- |
+| `prompt` | Send an instruction to an agent. |
+| `answer` | Answer a `PendingRequest` by its `requestId`. |
+| `interrupt` | Interrupt the current turn. |
+| `kill` | Terminate the agent process. |
+| `restart` | Restart the agent. |
+| `remove` | Remove the agent; optionally delete its worktree. |
+| `create` | Spawn a new agent from `CreateAgentOptions`. |
+| `snapshot` | Request a full roster + recent transcript replay. |
+| `subscribe` | Ask for a transcript replay of one agent (unicast). |
+| `commission` | Run the commissioning loop for a `CommissionSpec`. |

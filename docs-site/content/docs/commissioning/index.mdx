@@ -1,0 +1,126 @@
+---
+title: Commissioning
+description: Instead of hiring a human, the OS authors its own scoped Flue worker and onboards it only if it passes an acceptance gate.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+In a human org a job opens, someone is hired, and they're onboarded. omp-squad
+replaces the hire with **the OS authoring its own specialized worker**. A fuzzy job
+spec goes in; a builder agent writes a small, scoped, deployable [Flue](https://flueframework.com)
+worker; and — only if the worker passes an **acceptance gate** — it's onboarded into the
+live fleet as a `flue-service` member.
+
+```text
+author → gate → onboard
+```
+
+This is the principle-of-least-privilege answer to a job: instead of spawning another
+full-shell omp coding agent for every ability, the OS mints a worker with a narrow toolset
+and a recorded capability allowlist.
+
+## The loop is a workflow
+
+The `author → gate → onboard` sequence is not an imperative method body — it's a
+[workflow graph](/docs/workflows) (`workflows/commission/workflow.fabro`) run on the same
+pure engine as `plan-implement`, driven by `CommissionExecutor`
+(`src/workflow/commission-executor.ts`). Its three action nodes bind to the manager's
+domain hooks; `runAgent` / `runCommand` / `humanGate` throw, because the commission graph
+uses action nodes only.
+
+```text
+        ┌──────────────────────────────┐
+        │            (Reject)           │
+        ▼                               │
+JOB → AUTH ───────────► GATE ───────────┘
+                          │
+                          │ Pass (outcome=succeeded)
+                          ▼
+                         ONB → exit
+```
+
+```text title="workflows/commission/workflow.fabro"
+author   [label="Author",          action="author",   max_visits=2]
+gate     [label="Acceptance gate",  action="validate", goal_gate=true, retry_target="author"]
+onboard  [label="Onboard",          action="onboard"]
+
+start -> author -> gate
+gate -> onboard [label="Pass", condition="outcome=succeeded"]
+gate -> author  [label="Reject"]
+onboard -> exit
+```
+
+A failed gate (`outcome=failed`) skips the conditioned `Pass` edge and follows the
+unconditioned `Reject` edge back to `author`, which re-authors the worker — **feeding the
+prior failure forward** as guidance. `author` carries `max_visits=2`, so the engine bounds
+the loop: when authoring would exceed its visit cap, nothing routes and the run fails, so
+nothing is onboarded. See [gates & loops](/docs/workflows/gates) for the routing rules.
+
+<Callout type="info">
+`CommissionExecutor` keeps the latest `GateReport` on `report` and the onboarded member on
+`member`. The manager's `commission()` reads `member` after the run: set → `{ ok: true, … }`;
+absent → the candidate was rejected and `member` is omitted.
+</Callout>
+
+## The CLI
+
+```bash title="Deterministic worker (no model)"
+omp-squad commission extract-emails \
+  --purpose "Extract email addresses from payload.text; return { emails, count }." \
+  --accept-payload '{"text":"a@x.io b@y.org"}' --accept-expect '{"count":2}'
+```
+
+`commission` (alias `hire`) parses the flags into a `CommissionSpec`, POSTs a
+`{ type: "commission", spec }` command to the daemon, then prints one line per gate check
+(`✓` pass, `✗` fail, `·` skip). On success it reports the onboarded member, its id, and the
+worker dir; on a failed gate it exits non-zero and leaves the worker on disk for inspection.
+
+<TypeTable
+  type={{
+    '<name>': { description: 'Positional. Kebab worker name; becomes the Flue workflow + module name.', type: 'string', default: '(required)' },
+    '--purpose': { description: 'What the worker does — the job description.', type: 'string', default: '(required)' },
+    '--model': { description: 'Model specifier (provider/model), or "false" for a deterministic worker.', type: 'spec | false', default: 'false' },
+    '--target': { description: 'Deploy/run target.', type: 'node | cloudflare', default: 'node' },
+    '--capabilities': { description: 'Comma-separated least-privilege tool allowlist, recorded in the manifest.', type: 'a,b,c', default: '[]' },
+    '--accept-payload': { description: 'Acceptance input (JSON). Pair with --accept-expect.', type: 'json', default: '(none)' },
+    '--accept-expect': { description: 'Expected result subset (JSON), deep-matched against the run output.', type: 'json', default: '(none)' },
+  }}
+/>
+
+The daemon dispatches the command to `SquadManager.commission(spec, opts, actor)`, which
+resolves a worker dir (`<stateDir>/workers/<name>/` by default), builds the
+`CommissionExecutor` hooks, and runs the graph. The `actor` is the authorization handle for
+*who may onboard a worker*.
+
+## Two fleet classes, one seam
+
+| | `omp-operator` | `flue-service` |
+|---|---|---|
+| Runtime | `omp --mode rpc` child in a git worktree | a Flue worker invoked via `flue run` |
+| Role | interactive, steerable dev sessions | scoped, bounded automation |
+| Builder | spawned directly by an operator | **authored by an architect agent** |
+| Driver | `RpcAgent` | `FlueServiceDriver` |
+
+Both implement the one [`AgentDriver`](/docs/architecture/agent-driver) contract, so the
+`SquadManager` derives status, buffers a transcript, and federates presence identically.
+The DTO's `kind` (`"flue-service"`) is the only thing a surface needs to tell a commissioned
+worker apart from an interactive operator.
+
+## Result shape
+
+<TypeTable
+  type={{
+    ok: { description: 'True only when the gate passed and a member was onboarded.', type: 'boolean' },
+    report: { description: 'The acceptance gate outcome (every check + its status).', type: 'GateReport' },
+    member: { description: 'The onboarded flue-service member; present only when ok.', type: 'AgentDTO' },
+    dir: { description: 'Worker project directory on disk.', type: 'string' },
+  }}
+/>
+
+## Next
+
+<Cards>
+  <Card title="The architect seam" href="/docs/commissioning/architects" description="OmpArchitect drives a real omp agent to write the worker; TemplateArchitect renders it deterministically." />
+  <Card title="The acceptance gate" href="/docs/commissioning/acceptance-gate" description="The tiered, degrading interview: lint → typecheck → flue run → ponytail, with re-author-on-failure." />
+  <Card title="Onboarding (flue-service)" href="/docs/commissioning/flue-service" description="A passing worker becomes a roster member via FlueServiceDriver, federating like any agent." />
+</Cards>

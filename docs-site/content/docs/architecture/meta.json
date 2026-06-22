@@ -1,0 +1,4 @@
+{
+  "title": "Architecture",
+  "pages": ["overview", "agent-driver", "rpc-protocol", "state-and-events", "autonomy"]
+}

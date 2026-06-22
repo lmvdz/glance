@@ -1,0 +1,193 @@
+---
+title: State & events
+description: How roster config persists and reattaches across restarts, and the SquadEvent / ClientCommand wire protocol with the AgentDTO snapshot.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+The manager holds live state in memory and projects two things outward: a durable
+**roster config** on disk, and a **`SquadEvent`** stream to surfaces. Surfaces push
+mutations back as **`ClientCommand`**s. This page is the wire reference for all three.
+
+## Persistence
+
+Roster config persists to `~/.omp/squad/state.json`. The directory is overridable with
+the `OMP_SQUAD_STATE_DIR` environment variable (it also holds the access token,
+per-agent run receipts, resume digests, and commissioned-worker dirs).
+
+```text title="default state dir"
+~/.omp/squad/
+  state.json            # roster config + transcripts + features
+  access-token          # bearer token (mode 0600)
+  sockets/<id>.sock      # one agent-host UDS per live agent
+  worktrees/             # per-agent git worktrees
+```
+
+Writes are **serialized and atomic**. `persist()` chains each write after the last one
+through `writeChain` (so two writes never interleave and `await persist()` is a real
+durability barrier), and `persistNow()` writes to `state.json.tmp` then renames — a
+reader or a restart never sees a partial file.
+
+```ts title="src/squad-manager.ts — persistNow()"
+const agents = [...this.agents.values()].map((r) => r.options);   // PersistedAgent[]
+const transcripts = …;                                            // id → TranscriptEntry[]
+const features = [...this.featureStore.values()];                 // PersistedFeature[]
+await fs.writeFile(tmp, JSON.stringify({ version: 1, agents, transcripts, features }, null, 2));
+await fs.rename(tmp, this.stateFile);
+```
+
+<Callout type="info">
+  Transcripts are redacted at the single `append()` chokepoint **before** they reach
+  the in-memory buffer, `state.json`, or an emitted `transcript` event — secrets never
+  hit any of the three.
+</Callout>
+
+### What's persisted
+
+A `PersistedAgent` is exactly the data needed to reconstruct an agent's driver — it is
+the `options` half of each roster record:
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'Stable agent id (the agent-host socket derives from it).' },
+    name: { type: 'string', description: 'Display name.' },
+    repo: { type: 'string', description: 'Repo root the worktree was cut from.' },
+    worktree: { type: 'string', description: 'Absolute worktree path (the agent cwd).' },
+    branch: { type: 'string?', description: 'Worktree branch; defaults to "squad/" plus the name.' },
+    model: { type: 'string?', description: 'Model spec.' },
+    approvalMode: { type: '"always-ask" | "write" | "yolo"', description: 'Approval policy.' },
+    task: { type: 'string?', description: 'Initial task prompt, if created with one.' },
+    thinking: { type: 'ThinkingLevel?', description: 'Reasoning effort (minimal|low|medium|high|xhigh).' },
+    issue: { type: 'IssueRef?', description: 'Work item this agent advances (e.g. a Plane issue).' },
+    featureId: { type: 'string?', description: 'Feature this agent belongs to.' },
+    kind: { type: 'AgentKind?', description: 'Runtime class; defaults to "omp-operator" when absent (back-compat).' },
+    flue: { type: 'FlueMemberConfig?', description: 'flue-service only: worker invocation config (dir, workflow, target).' },
+    workflow: { type: 'WorkflowMemberConfig?', description: 'workflow only: the graph file path or a synthesized verify spec.' },
+    workflowState: { type: 'WorkflowRunState?', description: 'workflow only: resumable run position for restart.' },
+    parentId: { type: 'string?', description: 'Parent workflow agent id when this is a fan-out branch.' },
+    sandbox: { type: 'SandboxConfig?', description: 'When set, run the agent inside a container.' },
+    owns: { type: 'string[]?', description: 'Repo-relative path prefixes this agent owns (partition guard).' },
+  }}
+/>
+
+A `PersistedFeature` is the additive `features[]` envelope — a cross-cutting unit of
+work over a plan dir and/or a set of agents. Most of a feature is *derived* at read
+time; only the durable bits persist:
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'Feature id.' },
+    title: { type: 'string', description: 'Display title.' },
+    repo: { type: 'string', description: 'Repo this feature belongs to.' },
+    stageOverride: { type: 'FeatureStage?', description: 'Manual stage pin; otherwise the stage is fully derived.' },
+    origin: { type: '{ planDir?, briefPath? }', description: 'Repo-relative provenance.' },
+    plane: { type: '{ moduleId?, moduleUrl?, issueIdentifiers? }', description: 'Linked Plane module + issues.' },
+    acceptance: { type: 'string?', description: 'Acceptance command (exit 0 = pass) gating landing; defaults to the repo verify command.' },
+    branches: { type: '{ branch?, worktree, agentId? }[]?', description: 'Member-branch snapshot so land status survives an agent being killed.' },
+    workflowAgentId: { type: 'string?', description: 'When Fabro-driven: the workflow agent running this feature.' },
+    archived: { type: 'boolean?', description: 'Hidden from active views.' },
+  }}
+/>
+
+### Reattach on restart
+
+`loadPersisted()` rebuilds the fleet from `state.json`. It re-creates each agent with
+`autoRoute: false` (don't re-route a known agent) and `bypassCap: true` (a restored
+agent is already accounted for, so it never trips the WIP cap):
+
+- a **`flue-service`** member is restored via its own path (no live process to
+  reattach — it is re-onboarded);
+- a **`workflow`** run only resumes if its inner omp thread is still alive **and** a
+  `workflowState` checkpoint exists — otherwise the orchestration is unrecoverable and
+  it is not respawned;
+- an **`omp-operator`** is re-created, and because the agent's `agent-host` survived
+  the restart, `RpcAgent.start()` simply reconnects to the live socket and replays the
+  ring buffer — the agent kept running with full context the whole time.
+
+## The wire protocol
+
+### `SquadEvent` — manager → surface
+
+Everything the manager publishes is one of these. `SquadServer.broadcast` JSON-encodes
+each to every WebSocket client (stamping `version` onto `roster`); the TUI consumes the
+same objects in-process.
+
+```ts title="src/types.ts"
+export type SquadEvent =
+  | { type: "roster"; agents: AgentDTO[]; version: string }
+  | { type: "agent"; agent: AgentDTO }
+  | { type: "removed"; id: string }
+  | { type: "transcript"; id: string; entry: TranscriptEntry }
+  | { type: "log"; level: "info" | "warn" | "error"; text: string }
+  | { type: "commands"; id: string; commands: CommandInfo[] }
+  | { type: "features-changed" };
+```
+
+A new WebSocket gets a full `roster` snapshot on `open` (plus any per-agent
+`commands`). `transcript` replay is unicast to the socket that asked (`subscribe`);
+`agent` is the per-agent delta broadcast after every state change.
+
+### `ClientCommand` — surface → manager
+
+Every mutation a surface can request, routed through the single `applyCommand(cmd,
+actor)` entry point (`create` and `commission` are handled at the server before
+reaching it, because they return a value):
+
+```ts title="src/types.ts"
+export type ClientCommand =
+  | { type: "prompt"; id: string; message: string }
+  | { type: "answer"; id: string; requestId: string; value: string }
+  | { type: "interrupt"; id: string }
+  | { type: "kill"; id: string }
+  | { type: "restart"; id: string }
+  | { type: "remove"; id: string; deleteWorktree?: boolean }
+  | { type: "create"; options: CreateAgentOptions }
+  | { type: "snapshot" }              // request a full roster + recent transcript replay
+  | { type: "subscribe"; id: string } // transcript replay of one agent
+  | { type: "commission"; spec: CommissionSpec };
+```
+
+<Callout type="info">
+  `applyCommand` takes an `actor` (default the local operator). It is the seam Phase-2
+  federation rides: a remote peer's `{ command, actor }` flows through the *same*
+  method, after authorization, so there is no separate remote-command path.
+</Callout>
+
+### `AgentDTO` — the per-agent snapshot
+
+The serializable projection of one agent, carried on `roster` and `agent` events. This
+is what both surfaces render.
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'Stable agent id.' },
+    name: { type: 'string', description: 'Display name.' },
+    status: { type: 'AgentStatus', description: 'starting | working | idle | input | error | stopped (derived).' },
+    kind: { type: 'AgentKind', description: 'Which runtime backs this agent.' },
+    parentId: { type: 'string?', description: 'Parent workflow agent id when this is a fan-out branch.' },
+    verified: { type: 'boolean?', description: 'flue-service only: passed the acceptance gate at onboard.' },
+    repo: { type: 'string', description: 'Repo root the worktree was cut from.' },
+    worktree: { type: 'string', description: 'Absolute worktree path (the agent cwd).' },
+    branch: { type: 'string?', description: 'Worktree branch.' },
+    model: { type: 'string?', description: 'Active model (`provider/id`).' },
+    approvalMode: { type: 'ApprovalMode', description: 'always-ask | write | yolo.' },
+    activity: { type: 'string?', description: 'One-line "what it is doing right now" (tool name / intent).' },
+    todo: { type: '{ done, total, active? }?', description: 'Latest todo summary.' },
+    contextPct: { type: 'number?', description: 'Context-window usage, 0..1.' },
+    receipt: { type: 'ReceiptRollup?', description: 'Compact rollup of the in-flight/last run (tools, cost, duration).' },
+    pending: { type: 'PendingRequest[]', description: 'Unanswered human-input requests; status is "input" when non-empty.' },
+    lastActivity: { type: 'number', description: 'ms epoch of last activity of any kind.' },
+    messageCount: { type: 'number', description: 'Transcript length (cheap change detection).' },
+    error: { type: 'string?', description: 'Last error, when status === "error".' },
+    issue: { type: 'IssueRef?', description: 'Work item this agent is advancing.' },
+    featureId: { type: 'string?', description: 'Feature membership (single source of truth).' },
+    owns: { type: 'string[]?', description: 'Repo-relative path prefixes this agent owns.' },
+    queued: { type: 'boolean?', description: 'Only on the synthetic DTO returned when a spawn is parked at the WIP cap; never on a roster agent.' },
+  }}
+/>
+
+<Cards>
+  <Card title="Autonomy" href="/docs/architecture/autonomy" description="What sets `queued`, and the opt-in loop that drains it." />
+  <Card title="The RPC protocol" href="/docs/architecture/rpc-protocol" description="Where status, activity, todo, and contextPct come from." />
+  <Card title="Type reference" href="/docs/reference/types" description="The full exported type surface." />
+</Cards>

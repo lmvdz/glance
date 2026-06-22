@@ -1,0 +1,122 @@
+---
+title: Intake routing
+description: Describe intent in one line — the intake router reads the task and repo and picks the process.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+The goal: a human never has to do anything but say *what* they want; the OS chooses *how*.
+Spawning takes one natural-language line — the per-project composer, a Plane issue, or
+`omp-squad add … --task` — no forms, no flags. The **intake router** (`src/intake.ts`) reads
+the task plus the repo and routes it to a process.
+
+## The four routes
+
+`routeIntake(task, repo, classify?)` returns an `IntakeDecision` — a `workflow`, a `verify`
+command, an optional `thinking` effort, and always a human-readable `reason`:
+
+| Signal in the task | Route | Decision |
+|---|---|---|
+| Several approaches wanted | **parallel fan-out** | `workflow: fan-out` |
+| High-risk / destructive change | **plan + approval** | `workflow: plan-implement` |
+| Ordinary code change | **autonomous verify loop** | `verify: <detected command>` |
+| Nothing to verify | **plain agent** | no workflow, no verify |
+
+The router checks fan-out **before** high-risk, so "rewrite the auth layer three ways in
+parallel" fans out rather than going to plan+approval.
+
+### What triggers each (heuristic mode)
+
+The default router is pure regex over the task text (`heuristicRoute`):
+
+- **Fan-out** — `in parallel`, `fan out`, `several/multiple approaches`, `compare approaches`,
+  `N approaches`, `N ways`, `brainstorm`.
+- **High-risk** — `migrat*`, `deletion`, `drop `, `rewrit*`, `redesign*`, `re-architect*`,
+  `mainnet`, `deploy*`, `production`, `breaking change`, `schema change`. These are the
+  *only* routine human-in-the-loop gate — reserved for the genuinely dangerous cases.
+- **Reasoning effort** — words like `complex`, `carefully`, `tricky`, `subtle`, `thorough`,
+  `deep dive` bump `thinking` to `high`; `typo`, `rename`, `comment`, `bump`, `whitespace`,
+  `reformat`, `format` drop it to `minimal`.
+
+### Detecting the verify command
+
+For an ordinary change, the verify command is inferred from the repo's toolchain manifests
+(`detectVerify`), so the agent runs the project's *own* gate:
+
+| Manifest | Verify command |
+|---|---|
+| `package.json` with `typecheck` (or `check`) + `test` scripts | `<pm> run typecheck && <pm> run test` |
+| `Cargo.toml` | `cargo check && cargo test` |
+| `go.mod` | `go build ./... && go test ./...` |
+| `pyproject.toml` | `pytest -q` |
+
+The package manager (`<pm>`) is detected from the lockfile: `bun.lock`/`bun.lockb` → `bun`,
+`pnpm-lock.yaml` → `pnpm`, `yarn.lock` → `yarn`, else `npm`. If no command is detected, the
+change routes to a plain agent.
+
+<Callout type="info">
+The decision is logged so the operator sees the OS's reasoning:
+
+```text
+routed "fix-auth": code change → auto-verify with `bun run typecheck && bun run test`
+```
+</Callout>
+
+## Overriding the router
+
+Routing only runs for a task-bearing spawn that doesn't already pin a process. In
+`SquadManager.create`, the guard is:
+
+```ts title="src/squad-manager.ts"
+if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
+  const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
+  // …
+}
+```
+
+So you override routing by being explicit:
+
+- `--plain` sets `autoRoute = false` → a plain agent, no routing.
+- An explicit `--workflow`, `--verify`, or `--sandbox` is already a chosen process, so the
+  router stands aside.
+
+## LLM router (opt-in)
+
+By default routing is heuristic. Set `OMP_SQUAD_LLM_ROUTER=1` and the manager classifies
+intent with a one-shot call on the fast / `smol` model instead — same `routeIntake` seam, no
+caller changes.
+
+<TypeTable
+  type={{
+    OMP_SQUAD_LLM_ROUTER: {
+      type: 'flag',
+      description: 'When set, classify intent with a one-shot smol-model call (omp -p --no-tools --smol). Falls back to heuristics on any failure. Off by default.',
+    },
+  }}
+/>
+
+The model is asked for a strict JSON verdict — `{"process":"verify|plan|fanout|plain","effort":"minimal|low|high"}`
+— and the router extracts the last balanced JSON object from its output (so surrounding prose
+is tolerated). On **any** failure — empty output, unparseable text, the call throwing — it
+falls back to the heuristics above. A `verify` verdict still runs `detectVerify`; if no
+command is found it degrades to a plain agent.
+
+<Callout type="warn">
+The LLM router only changes *how* the process is chosen, never the set of processes. The four
+routes, the workflows they map to, and the override rules are identical to heuristic mode.
+</Callout>
+
+## Where it runs
+
+Every task-bearing spawn flows through intake: the project-view composer, the
+[spawn-from-issue](/docs/integrations/plane) button, `omp-squad add --task`, and — when
+enabled — every issue pulled in by [auto-dispatch](/docs/integrations/auto-dispatch). Same
+router, same reasons, logged the same way.
+
+## Related
+
+<Cards>
+  <Card title="Auto-dispatch" href="/docs/integrations/auto-dispatch" description="Issues from Plane, routed and spawned on a timer." />
+  <Card title="Verify loops" href="/docs/guides/verify-loops" description="The implement → verify → fixup loop intake wraps a change in." />
+  <Card title="Bundled workflows" href="/docs/workflows/bundled" description="The plan-implement and fan-out graphs intake routes to." />
+</Cards>

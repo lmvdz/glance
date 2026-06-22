@@ -1,0 +1,231 @@
+---
+title: Contributing
+description: Repo layout, how to build and test, the ponytail engineering mandate, and how to add a new agent kind.
+---
+
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+omp-squad is a single Bun + TypeScript package. One dependency at runtime
+(`@oh-my-pi/pi-tui`), `@oh-my-pi/pi-coding-agent` for spawning fleet agents, and
+TypeScript for the typecheck — that's the whole tree. Everything else is the
+standard library and the platform. This page is the map: where things live, how
+to verify a change, the engineering bar every change is held to, and the one
+seam you extend to teach the fleet a new kind of agent.
+
+## Repo layout
+
+The source is flat under `src/` — only `web/` (the dashboard SPA + its PWA
+assets) and `workflow/` (the graph runtime) are real subfolders. The tree below
+highlights the load-bearing files; see [Subsystems](#subsystems) for what each
+group does.
+
+<Files>
+  <Folder name="src" defaultOpen>
+    <File name="squad-manager.ts" />
+    <File name="server.ts" />
+    <File name="tui.ts" />
+    <File name="types.ts" />
+    <File name="index.ts" />
+    <File name="agent-driver.ts" />
+    <File name="rpc-agent.ts" />
+    <File name="agent-host.ts" />
+    <File name="workflow-driver.ts" />
+    <File name="flue-service-driver.ts" />
+    <File name="sandbox-agent-driver.ts" />
+    <File name="plane.ts" />
+    <File name="intake.ts" />
+    <File name="dispatch.ts" />
+    <File name="federation.ts" />
+    <File name="coordinator.ts" />
+    <File name="leases.ts" />
+    <File name="presence.ts" />
+    <File name="orchestrator.ts" />
+    <File name="scheduler.ts" />
+    <File name="supervisor.ts" />
+    <File name="resolver.ts" />
+    <File name="land.ts" />
+    <File name="proof.ts" />
+    <Folder name="workflow">
+      <File name="engine.ts" />
+      <File name="executor.ts" />
+      <File name="types.ts" />
+      <File name="dot.ts" />
+      <File name="stylesheet.ts" />
+      <File name="verify-workflow.ts" />
+      <File name="commission-executor.ts" />
+    </Folder>
+    <Folder name="web">
+      <File name="index.html" />
+    </Folder>
+  </Folder>
+  <Folder name="tests">
+    <File name="squad.test.ts" />
+    <File name="workflow.test.ts" />
+    <File name="…47 files" />
+  </Folder>
+  <Folder name="workflows">
+    <File name="research-plan-implement/workflow.fabro" />
+    <File name="fan-out/workflow.fabro" />
+    <File name="commission/workflow.fabro" />
+    <File name="plan-implement/workflow.fabro" />
+  </Folder>
+  <File name="README.md" />
+  <File name="AGENTS.md" />
+  <File name="package.json" />
+</Files>
+
+### Subsystems
+
+- **Core** — `squad-manager.ts` is the heart: it owns the agent records, derives
+  status, persists state, and routes every `ClientCommand`. `server.ts` is the
+  HTTP/WebSocket surface that broadcasts the `SquadEvent` stream; `tui.ts` and
+  `web/index.html` are thin clients of it. `types.ts` is the shared vocabulary.
+- **Drivers** — `agent-driver.ts` defines the `AgentDriver` seam; `rpc-agent.ts`
+  (backed by `agent-host.ts`) drives a real `omp --mode rpc` child,
+  `workflow-driver.ts` runs a graph as an agent, `flue-service-driver.ts` drives
+  a commissioned Flue worker, and `sandbox-agent-driver.ts` runs an agent inside
+  a container.
+- **Workflow** — `workflow/` is the graph runtime: `engine.ts` + `executor.ts`
+  step the DAG, `types.ts` is the node model, `dot.ts`/`stylesheet.ts` render and
+  route, `verify-workflow.ts` synthesizes the `--verify` loop, and
+  `commission-executor.ts` runs the commission graph.
+- **Integrations** — `plane.ts` (Plane issues), `intake.ts` (task → process
+  router), `dispatch.ts` (auto-dispatch from Plane), and the federation cluster:
+  `federation.ts`, `coordinator.ts`, `leases.ts`, `presence.ts`.
+- **Autonomy** — `orchestrator.ts`, `scheduler.ts`, `supervisor.ts`, and
+  `resolver.ts` are the unattended loops that keep the fleet advancing.
+- **Land + proof** — `land.ts` merges a finished worktree back; `proof.ts`
+  captures the receipt that it landed.
+
+## Building and testing
+
+<Steps>
+
+<Step>
+
+### Run the test suite
+
+```bash
+bun test
+```
+
+The suite is **deterministic and spends no model tokens** — it never spawns a
+real `omp` agent or calls a model. It covers worktree ops, the pure board
+renderer, the RPC transport (`get_state` + `bash`), and the manager lifecycle,
+plus the autonomy loops, federation/leases/presence, the workflow engine,
+commissioning, intake/dispatch, push, and land/proof. There are ~47 test files
+under `tests/` — run a single one with `bun test tests/squad.test.ts`.
+
+</Step>
+
+<Step>
+
+### Typecheck
+
+```bash
+bun run check
+```
+
+This is `tsc --noEmit`. There is no separate build step — Bun runs the
+TypeScript sources directly (`bin` points at `src/index.ts`).
+
+</Step>
+
+</Steps>
+
+A full model-driven smoke test (spends tokens, needs a git repo) is documented
+in the README's **Verify** section: `omp-squad up --no-tui`, `add` an agent with
+`--approval yolo` on a throwaway task, and watch it go `working → idle`.
+
+## The engineering mandate
+
+Every change to omp-squad — and every fleet agent or commissioned worker it
+spawns — is held to the **ponytail** bar in `AGENTS.md`. Read it before you write
+code; the short version:
+
+<Callout type="info">
+**Lazy means efficient, not careless. The best code is the code never written.**
+Before writing anything, stop at the first rung that holds:
+(1) does it need to exist at all (YAGNI), (2) does the standard library do it,
+(3) does a native platform feature cover it, (4) does an already-installed
+dependency solve it, (5) can it be one line, (6) only then the minimum code that
+works.
+</Callout>
+
+The rules that follow from it:
+
+- **No unrequested abstractions, no new dependencies, no boilerplate.** Deletion
+  over addition, boring over clever, fewest files possible.
+- **Mark intentional simplifications with a `ponytail:` comment.** If the
+  shortcut has a known ceiling (a global lock, an O(n²) scan, a naive heuristic),
+  the comment names the ceiling *and* the upgrade path.
+- **Lazy code without its check is unfinished.** Non-trivial logic leaves ONE
+  runnable check behind — the smallest thing that fails if the logic breaks (an
+  assert-based self-check or one small test file; no frameworks, no fixtures).
+  Trivial one-liners need no test.
+- **Ship behavior and its docs together.** Change a flag, env var, endpoint, or
+  the UI and the README/`docs/` update in the same change, or it is not done.
+- **Never lazy about:** input validation at trust boundaries, error handling that
+  prevents data loss, security, accessibility, or the calibration real hardware
+  needs.
+
+This is not just advice — the factory enforces it mechanically. `OmpArchitect`
+instructs every commissioned worker to follow the ladder, and the acceptance
+gate's `ponytail` check rejects over-built workers before onboarding.
+
+## Adding a new agent kind
+
+The fleet supports several kinds today — the default `omp --mode rpc` agent, a
+`workflow` graph runner, a `flue-service` commissioned worker, and a sandboxed
+container agent. They all reach the manager through one seam, so adding a kind is
+three small edits, not a refactor.
+
+<Steps>
+
+<Step>
+
+### Implement the `AgentDriver` interface
+
+Your driver is an `EventEmitter` (defined in `src/agent-driver.ts`) speaking the
+omp-shaped event vocabulary — it emits `ready`, `event` (a frame), `ui`,
+`hosttool`, `exit`, and `stderr` — and implements `start`, `stop`, `prompt`,
+`abort`, `getState`, plus `respondUi`/`respondHostTool`. The manager's status
+derivation, transcript, and federation are written against this contract only,
+so a conforming driver drops in without touching them.
+
+</Step>
+
+<Step>
+
+### Add a branch to `makeDriver`
+
+`SquadManager.makeDriver(p)` in `src/squad-manager.ts` selects the driver from
+the persisted agent: `kind === "flue-service"` → `FlueServiceDriver`,
+`kind === "workflow"` → `WorkflowDriver`, `p.sandbox` → `SandboxAgentDriver`,
+otherwise the default `RpcAgent`. Add your branch here, returning a fresh
+instance of your driver.
+
+</Step>
+
+<Step>
+
+### Give the kind a glyph
+
+Add an entry to `KIND_GLYPH` (and `KIND_COLOR`) in `src/tui.ts` — e.g.
+`workflow: "⚙"`, `flue-service: "⚒"` — so the TUI renders the new kind, and mirror
+it in the web dashboard.
+
+</Step>
+
+</Steps>
+
+For the full contract, event frames, and the rationale behind the seam, see the
+architecture deep-dive.
+
+<Cards>
+  <Card title="Architecture: the AgentDriver seam" href="/docs/architecture/agent-driver" description="The runtime contract every fleet class implements, frame by frame." />
+  <Card title="Reference: types" href="/docs/reference/types" description="SquadEvent, ClientCommand, PersistedAgent, and the rest of the shared vocabulary." />
+  <Card title="Workflows: authoring" href="/docs/workflows/authoring" description="Write a .fabro graph the WorkflowDriver can run as an agent." />
+  <Card title="Commissioning: the Flue service" href="/docs/commissioning/flue-service" description="How FlueServiceDriver drives a worker authored and gated by the factory." />
+</Cards>

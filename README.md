@@ -317,7 +317,7 @@ sequence — so `author → gate → onboard` runs on the same engine as plan-im
 
 Both classes implement one `AgentDriver` seam, so `kind` is the only thing surfaces
 need to tell an interactive operator from a commissioned worker. Design + rationale:
-[`docs/commission-loop`](docs-site/content/docs/commission-loop.md) (rendered in the docs site).
+[the Commissioning docs](docs-site/content/docs/commissioning/index.mdx) (rendered in the docs site).
 
 ## Autonomous intake — describe intent, the OS picks the process
 
@@ -393,7 +393,7 @@ omp-squad add ~/code/myproject --task "Add rate limiting to the public API." \
 Shapes: `Mdiamond` start · `Msquare` exit · `box` agent · `tab` prompt · `parallelogram`
 command · `hexagon` human gate · `diamond` conditional · `component` fork · `tripleoctagon`
 merge. Design + rationale:
-[`docs/workflow-runtime`](docs-site/content/docs/workflow-runtime.md) (rendered in the docs site).
+[the Workflows docs](docs-site/content/docs/workflows/index.mdx) (rendered in the docs site).
 
 ## Documentation
 

@@ -1,0 +1,149 @@
+---
+title: Remote Access & Mobile
+description: Reach the dashboard from your phone — binding beyond loopback, the bearer token, TLS, the installable PWA, Web Push, and the hands-free auto-supervisor.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+The dashboard is a PWA you can install on your phone and drive from anywhere — and it **pushes
+you a notification the moment an agent needs a human**, so you supervise by exception instead of
+watching a screen. This page covers getting it off `localhost` safely.
+
+## Bind beyond loopback
+
+By default the daemon binds `127.0.0.1`. To reach it from another device, bind a routable
+address:
+
+```bash
+omp-squad up --no-tui --host 0.0.0.0
+```
+
+<TypeTable
+  type={{
+    "--host / OMP_SQUAD_HOST": { description: "Bind address; 0.0.0.0 exposes on the LAN/tailnet. The env var wins over the flag.", type: "string", default: "127.0.0.1" },
+    "--port / OMP_SQUAD_PORT": { description: "Daemon port.", type: "number", default: "7878" },
+    "OMP_SQUAD_TLS_CERT + OMP_SQUAD_TLS_KEY": { description: "PEM paths — terminate TLS in-process (both required). Switches the scheme to https.", type: "path", default: "plain HTTP" },
+    "OMP_SQUAD_STATE_DIR": { description: "Where the token, VAPID keys, and subscriptions live.", type: "path", default: "~/.omp/squad" },
+  }}
+/>
+
+On boot the daemon prints every URL it's reachable on — loopback plus each non-internal IPv4
+when bound to `0.0.0.0` — each with a one-tap `?token=…` sign-in link.
+
+## The access token
+
+The control plane can spawn agents, land code, and re-exec itself, so **access is token-gated**
+(`src/auth.ts`). On first run the daemon generates a bearer token, persists it at
+`<state-dir>/access-token` (mode `0600`), and prints it on boot:
+
+```text
+omp-squad daemon running
+  dashboard: http://0.0.0.0:7878
+  access token: Bdnw7…IHo
+  open from any device on this network (tap to sign in):
+    http://192.168.1.20:7878/?token=Bdnw7…IHo
+```
+
+Every `/api` request carries it as `Authorization: Bearer <t>`; the WebSocket carries it as a
+`?token=` query param (browsers can't set headers on a WS handshake). Comparison is
+constant-time. The token is **required even on loopback**. Only the static shell — plus the
+manifest, service worker, and icons needed to bootstrap the PWA — is public; everything else is
+gated. The dashboard captures `?token=` into `localStorage`, strips it from the URL, and shows a
+sign-in overlay if it's missing or rejected.
+
+## Install the PWA on your phone
+
+<Callout type="warn">
+**HTTPS is required** to install the PWA and receive background push — browsers only allow
+service workers and Web Push in a secure context. `http://localhost` is exempt; a LAN IP is not.
+</Callout>
+
+<Tabs items={['Tailscale (recommended)', 'In-process TLS']}>
+<Tab value="Tailscale (recommended)">
+
+Front the daemon with a real cert — no in-process TLS needed:
+
+```bash
+omp-squad up --no-tui            # bound to localhost is fine
+tailscale serve --bg 7878        # → https://<machine>.<tailnet>.ts.net
+```
+
+Open that URL on your phone (same tailnet), append `?token=…` once, **Add to Home Screen**, and
+allow notifications. Tailnet ACLs gate who can reach it; the token gates the rest.
+
+</Tab>
+<Tab value="In-process TLS">
+
+Point `OMP_SQUAD_TLS_CERT` / `OMP_SQUAD_TLS_KEY` at a cert and bind `--host 0.0.0.0`:
+
+```bash
+OMP_SQUAD_TLS_CERT=./cert.pem OMP_SQUAD_TLS_KEY=./key.pem \
+  omp-squad up --no-tui --host 0.0.0.0
+```
+
+Self-signed works but browsers warn (and some refuse a service worker on an untrusted cert), so a
+real cert / tailnet is smoother.
+
+</Tab>
+</Tabs>
+
+On the phone the unified nav collapses to a drawer, the **attention queue is the landing view**
+when something's waiting, and one tap answers an approval or question.
+
+## Web Push
+
+When an agent transitions to a state that needs a human (`input` / `error`), the daemon pushes an
+encrypted notification to every subscribed device — the phone buzzes even with the app closed,
+and tapping it deep-links to that agent (`#/agent/<id>`).
+
+It's implemented **dependency-free** in `src/push.ts`: RFC 8291 message encryption
+(`aes128gcm`) + RFC 8292 VAPID. The daemon generates and persists a VAPID keypair in the state
+dir; the browser fetches the public key from `GET /api/push/key` and enrolls via
+`POST /api/push/subscribe` once notifications are granted.
+
+| Env | Meaning | Default |
+|---|---|---|
+| `OMP_SQUAD_PUSH_SUBJECT` | VAPID `sub` contact (`mailto:` or `https:`) | `mailto:squad@localhost` |
+
+Server-side alerts are throttled per agent and seeded from the first roster, so a reconnect or
+replay never fires a notification storm.
+
+## Hands-free auto-supervisor
+
+So a fleet keeps moving while you're away, the daemon runs a **standing auto-supervisor**
+(`src/supervisor.ts`) — a model-backed loop that answers blocked agents for you. It's **on by
+default**: the daemon starts it unless `OMP_SQUAD_AUTO_SUPERVISE=0` or `--no-supervise` is set.
+The boot line reports its state (`autonomy: session-tracker on · auto-supervisor on`).
+
+It opens the daemon's own WebSocket and, for every agent in `input`, decides and submits an
+answer per pending request:
+
+- **Approves** normal development actions — edits, reads, running tests/builds, installing deps,
+  committing inside the worktree, spawning subagents — and picks the gate option that advances
+  the work.
+- **Denies** only clearly destructive or irreversible actions that **escape the worktree**
+  (force-pushing main, deleting unrelated data, publishing a release, touching prod). The
+  worktree is the blast radius; when in doubt inside it, it approves.
+- Falls back to a deterministic choice if the model is unavailable or returns junk.
+
+| Env / flag | Meaning | Default |
+|---|---|---|
+| `OMP_SQUAD_AUTO_SUPERVISE` | Set to `0` to disable the standing supervisor loop | on |
+| `--no-supervise` | Disable it for this run | — |
+| `OMP_SQUAD_SUPERVISE_MODEL` | Model the answerer uses | omp default |
+
+<Callout type="info">
+This standing loop (`OMP_SQUAD_AUTO_SUPERVISE`, underscore, **on by default**) is distinct from
+the in-manager deterministic `OMP_SQUAD_AUTOSUPERVISE` path (no underscore, **off by default**)
+described in [Autonomy](/docs/architecture/autonomy). The daemon also runs a session-tracker that
+surfaces raw `omp` sessions in presence.
+</Callout>
+
+---
+
+<Cards>
+<Card title="Web dashboard" href="/docs/guides/web-dashboard" description="Everything the remote UI exposes." />
+<Card title="Configuration" href="/docs/reference/configuration" description="Every env var and flag, including the autonomy switches." />
+<Card title="Autonomy" href="/docs/architecture/autonomy" description="Supervision, auto-dispatch, and the self-healing control loop." />
+</Cards>
