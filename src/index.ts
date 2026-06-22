@@ -25,6 +25,7 @@ import { SquadManager } from "./squad-manager.ts";
 import { SquadTui } from "./tui.ts";
 import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
+import { loadEnvFile } from "./plane-secrets.ts";
 import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
@@ -140,6 +141,9 @@ async function postCommand(flags: Record<string, string | boolean>, cmd: ClientC
 
 async function cmdUp(args: string[]): Promise<void> {
 	const { flags } = parseArgs(args);
+	// Configure Plane from the shared secret so the squad runs Plane-connected with no manual sourcing.
+	const planeKeys = loadEnvFile(path.join(os.homedir(), ".claude", "secrets", "plane.env"));
+	if (planeKeys.length) process.stderr.write(`plane: loaded ${planeKeys.length} var(s) from ~/.claude/secrets/plane.env\n`);
 	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
 	const host = process.env.OMP_SQUAD_HOST || (typeof flags.host === "string" ? flags.host : undefined) || "127.0.0.1";
 	const stateDir = stateDirPath();
