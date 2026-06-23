@@ -389,6 +389,14 @@ with changed assets) the socket drops, the client auto-reconnects, sees a new ve
 **refreshes itself** ("Updated — reloading…") — so an open tab or installed PWA never runs
 stale UI without anyone touching it.
 
+**Web framework rewrite (in progress).** A new Vite + React 19 + TS + Tailwind v4 + shadcn SPA
+is being scaffolded under [`webapp/`](webapp/), to replace the single-file `src/web/index.html`
+dashboard at a later cutover. It is **inert by default**: the live dashboard is unchanged. To
+preview the new shell, build it (`cd webapp && bun install && bun run build`) and start the daemon
+with `OMP_SQUAD_WEBAPP=1` — the server then serves `webapp/dist` (the content-hashed Vite bundle)
+at `/` and `/assets/*` instead of the live HTML. The flag is OFF unless **both** set **and** a
+build exists; unset it (or skip the build) to get the current dashboard exactly as before.
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`
@@ -665,6 +673,7 @@ delegation/availability policy plus the outbound command frame — is the rest o
 | File | Role |
 |---|---|
 | `src/web/index.html` | Single-page web dashboard |
+| `webapp/` | Vite + React + Tailwind v4 + shadcn SPA (rewrite-in-progress; inert behind `OMP_SQUAD_WEBAPP=1`) |
 | `src/tui.ts` | Terminal dashboard — `buildBoard` chrome + pi-tui `Editor` input, two-level nav |
 | `src/index.ts` | CLI |
 

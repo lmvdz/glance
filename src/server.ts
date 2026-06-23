@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
@@ -36,6 +36,27 @@ import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
 const WEB_DIR = path.join(import.meta.dir, "web");
+/** Vite SPA build output (CC-rewrite). Served only via the inert opt-in seam below. */
+const WEBAPP_DIST = path.join(import.meta.dir, "..", "webapp", "dist");
+const WEBAPP_INDEX = path.join(WEBAPP_DIST, "index.html");
+const WEBAPP_ASSETS = path.join(WEBAPP_DIST, "assets");
+const ASSET_TYPES: Record<string, string> = {
+	".js": "text/javascript; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".map": "application/json; charset=utf-8",
+	".svg": "image/svg+xml",
+	".woff2": "font/woff2",
+};
+
+/**
+ * Inert opt-in serve seam for the Vite SPA rewrite. DEFAULT OFF: requires BOTH the explicit
+ * `OMP_SQUAD_WEBAPP=1` flag AND an existing built `webapp/dist/index.html`. Until cutover the live
+ * `src/web/index.html` is served unchanged. Exported for the build/serve gate test.
+ * ponytail: env-flag + dist-exists check, not a config object — one toggle, no machinery.
+ */
+export function webappEnabled(): boolean {
+	return process.env.OMP_SQUAD_WEBAPP === "1" && existsSync(WEBAPP_INDEX);
+}
 /** Files served without a token so the PWA can install + bootstrap before sign-in. */
 const PUBLIC_ASSETS: Record<string, string> = {
 	"/manifest.webmanifest": "application/manifest+json",
@@ -283,7 +304,7 @@ export class SquadServer {
 
 	start(): string {
 		if (this.singleManager) for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
-		this.uiVersion = computeUiVersion(readFileSync(INDEX_HTML, "utf8"));
+		this.uiVersion = computeUiVersion(readFileSync(webappEnabled() ? WEBAPP_INDEX : INDEX_HTML, "utf8"));
 
 		this.server = Bun.serve<SocketData>({
 			port: this.opts.port ?? 7878,
@@ -349,7 +370,7 @@ export class SquadServer {
 	}
 
 	private async handle(req: Request, server: Server<SocketData>): Promise<Response | undefined> {
-		const indexFile = Bun.file(INDEX_HTML);
+		const indexFile = Bun.file(webappEnabled() ? WEBAPP_INDEX : INDEX_HTML);
 		const url = new URL(req.url);
 		if (url.pathname === "/ws") {
 			// The handshake only authenticates; per-command tier checks happen in applyCommand,
@@ -385,6 +406,16 @@ export class SquadServer {
 		}
 		const asset = PUBLIC_ASSETS[url.pathname];
 		if (asset) return new Response(Bun.file(path.join(WEB_DIR, url.pathname.slice(1))), { headers: { "content-type": asset } });
+		// Inert webapp seam: serve Vite's content-hashed bundle tokenless (like the shell) when enabled.
+		// Containment check keeps requests inside dist/assets — no path traversal out of the build dir.
+		if (webappEnabled() && url.pathname.startsWith("/assets/")) {
+			const resolved = path.join(WEBAPP_ASSETS, url.pathname.slice("/assets/".length));
+			if (resolved.startsWith(WEBAPP_ASSETS + path.sep) && existsSync(resolved)) {
+				const type = ASSET_TYPES[path.extname(resolved)] ?? "application/octet-stream";
+				return new Response(Bun.file(resolved), { headers: { "content-type": type } });
+			}
+			return new Response("not found", { status: 404 });
+		}
 		// Public mode probe — lets the SPA pick its auth style before any login. No auth required.
 		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file" });
 		// DB mode: better-auth owns the rest of /api/auth/* (sign-in/up/out, org, members). Reachable

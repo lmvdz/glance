@@ -1,93 +1,82 @@
-# Implementation plan — Web race-board (concern 07, OMPSQ-8)
+# Implementation plan — [CC-rewrite 01] Scaffold + build + serve seam (OMPSQ-54, FOUNDATIONAL)
 
-Scope: `src/web/index.html` ONLY. Zero new deps. No edits to `src/server.ts` or `src/types.ts` —
-every consumed field (`kind`, `status`, `todo{done,total,active}`, `activity`, `lastActivity`,
-`parentId`, `issue`) is already on `AgentDTO` (`types.ts:139-174`) and broadcast via WS `roster`/`agent`.
+Scope (from issue): scaffold a NEW `webapp/` Vite SPA (React 19 + TS + Tailwind v4 + shadcn),
+content-hashed static build, add an **INERT, opt-in, DEFAULT-OFF** serve branch in `src/server.ts`,
+add `tests/webapp.test.ts` (build + typecheck gate). KEEP `tests/web.test.ts`.
+**Do NOT modify `src/web/index.html`.** TOUCHES: `webapp/**` (new), `src/server.ts` (seam only),
+`tests/webapp.test.ts` (new).
 
 Verification gate: `bun run check && bun test`.
 
-## Grounded anchors (current line numbers)
-- View state + comment: `:207` (`let view = "project"`).
-- Helpers to reuse: `esc` `:217`, `STATUSES` `:218`, `SPIN`/`spinFrame` `:230-231`, `ago()` `:232`,
-  `isStalled()` `:233` (STALL_MS `:229`, concern-04 threshold), `ctxColor()` `:234`.
-- Live spin/ago ticker (no re-render): `:236-240` — reuse `.spin` + `.agotime[data-ts]` so race lanes animate free.
-- Routing: `pushRoute` `:378-385`, `applyRoute` `:386-394`.
-- Nav rows: `renderNav` `rows[]` `:411-417`.
-- `renderBody` dispatch: `:446-455`.
-- `openQueue` `:466` (pattern for `openRace`); `openBoard` `:504`.
-- Fan-out nesting reference (roots/children fold + `.acard.child`): `fillAgentGrid` `:786-789`,
-  CSS `.acard.child` `:71`.
-- Card status/stall/todo render reference: `:796-800`.
-- `openAgent(id)` `:984`.
-- `paletteItems()` `:818-825` (command-palette entry).
-- Live-patch path: `refreshShell` `:1008-1015` (queue branch `:1010` is the mirror target).
+## Grounded anchors
+- Serve consts: `src/server.ts:37-38` (`INDEX_HTML`, `WEB_DIR`), public assets `:40-47`.
+- uiVersion seed from index: `:286`.
+- Request routing in `handle()`: index at `:352` + `:383-385`; PUBLIC_ASSETS at `:386-387`; 404 `:672`.
+- Root `tsc` scope: `tsconfig.json:17` `include: ["src"]` → `webapp/` is OUTSIDE root typecheck (good; it owns its own).
+- Version pins to mirror (docs-site/package.json): react/react-dom `^19.2.7`, tailwindcss + `@tailwindcss/postcss` `^4.3.1`,
+  typescript `^6.0.3`, `@types/react` `^19.2.17`, `@types/react-dom` `^19.2.3`, `class-variance-authority` `^0.7.1`,
+  `tailwind-merge` `^3.6.0`, `lucide-react` `^1.20.0`. SPA uses `@tailwindcss/vite` (v4 vite plugin) instead of postcss.
 
 ## Steps
 
-1. **View enum comment.** Update `:207` comment to include `"board" | "feature" | "queue" | "race"`
-   (doc only; `view` is untyped JS). No behavior change.
+1. **Create `webapp/` Vite SPA scaffold** (standalone package, own `node_modules`):
+   - `webapp/package.json`: `"type":"module"`, scripts `build` (`tsc -b && vite build`), `typecheck` (`tsc --noEmit`),
+     `dev` (`vite`). Deps: `react`/`react-dom` `^19.2.x`. devDeps: `vite` (latest 6), `@vitejs/plugin-react`,
+     `typescript ^6.0.3`, `@types/react`/`@types/react-dom`, `tailwindcss ^4`, `@tailwindcss/vite ^4`.
+     shadcn runtime: `class-variance-authority`, `clsx`, `tailwind-merge`, `lucide-react`, `tw-animate-css`.
+   - `webapp/vite.config.ts`: `plugins:[react(), tailwindcss()]`; `resolve.alias["@"] = ./src`;
+     `build.outDir:"dist"` (Vite default content-hashes `dist/assets/*-<hash>.{js,css}`).
+   - `webapp/tsconfig.json` (+ `tsconfig.node.json` for vite config): mirror docs-site compiler opts
+     (`strict`, `moduleResolution:"bundler"`, `jsx:"react-jsx"`, `paths {"@/*":["./src/*"]}`, `noEmit`).
+   - `webapp/index.html`: minimal `<div id="root">` + `<script type="module" src="/src/main.tsx">`.
+   - `webapp/.gitignore`: `node_modules`, `dist`.
 
-2. **`openRace()`.** Add next to `openQueue`/`openBoard`: `function openRace(){ view="race"; selAgent=null; renderAll(); }`.
+2. **App entry + Tailwind v4 + shadcn baseline** (proof-of-life only, NOT a port of the live dashboard):
+   - `webapp/src/main.tsx`: `createRoot(...).render(<App/>)`, imports `./index.css`.
+   - `webapp/src/index.css`: `@import "tailwindcss"; @import "tw-animate-css";` + shadcn v4 `@theme inline` token
+     block and `:root`/`.dark` CSS vars (standard shadcn neutral preset).
+   - `webapp/src/App.tsx`: trivial component rendering one shadcn `Button` to prove the toolchain compiles + Tailwind
+     classes resolve.
+   - `webapp/components.json` (shadcn config, Tailwind v4 / vite style), `webapp/src/lib/utils.ts` (`cn()` helper),
+     `webapp/src/components/ui/button.tsx` (canonical shadcn Button via `cva`). No registry network call needed —
+     author these files directly to keep the gate offline-deterministic.
 
-3. **Routing.**
-   - `pushRoute` `:379`: prepend `view === "race" ? "#/race" :` to the hash ladder.
-   - `applyRoute`: add `if (location.hash === "#/race") { view = "race"; selAgent = null; renderAll(); return; }`
-     mirroring the `#/queue` line `:388` (race is client-only — no `loadFeatures()` call needed).
+3. **Inert opt-in serve seam in `src/server.ts`** (DEFAULT OFF; `src/web/index.html` untouched):
+   - Add consts near `:38`: `WEBAPP_DIST = path.join(import.meta.dir, "..", "webapp", "dist")`,
+     `WEBAPP_INDEX = path.join(WEBAPP_DIST, "index.html")`.
+   - Add pure helper `webappEnabled(): boolean` (exported for the test) = `process.env.OMP_SQUAD_WEBAPP === "1" &&
+     existsSync(WEBAPP_INDEX)`. **Both** conditions required → off unless explicitly flagged AND built.
+   - In `handle()` index branch `:383-385`: when `webappEnabled()`, serve `Bun.file(WEBAPP_INDEX)`; else current `indexFile`.
+   - Add a hashed-asset branch (only when enabled): serve `GET /assets/<file>` from `WEBAPP_DIST/assets/` with a
+     containment check (resolved path must stay under `WEBAPP_DIST/assets`) to block path traversal; 404 otherwise.
+     Place before the auth gate (`:386` area) so built JS/CSS load tokenless like the shell.
+   - uiVersion seed `:286`: when enabled, fingerprint `WEBAPP_INDEX`; else keep `INDEX_HTML`. (Tabs still self-refresh.)
+   - Keep PUBLIC_ASSETS (manifest/sw/icons) path unchanged — PWA bootstrap stays on `src/web` until cutover.
+   - `import { existsSync } from "node:fs"` if not already imported.
 
-4. **Sidebar nav row.** In `renderNav` `rows[]` `:411-415`, add after the Queue row:
-   `{ id:"race", ico:"⇶", lbl:"Race", sel: view === "race", on: openRace }`. Existing `:416-417`
-   map/click wiring picks it up automatically.
+4. **`tests/webapp.test.ts` — build + typecheck gate** (`bun:test`, mirrors `web.test.ts` style):
+   - Test A: run `tsc --noEmit` in `webapp/` via `Bun.spawn`; assert exit 0 (typecheck passes).
+   - Test B: run `vite build` in `webapp/`; assert exit 0, `webapp/dist/index.html` exists, and it references at least one
+     content-hashed `/assets/*-<hash>.js` (regex on the emitted html).
+   - Idempotent prereq: if `webapp/node_modules` absent, `bun install` in `webapp/` first (ponytail: one-time;
+     ceiling = slow cold run, upgrade path = CI caches `webapp/node_modules`). Generous `timeout` on the build test.
+   - Test C (pure, no build): import `webappEnabled` from `../src/server.ts`; with `OMP_SQUAD_WEBAPP` unset assert
+     `false` (proves DEFAULT OFF regardless of dist state).
+   - KEEP `tests/web.test.ts` as-is.
 
-5. **`renderBody` dispatch.** Add `if (view === "race") return renderRace(body);` near `:449`
-   (before the project/agent fallthrough; race is roster-global, independent of `selProject`).
-
-6. **`renderRace(body)`** — pure client-side fold over `agents.values()`:
-   - **Header:** `.pv` + `.bvh` block like `renderQueue` `:477-478`: title "Race board", sub =
-     agent count, a "← Back" button (`view="project"; renderAll()`).
-   - **Ordering / fan-out nesting:** reuse the roots-then-children fold from `fillAgentGrid`
-     `:786-789` but over ALL agents (not per-project): roots = agents whose `parentId` is unset or
-     not in the live set; each root immediately followed by its `parentId`-children. Indent branch
-     lanes (left margin + `↳ branch` marker, mirroring `.acard.child` `:71`).
-   - **Per lane (one row per agent):**
-     - Left: `badge b-<status>` (reuse `:68-69` palette) + name + `issue` line if present +
-       `.spin` when `status==="working"` (reuses the `:236-240` ticker).
-     - **Phase track** when `a.todo` exists: a segmented bar of `a.todo.total` cells, first
-       `a.todo.done` filled, the current cell (index = `done`, clamped `< total`) highlighted and
-       labelled `a.todo.active`. Color the filled run by `a.status` via the status palette vars
-       (`--ok`/`--work`/`--input`/`--err`/`--stop`) — same colors `.b-*`/`.d.*` already use. Settled
-       runs (`idle` after done / `error` / `stopped`) fill into the last cell with the matching color.
-     - **No-rollup fallback** (`a.todo === undefined`, e.g. `--plain` omp-operators): render a single
-       `badge b-<status>` pill lane labelled by `a.activity` (fallback `"—"`) — honest, no fake track.
-     - **Liveness:** when `isStalled(a, Date.now())` (`:233`, the concern-04 STALL_MS threshold) show
-       the `⏳ idle <ago>` `pill bad` cue (same markup as `:797`); always render the
-       `.agotime[data-ts]` "<ago> ago" stamp so the `:239` ticker updates it live.
-     - **Click → `openAgent(a.id)`** (`:984`), matching `fillAgentGrid` `:801`.
-
-7. **CSS (minimal, reuse-first).** Add a small `/* race board */` block in the existing `<style>`
-   (near the feature-board block `:81-98`) for the segmented track only: a flex row of cells with
-   `var(--line)` borders, filled cells using the status color var, current cell outlined with
-   `var(--accent)`, plus a lane wrapper + branch indent. No new framework, no new file, ~8-12 lines.
-   Status colors come from existing `:root` vars `:9-11`; reuse `.section`, `.badge b-<status>`,
-   `.pill bad`, `.spin`, `.agotime`.
-
-8. **Live patch.** In `refreshShell` `:1010`, extend the queue branch to
-   `if (view === "queue" || view === "race") { renderBody(); return; }` so the board re-renders on
-   every `roster`/`agent` WS event (advancing bars live, no poll). Spin/ago tick via the shared
-   `:236-240` interval already.
-
-9. **Command palette (consistency).** Add `{ label: "Race board", hint: "per-agent pipeline", run: openRace }`
-   to `paletteItems()` `:822` area, beside "Feature board". (Nice-to-have; keeps ⌘K parity.)
+5. **Docs (same-change rule):** README section "Web framework rewrite (in progress)" documenting the `OMP_SQUAD_WEBAPP=1`
+   opt-in flag, that it requires a prior `webapp` build, and that it is OFF by default with the live dashboard unchanged.
 
 ## Verification
-- `bun run check && bun test` (the gate). No test files touched — this is a client-only HTML view;
-  existing suite must stay green (proves no accidental edits to `server.ts`/`types.ts`).
-- Manual sanity per concern-07 "Verify": spawn two `plan-implement` workflow agents → two segmented
-  lanes advancing plan→approve→implement→verify with `todo.active` labelled; `fan-out` run → indented
-  branch lanes under parent; stall one past STALL_MS → `⏳ idle`; drive one to `error` → red final
-  cell; `--plain` agent → single status-pill lane; reload on `#/race` restores view.
+- `bun run check` — root `tsc --noEmit`; `webapp/` is outside `include`, so the seam edit in `src/server.ts` is the only
+  root-typechecked change. Must stay green.
+- `bun test` — full suite incl. new `tests/webapp.test.ts` (typecheck + content-hashed build) and unchanged
+  `tests/web.test.ts`. `webappEnabled()` default-off unit test green.
+- Manual: `OMP_SQUAD_WEBAPP=1` after a `webapp` build serves the Vite shell at `/`; flag unset (or no dist) → live
+  `src/web/index.html` exactly as before.
 
 ## Ponytail notes
-- Pure fold over already-broadcast fields; no server route, no SQLite mirror, no poll, no dep.
-- Ceiling: column count keys off per-agent `todo.total` (assumes it reflects workflow stages).
-  Non-workflow agents get a named status-only lane. Upgrade path: surface the engine's ordered node
-  list on the DTO and key columns off that instead — out of scope here.
+- No new root dependency; webapp deps isolated under `webapp/`. Seam is ~10 lines, both-conditions-gated, reversible.
+- shadcn files authored directly (no registry/network) → deterministic offline gate.
+- Ceiling: serve branch handles only `/` + `/assets/*` (Vite's default hashed output); deep client routes / SPA history
+  fallback and PWA-asset migration are later cutover concerns, explicitly out of scope here.
