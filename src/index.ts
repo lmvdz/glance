@@ -16,6 +16,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { readFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { PushService } from "./push.ts";
@@ -23,12 +24,15 @@ import { TailnetFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
 import { SquadServer, type AuthInstance } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
+import { ManagerRegistry } from "./manager-registry.ts";
 import { SquadTui } from "./tui.ts";
 import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
 import { acquireStateLock, StateLockError } from "./state-lock.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
 import { openDatabase } from "./db/index.ts";
+import { DbStore } from "./dal/store.ts";
+import type { OrgContext } from "./dal/context.ts";
 import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
 import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
@@ -109,6 +113,16 @@ function base(flags: Record<string, string | boolean>): string {
 }
 function stateDirPath(): string {
 	return process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+}
+
+/** Enumerate org ids that have persisted state (the `<stateDir>/orgs/<id>` dir names). Tolerates a missing dir. */
+async function listOrgIds(stateDir: string): Promise<string[]> {
+	try {
+		const entries = await readdir(path.join(stateDir, "orgs"), { withFileTypes: true });
+		return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+	} catch {
+		return [];
+	}
 }
 
 /** Authorization header for CLI→daemon calls, read from the persisted token (empty if the daemon has none). */
@@ -192,8 +206,6 @@ async function cmdUp(args: string[]): Promise<void> {
 	}
 	const coordinator = process.env.OMP_SQUAD_COORDINATOR;
 	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
-	const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
-	const manager = new SquadManager({ bus, operator, stateDir, autoLand: process.env.OMP_SQUAD_AUTOLAND !== "0" });
 	// DB mode (DATABASE_URL set): open + migrate the shared DB (openDatabase migrates at boot) and
 	// build the live better-auth instance the server gates on. FILE mode (default): openDatabase()
 	// returns null, `auth` stays undefined, and nothing about today's behavior changes.
@@ -244,29 +256,61 @@ async function cmdUp(args: string[]): Promise<void> {
 		}
 		throw err;
 	}
-	await manager.start();
-	if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
-	if (flags.restore) {
-		const n = await manager.loadPersisted();
-		if (n) process.stderr.write(`restored ${n} agent(s)\n`);
+	// A daemon must never die from a stray async error in a fire-and-forget path (a poll / dispatch /
+	// orchestrator tick, a WS handler, an agent RPC). Without this, a single unhandled rejection takes
+	// the whole fleet down with no log flushed — the silent ~5-min deaths. Log it loudly and STAY UP;
+	// the known sources are fixed at the source, this is the backstop for the rest.
+	process.on("unhandledRejection", (reason) => {
+		process.stderr.write(`[unhandledRejection] ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}\n`);
+	});
+	process.on("uncaughtException", (err) => {
+		process.stderr.write(`[uncaughtException] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+	});
+	const autoLand = process.env.OMP_SQUAD_AUTOLAND !== "0";
+	let manager: SquadManager | undefined;
+	let registry: ManagerRegistry | undefined;
+	if (dbHandle) {
+		// DB mode: one daemon, a per-org SquadManager fleet behind the registry. No single root manager
+		// and no global federation bus — each org manager runs isolated under <stateDir>/orgs/<orgId>.
+		const ctx: OrgContext = { db: dbHandle.db, type: dbHandle.type };
+		registry = new ManagerRegistry({
+			root: stateDir,
+			store: (orgId) => new DbStore(ctx, orgId, path.join(stateDir, "orgs", orgId)),
+			operator,
+			autoLand,
+			listOrgIds: () => listOrgIds(stateDir),
+		});
+		registry.start();
+	} else {
+		// File mode: today's single root manager at the state-dir root.
+		const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
+		manager = new SquadManager({ bus, operator, stateDir, autoLand });
+		await manager.start();
+		if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
+		if (flags.restore) {
+			const n = await manager.loadPersisted();
+			if (n) process.stderr.write(`restored ${n} agent(s)\n`);
+		}
 	}
 	const token = await loadOrCreateToken(stateDir);
 	const push = new PushService(stateDir);
 	await push.init();
 	const roleTokens = { operator: process.env.OMP_SQUAD_OPERATOR_TOKEN || undefined, viewer: process.env.OMP_SQUAD_VIEWER_TOKEN || undefined };
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins });
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
 	// pending agent prompts hands-free — both started by the daemon so they live and die with it.
 	const stopTracker = startExternalSessionTracker();
-	const supervise = process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
+	// risk #7: the external supervisor authenticates with the file-mode bearer token; DB mode has none, so file-mode only.
+	const supervise = !dbHandle && process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
 	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
 
 	const shutdown = async () => {
 		stopSupervisor?.();
 		stopTracker();
-		await manager.stop();
+		if (registry) await registry.stopAll();
+		else await manager?.stop();
 		server.stop();
 		if (dbHandle) await dbHandle.close();
 		lock.release();
@@ -277,7 +321,7 @@ async function cmdUp(args: string[]): Promise<void> {
 
 	const useTui = !flags["no-tui"] && process.stdin.isTTY;
 	const access = reachableUrls(host, port, tls ? "https" : "http").map((u) => `    ${u}/?token=${token}`).join("\n");
-	if (useTui) {
+	if (manager && useTui) {
 		process.stdout.write(`omp-squad dashboard: ${url}\n  access token: ${token}\n`);
 		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
 		const tui = new SquadTui(manager);
