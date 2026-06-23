@@ -238,6 +238,16 @@ re-exec, or a re-spawn under a fresh id — one the roster no longer owns — is
 protocol) on daemon startup and on a periodic poll tick, so phantom `omp` processes can't accumulate.
 Together with `OMP_SQUAD_MAX_AGENTS`, the fleet's process count stays bounded across daemon lifetimes.
 
+**Dead-worktree pruning.** Each agent works in its own git worktree; repeated re-dispatch would
+otherwise leak one orphan worktree per attempt. On a periodic tick the daemon removes a worktree only
+when it is both unowned (no live roster agent) and provably dead — either fully merged into the base
+branch **and** clean, or its tracking Plane issue is closed (abandoned WIP is committed to the branch
+first; a branch is deleted only when merged + clean, so nothing recoverable is lost). An **active
+worktree with uncommitted changes on a still-open issue is never reaped**, even before its first
+commit, so the prune can't delete a worktree out from under a running agent. Disable with
+`OMP_SQUAD_WORKTREE_REAP=0`; tune the freshness window with `OMP_SQUAD_WORKTREE_GRACE_MS` (default
+120000).
+
 ### Federation (opt-in)
 
 `OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`

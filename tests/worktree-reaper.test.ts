@@ -38,9 +38,18 @@ test("merged + clean orphan is reaped and its branch deleted", () => {
 	expect(d[0]).toMatchObject({ reason: "merged", preserveWip: false, deleteBranch: true });
 });
 
-test("merged but dirty: WIP preserved, branch kept (committing makes it unmerged)", () => {
-	const d = run([wt({ aheadOfBase: 0, dirty: true })]);
-	expect(d[0]).toMatchObject({ reason: "merged", preserveWip: true, deleteBranch: false });
+test("OMPSQ-41: dirty worktree on an OPEN issue (active agent mid-task) is never reaped", () => {
+	// aheadOfBase 0 = nothing committed yet; dirty = live uncommitted work; issue OMPSQ-35 still open.
+	// Must NOT classify as merged — that would force-remove an active worktree out from under the agent.
+	const d = run([wt({ aheadOfBase: 0, dirty: true })], { openIdentifiers: new Set(["OMPSQ-35"]) });
+	expect(d).toHaveLength(0);
+});
+
+test("dirty worktree on a CLOSED issue is reaped with WIP preserved, branch kept", () => {
+	// Issue gone from the open set ⇒ work no longer needed; dirty ⇒ commit WIP, but don't delete the
+	// branch (committing makes it unmerged) and reason is issue-closed, not merged.
+	const d = run([wt({ aheadOfBase: 0, dirty: true })], { openIdentifiers: new Set(["OMPSQ-34"]) });
+	expect(d[0]).toMatchObject({ reason: "issue-closed", preserveWip: true, deleteBranch: false });
 });
 
 test("unmerged but issue closed: reaped, branch kept (work preserved)", () => {

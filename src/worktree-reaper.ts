@@ -5,15 +5,20 @@
  *
  * A worktree is reaped only when it is BOTH unowned (no live roster agent) AND
  * "dead" by one of:
- *   - merged:        every commit on its branch is already in the base (main), OR
+ *   - merged:        every commit on its branch is already in the base (main) AND the
+ *                    worktree is clean, OR
  *   - issue-closed:  its tracking Plane issue is no longer open.
  *
- * Lossless by construction: abandoned uncommitted work is committed to the branch
- * first, and a branch is deleted only when it is fully merged + clean (git's own
- * `branch -d` is the final backstop), so nothing recoverable is destroyed. A
- * freshly-created worktree — still within `graceMs` of its mtime, or briefly
- * unowned mid-spawn (create() makes the worktree before the roster entry) — is
- * never touched.
+ * A DIRTY worktree on a still-open issue is live in-progress work — even with zero
+ * commits (an agent mid-task before its first commit) — and is NEVER reaped, so the
+ * prune can't delete an active worktree out from under a running agent (OMPSQ-41).
+ *
+ * Lossless by construction: when a closed-issue worktree is reaped its abandoned
+ * uncommitted work is committed to the branch first, and a branch is deleted only when
+ * it is fully merged + clean (git's own `branch -d` is the final backstop), so nothing
+ * recoverable is destroyed. A freshly-created worktree — still within `graceMs` of its
+ * mtime, or briefly unowned mid-spawn (create() makes the worktree before the roster
+ * entry) — is never touched.
  *
  * Pure: every I/O edge (git ahead-count, dirty state, mtime, Plane open set) is
  * resolved into `WorktreeInfo`/`ReapInput` by the caller, so the policy is tested
@@ -70,7 +75,10 @@ export function selectReapable(input: ReapInput): ReapDecision[] {
 		if (w.isPrimary || !w.branch) continue; // never the main checkout; skip detached (no branch to anchor)
 		if (input.owned.has(w.worktree)) continue; // a live agent owns it
 		if (input.now - w.mtimeMs < input.graceMs) continue; // mid-spawn / recently active — leave it
-		const merged = w.aheadOfBase === 0; // <0 (unknown) is NOT merged ⇒ never reap on a failed ahead-count
+		// "merged" = dead: every commit is in base AND nothing uncommitted. A DIRTY worktree has work
+		// not in base — it is live/in-progress, never merged. So an active agent mid-task (often no
+		// commits yet ⇒ aheadOfBase 0, but dirty) is never reaped while its issue is open (OMPSQ-41).
+		const merged = w.aheadOfBase === 0 && !w.dirty; // <0 (unknown) is NOT merged ⇒ never reap on a failed ahead-count
 		const ident = parseIssueIdentifier(w.branch);
 		const issueClosed = input.openIdentifiers !== null && ident !== undefined && !input.openIdentifiers.has(ident);
 		if (!merged && !issueClosed) continue; // has unique work and issue still open ⇒ keep
@@ -79,8 +87,8 @@ export function selectReapable(input: ReapInput): ReapDecision[] {
 			branch: w.branch,
 			reason: merged ? "merged" : "issue-closed",
 			preserveWip: w.dirty,
-			// Committing WIP makes a merged branch unmerged again, so only delete when there is nothing to preserve.
-			deleteBranch: merged && !w.dirty,
+			// merged already implies clean (no WIP to preserve), so its branch is provably lossless to delete.
+			deleteBranch: merged,
 		});
 	}
 	return out;
