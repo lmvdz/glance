@@ -78,11 +78,11 @@ export function slug(text: string): string {
 	return parts.length > 0 ? parts.join("-") : "agent";
 }
 
-function asApproval(v: string | undefined): ApprovalMode | undefined {
+export function asApproval(v: string | undefined): ApprovalMode | undefined {
 	return v === "always-ask" || v === "write" || v === "yolo" ? v : undefined;
 }
 
-function asThinking(v: string | undefined): ThinkingLevel | undefined {
+export function asThinking(v: string | undefined): ThinkingLevel | undefined {
 	return v === "minimal" || v === "low" || v === "medium" || v === "high" || v === "xhigh" ? v : undefined;
 }
 
