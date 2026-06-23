@@ -247,6 +247,21 @@ even when a re-adopted worktree gets a fresh agent id. Without it, the in-memory
 restart and a bad branch churned main indefinitely. Operator one-tap Land is never blocked; the
 Observer files a bug for the parked branch.
 
+**Plane API throttle (shared rate limiter + read cache).** Plane cloud rate-limits per workspace
+token, and many in-process callers share it (dispatcher poll, observer poll + filing, worktree
+reaper, scout). They route through one chokepoint — `src/plane-throttle.ts` — so the daemon never
+bursts past the limit (which also frees the shared token for the Plane MCP and other agent sessions).
+`throttledFetch` serializes every Plane request with a min interval + central 429/Retry-After backoff;
+`listPlaneIssues` is wrapped in a short-TTL single-flight cache so concurrent polls of the same repo
+collapse to one call, and any write (create/close/transition) invalidates it.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_PLANE_MIN_INTERVAL_MS` | Min spacing between Plane API requests (default `500`); the global limiter never bursts faster |
+| `OMP_SQUAD_PLANE_CACHE_MS` | TTL for the `listPlaneIssues` read cache (default `15000`); higher = fewer API calls, staler open-issue view |
+
+A cross-process **Plane gateway** (one service all processes call) is designed in `docs/plane-gateway.md` as the follow-up.
+
 **Self-audit loop (Observer, on by default)** — a sibling to the orchestrator that runs the
 other direction: instead of driving work, it periodically *confirms* the fleet/project is in the
 intended state and, on a detected gap, **files a fix-issue** the auto-dispatcher then picks up —

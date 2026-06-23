@@ -18,6 +18,7 @@
 
 import * as path from "node:path";
 import type { IssueRef, PlaneTicket } from "./types.ts";
+import { makeCache, throttledFetch } from "./plane-throttle.ts";
 
 interface PlaneConfig {
 	apiKey: string;
@@ -105,14 +106,23 @@ function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string, prefix
 	};
 }
 
-/** Open issues for the Plane project mapped to `repo`. `null` ⇒ Plane not configured. */
+/** Short-TTL single-flight cache of listPlaneIssues results, keyed by repo — collapses the dispatcher,
+ *  observer, reaper, and scout all polling the same repo into ONE API refresh. Cleared on any write. */
+const issueListCache = makeCache<IssueRef[] | null>();
+
+/** Open issues for the Plane project mapped to `repo`. `null` ⇒ Plane not configured / unreachable. */
 export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> {
+	// Cache successful reads (not null/failure) so repeated polls within the TTL share a single call.
+	return issueListCache.get(repo, Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000, () => listPlaneIssuesUncached(repo), (v) => v !== null);
+}
+
+async function listPlaneIssuesUncached(repo: string): Promise<IssueRef[] | null> {
 	const ctx = planeContext(repo);
 	if (!ctx) return null;
 	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId) return [];
-	const res = await fetch(`${base}/issues/?per_page=50`, { headers }).catch(() => null);
-	if (!res || !res.ok) return [];
+	const res = await throttledFetch(`${base}/issues/?per_page=50`, { headers });
+	if (!res || !res.ok) return null; // unreachable ⇒ null (uncached) so the next poll retries, not a stale []
 	const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
 	const items = Array.isArray(data) ? data : (data?.results ?? []);
 	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so the
@@ -139,23 +149,8 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 /** Issue ids blocking `issueId` (Plane `blocked_by`). Retries on 429 (Plane rate limit); `[]` when none,
  *  unreachable, or still rate-limited after retries — the proof gate still catches any premature work. */
 async function fetchBlockedBy(base: string, headers: Record<string, string>, issueId: string): Promise<string[]> {
-	const url = `${base}/issues/${issueId}/relations/`;
-	for (let attempt = 0; attempt < 3; attempt++) {
-		const res = await fetch(url, { headers }).catch(() => null);
-		if (res?.ok) return parseBlockedBy(await res.json().catch(() => null));
-		if (res?.status !== 429) return []; // 404 / 5xx / network — not retryable here
-		await sleep(retryAfterMs(res, attempt));
-	}
-	return [];
-}
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-/** Backoff for a 429: honour Retry-After (seconds) when present, else exponential. Capped at 5s. */
-function retryAfterMs(res: Response, attempt: number): number {
-	const ra = Number(res.headers.get("retry-after"));
-	if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 5000);
-	return Math.min(500 * 2 ** attempt, 5000);
+	const res = await throttledFetch(`${base}/issues/${issueId}/relations/`, { headers });
+	return res?.ok ? parseBlockedBy(await res.json().catch(() => null)) : [];
 }
 
 /** Extract `blocked_by` issue ids from a Plane `/relations/` response. Tolerant of missing / odd shapes. */
@@ -202,7 +197,8 @@ async function transitionTo(issue: IssueRef, group: string): Promise<boolean> {
 	const base = projectBase(cfg, issue.projectId);
 	const target = (await fetchStates(base, headers)).find((s) => s.group === group);
 	if (!target) return false;
-	const res = await fetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: target.id }) }).catch(() => null);
+	const res = await throttledFetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: target.id }) });
+	if (res && res.ok) issueListCache.clear(); // a state change alters the open set
 	return !!res && res.ok;
 }
 
@@ -222,8 +218,9 @@ export async function createPlaneIssue(repo: string, name: string): Promise<Issu
 	if (!ctx) return null;
 	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId) return null;
-	const res = await fetch(`${base}/issues/`, { method: "POST", headers, body: JSON.stringify({ name }) }).catch(() => null);
+	const res = await throttledFetch(`${base}/issues/`, { method: "POST", headers, body: JSON.stringify({ name }) });
 	if (!res || !res.ok) return null;
+	issueListCache.clear(); // a new issue changes the open set
 	const raw = (await res.json().catch(() => null)) as PlaneIssue | null;
 	return raw?.id ? toIssueRef(raw, cfg, projectId) : null;
 }
@@ -244,7 +241,7 @@ interface IssueRaw {
 }
 
 async function getJson(url: string, headers: Record<string, string>): Promise<unknown> {
-	const res = await fetch(url, { headers }).catch(() => null);
+	const res = await throttledFetch(url, { headers });
 	if (!res || !res.ok) return null;
 	return res.json().catch(() => null);
 }
@@ -288,7 +285,7 @@ export async function ensureFeatureModule(repo: string, name: string, identifier
 	if (!ctx) return null;
 	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId) return null;
-	const res = await fetch(`${base}/modules/`, { method: "POST", headers, body: JSON.stringify({ name }) }).catch(() => null);
+	const res = await throttledFetch(`${base}/modules/`, { method: "POST", headers, body: JSON.stringify({ name }) });
 	if (!res || !res.ok) return null;
 	const mod: unknown = await res.json().catch(() => null);
 	if (!mod || typeof mod !== "object" || !("id" in mod) || typeof mod.id !== "string") return null;
@@ -297,7 +294,7 @@ export async function ensureFeatureModule(repo: string, name: string, identifier
 		const [prefix, issues] = await Promise.all([projectPrefix(base, headers), allIssues(base, headers)]);
 		const want = new Set(identifiers.map((s) => s.toUpperCase()));
 		const ids = issues.filter((i) => prefix && i.sequence_id != null && want.has(`${prefix}-${i.sequence_id}`.toUpperCase())).map((i) => i.id);
-		if (ids.length) await fetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) }).catch(() => {});
+		if (ids.length) await throttledFetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) });
 	}
 	return { moduleId, moduleUrl: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/modules/${moduleId}` };
 }
