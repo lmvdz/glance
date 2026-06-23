@@ -121,6 +121,17 @@ export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: 
 }
 
 /**
+ * From the adoptable set, resume only agents that still have UNLANDED work, capped at `cap`. A restart
+ * otherwise re-spawned EVERY orphaned worktree at once (adoptOrphanedAgents uses bypassCap, so MAX_AGENTS
+ * didn't hold) — N simultaneous omp hosts that OOM the box. Done/clean agents are skipped (their open
+ * issue, if any, is re-dispatched gradually under the WIP cap); `cap<=0` ⇒ adopt none.
+ */
+export function selectAdoptable<T extends { id: string }>(eligible: T[], hasWork: (a: T) => boolean, cap: number): T[] {
+	if (cap <= 0) return [];
+	return eligible.filter(hasWork).slice(0, cap);
+}
+
+/**
  * Unique agent id: name + time + random suffix. The branch and worktree derive from this id (NOT the
  * agent's display name), so two agents — even same name, even spawned in the same millisecond or across
  * a daemon restart — never share a branch or worktree. (The name alone collides: dispatched agents fall
@@ -406,7 +417,15 @@ export class SquadManager extends EventEmitter {
 	 *  still holds built-up context — re-create them in place (idle; the orchestrator then verifies/lands).
 	 *  So a restart RESUMES the issue with its context instead of re-dispatching a fresh worktree. */
 	private async adoptOrphanedAgents(snapshot: StateSnapshot): Promise<number> {
-		const adopt = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt));
+		const eligible = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt));
+		// Probe each for unlanded work, then cap re-adoption at the agent ceiling. Re-spawning EVERY
+		// orphaned worktree at once (bypassCap) is what OOM'd the host on restart. Resume only agents with
+		// work to continue; done/clean ones are dropped (a still-open issue re-dispatches gradually under
+		// the WIP cap), and at most (ceiling - already-live) are taken over this boot.
+		const work = new Map<string, boolean>();
+		for (const p of eligible) work.set(p.id, await this.persistedHasWork(p));
+		const adopt = selectAdoptable(eligible, (p) => work.get(p.id) ?? false, hardAgentCeiling() - this.agents.size);
+		const skipped = eligible.length - adopt.length;
 		let n = 0;
 		for (const p of adopt) {
 			await this.create({
@@ -428,8 +447,19 @@ export class SquadManager extends EventEmitter {
 				bypassCap: true,
 			}).then(() => { n++; }).catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
-		if (n) this.log("info", `took over ${n} orphaned worktree(s) with built-up context`);
+		if (n || skipped) this.log("info", `took over ${n} orphaned worktree(s) with work; skipped ${skipped} (done/clean or over the ${hardAgentCeiling()}-agent cap)`);
 		return n;
+	}
+
+	/** Does a persisted (pre-adoption) agent still have local work to resume — uncommitted edits or commits
+	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster. */
+	private async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
+		if (!p.worktree) return false;
+		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
+		if (st.dirtyFiles.length > 0) return true;
+		if (!p.branch) return false;
+		const r = Bun.spawnSync(["git", "-C", p.repo, "rev-list", "--count", `HEAD..${p.branch}`], { stdout: "pipe", stderr: "ignore" });
+		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
