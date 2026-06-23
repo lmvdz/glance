@@ -28,6 +28,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import type { LandLedger } from "./land-ledger.ts";
 import type { AgentDTO, IssueRef } from "./types.ts";
 
 export type Severity = "low" | "high" | "structural";
@@ -62,6 +63,9 @@ export interface ObserverDeps {
 	untrackedInMain: () => string[];
 	/** Tracked files on an agent's branch (for the untracked-collision check); `[]` when no branch. */
 	filesOnAgentBranch: (agent: AgentDTO) => string[];
+	/** Branch → auto-land failure streak (the persisted ledger). Absent ⇒ the land-failure check is
+	 *  skipped — keeps the loop usable in tests / before any land. */
+	landLedger?: () => LandLedger;
 	/** Where to persist seen fingerprints (<stateDir>/observer-seen.json). */
 	stateDir: string;
 	/** Clock seam (defaults to Date.now). */
@@ -91,6 +95,11 @@ function autoDispatch(): boolean {
 function autoFix(): boolean {
 	return process.env.OMP_SQUAD_OBSERVE_AUTOFIX === "1";
 }
+/** Consecutive failed auto-lands before the observer files a bug for a branch (mirrors the manager's
+ *  AUTO_LAND_FAIL_CAP so a parked branch is exactly the one that gets a bug filed). */
+function landFailCap(): number {
+	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
+}
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -110,17 +119,20 @@ export function auditTestsGreen(gate: { ok: boolean; firstFailure?: string }): F
 	];
 }
 
-/** Check 2 — an idle agent ahead=0 of main whose Plane issue is Done ⇒ reap landed survivor (autofixable). */
-export function auditIdleSurvivors(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => number, removeAgent: (id: string) => Promise<void>): Finding[] {
+/** Check 2 — a finished (idle OR stopped) agent ahead=0 of main whose Plane issue is Done ⇒ reap the
+ *  landed survivor (autofixable). Covers `stopped` too: a cleanly-landed agent's host exits, so it
+ *  ends up stopped, not idle — the common done-state. Reaping frees the roster slot + host + worktree
+ *  so the next ticket has room. `error` is excluded (a crash needs a human). */
+export function auditLandedSurvivors(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => number, removeAgent: (id: string) => Promise<void>): Finding[] {
 	const out: Finding[] = [];
 	for (const a of agents) {
-		if (a.status !== "idle" || !a.issue) continue;
+		if ((a.status !== "idle" && a.status !== "stopped") || !a.issue) continue;
 		if (openIds.has(a.issue.id)) continue; // issue still open ⇒ not Done
 		if (aheadOf(a) !== 0) continue; // >0 ⇒ unlanded (stale-done); <0 ⇒ unknown — leave it
 		out.push({
 			fingerprint: `survivor:${a.id}`,
 			title: `reap landed survivor ${a.id}`,
-			detail: `idle agent ${a.id} — branch ${a.branch ?? "?"} is ahead=0 of main and issue ${a.issue.identifier ?? a.issue.id} is Done; safe to reap`,
+			detail: `${a.status} agent ${a.id} — branch ${a.branch ?? "?"} is ahead=0 of main and issue ${a.issue.identifier ?? a.issue.id} is Done; safe to reap`,
 			severity: "low",
 			autoFixable: true,
 			fix: () => removeAgent(a.id),
@@ -158,6 +170,26 @@ export function auditUntrackedHazard(untracked: string[], branchFiles: Set<strin
 			severity: "structural",
 		},
 	];
+}
+
+/**
+ * Check 5 — a branch whose auto-land has failed `cap`+ times in a row (the manager parks it) ⇒ file
+ * a bug so the fleet re-does the work on a fresh branch. Scoped to `liveBranches` (branches of agents
+ * still in the roster) so a reaped/merged branch's stale ledger entry ages out instead of keeping the
+ * finding alive forever.
+ */
+export function landFailureFindings(ledger: LandLedger, liveBranches: Set<string>, cap: number): Finding[] {
+	const out: Finding[] = [];
+	for (const [branch, entry] of Object.entries(ledger)) {
+		if (entry.fails < cap || !liveBranches.has(branch)) continue;
+		out.push({
+			fingerprint: `land-failing:${branch}`,
+			title: `auto-land failing for ${branch} — fix so it passes the gate`,
+			detail: `auto-land merged then rolled back ${entry.fails}× in a row (the branch fails the acceptance gate). Latest failure:\n${entry.lastDetail}`,
+			severity: "high",
+		});
+	}
+	return out;
 }
 
 interface SeenEntry {
@@ -263,10 +295,9 @@ export class Observer {
 		const agents = this.deps.listAgents();
 		const openIds = new Set(open.map((i) => i.id));
 		const findings: Finding[] = [];
-		// Gate is total by contract on the manager side; default to green if it ever throws.
 		const gate = await this.deps.runGate().catch(() => ({ ok: true }) as { ok: boolean; firstFailure?: string });
 		findings.push(...auditTestsGreen(gate));
-		findings.push(...auditIdleSurvivors(agents, openIds, this.deps.gitAheadOfMain, this.deps.removeAgent));
+		findings.push(...auditLandedSurvivors(agents, openIds, this.deps.gitAheadOfMain, this.deps.removeAgent));
 		findings.push(...auditStaleDone(agents, openIds, this.deps.gitAheadOfMain));
 		// Union of files across in-flight agent branches — the set an auto-land would touch.
 		// ponytail: one git ls-tree per branched agent per tick; fine for a normal roster.
@@ -276,6 +307,12 @@ export class Observer {
 			for (const file of this.deps.filesOnAgentBranch(a)) branchFiles.add(file);
 		}
 		findings.push(...auditUntrackedHazard(this.deps.untrackedInMain(), branchFiles));
+		// Branches whose auto-land keeps failing the gate (the manager parks them after the cap) ⇒ each
+		// becomes a dedup'd bug issue the dispatcher can pick up to re-do the work on a fresh branch.
+		if (this.deps.landLedger) {
+			const liveBranches = new Set(agents.map((a) => a.branch).filter((b): b is string => !!b));
+			findings.push(...landFailureFindings(this.deps.landLedger(), liveBranches, landFailCap()));
+		}
 		return findings;
 	}
 

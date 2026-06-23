@@ -81,12 +81,24 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
+import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
+/**
+ * Consecutive failed auto-lands before the manager PARKS a branch instead of re-merging it. The
+ * count is read from the persistent audit log (consecutiveLandFailures), so it survives daemon
+ * restarts — unlike the orchestrator's in-memory cap, whose reset on every restart let a
+ * gate-failing branch be merged + rolled-back forever (the workflow_done auto-land path had no cap
+ * at all). Override with OMP_SQUAD_AUTOLAND_FAIL_CAP. The Observer turns a parked branch into a
+ * dedup'd bug issue so the fleet re-does the work on a fresh branch.
+ */
+function autoLandFailCap(): number {
+	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
+}
 
 // liveAgents + the WIP cap live in ./scheduler.ts now; re-export keeps the public import path stable.
 export { liveAgents };
@@ -308,6 +320,7 @@ export class SquadManager extends EventEmitter {
 				gitAheadOfMain: (a) => this.aheadOfMain(a),
 				untrackedInMain: () => this.untrackedInMain(repo),
 				filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
+				landLedger: () => readLandLedger(this.stateDir),
 				stateDir: this.stateDir,
 				log: (m) => this.log("info", `observer: ${m}`),
 			});
@@ -590,10 +603,24 @@ export class SquadManager extends EventEmitter {
 	 * is guaranteed for the single-agent path too — not only the multi-branch `landFeature`. Close is
 	 * idempotent (`closedIssues`) and best-effort. Busy-aware `commitWip` mirrors the feature path.
 	 */
-	async land(id: string, message?: string): Promise<LandResult> {
+	async land(id: string, message?: string, opts: { auto?: boolean } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
+		const auto = opts.auto ?? true;
+		// Restart-safe auto-land cap: a branch whose merge keeps failing the gate is parked rather than
+		// re-merged + rolled-back forever. The streak is keyed by BRANCH (stable across re-adoption,
+		// unlike the agent id which create() re-mints) and persisted, so it holds across daemon restarts.
+		// Operator lands (server /api/agents/:id/land → landAgent directly) bypass this method, so a human
+		// is never blocked; the Observer files a dedup'd bug issue for a parked branch so the fleet re-does
+		// the work on a fresh branch.
+		if (auto && dto.branch) {
+			const fails = landFailureCount(this.stateDir, dto.branch);
+			if (fails >= autoLandFailCap()) {
+				this.log("warn", `auto-land parked for ${dto.branch} — ${fails} consecutive failed lands; awaiting a fix (the observer files a bug issue)`);
+				return { ok: false, committed: false, merged: false, message: "auto-land parked", detail: `auto-land parked: ${fails} consecutive failed lands on ${dto.branch} — not re-merging until the branch is fixed` };
+			}
+		}
 		const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
 		const result = await this.landBranch({
 			repo: dto.repo,
@@ -602,6 +629,9 @@ export class SquadManager extends EventEmitter {
 			message: message ?? `squad(${dto.name}): land ${dto.branch ?? "changes"}`,
 			commitWip: !busy,
 		});
+		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
+		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
+		if (auto || result.ok) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 		if (result.ok) {
 			rec.dto.landReady = false; // merged ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);

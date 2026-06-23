@@ -16,10 +16,11 @@ import { SquadManager } from "../src/squad-manager.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { LandResult } from "../src/land.ts";
+import { recordLandOutcome } from "../src/land-ledger.ts";
 import type { AgentDTO, IssueRef, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];
-const ENV = ["PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "OMP_SQUAD_MAX_WIP", "OMP_SQUAD_QUEUE_ON_FULL", "OMP_SQUAD_AUTOSUPERVISE", "OMP_SQUAD_AUTOSUPERVISE_BUDGET"] as const;
+const ENV = ["PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "OMP_SQUAD_MAX_WIP", "OMP_SQUAD_QUEUE_ON_FULL", "OMP_SQUAD_AUTOSUPERVISE", "OMP_SQUAD_AUTOSUPERVISE_BUDGET", "OMP_SQUAD_AUTOLAND_FAIL_CAP"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV) saved[k] = process.env[k];
 
@@ -167,6 +168,25 @@ test("single-agent land of an issue-less agent makes no Plane call", async () =>
 	} finally {
 		server.stop(true);
 	}
+});
+
+test("auto-land parks a branch after the failure cap (restart-safe via the branch ledger); operator land bypasses it", async () => {
+	process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP = "2";
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "auto-"));
+	tmps.push(stateDir);
+	const mgr = new TestManager({ stateDir });
+	mgr.landResult = { ok: true, committed: true, merged: true, message: "landed" };
+	seed(mgr, "a1"); // branch squad/a1, no issue
+	// Two prior failed auto-lands persisted to the ledger (e.g. survived a daemon restart that re-minted the id).
+	recordLandOutcome(stateDir, "squad/a1", false, "gate red");
+	recordLandOutcome(stateDir, "squad/a1", false, "gate red");
+	// Auto-land now parks (does NOT reach the land seam, which would return ok).
+	const parked = await mgr.land("a1");
+	expect(parked.ok).toBe(false);
+	expect(parked.detail).toContain("parked");
+	// An operator land (auto:false) is never blocked — it reaches the real seam and clears the streak.
+	const forced = await mgr.land("a1", undefined, { auto: false });
+	expect(forced.ok).toBe(true);
 });
 
 // ── #13 admission backpressure: enqueue at the cap ───────────────────────────

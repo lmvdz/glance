@@ -239,13 +239,23 @@ exhaustion or a catastrophe tripwire (infra failure, safety violation, regressio
 oscillation), and drains cap-parked spawns back in under the WIP ceiling. On by default; set
 `OMP_SQUAD_AUTODRIVE=0` to disable — then the daemon arms no timer and the tick is fully inert.
 
+**Auto-land failure cap (restart-safe).** A branch whose merge keeps failing the gate is *parked*
+after `OMP_SQUAD_AUTOLAND_FAIL_CAP` (default `3`) consecutive failed auto-lands instead of being
+merged + rolled-back forever. The streak lives in a persisted, **branch-keyed** ledger
+(`<stateDir>/land-failures.json`), so it holds across daemon restarts and keys on the branch — stable
+even when a re-adopted worktree gets a fresh agent id. Without it, the in-memory cap reset on every
+restart and a bad branch churned main indefinitely. Operator one-tap Land is never blocked; the
+Observer files a bug for the parked branch.
+
 **Self-audit loop (Observer, on by default)** — a sibling to the orchestrator that runs the
 other direction: instead of driving work, it periodically *confirms* the fleet/project is in the
 intended state and, on a detected gap, **files a fix-issue** the auto-dispatcher then picks up —
 closing observe → fix → confirm. v1 audit checks: a red acceptance gate on main (`regression: <test>`),
-an idle agent landed-and-Done but never reaped (`reap landed survivor <id>`), untracked files in the
+a finished (idle **or stopped**) agent landed-and-Done but never reaped (`reap landed survivor <id>`), untracked files in the
 main checkout that collide with an open agent branch (`commit/remove <files> — blocks auto-land`), and
-a Plane issue marked Done whose branch is still ahead (`reconcile Done-but-unlanded <issue>`). Findings
+a Plane issue marked Done whose branch is still ahead (`reconcile Done-but-unlanded <issue>`), and a
+branch whose **auto-land keeps failing the gate** — from the branch-keyed land-failure ledger — so the
+work is re-done on a fresh branch (`auto-land failing for <branch>`). Findings
 are deduped by fingerprint (persisted to `<stateDir>/observer-seen.json`, never re-filed across
 ticks/restarts); a finding that stops reproducing is confirmed resolved and its fingerprint cleared.
 
@@ -259,6 +269,14 @@ ticks/restarts); a finding that stops reproducing is confirmed resolved and its 
 Findings default to **needs-triage**: filed with a do-not-auto-land marker so the dispatcher's
 `noAutoDispatch` gate skips them — the observer never auto-dispatches its own findings to the yolo
 fleet unsupervised unless you opt in.
+
+**Auto-removing done agents (freeing room for the next ticket).** A completed agent lands its branch,
+`OMP_SQUAD_AUTOCLOSE` closes its Plane issue, and its host exits → it lingers in the roster as a
+landed survivor (`ahead=0`, issue Done, status idle **or** stopped). Set `OMP_SQUAD_OBSERVE_AUTOFIX=1`
+and the observer reaps it on the next tick — removing the roster record (and letting the worktree
+janitor free its worktree), so the dispatcher has headroom for the next issue. Reaping is lossless:
+only `ahead=0` + Done agents are removed (the digest + receipts persist); an agent with unlanded work,
+a still-open issue, or an `error` state is left alone for a human.
 
 **Orphan-host reaping.** Each agent runs in a detached `agent-host` process that outlives the daemon
 (so a restart/upgrade reconnects to live agents with full context). A host left behind by a crash,
@@ -584,6 +602,7 @@ can't be proven.
 | `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (on by default; `=0` to disable) |
 | `OMP_SQUAD_LAND_CONFIRM` | Safety valve: the auto-land loop still verifies idle agents, but a GREEN verify only marks them **✓ ready to land** (no merge) — the operator merges via the existing one-tap Land (off by default) |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
+| `OMP_SQUAD_AUTOLAND_FAIL_CAP` | Consecutive failed auto-lands before a branch is parked instead of re-merged (default `3`); restart-safe via a persisted, branch-keyed ledger (`<stateDir>/land-failures.json`). Operator land bypasses it; the Observer files a bug for the parked branch |
 
 ## Sandboxed execution — agents off your laptop
 
@@ -714,6 +733,7 @@ delegation/availability policy plus the outbound command frame — is the rest o
 | `src/orchestrator.ts` | Self-healing control loop — auto-land → self-heal → catastrophe → admission drain (on by default) |
 | `src/scheduler.ts` | Admission + global WIP ceiling, with a FIFO park queue for spawns past the cap |
 | `src/resolver.ts` | Failure-routing policy — retry / hold / escalate by a bounded repair budget |
+| `src/land-ledger.ts` | Branch-keyed auto-land failure ledger — the restart-safe retry cap that parks a gate-failing branch |
 | `src/supervisor.ts` | Auto-supervisor — answers low-risk pending requests via a one-shot omp agent |
 | `src/autoland.ts` | Auto-land policy — a successful workflow run lands its own branch (pure decision) |
 

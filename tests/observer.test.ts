@@ -11,10 +11,11 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Observer, type ObserverDeps } from "../src/observer.ts";
+import { Observer, type ObserverDeps, landFailureFindings } from "../src/observer.ts";
+import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
-const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX"] as const;
+const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX", "OMP_SQUAD_AUTOLAND_FAIL_CAP"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -134,6 +135,37 @@ test("(b) an idle ahead=0 agent whose issue is Done files exactly one reap findi
 	expect(h2.filed).toEqual([]);
 });
 
+test("a STOPPED landed-and-Done agent is reaped too (the common done-state — host exits), and OBSERVE_AUTOFIX actions it", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const done = { id: "done-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
+	// Filing path: a stopped ahead=0 Done agent files the reap finding (not just idle).
+	const filer = makeDeps(tmpDir(), { listAgents: () => [agent("s1", "stopped", done)], listIssues: async () => [], gitAheadOfMain: () => 0 });
+	await new Observer(filer.deps).tick();
+	expect(filer.filed).toEqual(expect.arrayContaining([expect.stringContaining("reap landed survivor s1")]));
+
+	// Autofix path: with OMP_SQUAD_OBSERVE_AUTOFIX=1 the loop removes it directly instead of filing.
+	process.env.OMP_SQUAD_OBSERVE_AUTOFIX = "1";
+	const removed: string[] = [];
+	const fixer = makeDeps(tmpDir(), {
+		listAgents: () => [agent("s2", "stopped", done)],
+		listIssues: async () => [],
+		gitAheadOfMain: () => 0,
+		removeAgent: async (id) => { removed.push(id); },
+	});
+	await new Observer(fixer.deps).tick();
+	expect(removed).toEqual(["s2"]);
+	expect(fixer.filed).toEqual([]); // actioned, not filed
+});
+
+test("a stopped agent still AHEAD of main (unlanded) is NOT reaped as a survivor", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const done = { id: "d2", name: "x", identifier: "OMPSQ-60" } satisfies IssueRef;
+	const { deps, filed } = makeDeps(tmpDir(), { listAgents: () => [agent("s3", "stopped", done)], listIssues: async () => [], gitAheadOfMain: () => 2 });
+	await new Observer(deps).tick();
+	// ahead>0 ⇒ not a landed survivor (it's a stale-done finding instead); never reaped.
+	expect(filed.some((t) => t.includes("reap landed survivor"))).toBe(false);
+});
+
 test("(c) the same gap next tick is NOT re-filed — dedup persists in-process and across a restart", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	const dir = tmpDir();
@@ -240,4 +272,34 @@ test("untracked-land-hazard fires only on a collision with an open agent branch"
 	const h2 = makeDeps(tmpDir(), { listAgents: () => [branched], untrackedInMain: () => ["scratch.txt"], filesOnAgentBranch: () => ["src/x.ts"] });
 	await new Observer(h2.deps).tick();
 	expect(h2.filed).toEqual([]);
+});
+
+// ── Check 5: land-ledger mining → bug issue ───────────────────────────────────
+
+test("landFailureFindings flags live branches at/over the cap, ignores reaped + under-cap", () => {
+	const ledger: LandLedger = {
+		"squad/a1": { fails: 3, lastDetail: "gate red", at: 1 }, // at cap, live
+		"squad/a2": { fails: 1, lastDetail: "x", at: 1 }, // under cap
+		"squad/gone": { fails: 5, lastDetail: "x", at: 1 }, // over cap but not in the live set ⇒ aged out
+	};
+	const out = landFailureFindings(ledger, new Set(["squad/a1", "squad/a2"]), 3);
+	expect(out.map((f) => f.fingerprint)).toEqual(["land-failing:squad/a1"]);
+	expect(out[0].title).toContain("auto-land failing for squad/a1");
+	expect(out[0].severity).toBe("high");
+});
+
+test("a branch below the cap yields no finding", () => {
+	expect(landFailureFindings({ "squad/a1": { fails: 2, lastDetail: "x", at: 1 } }, new Set(["squad/a1"]), 3)).toEqual([]);
+});
+
+test("(b) the observer files exactly one bug for a branch whose auto-land keeps failing", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const ledger: LandLedger = { "squad/a1": { fails: 3, lastDetail: "gate red", at: 1 } };
+	const { deps, filed } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("a1", "stopped", undefined, "squad/a1")],
+		landLedger: () => ledger,
+	});
+	await new Observer(deps).tick();
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("auto-land failing for squad/a1");
 });
