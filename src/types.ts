@@ -439,7 +439,26 @@ export type SquadEvent =
 	| { type: "transcript"; id: string; entry: TranscriptEntry }
 	| { type: "log"; level: "info" | "warn" | "error"; text: string }
 	| { type: "commands"; id: string; commands: CommandInfo[] }
-	| { type: "features-changed" };
+	| { type: "features-changed" }
+	| { type: "audit"; entry: AuditEntry };
+
+/** One append-only fleet-action audit record (actor / action / target / outcome). */
+export interface AuditEntry {
+	/** Strictly-increasing id (epoch millis, bumped on collision); stable sort + dedupe key. */
+	id: number;
+	/** Epoch millis the action resolved. */
+	at: number;
+	/** Who initiated it — an `Actor.id` ("local", "web:admin", "auto-supervise", a tailnet login…). */
+	actor: string;
+	/** What they did: create | prompt | answer | interrupt | kill | restart | remove | commission | land. */
+	action: string;
+	/** What it acted on (agent id, worker name, feature id) — null for fleet-wide actions. */
+	target: string | null;
+	/** Result of the action once it resolved. */
+	outcome: "ok" | "error";
+	/** Optional human-readable detail (truncated message, error text). */
+	detail?: string;
+}
 
 // ── Surface → manager commands ──────────────────────────────────────────────
 

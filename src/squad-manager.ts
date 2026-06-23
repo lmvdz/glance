@@ -43,6 +43,7 @@ import { sweepPresence } from "./presence.ts";
 import { chooseFallback } from "./supervisor.ts";
 import type {
 	Actor,
+	AuditEntry,
 	IssueRef,
 	PlaneTicket,
 	AgentDTO,
@@ -76,6 +77,7 @@ import { addWorktree, branchAhead, commitWorktreeWip, deleteBranchIfMerged, isGi
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
+import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
@@ -536,10 +538,11 @@ export class SquadManager extends EventEmitter {
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
 			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
-			if (!res.ok) { this.emitFeaturesChanged(); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
+			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
 			void this.closeLandedIssue(rec?.dto.issue); // landed branch ⇒ close its tracking issue (idempotent)
 		}
 		this.emitFeaturesChanged();
+		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
 		return { ok: true, results };
 	}
 
@@ -567,6 +570,7 @@ export class SquadManager extends EventEmitter {
 			this.emitAgent(rec);
 			await this.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
 		}
+		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		return result;
 	}
 
@@ -666,7 +670,7 @@ export class SquadManager extends EventEmitter {
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
 
-	async create(opts: CreateAgentOptions): Promise<AgentDTO> {
+	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
 		if (opts.owns?.length) {
 			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
 			if (conflict) throw new Error(`path ownership conflict: ${conflict.paths.join(", ")} held by agent "${conflict.agent}" — narrow the scope or stop that agent`);
@@ -687,6 +691,7 @@ export class SquadManager extends EventEmitter {
 					this.scheduler.enqueue(opts);
 					const qname = opts.name?.trim() || `agent-${++this.idSeq}`;
 					this.log("info", `${reason} — queued "${qname}" (${this.scheduler.queued} waiting)`);
+					void this.recordAudit(actor, "create", qname, "ok", `queued — ${reason}`);
 					return this.queuedDto(qname, opts);
 				}
 				throw new Error(`${reason} — finish or remove an agent before spawning`);
@@ -797,6 +802,8 @@ export class SquadManager extends EventEmitter {
 		}
 
 		await this.persist();
+		const failed = rec.dto.status === "error";
+		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncate(opts.task ?? rec.dto.name, 80));
 		return rec.dto;
 	}
 
@@ -880,7 +887,11 @@ export class SquadManager extends EventEmitter {
 		await new WorkflowEngine(await loadCommissionWorkflow(), executor).run(spec.purpose);
 		const report = executor.report;
 		if (report) this.log(report.ok ? "info" : "warn", `gate "${spec.name}": ${report.checks.map((c) => `${c.name}=${c.status}`).join(" ")}`);
-		if (!executor.member || !report) return { ok: false, report: report ?? { ok: false, checks: [] }, dir };
+		if (!executor.member || !report) {
+			void this.recordAudit(actor, "commission", spec.name, "error", report ? "gate failed" : "no candidate");
+			return { ok: false, report: report ?? { ok: false, checks: [] }, dir };
+		}
+		void this.recordAudit(actor, "commission", spec.name, "ok", truncate(spec.purpose, 80));
 		return { ok: true, report, member: executor.member, dir };
 	}
 
@@ -960,7 +971,7 @@ export class SquadManager extends EventEmitter {
 				.catch((err) => this.log("warn", `audit write failed for "${cmd.type}": ${err instanceof Error ? err.message : String(err)}`));
 		}
 		if (cmd.type === "create") {
-			await this.create(cmd.options);
+			await this.create(cmd.options, actor);
 			return;
 		}
 		if (cmd.type === "snapshot") {
@@ -989,6 +1000,7 @@ export class SquadManager extends EventEmitter {
 				rec.dto.status = "working";
 				this.emitAgent(rec);
 				await rec.agent.prompt(cmd.message).catch((err) => this.fail(rec, err));
+				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncate(cmd.message, 80));
 				break;
 			}
 			case "answer": {
@@ -999,17 +1011,21 @@ export class SquadManager extends EventEmitter {
 			}
 			case "interrupt":
 				await rec.agent.abort().catch(() => {});
+				void this.recordAudit(actor, "interrupt", cmd.id);
 				break;
 			case "kill":
 				await rec.agent.stop();
 				rec.dto.status = "stopped";
 				this.emitAgent(rec);
+				void this.recordAudit(actor, "kill", cmd.id);
 				break;
 			case "restart":
 				await this.restart(rec);
+				void this.recordAudit(actor, "restart", cmd.id);
 				break;
 			case "remove":
 				await this.remove(cmd.id, cmd.deleteWorktree ?? false);
+				void this.recordAudit(actor, "remove", cmd.id, "ok", cmd.deleteWorktree ? "deleted worktree" : undefined);
 				break;
 		}
 	}
@@ -1026,6 +1042,7 @@ export class SquadManager extends EventEmitter {
 		rec.streaming = true;
 		rec.dto.status = this.derive(rec);
 		this.emitAgent(rec);
+		void this.recordAudit(actor, "answer", rec.dto.id, "ok", `${truncate(req.title, 48)} → ${truncate(value, 40)}`);
 	}
 
 	/**
@@ -1242,6 +1259,28 @@ export class SquadManager extends EventEmitter {
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
 	async receipts(id: string): Promise<RunReceipt[]> {
 		return readReceipts(this.stateDir, id);
+	}
+
+	/**
+	 * Append one fleet-action audit record (actor / action / target / outcome) and
+	 * broadcast it live to any open Audit view. The single recorder for every
+	 * surface (TUI, web, REST, federation peers) — public so the server can stamp
+	 * actions it runs outside applyCommand (per-agent + feature land). Best-effort:
+	 * a disk failure must never break the action it records, so we log and move on.
+	 */
+	async recordAudit(actor: Actor | string, action: string, target: string | null, outcome: "ok" | "error" = "ok", detail?: string): Promise<void> {
+		const entry = makeAuditEntry({ actor, action, target, outcome, detail });
+		this.emit("event", { type: "audit", entry } satisfies SquadEvent);
+		try {
+			await appendAudit(this.stateDir, entry);
+		} catch (err) {
+			this.log("warn", `audit append failed (${action}): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	/** Fleet-action audit log, newest first (server reads this; keeps stateDir private). */
+	async auditLog(query: AuditQuery = {}): Promise<AuditEntry[]> {
+		return readAudit(this.stateDir, query);
 	}
 
 	/** Saved cold-start resume digest for an agent ("" if none yet). */
