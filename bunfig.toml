@@ -3,3 +3,6 @@
 # `cd webapp && bun run test`).
 [test]
 root = "tests"
+# Hermetic baseline: strip inherited PLANE_* creds and OBSERVE flags so tests
+# never hit the live Plane API or pick up the daemon's self-audit toggles.
+preload = "./tests/preload.ts"
