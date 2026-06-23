@@ -14,7 +14,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Actor, ClientCommand, Role } from "./types.ts";
+import type { Actor, Role } from "./types.ts";
 
 const TOKEN_FILE = "access-token";
 
@@ -103,21 +103,10 @@ export function effectiveRole(actor: Actor): Role {
 	return actor.role ?? (actor.origin === "local" ? "admin" : "viewer");
 }
 
-/** Minimum tier a `ClientCommand` requires. Reads (`snapshot`/`subscribe`) need `viewer`;
- *  every state mutation needs `operator`. (No command re-execs the daemon — that is the
- *  admin-only `/api/upgrade` REST route.) */
-export function commandRole(cmd: ClientCommand): Role {
-	return cmd.type === "snapshot" || cmd.type === "subscribe" ? "viewer" : "operator";
-}
-
-/** Minimum tier a REST route requires. `/api/upgrade` re-execs the daemon (admin); reads are
- *  `viewer`; auth/check + push registration are any-authenticated (`viewer`); all other
- *  methods mutate (`operator`). */
-export function requiredRole(method: string, pathname: string): Role {
-	if (pathname === "/api/upgrade") return "admin";
-	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
-	return method === "GET" ? "viewer" : "operator";
-}
+// The role↔action permission map lives in authz.ts (OMPSQ-36 / P3). Re-exported here under the
+// names every caller already imports, so the manager's applyCommand chokepoint (`commandRole`)
+// and the REST gate (`requiredRole`) both pick up the finer map with no scattered edits.
+export { commandTier as commandRole, restActionTier as requiredRole } from "./authz.ts";
 
 /** Synthesize the actor for a token-authenticated surface request, carrying its resolved tier. */
 export function actorForRole(role: Role): Actor {

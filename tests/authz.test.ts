@@ -1,0 +1,119 @@
+/**
+ * authz (OMPSQ-36 / P3) — the single role↔action permission map (src/authz.ts) enforced
+ * IDENTICALLY at the WS/command chokepoint (`commandTier`, via applyCommand) and the REST gate
+ * (`restActionTier`, via `roleAtLeast(role, requiredRole(...))`).
+ *
+ * Pure-map units for the full action set, plus a manager-level proof that an OPERATOR is denied
+ * destructive ops (kill/remove) — RbacDenied AND audited — while an admin is allowed, and a
+ * server-level proof that a REST land route 403s an operator but lets an admin past the gate.
+ */
+
+import { afterEach, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { RbacDenied } from "../src/auth.ts";
+import { commandTier, restActionTier } from "../src/authz.ts";
+import type { StateSnapshot, Store } from "../src/dal/store.ts";
+import { SquadManager } from "../src/squad-manager.ts";
+import { SquadServer } from "../src/server.ts";
+import type { Actor } from "../src/types.ts";
+
+const cleanups: Array<() => Promise<void> | void> = [];
+afterEach(async () => {
+	for (const c of cleanups.splice(0)) await c();
+});
+
+test("commandTier: viewer reads, operator drives, admin destroys", () => {
+	expect(commandTier({ type: "snapshot" })).toBe("viewer");
+	expect(commandTier({ type: "subscribe", id: "a" })).toBe("viewer");
+	expect(commandTier({ type: "prompt", id: "a", message: "hi" })).toBe("operator");
+	expect(commandTier({ type: "answer", id: "a", requestId: "r", value: "v" })).toBe("operator");
+	expect(commandTier({ type: "interrupt", id: "a" })).toBe("operator");
+	expect(commandTier({ type: "create", options: { repo: "/x" } })).toBe("operator");
+	expect(commandTier({ type: "commission", spec: { name: "x", purpose: "y" } })).toBe("operator");
+	expect(commandTier({ type: "kill", id: "a" })).toBe("admin");
+	expect(commandTier({ type: "restart", id: "a" })).toBe("admin");
+	expect(commandTier({ type: "remove", id: "a" })).toBe("admin");
+});
+
+test("restActionTier: reads viewer, mutations operator, destructive admin, auth/push viewer", () => {
+	expect(restActionTier("GET", "/api/agents")).toBe("viewer");
+	expect(restActionTier("GET", "/api/features")).toBe("viewer");
+	expect(restActionTier("POST", "/api/features")).toBe("operator");
+	expect(restActionTier("PATCH", "/api/features/x")).toBe("operator");
+	expect(restActionTier("POST", "/api/command")).toBe("operator");
+	expect(restActionTier("POST", "/api/spawn")).toBe("operator");
+	expect(restActionTier("POST", "/api/upgrade")).toBe("admin");
+	expect(restActionTier("POST", "/api/agents/a1/land")).toBe("admin");
+	expect(restActionTier("POST", "/api/features/f1/land")).toBe("admin");
+	expect(restActionTier("POST", "/api/features/f1/verify")).toBe("admin");
+	expect(restActionTier("GET", "/api/auth/check")).toBe("viewer");
+	expect(restActionTier("POST", "/api/push/subscribe")).toBe("viewer");
+	// agent verify runs the acceptance command (non-destructive) — stays operator, unlike feature verify.
+	expect(restActionTier("POST", "/api/agents/a1/verify")).toBe("operator");
+});
+
+test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "authz-mgr-"));
+	// Store stub recording audit entries; everything else inert (org↔resource isolation proven elsewhere).
+	const audits: { actor: string; action: string }[] = [];
+	const store: Store = {
+		async hasState() {
+			return false;
+		},
+		async load(): Promise<StateSnapshot> {
+			return { agents: [], transcripts: {}, features: [] };
+		},
+		async save() {},
+		async appendAudit(e) {
+			audits.push({ actor: e.actor, action: e.action });
+		},
+		async appendUsage() {},
+	};
+	const mgr = new SquadManager({ stateDir: dir, store });
+	await mgr.start();
+	cleanups.push(async () => {
+		await mgr.stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	const operator: Actor = { id: "op", origin: "remote", role: "operator" };
+	const admin: Actor = { id: "ad", origin: "remote", role: "admin" };
+
+	// Operator is denied kill + remove (destructive ⇒ admin): throws AND audits a denial row.
+	await expect(mgr.applyCommand({ type: "kill", id: "ghost" }, operator)).rejects.toThrow(RbacDenied);
+	await expect(mgr.applyCommand({ type: "remove", id: "ghost" }, operator)).rejects.toThrow(RbacDenied);
+	expect(audits.some((a) => a.actor === "op" && a.action === "denied:kill")).toBe(true);
+	expect(audits.some((a) => a.actor === "op" && a.action === "denied:remove")).toBe(true);
+
+	// Operator CAN still drive (prompt = operator) — passes the gate (unknown agent ⇒ no-op).
+	await mgr.applyCommand({ type: "prompt", id: "ghost", message: "x" }, operator);
+
+	// Admin passes the gate for the same destructive ops (unknown agent ⇒ no-op, no RBAC throw) — audited under its type.
+	await mgr.applyCommand({ type: "kill", id: "ghost" }, admin);
+	await mgr.applyCommand({ type: "remove", id: "ghost" }, admin);
+	expect(audits.some((a) => a.actor === "ad" && a.action === "kill")).toBe(true);
+	expect(audits.some((a) => a.actor === "ad" && a.action === "remove")).toBe(true);
+});
+
+test("REST land route: operator 403 at the gate, admin passes through", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "authz-srv-"));
+	const tokens = { admin: "admin-token-xxxxxxxx", operator: "operator-token-xxxxxx" };
+	const mgr = new SquadManager({ stateDir: dir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0, token: tokens.admin, roleTokens: { operator: tokens.operator } });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	const land = (t: string) =>
+		fetch(`${url}/api/agents/ghost/land`, { method: "POST", headers: { authorization: `Bearer ${t}`, "content-type": "application/json" }, body: "{}" });
+
+	// Operator is stopped at the single REST gate (land ⇒ admin).
+	expect((await land(tokens.operator)).status).toBe(403);
+	// Admin clears the gate; the handler then 404s (no such agent) — proving authz passed, not denied.
+	expect((await land(tokens.admin)).status).toBe(404);
+});

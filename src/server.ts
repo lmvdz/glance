@@ -659,7 +659,14 @@ export class SquadServer {
 				const result = await manager.commission(cmd.spec, { install: true }, actor);
 				return Response.json(result);
 			}
-			await manager.applyCommand(cmd, actor);
+			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
+			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
+			try {
+				await manager.applyCommand(cmd, actor);
+			} catch (err) {
+				if (err instanceof RbacDenied) return new Response("forbidden", { status: 403 });
+				throw err;
+			}
 			return Response.json({ ok: true });
 		}
 		return new Response("not found", { status: 404 });

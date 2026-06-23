@@ -29,22 +29,26 @@ test("roleAtLeast respects the viewer ⊂ operator ⊂ admin ordering", () => {
 	expect(roleAtLeast("viewer", "admin")).toBe(false);
 });
 
-test("commandRole: reads need viewer, every mutation needs operator", () => {
+test("commandRole: reads need viewer, driving needs operator, destructive needs admin", () => {
 	expect(commandRole({ type: "snapshot" })).toBe("viewer");
 	expect(commandRole({ type: "subscribe", id: "a" })).toBe("viewer");
 	expect(commandRole({ type: "prompt", id: "a", message: "hi" })).toBe("operator");
-	expect(commandRole({ type: "kill", id: "a" })).toBe("operator");
-	expect(commandRole({ type: "remove", id: "a" })).toBe("operator");
 	expect(commandRole({ type: "create", options: { repo: "/x" } })).toBe("operator");
+	expect(commandRole({ type: "kill", id: "a" })).toBe("admin");
+	expect(commandRole({ type: "restart", id: "a" })).toBe("admin");
+	expect(commandRole({ type: "remove", id: "a" })).toBe("admin");
 });
 
-test("requiredRole: GET=viewer, mutation=operator, upgrade=admin, auth/push=viewer", () => {
+test("requiredRole: GET=viewer, mutation=operator, destructive=admin, auth/push=viewer", () => {
 	expect(requiredRole("GET", "/api/agents")).toBe("viewer");
 	expect(requiredRole("GET", "/api/upgrade/status")).toBe("viewer");
 	expect(requiredRole("POST", "/api/features")).toBe("operator");
 	expect(requiredRole("PATCH", "/api/features/x")).toBe("operator");
 	expect(requiredRole("POST", "/api/command")).toBe("operator");
 	expect(requiredRole("POST", "/api/upgrade")).toBe("admin");
+	expect(requiredRole("POST", "/api/agents/a1/land")).toBe("admin");
+	expect(requiredRole("POST", "/api/features/f1/land")).toBe("admin");
+	expect(requiredRole("POST", "/api/features/f1/verify")).toBe("admin");
 	expect(requiredRole("GET", "/api/auth/check")).toBe("viewer");
 	expect(requiredRole("POST", "/api/push/subscribe")).toBe("viewer");
 });
