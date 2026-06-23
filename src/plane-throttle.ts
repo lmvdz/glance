@@ -17,11 +17,13 @@
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const MAX_429_RETRIES = 4;
 
-/** Backoff for a 429: honour Retry-After (seconds) when present, else exponential. Capped at 5s. */
+/** Backoff for a 429: honour Retry-After (seconds) when present, else exponential from a configurable
+ * base (OMP_SQUAD_PLANE_BACKOFF_BASE_MS, default 500). Capped at 5s. */
 function retryAfterMs(res: Response, attempt: number): number {
 	const ra = Number(res.headers.get("retry-after"));
 	if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 5000);
-	return Math.min(500 * 2 ** attempt, 5000);
+	const base = Number(process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS) || 500;
+	return Math.min(base * 2 ** attempt, 5000);
 }
 
 // Global serialization: every request chains onto the previous, then waits out the min interval — so

@@ -258,6 +258,7 @@ collapse to one call, and any write (create/close/transition) invalidates it.
 | Env | Meaning |
 |---|---|
 | `OMP_SQUAD_PLANE_MIN_INTERVAL_MS` | Min spacing between Plane API requests (default `500`); the global limiter never bursts faster |
+| `OMP_SQUAD_PLANE_BACKOFF_BASE_MS` | Base for the exponential 429 backoff (default `500`); doubles per retry, capped at 5s, overridden by a `Retry-After` header |
 | `OMP_SQUAD_PLANE_CACHE_MS` | TTL for the `listPlaneIssues` read cache (default `15000`); higher = fewer API calls, staler open-issue view |
 
 A cross-process **Plane gateway** (one service all processes call) is designed in `docs/plane-gateway.md` as the follow-up.

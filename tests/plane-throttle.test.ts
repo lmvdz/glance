@@ -12,10 +12,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 const realFetch = globalThis.fetch;
 const savedInterval = process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS;
+const savedBackoff = process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS;
 afterEach(() => {
 	globalThis.fetch = realFetch;
 	if (savedInterval === undefined) delete process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS;
 	else process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS = savedInterval;
+	if (savedBackoff === undefined) delete process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS;
+	else process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS = savedBackoff;
 });
 
 // ── makeCache ────────────────────────────────────────────────────────────────
@@ -66,6 +69,7 @@ function fakeRes(status: number, retryAfter?: string): Response {
 
 test("throttledFetch retries a 429 then returns the eventual success", async () => {
 	process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS = "5";
+	process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS = "5"; // keep the 429 retry fast (real default is 500ms)
 	let calls = 0;
 	globalThis.fetch = (async () => {
 		calls++;
