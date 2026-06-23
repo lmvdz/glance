@@ -253,6 +253,11 @@ export class SquadManager extends EventEmitter {
 			});
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
+		// Auto-dispatch + auto-land (Orchestrator) live in start(), so they are per-org for free in DB
+		// mode (one loop per SquadManager). ponytail: Plane repo config (planeRepos) is still read
+		// daemon-global, so every org would dispatch the same repos — meaningful only for single-org
+		// self-host. Ceiling: no per-tenant Plane wiring. Upgrade path: thread per-org Plane config
+		// through RegistryDeps and pass it into each manager (deferred follow-up, out of P2 scope).
 		if (process.env.OMP_SQUAD_AUTODISPATCH !== "0" && planeRepos().length > 0) {
 			const interval = Number(process.env.OMP_SQUAD_DISPATCH_INTERVAL_MS) || 60_000;
 			const maxActive = Number(process.env.OMP_SQUAD_DISPATCH_MAX) || 3;

@@ -148,21 +148,30 @@ export class ManagerRegistry {
 	}
 
 	/**
-	 * Reap orphan agent-host processes machine-wide, protecting the UNION of every live manager's
-	 * agent ids and every org's persisted roster (so a host awaiting lazy re-adoption is never
-	 * killed), then prune stale sockets + sweep the global lease/presence/proof registries once.
+	 * The reap-protected id set: the UNION of every live manager's agent ids and every org's
+	 * persisted roster (so a host awaiting lazy re-adoption is never killed at boot, when no
+	 * manager has been created yet). Seeding from the persisted rosters is the boot-safety trap
+	 * the lifecycle plan calls out — an empty union would reap ALL surviving hosts.
 	 * ponytail: re-scans every org's persisted roster each pass (bounded by org count). Upgrade path:
 	 * a dedicated roster-id query if the per-org store load proves too heavy at high tenant counts.
 	 */
-	private async reapGlobal(): Promise<void> {
-		const protectedIds = new Set<string>();
-		for (const entry of this.managers.values()) for (const a of entry.manager.list()) protectedIds.add(a.id);
+	async protectedIds(): Promise<Set<string>> {
+		const ids = new Set<string>();
+		for (const entry of this.managers.values()) for (const a of entry.manager.list()) ids.add(a.id);
 		if (this.deps.listOrgIds) {
 			for (const orgId of await this.deps.listOrgIds()) {
-				for (const a of (await this.deps.store(orgId).load()).agents) protectedIds.add(a.id);
+				for (const a of (await this.deps.store(orgId).load()).agents) ids.add(a.id);
 			}
 		}
-		await reapOrphanHosts(protectedIds).catch(() => []);
+		return ids;
+	}
+
+	/**
+	 * Reap orphan agent-host processes machine-wide, protecting the union (above), then prune stale
+	 * sockets + sweep the global lease/presence/proof registries once (a per-org manager must not).
+	 */
+	private async reapGlobal(): Promise<void> {
+		await reapOrphanHosts(await this.protectedIds()).catch(() => []);
 		await pruneStaleSockets().catch(() => []);
 		await Promise.all([sweepLeases(), sweepPresence(), sweepProofs()]).catch(() => []);
 	}
