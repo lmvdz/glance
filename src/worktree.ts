@@ -69,10 +69,12 @@ export async function addWorktree(opts: {
 	repo: string;
 	branch: string;
 	dir?: string;
+	/** Worktree base dir override (org-scoped in DB mode). Default: worktreeBase(). */
+	base?: string;
 }, run: GitRunner = runGit): Promise<CreatedWorktree> {
 	const repo = await repoRoot(opts.repo, run);
 	const safe = opts.branch.replace(/[^a-zA-Z0-9._-]/g, "-");
-	const dir = opts.dir ?? path.join(worktreeBase(), `${path.basename(repo)}-${safe}`);
+	const dir = opts.dir ?? path.join(opts.base ?? worktreeBase(), `${path.basename(repo)}-${safe}`);
 
 	// Already registered as a worktree at this path? Reuse it.
 	const list = await run(["worktree", "list", "--porcelain"], repo);
@@ -132,9 +134,10 @@ export async function resolveWorktree(
 	branch: string,
 	add: typeof addWorktree = addWorktree,
 	gitProbe: typeof isGitRepo = isGitRepo,
+	base?: string,
 ): Promise<ResolvedWorktree> {
 	try {
-		const wt = await add({ repo, branch });
+		const wt = await add({ repo, branch, base });
 		return { cwd: wt.worktree, repo: wt.repo, branch: wt.branch, inPlace: false };
 	} catch (err) {
 		if (await gitProbe(repo)) throw err;

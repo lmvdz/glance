@@ -72,12 +72,13 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
-import { addWorktree, branchAhead, commitWorktreeWip, deleteBranchIfMerged, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeStatus } from "./worktree.ts";
+import { addWorktree, branchAhead, commitWorktreeWip, deleteBranchIfMerged, isGitRepo, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeStatus } from "./worktree.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
+import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -156,6 +157,13 @@ export interface SquadManagerOptions {
 	bin?: string;
 	/** Autonomous-land mode: a workflow run that succeeds lands its own branch (OMP_SQUAD_AUTOLAND). */
 	autoLand?: boolean;
+	/** Org-scoped worktree base (DB mode). Default: worktree.ts's global worktreeBase(). */
+	worktreeBase?: string;
+	/** Persistence seam. Default: FileStore(stateDir) — today's state.json behavior. */
+	store?: Store;
+	/** When the registry owns machine-global janitors (reap orphan hosts / sockets / registries over
+	 *  the union of all orgs), the per-org manager skips them so it can't reap another org's hosts. */
+	skipGlobalJanitors?: boolean;
 }
 
 export interface CommissionOptions {
@@ -175,10 +183,15 @@ export class SquadManager extends EventEmitter {
 	private readonly operator: Actor;
 	private availability: OperatorPresence["availability"] = "active";
 	private readonly stateDir: string;
-	private readonly stateFile: string;
 	private readonly featureStore = new Map<string, PersistedFeature>();
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
+	/** Org-scoped worktree base override (DB mode); undefined ⇒ global worktreeBase(). */
+	private readonly worktreeBaseDir?: string;
+	/** Persistence seam (FileStore in file mode, DbStore in DB mode). */
+	private readonly store: Store;
+	/** True when the registry owns the machine-global janitors (DB mode). */
+	private readonly skipGlobalJanitors: boolean;
 	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. */
 	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM !== "0";
 	private pollTimer?: Timer;
@@ -204,9 +217,11 @@ export class SquadManager extends EventEmitter {
 		this.operator = opts.operator ?? LOCAL_ACTOR;
 		this.bus = opts.bus ?? new NullFederationBus();
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
-		this.stateFile = path.join(this.stateDir, "state.json");
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
+		this.worktreeBaseDir = opts.worktreeBase;
+		this.store = opts.store ?? new FileStore(this.stateDir);
+		this.skipGlobalJanitors = opts.skipGlobalJanitors ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 	}
 
@@ -214,12 +229,14 @@ export class SquadManager extends EventEmitter {
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
 		// reap, or adopt — and a fresh-state manager must NOT reap the shared sockets dir out from under
 		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
-		if (existsSync(this.stateFile)) {
-			await this.reconnectLive();
-			await this.reapOrphans();
-			await this.adoptOrphanedAgents();
+		const snapshot = (await this.store.hasState()) ? await this.store.load() : undefined;
+		if (snapshot) {
+			await this.reconnectLive(snapshot);
+			if (!this.skipGlobalJanitors) await this.reapOrphans();
+			await this.adoptOrphanedAgents(snapshot);
 		}
-		await pruneStaleSockets().catch(() => []);
+		// DB mode: the registry runs pruneStaleSockets once over all orgs (a per-org manager must not).
+		if (!this.skipGlobalJanitors) await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
 			// RBAC authorization happens inside applyCommand against remote.actor's tier (a role-less
@@ -280,17 +297,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** On daemon start, reattach to any agent whose detached host survived (upgrade/restart). */
-	private async reconnectLive(): Promise<number> {
-		let raw: string;
-		try {
-			raw = await fs.readFile(this.stateFile, "utf8");
-		} catch {
-			return 0;
-		}
-		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[]; transcripts?: Record<string, TranscriptEntry[]>; features?: PersistedFeature[] };
-		for (const f of parsed.features ?? []) this.featureStore.set(f.id, f);
+	private async reconnectLive(snapshot: StateSnapshot): Promise<number> {
+		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		let n = 0;
-		for (const p of parsed.agents ?? []) {
+		for (const p of snapshot.agents) {
 			if (this.agents.has(p.id)) continue;
 			if (p.kind === "flue-service") continue; // flue workers are not reattached
 			if (p.kind === "workflow") {
@@ -298,7 +308,7 @@ export class SquadManager extends EventEmitter {
 				// checkpoint to resume the graph from; otherwise the orchestration is unrecoverable.
 				const innerAlive = await hostAlive(socketPathFor(`${p.id}-wf`));
 				if (innerAlive && p.workflowState) {
-					await this.attachExisting(p, parsed.transcripts?.[p.id] ?? []).catch((err) => this.log("warn", `resume ${p.name} failed: ${String(err)}`));
+					await this.attachExisting(p, snapshot.transcripts[p.id] ?? []).catch((err) => this.log("warn", `resume ${p.name} failed: ${String(err)}`));
 					n++;
 				} else if (innerAlive) {
 					this.log("warn", `workflow ${p.name} has a live thread but no checkpoint — cannot resume the graph`);
@@ -306,7 +316,7 @@ export class SquadManager extends EventEmitter {
 				continue;
 			}
 			if (!(await hostAlive(socketPathFor(p.id)))) continue;
-			await this.attachExisting(p, parsed.transcripts?.[p.id] ?? []).catch((err) => this.log("warn", `reattach ${p.name} failed: ${String(err)}`));
+			await this.attachExisting(p, snapshot.transcripts[p.id] ?? []).catch((err) => this.log("warn", `reattach ${p.name} failed: ${String(err)}`));
 			n++;
 		}
 		if (n) this.log("info", `reattached ${n} live agent(s)`);
@@ -316,15 +326,8 @@ export class SquadManager extends EventEmitter {
 	/** After live reattach + orphan reap: take over persisted agents whose host is gone but whose worktree
 	 *  still holds built-up context — re-create them in place (idle; the orchestrator then verifies/lands).
 	 *  So a restart RESUMES the issue with its context instead of re-dispatching a fresh worktree. */
-	private async adoptOrphanedAgents(): Promise<number> {
-		let raw: string;
-		try {
-			raw = await fs.readFile(this.stateFile, "utf8");
-		} catch {
-			return 0;
-		}
-		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[] };
-		const adopt = agentsToAdopt(parsed.agents ?? [], new Set(this.agents.keys()), (wt) => existsSync(wt));
+	private async adoptOrphanedAgents(snapshot: StateSnapshot): Promise<number> {
+		const adopt = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt));
 		let n = 0;
 		for (const p of adopt) {
 			await this.create({
@@ -720,7 +723,7 @@ export class SquadManager extends EventEmitter {
 			repo = opts.repo;
 			resolvedBranch = (await worktreeStatus(cwd).catch(() => ({ branch: undefined }))).branch;
 		} else {
-			const wt = await resolveWorktree(opts.repo, branch);
+			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir);
 			cwd = wt.cwd;
 			repo = wt.repo;
 			resolvedBranch = wt.branch;
@@ -949,6 +952,13 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `rbac: ${actor.id} (${have}) denied "${cmd.type}" — needs ${need}`);
 			throw new RbacDenied(need, have, cmd.type);
 		}
+		// Security trail: record every accepted mutation (reads — snapshot/subscribe — are need=viewer
+		// and not audited). DB mode persists to the per-org `audit` table; FileStore is a no-op.
+		if (need !== "viewer") {
+			await this.store
+				.appendAudit({ actor: actor.id, action: cmd.type, target: "id" in cmd ? cmd.id : undefined })
+				.catch((err) => this.log("warn", `audit write failed for "${cmd.type}": ${err instanceof Error ? err.message : String(err)}`));
+		}
 		if (cmd.type === "create") {
 			await this.create(cmd.options);
 			return;
@@ -1047,6 +1057,9 @@ export class SquadManager extends EventEmitter {
 		this.superviseBudget.set(rec.dto.id, used + 1);
 		this.log("info", `autosupervise: auto-answered ${rec.dto.name} [${req.kind}] "${req.title}" -> ${value} (${used + 1}/${budget})`);
 		this.answerPending(rec, req, value, AUTO_ACTOR);
+		void this.store
+			.appendAudit({ actor: AUTO_ACTOR.id, action: "auto-supervise", target: rec.dto.id, detail: { kind: req.kind, title: req.title, value } })
+			.catch(() => {});
 	}
 
 	/** True if a pending request must NEVER be auto-answered: a host-tool side-effect, or text matching RISKY_RE. */
@@ -1210,7 +1223,10 @@ export class SquadManager extends EventEmitter {
 		if (!run || run.finalized) return;
 		run.finalized = true;
 		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
-		await appendReceipt(this.stateDir, run.snapshot());
+		const receipt = run.snapshot();
+		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
+		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
+		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		// Best-effort cold-start digest: a failure here must never break run completion.
 		try {
 			const md = buildDigest({ transcript: rec.transcript, receipts: await readReceipts(this.stateDir, rec.dto.id) });
@@ -1313,9 +1329,14 @@ export class SquadManager extends EventEmitter {
 		this.publishPresence();
 		// Periodically (~every 30s) reap detached hosts the roster no longer owns. Safe because an
 		// agent is in this.agents before its host spawns, so a just-spawned agent is never reaped.
+		// In DB mode the registry owns the machine-global reaps (over the union of all orgs) so a
+		// per-org manager never kills another org's hosts; reapDeadWorktrees stays per-org (worktrees
+		// are org-scoped, so each manager only sees its own).
 		if (++this.reapTicks % 12 === 0) {
-			void this.reapOrphans();
-			void this.sweepRegistries();
+			if (!this.skipGlobalJanitors) {
+				void this.reapOrphans();
+				void this.sweepRegistries();
+			}
 			void this.reapDeadWorktrees();
 		}
 		void this.sampleHealth().then((h) => {
@@ -1510,32 +1531,20 @@ export class SquadManager extends EventEmitter {
 		return next;
 	}
 
-	/** Atomic write: serialize into a temp file then rename, so a reader (or a restart) never sees a partial file. */
+	/** Atomic write through the store: file mode → state.json temp+rename; DB mode → roster/feature tables + on-disk transcripts. */
 	private async persistNow(): Promise<void> {
 		const agents = [...this.agents.values()].map((r) => r.options);
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
-		const tmp = `${this.stateFile}.tmp`;
-		try {
-			await fs.writeFile(tmp, JSON.stringify({ version: 1, agents, transcripts, features }, null, 2));
-			await fs.rename(tmp, this.stateFile);
-		} catch {
-			await fs.rm(tmp, { force: true }).catch(() => {});
-		}
+		await this.store.save({ agents, transcripts, features });
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
 	async loadPersisted(): Promise<number> {
-		let raw: string;
-		try {
-			raw = await fs.readFile(this.stateFile, "utf8");
-		} catch {
-			return 0;
-		}
-		const parsed = JSON.parse(raw) as { agents?: PersistedAgent[]; features?: PersistedFeature[] };
-		for (const f of parsed.features ?? []) this.featureStore.set(f.id, f);
-		const list = parsed.agents ?? [];
+		const snapshot = await this.store.load();
+		for (const f of snapshot.features) this.featureStore.set(f.id, f);
+		const list = snapshot.agents;
 		for (const p of list) {
 			if (p.kind === "flue-service" && p.flue) {
 				await this.restoreFlueMember(p).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
