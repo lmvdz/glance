@@ -689,7 +689,8 @@ export class SquadManager extends EventEmitter {
 		}
 		// Global concurrency ceiling (see Scheduler). Restore / fan-out recreate already-counted agents → bypassCap.
 		if (!opts.bypassCap) {
-			const live = liveAgents(this.list());
+			// WIP cap counts only agents OCCUPYING a slot (starting/working/input); idle/landed agents must not block new dispatch.
+			const live = occupyingAgents(this.list());
 			if (!this.scheduler.canAdmit(live)) {
 				// Denied by the count ceiling OR by host resource pressure (CPU/RAM): the count cap
 				// bounds agents, but each is several processes, so admission also backs off when the

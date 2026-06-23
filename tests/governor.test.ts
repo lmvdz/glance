@@ -64,10 +64,21 @@ test("create throws at the WIP cap before cutting a worktree", async () => {
 	const mgr = await freshManager();
 	// Shadow the public list() the cap reads, so the guard fires without spawning anything.
 	const overridable: { list: () => AgentDTO[] } = mgr;
-	overridable.list = () => [dto("working"), dto("idle")];
+	overridable.list = () => [dto("working"), dto("working")]; // 2 occupying → fills cap 2
 	process.env.OMP_SQUAD_MAX_WIP = "2";
 	delete process.env.OMP_SQUAD_QUEUE_ON_FULL; // hermetic: this test asserts the hard-cap throw, not the backpressure enqueue path
 	await expect(mgr.create({ repo: "/x/repo", name: "blocked" })).rejects.toThrow(/WIP cap reached \(2\/2\)/);
+});
+
+test("create does NOT count idle/landed agents toward the WIP cap (they free their slot)", async () => {
+	const mgr = await freshManager();
+	const overridable: { list: () => AgentDTO[] } = mgr;
+	overridable.list = () => [dto("idle"), dto("idle")]; // 2 idle = 0 occupying
+	process.env.OMP_SQUAD_MAX_WIP = "2";
+	delete process.env.OMP_SQUAD_QUEUE_ON_FULL;
+	// idle agents don't occupy a slot → create proceeds (fails fast on the fake repo, never a cap throw)
+	const r = await mgr.create({ repo: path.join(os.tmpdir(), "cap-idle-nonexistent-repo"), name: "ok" });
+	expect(r.name).toBe("ok");
 });
 
 test("create stays under cap when a slot is free (no throw at the boundary)", async () => {

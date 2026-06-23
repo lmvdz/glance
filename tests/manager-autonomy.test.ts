@@ -174,7 +174,8 @@ test("single-agent land of an issue-less agent makes no Plane call", async () =>
 test("create enqueues at the WIP cap when OMP_SQUAD_QUEUE_ON_FULL is set (signals queued, no throw, not in roster)", async () => {
 	const mgr = await freshManager();
 	seed(mgr, "live1");
-	seed(mgr, "live2"); // 2 live, cap 2 → full
+	seed(mgr, "live2"); // 2 occupying live agents, cap 2 → full
+	for (const id of ["live1", "live2"]) mgr.agents.get(id)!.dto.status = "working";
 	process.env.OMP_SQUAD_MAX_WIP = "2";
 	process.env.OMP_SQUAD_QUEUE_ON_FULL = "1";
 	const dto = await mgr.create({ repo: "/x/repo", name: "parked" });
@@ -187,6 +188,7 @@ test("create still hard-throws at the cap when the flag is off (default behavior
 	const mgr = await freshManager();
 	seed(mgr, "live1");
 	seed(mgr, "live2");
+	for (const id of ["live1", "live2"]) mgr.agents.get(id)!.dto.status = "working";
 	process.env.OMP_SQUAD_MAX_WIP = "2";
 	delete process.env.OMP_SQUAD_QUEUE_ON_FULL;
 	await expect(mgr.create({ repo: "/x/repo", name: "blocked" })).rejects.toThrow(/WIP cap reached \(2\/2\)/);
