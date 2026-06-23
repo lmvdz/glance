@@ -473,6 +473,8 @@ export interface Actor {
 	/** RBAC tier this actor holds. Absent ⇒ derived from origin: a local surface is
 	 *  trusted (admin), a remote peer is read-only (viewer) until a transport stamps a role. */
 	role?: Role;
+	/** Org whose fleet this actor acts on (DB mode). Absent ⇒ file mode / no active org. */
+	orgId?: string;
 }
 
 /** One operator's published state in a team room. */
