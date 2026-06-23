@@ -1,5 +1,5 @@
 # fsync durability hardening of the persistence layer
-STATUS: open
+STATUS: done (writeFileDurable added; FileStore.save, DbStore.saveTranscripts, appendReceipt routed through fsync — landed as prerequisite of OMPSQ-76)
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,5 +1,5 @@
 # Durability across an UNCLEAN stop
-STATUS: open
+STATUS: done (local leg landed; live remount leg is external-dep, reports blocker without ARCHIL_*)
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
