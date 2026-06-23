@@ -31,7 +31,7 @@ import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { Orchestrator } from "./orchestrator.ts";
-import { Scheduler, liveAgents } from "./scheduler.ts";
+import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent, type LandOpts, type LandResult } from "./land.ts";
@@ -73,7 +73,7 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
-import { addWorktree, branchAhead, commitWorktreeWip, deleteBranchIfMerged, isGitRepo, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeStatus } from "./worktree.ts";
+import { addWorktree, branchAhead, deleteBranchIfMerged, isGitRepo, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
@@ -260,7 +260,7 @@ export class SquadManager extends EventEmitter {
 				activeCount: () => [...this.agents.values()].filter((r) => !!r.dto.issue && (r.dto.status === "working" || r.dto.status === "starting" || r.dto.status === "input")).length,
 				log: (m) => this.log("info", `auto-dispatch: ${m}`),
 				maxActive,
-				liveCount: () => liveAgents(this.list()),
+				liveCount: () => occupyingAgents(this.list()), // only starting/working/input occupy a slot — idle/done agents must not pin the cap
 				maxWip: this.scheduler.cap(),
 			});
 			this.dispatcher.start(interval);
@@ -1452,9 +1452,9 @@ export class SquadManager extends EventEmitter {
 				const openIdentifiers = issues
 					? new Set(issues.map((i) => i.identifier).filter((x): x is string => !!x).map((s) => s.toUpperCase()))
 					: null;
-				const decisions = selectReapable({ worktrees: infos, owned, openIdentifiers, now: Date.now(), graceMs });
+				const managedBase = this.worktreeBaseDir ?? worktreeBase();
+				const decisions = selectReapable({ worktrees: infos, owned, managedBase, openIdentifiers, now: Date.now(), graceMs });
 				for (const d of decisions) {
-					if (d.preserveWip) await commitWorktreeWip(d.worktree, "chore: preserve WIP before reaping dead worktree").catch(() => {});
 					await removeWorktree(root, d.worktree).catch(() => {});
 					if (d.deleteBranch) await deleteBranchIfMerged(root, d.branch).catch(() => {});
 				}

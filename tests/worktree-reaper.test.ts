@@ -1,9 +1,9 @@
 /**
  * Worktree reaper policy — `selectReapable` decides which orphan worktrees are safe to
- * remove. The guards that matter: never a live/owned or primary worktree, never one inside
- * the spawn grace window (create() makes the worktree before the roster entry), reap only on
- * merged-into-base OR closed-Plane-issue, and stay lossless (preserve WIP, delete a branch
- * only when merged + clean). A failed ahead-count (-1) must never read as "merged".
+ * remove. The guards that matter (OMPSQ-41): only worktrees UNDER the managed base, never a
+ * live/owned or primary worktree, never a DIRTY one (uncommitted work), never one inside the
+ * spawn grace window, reap only on merged-into-base OR closed-Plane-issue, and delete a branch
+ * only when merged (0 unmerged commits). A failed ahead-count (-1) must never read as "merged".
  */
 
 import { expect, test } from "bun:test";
@@ -23,7 +23,7 @@ const wt = (over: Partial<WorktreeInfo>): WorktreeInfo => ({
 });
 
 const run = (worktrees: WorktreeInfo[], over: Partial<ReapInput> = {}) =>
-	selectReapable({ worktrees, owned: new Set(), openIdentifiers: new Set(), now: NOW, graceMs: GRACE, ...over });
+	selectReapable({ worktrees, owned: new Set(), managedBase: "/wt", openIdentifiers: new Set(), now: NOW, graceMs: GRACE, ...over });
 
 test("parseIssueIdentifier pulls PREFIX-N from a squad branch, ignores non-issue branches", () => {
 	expect(parseIssueIdentifier("squad/ompsq-35-mqpp4ic2-osrh")).toBe("OMPSQ-35");
@@ -35,7 +35,7 @@ test("parseIssueIdentifier pulls PREFIX-N from a squad branch, ignores non-issue
 test("merged + clean orphan is reaped and its branch deleted", () => {
 	const d = run([wt({ aheadOfBase: 0, dirty: false })]);
 	expect(d).toHaveLength(1);
-	expect(d[0]).toMatchObject({ reason: "merged", preserveWip: false, deleteBranch: true });
+	expect(d[0]).toMatchObject({ reason: "merged", deleteBranch: true });
 });
 
 test("OMPSQ-41: dirty worktree on an OPEN issue (active agent mid-task) is never reaped", () => {
@@ -45,11 +45,9 @@ test("OMPSQ-41: dirty worktree on an OPEN issue (active agent mid-task) is never
 	expect(d).toHaveLength(0);
 });
 
-test("dirty worktree on a CLOSED issue is reaped with WIP preserved, branch kept", () => {
-	// Issue gone from the open set ⇒ work no longer needed; dirty ⇒ commit WIP, but don't delete the
-	// branch (committing makes it unmerged) and reason is issue-closed, not merged.
-	const d = run([wt({ aheadOfBase: 0, dirty: true })], { openIdentifiers: new Set(["OMPSQ-34"]) });
-	expect(d[0]).toMatchObject({ reason: "issue-closed", preserveWip: true, deleteBranch: false });
+test("OMPSQ-41: a dirty worktree is never reaped, even once its issue closes (no destroying WIP)", () => {
+	// dirty = uncommitted work. The clean requirement means we never force-remove it — closed issue or not.
+	expect(run([wt({ aheadOfBase: 0, dirty: true })], { openIdentifiers: new Set(["OMPSQ-34"]) })).toHaveLength(0);
 });
 
 test("unmerged but issue closed: reaped, branch kept (work preserved)", () => {
@@ -95,5 +93,12 @@ test("Plane unreachable (null) falls back to merged-only reaping", () => {
 
 test("detached worktree (no branch) is skipped", () => {
 	const d = run([wt({ branch: "", aheadOfBase: 0 })]);
+	expect(d).toHaveLength(0);
+});
+
+test("OMPSQ-41: a worktree OUTSIDE the managed base is never reaped, even when merged + clean", () => {
+	// An out-of-band worktree (e.g. made by hand under /tmp) is merged+clean+dead but lives outside
+	// worktreeBase() ⇒ the reaper must not touch it (destroying out-of-band work was the OMPSQ-41 bug).
+	const d = run([wt({ worktree: "/tmp/elsewhere/wt", aheadOfBase: 0, dirty: false })], { managedBase: "/wt" });
 	expect(d).toHaveLength(0);
 });

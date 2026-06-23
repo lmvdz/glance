@@ -85,15 +85,23 @@ interface PlaneIssue {
 	project_detail?: { identifier?: string };
 }
 
+/** True when an issue's name flags it for human review / do-NOT-auto-land. The dispatcher skips these,
+ *  but they still appear in the UI's issue list (no filtering here). */
+export function noAutoDispatchName(name: string): boolean {
+	return /do not auto-?land|human[ -]?review|do-?not-?auto/i.test(name);
+}
+
 function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string, prefix?: string): IssueRef {
 	const ident = raw.project_detail?.identifier ?? prefix;
+	const name = raw.name ?? "(untitled)";
 	return {
 		id: raw.id,
 		identifier: ident && raw.sequence_id != null ? `${ident}-${raw.sequence_id}` : undefined,
-		name: raw.name ?? "(untitled)",
+		name,
 		state: raw.state_detail?.group ?? raw.state,
 		url: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/issues/${raw.id}`,
 		projectId,
+		noAutoDispatch: noAutoDispatchName(name),
 	};
 }
 

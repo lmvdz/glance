@@ -7,7 +7,7 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
-import { defaultWipCap, liveAgents, Scheduler } from "../src/scheduler.ts";
+import { defaultWipCap, liveAgents, occupyingAgents, Scheduler } from "../src/scheduler.ts";
 import type { AgentDTO, AgentStatus, CreateAgentOptions } from "../src/types.ts";
 
 const savedWip = process.env.OMP_SQUAD_MAX_WIP;
@@ -87,4 +87,10 @@ test("canAdmit needs both count headroom and no pressure", () => {
 test("default probe gates host-pressure behind OMP_SQUAD_RESOURCE_GATE (off ⇒ never pressured)", () => {
 	delete process.env.OMP_SQUAD_RESOURCE_GATE;
 	expect(new Scheduler().pressured()).toBe(false); // gate off → admission ignores host load
+});
+
+test("occupyingAgents counts only starting/working/input (idle/terminal free their slot)", () => {
+	const roster = [dto("working"), dto("idle"), dto("starting"), dto("input"), dto("stopped"), dto("error")];
+	expect(occupyingAgents(roster)).toBe(3); // working + starting + input; idle/stopped/error excluded
+	expect(occupyingAgents([])).toBe(0);
 });

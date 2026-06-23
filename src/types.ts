@@ -65,6 +65,9 @@ export interface IssueRef {
 	projectId?: string;
 	/** Issue ids that block this one (Plane `blocked_by` relations). Dispatch defers the issue while any blocker is still open. */
 	blockedBy?: string[];
+	/** Name flags this issue for human review / do-NOT-auto-land (e.g. SECURITY-CRITICAL). The dispatcher
+	 *  skips it (never auto-dispatched/auto-landed), but it still appears in the UI's issue list. */
+	noAutoDispatch?: boolean;
 }
 
 /** A feature's associated Plane issue, resolved for display: status group + deep link. */

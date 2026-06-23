@@ -21,6 +21,16 @@ export function liveAgents(dtos: AgentDTO[]): number {
 	return dtos.filter((d) => !TERMINAL_STATUSES[d.status]).length;
 }
 
+/** Statuses that actively occupy a dispatch slot. `idle` is excluded: a finished agent lingers in the
+ *  roster as idle, and counting it would pin the WIP cap and starve the backlog. */
+const OCCUPYING_STATUSES: Record<string, true> = { starting: true, working: true, input: true };
+
+/** Agents currently occupying a WIP slot for the auto-dispatcher's gate — only starting/working/input.
+ *  Narrower than liveAgents (idle counts as non-terminal there) so done/idle agents don't block new dispatch. */
+export function occupyingAgents(dtos: AgentDTO[]): number {
+	return dtos.filter((d) => OCCUPYING_STATUSES[d.status]).length;
+}
+
 /** Safe default WIP cap when OMP_SQUAD_MAX_WIP is unset: ~half the host's CPUs (min 2), so a launch is
  *  bounded even without up.sh's env. */
 export function defaultWipCap(): number {

@@ -6,9 +6,16 @@
 
 import { expect, test } from "bun:test";
 import { Dispatcher, type DispatchDeps } from "../src/dispatch.ts";
-import type { IssueRef } from "../src/types.ts";
+import { noAutoDispatchName } from "../src/plane.ts";
+import { occupyingAgents } from "../src/scheduler.ts";
+import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const issue = (id: string): IssueRef => ({ id, name: `issue ${id}` });
+
+const dto = (status: AgentStatus): AgentDTO => ({
+	id: status, name: status, status, kind: "omp-operator",
+	repo: "/r", worktree: "/w", approvalMode: "write", pending: [], lastActivity: 0, messageCount: 0,
+});
 
 function harness(over: Partial<DispatchDeps> = {}): { deps: DispatchDeps; spawned: string[] } {
 	const spawned: string[] = [];
@@ -118,4 +125,43 @@ test("dispatcher: a blocker not in the open list (done / other project) does not
 	const { deps, spawned } = harness({ listIssues: async () => [{ id: "C", name: "c", blockedBy: ["Z"] }] });
 	await new Dispatcher(deps).tick();
 	expect(spawned).toEqual(["C"]); // Z absent from the open list ⇒ not blocking
+});
+
+test("dispatcher: skips a human-review / no-auto-land issue (visible in UI, never auto-dispatched)", async () => {
+	const { deps, spawned } = harness({
+		listIssues: async () => [issue("A"), { id: "B", name: "SECURITY-CRITICAL — human review", noAutoDispatch: true }],
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(1);
+	expect(spawned).toEqual(["A"]); // only the normal issue; the flagged one is never spawned
+});
+
+test("noAutoDispatchName flags human-review / do-not-auto-land names, not plain ones", () => {
+	expect(noAutoDispatchName("do NOT auto-land")).toBe(true);
+	expect(noAutoDispatchName("SECURITY-CRITICAL — human review")).toBe(true);
+	expect(noAutoDispatchName("human-review needed")).toBe(true);
+	expect(noAutoDispatchName("Fix the dispatcher backlog bug")).toBe(false);
+});
+
+test("dispatcher: an all-idle roster does not pin the WIP cap (occupying count, not live)", async () => {
+	const roster = [dto("idle"), dto("idle"), dto("idle")];
+	const { deps, spawned } = harness({ maxActive: 10, maxWip: 3, liveCount: () => occupyingAgents(roster) });
+	expect(await new Dispatcher(deps).tick()).toBe(3); // 0 occupying → cap not pinned; all 3 dispatch
+	expect(spawned.sort()).toEqual(["A", "B", "C"]);
+});
+
+test("dispatcher: WIP cap counts only occupying agents (idle/stopped don't pin it)", async () => {
+	const roster = [dto("working"), dto("idle"), dto("stopped"), dto("input")]; // 2 occupying (working+input)
+	let live = occupyingAgents(roster); // 2 — idle/stopped excluded, so the cap starts with headroom
+	const got: string[] = [];
+	const { deps } = harness({
+		maxActive: 10,
+		maxWip: 3,
+		liveCount: () => live,
+		spawn: async (_repo, iss) => {
+			got.push(iss.id);
+			live++; // each spawn occupies a new slot, like manager.create adding to the roster
+		},
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(1); // 2 occupying < cap 3 → exactly 1 slot before the cap binds
+	expect(got.length).toBe(1);
 });

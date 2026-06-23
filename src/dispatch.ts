@@ -38,6 +38,8 @@ export class Dispatcher {
 	private readonly dispatched = new Set<string>();
 	/** Issue ids deferred because a blocker is still open — tracked only to log the deferral once per episode. */
 	private readonly blockedLogged = new Set<string>();
+	/** Issue ids skipped for human-review / no-auto-land — tracked only to log the skip once per episode. */
+	private readonly skipLogged = new Set<string>();
 	private timer?: Timer;
 	private running = false;
 
@@ -66,6 +68,15 @@ export class Dispatcher {
 					if (budget <= 0) break;
 					if (this.atGlobalCap()) break; // recheck per spawn: each spawned agent counts toward the global cap
 					if (claimed.has(issue.id) || this.dispatched.has(issue.id)) continue;
+					// Human-review / do-NOT-auto-land: stays visible in the UI's issue list but never auto-dispatched.
+					// Not added to `dispatched`, logged once like the blocked_by deferral.
+					if (issue.noAutoDispatch) {
+						if (!this.skipLogged.has(issue.id)) {
+							this.skipLogged.add(issue.id);
+							this.deps.log(`skip ${issue.identifier ?? issue.id} — human-review / do-not-auto-land`);
+						}
+						continue;
+					}
 					// Dependency gate: defer while any blocked_by issue is still open. Not added to `dispatched`,
 					// so it's reconsidered each tick and dispatches once its blockers land/close.
 					const blockers = issue.blockedBy?.filter((b) => openIds.has(b)) ?? [];
