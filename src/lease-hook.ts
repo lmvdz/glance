@@ -19,6 +19,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { claimLease, heartbeatSession, holdersOf, LEASE_TTL_MS, releaseSession } from "./leases.ts";
 import type { LeaseEntry } from "./leases.ts";
 import { hardenedGitSync } from "./git-harden.ts";
+import { screenToolCall, targetFiles } from "./agent-guard.ts";
 
 interface ToolCallEvent {
 	toolName: string;
@@ -41,18 +42,6 @@ function git(cwd: string, args: string[]): string | undefined {
 	}
 }
 
-/** Pull candidate file paths out of an edit/write tool call. */
-function targetFiles(ev: ToolCallEvent): string[] {
-	const files = new Set<string>();
-	const p = ev.input.path;
-	if (typeof p === "string" && p) files.add(p);
-	// `edit` patches carry one or more [PATH#TAG] section headers.
-	const patch = ev.input.input;
-	if (typeof patch === "string") {
-		for (const m of patch.matchAll(/\[([^\]\n#]+)#[0-9A-Fa-f]+\]/g)) files.add(m[1]);
-	}
-	return [...files];
-}
 
 function ago(ts: number): string {
 	const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -73,9 +62,17 @@ export default function leaseHook(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const ev = event as ToolCallEvent;
+		// Guardrail FIRST — hard-block daemon/host control + out-of-worktree edits for EVERY tool call,
+		// before the edit/write lease logic below. A yolo agent can't bypass it: a hook block stops the
+		// tool before it runs. `repo` is this agent's worktree root (resolved in session_start).
+		const fenced = screenToolCall(ev.toolName, ev.input, repo);
+		if (fenced) {
+			if (ctx.hasUI) await ctx.ui.notify(fenced.reason, "error");
+			return fenced;
+		}
 		if (ev.toolName !== "edit" && ev.toolName !== "write") return undefined;
 		const rels: string[] = [];
-		for (const f of targetFiles(ev)) {
+		for (const f of targetFiles(ev.input)) {
 			const abs = path.isAbsolute(f) ? f : path.resolve(repo, f);
 			rels.push(path.relative(repo, abs) || f);
 		}
