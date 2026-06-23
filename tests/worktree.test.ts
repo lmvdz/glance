@@ -9,7 +9,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { addWorktree, type GitResult, type GitRunner, isGitRepo, resolveWorktree } from "../src/worktree.ts";
+import { addWorktree, type GitResult, type GitRunner, isGitRepo, resolveWorktree, worktreeBase } from "../src/worktree.ts";
 
 const LOCK: GitResult = { code: 128, stdout: "", stderr: "fatal: Unable to create '/r/.git/worktrees/x/index.lock': File exists" };
 const OK: GitResult = { code: 0, stdout: "", stderr: "" };
@@ -69,4 +69,33 @@ test("isGitRepo: true inside a checkout, false in a plain dir", async () => {
 	} finally {
 		await fs.rm(plain, { recursive: true, force: true });
 	}
+});
+
+test("addWorktree: org-scoped base isolates the same repo+branch into distinct paths", async () => {
+	// stubRunner reports repoRoot "/tmp/omp-fake-repo" → basename "omp-fake-repo"; branch "squad/x" → "squad-x".
+	const { run } = stubRunner([OK]);
+	const { run: run2 } = stubRunner([OK]);
+	const a = await addWorktree({ repo: "/tmp/omp-fake-repo", branch: "squad/x", base: "/tmpA" }, run);
+	const b = await addWorktree({ repo: "/tmp/omp-fake-repo", branch: "squad/x", base: "/tmpB" }, run2);
+	expect(a.worktree).toBe(path.join("/tmpA", "omp-fake-repo-squad-x"));
+	expect(b.worktree).toBe(path.join("/tmpB", "omp-fake-repo-squad-x"));
+	expect(a.worktree).not.toBe(b.worktree); // two orgs, same repo+branch, no collision
+});
+
+test("addWorktree: base omitted falls back to the global worktreeBase()", async () => {
+	const { run } = stubRunner([OK]);
+	const wt = await addWorktree({ repo: "/tmp/omp-fake-repo", branch: "squad/x" }, run);
+	expect(wt.worktree).toBe(path.join(worktreeBase(), "omp-fake-repo-squad-x"));
+});
+
+test("resolveWorktree threads base into addWorktree", async () => {
+	let seenBase: string | undefined;
+	const add: typeof addWorktree = async (opts) => {
+		seenBase = opts.base;
+		return { worktree: path.join(opts.base ?? worktreeBase(), "r-b"), branch: opts.branch, repo: opts.repo };
+	};
+	const wt = await resolveWorktree("/repo", "squad/x", add, async () => true, "/tmpC");
+	expect(seenBase).toBe("/tmpC");
+	expect(wt.cwd).toBe(path.join("/tmpC", "r-b"));
+	expect(wt.inPlace).toBe(false);
 });

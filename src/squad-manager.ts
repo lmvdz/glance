@@ -538,11 +538,12 @@ export class SquadManager extends EventEmitter {
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
 			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
-			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
+			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
 			void this.closeLandedIssue(rec?.dto.issue); // landed branch ⇒ close its tracking issue (idempotent)
 		}
 		this.emitFeaturesChanged();
 		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
+		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "ok", branches: results.length } }).catch(() => {});
 		return { ok: true, results };
 	}
 
@@ -571,6 +572,7 @@ export class SquadManager extends EventEmitter {
 			await this.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
+		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
 		return result;
 	}
 
