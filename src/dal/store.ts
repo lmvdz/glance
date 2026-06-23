@@ -20,6 +20,49 @@ import * as path from "node:path";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { type OrgContext, withOrg } from "./context.ts";
 
+/**
+ * Atomically + durably write `data` to `file`: temp → fsync(file) → rename → fsync(dir).
+ * After this resolves, the bytes survive a host crash (POSIX and Archil both define
+ * fsync as the durability barrier). On any throw the temp file is best-effort removed,
+ * preserving the old store behavior of never leaving a stray `.tmp` as truth.
+ *
+ * ponytail: the directory-fd fsync (which makes the rename itself durable) is skipped
+ * on platforms where opening a dir for fsync fails — some FUSE mounts reject it. We
+ * swallow EISDIR/EINVAL/EBADF/EPERM/ENOTSUP there and proceed; the file-bytes fsync
+ * still holds. Upgrade path: a platform-specific dir-sync syscall if a target ever needs
+ * the rename barrier and the dir-fd open is the only thing blocking it.
+ */
+export async function writeFileDurable(file: string, data: string): Promise<void> {
+	const dir = path.dirname(file);
+	await fs.mkdir(dir, { recursive: true });
+	const tmp = `${file}.tmp`;
+	try {
+		const fh = await fs.open(tmp, "w");
+		try {
+			await fh.writeFile(data);
+			await fh.sync(); // fsync the file's bytes before the rename
+		} finally {
+			await fh.close();
+		}
+		await fs.rename(tmp, file);
+	} catch (err) {
+		await fs.rm(tmp, { force: true }).catch(() => {});
+		throw err;
+	}
+	// fsync the directory so the rename entry itself is durable.
+	try {
+		const dfh = await fs.open(dir, "r");
+		try {
+			await dfh.sync();
+		} finally {
+			await dfh.close();
+		}
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		if (code && !["EISDIR", "EINVAL", "EBADF", "EPERM", "ENOTSUP"].includes(code)) throw err;
+	}
+}
+
 /** Full persisted state the manager round-trips on save/load. */
 export interface StateSnapshot {
 	agents: PersistedAgent[];
@@ -73,14 +116,11 @@ export class FileStore implements Store {
 	}
 
 	async save(snapshot: StateSnapshot): Promise<void> {
-		await fs.mkdir(this.stateDir, { recursive: true });
-		const tmp = `${this.stateFile}.tmp`;
+		// Durable atomic write (temp → fsync → rename → fsync dir). Behavior-preserving:
+		// swallow write errors as the old inline temp+rename did, leaving no stray `.tmp`.
 		try {
-			await fs.writeFile(tmp, JSON.stringify({ version: 1, ...snapshot }, null, 2));
-			await fs.rename(tmp, this.stateFile);
-		} catch {
-			await fs.rm(tmp, { force: true }).catch(() => {});
-		}
+			await writeFileDurable(this.stateFile, JSON.stringify({ version: 1, ...snapshot }, null, 2));
+		} catch {}
 	}
 
 	// Single-tenant file mode: audit/usage live in the on-disk receipts; the DB ledger is DB-mode only.
@@ -227,13 +267,9 @@ export class DbStore implements Store {
 	}
 
 	private async saveTranscripts(transcripts: Record<string, TranscriptEntry[]>): Promise<void> {
-		await fs.mkdir(this.stateDir, { recursive: true });
-		const tmp = `${this.transcriptsFile}.tmp`;
+		// Durable atomic write; swallow errors as the old inline temp+rename did.
 		try {
-			await fs.writeFile(tmp, JSON.stringify(transcripts));
-			await fs.rename(tmp, this.transcriptsFile);
-		} catch {
-			await fs.rm(tmp, { force: true }).catch(() => {});
-		}
+			await writeFileDurable(this.transcriptsFile, JSON.stringify(transcripts));
+		} catch {}
 	}
 }
