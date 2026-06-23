@@ -968,6 +968,9 @@ export class SquadManager extends EventEmitter {
 		const have = effectiveRole(actor);
 		if (!roleAtLeast(have, need)) {
 			this.log("warn", `rbac: ${actor.id} (${have}) denied "${cmd.type}" — needs ${need}`);
+			void this.store
+				.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target: "id" in cmd ? cmd.id : undefined, detail: { need, have } })
+				.catch(() => {});
 			throw new RbacDenied(need, have, cmd.type);
 		}
 		// Security trail: record every accepted mutation (reads — snapshot/subscribe — are need=viewer
