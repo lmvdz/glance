@@ -32,6 +32,7 @@ import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.
 import { Dispatcher } from "./dispatch.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
+import { RateLimitGate } from "./rate-limit.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
 import { landAgent, type LandOpts, type LandResult } from "./land.ts";
@@ -203,6 +204,9 @@ export class SquadManager extends EventEmitter {
 	private lastWarnKey = "";
 	private dispatcher?: Dispatcher;
 	private readonly scheduler = new Scheduler();
+	/** Pauses auto-dispatch while the model subscription is rate-limited (5h/weekly cap). Fed by agents'
+	 *  auto_retry_start usage-limit events; consulted by the dispatcher before it spawns. */
+	private readonly rateLimit = new RateLimitGate();
 	private orchestrator?: Orchestrator;
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
@@ -262,6 +266,7 @@ export class SquadManager extends EventEmitter {
 				maxActive,
 				liveCount: () => occupyingAgents(this.list()), // only starting/working/input occupy a slot — idle/done agents must not pin the cap
 				maxWip: this.scheduler.cap(),
+				paused: () => this.rateLimit.paused(),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
@@ -1212,6 +1217,17 @@ export class SquadManager extends EventEmitter {
 				// The valve gates EVERY autonomous land path, not just the orchestrator tick.
 				void autoLandOnSuccess(this.autoLand && !this.landConfirm, frame.outcome as string | undefined, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
 				break;
+			case "auto_retry_start": {
+				// A usage-limit retry means the model subscription is rate-limited (5h/weekly cap). Note it so the
+				// dispatcher pauses; log once per episode (only on the not-paused → paused transition) to avoid spam
+				// when several agents trip the same cap. delayMs is omp's parsed retry hint (when the cap frees up).
+				const wasPaused = this.rateLimit.paused();
+				if (this.rateLimit.note(frame.errorMessage, frame.delayMs) && !wasPaused) {
+					const mins = Math.ceil((this.rateLimit.until - Date.now()) / 60_000);
+					this.log("warn", `model subscription rate-limited (${rec.dto.name}) — pausing auto-dispatch ~${mins}m: ${this.rateLimit.reason}`);
+				}
+				break;
+			}
 		}
 		rec.dto.receipt = rec.run?.rollup();
 		rec.dto.status = this.derive(rec);

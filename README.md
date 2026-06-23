@@ -206,6 +206,12 @@ starts with nobody typing. Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so
 | `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
 | `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate (on by default; `=0` to disable) |
 
+**Rate-limit pause** — when an agent's model subscription hits a usage cap (the 5-hour / weekly
+limit, a `429`, "too many requests"), the daemon sees omp's `auto_retry_start` and **pauses
+auto-dispatch** rather than spawning agents that would immediately stall on the same cap. The pause
+lifts on its own once the provider's retry hint elapses (you'll see `paused …`/`resumed …` log
+lines). No knob — it tracks the live cap signal.
+
 ### Concurrency & autonomy
 
 The daemon caps concurrent **live** agents (everything not `stopped`/`error`) at a global WIP
