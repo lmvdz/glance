@@ -1,0 +1,297 @@
+/**
+ * Scout — semantic backlog harvester, sibling to the Observer (OMPSQ-52).
+ *
+ * The Observer audits *operational* fleet state with pure checks (red gate, stale
+ * branches, land failures). The Scout reads the *reasoning* of the fleet and files
+ * the latent, file-worthy items an agent surfaced but didn't do: bugs noticed in
+ * passing, deferred follow-ups, tech debt called out, design risks. "A system that
+ * thinks about what it's thinking about."
+ *
+ * Two triggers, both fire-and-forget so they never block an agent:
+ *   - mid-run: a periodic sweep (start(); driven by the liveReasoning dep) scans
+ *     each working agent's NEW reasoning since its last scan, so a ticket can appear
+ *     while the agent is still thinking;
+ *   - run-end: the manager calls scan() from finalizeRun with the final delta.
+ * Both go through the same scan(): one LLM one-shot, deduped against a persisted
+ * seen-set AND the current open issues, capped globally + per-run. scan() is
+ * serialized (one at a time) so the seen-set is race-free across the two triggers.
+ * Tickets are always filed for human triage (do-not-auto-land) — LLM-extracted work
+ * is unvetted, so the dispatcher must never auto-spawn the fleet on it.
+ *
+ * ponytail: the per-agent scan cursor is in-memory; a daemon restart re-scans a
+ * reattached agent's transcript once (the persisted seen-set still prevents dup
+ * tickets — only one redundant LLM call). Upgrade path: persist the cursor if that
+ * call ever matters.
+ */
+
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import * as path from "node:path";
+import type { Classify } from "./intake.ts";
+import { extractJsonObject } from "./omp-call.ts";
+import type { IssueRef, TranscriptEntry } from "./types.ts";
+
+export type ScoutKind = "bug" | "followup" | "tech-debt" | "risk";
+const KINDS: Record<ScoutKind, true> = { bug: true, followup: true, "tech-debt": true, risk: true };
+
+/** One latent backlog item extracted from a chunk of reasoning. */
+export interface ScoutTicket {
+	title: string;
+	detail: string;
+	kind: ScoutKind;
+}
+
+/** Context for one scan — what the run was, so the filed ticket is traceable. */
+export interface ScanContext {
+	agent: string;
+	task?: string;
+	/** Human identifier (or name) of the run's tracking issue, if any. */
+	issue?: string;
+}
+
+/** A reasoning chunk plus its context — what the mid-run sweep yields per live agent. */
+export interface ScanInput extends ScanContext {
+	text: string;
+}
+
+/** External edges, all injected so the harvester runs without a live daemon. */
+export interface ScoutDeps {
+	/** One-shot LLM call (e.g. omp --smol --no-tools -p). Returns raw text. */
+	extract: Classify;
+	/** Open Plane issues for the observed repo (dedup against existing work); `null` ⇒ unreachable. */
+	listIssues: () => Promise<IssueRef[] | null>;
+	/** File a scout ticket → its ref; `null` ⇒ not configured / failed. */
+	fileIssue: (title: string, descriptionHtml: string) => Promise<IssueRef | null>;
+	/** Working agents' UNSCANNED reasoning for the periodic mid-run sweep (the manager owns the cursor).
+	 *  Omit ⇒ run-end harvesting only (no timer is armed). */
+	liveReasoning?: () => ScanInput[];
+	/** Where to persist seen fingerprints (<stateDir>/scout-seen.json). */
+	stateDir: string;
+	/** Clock seam (defaults to Date.now). */
+	now?: () => number;
+	/** Log sink (defaults to no-op). */
+	log?: (msg: string) => void;
+}
+
+/** Marks a scout-filed issue so the cap counts its own OPEN issues; also a human-scannable provenance tag. */
+const SCOUT_TAG = "[scout]";
+/** Embedded in every title so the dispatcher's `noAutoDispatchName` gate skips unvetted scout work. */
+const TRIAGE_MARKER = "do-not-auto-land";
+/** Min new-reasoning chars worth an LLM call — also the trickle-accrual threshold for the cursor. */
+export const MIN_SCAN_CHARS = 200;
+const MAX_TEXT = 8000; // cap LLM input to the most recent chars (conclusions/deferrals live at the end)
+const DEDUP_THRESHOLD = 0.6; // title-token Jaccard above which a candidate is a dup of existing work
+
+const PROMPT_HEAD = `You are a backlog scout reading an AI software engineer's work session.
+Extract ONLY concrete, file-worthy work items the engineer SURFACED but did NOT complete here:
+bugs noticed in passing, deferred follow-ups, tech debt called out, design risks, "out of scope" notes.
+
+Do NOT emit:
+- the session's own assigned task, or anything actually done/finished here;
+- vague musings, questions, restatements, or progress narration;
+- anything without a clear, actionable change.
+
+Be conservative — if nothing qualifies, return {"tickets":[]}.
+Return ONLY JSON, no prose, no code fence:
+{"tickets":[{"title":"imperative, <=90 chars","detail":"1-3 sentences: what & why","kind":"bug|followup|tech-debt|risk"}]}
+`;
+
+/** Build the extraction prompt for one reasoning chunk. */
+export function buildPrompt(task: string | undefined, text: string): string {
+	const t = (task ?? "").trim().slice(0, 300) || "(unspecified)";
+	return `${PROMPT_HEAD}\nSession task: ${t}\nSession reasoning:\n${text.slice(-MAX_TEXT)}`;
+}
+
+/** Parse the model's {"tickets":[...]} payload into validated tickets. Tolerant of fences / stray prose. */
+export function parseTickets(raw: string): ScoutTicket[] {
+	const obj = extractJsonObject(raw);
+	const arr = obj && Array.isArray(obj.tickets) ? obj.tickets : [];
+	const out: ScoutTicket[] = [];
+	for (const item of arr) {
+		if (!item || typeof item !== "object") continue;
+		const r = item as Record<string, unknown>;
+		const title = typeof r.title === "string" ? r.title.trim().slice(0, 90) : "";
+		if (!title) continue;
+		const detail = typeof r.detail === "string" ? r.detail.trim().slice(0, 400) : "";
+		// `=== true` (not `in`): reject proto-chain keys like "toString" from untrusted LLM output.
+		const kind = typeof r.kind === "string" && KINDS[r.kind as ScoutKind] === true ? (r.kind as ScoutKind) : "followup";
+		out.push({ title, detail, kind });
+	}
+	return out;
+}
+
+/** Lowercase alnum token set of a title (tag/marker stripped) — the fuzzy-dedup key. */
+export function titleTokens(s: string): Set<string> {
+	return new Set(
+		s
+			.toLowerCase()
+			.replace(/\[[a-z]+\]/g, " ") // drop [scout]/[observer] tags
+			.replace(/do-?not-?auto-?land|human[ -]?review/g, " ") // drop triage markers
+			.replace(/[^a-z0-9]+/g, " ")
+			.split(/\s+/)
+			.filter((w) => w.length > 1),
+	);
+}
+
+/** Jaccard overlap of two token sets; 0 when either side is empty. */
+export function jaccard(a: Set<string>, b: Set<string>): number {
+	if (a.size === 0 || b.size === 0) return 0;
+	let inter = 0;
+	for (const t of a) if (b.has(t)) inter++;
+	return inter / (a.size + b.size - inter);
+}
+
+/**
+ * New reasoning (assistant+thinking transcript entries) past `cursor` (a ts), plus the cursor to store
+ * next. ts-keyed so it survives the transcript's ring-buffer shifts. Returns text:"" with the cursor
+ * UNCHANGED until ≥ MIN_SCAN_CHARS has accrued, so a slow trickle is never skipped past unscanned.
+ */
+export function unscannedReasoning(transcript: TranscriptEntry[], cursor: number): { text: string; cursor: number } {
+	const fresh = transcript.filter((e) => (e.kind === "assistant" || e.kind === "thinking") && e.ts > cursor);
+	const text = fresh.map((e) => e.text).join("\n");
+	if (text.length < MIN_SCAN_CHARS) return { text: "", cursor };
+	return { text, cursor: fresh[fresh.length - 1].ts };
+}
+
+/** Stable dedup key for a candidate title — sorted normalized tokens (falls back to the raw title). */
+function fingerprint(title: string): string {
+	const toks = [...titleTokens(title)].sort();
+	return toks.length ? toks.join(" ") : title.toLowerCase().trim();
+}
+
+const esc = (s: string): string =>
+	s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+/** Ticket body HTML — provenance first (so triage knows where it came from), then the detail. */
+function buildBody(t: ScoutTicket, ctx: ScanContext): string {
+	const where = ctx.issue ? ` while working <code>${esc(ctx.issue)}</code>` : "";
+	return (
+		`<p><strong>Scout</strong> — surfaced from <code>${esc(ctx.agent)}</code>'s reasoning${where}.</p>` +
+		`<p><strong>Kind:</strong> ${t.kind}</p>` +
+		(t.detail ? `<p>${esc(t.detail)}</p>` : "") +
+		`<p><em>Auto-extracted from agent reasoning — verify before acting.</em></p>`
+	);
+}
+
+interface SeenEntry {
+	title: string;
+	issueId: string;
+	filedAt: number;
+}
+type SeenMap = Record<string, SeenEntry>;
+
+export class Scout {
+	private readonly deps: ScoutDeps;
+	private readonly seenPath: string;
+	/** Filed-ticket fingerprints, persisted so a latent item is never re-filed (even after it's closed — no nagging). */
+	private seen: SeenMap;
+	private timer?: Timer;
+	/** Guards against overlapping mid-run sweeps — a sweep's LLM calls can outlast the interval. */
+	private running = false;
+	/** Serializes scan() bodies so the seen-set check/write is race-free across mid-run + run-end. */
+	private queue: Promise<void> = Promise.resolve();
+
+	constructor(deps: ScoutDeps) {
+		this.deps = deps;
+		this.seenPath = path.join(deps.stateDir, "scout-seen.json");
+		this.seen = this.loadSeen();
+	}
+
+	/** Arm the periodic mid-run sweep. No-op (arms no timer) when disabled or without a liveReasoning dep. */
+	start(intervalMs = 60_000): void {
+		if (this.timer || process.env.OMP_SQUAD_SCOUT === "0" || !this.deps.liveReasoning) return;
+		const log = this.deps.log ?? (() => {});
+		this.timer = setInterval(() => void this.tick().catch((e) => log(`tick error (contained): ${e instanceof Error ? e.message : String(e)}`)), intervalMs);
+		this.timer.unref?.();
+	}
+
+	stop(): void {
+		if (this.timer) {
+			clearInterval(this.timer);
+			this.timer = undefined;
+		}
+	}
+
+	/** One mid-run sweep: scan each live agent's new reasoning. Inert when disabled; never overlaps itself. */
+	async tick(): Promise<void> {
+		if (process.env.OMP_SQUAD_SCOUT === "0" || this.running) return;
+		const live = this.deps.liveReasoning?.() ?? [];
+		if (!live.length) return;
+		this.running = true;
+		try {
+			for (const { text, ...ctx } of live) await this.scan(text, ctx);
+		} finally {
+			this.running = false;
+		}
+	}
+
+	/** Harvest from one reasoning chunk. Serialized (one scan at a time) so concurrent mid-run + run-end
+	 *  triggers can't both file the same item. Never throws — a transport/LLM edge is logged and dropped. */
+	async scan(text: string, ctx: ScanContext): Promise<void> {
+		const next = this.queue.then(() => this.runScan(text, ctx));
+		this.queue = next.catch(() => {}); // keep the chain alive after a failure
+		return next;
+	}
+
+	private async runScan(text: string, ctx: ScanContext): Promise<void> {
+		if (process.env.OMP_SQUAD_SCOUT === "0" || text.length < MIN_SCAN_CHARS) return;
+		const log = this.deps.log ?? (() => {});
+		const clock = this.deps.now ?? Date.now;
+		try {
+			const tickets = parseTickets(await this.deps.extract(buildPrompt(ctx.task, text)));
+			if (!tickets.length) return;
+
+			const open = (await this.deps.listIssues().catch(() => null)) ?? [];
+			const openTokens = open.map((i) => titleTokens(i.name));
+			let openScout = open.filter((i) => i.name.includes(SCOUT_TAG)).length;
+			const max = Number(process.env.OMP_SQUAD_SCOUT_MAX) || 20; // cap on scout-filed OPEN issues
+			const limit = Number(process.env.OMP_SQUAD_SCOUT_PER_RUN) || 3; // cap on tickets from one scan
+			let filed = 0;
+			let changed = false;
+
+			for (const t of tickets) {
+				if (filed >= limit) break;
+				if (openScout >= max) {
+					log(`cap reached (${max} open) — skipping "${t.title}"`);
+					break;
+				}
+				const fp = fingerprint(t.title);
+				if (this.seen[fp]) continue; // already filed once — never re-file (even if since closed)
+				const cand = titleTokens(t.title);
+				if (openTokens.some((ot) => jaccard(cand, ot) >= DEDUP_THRESHOLD)) continue; // dup of existing open work
+
+				const title = `${SCOUT_TAG} ${TRIAGE_MARKER}: ${t.title}`;
+				const ref = await this.deps.fileIssue(title, buildBody(t, ctx)).catch(() => null);
+				if (!ref) {
+					log(`file failed for "${t.title}"`);
+					continue; // transient — a later scan re-harvests it
+				}
+				openScout++;
+				filed++;
+				changed = true;
+				this.seen[fp] = { title: t.title, issueId: ref.id, filedAt: clock() };
+				log(`filed ${t.kind} ${ref.identifier ?? ref.id}: ${t.title}`);
+			}
+			if (changed) this.saveSeen();
+		} catch (e) {
+			log(`scan error (contained): ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	private loadSeen(): SeenMap {
+		try {
+			if (!existsSync(this.seenPath)) return {};
+			const raw = JSON.parse(readFileSync(this.seenPath, "utf8")) as unknown;
+			return raw && typeof raw === "object" ? (raw as SeenMap) : {};
+		} catch {
+			return {}; // corrupt/unreadable ⇒ start fresh (worst case: one redundant re-file)
+		}
+	}
+
+	private saveSeen(): void {
+		try {
+			writeFileSync(this.seenPath, JSON.stringify(this.seen));
+		} catch (e) {
+			(this.deps.log ?? (() => {}))(`persist failed: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+}

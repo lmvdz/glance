@@ -212,13 +212,15 @@ export async function startPlaneIssue(issue: IssueRef): Promise<boolean> {
 	return transitionTo(issue, "started");
 }
 
-/** Create an issue in the Plane project mapped to `repo`, returning its ref. `null` ⇒ not configured / no project / failed. */
-export async function createPlaneIssue(repo: string, name: string): Promise<IssueRef | null> {
+/** Create an issue in the Plane project mapped to `repo`, returning its ref. Optional `descriptionHtml`
+ *  becomes the issue body. `null` ⇒ not configured / no project / failed. */
+export async function createPlaneIssue(repo: string, name: string, descriptionHtml?: string): Promise<IssueRef | null> {
 	const ctx = planeContext(repo);
 	if (!ctx) return null;
 	const { cfg, headers, projectId, base } = ctx;
 	if (!projectId) return null;
-	const res = await throttledFetch(`${base}/issues/`, { method: "POST", headers, body: JSON.stringify({ name }) });
+	const body = JSON.stringify(descriptionHtml ? { name, description_html: descriptionHtml } : { name });
+	const res = await throttledFetch(`${base}/issues/`, { method: "POST", headers, body });
 	if (!res || !res.ok) return null;
 	issueListCache.clear(); // a new issue changes the open set
 	const raw = (await res.json().catch(() => null)) as PlaneIssue | null;

@@ -285,6 +285,26 @@ Findings default to **needs-triage**: filed with a do-not-auto-land marker so th
 `noAutoDispatch` gate skips them — the observer never auto-dispatches its own findings to the yolo
 fleet unsupervised unless you opt in.
 
+**Reasoning harvester (Scout, on by default)** — the Observer's semantic sibling. Where the Observer
+audits *operational* state with pure checks, the Scout reads the *reasoning* of the fleet and files
+the latent, file-worthy items an agent surfaced but didn't do: bugs noticed in passing, deferred
+follow-ups, tech debt called out, design risks, "out of scope" notes. It's the system thinking about
+what it's thinking about — nothing an agent flags mid-task gets lost. Two triggers, both fire-and-forget
+so they never block an agent: a **mid-run** periodic sweep scans each working agent's new reasoning
+(per-agent transcript cursor, so a ticket can appear *while* it's still thinking), and **run-end** from
+`finalizeRun` scans the final delta. Each candidate is deduped against a persisted seen-set
+(`<stateDir>/scout-seen.json`, never re-filed even after it's closed) **and** the current open issues
+(title-token Jaccard ≥ 0.6, so it won't duplicate human/observer work), then filed as a
+`[scout] do-not-auto-land: …` Plane issue with a provenance body (which agent, which run-issue, the
+detail). scan() is serialized so the two triggers can't race-file the same item. Scout tickets are
+**always** needs-triage — LLM-extracted work is unvetted, so the dispatcher never auto-spawns the fleet on it.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_SCOUT` | Reasoning harvester — **on** when Plane is configured (`=0` to disable; then no sweep timer is armed) |
+| `OMP_SQUAD_SCOUT_MAX` | Hard cap on scout-filed *open* issues (default `20`); past it, log + skip |
+| `OMP_SQUAD_SCOUT_PER_RUN` | Cap on tickets filed from a single scan (default `3`) so a verbose run can't flood |
+
 **Auto-removing done agents (freeing room for the next ticket).** A completed agent lands its branch,
 `OMP_SQUAD_AUTOCLOSE` closes its Plane issue, and its host exits → it lingers in the roster as a
 landed survivor (`ahead=0`, issue Done, status idle **or** stopped). Set `OMP_SQUAD_OBSERVE_AUTOFIX=1`

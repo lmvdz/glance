@@ -32,6 +32,7 @@ import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.
 import { Dispatcher } from "./dispatch.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
+import { Scout, unscannedReasoning } from "./scout.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
@@ -223,6 +224,10 @@ export class SquadManager extends EventEmitter {
 	private readonly rateLimit = new RateLimitGate();
 	private orchestrator?: Orchestrator;
 	private observer?: Observer;
+	/** Scout (sibling to the Observer) — semantic backlog harvester over agent reasoning. */
+	private scout?: Scout;
+	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning. */
+	private readonly scoutCursor = new Map<string, number>();
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -328,6 +333,27 @@ export class SquadManager extends EventEmitter {
 			this.observer.start();
 			this.log("info", `observer on (auditing ${repo})`);
 		}
+
+		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
+		// reasoning and files the latent items they surfaced but didn't do. Mid-run via the periodic sweep
+		// (liveReasoning) + run-end via finalizeRun. On when Plane is configured; OMP_SQUAD_SCOUT=0 to disable.
+		if (process.env.OMP_SQUAD_SCOUT !== "0" && observeRepos.length > 0) {
+			const repo = observeRepos[0];
+			this.scout = new Scout({
+				extract: ompClassify(this.bin),
+				listIssues: () => listPlaneIssues(repo),
+				fileIssue: (title, body) => createPlaneIssue(repo, title, body),
+				liveReasoning: () =>
+					[...this.agents.values()]
+						.filter((r) => r.dto.status === "working")
+						.map((r) => ({ agent: r.dto.name, task: r.options.task, issue: r.dto.issue?.identifier ?? r.dto.issue?.name, text: this.takeScoutReasoning(r) }))
+						.filter((s) => s.text.length > 0),
+				stateDir: this.stateDir,
+				log: (m) => this.log("info", `scout: ${m}`),
+			});
+			this.scout.start();
+			this.log("info", `scout on (harvesting reasoning → ${repo})`);
+		}
 	}
 
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
@@ -341,6 +367,7 @@ export class SquadManager extends EventEmitter {
 		this.dispatcher?.stop();
 		this.orchestrator?.stop();
 		this.observer?.stop();
+		this.scout?.stop();
 		await this.persist();
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
@@ -1239,6 +1266,7 @@ export class SquadManager extends EventEmitter {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});
 		}
 		this.agents.delete(id);
+		this.scoutCursor.delete(id);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
 	}
@@ -1383,9 +1411,29 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			this.log("warn", `digest failed for ${rec.dto.name}: ${err}`);
 		}
+		// Scout: harvest latent backlog items from this run's final reasoning delta. Fire-and-forget +
+		// best-effort — must never block or break run completion (scan() also catches internally).
+		if (this.scout) {
+			const reasoning = this.takeScoutReasoning(rec);
+			if (reasoning)
+				void this.scout
+					.scan(reasoning, { agent: rec.dto.name, task: rec.options.task, issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name })
+					.catch((err) => this.log("warn", `scout scan failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
+		}
 		rec.dto.receipt = run.rollup();
 		rec.run = undefined;
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * Reasoning (assistant+thinking) an agent has produced since its last scout scan; advances the
+	 * per-agent cursor so each chunk is scanned at most once. Returns "" until ≥ MIN_SCAN_CHARS of new
+	 * reasoning has accrued (the cursor stays put), so a slow trickle is never skipped past unscanned.
+	 */
+	private takeScoutReasoning(rec: AgentRecord): string {
+		const { text, cursor } = unscannedReasoning(rec.transcript, this.scoutCursor.get(rec.dto.id) ?? 0);
+		if (text) this.scoutCursor.set(rec.dto.id, cursor);
+		return text;
 	}
 
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
