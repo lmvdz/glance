@@ -114,6 +114,37 @@ function renderEntry(e: TranscriptEntry, width: number): string {
 	return `${c(colorByKind[e.kind] ?? "dim", who)} ${truncateToWidth(e.text.replace(/\n/g, " "), Math.max(1, width - 10))}`;
 }
 
+// ── Stat-header formatting (mirrors the web dashboard's read-outs by value) ───
+function fmtDur(ms: number): string {
+	const s = ms / 1000;
+	return s < 60 ? `${s.toFixed(1)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+}
+function fmtCost(n: number): string {
+	return `$${n.toFixed(4)}`;
+}
+function fmtTokens(n: number): string {
+	return n < 1000 ? `${n}` : n < 1e6 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1e6).toFixed(1)}M`;
+}
+/** Context-usage colour: red near compaction, yellow when filling, dim otherwise. Matches the web. */
+function ctxColor(p: number): string {
+	return p > 0.9 ? "red" : p > 0.7 ? "yellow" : "dim";
+}
+
+/** Rich agent-view stat header: branch · model · ctx% · cost · tokens · tool-calls · duration. */
+function statHeader(sel: AgentDTO, now: number): string {
+	const r = sel.receipt;
+	const durMs = r?.durationMs ?? (sel.startedAt ? now - sel.startedAt : undefined);
+	const parts: string[] = [];
+	if (sel.branch) parts.push(c("dim", `⎇ ${sel.branch}`));
+	if (sel.model) parts.push(c("dim", sel.model));
+	if (sel.contextPct != null) parts.push(c(ctxColor(sel.contextPct), `ctx ${Math.round(sel.contextPct * 100)}%`));
+	if (r?.costUsd != null) parts.push(c("dim", fmtCost(r.costUsd)));
+	if (r?.tokens != null) parts.push(c("dim", `${fmtTokens(r.tokens)} tok`));
+	if (r) parts.push(c("dim", `🔧 ${r.toolCalls}`));
+	if (durMs != null) parts.push(c("dim", fmtDur(durMs)));
+	return parts.join(c("gray", " · "));
+}
+
 /** Pure renderer: produce exactly `height` width-safe lines for the current state. */
 export function buildBoard(state: BoardState): string[] {
 	const { width, height, view } = state;
@@ -160,8 +191,10 @@ export function buildBoard(state: BoardState): string[] {
 			lines.push(pad(c("dim", "← back · Ctrl-C quit"), width));
 			lines.push(composerLine("", state.draft, width));
 		} else {
-			const head = `${c("bold", sel.name)} ${c(STATUS_COLOR[sel.status], `[${sel.status}]`)} ${c("dim", sel.model ?? "")}  ${c("dim", sel.worktree)}`;
+			const issue = sel.issue ? c("dim", ` · ${sel.issue.identifier ?? ""} ${sel.issue.name}`) : "";
+			const head = `${c("bold", sel.name)} ${c(STATUS_COLOR[sel.status], `[${sel.status}]`)}${issue}`;
 			lines.push(pad(head, width));
+			lines.push(pad(statHeader(sel, state.now), width));
 			const transcriptRows = Math.max(1, height - lines.length - sel.pending.length - 2);
 			const end = Math.max(0, state.transcript.length - state.scroll);
 			const start = Math.max(0, end - transcriptRows);

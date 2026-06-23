@@ -144,7 +144,7 @@ controls do everything the CLI does.
 Two levels, arrow-driven (like `claude agents`):
 
 - **Dashboard (list):** `↑/↓` move between agents · `→` (or `Enter`) open the selected agent · **type a task + `Enter` to spawn a new agent** in the launch directory.
-- **Agent (session):** type + `Enter` to steer it (or answer a pending request) · `←` on an empty prompt returns to the dashboard · `↑/↓` scroll the transcript · `/stop` `/restart` `/kill` as slash-commands.
+- **Agent (session):** a rich stat header tops the view — branch · model · context% · cost · tokens · tool-calls · duration (matching the omp TUI, live for an in-flight run) — then type + `Enter` to steer it (or answer a pending request) · `←` on an empty prompt returns to the dashboard · `↑/↓` scroll the transcript · `/stop` `/restart` `/kill` as slash-commands.
 - `Ctrl-C` quits anywhere; `Esc` backs out (agent → list → quit).
 
 New agents spawn in a git worktree when the directory is a repo, otherwise they run in place.

@@ -114,7 +114,7 @@ export class RunAccumulator {
 
 	/** Compact summary for the DTO. */
 	rollup(): ReceiptRollup {
-		return { toolCalls: this.toolCalls, costUsd: this.costUsd, durationMs: this.durationMs, endedAt: this.endedAt };
+		return { toolCalls: this.toolCalls, costUsd: this.costUsd, durationMs: this.durationMs, endedAt: this.endedAt, tokens: this.tokens?.total };
 	}
 }
 

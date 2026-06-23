@@ -241,6 +241,8 @@ export interface ReceiptRollup {
 	costUsd?: number;
 	durationMs?: number;
 	endedAt?: number;
+	/** Total tokens across the run (sum of input/output/cache); absent when no usage seen. */
+	tokens?: number;
 }
 
 export type ApprovalMode = "always-ask" | "write" | "yolo";

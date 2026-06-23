@@ -156,6 +156,37 @@ test("agent view shows transcript, pending detail, and the draft", () => {
 	expect(plain).toContain("← back");
 });
 
+test("agent view renders the rich stat header: branch · model · ctx% · cost · tokens · tools · duration", () => {
+	const sel = dto({
+		id: "s",
+		name: "stat",
+		status: "working",
+		branch: "squad/stat",
+		model: "opus-4",
+		contextPct: 0.42,
+		receipt: { toolCalls: 47, costUsd: 0.1234, durationMs: 90000, tokens: 12345 },
+	});
+	const plain = buildBoard(board({ view: "agent", selectedId: "s", agents: [sel] }))
+		.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""))
+		.join("\n");
+	expect(plain).toContain("⎇ squad/stat");
+	expect(plain).toContain("opus-4");
+	expect(plain).toContain("ctx 42%");
+	expect(plain).toContain("$0.1234");
+	expect(plain).toContain("12.3k tok");
+	expect(plain).toContain("🔧 47");
+	expect(plain).toContain("2m"); // 90s duration rounds to 2m
+});
+
+test("agent view computes a live duration from startedAt when the run is still in flight", () => {
+	const now = 1_000_000;
+	const sel = dto({ id: "s", name: "stat", status: "working", startedAt: now - 5000, receipt: { toolCalls: 3 } });
+	const plain = buildBoard(board({ view: "agent", selectedId: "s", agents: [sel], now }))
+		.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""))
+		.join("\n");
+	expect(plain).toContain("5.0s");
+});
+
 test("buildBoard nests fan-out branches under their workflow parent, with a kind glyph", () => {
 	const lines = buildBoard(
 		board({
