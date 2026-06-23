@@ -1,0 +1,5 @@
+# Scope the root test runner to tests/ so `bun test` does not descend into
+# webapp/ (a separate Vite+React package with its own vitest suite, run via
+# `cd webapp && bun run test`).
+[test]
+root = "tests"

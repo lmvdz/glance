@@ -34,12 +34,13 @@ async function run(args: string[]): Promise<number> {
 	return code;
 }
 
-// Idempotent prereq: cold checkouts have no webapp/node_modules.
-// ponytail: one-time install; ceiling = slow first run, upgrade path = CI caches webapp/node_modules.
+// Always install — never a presence-only check. The land gate runs in the MAIN checkout, whose
+// webapp/node_modules already exists from an earlier branch; a branch that ADDS deps to
+// webapp/package.json would then be typechecked/built against stale modules and fail the gate (this
+// is exactly what blocked every dep-adding CC-rewrite branch from landing). `bun install` is a fast
+// no-op when the lockfile is already satisfied, so running it unconditionally is cheap + correct.
 test("webapp deps installed", async () => {
-	if (!existsSync(path.join(WEBAPP, "node_modules"))) {
-		expect(await run(["install"])).toBe(0);
-	}
+	expect(await run(["install"])).toBe(0);
 }, 320_000);
 
 test("webapp typechecks", async () => {
