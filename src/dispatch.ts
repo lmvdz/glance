@@ -29,6 +29,9 @@ export interface DispatchDeps {
 	liveCount?: () => number;
 	/** Global live-agent WIP cap (OMP_SQUAD_MAX_WIP). When set, dispatch never pushes live agents past it. */
 	maxWip?: number;
+	/** True while the model subscription is rate-limited (5h/weekly cap). When set, a tick spawns nothing —
+	 *  spawning here would only launch agents that immediately stall on the same cap. Self-clears on cooldown. */
+	paused?: () => boolean;
 }
 
 export class Dispatcher {
@@ -42,6 +45,8 @@ export class Dispatcher {
 	private readonly skipLogged = new Set<string>();
 	private timer?: Timer;
 	private running = false;
+	/** True while a rate-limit pause is in effect — so the pause/resume is logged once per episode, not per tick. */
+	private pauseLogged = false;
 
 	constructor(deps: DispatchDeps) {
 		this.deps = deps;
@@ -51,6 +56,19 @@ export class Dispatcher {
 	/** One poll: spawn routed agents for new open issues, bounded by `maxActive`. Returns the number spawned. */
 	async tick(): Promise<number> {
 		if (this.running) return 0; // never overlap polls
+		// Model subscription rate-limited (5h/weekly cap): spawning now only launches agents that immediately
+		// stall on the same cap. Skip the whole poll until the cooldown lifts; issues stay open for a later tick.
+		if (this.deps.paused?.()) {
+			if (!this.pauseLogged) {
+				this.pauseLogged = true;
+				this.deps.log("paused — model subscription rate-limited (5h/weekly cap); not spawning until it clears");
+			}
+			return 0;
+		}
+		if (this.pauseLogged) {
+			this.pauseLogged = false;
+			this.deps.log("resumed — model subscription rate-limit cleared");
+		}
 		this.running = true;
 		let spawned = 0;
 		try {
