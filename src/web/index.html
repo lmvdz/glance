@@ -1265,6 +1265,50 @@ function renderRace(body) {
   for (const el of box.querySelectorAll("[data-aid]")) clickable(el, () => openAgent(el.dataset.aid), `open ${agents.get(el.dataset.aid)?.name || "agent"}`);
 }
 
+// ── Audit log ─────────────────────────────────────────────────────────────
+// Append-only fleet-action trail (actor/action/target/outcome) from /api/audit.
+// Live: an "audit" WS event prepends a row so an open view stays current with no poll.
+let auditEntries = [];     // newest-first, as the server returns them
+let auditLoaded = false;   // first /api/audit response landed — tells "loading" from "empty"
+let auditError = "";       // last /api/audit failure, surfaced when the list would be blank
+let auditAction = "";      // active action filter ("" = all)
+const AUDIT_ACTIONS = ["create","prompt","answer","interrupt","kill","restart","remove","commission","land"];
+function openAudit() { view = "audit"; selAgent = null; renderAll(); loadAudit(); }
+async function loadAudit() {
+  try {
+    const q = "limit=200" + (auditAction ? "&action=" + encodeURIComponent(auditAction) : "");
+    const r = await fetch("/api/audit?" + q);
+    if (r.ok) { auditEntries = await r.json(); auditError = ""; }
+    else auditError = `couldn't load audit log (${r.status})`;
+  } catch { auditError = "couldn't reach the daemon for the audit log"; }
+  auditLoaded = true;
+  if (view === "audit") renderBody();
+}
+function auditRow(e) {
+  const oc = e.outcome === "error" ? `<span class="pill bad">error</span>` : `<span class="pill ok">ok</span>`;
+  const tgt = e.target ? `<span class="nm">${esc(e.target)}</span>` : `<span style="color:var(--dim)">—</span>`;
+  const det = e.detail ? `<div class="sub" style="grid-column:1/-1;color:var(--dim);white-space:pre-wrap;word-break:break-word">${esc(e.detail)}</div>` : "";
+  return `<div class="auditrow"><span class="badge b-stage">${esc(e.action)}</span>${tgt}<span style="color:var(--dim)">${esc(e.actor)}</span>${oc}<span class="agotime" data-ts="${e.at}" title="${esc(new Date(e.at).toLocaleString())}">${ago(e.at)} ago</span>${det}</div>`;
+}
+function renderAudit(body) {
+  const opts = `<option value="">all actions</option>` + AUDIT_ACTIONS.map(a => `<option value="${a}"${a===auditAction?" selected":""}>${a}</option>`).join("");
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Audit log</h2><div class="sub">${auditEntries.length} recent fleet action${auditEntries.length===1?"":"s"} · who did what, to which agent, and how it turned out</div></div>
+      <div style="display:flex;gap:6px;align-items:center"><select id="auditFilter" class="sm" aria-label="Filter by action">${opts}</select><button id="auditRefresh" class="navbtn" title="Refresh">↻</button><button id="auditHome" class="navbtn" title="Back">← Back</button></div></div>
+    <div class="section"><div class="inner" id="auditlist" style="display:flex;flex-direction:column;gap:6px"></div></div></div>`;
+  $("#auditHome").onclick = () => { view = "project"; renderAll(); };
+  $("#auditRefresh").onclick = () => loadAudit();
+  $("#auditFilter").onchange = (ev) => { auditAction = ev.target.value; loadAudit(); };
+  const box = $("#auditlist");
+  if (!auditEntries.length) {
+    if (!auditLoaded && !auditError) { box.innerHTML = skel(6, "skelcard"); return; }
+    if (auditError) { box.innerHTML = `<div class="nodetail">${esc(auditError)}</div>`; return; }
+    box.innerHTML = estate("📜", auditAction ? `No "${auditAction}" actions yet` : "No actions recorded yet", "Spawn, prompt, answer, or land an agent and it shows up here.", "");
+    return;
+  }
+  box.innerHTML = auditEntries.map(auditRow).join("");
+}
+
 // ── Feature board ─────────────────────────────────────────────────────────
 const FSTAGES = ["planned", "issues-created", "in-progress", "review", "diverged", "landed", "done"];
 const FSTAGE_LABEL = { "planned": "Planned", "issues-created": "Issues filed", "in-progress": "In progress", "review": "Review · needs land", "diverged": "Diverged", "landed": "Landed", "done": "Done" };
