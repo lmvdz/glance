@@ -301,6 +301,9 @@ async function cmdUp(args: string[]): Promise<void> {
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
 	// pending agent prompts hands-free — both started by the daemon so they live and die with it.
+	// The external supervisor is a single global WS client that authenticates with the file-mode
+	// bearer token; DB mode's WS requires a per-org session, so it runs in FILE MODE ONLY. DB-mode
+	// auto-supervision is the per-org, in-process maybeAutoSupervise inside each manager (lifecycle 05).
 	const stopTracker = startExternalSessionTracker();
 	// risk #7: the external supervisor authenticates with the file-mode bearer token; DB mode has none, so file-mode only.
 	const supervise = !dbHandle && process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;

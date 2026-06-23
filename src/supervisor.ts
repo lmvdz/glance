@@ -16,6 +16,12 @@
  * The pure decision helpers (chooseFallback / parseDecision / formatRequestPrompt)
  * are side-effect-free and are what the test suite targets; `decide` and
  * `startSupervisor` add the omp spawn + the live socket around them.
+ *
+ * FILE MODE ONLY: this is a single global WS client that authenticates with the
+ * file-mode bearer token (readToken + the `ompsq-token` subprotocol). DB mode's
+ * WS requires a per-org session, so index.ts gates `startSupervisor` on `!dbHandle`;
+ * DB-mode auto-supervision is the per-org, in-process `maybeAutoSupervise` inside
+ * each SquadManager (no external WS client). See plans/mt-isolation/05-lifecycle.md.
  */
 
 import { readFileSync } from "node:fs";

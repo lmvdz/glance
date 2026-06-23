@@ -310,6 +310,10 @@ mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-a
   plus Appearance / Notifications / Daemon, which also show in file mode.
 - **Storage.** `postgres(ql)://…` ⇒ Postgres (with row-level-security backstops); anything else
   (`sqlite:<path>` or a bare path) ⇒ SQLite. Auth + app tables migrate on boot.
+- **Auto-supervisor is file mode only.** The external auto-supervisor (answers blocked agents
+  hands-free) is a single global WS client that authenticates with the file-mode bearer token, so
+  it does not start in DB mode (whose WS requires a per-org session). DB-mode auto-supervision is
+  the per-org, in-process answerer inside each org's manager.
 
 | Env | Meaning | Default |
 |---|---|---|
