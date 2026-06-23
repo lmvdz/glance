@@ -200,6 +200,10 @@ parallel.
 - Gate: `bun run check` (types) + the full `bun test` suite green.
 
 ## Plane tracking
-- Project: omp-squad (`OMPSQ`) · Issue: **OMPSQ-37** (P2 per-org runtime isolation)
-- Module: Multi-tenant SaaS (same module as P0/P1/P3). Concern→issue links filled in by
-  /plan-to-plane.
+- Project: omp-squad (`OMPSQ`) · Umbrella: **OMPSQ-37** (P2 per-org runtime isolation) — ✅ done
+- Module: Multi-tenant SaaS (with P0/P1/P1-hardening/P3). Concern → issue:
+  - 01 ManagerRegistry → OMPSQ-43 ✅ · 02 state roots → OMPSQ-44 ✅ · 04 Store seam → OMPSQ-45 ✅
+  - 03 routing + per-org WS → OMPSQ-46 ✅ · 05 lifecycle → OMPSQ-48 ✅ · 06 security → OMPSQ-47 ✅
+- P3 RBAC enforcement → OMPSQ-36 ✅ (src/authz.ts role↔action map). P1 hardening → OMPSQ-42 ✅.
+- Landed across: 01/02/04/05 by the autonomous fleet (ompsq-37 lands) + tests/land-audit (2a131fe);
+  03b/06 integration (b8a48c8); P3 authz (cf8a726). Gate: `bun run check` + `bun test` → 417 pass / 0 fail.
