@@ -246,15 +246,17 @@ export class Observer {
 
 			for (const f of findings) {
 				reproduced.add(f.fingerprint);
-				if (this.seen[f.fingerprint]) continue; // dedup — already filed; never re-file
-
-				// Autofix path (safe edges only): repair directly, don't file. Next tick the gap is gone ⇒ it
-				// drops out of `reproduced` and clears itself, so we don't persist the fingerprint here.
+				// Autofix path (safe edges only): repair directly. Checked BEFORE the dedup so a finding
+				// already FILED (e.g. filed while autofix was off, then enabled) still gets actioned — the
+				// reap is what matters; the stale filed issue clears when the gap stops reproducing. The
+				// fingerprint is NOT persisted: an autofixed gap self-clears next tick.
 				if (f.autoFixable && f.fix && autoFix()) {
 					await f.fix().catch((e) => log(`autofix failed for ${f.fingerprint}: ${msg(e)}`));
 					log(`autofixed ${f.fingerprint}: ${f.title}`);
 					continue;
 				}
+
+				if (this.seen[f.fingerprint]) continue; // dedup — already filed; never re-file
 
 				if (openObserverCount >= max) {
 					// Cap reached: log + skip, and do NOT mark reproduced/persist — so it's retried once a slot frees.

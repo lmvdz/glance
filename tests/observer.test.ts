@@ -8,7 +8,7 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Observer, type ObserverDeps, landFailureFindings } from "../src/observer.ts";
@@ -219,6 +219,25 @@ test("(e) findings default to needs-triage (do-not-auto-land marker); autodispat
 	await new Observer(h3.deps).tick();
 	expect(h3.filed[0]).toContain("reconcile Done-but-unlanded OMPSQ-9");
 	expect(h3.filed[0]).toContain("do-not-auto-land");
+});
+
+test("autofix actions a survivor even if it was already FILED while autofix was off (reorder before dedup)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_AUTOFIX = "1";
+	const dir = tmpDir();
+	// Pre-seed seen.json as if the survivor was filed by an earlier run (autofix off then).
+	writeFileSync(path.join(dir, "observer-seen.json"), JSON.stringify({ "survivor:agz": { title: "reap landed survivor agz", issueId: "i-old", filedAt: 1 } }));
+	const done = { id: "done-9", name: "shipped", identifier: "OMPSQ-99" } satisfies IssueRef;
+	const removed: string[] = [];
+	const { deps, filed } = makeDeps(dir, {
+		listAgents: () => [agent("agz", "stopped", done)],
+		listIssues: async () => [],
+		gitAheadOfMain: () => 0,
+		removeAgent: async (id) => { removed.push(id); },
+	});
+	await new Observer(deps).tick();
+	expect(removed).toEqual(["agz"]); // reaped despite the prior filing
+	expect(filed).toEqual([]); // actioned, not re-filed
 });
 
 test("cap: observer-filed OPEN issues past OMP_SQUAD_OBSERVE_MAX are logged + skipped, not filed", async () => {
