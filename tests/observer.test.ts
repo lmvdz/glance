@@ -1,0 +1,243 @@
+/**
+ * Observer — fleet self-audit loop (OMPSQ-52). Every edge runs through fake deps, no live daemon.
+ *
+ * Covers the acceptance contract: (a) start() arms no timer when OMP_SQUAD_OBSERVE=0; (b) a seeded gap
+ * files exactly one finding; (c) the same gap next tick (and on a fresh Observer over the same stateDir)
+ * is NOT re-filed — dedup persists; (d) a resolved gap clears its fingerprint; (e) findings default to
+ * needs-triage (do-not-auto-land marker, never auto-dispatch). Plus the cap, autofix, and autodispatch seams.
+ */
+
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Observer, type ObserverDeps } from "../src/observer.ts";
+import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
+
+const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX"] as const;
+const saved: Record<string, string | undefined> = {};
+for (const k of ENV_KEYS) saved[k] = process.env[k];
+afterEach(() => {
+	for (const k of ENV_KEYS) {
+		if (saved[k] === undefined) delete process.env[k];
+		else process.env[k] = saved[k];
+	}
+});
+
+const tmpDir = (): string => mkdtempSync(path.join(os.tmpdir(), "observer-"));
+
+const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squad/x"): AgentDTO => ({
+	id,
+	name: id,
+	status,
+	kind: "omp-operator",
+	repo: "/r",
+	worktree: "/w",
+	branch,
+	approvalMode: "write",
+	pending: [],
+	lastActivity: 0,
+	messageCount: 0,
+	issue,
+});
+
+interface Harness {
+	deps: ObserverDeps;
+	filed: string[];
+}
+function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
+	const filed: string[] = [];
+	let seq = 0;
+	const deps: ObserverDeps = {
+		listAgents: () => [],
+		listIssues: async () => [],
+		fileIssue: async (title) => {
+			filed.push(title);
+			return { id: `i-${++seq}`, name: title, identifier: `OMPSQ-${seq}` };
+		},
+		removeAgent: async () => {},
+		runGate: async () => ({ ok: true }),
+		gitAheadOfMain: () => 0,
+		untrackedInMain: () => [],
+		filesOnAgentBranch: () => [],
+		stateDir,
+		now: () => 1,
+		log: () => {},
+		...over,
+	};
+	return { deps, filed };
+}
+
+test("(a) start() arms no timer when OMP_SQUAD_OBSERVE=0; arms one when enabled", () => {
+	const real = globalThis.setInterval;
+	let armed = 0;
+	// @ts-expect-error — spy stand-in for the timer factory.
+	globalThis.setInterval = () => {
+		armed++;
+		return { unref() {} } as unknown as Timer;
+	};
+	try {
+		process.env.OMP_SQUAD_OBSERVE = "0";
+		new Observer(makeDeps(tmpDir()).deps).start();
+		expect(armed).toBe(0); // disabled ⇒ no timer leaked
+
+		process.env.OMP_SQUAD_OBSERVE = "1";
+		new Observer(makeDeps(tmpDir()).deps).start();
+		expect(armed).toBe(1);
+	} finally {
+		globalThis.setInterval = real;
+	}
+});
+
+test("(a) tick is inert when OMP_SQUAD_OBSERVE=0 (gate precedes every dep)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "0";
+	let touched = false;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		listIssues: async () => {
+			touched = true;
+			return [];
+		},
+		runGate: async () => {
+			touched = true;
+			return { ok: true };
+		},
+	});
+	await new Observer(deps).tick();
+	expect(touched).toBe(false);
+	expect(filed).toEqual([]);
+});
+
+test("(b) a red gate files exactly one regression finding", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const { deps, filed } = makeDeps(tmpDir(), { runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }) });
+	await new Observer(deps).tick();
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("regression: auth.test.ts > login");
+});
+
+test("(b) an idle ahead=0 agent whose issue is Done files exactly one reap finding", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const done = { id: "done-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("ag1", "idle", done)],
+		listIssues: async () => [], // done issue absent from the open set ⇒ Done
+		gitAheadOfMain: () => 0,
+	});
+	await new Observer(deps).tick();
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("reap landed survivor ag1");
+
+	// An idle agent whose issue is STILL OPEN is not a survivor — no finding.
+	const open = { id: "open-1", name: "wip", identifier: "OMPSQ-50" } satisfies IssueRef;
+	const h2 = makeDeps(tmpDir(), { listAgents: () => [agent("ag2", "idle", open)], listIssues: async () => [open] });
+	await new Observer(h2.deps).tick();
+	expect(h2.filed).toEqual([]);
+});
+
+test("(c) the same gap next tick is NOT re-filed — dedup persists in-process and across a restart", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const dir = tmpDir();
+	const { deps, filed } = makeDeps(dir, { runGate: async () => ({ ok: false, firstFailure: "x.test.ts" }) });
+	const obs = new Observer(deps);
+	await obs.tick();
+	await obs.tick();
+	expect(filed.length).toBe(1); // second tick reproduces the same fingerprint ⇒ skipped
+
+	// A fresh Observer over the same stateDir loads the persisted fingerprint ⇒ still no re-file.
+	const { deps: deps2, filed: filed2 } = makeDeps(dir, { runGate: async () => ({ ok: false, firstFailure: "x.test.ts" }) });
+	await new Observer(deps2).tick();
+	expect(filed2).toEqual([]);
+});
+
+test("(d) a resolved gap clears its fingerprint, so it would re-file if it recurs", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const dir = tmpDir();
+	let red = true;
+	const logs: string[] = [];
+	const { deps, filed } = makeDeps(dir, { runGate: async () => (red ? { ok: false, firstFailure: "y.test.ts" } : { ok: true }), log: (m) => logs.push(m) });
+	const obs = new Observer(deps);
+	await obs.tick(); // red ⇒ filed
+	expect(filed.length).toBe(1);
+
+	red = false;
+	await obs.tick(); // green ⇒ no longer reproduces ⇒ resolved + cleared
+	expect(logs.some((l) => l.startsWith("resolved regression:y.test.ts"))).toBe(true);
+
+	red = true;
+	await obs.tick(); // recurs ⇒ fingerprint was cleared ⇒ re-files
+	expect(filed.length).toBe(2);
+});
+
+test("(e) findings default to needs-triage (do-not-auto-land marker); autodispatch drops the marker for plain findings", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	// Default: a plain high-severity regression is filed needs-triage (marker present).
+	const h1 = makeDeps(tmpDir(), { runGate: async () => ({ ok: false, firstFailure: "z.test.ts" }) });
+	await new Observer(h1.deps).tick();
+	expect(h1.filed[0]).toContain("do-not-auto-land");
+
+	// Opt-in autodispatch: the same plain finding files WITHOUT the marker (dispatcher will consume it).
+	process.env.OMP_SQUAD_OBSERVE_AUTODISPATCH = "1";
+	const h2 = makeDeps(tmpDir(), { runGate: async () => ({ ok: false, firstFailure: "z.test.ts" }) });
+	await new Observer(h2.deps).tick();
+	expect(h2.filed[0]).not.toContain("do-not-auto-land");
+
+	// Structural findings ALWAYS keep the marker, even under autodispatch.
+	const done = { id: "d", name: "n", identifier: "OMPSQ-9" } satisfies IssueRef;
+	const h3 = makeDeps(tmpDir(), { listAgents: () => [agent("a", "working", done)], listIssues: async () => [], gitAheadOfMain: () => 3 });
+	await new Observer(h3.deps).tick();
+	expect(h3.filed[0]).toContain("reconcile Done-but-unlanded OMPSQ-9");
+	expect(h3.filed[0]).toContain("do-not-auto-land");
+});
+
+test("cap: observer-filed OPEN issues past OMP_SQUAD_OBSERVE_MAX are logged + skipped, not filed", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_MAX = "1";
+	const logs: string[] = [];
+	// One observer issue already open ⇒ at cap ⇒ a new gap is skipped.
+	const { deps, filed } = makeDeps(tmpDir(), {
+		listIssues: async () => [{ id: "o1", name: "[observer] do-not-auto-land: prior", identifier: "OMPSQ-1" }],
+		runGate: async () => ({ ok: false, firstFailure: "cap.test.ts" }),
+		log: (m) => logs.push(m),
+	});
+	await new Observer(deps).tick();
+	expect(filed).toEqual([]);
+	expect(logs.some((l) => l.includes("observe cap reached"))).toBe(true);
+});
+
+test("autofix: a reap-survivor finding is actioned (removeAgent) and not filed under OMP_SQUAD_OBSERVE_AUTOFIX=1", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_AUTOFIX = "1";
+	const removed: string[] = [];
+	const done = { id: "done", name: "n", identifier: "OMPSQ-33" } satisfies IssueRef;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("survivor", "idle", done)],
+		listIssues: async () => [],
+		gitAheadOfMain: () => 0,
+		removeAgent: async (id) => {
+			removed.push(id);
+		},
+	});
+	await new Observer(deps).tick();
+	expect(removed).toEqual(["survivor"]);
+	expect(filed).toEqual([]); // fixed directly ⇒ not filed
+});
+
+test("untracked-land-hazard fires only on a collision with an open agent branch", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const branched = agent("a", "working", undefined, "squad/a");
+	// Untracked file in main that ALSO exists on the agent branch ⇒ hazard.
+	const h1 = makeDeps(tmpDir(), {
+		listAgents: () => [branched],
+		untrackedInMain: () => ["tests/routing.test.ts", "scratch.txt"],
+		filesOnAgentBranch: () => ["tests/routing.test.ts", "src/x.ts"],
+	});
+	await new Observer(h1.deps).tick();
+	expect(h1.filed.length).toBe(1);
+	expect(h1.filed[0]).toContain("tests/routing.test.ts");
+	expect(h1.filed[0]).not.toContain("scratch.txt"); // no branch collision ⇒ excluded
+
+	// Untracked but no overlap ⇒ no finding.
+	const h2 = makeDeps(tmpDir(), { listAgents: () => [branched], untrackedInMain: () => ["scratch.txt"], filesOnAgentBranch: () => ["src/x.ts"] });
+	await new Observer(h2.deps).tick();
+	expect(h2.filed).toEqual([]);
+});

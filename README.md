@@ -239,6 +239,27 @@ exhaustion or a catastrophe tripwire (infra failure, safety violation, regressio
 oscillation), and drains cap-parked spawns back in under the WIP ceiling. On by default; set
 `OMP_SQUAD_AUTODRIVE=0` to disable — then the daemon arms no timer and the tick is fully inert.
 
+**Self-audit loop (Observer, on by default)** — a sibling to the orchestrator that runs the
+other direction: instead of driving work, it periodically *confirms* the fleet/project is in the
+intended state and, on a detected gap, **files a fix-issue** the auto-dispatcher then picks up —
+closing observe → fix → confirm. v1 audit checks: a red acceptance gate on main (`regression: <test>`),
+an idle agent landed-and-Done but never reaped (`reap landed survivor <id>`), untracked files in the
+main checkout that collide with an open agent branch (`commit/remove <files> — blocks auto-land`), and
+a Plane issue marked Done whose branch is still ahead (`reconcile Done-but-unlanded <issue>`). Findings
+are deduped by fingerprint (persisted to `<stateDir>/observer-seen.json`, never re-filed across
+ticks/restarts); a finding that stops reproducing is confirmed resolved and its fingerprint cleared.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_OBSERVE` | Self-audit loop — **on** when Plane is configured (`=0` to disable; then no timer is armed) |
+| `OMP_SQUAD_OBSERVE_MAX` | Hard cap on observer-filed *open* issues (default `10`); past it, log + skip |
+| `OMP_SQUAD_OBSERVE_AUTODISPATCH` | `=1` files plain findings *without* the do-not-auto-land marker so the dispatcher fixes them; structural findings stay needs-triage regardless |
+| `OMP_SQUAD_OBSERVE_AUTOFIX` | `=1` lets the loop action autofixable findings directly (reap a landed survivor); never touches main/code; default off |
+
+Findings default to **needs-triage**: filed with a do-not-auto-land marker so the dispatcher's
+`noAutoDispatch` gate skips them — the observer never auto-dispatches its own findings to the yolo
+fleet unsupervised unless you opt in.
+
 **Orphan-host reaping.** Each agent runs in a detached `agent-host` process that outlives the daemon
 (so a restart/upgrade reconnects to live agents with full context). A host left behind by a crash,
 re-exec, or a re-spawn under a fresh id — one the roster no longer owns — is shut down (over the host

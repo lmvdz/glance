@@ -31,6 +31,8 @@ import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { Orchestrator } from "./orchestrator.ts";
+import { Observer } from "./observer.ts";
+import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
@@ -208,6 +210,7 @@ export class SquadManager extends EventEmitter {
 	 *  auto_retry_start usage-limit events; consulted by the dispatcher before it spawns. */
 	private readonly rateLimit = new RateLimitGate();
 	private orchestrator?: Orchestrator;
+	private observer?: Observer;
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -289,6 +292,28 @@ export class SquadManager extends EventEmitter {
 			log: (m) => this.log("info", `orchestrator: ${m}`),
 		});
 		this.orchestrator.start();
+
+		// Observer (OMPSQ-52) — periodic self-audit sibling to the orchestrator. File mode only for now:
+		// it observes the first configured Plane repo. ponytail: a multi-repo / per-org observer (one per
+		// SquadManager in DB mode) is a later follow-up — wire per-org Plane config through and loop repos.
+		const observeRepos = planeRepos();
+		if (process.env.OMP_SQUAD_OBSERVE !== "0" && observeRepos.length > 0) {
+			const repo = observeRepos[0];
+			this.observer = new Observer({
+				listAgents: () => this.list(),
+				listIssues: () => listPlaneIssues(repo),
+				fileIssue: (title) => createPlaneIssue(repo, title),
+				removeAgent: (id) => this.remove(id, false),
+				runGate: () => this.runMainGate(repo),
+				gitAheadOfMain: (a) => this.aheadOfMain(a),
+				untrackedInMain: () => this.untrackedInMain(repo),
+				filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
+				stateDir: this.stateDir,
+				log: (m) => this.log("info", `observer: ${m}`),
+			});
+			this.observer.start();
+			this.log("info", `observer on (auditing ${repo})`);
+		}
 	}
 
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
@@ -301,6 +326,7 @@ export class SquadManager extends EventEmitter {
 		clearInterval(this.pollTimer);
 		this.dispatcher?.stop();
 		this.orchestrator?.stop();
+		this.observer?.stop();
 		await this.persist();
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
@@ -660,6 +686,54 @@ export class SquadManager extends EventEmitter {
 		if (st.dirtyFiles.length > 0) return true;
 		const r = Bun.spawnSync(["git", "-C", rec.dto.repo, "rev-list", "--count", `HEAD..${rec.dto.branch}`], { stdout: "pipe", stderr: "ignore" });
 		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+	}
+
+	// ── Observer edges (OMPSQ-52) — read-only git probes + the main gate, injected into Observer. ──
+
+	/** Commits on an agent's branch not in main's HEAD: 0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
+	private aheadOfMain(a: AgentDTO): number {
+		if (!a.branch) return -1;
+		const r = hardenedGitSync(["-C", a.repo, "rev-list", "--count", `HEAD..${a.branch}`]);
+		return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+	}
+
+	/** Untracked file paths in the main checkout (the auto-land hazard surface). */
+	private untrackedInMain(repo: string): string[] {
+		const r = hardenedGitSync(["-C", repo, "status", "--porcelain", "--untracked-files=all"]);
+		if (r.code !== 0) return [];
+		return r.stdout
+			.split("\n")
+			.filter((l) => l.startsWith("??"))
+			.map((l) => l.slice(3).trim())
+			.filter((f) => f.length > 0);
+	}
+
+	/** Tracked files on an agent's branch; `[]` when no branch / not a repo. */
+	private filesOnAgentBranch(a: AgentDTO): string[] {
+		if (!a.branch) return [];
+		const r = hardenedGitSync(["-C", a.repo, "ls-tree", "-r", "--name-only", a.branch]);
+		return r.code === 0 ? r.stdout.split("\n").filter((f) => f.length > 0) : [];
+	}
+
+	/**
+	 * Run the acceptance gate (the repo's `check` + `test` scripts) on main → {ok, firstFailure?}.
+	 * Total by contract: any spawn failure yields ok:false, never a throw (the observer tick must not crash).
+	 * ponytail: runs the full gate per observer tick; the Observer's own overlap guard prevents pile-up,
+	 * but a long suite makes ticks costly — throttle (run every Nth tick) if it ever bites.
+	 */
+	private async runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+		try {
+			const proc = Bun.spawn(["bash", "-lc", "bun run check && bun test"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			if (code === 0) return { ok: true };
+			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
+			const text = `${out}\n${err}`;
+			const failLine = text.split("\n").find((l) => l.includes("(fail)"));
+			const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
+			return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
+		} catch (e) {
+			return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
+		}
 	}
 
 	/**
