@@ -27,6 +27,7 @@ import { leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
+import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
@@ -49,6 +50,8 @@ interface SocketData {
 	id: number;
 	/** RBAC tier granted by the token presented at the WS handshake; gates inbound commands. */
 	role: Role;
+	/** Org whose fleet this socket sees (DB-registry mode); undefined in file mode / no active org. */
+	orgId?: string;
 }
 
 /** Resolved better-auth session shape we read (subset; structural typing tolerates better-auth's wider type). */
@@ -91,6 +94,9 @@ export interface SquadServerOptions {
 	/** Origins trusted for the squad's own cross-site mutation defense (DB mode). Same list the
 	 *  better-auth instance gets (reachable daemon origins + BETTER_AUTH_URL). FILE mode ignores it. */
 	trustedOrigins?: string[];
+	/** DB-registry mode: a per-org SquadManager fleet. Set ⇒ route every request/WS to the caller's
+	 *  org manager (org from the session) and fan WS events out per org. Unset ⇒ single-manager / file mode. */
+	registry?: ManagerRegistry;
 }
 
 /** Pure: a short, stable fingerprint of the served UI. Changes whenever index.html changes,
@@ -127,8 +133,13 @@ function isLoopbackAddr(ip: string): boolean {
 }
 
 export class SquadServer {
-	private readonly manager: SquadManager;
+	private readonly singleManager?: SquadManager;
+	/** DB-registry mode fleet (per-org managers); undefined ⇒ single-manager (file mode / db-single). */
+	private readonly registry?: ManagerRegistry;
+	/** Single-manager mode WS clients (one bucket). */
 	private readonly clients = new Set<ServerWebSocket<SocketData>>();
+	/** DB-registry mode WS clients bucketed by org so events fan out per tenant (risk #3). */
+	private readonly clientsByOrg = new Map<string, Set<ServerWebSocket<SocketData>>>();
 	private server?: Server<SocketData>;
 	private readonly opts: SquadServerOptions;
 	private sockSeq = 0;
@@ -162,8 +173,9 @@ export class SquadServer {
 	/** Origins allowed to mutate the squad's own routes in DB mode (cross-site defense). */
 	private readonly trustedOrigins: Set<string>;
 
-	constructor(manager: SquadManager, opts: SquadServerOptions = {}) {
-		this.manager = manager;
+	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
+		this.singleManager = manager;
+		this.registry = opts.registry;
 		this.opts = opts;
 		this.onEvent = (e: SquadEvent) => this.broadcast(e);
 		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
@@ -218,10 +230,59 @@ export class SquadServer {
 		return this.trustedOrigins.has(origin);
 	}
 
+	/** Resolve the fleet a request/socket acts on. Single-manager mode: the root manager. DB-registry
+	 *  mode: the caller's org manager (org is session-derived, never request-supplied), or none when the
+	 *  actor has no active org. This is the ONLY way to reach a manager. */
+	private async managerFor(actor: Actor): Promise<SquadManager | undefined> {
+		if (!this.registry) return this.singleManager;
+		return actor.orgId ? await this.registry.get(actor.orgId) : undefined;
+	}
+
+	/** Actor for an inbound WS command — the socket's tier plus, in DB-registry mode, its stamped org. */
+	private actorForSocket(ws: ServerWebSocket<SocketData>): Actor {
+		return this.registry ? { id: `web:${ws.data.role}`, origin: "local", role: ws.data.role, orgId: ws.data.orgId } : actorForRole(ws.data.role);
+	}
+
+	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
+	private async registerSocket(ws: ServerWebSocket<SocketData>): Promise<SquadManager | undefined> {
+		if (!this.registry) {
+			this.clients.add(ws);
+			return this.singleManager;
+		}
+		const key = ws.data.orgId ?? "";
+		let bucket = this.clientsByOrg.get(key);
+		if (!bucket) {
+			bucket = new Set();
+			this.clientsByOrg.set(key, bucket);
+		}
+		bucket.add(ws);
+		return ws.data.orgId ? await this.registry.get(ws.data.orgId) : undefined;
+	}
+
+	/** Drop a closing socket from its bucket (and prune the bucket when empty). */
+	private unregisterSocket(ws: ServerWebSocket<SocketData>): void {
+		if (!this.registry) {
+			this.clients.delete(ws);
+			return;
+		}
+		const key = ws.data.orgId ?? "";
+		const bucket = this.clientsByOrg.get(key);
+		if (bucket) {
+			bucket.delete(ws);
+			if (bucket.size === 0) this.clientsByOrg.delete(key);
+		}
+	}
+
+	/** DB-registry response for an actor with no active org: reads are empty, mutations denied. */
+	private noFleet(req: Request, url: URL): Response {
+		if (req.method !== "GET") return new Response("no active organization", { status: 403 });
+		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
+		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
+		return Response.json([]);
+	}
+
 	start(): string {
-		for (const a of this.manager.list()) this.startupAgentIds.add(a.id);
-		const manager = this.manager;
-		const clients = this.clients;
+		if (this.singleManager) for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
 		this.uiVersion = computeUiVersion(readFileSync(INDEX_HTML, "utf8"));
 
 		this.server = Bun.serve<SocketData>({
@@ -234,53 +295,60 @@ export class SquadServer {
 				return resp;
 			},
 			websocket: {
-				open: (ws) => {
-					clients.add(ws);
-					ws.send(JSON.stringify({ type: "roster", agents: manager.list(), version: this.uiVersion } satisfies SquadEvent));
-					for (const a of manager.list()) {
-						const commands = manager.commandsFor(a.id);
+				open: async (ws) => {
+					const m = await this.registerSocket(ws);
+					const agents = m?.list() ?? [];
+					ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
+					for (const a of agents) {
+						const commands = m?.commandsFor(a.id);
 						if (commands?.length) ws.send(JSON.stringify({ type: "commands", id: a.id, commands } satisfies SquadEvent));
 					}
 				},
-				close: (ws) => {
-					clients.delete(ws);
-				},
-				message: (ws, raw) => {
+				close: (ws) => this.unregisterSocket(ws),
+				message: async (ws, raw) => {
 					let cmd: ClientCommand;
 					try {
 						cmd = JSON.parse(typeof raw === "string" ? raw : raw.toString());
 					} catch {
 						return;
 					}
+					// Route to the socket's org fleet (registry mode) or the single manager; org never from the wire.
+					const actor = this.actorForSocket(ws);
+					const m = await this.managerFor(actor);
+					if (!m) return;
 					// Transcript replay is unicast to the requesting socket.
 					if (cmd.type === "subscribe") {
-						for (const entry of manager.getTranscript(cmd.id)) {
+						for (const entry of m.getTranscript(cmd.id)) {
 							ws.send(JSON.stringify({ type: "transcript", id: cmd.id, entry } satisfies SquadEvent));
 						}
 						return;
 					}
 					// Carry the socket's granted tier; applyCommand denies a command above it (logged there).
-					void manager.applyCommand(cmd, actorForRole(ws.data.role)).catch((err) => {
+					void m.applyCommand(cmd, actor).catch((err) => {
 						if (!(err instanceof RbacDenied)) throw err;
 					});
 				},
 			},
 		});
 
-		manager.on("event", this.onEvent);
-		void this.syncPresence();
-		this.presenceTimer = setInterval(() => void this.syncPresence(), 25_000);
-		this.presenceTimer.unref?.();
-		// Best-effort: only when a coordinator is configured do we open a read-only feed for peer presence.
-		if (this.coordinator) {
-			this.peerPresence = new PeerPresenceTracker({ coordinatorUrl: this.coordinator, operator: this.operator });
-			void this.peerPresence.start();
+		if (this.registry) {
+			// DB-registry mode: per-org fan-out via the registry's event sink. No global presence/federation (risk #6).
+			this.registry.onEvent = (orgId, e) => this.broadcastTo(orgId, e);
+		} else {
+			this.singleManager?.on("event", this.onEvent);
+			void this.syncPresence();
+			this.presenceTimer = setInterval(() => void this.syncPresence(), 25_000);
+			this.presenceTimer.unref?.();
+			// Best-effort: only when a coordinator is configured do we open a read-only feed for peer presence.
+			if (this.coordinator) {
+				this.peerPresence = new PeerPresenceTracker({ coordinatorUrl: this.coordinator, operator: this.operator });
+				void this.peerPresence.start();
+			}
 		}
 		return this.url;
 	}
 
 	private async handle(req: Request, server: Server<SocketData>): Promise<Response | undefined> {
-		const manager = this.manager;
 		const indexFile = Bun.file(INDEX_HTML);
 		const url = new URL(req.url);
 		if (url.pathname === "/ws") {
@@ -288,21 +356,27 @@ export class SquadServer {
 			// so a viewer may connect to read the roster + subscribe to transcripts.
 			if (this.dbMode && !this.originAllowed(req)) return new Response("forbidden origin", { status: 403 });
 			let role: Role | null;
+			let orgId: string | undefined;
 			if (this.auth) {
 				// DB mode: loopback admin token bootstraps; otherwise the session cookie rides the upgrade headers.
 				if (this.loopbackBootstrapAdmin(req, server)) {
 					role = "admin";
 				} else {
 					const session = await this.auth.api.getSession({ headers: req.headers });
-					role = session ? await this.bridgeRole(req, session.session.activeOrganizationId) : null;
+					if (session) {
+						role = await this.bridgeRole(req, session.session.activeOrganizationId);
+						orgId = session.session.activeOrganizationId ?? undefined;
+					} else {
+						role = null;
+					}
 				}
 			} else {
 				role = resolveRole(req, this.authPolicy);
 			}
 			if (role === null) return new Response("unauthorized", { status: 401 });
 			const upgraded = this.auth
-				? server.upgrade(req, { data: { id: ++this.sockSeq, role } })
-				: server.upgrade(req, { data: { id: ++this.sockSeq, role }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
+				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId } })
+				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
 			if (upgraded) return undefined;
 			return new Response("websocket upgrade failed", { status: 426 });
 		}
@@ -358,6 +432,15 @@ export class SquadServer {
 			await this.opts.push.subscribe({ endpoint: sub.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } });
 			return Response.json({ ok: true });
 		}
+		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: the
+		// org's manager (org from the session, never the request). No active org ⇒ empty reads / 403 mutations.
+		const orgId = this.registry ? (session?.session.activeOrganizationId ?? undefined) : undefined;
+		const actor: Actor =
+			this.registry && session
+				? { id: `db:${session.user.id}`, displayName: session.user.name, origin: "local", role, orgId }
+				: actorForRole(role);
+		const manager = await this.managerFor(actor);
+		if (!manager) return this.noFleet(req, url);
 		if (url.pathname === "/api/agents") return Response.json(manager.list());
 		if (url.pathname === "/api/projects") return Response.json(manager.projects());
 		if (url.pathname === "/api/features" && req.method === "GET") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
@@ -405,7 +488,7 @@ export class SquadServer {
 			if (body && typeof body === "object" && "task" in body && typeof body.task === "string" && body.task.trim()) {
 				const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 				const name = "name" in body && typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-				const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: id, approvalMode: "yolo", track: true }, actorForRole(role));
+				const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: id, approvalMode: "yolo", track: true }, actor);
 				manager.linkAgent(id, dto.id);
 				return Response.json({ agent: dto });
 			}
@@ -448,11 +531,13 @@ export class SquadServer {
 			return Response.json({ ok: h.warnings.length === 0, warnings: h.warnings, ...h.sample, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()), at: h.at });
 		}
 		if (url.pathname === "/api/presence") {
+			// risk #6: the global presence registry is machine-wide; never serve it in DB-registry mode.
+			if (this.registry) return Response.json([]);
 			const repo = url.searchParams.get("repo");
 			return Response.json(repo ? await who(repo) : await all());
 		}
-		if (url.pathname === "/api/leases") return Response.json(await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
-		if (url.pathname === "/api/federation") return Response.json(this.federationSnapshot());
+		if (url.pathname === "/api/leases") return Response.json(this.registry ? [] : await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
+		if (url.pathname === "/api/federation") return Response.json(this.registry ? ({ coordinator: null, operators: [], collisions: [] } satisfies FederationSnapshot) : this.federationSnapshot());
 		if (url.pathname === "/api/audit") {
 			const q = url.searchParams;
 			const limit = Number(q.get("limit"));
@@ -472,7 +557,7 @@ export class SquadServer {
 			const tracked = manager.projects().map((p) => p.repo);
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
 			try {
-				const dto = await manager.create({ ...plan, track: true }, actorForRole(role));
+				const dto = await manager.create({ ...plan, track: true }, actor);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
@@ -509,7 +594,7 @@ export class SquadServer {
 			const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
 			const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message, commitWip: !busy });
 			if (result.ok) void manager.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
-			void manager.recordAudit(actorForRole(role), "land", dto.id, result.ok ? "ok" : "error", result.detail ?? result.message);
+			void manager.recordAudit(actor, "land", dto.id, result.ok ? "ok" : "error", result.detail ?? result.message);
 			return Response.json(result);
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
@@ -550,7 +635,8 @@ export class SquadServer {
 			// relaunched daemon reconnects to the live agents with full context.
 			setTimeout(() => {
 				void (async () => {
-					await manager.stop();
+					if (this.registry) await this.registry.stopAll();
+					else await manager.stop();
 					this.server?.stop(true);
 					reexecDaemon({ cmd: process.argv, cwd: repo });
 					process.exit(0);
@@ -566,14 +652,14 @@ export class SquadServer {
 				return new Response("bad json", { status: 400 });
 			}
 			if (cmd.type === "create") {
-				const dto = await manager.create({ ...cmd.options, track: true }, actorForRole(role));
+				const dto = await manager.create({ ...cmd.options, track: true }, actor);
 				return Response.json(dto);
 			}
 			if (cmd.type === "commission") {
-				const result = await manager.commission(cmd.spec, { install: true }, actorForRole(role));
+				const result = await manager.commission(cmd.spec, { install: true }, actor);
 				return Response.json(result);
 			}
-			await manager.applyCommand(cmd, actorForRole(role));
+			await manager.applyCommand(cmd, actor);
 			return Response.json({ ok: true });
 		}
 		return new Response("not found", { status: 404 });
@@ -591,6 +677,21 @@ export class SquadServer {
 		}
 		this.maybePushAlert(e);
 		if (e.type === "agent" || e.type === "removed" || e.type === "roster") this.schedulePresence();
+	}
+
+	/** DB-registry per-org fan-out: serialize once, deliver only to that org's sockets (risk #3).
+	 *  Background push + global presence are file-mode-only, so neither fires here. */
+	private broadcastTo(orgId: string, e: SquadEvent): void {
+		const bucket = this.clientsByOrg.get(orgId);
+		if (!bucket) return;
+		const s = JSON.stringify(e.type === "roster" ? { ...e, version: this.uiVersion } : e);
+		for (const ws of bucket) {
+			try {
+				ws.send(s);
+			} catch {
+				/* dropped client */
+			}
+		}
 	}
 
 	/** Fire a background push when an agent transitions into a state that needs a human. Mirrors the
@@ -626,8 +727,9 @@ export class SquadServer {
 
 	/** Mirror live squad agents into the shared presence registry so `who` + the command center see them next to raw omp sessions. */
 	private async syncPresence(): Promise<void> {
+		if (!this.singleManager) return;
 		const liveIds = new Set<string>();
-		for (const a of this.manager.list()) {
+		for (const a of this.singleManager.list()) {
 			liveIds.add(a.id);
 			this.claimed.set(a.id, a.repo);
 			await claim({ repo: a.repo, agent: a.name, branch: a.branch, task: a.issue?.name ?? a.activity, source: "squad", id: a.id, reattached: this.startupAgentIds.has(a.id) });
@@ -651,7 +753,7 @@ export class SquadServer {
 			operator: this.operator,
 			availability: "active",
 			host: os.hostname(),
-			agents: this.manager.list(),
+			agents: this.singleManager?.list() ?? [],
 			updatedAt: Date.now(),
 		};
 		const peers = this.peerPresence?.live() ?? [];
@@ -659,7 +761,8 @@ export class SquadServer {
 	}
 
 	stop(): void {
-		this.manager.off("event", this.onEvent);
+		this.singleManager?.off("event", this.onEvent);
+		if (this.registry) this.registry.onEvent = () => {};
 		clearInterval(this.presenceTimer);
 		clearTimeout(this.presenceDebounce);
 		for (const [id, repo] of this.claimed) void release(id, repo);
