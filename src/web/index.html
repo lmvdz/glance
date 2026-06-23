@@ -796,6 +796,7 @@ function handle(ev) {
     case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); lastNotify.delete(ev.id); commandsByAgent.delete(ev.id); composerDraft.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; renderAll(); } else refreshShell(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
+    case "audit": if (!auditAction || ev.entry.action === auditAction) { auditEntries.unshift(ev.entry); if (auditEntries.length > 200) auditEntries.length = 200; auditLoaded = true; if (view === "audit") renderBody(); } break;
     default: console.warn("unknown event type:", ev && ev.type); break;
   }
 }
@@ -912,6 +913,7 @@ function renderNav() {
     { id:"board", ico:"▦",  lbl:"Features", sel: view === "board" || view === "feature", on: openBoard },
     { id:"queue", ico:"⛔", lbl:"Queue",    sel: view === "queue", ct: need, attn: need > 0, on: openQueue },
     { id:"race",  ico:"⇶",  lbl:"Race",     sel: view === "race", on: openRace },
+    { id:"audit", ico:"📜", lbl:"Audit",    sel: view === "audit", on: openAudit },
     { id:"settings", ico:"⚙", lbl:"Settings", sel: view === "settings", on: openSettings },
   ];
   nav.innerHTML = rows.map(r => `<div class="navrow${r.sel?" sel":""}${r.attn?" attn":""}" data-id="${r.id}" role="button" tabindex="0" aria-label="${r.lbl}" title="${r.lbl}"><span class="ico">${r.ico}</span><span class="lbl">${r.lbl}</span>${r.ct?`<span class="ct">${r.ct}</span>`:""}</div>`).join("");
@@ -957,6 +959,7 @@ function renderBody() {
   if (view === "board") return renderBoard(body);
   if (view === "queue") return renderQueue(body);
   if (view === "race") return renderRace(body);
+  if (view === "audit") return renderAudit(body);
   if (view === "feature") return renderFeature(body, features.get(selFeature));
   const p = projects().find(x => x.id === selProject);
   if (!p) return renderHome(body);
@@ -1794,6 +1797,7 @@ function paletteItems() {
     { label: "Attention queue", hint: "blocked agents", run: openQueue },
     { label: "Feature board", hint: "", run: openBoard },
     { label: "Race board", hint: "per-agent pipeline", run: openRace },
+    { label: "Audit log", hint: "fleet actions", run: openAudit },
     { label: "New agent", hint: "spawn", run: () => $("#addBtn").click() },
     { label: "Upgrade daemon", hint: "pull + restart", run: () => $("#upgradeBtn").click() },
     { label: "Settings", hint: "account · org · appearance", run: openSettings },
