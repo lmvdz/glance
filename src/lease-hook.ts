@@ -15,6 +15,7 @@
  */
 
 import * as path from "node:path";
+import * as os from "node:os";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { claimLease, heartbeatSession, holdersOf, LEASE_TTL_MS, releaseSession } from "./leases.ts";
 import type { LeaseEntry } from "./leases.ts";
@@ -50,12 +51,20 @@ function ago(ts: number): string {
 
 export default function leaseHook(pi: ExtensionAPI): void {
 	let repo = process.cwd();
+	const home = os.homedir();
+	let protectedRoots: string[] = [];
 	const session = `omp:${process.pid}`;
 	let timer: Timer | undefined;
 	const warned = new Set<string>();
 
 	pi.on("session_start", async () => {
 		repo = git(process.cwd(), ["rev-parse", "--show-toplevel"]) ?? process.cwd();
+		// Protected trees the guard fences this agent out of: the shared MAIN checkout (resolved via the
+		// worktree's shared git dir) and the whole ~/.omp/squad state dir (launcher/lock/token + sibling
+		// worktrees). The agent's own worktree, though nested under ~/.omp/squad, is exempt in the guard.
+		const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
+		const mainRepo = commonDir ? path.dirname(path.resolve(repo, commonDir)) : repo;
+		protectedRoots = [path.join(home, ".omp", "squad"), mainRepo];
 		timer = setInterval(() => void heartbeatSession(session, repo), Math.min(40_000, Math.floor(LEASE_TTL_MS / 3)));
 		timer.unref?.();
 	});
@@ -65,7 +74,7 @@ export default function leaseHook(pi: ExtensionAPI): void {
 		// Guardrail FIRST — hard-block daemon/host control + out-of-worktree edits for EVERY tool call,
 		// before the edit/write lease logic below. A yolo agent can't bypass it: a hook block stops the
 		// tool before it runs. `repo` is this agent's worktree root (resolved in session_start).
-		const fenced = screenToolCall(ev.toolName, ev.input, repo);
+		const fenced = screenToolCall(ev.toolName, ev.input, { worktree: repo, protectedRoots, home });
 		if (fenced) {
 			if (ctx.hasUI) await ctx.ui.notify(fenced.reason, "error");
 			return fenced;

@@ -3,14 +3,21 @@
  *
  * A dispatched agent runs `--approval-mode yolo` in its own worktree, so without fencing it can
  * (and did) take the whole fleet down: spawn rogue daemons (`omp-squad up`), set up watchdog loops
- * (`while true; … up.sh`), kill the daemon (`pkill bun`), grab the admin token, or edit the shared
- * main checkout. None of that is ever legitimate agent work — an agent's job is to change code IN
- * ITS WORKTREE and let the daemon land + supervise.
+ * (`while true; … up.sh`), kill the daemon (`pkill bun`, `kill <pid>`), grab the admin token, or
+ * edit the shared main checkout. None of that is ever legitimate agent work — an agent's job is to
+ * change code IN ITS WORKTREE and let the daemon land + supervise.
  *
  * `screenToolCall` returns a block reason for any such operation and `undefined` for everything
  * else. It is enforced in-process by the agent's hook (lease-hook), so a `{ block: true }` return
  * stops the tool BEFORE it runs — yolo can't bypass it (yolo only auto-approves; a hook block is a
  * hard stop). Pure + data-driven so the policy is unit-tested and trivially extended.
+ *
+ * Two jobs:
+ *   1. Forbidden shell commands  — daemon lifecycle, up.sh (re)launches, pkill/killall, kill by
+ *                                  numeric pid or daemon name, and daemon control-file access.
+ *   2. Protected-tree isolation  — no tool call (bash OR edit/write) may touch the main checkout or
+ *                                  ~/.omp/squad by absolute path; the agent's own worktree is exempt,
+ *                                  and unrelated paths (e.g. /tmp scratch, /etc, /usr) are left alone.
  */
 
 import * as path from "node:path";
@@ -18,6 +25,16 @@ import * as path from "node:path";
 export interface GuardBlock {
 	block: true;
 	reason: string;
+}
+
+export interface GuardContext {
+	/** The agent's own worktree — its only writable tree. */
+	worktree: string;
+	/** Sensitive roots an agent must never touch by absolute path (the main checkout + ~/.omp/squad).
+	 *  Paths inside the agent's own worktree are always exempt even when nested under one of these. */
+	protectedRoots: string[];
+	/** Home dir, for expanding ~ / $HOME in shell tokens (defaults to process env at call sites). */
+	home: string;
 }
 
 /**
@@ -35,6 +52,9 @@ const FORBIDDEN_COMMANDS: { re: RegExp; reason: string }[] = [
 	{ re: /\b(?:pkill|killall)\b/, reason: "an agent must not mass-kill processes (pkill/killall) — it can take down the daemon and sibling agents" },
 	{ re: /\bkill\b[^\n|;&]*\b(?:bun|omp|omp-squad|daemon|squad)\b/, reason: "an agent must not kill the daemon or agent processes" },
 	{ re: /\bkill\s+(?:-9|-KILL|-SIGKILL|-s\s*(?:9|KILL|SIGKILL))\b/, reason: "an agent must not SIGKILL processes" },
+	// kill by NUMERIC pid: where did the number come from? Almost always the daemon's. An agent kills
+	// its own children with $! / %job (variables/job specs), never a literal pid — so block literals.
+	{ re: /\bkill\s+(?:-\w+\s+)*[0-9]/, reason: "an agent must not kill a process by numeric pid (use $! or %job for your own processes)" },
 	// Daemon control files: the launcher, the single-writer lock, and the admin token are off-limits.
 	{ re: /\.omp\/squad\/(?:up\.sh|daemon\.lock|access-token)\b/, reason: "an agent must not read or write the daemon control files under ~/.omp/squad (launcher, lock, admin token)" },
 ];
@@ -52,7 +72,36 @@ export function targetFiles(input: Record<string, unknown>): string[] {
 	return [...files];
 }
 
-/** First target path (if any) that resolves OUTSIDE `worktree`; agents must stay in their own worktree. */
+/** Expand a leading ~ / $HOME and return the absolute form of a shell token, or undefined if not a path. */
+function expandAbs(token: string, home: string): string | undefined {
+	let t = token;
+	if (t === "~" || t.startsWith("~/")) t = path.join(home, t.slice(1));
+	else if (t === "$HOME" || t.startsWith("$HOME/")) t = path.join(home, t.slice("$HOME".length));
+	return path.isAbsolute(t) ? path.resolve(t) : undefined;
+}
+
+/** Absolute-path-ish tokens (`/…`, `~/…`, `$HOME/…`) referenced anywhere in a shell command. */
+function absPathTokens(cmd: string): string[] {
+	return [...cmd.matchAll(/(?:\$HOME|~)?\/[^\s'"|;&<>()]+/g)].map((m) => m[0]);
+}
+
+/** True when `abs` lives inside `root` (or is `root` itself). */
+function within(abs: string, root: string): boolean {
+	const r = path.resolve(root);
+	return abs === r || abs.startsWith(r + path.sep);
+}
+
+/** First absolute path that lands in a protected tree but NOT in the agent's own worktree. */
+function touchesProtected(absPaths: string[], ctx: GuardContext): string | undefined {
+	const own = path.resolve(ctx.worktree);
+	for (const abs of absPaths) {
+		if (within(abs, own)) continue; // the agent's own worktree is always allowed
+		if (ctx.protectedRoots.some((root) => within(abs, root))) return abs;
+	}
+	return undefined;
+}
+
+/** First edit/write target (if any) that resolves OUTSIDE `worktree`; agents must stay in their worktree. */
 export function escapesWorktree(paths: string[], worktree: string): string | undefined {
 	const root = path.resolve(worktree);
 	for (const p of paths) {
@@ -66,19 +115,25 @@ export function escapesWorktree(paths: string[], worktree: string): string | und
 
 /**
  * The deny gate. Returns a block (with a human reason) for a tool call that would touch the
- * daemon/host or escape the worktree; `undefined` to allow. Screens shell commands by the presence
- * of a `command` field (independent of the exact bash tool name) and edit/write by target path.
+ * daemon/host, reach into a protected tree, or escape the worktree; `undefined` to allow. Screens
+ * shell commands by the presence of a `command` field (independent of the exact bash tool name).
  */
-export function screenToolCall(toolName: string, input: Record<string, unknown>, worktree: string): GuardBlock | undefined {
+export function screenToolCall(toolName: string, input: Record<string, unknown>, ctx: GuardContext): GuardBlock | undefined {
 	const cmd = input.command;
 	if (typeof cmd === "string" && cmd.trim()) {
 		for (const f of FORBIDDEN_COMMANDS) {
 			if (f.re.test(cmd)) return { block: true, reason: `squad guardrail: ${f.reason}` };
 		}
+		// Bash path-escape: any reference to the main checkout / ~/.omp/squad by absolute path (the
+		// edit/write fence below only covers the file tools — this catches `echo > /main/x`, `sed -i
+		// /main/x`, `git -C /main …`, `cat /main/secret`, etc.). Own worktree + /tmp etc. are fine.
+		const abs = absPathTokens(cmd).map((t) => expandAbs(t, ctx.home)).filter((x): x is string => !!x);
+		const hit = touchesProtected(abs, ctx);
+		if (hit) return { block: true, reason: `squad guardrail: ${hit} is in a protected tree (the main checkout / squad state) — an agent works only inside its own worktree` };
 	}
 	if (toolName === "edit" || toolName === "write") {
-		const escaped = escapesWorktree(targetFiles(input), worktree);
-		if (escaped) return { block: true, reason: `squad guardrail: ${escaped} is outside this agent's worktree (${path.resolve(worktree)}) — agents must only edit files in their own worktree` };
+		const escaped = escapesWorktree(targetFiles(input), ctx.worktree);
+		if (escaped) return { block: true, reason: `squad guardrail: ${escaped} is outside this agent's worktree (${path.resolve(ctx.worktree)}) — agents must only edit files in their own worktree` };
 	}
 	return undefined;
 }
