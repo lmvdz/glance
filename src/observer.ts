@@ -53,6 +53,8 @@ export interface ObserverDeps {
 	listIssues: () => Promise<IssueRef[] | null>;
 	/** File a finding as a Plane issue → its ref; `null` ⇒ not configured / failed. */
 	fileIssue: (title: string) => Promise<IssueRef | null>;
+	/** Close a now-resolved observer issue (self-healing). Optional — absent ⇒ resolved issues are only cleared from the seen-map, not closed. */
+	closeIssue?: (ref: IssueRef) => Promise<boolean>;
 	/** Reap a landed-survivor agent (the only autofix; never touches main/code). */
 	removeAgent: (id: string) => Promise<void>;
 	/** Run the acceptance gate (bun run check && bun test) on main; `ok:false` ⇒ red. */
@@ -130,7 +132,7 @@ export function auditLandedSurvivors(agents: AgentDTO[], openIds: Set<string>, a
 		if (openIds.has(a.issue.id)) continue; // issue still open ⇒ not Done
 		if (aheadOf(a) !== 0) continue; // >0 ⇒ unlanded (stale-done); <0 ⇒ unknown — leave it
 		out.push({
-			fingerprint: `survivor:${a.id}`,
+			fingerprint: `survivor:${a.issue.identifier ?? a.issue.id}`,
 			title: `reap landed survivor ${a.id}`,
 			detail: `${a.status} agent ${a.id} — branch ${a.branch ?? "?"} is ahead=0 of main and issue ${a.issue.identifier ?? a.issue.id} is Done; safe to reap`,
 			severity: "low",
@@ -246,13 +248,17 @@ export class Observer {
 
 			for (const f of findings) {
 				reproduced.add(f.fingerprint);
-				// Autofix path (safe edges only): repair directly. Checked BEFORE the dedup so a finding
-				// already FILED (e.g. filed while autofix was off, then enabled) still gets actioned — the
-				// reap is what matters; the stale filed issue clears when the gap stops reproducing. The
-				// fingerprint is NOT persisted: an autofixed gap self-clears next tick.
-				if (f.autoFixable && f.fix && autoFix()) {
-					await f.fix().catch((e) => log(`autofix failed for ${f.fingerprint}: ${msg(e)}`));
-					log(`autofixed ${f.fingerprint}: ${f.title}`);
+				// Autofixable findings are safe operational housekeeping (reap a landed survivor), never backlog
+				// noise: reap when OMP_SQUAD_OBSERVE_AUTOFIX=1, otherwise just log — but NEVER file them as a
+				// Plane issue (that floods the tracker with do-not-auto-land churn). Checked BEFORE the dedup
+				// so a stale pre-fix filing self-clears via the resolve loop below.
+				if (f.autoFixable) {
+					if (f.fix && autoFix()) {
+						await f.fix().catch((e) => log(`autofix failed for ${f.fingerprint}: ${msg(e)}`));
+						log(`autofixed ${f.fingerprint}: ${f.title}`);
+					} else {
+						log(`autofixable — not filing ${f.fingerprint}: ${f.title} (OMP_SQUAD_OBSERVE_AUTOFIX=1 to reap)`);
+					}
 					continue;
 				}
 
@@ -283,7 +289,11 @@ export class Observer {
 			// dispatcher's proof gate still catches premature work. Upgrade path: require N clean ticks.
 			for (const fp of Object.keys(this.seen)) {
 				if (reproduced.has(fp)) continue;
-				log(`resolved ${fp} (${this.seen[fp].title}) — clearing fingerprint`);
+				const entry = this.seen[fp];
+				// Self-healing: close the now-resolved Plane issue before clearing its fingerprint, so a finding
+				// that stops reproducing never leaves a stale OPEN issue behind.
+				if (this.deps.closeIssue && entry.issueId) await this.deps.closeIssue({ id: entry.issueId, name: entry.title }).catch((e) => log(`close failed for ${entry.issueId}: ${msg(e)}`));
+				log(`resolved ${fp} (${entry.title}) — clearing fingerprint`);
 				delete this.seen[fp];
 			}
 			this.saveSeen();

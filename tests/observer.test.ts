@@ -11,7 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Observer, type ObserverDeps, landFailureFindings } from "../src/observer.ts";
+import { Observer, type ObserverDeps, auditLandedSurvivors, landFailureFindings } from "../src/observer.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
@@ -45,9 +45,11 @@ const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squa
 interface Harness {
 	deps: ObserverDeps;
 	filed: string[];
+	closed: string[];
 }
 function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
 	const filed: string[] = [];
+	const closed: string[] = [];
 	let seq = 0;
 	const deps: ObserverDeps = {
 		listAgents: () => [],
@@ -55,6 +57,10 @@ function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
 		fileIssue: async (title) => {
 			filed.push(title);
 			return { id: `i-${++seq}`, name: title, identifier: `OMPSQ-${seq}` };
+		},
+		closeIssue: async (ref) => {
+			closed.push(ref.id);
+			return true;
 		},
 		removeAgent: async () => {},
 		runGate: async () => ({ ok: true }),
@@ -66,7 +72,7 @@ function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
 		log: () => {},
 		...over,
 	};
-	return { deps, filed };
+	return { deps, filed, closed };
 }
 
 test("(a) start() arms no timer when OMP_SQUAD_OBSERVE=0; arms one when enabled", () => {
@@ -116,7 +122,7 @@ test("(b) a red gate files exactly one regression finding", async () => {
 	expect(filed[0]).toContain("regression: auth.test.ts > login");
 });
 
-test("(b) an idle ahead=0 agent whose issue is Done files exactly one reap finding", async () => {
+test("(b) an idle ahead=0 agent whose issue is Done does NOT file a reap (housekeeping, not backlog)", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	const done = { id: "done-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
 	const { deps, filed } = makeDeps(tmpDir(), {
@@ -125,8 +131,7 @@ test("(b) an idle ahead=0 agent whose issue is Done files exactly one reap findi
 		gitAheadOfMain: () => 0,
 	});
 	await new Observer(deps).tick();
-	expect(filed.length).toBe(1);
-	expect(filed[0]).toContain("reap landed survivor ag1");
+	expect(filed).toEqual([]); // landed-survivor reap is housekeeping — reaped/logged, NEVER filed as backlog
 
 	// An idle agent whose issue is STILL OPEN is not a survivor — no finding.
 	const open = { id: "open-1", name: "wip", identifier: "OMPSQ-50" } satisfies IssueRef;
@@ -138,10 +143,10 @@ test("(b) an idle ahead=0 agent whose issue is Done files exactly one reap findi
 test("a STOPPED landed-and-Done agent is reaped too (the common done-state — host exits), and OBSERVE_AUTOFIX actions it", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	const done = { id: "done-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
-	// Filing path: a stopped ahead=0 Done agent files the reap finding (not just idle).
+	// A stopped ahead=0 Done agent is NOT filed (housekeeping reap, never backlog noise).
 	const filer = makeDeps(tmpDir(), { listAgents: () => [agent("s1", "stopped", done)], listIssues: async () => [], gitAheadOfMain: () => 0 });
 	await new Observer(filer.deps).tick();
-	expect(filer.filed).toEqual(expect.arrayContaining([expect.stringContaining("reap landed survivor s1")]));
+	expect(filer.filed).toEqual([]);
 
 	// Autofix path: with OMP_SQUAD_OBSERVE_AUTOFIX=1 the loop removes it directly instead of filing.
 	process.env.OMP_SQUAD_OBSERVE_AUTOFIX = "1";
@@ -321,4 +326,27 @@ test("(b) the observer files exactly one bug for a branch whose auto-land keeps 
 	await new Observer(deps).tick();
 	expect(filed.length).toBe(1);
 	expect(filed[0]).toContain("auto-land failing for squad/a1");
+});
+
+test("survivor fingerprint is keyed on the stable Plane identifier, not the ephemeral agent id", () => {
+	const issue = { id: "iss-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
+	// Two agent ids for the SAME landed issue (a re-dispatch) ⇒ ONE stable fingerprint, so a reap
+	// can't be re-filed per re-spawn (the old `survivor:${a.id}` key flooded the tracker).
+	const f1 = auditLandedSurvivors([agent("ompsq-48-aaaa", "stopped", issue)], new Set<string>(), () => 0, async () => {});
+	const f2 = auditLandedSurvivors([agent("ompsq-48-bbbb", "stopped", issue)], new Set<string>(), () => 0, async () => {});
+	expect(f1[0].fingerprint).toBe("survivor:OMPSQ-48");
+	expect(f2[0].fingerprint).toBe(f1[0].fingerprint);
+});
+
+test("a resolved finding CLOSES its Plane issue (self-healing), not just clears the fingerprint", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	let red = true;
+	const h = makeDeps(tmpDir(), { runGate: async () => (red ? { ok: false, firstFailure: "y.test.ts" } : { ok: true }) });
+	const obs = new Observer(h.deps);
+	await obs.tick(); // red ⇒ one regression issue filed
+	expect(h.filed.length).toBe(1);
+	expect(h.closed).toEqual([]);
+	red = false;
+	await obs.tick(); // green ⇒ resolved ⇒ the filed issue is closed, not left open
+	expect(h.closed).toEqual(["i-1"]);
 });

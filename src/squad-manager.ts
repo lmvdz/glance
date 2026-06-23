@@ -315,6 +315,7 @@ export class SquadManager extends EventEmitter {
 				listAgents: () => this.list(),
 				listIssues: () => listPlaneIssues(repo),
 				fileIssue: (title) => createPlaneIssue(repo, title),
+				closeIssue: (ref) => closePlaneIssue(ref),
 				removeAgent: (id) => this.remove(id, false),
 				runGate: () => this.runMainGate(repo),
 				gitAheadOfMain: (a) => this.aheadOfMain(a),
