@@ -1,6 +1,6 @@
 # Characterization tests for the LLM-decision coercers
 
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -54,3 +54,7 @@ None. Two new exports (`asApproval`/`asThinking`) and one extracted export (`par
 - `bun test tests/llm-coerce.test.ts` → green.
 - `bun test tests/supervisor.test.ts tests/smart-spawn.test.ts tests/intake.test.ts tests/land.test.ts` → still green (no behavior change).
 - `bun run check` → typecheck clean (new exports + extraction only).
+
+## Resolution
+
+CLOSED — landed in commit `bfd8eb1`. Built + self-verified by an omp-squad fleet agent (`goal1-coerce-tests`, dogfood), reviewed and integrated by the operator. Gate green on main (21/21 targeted; the agent also caught a real `\t`→`\\t` JSON-escape bug in its own fixtures during the verify loop). No runtime behavior changed.

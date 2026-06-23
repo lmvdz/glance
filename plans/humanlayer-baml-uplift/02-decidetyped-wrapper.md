@@ -1,6 +1,6 @@
 # `decideTyped` — one transport+fallback wrapper for LLM decisions
 
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -85,3 +85,7 @@ None outside omp-squad. `decideTyped` is additive; the two migrations are intern
 - `bun test tests/supervisor.test.ts tests/smart-spawn.test.ts tests/llm-coerce.test.ts tests/omp-call.test.ts` → all green (parity preserved; this is the load-bearing check).
 - `bun run check` → typecheck clean.
 - Grep sanity: `decideTyped` referenced by `supervisor.ts` and `smart-spawn.ts`; `intake.ts`/`land.ts` unchanged.
+
+## Resolution
+
+CLOSED — landed in commit `1e1bce6`. Built + self-verified by an omp-squad fleet agent (`goal1-decidetyped`, dogfood), reviewed and integrated by the operator. `decideTyped` added to `omp-call.ts`; `supervisor.decide` + `smart-spawn.infer` migrated; `parseDecision`/`chooseFallback` kept exported; `intake`/`land` excluded by design. Gate green on main (45/47 across the Goal-1 suite; full combined Goal-1 gate 47/0). Behavior identical at both sites.

@@ -63,4 +63,4 @@ Estimated 4 batches; Batches 1–2 are unblocked today, Batches 3–4 wait on th
 
 ## Status
 
-This plan is **planned, not executed** (operator deferred execution to the self-drive fleet). Closing happens per-concern as the fleet lands each.
+**Goal 1 LANDED via the self-drive fleet (dogfood):** concern `01` → `bfd8eb1`, concern `02` → `1e1bce6` (each built + self-verified by an `omp-squad add … --verify` agent in its own worktree, then operator-reviewed and integrated; combined Goal-1 gate 47/0 on main). Concerns `03`–`06` (Goal 2 + Goal 3) remain **open**, deferred until the in-flight `context-thermodynamics` + `web-framework` plans land — Goal 2 shares `server.ts`/`squad-manager.ts`/`types.ts` with the uncommitted context-thermo work, and Goal 3 is blocked by `web-framework`. Resume by dispatching `03` the same way once those stabilize.
