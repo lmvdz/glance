@@ -37,3 +37,28 @@ export function extractJsonObject(raw: string): Record<string, unknown> | undefi
 		return undefined;
 	}
 }
+
+/**
+ * One-shot omp decision with a guaranteed fallback. Runs `ompOneShot(args)`; on
+ * non-zero exit / empty output / a parse that returns undefined, returns `fallback`.
+ * `retries` (default 0 = today's single-shot behavior) adds bounded re-attempts
+ * before the fallback — for transient model hiccups (BRIEF Pattern 6). Never throws.
+ */
+export async function decideTyped<T>(opts: {
+	args: string[];
+	parse: (raw: string) => T | undefined;
+	fallback: T;
+	bin?: string;
+	timeoutMs?: number;
+	retries?: number;
+}): Promise<T> {
+	const attempts = Math.max(1, 1 + (opts.retries ?? 0));
+	for (let i = 0; i < attempts; i++) {
+		const { out, code } = await ompOneShot(opts.args, { bin: opts.bin, timeoutMs: opts.timeoutMs });
+		if (code === 0 && out) {
+			const v = opts.parse(out);
+			if (v !== undefined) return v;
+		}
+	}
+	return opts.fallback;
+}

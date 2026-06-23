@@ -28,7 +28,7 @@ import { readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDTO, ClientCommand, PendingRequest, SquadEvent, TranscriptEntry } from "./types.ts";
-import { extractJsonObject, ompOneShot } from "./omp-call.ts";
+import { decideTyped, extractJsonObject } from "./omp-call.ts";
 
 /** Options that escape the worktree and are clearly destructive should be denied; everything else advances. */
 export const SUPERVISOR_SYSTEM = [
@@ -199,19 +199,16 @@ function extractAssistantText(stdout: string): string {
  */
 export async function decide(req: PendingRequest, context: string, opts?: { model?: string }): Promise<string> {
 	const prompt = formatRequestPrompt(req, context);
-	try {
-		const args = ["-p", "--mode", "json"];
-		if (opts?.model) args.push("--model", opts.model);
-		else args.push("--smol");
-		args.push("--system-prompt", SUPERVISOR_SYSTEM, prompt);
-		const { out, code } = await ompOneShot(args, { timeoutMs: DECIDE_TIMEOUT_MS });
-		if (code !== 0) return chooseFallback(req);
-		const text = extractAssistantText(out);
-		if (!text.trim()) return chooseFallback(req);
-		return parseDecision(text, req);
-	} catch {
-		return chooseFallback(req);
-	}
+	const args = ["-p", "--mode", "json", ...(opts?.model ? ["--model", opts.model] : ["--smol"]), "--system-prompt", SUPERVISOR_SYSTEM, prompt];
+	return decideTyped<string>({
+		args,
+		timeoutMs: DECIDE_TIMEOUT_MS,
+		parse: (out) => {
+			const t = extractAssistantText(out);
+			return t.trim() ? parseDecision(t, req) : undefined;
+		},
+		fallback: chooseFallback(req),
+	});
 }
 
 /** The daemon auto-generates a bearer token on boot; read it the same way the CLI does (empty if absent). */

@@ -12,7 +12,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ApprovalMode, CreateAgentOptions, ThinkingLevel } from "./types.ts";
-import { extractJsonObject, ompOneShot } from "./omp-call.ts";
+import { decideTyped, extractJsonObject } from "./omp-call.ts";
 
 const INFER_TIMEOUT_MS = 20_000;
 
@@ -125,9 +125,12 @@ const SYSTEM_PROMPT =
 
 async function infer(prompt: string, candidates: string[]): Promise<RawPlan | undefined> {
 	const user = `Candidate repos:\n${candidates.map((c) => `- ${c}`).join("\n")}\n\nTask: ${prompt}\n\nJSON:`;
-	const { out, code } = await ompOneShot(["-p", "--smol", "--system-prompt", SYSTEM_PROMPT, user], { timeoutMs: INFER_TIMEOUT_MS });
-	if (code !== 0) return undefined;
-	return parsePlanJson(out);
+	return decideTyped<RawPlan | undefined>({
+		args: ["-p", "--smol", "--system-prompt", SYSTEM_PROMPT, user],
+		timeoutMs: INFER_TIMEOUT_MS,
+		parse: parsePlanJson,
+		fallback: undefined,
+	});
 }
 
 /** Resolve a free-text task into a complete, valid spawn plan. Never throws; always returns a usable plan. */
