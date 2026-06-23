@@ -67,6 +67,7 @@ test("create throws at the WIP cap before cutting a worktree", async () => {
 	overridable.list = () => [dto("working"), dto("working")]; // 2 occupying → fills cap 2
 	process.env.OMP_SQUAD_MAX_WIP = "2";
 	delete process.env.OMP_SQUAD_QUEUE_ON_FULL; // hermetic: this test asserts the hard-cap throw, not the backpressure enqueue path
+	delete process.env.OMP_SQUAD_RESOURCE_GATE; // hermetic: assert the count cap, not ambient host-pressure backoff
 	await expect(mgr.create({ repo: "/x/repo", name: "blocked" })).rejects.toThrow(/WIP cap reached \(2\/2\)/);
 });
 
@@ -76,6 +77,7 @@ test("create does NOT count idle/landed agents toward the WIP cap (they free the
 	overridable.list = () => [dto("idle"), dto("idle")]; // 2 idle = 0 occupying
 	process.env.OMP_SQUAD_MAX_WIP = "2";
 	delete process.env.OMP_SQUAD_QUEUE_ON_FULL;
+	delete process.env.OMP_SQUAD_RESOURCE_GATE; // hermetic: count-only — idle agents free their slot regardless of host load
 	// idle agents don't occupy a slot → create proceeds (fails fast on the fake repo, never a cap throw)
 	const r = await mgr.create({ repo: path.join(os.tmpdir(), "cap-idle-nonexistent-repo"), name: "ok" });
 	expect(r.name).toBe("ok");

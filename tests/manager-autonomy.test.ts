@@ -191,6 +191,7 @@ test("create still hard-throws at the cap when the flag is off (default behavior
 	for (const id of ["live1", "live2"]) mgr.agents.get(id)!.dto.status = "working";
 	process.env.OMP_SQUAD_MAX_WIP = "2";
 	delete process.env.OMP_SQUAD_QUEUE_ON_FULL;
+	delete process.env.OMP_SQUAD_RESOURCE_GATE; // hermetic: assert the count cap, not ambient host-pressure backoff
 	await expect(mgr.create({ repo: "/x/repo", name: "blocked" })).rejects.toThrow(/WIP cap reached \(2\/2\)/);
 });
 

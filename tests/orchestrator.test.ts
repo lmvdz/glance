@@ -247,6 +247,7 @@ test("isCatastrophic tripwire summons a human before verify/land (#14)", async (
 test("queued spawns are admitted only while under the WIP cap, draining as slots free (#13)", async () => {
 	process.env.OMP_SQUAD_AUTODRIVE = "1";
 	process.env.OMP_SQUAD_MAX_WIP = "3";
+	delete process.env.OMP_SQUAD_RESOURCE_GATE; // hermetic: assert count-cap admission, not ambient host-pressure backoff
 	const roster: AgentDTO[] = [agent("live-1", "working"), agent("live-2", "working")]; // 2 live, cap 3 ⇒ room for 1
 	const spawned: string[] = [];
 	const orch = new Orchestrator({

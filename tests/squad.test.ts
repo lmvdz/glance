@@ -216,6 +216,7 @@ test(
 test(
 	"SquadManager: create (no task) reaches idle, lists, removes + cleans worktree",
 	async () => {
+		delete process.env.OMP_SQUAD_RESOURCE_GATE; // hermetic: create must admit regardless of ambient host-pressure backoff
 		const repo = await makeRepo();
 		const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-state-"));
 		tmps.push(stateDir);
