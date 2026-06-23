@@ -793,7 +793,7 @@ function handle(ev) {
     case "agent": { const prev = prevStatus.get(ev.agent.id); agents.set(ev.agent.id, ev.agent); signalTransition(prev, ev.agent); prevStatus.set(ev.agent.id, ev.agent.status); refreshShell(); break; }
     case "commands": commandsByAgent.set(ev.id, ev.commands); break;
     case "features-changed": if (view === "board" || view === "feature") loadFeatures(); break;
-    case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); lastNotify.delete(ev.id); commandsByAgent.delete(ev.id); composerDraft.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; } renderAll(); break;
+    case "removed": agents.delete(ev.id); prevStatus.delete(ev.id); transcripts.delete(ev.id); lastNotify.delete(ev.id); commandsByAgent.delete(ev.id); composerDraft.delete(ev.id); if (selAgent === ev.id) { selAgent = null; view = "project"; renderAll(); } else refreshShell(); break;
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
     default: console.warn("unknown event type:", ev && ev.type); break;
@@ -1320,10 +1320,15 @@ let featTimer = null;
 function scheduleFeatures() { if (featTimer) return; featTimer = setTimeout(() => { featTimer = null; loadFeatures(); }, 4000); }
 let featuresError = "";   // last /api/features failure, surfaced on the board when it would otherwise be blank
 let featuresLoaded = false;   // first /api/features response landed — lets renderBoard tell "loading" from "empty"
+let featuresSig = null;       // signature of the last-painted feature set — skip identical repaints so the board's lanes don't rebuild + flash the scrollbar (OMPSQ-49)
 async function loadFeatures() {
   try { const r = await fetch("/api/features"); if (r.ok) { const list = await r.json(); features.clear(); for (const f of list) features.set(f.id, f); featuresError = ""; } else featuresError = `couldn't load features (${r.status})`; } catch { featuresError = "couldn't reach the daemon for features"; }
   featuresLoaded = true;
-  if (view === "board" || view === "feature") renderBody();
+  if (view !== "board" && view !== "feature") return;
+  const sig = featuresError || JSON.stringify([...features.values()]);
+  if (sig === featuresSig) return;   // feature data unchanged since last paint — leave the DOM (and scroll) alone
+  featuresSig = sig;
+  renderBody();
 }
 function openBoard() { view = "board"; selFeature = null; renderAll(); loadFeatures(); }
 function openFeature(id) { selFeature = id; view = "feature"; renderAll(); }
@@ -2020,7 +2025,12 @@ function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
   if (view === "settings") return;   // settings is fetch-driven; don't rebuild it on live roster events
   if (view === "queue" || view === "race") { renderBody(); return; }
-  if (view === "board" || view === "feature") { renderBody(); scheduleFeatures(); return; }
+  if (view === "feature") { renderBody(); scheduleFeatures(); return; }
+  // The Features board reflects only feature data — never agent/roster state — so a live
+  // agent tick must NOT rebuild its horizontal lanes (that resets scroll + flashes the
+  // scrollbar, OMPSQ-49). Refresh the data on a debounce; loadFeatures repaints the lanes
+  // only when the feature set actually changed.
+  if (view === "board") { scheduleFeatures(); return; }
   if (view === "agent" && selAgent && agents.has(selAgent)) { patchAgentView(agents.get(selAgent)); return; }
   if (view === "project" && selProject) { const p = projects().find(x => x.id === selProject); if (p) { patchProjectView(p); return; } }
   renderBody();
