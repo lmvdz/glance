@@ -270,9 +270,12 @@ export class TailnetFederationBus implements FederationBus {
 	private lastPresence?: OperatorPresence;
 	private readonly lastLeases = new Map<string, LeaseEntry[]>();
 
-	constructor(opts: { coordinatorUrl: string; operator: Actor; whois?: (ip: string) => Promise<Actor | undefined> }) {
+	private readonly token?: string;
+
+	constructor(opts: { coordinatorUrl: string; operator: Actor; token?: string; whois?: (ip: string) => Promise<Actor | undefined> }) {
 		this.coordinatorUrl = opts.coordinatorUrl;
 		this.operator = opts.operator;
+		this.token = opts.token;
 		this.whois = opts.whois ?? tailscaleWhois;
 	}
 
@@ -330,7 +333,7 @@ export class TailnetFederationBus implements FederationBus {
 		if (this.stopped) return;
 		let ws: WebSocket;
 		try {
-			ws = new WebSocket(this.coordinatorUrl);
+			ws = this.token !== undefined ? new WebSocket(this.coordinatorUrl, ["ompsq-token", this.token]) : new WebSocket(this.coordinatorUrl);
 		} catch {
 			// swallow: a bad URL throws synchronously — retry on backoff
 			this.scheduleReconnect();
@@ -420,9 +423,9 @@ export class PeerPresenceTracker {
 	private readonly bus: TailnetFederationBus;
 	readonly roster: PeerRoster;
 
-	constructor(opts: { coordinatorUrl: string; operator: Actor; ttlMs?: number }) {
+	constructor(opts: { coordinatorUrl: string; operator: Actor; token?: string; ttlMs?: number }) {
 		this.roster = new PeerRoster(opts.operator.id, opts.ttlMs);
-		this.bus = new TailnetFederationBus({ coordinatorUrl: opts.coordinatorUrl, operator: opts.operator });
+		this.bus = new TailnetFederationBus({ coordinatorUrl: opts.coordinatorUrl, operator: opts.operator, token: opts.token });
 		this.bus.onPresence((p) => this.roster.record(p));
 	}
 

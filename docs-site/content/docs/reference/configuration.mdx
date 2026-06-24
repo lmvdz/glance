@@ -69,6 +69,8 @@ Cross-operator coordination. Read by `src/index.ts`, `src/server.ts`, `src/coord
 		'OMP_SQUAD_COORDINATOR': { type: 'ws url', default: 'unset', description: 'Coordinator WebSocket URL (ws://host:port). Set ⇒ this daemon joins federation and opens a peer-presence feed; unset ⇒ the federation surface stays inert.' },
 		'OMP_SQUAD_OPERATOR': { type: 'string', default: 'OS username, else "local"', description: 'This host operator identity, used in presence, leases, and the federation roster.' },
 		'OMP_SQUAD_COORDINATOR_PORT': { type: 'number', default: '7900', description: 'Port the standalone coordinator (coordinator-main.ts) listens on, when no port arg is passed.' },
+		'OMP_SQUAD_COORDINATOR_HOST': { type: 'string', default: '127.0.0.1', description: 'Coordinator bind address. 0.0.0.0 exposes the relay on the LAN/tailnet; a non-loopback bind then requires OMP_SQUAD_COORDINATOR_TOKEN (or OMP_SQUAD_INSECURE=1).' },
+		'OMP_SQUAD_COORDINATOR_TOKEN': { type: 'string', default: 'unset', description: 'Pre-shared secret gating the coordinator relay. The coordinator and every client (daemon, federation-sync, command center) must set the same value. Unset ⇒ no auth — only safe on the loopback default, since any reachable peer could otherwise snoop and spoof presence/lease frames.' },
 		'OMP_SQUAD_FED_REPOS': { type: 'csv', default: 'unset', description: 'Extra repo paths the federation-sync worker advertises, comma-separated.' },
 	}}
 />

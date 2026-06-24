@@ -28,9 +28,11 @@ if (import.meta.main) {
 		.filter((s) => s.length > 0);
 	const repos = [process.cwd(), ...extra];
 
+	const token = process.env.OMP_SQUAD_COORDINATOR_TOKEN || undefined;
 	const handle = await startFederationSync({
 		coordinatorUrl,
 		operator,
+		token,
 		repos,
 		onMirror: (frame) => process.stderr.write(`federation-sync: mirrored ${frame.leases.length} lease(s) for ${frame.repoId} from ${frame.operator.id}\n`),
 	});

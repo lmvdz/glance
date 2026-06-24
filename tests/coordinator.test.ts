@@ -22,6 +22,16 @@ function connect(url: string): Promise<WebSocket> {
 	return promise;
 }
 
+/** Connect offering the `ompsq-token, <token>` subprotocol the relay's auth gate expects. */
+function connectWithToken(url: string, token: string): Promise<WebSocket> {
+	const { promise, resolve, reject } = Promise.withResolvers<WebSocket>();
+	const ws = new WebSocket(url, ["ompsq-token", token]);
+	opened.push(ws);
+	ws.onopen = (): void => resolve(ws);
+	ws.onerror = (): void => reject(new Error(`failed to connect to ${url}`));
+	return promise;
+}
+
 afterEach(() => {
 	for (const ws of opened.splice(0)) {
 		try {
@@ -57,6 +67,37 @@ test("relays a frame to other peers but not the sender", async () => {
 
 test("a plain GET returns 200", async () => {
 	handle = runCoordinator({ port: 0 });
+	const res = await fetch(handle.url.replace("ws://", "http://"));
+	expect(res.status).toBe(200);
+});
+
+test("a token-gated relay rejects an upgrade with no token", async () => {
+	handle = runCoordinator({ port: 0, token: "s3cret" });
+	await expect(connect(handle.url)).rejects.toThrow();
+});
+
+test("a token-gated relay rejects an upgrade with the wrong token", async () => {
+	handle = runCoordinator({ port: 0, token: "s3cret" });
+	await expect(connectWithToken(handle.url, "wrong")).rejects.toThrow();
+});
+
+test("a token-gated relay accepts the right token and relays", async () => {
+	handle = runCoordinator({ port: 0, token: "s3cret" });
+
+	const client1 = await connectWithToken(handle.url, "s3cret");
+	const client2 = await connectWithToken(handle.url, "s3cret");
+
+	const received = Promise.withResolvers<unknown>();
+	client2.onmessage = (event: MessageEvent): void => received.resolve(JSON.parse(String(event.data)));
+
+	const payload = { kind: "presence", n: 7 };
+	client1.send(JSON.stringify(payload));
+
+	expect(await received.promise).toEqual(payload);
+});
+
+test("a token-gated relay still serves the health GET without a token", async () => {
+	handle = runCoordinator({ port: 0, token: "s3cret" });
 	const res = await fetch(handle.url.replace("ws://", "http://"));
 	expect(res.status).toBe(200);
 });
