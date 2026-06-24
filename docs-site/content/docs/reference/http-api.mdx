@@ -48,11 +48,11 @@ Any other unmatched path returns `404 not found`.
 | GET | `/api/agents/:id/tree` | Worktree file tree. | tree payload |
 | POST | `/api/agents/:id/land` | Commit + merge the branch to main. | land result; see below |
 | POST | `/api/agents/:id/verify` | Run the repo's detected acceptance command as a land-proof. | proof result; `422` if none detected |
-| POST | `/api/agents/:id/vision` | Capture screenshot evidence (never gates a land). | `{ artifacts }`; `422` if no URL |
+| POST | `/api/agents/:id/vision` | Capture screenshot evidence (never gates a land). **Admin-tier.** | `{ artifacts }`; `422` if no URL; `400` if the URL fails the SSRF guard |
 
 **`/land`** accepts an optional JSON body `{ message?, force? }`. Unless `force` is `true`, a proof gate runs first; if it fails the route returns `409` with `{ ok: false, committed: false, merged: false, message, detail }`. Work-in-progress is committed only when the agent is not busy (`working`/`starting`/`input`). On a successful land the agent's tracking Plane issue is closed (best-effort, idempotent).
 
-**`/vision`** takes `{ url? }`; absent that it falls back to `$OMP_SQUAD_APP_URL`. With neither it returns `422`.
+**`/vision`** takes `{ url? }`; absent that it falls back to `$OMP_SQUAD_APP_URL`. With neither it returns `422`. It is **admin-tier** — it drives the daemon's headless browser, which reaches the daemon's network position. To stop that becoming an SSRF vector, the target is validated: only `http(s)` is allowed, and the host is DNS-resolved and **rejected with `400`** if it lands on a private / loopback / link-local / reserved range (RFC1918, `127.0.0.0/8`, `169.254.0.0/16` incl. the cloud-metadata IP, `::1`, `fc00::/7`, `fe80::/10`, …). The one exception is the origin of `$OMP_SQUAD_APP_URL`, which is allowlisted — set it to screenshot a trusted local app (e.g. `http://localhost:3000`).
 
 ## Features
 

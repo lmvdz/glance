@@ -48,6 +48,8 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("POST", "/api/agents/a1/land")).toBe("admin");
 	expect(restActionTier("POST", "/api/features/f1/land")).toBe("admin");
 	expect(restActionTier("POST", "/api/features/f1/verify")).toBe("admin");
+	// vision drives the daemon's browser off-box (SSRF surface, OMPSQ-152) — admin, not operator.
+	expect(restActionTier("POST", "/api/agents/a1/vision")).toBe("admin");
 	expect(restActionTier("GET", "/api/auth/check")).toBe("viewer");
 	expect(restActionTier("POST", "/api/push/subscribe")).toBe("viewer");
 	// agent verify runs the acceptance command (non-destructive) — stays operator, unlike feature verify.
@@ -116,4 +118,24 @@ test("REST land route: operator 403 at the gate, admin passes through", async ()
 	expect((await land(tokens.operator)).status).toBe(403);
 	// Admin clears the gate; the handler then 404s (no such agent) — proving authz passed, not denied.
 	expect((await land(tokens.admin)).status).toBe(404);
+});
+
+test("REST vision route: operator 403 at the gate, admin passes through (OMPSQ-152)", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "authz-vis-"));
+	const tokens = { admin: "admin-token-xxxxxxxx", operator: "operator-token-xxxxxx" };
+	const mgr = new SquadManager({ stateDir: dir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0, token: tokens.admin, roleTokens: { operator: tokens.operator } });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	const vision = (t: string) =>
+		fetch(`${url}/api/agents/ghost/vision`, { method: "POST", headers: { authorization: `Bearer ${t}`, "content-type": "application/json" }, body: JSON.stringify({ url: "http://example.com/" }) });
+	// Operator is stopped at the single REST gate (vision ⇒ admin), so the SSRF surface is unreachable to it.
+	expect((await vision(tokens.operator)).status).toBe(403);
+	// Admin clears the gate; the handler then 404s (no such agent) — proving authz passed, not denied.
+	expect((await vision(tokens.admin)).status).toBe(404);
 });
