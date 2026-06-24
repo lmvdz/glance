@@ -324,6 +324,8 @@ export interface CreateAgentOptions {
 	featureId?: string;
 	/** Path to a workflow graph (`.fabro`) to run as the agent's process; `task` becomes the goal. */
 	workflow?: string;
+	/** Resumable workflow checkpoint to continue from instead of restarting the graph (adopt/restore paths). */
+	workflowState?: WorkflowRunState;
 	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
 	verify?: string;
 	/** Parent workflow agent id, when spawning a fan-out branch. */

@@ -268,6 +268,38 @@ test(
 	30_000,
 );
 
+// ── workflow checkpoint survives adopt/restore (OMPSQ-165) ───────────────────
+
+test(
+	"SquadManager: create carries a workflow checkpoint into the persisted record (resume, not restart)",
+	async () => {
+		delete process.env.OMP_SQUAD_RESOURCE_GATE;
+		const repo = await makeRepo();
+		const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-wfstate-"));
+		tmps.push(stateDir);
+		// Minimal graph; resume points straight at exit so the run completes without spawning an inner omp.
+		const fabro = path.join(stateDir, "wf.fabro");
+		await fs.writeFile(fabro, "digraph D {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n  start -> exit\n}\n");
+		const checkpoint = { goal: "g", currentNode: "exit", visits: { start: 1 }, vars: { phase: "done" }, index: 1, rollup: [] };
+
+		const mgr = new SquadManager({ stateDir });
+		await mgr.start();
+		const created = await mgr.create({ name: "wf", repo, approvalMode: "yolo", workflow: fabro, workflowState: checkpoint });
+		tmps.push(created.worktree);
+
+		const persisted = JSON.parse(await fs.readFile(path.join(stateDir, "state.json"), "utf8")) as {
+			agents: { id: string; kind?: string; workflowState?: { currentNode?: string; vars?: Record<string, string> } }[];
+		};
+		const saved = persisted.agents.find((a) => a.id === created.id);
+		expect(saved?.kind).toBe("workflow");
+		// The bug: create dropped opts.workflowState, so an adopted/restored workflow restarted from start.
+		expect(saved?.workflowState?.currentNode).toBe("exit");
+		expect(saved?.workflowState?.vars?.phase).toBe("done");
+		await mgr.stop();
+	},
+	30_000,
+);
+
 // ── commissioning loop (deterministic — no model, no network) ────────────────
 
 const EMAIL_BODY = `const text = String(payload.text ?? "");

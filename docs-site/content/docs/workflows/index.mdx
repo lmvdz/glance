@@ -84,9 +84,10 @@ continuous working session.
 
 <Callout type="info">
 Workflow runs persist a resumable checkpoint at every node boundary (`WorkflowRunState` =
-engine checkpoint + rollup). After a daemon restart a run resumes **only** if its inner thread
-is still alive *and* a checkpoint exists; otherwise the orchestration is unrecoverable and the
-manager logs a warning.
+engine checkpoint + rollup). After a daemon restart a run resumes from that checkpoint: if its
+inner thread is still alive it reattaches in place, otherwise it is respawned and the graph
+continues from the last completed node — completed stages are not re-run. Only a run with **no**
+checkpoint is unrecoverable; the manager logs a warning and does not restart it from scratch.
 </Callout>
 
 ## Read next
