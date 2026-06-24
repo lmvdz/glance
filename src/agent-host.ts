@@ -258,6 +258,16 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 		}
 	})();
 
+	// Drain omp stderr → host stderr. Without this the OS pipe buffer (~64KB)
+	// fills on a chatty child, omp blocks on write(2), and the agent hangs.
+	void (async () => {
+		try {
+			for await (const chunk of proc.stderr) process.stderr.write(chunk);
+		} catch {
+			/* stream ended */
+		}
+	})();
+
 	const code = await proc.exited;
 	exited = code ?? 0;
 	broadcast(meta());
