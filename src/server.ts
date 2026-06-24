@@ -608,6 +608,15 @@ export class SquadServer {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
 			}
 		}
+		if (url.pathname === "/api/console" && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const message = body && typeof body === "object" && "message" in body && typeof body.message === "string" ? body.message.trim() : "";
+			if (!message) return new Response("empty message", { status: 400 });
+			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			// A plain conversational omp agent: no smart-spawn routing, no workflow, not filed to Plane.
+			const dto = await manager.create({ repo, task: message }, actor);
+			return Response.json({ agentId: dto.id });
+		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
 		const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);

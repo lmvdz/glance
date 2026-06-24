@@ -7,11 +7,13 @@ import { groupTasks } from "@/lib/projects";
 import { STAGE_LABEL, stageColorVar } from "@/lib/status";
 import { TaskList } from "@/components/project/TaskList";
 import { TaskDetail } from "@/components/project/TaskDetail";
+import { DetailPanel } from "@/components/DetailPanel";
 
 export function ProjectView({ repo, squad }: { repo: string; squad: SquadState }) {
   const reduce = useReducedMotion();
   const { issues, configured } = useProjectIssues(repo);
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [featureId, setFeatureId] = useState<string | null>(null);
 
   const features = useMemo(() => squad.features.filter((f) => f.repo === repo), [squad.features, repo]);
   const agentByIssueId = useMemo(() => {
@@ -50,6 +52,7 @@ export function ProjectView({ repo, squad }: { repo: string; squad: SquadState }
   const name = repo.split("/").filter(Boolean).pop() ?? repo;
   const empty = features.length === 0 && issues.length === 0;
   const transition = reduce ? { duration: 0 } : { duration: 0.22, ease: [0.16, 1, 0.3, 1] as const };
+  const selFeature = featureId ? (features.find((f) => f.id === featureId) ?? null) : null;
 
   return (
     <div className="relative h-full overflow-y-auto">
@@ -69,11 +72,18 @@ export function ProjectView({ repo, squad }: { repo: string; squad: SquadState }
         <div className="p-2">
           {byFeature.map(({ feature, tasks }) => (
             <section key={feature.id} className="mb-3">
-              <div className="flex items-center gap-2 px-2 py-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setTaskId(null);
+                  setFeatureId(feature.id);
+                }}
+                className="flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-surface-hover"
+              >
                 <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: stageColorVar(feature.stage) }} />
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-text-primary">{feature.title}</span>
                 <span className="shrink-0 text-xs text-text-muted">{STAGE_LABEL[feature.stage]}</span>
-              </div>
+              </button>
               <TaskList issues={tasks} agentByIssueId={agentByIssueId} selectedId={taskId} focusedId={taskId ? null : flatIds[focus]} onSelect={setTaskId} />
             </section>
           ))}
@@ -97,6 +107,23 @@ export function ProjectView({ repo, squad }: { repo: string; squad: SquadState }
             className="absolute bottom-0 right-0 top-0 z-20 flex w-[480px] max-w-[90vw] border-l border-border bg-base shadow-[var(--shadow-float)]"
           >
             <TaskDetail repo={repo} taskId={taskId} onClose={() => setTaskId(null)} squad={squad} />
+          </motion.div>
+        ) : null}
+        {!taskId && selFeature ? (
+          <motion.div
+            key="feature-detail"
+            initial={{ x: "100%" }}
+            animate={{ x: 0 }}
+            exit={{ x: "100%" }}
+            transition={transition}
+            className="absolute bottom-0 right-0 top-0 z-20 flex w-[480px] max-w-[90vw] border-l border-border bg-base shadow-[var(--shadow-float)]"
+          >
+            <DetailPanel
+              feature={selFeature}
+              agents={squad.agents.filter((a) => a.featureId === selFeature.id)}
+              onClose={() => setFeatureId(null)}
+              onAnswer={(agentId, requestId, value) => squad.send({ type: "answer", id: agentId, requestId, value })}
+            />
           </motion.div>
         ) : null}
       </AnimatePresence>

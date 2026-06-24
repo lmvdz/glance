@@ -15,8 +15,9 @@ import { NetworkView } from "@/components/views/NetworkView";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { groupProjects } from "@/lib/projects";
 import { ProjectView } from "@/components/views/ProjectView";
+import { ConsoleView } from "@/components/views/ConsoleView";
 
-const VIEWS = ["inbox", "agents", "features", "graph", "audit", "network", "project"] as const;
+const VIEWS = ["inbox", "agents", "features", "graph", "audit", "network", "project", "console"] as const;
 
 function readHash(): { view: View; sel: string | null } {
   const raw = location.hash.replace(/^#\/?/, "");
@@ -98,6 +99,7 @@ export function App() {
                 {view === "inbox" && <InboxView squad={squad} />}
                 {view === "audit" && <AuditView />}
                 {view === "network" && <NetworkView squad={squad} />}
+                {view === "console" && <ConsoleView squad={squad} />}
                 {view === "project" && sel ? <ProjectView repo={sel} squad={squad} /> : null}
               </main>
             </div>

@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
-import { Bot, FolderGit2, Inbox, Layers, Network, ScrollText, Share2 } from "lucide-react";
+import { Bot, FolderGit2, Inbox, Layers, MessageSquare, Network, ScrollText, Share2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Project } from "@/lib/projects";
 
-export type View = "inbox" | "agents" | "features" | "graph" | "audit" | "network" | "project";
+export type View = "inbox" | "agents" | "features" | "graph" | "audit" | "network" | "project" | "console";
 
 const ITEMS: { id: View; label: string; icon: ReactNode }[] = [
   { id: "inbox", label: "Inbox", icon: <Inbox size={16} /> },
@@ -12,6 +12,7 @@ const ITEMS: { id: View; label: string; icon: ReactNode }[] = [
   { id: "graph", label: "Graph", icon: <Network size={16} /> },
   { id: "audit", label: "Audit", icon: <ScrollText size={16} /> },
   { id: "network", label: "Network", icon: <Share2 size={16} /> },
+  { id: "console", label: "Console", icon: <MessageSquare size={16} /> },
 ];
 
 interface SidebarProps {

@@ -38,6 +38,25 @@ export interface IssueRef {
   noAutoDispatch?: boolean;
 }
 
+/** A concern doc inside a plan dir (mirrors src/features.ts PlanConcern) — a draft task before filing. */
+export interface PlanConcern {
+  file: string;
+  title: string;
+  status: string;
+  priority?: string;
+  complexity?: string;
+  /** Set once filed to Plane (the PLANE: pointer); absent ⇒ still a local draft. */
+  planeId?: string;
+  open: boolean;
+}
+
+/** The automation-loop snapshot for a feature (GET /api/features/:id/pipeline). */
+export interface FeaturePipeline {
+  concerns: PlanConcern[];
+  issues: IssueRef[];
+  agentIds: string[];
+}
+
 export interface FeatureDTO {
   id: string;
   title: string;

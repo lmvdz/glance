@@ -5,12 +5,16 @@ import { useToast } from "@/components/ui/toast";
 import { apiPost } from "@/lib/api";
 import { AnswerControls } from "@/components/agent/AnswerControls";
 import { CommentsPanel } from "@/components/project/CommentsPanel";
+import { Badge } from "@/components/ui/badge";
+import { LoopBreadcrumb } from "@/components/project/LoopBreadcrumb";
+import { useFeaturePipeline } from "@/hooks/useFeaturePipeline";
 
 export function DetailPanel({ feature, agents, onClose, onAnswer }: { feature: FeatureDTO; agents: AgentDTO[]; onClose: () => void; onAnswer?: (agentId: string, requestId: string, value: string) => void }) {
   const { toast } = useToast();
   const repo = feature.repo.split("/").filter(Boolean).pop() ?? feature.repo;
   // Plan-review gates: the RPI approve hexagon surfaces as a pending request on the workflow agent.
   const gates = agents.flatMap((a) => a.pending.map((req) => ({ agentId: a.id, req })));
+  const { pipeline } = useFeaturePipeline(feature.id, feature.repo);
 
   const act = async (kind: "verify" | "land") => {
     const res = await apiPost<{ ok?: boolean; detail?: string; stopped?: string }>(
@@ -56,6 +60,29 @@ export function DetailPanel({ feature, agents, onClose, onAnswer }: { feature: F
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        {pipeline ? (
+          <div className="mb-4 rounded-md border border-border bg-surface p-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs font-medium uppercase tracking-wide text-text-muted">Pipeline</h3>
+              <LoopBreadcrumb stage={feature.stage} counts={{ concerns: pipeline.concerns.length, issues: pipeline.issues.length, agents: pipeline.agentIds.length }} />
+            </div>
+            {pipeline.concerns.length === 0 ? (
+              <p className="text-xs text-text-muted">{feature.planDir ? "No plan concerns." : "No plan dir — this feature has no concerns to file."}</p>
+            ) : (
+              <ul className="flex flex-col gap-0.5">
+                {pipeline.concerns.map((c) => (
+                  <li key={c.file} className="flex items-center gap-2 rounded px-1.5 py-1 text-sm">
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: c.open ? "var(--color-glyph-planned)" : "var(--color-glyph-done)" }} title={c.status} />
+                    <span className="min-w-0 flex-1 truncate text-text-primary">{c.title}</span>
+                    {c.complexity ? <span className="shrink-0 text-[0.65rem] uppercase tracking-wide text-text-muted">{c.complexity}</span> : null}
+                    {c.priority ? <Badge tone="neutral">{c.priority}</Badge> : null}
+                    {c.planeId ? <span className="shrink-0 font-mono text-xs text-accent">{c.planeId}</span> : <Badge tone="warning">draft</Badge>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : null}
         {gates.length > 0 && onAnswer ? (
           <div className="mb-4 rounded-md border border-border bg-surface p-3">
             <h3 className="mb-2 text-xs font-medium uppercase tracking-wide" style={{ color: "var(--color-progress)" }}>
@@ -72,15 +99,6 @@ export function DetailPanel({ feature, agents, onClose, onAnswer }: { feature: F
         <div className="mb-4">
           <CommentsPanel repo={feature.repo} subject={feature.id} />
         </div>
-        {feature.issueIdentifiers && feature.issueIdentifiers.length > 0 ? (
-          <div className="mb-4 flex flex-wrap gap-1.5">
-            {feature.issueIdentifiers.map((id) => (
-              <span key={id} className="rounded border border-border px-1.5 py-0.5 font-mono text-xs text-text-secondary">
-                {id}
-              </span>
-            ))}
-          </div>
-        ) : null}
         <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-text-muted">Agents ({agents.length})</h3>
         {agents.length === 0 ? (
           <p className="text-sm text-text-muted">No agents on this feature.</p>
