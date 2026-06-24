@@ -42,9 +42,10 @@ export interface OrchestratorDeps {
 	/**
 	 * Land a plain agent's OWN branch. true ⇒ merged; false ⇒ blocked (retry, then park); "staged" ⇒
 	 * the conflict was auto-resolved and held for a one-tap Land (OMPSQ-138/175) — stage it, never
-	 * re-attempt the merge, never park.
+	 * re-attempt the merge, never park. "retryable" ⇒ an environmental precondition blocked it (a dirty
+	 * main checkout) — retry next tick, never bump the block counter or park/halt.
 	 */
-	landAgentWork?: (agentId: string) => Promise<boolean | "staged">;
+	landAgentWork?: (agentId: string) => Promise<boolean | "staged" | "retryable">;
 	agentHasWork?: (agentId: string) => Promise<boolean>;
 	/**
 	 * Failure router. Defaults to the resolver's `routeFailure` seam (escalate-everything until
@@ -265,6 +266,14 @@ export class Orchestrator {
 			this.attempts.delete(a.id);
 			this.landBlocks.delete(a.id);
 			log(`ready to land ${workId} (${a.id})${label} — conflict auto-resolved, awaiting confirm`);
+			return;
+		}
+		// Retryable (dirty main checkout): an environmental precondition, not a branch defect — do NOT
+		// bump the blocked-land counter or park/halt. Skip this tick; a later tick lands it once main is
+		// clean. A transient dirty main would otherwise halt every healthy branch behind it. Must precede
+		// the truthy `if (outcome)` below, since "retryable" is a truthy string.
+		if (outcome === "retryable") {
+			log(`land deferred ${workId} (${a.id})${label} — main checkout busy; will retry`);
 			return;
 		}
 		if (outcome) {

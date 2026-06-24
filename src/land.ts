@@ -25,6 +25,13 @@ export interface LandResult {
 	 * caller must treat this as "staged", not "blocked": no merge-retry, no park (OMPSQ-175).
 	 */
 	staged?: boolean;
+	/**
+	 * Environmental precondition blocked the land — the main checkout had uncommitted TRACKED changes,
+	 * not a branch defect. `ok` stays false (nothing merged) but the caller must RETRY later WITHOUT
+	 * bumping the fail streak or parking/halting the branch: a transient dirty main (a human editing the
+	 * shared checkout) would otherwise permanently brick every healthy branch behind it.
+	 */
+	retryable?: boolean;
 }
 
 /**
@@ -171,7 +178,7 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	// path: stash + restore around the land instead of refusing.
 	const mainStatus = await git(["status", "--porcelain", "--untracked-files=no"], repo);
 	if (mainStatus.code === 0 && mainStatus.stdout.length > 0) {
-		return { ok: false, committed, merged: false, message, detail: `main checkout ${repo} has uncommitted tracked changes — refusing to land ${branch} (a failed-gate rollback would discard them); commit or stash them first` };
+		return { ok: false, retryable: true, committed, merged: false, message, detail: `main checkout ${repo} has uncommitted tracked changes — refusing to land ${branch} (a failed-gate rollback would discard them); commit or stash them first` };
 	}
 
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the
