@@ -152,8 +152,9 @@ export interface NodeExecutor {
 	humanGate(node: WorkflowNode, options: string[], ctx: RunContext): Promise<string>;
 	/** Run a node carrying an `action="<name>"` attribute — a host-registered domain step. */
 	runAction?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
-	/** Run a parallel-branch node as an independent unit (e.g. a spawned fleet agent). Falls back to runAgent. */
-	runBranch?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
+	/** Run a parallel-branch node as an independent unit (e.g. a spawned fleet agent). Falls back to runAgent.
+	 * `signal` aborts when the join short-circuits (first_success win) or a sibling threw — honor it to stop the agent. */
+	runBranch?(node: WorkflowNode, ctx: RunContext, signal?: AbortSignal): Promise<NodeResult>;
 	/** Resume an agent / prompt node whose turn may still be in flight from a prior daemon — MUST NOT re-prompt. */
 	resumeAgent?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
 	/** Optional: observe each stage as it starts / ends. */

@@ -106,6 +106,12 @@ export class WorkflowEngine {
 		const policy = fork.attrs.join_policy === "first_success" ? "first_success" : "wait_all";
 		const maxParallel = fork.attrs.max_parallel ? Math.max(1, Number.parseInt(fork.attrs.max_parallel, 10) || 4) : 4;
 
+		// One controller per fan-out. Aborting it signals every in-flight branch agent to stop, so a
+		// first_success win tears down the losers, and a thrown branch executor tears down its siblings
+		// instead of leaving them running detached in their worktrees (the leak this guards against).
+		const controller = new AbortController();
+		const results = new Array<NodeResult | undefined>(branchIds.length);
+
 		const runOne = async (bid: string): Promise<NodeResult> => {
 			const bn = this.wf.nodes.get(bid);
 			if (!bn) return { outcome: "failed" };
@@ -116,18 +122,42 @@ export class WorkflowEngine {
 			this.stage(shared, index, bn, "start", ctx);
 			// Each branch gets an isolated context fork (fabro semantics).
 			const branchCtx: RunContext = { goal: ctx.goal, vars: { ...ctx.vars } };
-			const r = this.executor.runBranch ? await this.executor.runBranch(bn, branchCtx) : await this.executor.runAgent(bn, branchCtx);
+			let r: NodeResult;
+			try {
+				r = this.executor.runBranch ? await this.executor.runBranch(bn, branchCtx, controller.signal) : await this.executor.runAgent(bn, branchCtx);
+			} catch {
+				// A branch executor that rejected (e.g. its spawn crashed) fails just this branch — never
+				// the whole run. Abort the controller so any sibling agent already in flight is torn down
+				// rather than orphaned: a Promise.all rejection here would lose those handles entirely.
+				controller.abort();
+				r = { outcome: "failed" };
+			}
 			branchCtx.outcome = r.outcome;
 			if (r.text !== undefined) branchCtx.vars.lastText = r.text;
 			this.stage(shared, index, bn, "end", branchCtx);
 			return r;
 		};
 
-		const results = await this.runBounded(branchIds, maxParallel, runOne);
-		ctx.vars.parallelResults = JSON.stringify(branchIds.map((id, i) => ({ branch: id, outcome: results[i]!.outcome, text: results[i]!.text })));
-		const succeeded = results.filter((r) => r.outcome === "succeeded").length;
+		// Bounded concurrency: at most `maxParallel` branches in flight. For first_success the join
+		// resolves the instant one branch succeeds — we abort the rest and stop pulling new work, so
+		// the merge never blocks on the slowest/hung loser.
+		let cursor = 0;
+		const worker = async (): Promise<void> => {
+			while (cursor < branchIds.length && !controller.signal.aborted) {
+				const idx = cursor++;
+				const r = await runOne(branchIds[idx]!);
+				results[idx] = r;
+				if (policy === "first_success" && r.outcome === "succeeded") controller.abort();
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(maxParallel, branchIds.length) }, () => worker()));
+
+		// Branches short-circuited before they ever ran count as failed for the record.
+		const final = branchIds.map((_, i) => results[i] ?? { outcome: "failed" as Outcome });
+		ctx.vars.parallelResults = JSON.stringify(branchIds.map((id, i) => ({ branch: id, outcome: final[i]!.outcome, text: final[i]!.text })));
+		const succeeded = final.filter((r) => r.outcome === "succeeded").length;
 		if (policy === "first_success") return succeeded > 0 ? "succeeded" : "failed";
-		return results.length > 0 && succeeded === results.length ? "succeeded" : "failed";
+		return final.length > 0 && succeeded === final.length ? "succeeded" : "failed";
 	}
 
 	/** The single merge node that parallel branches converge on. */
@@ -135,20 +165,6 @@ export class WorkflowEngine {
 		const merges = [...this.wf.nodes.values()].filter((n) => n.kind === "merge");
 		if (merges.length !== 1) throw new Error(`parallel node "${fork.id}" needs exactly one merge node (found ${merges.length})`);
 		return merges[0]!.id;
-	}
-
-	/** Run `fn` over items with at most `limit` in flight, preserving input order in the results. */
-	private async runBounded<T>(items: string[], limit: number, fn: (item: string) => Promise<T>): Promise<T[]> {
-		const results = new Array<T>(items.length);
-		let cursor = 0;
-		const worker = async (): Promise<void> => {
-			while (cursor < items.length) {
-				const idx = cursor++;
-				results[idx] = await fn(items[idx]!);
-			}
-		};
-		await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
-		return results;
 	}
 
 	private stage(shared: Shared, index: number, node: WorkflowNode, phase: "start" | "end", ctx: RunContext): void {
