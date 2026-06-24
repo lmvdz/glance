@@ -68,8 +68,11 @@ export interface ObserverDeps {
 	/** Branch → auto-land failure streak (the persisted ledger). Absent ⇒ the land-failure check is
 	 *  skipped — keeps the loop usable in tests / before any land. */
 	landLedger?: () => LandLedger;
-	/** Where to persist seen fingerprints (<stateDir>/observer-seen.json). */
+	/** Where to persist seen fingerprints. */
 	stateDir: string;
+	/** Seen-map filename within stateDir (default "observer-seen.json"). Per-repo observers pass distinct
+	 *  names so multi-repo audits don't share one dedup map. */
+	seenFile?: string;
 	/** Clock seam (defaults to Date.now). */
 	now?: () => number;
 	/** Log sink (defaults to no-op). */
@@ -212,7 +215,7 @@ export class Observer {
 
 	constructor(deps: ObserverDeps) {
 		this.deps = deps;
-		this.seenPath = path.join(deps.stateDir, "observer-seen.json");
+		this.seenPath = path.join(deps.stateDir, deps.seenFile ?? "observer-seen.json");
 		this.seen = this.loadSeen();
 	}
 

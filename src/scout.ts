@@ -64,8 +64,11 @@ export interface ScoutDeps {
 	/** Working agents' UNSCANNED reasoning for the periodic mid-run sweep (the manager owns the cursor).
 	 *  Omit ⇒ run-end harvesting only (no timer is armed). */
 	liveReasoning?: () => ScanInput[];
-	/** Where to persist seen fingerprints (<stateDir>/scout-seen.json). */
+	/** Where to persist seen fingerprints. */
 	stateDir: string;
+	/** Seen-map filename within stateDir (default "scout-seen.json"). Per-repo scouts pass distinct names
+	 *  so multi-repo harvests don't share one dedup map. */
+	seenFile?: string;
 	/** Clock seam (defaults to Date.now). */
 	now?: () => number;
 	/** Log sink (defaults to no-op). */
@@ -192,7 +195,7 @@ export class Scout {
 
 	constructor(deps: ScoutDeps) {
 		this.deps = deps;
-		this.seenPath = path.join(deps.stateDir, "scout-seen.json");
+		this.seenPath = path.join(deps.stateDir, deps.seenFile ?? "scout-seen.json");
 		this.seen = this.loadSeen();
 	}
 
