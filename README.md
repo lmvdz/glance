@@ -464,6 +464,11 @@ Structure <-> Graph. Feature nodes render stage-colored with dependency edges wh
 resolves; each agent shows as a status ring on the feature it is executing (a `needs-input` agent
 rings amber and glows); selecting a node slides in the detail panel listing that feature's agents.
 
+For live-reload development, `cd webapp && bun run dev` serves the SPA with HMR and proxies
+`/api` + `/ws` to a daemon on `127.0.0.1:7878` (override with `OMP_SQUAD_PROXY`). Open
+`http://localhost:5173/?token=<dashboard-token>` — the token is captured into localStorage and
+reused for the Bearer header and the `ompsq-token` WS subprotocol, same as the live dashboard.
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`
