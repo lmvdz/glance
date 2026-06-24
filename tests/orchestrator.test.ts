@@ -466,3 +466,72 @@ test("holdForConfirm: a re-adopted idle agent is staged for a one-tap Land, not 
 	await orch.tick(); // staged ⇒ no re-attempt
 	expect(landed).toEqual([]);
 });
+
+// ── OMPSQ-139: halted/landed/staged are persisted by branch so a restart doesn't re-drive ──
+// agents. A fresh Orchestrator sharing the same on-disk ledger must skip a previously-parked or
+// already-landed branch even though create() mints a new agent id on re-adoption.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { openOrchestratorState } from "../src/orchestrator-state.ts";
+
+test("halted/landed decisions persist across a restart, keyed by branch (OMPSQ-139)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const dir = mkdtempSync(path.join(tmpdir(), "orch-state-"));
+	try {
+		// ── Boot 1: a feature agent on branch feat/x exhausts its repair budget → CATASTROPHE (halted). ──
+		const halt = { ...agent("old-id", "idle", "F1"), branch: "feat/x" };
+		const verified1: string[] = [];
+		const logs1: string[] = [];
+		const orch1 = new Orchestrator({
+			listAgents: () => [halt],
+			spawn: async () => { throw new Error("no spawn"); },
+			verify: async (id) => { verified1.push(id); return false; }, // red gate
+			land: async () => { throw new Error("must not land a red gate"); },
+			route: () => "escalate", // straight to catastrophe
+			log: (m) => logs1.push(m),
+			persist: openOrchestratorState(dir),
+		});
+		await orch1.tick();
+		expect(verified1).toEqual(["F1"]);
+		expect(logs1.some((l) => l.startsWith("CATASTROPHE:"))).toBe(true);
+
+		// ── Boot 2: a NEW Orchestrator (fresh in-memory sets) over the same ledger. The agent is
+		//    re-adopted with a NEW id but the SAME branch — it must stay parked: no re-verify. ──
+		const readopted = { ...agent("new-id", "idle", "F1"), branch: "feat/x" };
+		const verified2: string[] = [];
+		const orch2 = new Orchestrator({
+			listAgents: () => [readopted],
+			spawn: async () => { throw new Error("no spawn"); },
+			verify: async (id) => { verified2.push(id); return true; },
+			land: async () => { throw new Error("a halted branch must not be re-landed"); },
+			persist: openOrchestratorState(dir),
+		});
+		await orch2.tick();
+		expect(verified2).toEqual([]); // halted branch skipped before verify — no re-summon, no re-spend
+
+		// ── A separate branch that landed in boot 2 must skip re-verify in boot 3. ──
+		const landAgent = { ...agent("lander", "idle", "F2"), branch: "feat/y" };
+		const orch3 = new Orchestrator({
+			listAgents: () => [landAgent],
+			spawn: async () => { throw new Error("no spawn"); },
+			verify: async () => true,
+			land: async () => true,
+			persist: openOrchestratorState(dir),
+		});
+		await orch3.tick(); // verifies + lands feat/y, persisting it as landed
+
+		const verified4: string[] = [];
+		const orch4 = new Orchestrator({
+			listAgents: () => [{ ...agent("lander-2", "idle", "F2"), branch: "feat/y" }],
+			spawn: async () => { throw new Error("no spawn"); },
+			verify: async (id) => { verified4.push(id); return true; },
+			land: async () => { throw new Error("an already-landed branch must not be re-landed"); },
+			persist: openOrchestratorState(dir),
+		});
+		await orch4.tick();
+		expect(verified4).toEqual([]); // landed branch skipped before verify
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

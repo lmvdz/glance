@@ -83,6 +83,7 @@ import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
+import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
@@ -318,6 +319,7 @@ export class SquadManager extends EventEmitter {
 			holdForConfirm: this.landConfirm,
 			notifyReady: (id) => this.markLandReady(id),
 			log: (m) => this.log("info", `orchestrator: ${m}`),
+			persist: openOrchestratorState(this.stateDir), // OMPSQ-139: halted/landed/staged survive restart, keyed by branch
 		});
 		this.orchestrator.start();
 
