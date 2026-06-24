@@ -82,6 +82,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
+import { appendCommentEvent, type ArtifactComment, type CommentQuery, listComments as readComments, nextCommentId } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
@@ -1616,6 +1617,32 @@ export class SquadManager extends EventEmitter {
 	/** Fleet-action audit log, newest first (server reads this; keeps stateDir private). */
 	async auditLog(query: AuditQuery = {}): Promise<AuditEntry[]> {
 		return readAudit(this.stateDir, query);
+	}
+
+	/** Add a review comment on a subject (a planner task's Plane issue id, or a plan-dir file). */
+	async addComment(input: { repo: string; subject: string; body: string; urgent?: boolean }, actor: Actor | string = LOCAL_ACTOR): Promise<ArtifactComment> {
+		const author = typeof actor === "string" ? actor : actor.id;
+		const at = Date.now();
+		const id = nextCommentId(at);
+		await appendCommentEvent(this.stateDir, { type: "add", id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, at });
+		void this.recordAudit(actor, "comment", input.subject, "ok", truncate(input.body, 80));
+		return { id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, createdAt: at };
+	}
+
+	/** Review comments on a subject (server reads this; keeps stateDir private). */
+	async listComments(q: CommentQuery): Promise<ArtifactComment[]> {
+		return readComments(this.stateDir, q);
+	}
+
+	/** Resolve (close) a review comment. */
+	async resolveComment(id: string, actor: Actor | string = LOCAL_ACTOR): Promise<void> {
+		await appendCommentEvent(this.stateDir, { type: "resolve", id, at: Date.now() });
+		void this.recordAudit(actor, "comment-resolve", id, "ok");
+	}
+
+	/** Unresolved comments on a subject — consumed by the Slice-2 RPI feed-forward. */
+	async getUnresolvedComments(repo: string, subject: string): Promise<ArtifactComment[]> {
+		return readComments(this.stateDir, { repo, subject, unresolved: true });
 	}
 
 	/** Saved cold-start resume digest for an agent ("" if none yet). */

@@ -522,7 +522,10 @@ opens a plannable list of its **features** (plan dirs) and their **tasks** (Plan
 task panel shows description + acceptance criteria + a context-bundle preview + properties. Layering
 is `project = repo → feature = plan dir → task = Plane issue`; the issue body is fetched and parsed
 (the `/promote-issue` Tier-2 schema → `src/tier2.ts`) via the new `GET /api/tasks/:id?repo=`.
-The HumanLayer-style generate→review→approve→dispatch flow is **Phase 2** (planned, not yet shipped).
+Reviewers comment on a task before it's dispatched (**review the plan, not the diff**) via the
+planner's **Review** panel + `GET/POST /api/comments` (append-only `comments.jsonl`, resolve folded
+at read); the generate→approve→**gated**-dispatch flow (unresolved comments feeding the next phase)
+is the remaining slice.
 Plan: `plans/omp-planner/`.
 
 Transcripts render via [streamdown](https://github.com/vercel/streamdown) (MIT) — the streaming-

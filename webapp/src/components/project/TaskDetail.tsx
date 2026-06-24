@@ -5,6 +5,7 @@ import { apiGet } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SkeletonRow } from "@/components/ui/skeleton";
+import { CommentsPanel } from "@/components/project/CommentsPanel";
 
 type Tone = "success" | "warning" | "attention" | "danger" | "accent" | "neutral";
 
@@ -140,6 +141,8 @@ export function TaskDetail({ repo, taskId, onClose }: { repo: string; taskId: st
                 </CardContent>
               </Card>
             ) : null}
+
+            <CommentsPanel repo={repo} subject={task.identifier ?? task.id} />
           </div>
         )}
       </div>

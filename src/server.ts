@@ -674,6 +674,27 @@ export class SquadServer {
 			if (detail === null) return new Response("plane not configured", { status: 501 });
 			return Response.json(detail);
 		}
+		if (url.pathname === "/api/comments" && req.method === "GET") {
+			const subject = url.searchParams.get("subject") ?? "";
+			if (!subject) return new Response("subject required", { status: 400 });
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const unresolved = url.searchParams.get("unresolved") === "1";
+			return Response.json(await manager.listComments({ repo, subject, unresolved }));
+		}
+		if (url.pathname === "/api/comments" && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object" || !("subject" in body) || typeof body.subject !== "string" || !body.subject || !("body" in body) || typeof body.body !== "string" || !body.body.trim()) {
+				return new Response("subject and body required", { status: 400 });
+			}
+			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const urgent = "urgent" in body && body.urgent === true;
+			return Response.json(await manager.addComment({ repo, subject: body.subject, body: body.body.trim(), urgent }, actor));
+		}
+		const mresolve = url.pathname.match(/^\/api\/comments\/([^/]+)\/resolve$/);
+		if (mresolve && req.method === "POST") {
+			await manager.resolveComment(decodeURIComponent(mresolve[1]), actor);
+			return Response.json({ ok: true });
+		}
 		if (url.pathname === "/api/upgrade/status") return Response.json(await gitState(process.cwd()));
 		if (url.pathname === "/api/upgrade" && req.method === "POST") {
 			const repo = process.cwd();
