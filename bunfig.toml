@@ -3,6 +3,7 @@
 # `cd webapp && bun run test`).
 [test]
 root = "tests"
-# Hermetic baseline: strip inherited PLANE_* / OMP_SQUAD_* env so tests never hit the
-# live Plane API or pick up the daemon's self-audit toggles. See tests/preload.ts and tests/setup.ts.
+# Hermetic baseline: strip inherited PLANE_* creds (so no test hits the live Plane API) and
+# OMP_SQUAD_* runtime toggles (so the daemon's self-audit flags can't flip default-path tests).
+# See tests/preload.ts and tests/setup.ts.
 preload = ["./tests/preload.ts", "./tests/setup.ts"]
