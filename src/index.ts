@@ -205,6 +205,7 @@ async function cmdUp(args: string[]): Promise<void> {
 		process.exit(1);
 	}
 	const coordinator = process.env.OMP_SQUAD_COORDINATOR;
+	const coordinatorToken = process.env.OMP_SQUAD_COORDINATOR_TOKEN || undefined;
 	const operator: Actor = { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 	// DB mode (DATABASE_URL set): open + migrate the shared DB (openDatabase migrates at boot) and
 	// build the live better-auth instance the server gates on. FILE mode (default): openDatabase()
@@ -283,7 +284,7 @@ async function cmdUp(args: string[]): Promise<void> {
 		registry.start();
 	} else {
 		// File mode: today's single root manager at the state-dir root.
-		const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator }) : undefined;
+		const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator, token: coordinatorToken }) : undefined;
 		manager = new SquadManager({ bus, operator, stateDir, autoLand });
 		await manager.start();
 		if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);

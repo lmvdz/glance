@@ -61,11 +61,20 @@ from one client is rebroadcast verbatim to every *other* client. It never parses
 the wire protocol stays owned entirely by the buses (`TailnetFederationBus`). A plain `GET`
 gets a tiny `omp-squad coordinator` health body; the upgrade is accepted on any path.
 
+The relay **binds `127.0.0.1` by default** and carries a **pre-shared-token auth gate** —
+without it any peer that can reach the port snoops every presence/lease frame and can
+spoof/impersonate. Exposing it (`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`) therefore requires
+`OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator and on every client; a non-loopback bind
+with no token is refused unless `OMP_SQUAD_INSECURE=1`. The token rides the WS handshake as
+the `ompsq-token` subprotocol, exactly like the daemon's bearer token.
+
 Run one anywhere on the tailnet via `src/coordinator-main.ts`:
 
 ```sh title="run a coordinator"
+OMP_SQUAD_COORDINATOR_HOST=0.0.0.0 \
+OMP_SQUAD_COORDINATOR_TOKEN=$(openssl rand -hex 32) \
 OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
-# → omp-squad coordinator listening on ws://127.0.0.1:7900
+# → omp-squad coordinator listening on ws://127.0.0.1:7900 (token-gated)
 ```
 
 <TypeTable
@@ -73,7 +82,17 @@ OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
     OMP_SQUAD_COORDINATOR_PORT: {
       type: 'number',
       default: '7900',
-      description: 'Port the relay binds (0.0.0.0). A positional CLI arg (bun src/coordinator-main.ts 7901) overrides it.',
+      description: 'Port the relay binds. A positional CLI arg (bun src/coordinator-main.ts 7901) overrides it.',
+    },
+    OMP_SQUAD_COORDINATOR_HOST: {
+      type: 'string',
+      default: '127.0.0.1',
+      description: 'Coordinator bind address. 0.0.0.0 exposes it on the LAN/tailnet and then requires a token (or OMP_SQUAD_INSECURE=1).',
+    },
+    OMP_SQUAD_COORDINATOR_TOKEN: {
+      type: 'string',
+      default: 'unset',
+      description: 'Pre-shared secret gating the relay. Coordinator and every client must match. Unset ⇒ no auth (only safe on the loopback default).',
     },
   }}
 />

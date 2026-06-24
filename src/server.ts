@@ -108,6 +108,8 @@ export interface SquadServerOptions {
 	roleTokens?: { operator?: string; viewer?: string };
 	/** Coordinator URL to listen on for peer presence. Defaults to OMP_SQUAD_COORDINATOR; unset ⇒ federation surface stays inert. */
 	coordinator?: string;
+	/** Pre-shared token presented to the coordinator's auth gate. Defaults to OMP_SQUAD_COORDINATOR_TOKEN. */
+	coordinatorToken?: string;
 	/** DB-mode identity layer (better-auth). Set ⇒ DB mode: cookie sessions + orgs replace the bearer gate. Unset ⇒ FILE mode (today's bearer gate). */
 	auth?: AuthInstance;
 	/** The open DB handle backing DB mode; held so the server's lifetime owns it (closed by the daemon). */
@@ -183,6 +185,8 @@ export class SquadServer {
 	private readonly operator: Actor;
 	/** Coordinator URL backing the peer-presence feed; null ⇒ federation surface inert. */
 	private readonly coordinator: string | null;
+	/** Pre-shared token presented to the coordinator; undefined ⇒ no auth. */
+	private readonly coordinatorToken?: string;
 	/** Listener-only peer-presence feed; created on start() only when a coordinator is configured. */
 	private peerPresence?: PeerPresenceTracker;
 	/** Token → tier map gating every /api request + WS command. Empty ⇒ auth off (loopback test mode). */
@@ -202,6 +206,7 @@ export class SquadServer {
 		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
 		this.operator = opts.operator ?? { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 		this.coordinator = opts.coordinator ?? process.env.OMP_SQUAD_COORDINATOR ?? null;
+		this.coordinatorToken = opts.coordinatorToken ?? process.env.OMP_SQUAD_COORDINATOR_TOKEN ?? undefined;
 		this.authPolicy = { admin: opts.token, operator: opts.roleTokens?.operator, viewer: opts.roleTokens?.viewer };
 		this.auth = opts.auth;
 		this.db = opts.db;
@@ -362,7 +367,7 @@ export class SquadServer {
 			this.presenceTimer.unref?.();
 			// Best-effort: only when a coordinator is configured do we open a read-only feed for peer presence.
 			if (this.coordinator) {
-				this.peerPresence = new PeerPresenceTracker({ coordinatorUrl: this.coordinator, operator: this.operator });
+				this.peerPresence = new PeerPresenceTracker({ coordinatorUrl: this.coordinator, operator: this.operator, token: this.coordinatorToken });
 				void this.peerPresence.start();
 			}
 		}

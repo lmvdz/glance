@@ -10,6 +10,7 @@
  */
 
 import type { Server, ServerWebSocket } from "bun";
+import { requestToken, tokenOk } from "./auth.ts";
 
 /** Live handle over a running coordinator: its address plus lifecycle control. */
 export interface CoordinatorHandle {
@@ -22,6 +23,13 @@ export interface CoordinatorHandle {
 export interface CoordinatorOptions {
 	port?: number;
 	hostname?: string;
+	/**
+	 * Pre-shared token gating the relay. When set, a client MUST present it
+	 * (Authorization: Bearer, or the `ompsq-token` WS subprotocol) to upgrade;
+	 * unauthenticated upgrades are rejected with 401. Unset ⇒ no auth (only safe
+	 * on a loopback bind — coordinator-main refuses a non-loopback tokenless bind).
+	 */
+	token?: string;
 }
 
 interface SocketData {
@@ -35,13 +43,22 @@ interface SocketData {
 export function runCoordinator(opts: CoordinatorOptions = {}): CoordinatorHandle {
 	const sockets = new Set<ServerWebSocket<SocketData>>();
 	let seq = 0;
+	const token = opts.token;
 
 	const server: Server<SocketData> = Bun.serve<SocketData>({
 		port: opts.port ?? 7900,
-		hostname: opts.hostname ?? "0.0.0.0",
+		hostname: opts.hostname ?? "127.0.0.1",
 		fetch(req, srv) {
-			// Accept the upgrade on ANY path; a plain GET gets a tiny health body.
-			if (srv.upgrade(req, { data: { id: ++seq } })) return undefined;
+			// Auth gate: a configured token must match before any upgrade. The plain
+			// GET health body leaks nothing, so it stays open for liveness checks.
+			const upgradeRequested = req.headers.get("upgrade")?.toLowerCase() === "websocket";
+			if (token !== undefined && upgradeRequested && !tokenOk(requestToken(req), token)) {
+				return new Response("unauthorized", { status: 401 });
+			}
+			// Accept the upgrade on ANY path; echo the subprotocol sentinel so a
+			// token-bearing client's negotiation succeeds (mirrors the daemon WS).
+			const headers = token !== undefined ? { "Sec-WebSocket-Protocol": "ompsq-token" } : undefined;
+			if (srv.upgrade(req, { data: { id: ++seq }, headers })) return undefined;
 			return new Response("omp-squad coordinator", { status: 200 });
 		},
 		websocket: {
@@ -65,8 +82,8 @@ export function runCoordinator(opts: CoordinatorOptions = {}): CoordinatorHandle
 		},
 	});
 
-	// 0.0.0.0 (or unset) binds all interfaces but isn't a connectable address —
-	// hand callers a loopback url so a local bus can dial straight back in.
+	// 0.0.0.0 binds all interfaces but isn't a connectable address; an unset host
+	// now binds loopback. Either way hand callers a loopback url to dial back in.
 	const hostname = opts.hostname;
 	const connectHost = hostname === undefined || hostname === "0.0.0.0" ? "127.0.0.1" : hostname;
 	const url = `ws://${connectHost}:${server.port}`;

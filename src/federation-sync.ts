@@ -31,6 +31,8 @@ const PUBLISH_INTERVAL_MS = 15_000;
 export interface FederationSyncOptions {
 	coordinatorUrl: string;
 	operator: Actor;
+	/** Pre-shared token presented to the coordinator's auth gate. */
+	token?: string;
 	/** Repo paths to always gossip, in addition to those discovered from the presence registry. */
 	repos?: string[];
 	publishIntervalMs?: number;
@@ -45,7 +47,7 @@ export interface FederationSyncHandle {
 }
 
 export async function startFederationSync(opts: FederationSyncOptions): Promise<FederationSyncHandle> {
-	const bus = new TailnetFederationBus({ coordinatorUrl: opts.coordinatorUrl, operator: opts.operator });
+	const bus = new TailnetFederationBus({ coordinatorUrl: opts.coordinatorUrl, operator: opts.operator, token: opts.token });
 	/** Cross-host repo identity → the local repo paths that resolve to it. */
 	const localByIdentity = new Map<string, Set<string>>();
 

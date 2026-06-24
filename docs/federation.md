@@ -26,9 +26,28 @@ OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
 # → omp-squad coordinator listening on ws://127.0.0.1:7900
 ```
 
+The relay **binds `127.0.0.1` by default** and ships a **pre-shared-token auth gate**.
+Without a token any peer that can reach the port snoops every presence/lease frame
+and can spoof/impersonate, so:
+
+- **Loopback (default):** no token needed — only this host can reach it.
+- **Exposed (`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`):** set `OMP_SQUAD_COORDINATOR_TOKEN`
+  on the coordinator **and** on every client (the daemon, `federation-sync`, and the
+  command center read the same env var). A non-loopback bind with no token is **refused**
+  unless you set `OMP_SQUAD_INSECURE=1` to lean on tailnet ACLs alone, deliberately.
+
+```sh
+OMP_SQUAD_COORDINATOR_HOST=0.0.0.0 \
+OMP_SQUAD_COORDINATOR_TOKEN=$(openssl rand -hex 32) \
+OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
+# → omp-squad coordinator listening on ws://127.0.0.1:7900 (token-gated)
+```
+
 Put it on a Tailscale node and point every operator at its tailnet address.
-WireGuard encrypts the wire; Tailscale ACLs gate who can reach it; identity is
-the tailnet SSO login resolved via `tailscale whois` (see `federation.ts`).
+WireGuard encrypts the wire; the token gates who may join; Tailscale ACLs gate who
+can reach it; identity is the tailnet SSO login resolved via `tailscale whois` (see
+`federation.ts`). The token is presented over the WS handshake as the `ompsq-token`
+subprotocol, exactly like the daemon's bearer token.
 
 ## 2. Cross-host file leasing (`federation-sync.ts` / `-main.ts`)
 

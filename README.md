@@ -334,6 +334,10 @@ commit, so the prune can't delete a worktree out from under a running agent. Dis
 
 `OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
 (or your OS username) via `TailnetFederationBus`; unset → single-operator with `NullFederationBus`.
+The coordinator relay (`bun src/coordinator-main.ts`) binds `127.0.0.1` by default; to expose it
+(`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`) set a shared `OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator
+and every client, or it refuses to start (override with `OMP_SQUAD_INSECURE=1`). Without a token any
+reachable peer can snoop and spoof presence/lease frames.
 
 When a coordinator is set, the command center surfaces who else is on the tailnet: a
 **Federation** panel (in each project view) lists peer operators, their live agents, and any
