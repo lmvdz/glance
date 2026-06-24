@@ -35,6 +35,8 @@ export interface BranchSpec {
 	name: string;
 	task: string;
 	model?: string;
+	/** Aborts when the join short-circuits or a sibling branch threw; the fleet stops the agent so it isn't leaked. */
+	signal?: AbortSignal;
 }
 
 /** The fleet capability a workflow uses to fan out parallel branches into real, steerable roster agents. */
@@ -109,7 +111,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			execCommand: this.opts.execCommand,
 			readPromptRef: (ref) => fs.readFile(path.join(wfDir, ref.slice(1)), "utf8"),
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
-			spawnBranch: this.opts.fleet ? (node, task) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model }) : undefined,
+			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, signal }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
 		});
 		this.engine = new WorkflowEngine(this.wf, this.executor);

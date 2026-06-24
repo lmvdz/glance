@@ -70,11 +70,15 @@ The join outcome flows out of the merge as the run's `outcome`:
 
 - **`wait_all`** — succeeds only if there is at least one branch **and every branch
   succeeded**. Any failure fails the join.
-- **`first_success`** — succeeds if **at least one** branch succeeded.
+- **`first_success`** — succeeds as soon as **one** branch succeeds, and **short-circuits**:
+  the moment a branch wins, the remaining branches are signalled to stop and their roster agents
+  are torn down, so the join never blocks on a slow or hung loser.
 
 The engine also records `context.parallelResults` — a JSON array of
 `{ branch, outcome }` — into the run context after the join. A branch that would exceed its
-visit cap returns `failed` rather than running again.
+visit cap returns `failed` rather than running again. A branch whose executor **throws** fails
+only that branch (it becomes `failed`); its still-running siblings are then signalled to stop so
+a crashed branch never leaves orphaned agents or worktrees behind.
 
 <Callout type="warn">
 The merge resolution requires **exactly one** `tripleoctagon` node in the whole graph

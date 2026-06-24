@@ -1032,11 +1032,13 @@ export class SquadManager extends EventEmitter {
 		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false, bypassCap: true });
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", text: "branch agent not created" };
-		return this.runAgentTask(rec, spec.task);
+		return this.runAgentTask(rec, spec.task, spec.signal);
 	}
 
-	/** Prompt an agent and resolve once its turn ends, collecting the assistant text. */
-	private runAgentTask(rec: AgentRecord, task: string): Promise<NodeResult> {
+	/** Prompt an agent and resolve once its turn ends, collecting the assistant text.
+	 * If `signal` aborts (parallel join short-circuited or a sibling threw), tear the agent down — stop()
+	 * its backing process and mark it stopped — so a won/failed fan-out leaves no live detached branch. */
+	private runAgentTask(rec: AgentRecord, task: string, signal?: AbortSignal): Promise<NodeResult> {
 		const { promise, resolve } = Promise.withResolvers<NodeResult>();
 		let buf = "";
 		const onEvent = (frame: { type?: string; assistantMessageEvent?: { type?: string; delta?: string } }) => {
@@ -1044,13 +1046,25 @@ export class SquadManager extends EventEmitter {
 			else if (frame.type === "agent_end") finish("succeeded");
 		};
 		const onExit = () => finish("failed");
+		const onAbort = () => {
+			void rec.agent.stop().catch(() => {});
+			rec.dto.status = "stopped";
+			this.emitAgent(rec);
+			finish("failed");
+		};
 		const timer = setTimeout(() => finish("failed"), 30 * 60_000);
 		const finish = (outcome: "succeeded" | "failed"): void => {
 			clearTimeout(timer);
 			rec.agent.off("event", onEvent);
 			rec.agent.off("exit", onExit);
+			signal?.removeEventListener("abort", onAbort);
 			resolve({ outcome, text: buf.trim() });
 		};
+		if (signal?.aborted) {
+			onAbort();
+			return promise;
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
 		rec.agent.on("event", onEvent);
 		rec.agent.once("exit", onExit);
 		this.append(rec, "user", task);

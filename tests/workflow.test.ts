@@ -557,6 +557,58 @@ test("engine: first_success reaches exit when any branch succeeds", async () => 
 	expect(exec.agentCalls).not.toContain("recover"); // one success ⇒ join succeeded
 });
 
+/**
+ * A branch executor that honors the abort signal: each branch resolves per `plan[id]`, except a
+ * branch told to "hang" stays pending until its signal aborts (then resolves failed) — modelling a
+ * real roster agent that only stops when the engine signals it. `aborted` records which branches
+ * were signalled, so a test can prove losers/siblings are torn down rather than left running.
+ */
+class SignalAwareExecutor implements NodeExecutor {
+	aborted = new Set<string>();
+	agentCalls: string[] = [];
+	constructor(private readonly plan: Record<string, "succeed" | "fail" | "hang" | "throw">) {}
+	async runAgent(node: WorkflowNode): Promise<NodeResult> {
+		this.agentCalls.push(node.id);
+		return { outcome: "succeeded", text: `${node.id} done` };
+	}
+	async runCommand(): Promise<NodeResult> {
+		return { outcome: "succeeded" };
+	}
+	async humanGate(_node: WorkflowNode, options: string[]): Promise<string> {
+		return options[0]!;
+	}
+	async runBranch(node: WorkflowNode, _ctx: RunContext, signal?: AbortSignal): Promise<NodeResult> {
+		const what = this.plan[node.id] ?? "succeed";
+		if (what === "throw") throw new Error(`branch ${node.id} blew up`);
+		if (what === "hang") {
+			return new Promise<NodeResult>((resolve) => {
+				signal?.addEventListener("abort", () => {
+					this.aborted.add(node.id);
+					resolve({ outcome: "failed", text: `${node.id} stopped` });
+				}, { once: true });
+			});
+		}
+		return { outcome: what === "succeed" ? "succeeded" : "failed", text: `${node.id} ${what}` };
+	}
+}
+
+test("engine: first_success short-circuits — a winning branch aborts the slow loser instead of blocking on it", async () => {
+	const wf = parseWorkflow(FORK_GRAPH.replace("JOIN", 'join_policy="first_success"'));
+	const exec = new SignalAwareExecutor({ a: "hang", b: "succeed" });
+	const res = await new WorkflowEngine(wf, exec).run("explore");
+	expect(res.outcome).toBe("succeeded"); // b won; the join did not wait on the hung branch
+	expect(exec.aborted.has("a")).toBe(true); // the slow loser was signalled to stop, not leaked
+});
+
+test("engine: a throwing branch fails just itself and aborts its siblings — no orphaned branch agents", async () => {
+	const wf = parseWorkflow(FORK_GRAPH.replace("JOIN", 'join_policy="wait_all"'));
+	const exec = new SignalAwareExecutor({ a: "throw", b: "hang" });
+	const res = await new WorkflowEngine(wf, exec).run("explore");
+	expect(exec.aborted.has("b")).toBe(true); // the sibling was torn down rather than left running detached
+	expect(exec.agentCalls).toContain("recover"); // both branches failed → merge fell through to recover
+	expect(res.outcome).toBe("succeeded"); // recover reaches exit; the run never crashed on the throw
+});
+
 test("WorkflowDriver: a fan-out spawns one fleet agent per branch and merges", async () => {
 	const file = await writeWorkflow(`digraph F {
 		start [shape=Mdiamond]
