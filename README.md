@@ -539,8 +539,10 @@ is `project = repo → feature = plan dir → task = Plane issue`; the issue bod
 (the `/promote-issue` Tier-2 schema → `src/tier2.ts`) via the new `GET /api/tasks/:id?repo=`.
 Reviewers comment on a task before it's dispatched (**review the plan, not the diff**) via the
 planner's **Review** panel + `GET/POST /api/comments` (append-only `comments.jsonl`, resolve folded
-at read); the generate→approve→**gated**-dispatch flow (unresolved comments feeding the next phase)
-is the remaining slice.
+at read). The **gated review flow** is now live too: an auto-feature (`Plan & review`) runs
+research → plan → **pauses at a review gate on the feature** — comment + Approve/Revise from the
+feature detail — and the unresolved comments are fed into the next workflow phase (Revise → re-plan,
+Approve → file/implement) via the executor's `decoratePrompt` seam.
 Plan: `plans/omp-planner/`.
 
 Transcripts render via [streamdown](https://github.com/vercel/streamdown) (MIT) — the streaming-

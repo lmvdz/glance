@@ -1113,7 +1113,16 @@ export class SquadManager extends EventEmitter {
 		if (p.kind === "workflow" && p.workflow) {
 			const workflow = p.workflow.verify ? buildVerifyWorkflow(p.workflow.verify) : undefined;
 			const fleet: WorkflowFleet = { runBranch: (spec) => this.spawnFleetBranch(p.repo, p.id, spec) };
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState });
+			// Feed-forward: a workflow tied to a feature folds that feature's unresolved plan-review
+			// comments into the first agent node after the approve gate (Revise → re-plan, Approve → file/implement).
+			const fid = p.featureId;
+			const decoratePrompt = fid
+				? async (): Promise<string | undefined> => {
+						const cs = await this.getUnresolvedComments(p.repo, fid);
+						return cs.length ? `--- Reviewer comments to address (from the plan review) ---\n${cs.map((c) => `- ${c.body}`).join("\n")}` : undefined;
+					}
+				: undefined;
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState, decoratePrompt });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });

@@ -3,10 +3,14 @@ import { AGENT_LABEL, STAGE_LABEL, agentColorVar, stageColorVar } from "@/lib/st
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { apiPost } from "@/lib/api";
+import { AnswerControls } from "@/components/agent/AnswerControls";
+import { CommentsPanel } from "@/components/project/CommentsPanel";
 
-export function DetailPanel({ feature, agents, onClose }: { feature: FeatureDTO; agents: AgentDTO[]; onClose: () => void }) {
+export function DetailPanel({ feature, agents, onClose, onAnswer }: { feature: FeatureDTO; agents: AgentDTO[]; onClose: () => void; onAnswer?: (agentId: string, requestId: string, value: string) => void }) {
   const { toast } = useToast();
   const repo = feature.repo.split("/").filter(Boolean).pop() ?? feature.repo;
+  // Plan-review gates: the RPI approve hexagon surfaces as a pending request on the workflow agent.
+  const gates = agents.flatMap((a) => a.pending.map((req) => ({ agentId: a.id, req })));
 
   const act = async (kind: "verify" | "land") => {
     const res = await apiPost<{ ok?: boolean; detail?: string; stopped?: string }>(
@@ -52,6 +56,22 @@ export function DetailPanel({ feature, agents, onClose }: { feature: FeatureDTO;
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        {gates.length > 0 && onAnswer ? (
+          <div className="mb-4 rounded-md border border-border bg-surface p-3">
+            <h3 className="mb-2 text-xs font-medium uppercase tracking-wide" style={{ color: "var(--color-progress)" }}>
+              Plan review — your decision
+            </h3>
+            {gates.map(({ agentId, req }) => (
+              <div key={req.id} className="mb-2 last:mb-0">
+                <p className="mb-1 text-sm text-text-primary">{req.title}</p>
+                <AnswerControls request={req} onAnswer={(v) => onAnswer(agentId, req.id, v)} />
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <div className="mb-4">
+          <CommentsPanel repo={feature.repo} subject={feature.id} />
+        </div>
         {feature.issueIdentifiers && feature.issueIdentifiers.length > 0 ? (
           <div className="mb-4 flex flex-wrap gap-1.5">
             {feature.issueIdentifiers.map((id) => (

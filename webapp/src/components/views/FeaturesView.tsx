@@ -35,7 +35,12 @@ export function FeaturesView({ squad, selectedId, onSelect, onClose }: FeaturesV
             transition={transition}
             className="absolute bottom-0 right-0 top-0 z-20 flex w-[480px] max-w-[90vw] border-l border-border bg-base shadow-[var(--shadow-float)]"
           >
-            <DetailPanel feature={feature} agents={model.agentsByFeature.get(feature.id) ?? []} onClose={onClose} />
+            <DetailPanel
+              feature={feature}
+              agents={model.agentsByFeature.get(feature.id) ?? []}
+              onClose={onClose}
+              onAnswer={(agentId, requestId, value) => squad.send({ type: "answer", id: agentId, requestId, value })}
+            />
           </motion.div>
         ) : null}
       </AnimatePresence>

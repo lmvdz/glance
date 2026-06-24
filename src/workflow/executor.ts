@@ -52,6 +52,9 @@ export interface SingleAgentExecutorOptions {
 	scheduleIdleCheck?: IdleScheduler;
 	/** Seed the stage rollup when resuming a run, so the progress view survives a restart. */
 	initialRollup?: { label: string; status: "in_progress" | "completed" }[];
+	/** Fold extra context (e.g. unresolved plan-review comments) into the FIRST agent node after a
+	 *  human gate resolves — the feed-forward seam. Returns undefined to add nothing. May be async. */
+	decoratePrompt?: (node: WorkflowNode, ctx: RunContext) => Promise<string | undefined> | string | undefined;
 }
 
 const MAX_CONTEXT_OUTPUT = 4000;
@@ -67,6 +70,8 @@ export class SingleAgentExecutor implements NodeExecutor {
 	private primed = false;
 	private lastModel?: string;
 	private lastEffort?: string;
+	/** Set when a human gate resolves; consumed once by the next runAgent (the decoratePrompt fold). */
+	private gateJustPassed = false;
 
 	constructor(opts: SingleAgentExecutorOptions) {
 		this.opts = opts;
@@ -104,6 +109,13 @@ export class SingleAgentExecutor implements NodeExecutor {
 		parts.push(body);
 		if (ctx.vars.lastOutput) {
 			parts.push(`--- Recent command output ---\n${ctx.vars.lastOutput}`);
+		}
+		// Feed-forward: on the FIRST agent node after a gate resolves, fold in the reviewer's comments once
+		// (agent nodes share one thread, so re-injecting every turn would spam the same notes).
+		if (this.gateJustPassed) {
+			this.gateJustPassed = false;
+			const extra = await this.opts.decoratePrompt?.(node, ctx);
+			if (extra) parts.push(extra);
 		}
 		const message = parts.join("\n\n");
 
@@ -156,8 +168,10 @@ export class SingleAgentExecutor implements NodeExecutor {
 		return { outcome: code === 0 ? "succeeded" : "failed", text: shown };
 	}
 
-	humanGate(node: WorkflowNode, options: string[], _ctx: RunContext): Promise<string> {
-		return this.opts.gate(node, options);
+	async humanGate(node: WorkflowNode, options: string[], _ctx: RunContext): Promise<string> {
+		const label = await this.opts.gate(node, options);
+		this.gateJustPassed = true; // the next agent node folds in the review comments once
+		return label;
 	}
 
 	/** A parallel branch: a fresh fleet agent (if `spawnBranch`) or, without a fleet, a sequential turn. */

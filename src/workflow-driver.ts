@@ -28,7 +28,7 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
 import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
 import { parseStylesheet, resolveNodeStyle } from "./workflow/stylesheet.ts";
-import type { EngineCheckpoint, NodeResult, Workflow, WorkflowNode, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowNode, WorkflowRunState } from "./workflow/types.ts";
 
 /** A branch agent to spawn into the roster (one parallel branch = one fleet agent). */
 export interface BranchSpec {
@@ -65,6 +65,9 @@ export interface WorkflowDriverOptions {
 	fleet?: WorkflowFleet;
 	/** Resume an interrupted run from this persisted position (after a daemon restart). Absent → fresh run. */
 	resumeState?: WorkflowRunState;
+	/** Feed-forward: fold context (e.g. unresolved plan-review comments) into the first agent node after
+	 *  a gate. Passed straight to the executor. */
+	decoratePrompt?: (node: WorkflowNode, ctx: RunContext) => Promise<string | undefined> | string | undefined;
 }
 
 interface PendingGate {
@@ -113,6 +116,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
 			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, signal }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
+			decoratePrompt: this.opts.decoratePrompt,
 		});
 		this.engine = new WorkflowEngine(this.wf, this.executor);
 		this.ready = true;

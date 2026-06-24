@@ -50,7 +50,7 @@ export function NewWork() {
           <SelectContent>
             <SelectItem value="spawn">Spawn agent (from a prompt)</SelectItem>
             <SelectItem value="feature">New feature</SelectItem>
-            <SelectItem value="auto">Auto-feature (research → plan → implement)</SelectItem>
+            <SelectItem value="auto">Plan & review (research → plan → you approve → implement)</SelectItem>
           </SelectContent>
         </Select>
         {mode !== "spawn" ? (
@@ -63,6 +63,11 @@ export function NewWork() {
           placeholder={mode === "feature" ? "Feature title" : "Describe what the agent should do"}
           className="w-full rounded-[var(--radius-sm)] border border-border bg-secondary px-3 py-2 text-sm text-text-1 outline-none focus:border-accent"
         />
+        {mode === "auto" ? (
+          <p className="text-xs text-text-muted">
+            Drafts a plan, then pauses at a review gate on the feature — comment, then Approve or Revise. Your unresolved comments are fed into the next phase.
+          </p>
+        ) : null}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={() => setOpen(false)}>
             Cancel
