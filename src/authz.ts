@@ -46,7 +46,9 @@ export function commandTier(cmd: ClientCommand): Role {
 }
 
 /** Minimum tier a REST route requires — supersedes the old requiredRole, adding the destructive
- *  direct-manager mutation routes (agent land, feature land, feature verify) → admin. `/api/upgrade`
+ *  direct-manager mutation routes (agent land/vision, feature land, feature verify) → admin.
+ *  Vision drives the daemon's browser off-box (SSRF surface, OMPSQ-152), so it is admin-only.
+ *  `/api/upgrade`
  *  re-execs the daemon (admin). Reads are viewer; auth/check + push registration are
  *  any-authenticated (viewer); every other mutation is operator.
  *
@@ -55,8 +57,9 @@ export function commandTier(cmd: ClientCommand): Role {
  *  inside `applyCommand`, the SAME single chokepoint the WS surface uses. No second authz site. */
 export function restActionTier(method: string, pathname: string): Role {
 	if (pathname === "/api/upgrade") return "admin";
-	// Destructive direct-manager mutations whose server.ts handlers bypass applyCommand.
-	if (/^\/api\/agents\/[^/]+\/land$/.test(pathname) || /^\/api\/features\/[^/]+\/(land|verify)$/.test(pathname)) {
+	// Destructive direct-manager mutations whose server.ts handlers bypass applyCommand, plus vision
+	// (OMPSQ-152): it drives the daemon's browser off-box, so it is admin-only — not operator.
+	if (/^\/api\/agents\/[^/]+\/(land|vision)$/.test(pathname) || /^\/api\/features\/[^/]+\/(land|verify)$/.test(pathname)) {
 		return "admin";
 	}
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";

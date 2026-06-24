@@ -805,6 +805,7 @@ delegation/availability policy plus the outbound command frame — is the rest o
 | `src/land.ts` | Landing — commit a branch + merge into main (ff / merge commit), serialized per-repo; opt-in rebase auto-resolve |
 | `src/proof.ts` | Land proof — deterministic acceptance command keyed to HEAD; the gate refuses a stale proof |
 | `src/vision.ts` | Optional browser-vision evidence pass (screenshots + notes) — evidence only, never gates |
+| `src/ssrf.ts` | SSRF guard for the vision target URL — http(s) only, blocks private/loopback/link-local/metadata ranges (admin-tier route; `OMP_SQUAD_APP_URL` origin allowlisted) |
 | `src/explore.ts` | Worktree file tree + git diff (the Changes panel) |
 | `src/git-harden.ts` | Hardening args/env for read-only git on untrusted repos (no hooks / pager / prompt) |
 

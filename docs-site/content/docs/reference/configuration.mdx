@@ -82,7 +82,7 @@ See [Federation](/docs/integrations/federation) for the topology.
 <TypeTable
 	type={{
 		'OMP_SQUAD_REPO_ROOTS': { type: 'csv', default: 'parent of cwd, $HOME/sui, $HOME/src, $HOME/code', description: 'Comma-separated roots scanned to discover candidate repos for smart spawn (src/smart-spawn.ts).' },
-		'OMP_SQUAD_APP_URL': { type: 'url', default: 'unset', description: 'Default URL for the vision pass (screenshot evidence) when a land/verify run captures one (src/proof.ts, src/server.ts).' },
+		'OMP_SQUAD_APP_URL': { type: 'url', default: 'unset', description: "Default URL for the vision pass (screenshot evidence) when a land/verify run captures one (src/proof.ts, src/server.ts). Its origin is also the one allowlist exemption for /api/agents/:id/vision's SSRF guard, so set it to screenshot a trusted local app (e.g. http://localhost:3000)." },
 		'OMP_SQUAD_PUSH_SUBJECT': { type: 'string', default: 'mailto:squad@localhost', description: 'VAPID subject for Web Push notifications (src/push.ts).' },
 		'OMP_EXT_DIR': { type: 'path', default: '~/.omp/agent/extensions', description: 'Where the omp extension hooks are installed (src/install-hooks.ts).' },
 	}}

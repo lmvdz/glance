@@ -20,6 +20,7 @@ import { parsePlanConcerns } from "./features.ts";
 import { listPlaneIssues } from "./plane.ts";
 import { proofGate, runProof } from "./proof.ts";
 import { runVisionPass } from "./vision.ts";
+import { checkVisionUrl } from "./ssrf.ts";
 import { detectVerify } from "./intake.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
@@ -649,8 +650,12 @@ export class SquadServer {
 			const body: unknown = await req.json().catch(() => null);
 			const target = body && typeof body === "object" && "url" in body && typeof body.url === "string" && body.url.trim() ? body.url.trim() : process.env.OMP_SQUAD_APP_URL;
 			if (!target) return new Response("no url for vision — pass {url} or set OMP_SQUAD_APP_URL", { status: 422 });
+			// SSRF guard (OMPSQ-152): the daemon's browser must not be aimed at private/loopback/metadata
+			// targets. Only http(s) public hosts pass; the operator's OMP_SQUAD_APP_URL origin is allowlisted.
+			const checked = await checkVisionUrl(target);
+			if (!checked.ok) return new Response(`refusing vision target: ${checked.reason}`, { status: 400 });
 			// Evidence only: returns the artifact paths the pass captured; it never gates a land.
-			return Response.json({ artifacts: await runVisionPass({ worktree: dto.worktree, url: target }) });
+			return Response.json({ artifacts: await runVisionPass({ worktree: dto.worktree, url: checked.url.href }) });
 		}
 		const mfverify = url.pathname.match(/^\/api\/features\/([^/]+)\/verify$/);
 		if (mfverify && req.method === "POST") {

@@ -223,7 +223,7 @@ service worker, and icons are public so the PWA can bootstrap; **everything unde
 | `GET /ws` | The `SquadEvent` stream + `ClientCommand` sink |
 | `GET /api/agents` · `/api/projects` | Roster and derived projects |
 | `GET /api/agents/<id>/transcript` · `/subagents` · `/diff` · `/tree` · `/receipts` · `/commands` | Per-agent detail |
-| `POST /api/agents/<id>/land` · `/verify` · `/vision` | Land, run a proof, capture vision evidence |
+| `POST /api/agents/<id>/land` · `/verify` · `/vision` | Land, run a proof, capture vision evidence (`/land` + `/vision` are admin-tier; `/vision` SSRF-guards its target URL) |
 | `GET`/`POST` `/api/features…` | Feature board CRUD + `land` / `verify` / `module` |
 | `POST /api/command` · `/api/spawn` | Create / commission / steer; smart-spawn |
 | `GET /api/presence` · `/api/leases` · `/api/federation` | Coordination surfaces |
