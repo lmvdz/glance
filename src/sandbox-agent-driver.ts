@@ -85,45 +85,58 @@ export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
 		const created = await this.docker_(runArgs);
 		if (created.code !== 0) throw new Error(`docker run failed: ${(created.stderr || created.stdout).trim().slice(0, 200)}`);
 
-		const build = this.opts.agentCommand ?? defaultAgentCommand;
-		const cmd = build({ workdir: this.workdir, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking });
-		const proc = Bun.spawn([this.docker, "exec", "-i", "-e", "PI_RPC_EMIT_TITLE=0", this.container, ...cmd], {
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		this.proc = proc;
-		void this.pumpStdout(proc.stdout);
-		void this.pumpStderr(proc.stderr);
-		void proc.exited.then((code) => {
-			this.exited = true;
-			for (const [, p] of this.pending) p.reject(new Error("sandbox agent exited"));
-			this.pending.clear();
-			if (!this.detaching) this.emit("exit", { code });
-		});
+		try {
+			const build = this.opts.agentCommand ?? defaultAgentCommand;
+			const cmd = build({ workdir: this.workdir, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking });
+			const proc = Bun.spawn([this.docker, "exec", "-i", "-e", "PI_RPC_EMIT_TITLE=0", this.container, ...cmd], {
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			this.proc = proc;
+			void this.pumpStdout(proc.stdout);
+			void this.pumpStderr(proc.stderr);
+			void proc.exited.then((code) => {
+				this.exited = true;
+				for (const [, p] of this.pending) p.reject(new Error("sandbox agent exited"));
+				this.pending.clear();
+				if (!this.detaching) this.emit("exit", { code });
+			});
 
-		await new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				cleanup();
-				reject(new Error(`sandboxed omp did not become ready within ${timeoutMs}ms`));
-			}, timeoutMs);
-			const onReady = () => {
-				cleanup();
-				resolve();
-			};
-			const onExit = () => {
-				cleanup();
-				reject(new Error("sandboxed omp exited before ready"));
-			};
-			const cleanup = () => {
-				clearTimeout(timer);
-				this.off("ready", onReady);
-				this.off("exit", onExit);
-			};
-			this.once("ready", onReady);
-			this.once("exit", onExit);
-		});
-		this.sendRaw({ type: "set_subagent_subscription", level: "progress" });
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					cleanup();
+					reject(new Error(`sandboxed omp did not become ready within ${timeoutMs}ms`));
+				}, timeoutMs);
+				const onReady = () => {
+					cleanup();
+					resolve();
+				};
+				const onExit = () => {
+					cleanup();
+					reject(new Error("sandboxed omp exited before ready"));
+				};
+				const cleanup = () => {
+					clearTimeout(timer);
+					this.off("ready", onReady);
+					this.off("exit", onExit);
+				};
+				this.once("ready", onReady);
+				this.once("exit", onExit);
+			});
+			this.sendRaw({ type: "set_subagent_subscription", level: "progress" });
+		} catch (err) {
+			// start() failed after the container was created — don't leak it.
+			try {
+				this.proc?.kill();
+			} catch {
+				/* ignore */
+			}
+			this.proc = undefined;
+			this.exited = true;
+			await this.docker_(["rm", "-f", this.container]).catch(() => {});
+			throw err;
+		}
 	}
 
 	private async docker_(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
