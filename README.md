@@ -488,6 +488,42 @@ with `OMP_SQUAD_WEBAPP=1` — the server then serves `webapp/dist` (the content-
 at `/` and `/assets/*` instead of the live HTML. The flag is OFF unless **both** set **and** a
 build exists; unset it (or skip the build) to get the current dashboard exactly as before.
 
+**omp-graph view (in `webapp/`).** The new SPA renders the fleet as a force-directed graph
+("omp-graph"): `FeatureDTO` nodes (stage-colored, dependency edges derived from
+`IssueRef.blockedBy`) with live `AgentDTO` presence overlaid on the feature each agent is
+executing, alongside a Structure list. Its canvas force-graph engine and design tokens are adapted
+from [FrkAk/piyaz](https://github.com/FrkAk/piyaz) under **AGPL-3.0**, so `webapp/` is licensed
+AGPL-3.0 (see [`webapp/LICENSE`](webapp/LICENSE), [`webapp/NOTICE`](webapp/NOTICE)). Serving it
+(`OMP_SQUAD_WEBAPP=1`) triggers AGPL §13 — the corresponding source must be offered to users.
+
+Smoke-test it: `cd webapp && bun install && bun run build`, then `OMP_SQUAD_WEBAPP=1 omp-squad up`.
+Spawn 2-3 agents across a repo that has a `plans/<name>/` directory, open the dashboard, and toggle
+Structure <-> Graph. Feature nodes render stage-colored with dependency edges where `blockedBy`
+resolves; each agent shows as a status ring on the feature it is executing (a `needs-input` agent
+rings amber and glows); selecting a node slides in the detail panel listing that feature's agents.
+
+For live-reload development, `cd webapp && bun run dev` serves the SPA with HMR and proxies
+`/api` + `/ws` to a daemon on `127.0.0.1:7878` (override with `OMP_SQUAD_PROXY`). Open
+`http://localhost:5173/?token=<dashboard-token>` — the token is captured into localStorage and
+reused for the Bearer header and the `ompsq-token` WS subprotocol, same as the live dashboard.
+
+**Operator dashboard (HumanLayer-shaped).** The `webapp/` SPA is now a full operator console, not
+just the graph: a left sidebar (Inbox · Agents · Features · Graph · Audit), a list/detail center,
+and a command palette (Cmd-K). It reaches parity with `src/web/index.html` over the daemon's
+existing WS + `/api` surface — live transcript (`subscribe`), an approvals **inbox** answering every
+`PendingRequest` kind (`answer`), agent actions (prompt/interrupt/kill/restart/remove + land/diff/
+subagents), spawn / new-feature / auto-feature, a feature **board**, and the **audit** log; the
+force-graph is one view. Deferred (P3): federation, presence, leases, deep Plane, push. Still behind
+`OMP_SQUAD_WEBAPP=1`, so the live `index.html` dashboard is untouched until cutover. Plan + parity
+matrix: `plans/omp-dashboard/`.
+
+Transcripts render via [streamdown](https://github.com/vercel/streamdown) (MIT) — the streaming-
+markdown engine behind assistant-ui / AI Elements — with Shiki code highlighting, lazy-loaded so
+its grammars stay out of the initial bundle. P3 surfaces are now in: a **Network** view
+(federation · presence · file leases · Plane issues, repo-scoped) and **web push** (the Notify
+button + `public/sw.js`). Push works under `bun run dev`/`preview`; behind the daemon
+`OMP_SQUAD_WEBAPP` flag the serve seam must also serve `/sw.js` (one-line `src/server.ts` follow-up).
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`

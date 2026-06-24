@@ -1,53 +1,836 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/geist-mono";
 
-@custom-variant dark (&:is(.dark *));
+/* Tailwind must scan streamdown's utility classes (transcript markdown renderer). */
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+
+@theme {
+  --font-body: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-mono:
+    "GeistMono Variable", "GeistMono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Dark mode (default) — Raycast near-black blue */
+  --color-base: #07080a;
+  --color-base-2: #0d0e11;
+  --color-surface: #101111;
+  --color-surface-raised: #1b1c1e;
+  --color-surface-hover: #252829;
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-strong: rgba(255, 255, 255, 0.1);
+
+  --color-text-primary: #f9f9f9;
+  --color-text-secondary: #cecece;
+  --color-text-muted: #6a6b6c;
+  --color-text-faint: #4a4b4c;
+
+  --color-accent: #818cf8;
+  --color-accent-2: #6ee7d8;
+  --color-accent-light: #a5b4fc;
+  --color-accent-glow: rgba(129, 140, 248, 0.12);
+
+  --color-done: #5fc992;
+  --color-done-bg: rgba(95, 201, 146, 0.1);
+  --color-progress: #ffbc33;
+  --color-progress-bg: rgba(255, 188, 51, 0.1);
+  --color-todo: #6a6b6c;
+  --color-todo-bg: rgba(106, 107, 108, 0.08);
+
+  --color-draft: #9ca3af;
+  --color-planned: #55b3ff;
+  --color-cancelled: #e57373;
+  --color-cancelled-bg: rgba(229, 115, 115, 0.1);
+  --color-danger: #ff6363;
+
+  --color-depends: #55b3ff;
+  --color-relates: #a78bfa;
+
+  /* Status glyph fills — graph + list */
+  --color-glyph-draft: rgba(156, 163, 175, 0.45);
+  --color-glyph-planned: #55b3ff;
+  --color-glyph-ready: #818cf8;
+  --color-glyph-progress: #ffbc33;
+  --color-glyph-review: #a78bfa;
+  --color-glyph-done: #5fc992;
+  --color-glyph-blocked: #e57373;
+  --color-glyph-cancelled: #6a6b6c;
+
+  /* Depth shadows — used alongside border-border for the modern hybrid look */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover:
+    0 4px 12px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-float:
+    0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --shadow-button:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+  --shadow-glow-accent: 0 0 8px rgba(129, 140, 248, 0.3);
+  --shadow-glow-accent-2: 0 0 8px rgba(110, 231, 216, 0.3);
+  --shadow-glow-done: 0 0 8px rgba(95, 201, 146, 0.3);
+
+  --sidebar-w: 224px;
+  --rail-w: 280px;
+  --row-h: 56px;
+  --topbar-h: 2.75rem;
+}
+
+/* Brand gradient — declared outside @theme so Tailwind doesn't try to coerce it into a single color utility. */
+:root {
+  --color-accent-grad: linear-gradient(135deg, #818cf8 0%, #6ee7d8 100%);
+  --color-accent-grad-soft: linear-gradient(
+    135deg,
+    rgba(129, 140, 248, 0.18) 0%,
+    rgba(110, 231, 216, 0.14) 100%
+  );
+}
+
+/* ===========================================
+   LIGHT MODE overrides
+   =========================================== */
+html.light {
+  --color-base: #f0f1f3;
+  --color-base-2: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f5f6f8;
+  --color-surface-hover: #e8eaed;
+  --color-border: rgba(0, 0, 0, 0.08);
+  --color-border-strong: rgba(0, 0, 0, 0.15);
+
+  --color-text-primary: #1a1a1a;
+  --color-text-secondary: #5a5a5a;
+  --color-text-muted: #9a9a9a;
+  --color-text-faint: #b8b8b8;
+
+  --color-accent: #6366f1;
+  --color-accent-2: #14b8a6;
+  --color-accent-light: #4338ca;
+  --color-accent-glow: rgba(99, 102, 241, 0.08);
+  --color-accent-grad: linear-gradient(135deg, #6366f1 0%, #14b8a6 100%);
+  --color-accent-grad-soft: linear-gradient(
+    135deg,
+    rgba(99, 102, 241, 0.16) 0%,
+    rgba(20, 184, 166, 0.12) 100%
+  );
+
+  /* Chip palette — saturated dark hues so `text-X` reads on pale `bg-X/15`. */
+  --color-planned: #2563eb;
+  --color-done: #059669;
+  --color-progress: #d97706;
+  --color-cancelled: #c25454;
+  --color-depends: #2563eb;
+  --color-relates: #7c3aed;
+
+  --color-done-bg: rgba(95, 201, 146, 0.08);
+  --color-progress-bg: rgba(255, 188, 51, 0.08);
+  --color-todo-bg: rgba(106, 107, 108, 0.06);
+  --color-cancelled-bg: rgba(229, 115, 115, 0.08);
+
+  /* Status glyph fills — light variants */
+  --color-glyph-draft: rgba(107, 114, 128, 0.55);
+  --color-glyph-planned: #2563eb;
+  --color-glyph-ready: #6366f1;
+  --color-glyph-progress: #d97706;
+  --color-glyph-review: #7c3aed;
+  --color-glyph-done: #059669;
+  --color-glyph-blocked: #dc2626;
+  --color-glyph-cancelled: #94a3b8;
+
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-card-hover:
+    0 4px 12px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.08);
+  --shadow-button:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.8), 0 1px 2px rgba(0, 0, 0, 0.06),
+    0 0 0 1px rgba(0, 0, 0, 0.08);
+  --shadow-glow-accent-2: 0 0 8px rgba(20, 184, 166, 0.25);
+}
 
 :root {
+  --viewport-height: 100vh;
+}
+@supports (height: 100dvh) {
+  :root {
+    --viewport-height: 100dvh;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Focus-visible ring for interactive elements */
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+/* Form controls own their focus indicator via component-level Tailwind
+   classes (`focus:border-accent`, `focus:ring-*`). No global outline. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
+html {
+  background-color: var(--color-base);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  font-feature-settings:
+    "calt" 1,
+    "kern" 1,
+    "liga" 1,
+    "ss03" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  interpolate-size: allow-keywords;
+}
+
+body {
+  margin: 0;
+  min-height: var(--viewport-height);
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+/* ===========================================
+   ATMOSPHERE: Dark mode layers
+   =========================================== */
+
+html:not(.light) body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(
+    ellipse 80% 50% at 15% -10%,
+    rgba(129, 140, 248, 0.05) 0%,
+    transparent 60%
+  );
+}
+
+/* Light mode: subtle cool texture */
+html.light body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(
+      ellipse 80% 50% at 20% 0%,
+      rgba(99, 102, 241, 0.03) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      ellipse 50% 40% at 80% 100%,
+      rgba(129, 140, 248, 0.02) 0%,
+      transparent 50%
+    );
+}
+
+/* ===========================================
+   NOISE OVERLAY (dark mode only)
+   =========================================== */
+html:not(.light) #root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.15;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* ===========================================
+   GLOW CARD
+   =========================================== */
+.glow-card {
+  position: relative;
+}
+.glow-card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  z-index: -1;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+html:not(.light) .glow-card::before {
+  background: linear-gradient(
+    135deg,
+    rgba(129, 140, 248, 0.15) 0%,
+    transparent 40%,
+    transparent 60%,
+    rgba(99, 102, 241, 0.08) 100%
+  );
+}
+html.light .glow-card::before {
+  background: linear-gradient(
+    135deg,
+    rgba(99, 102, 241, 0.08) 0%,
+    transparent 40%,
+    transparent 60%,
+    rgba(129, 140, 248, 0.04) 100%
+  );
+}
+.glow-card:hover::before {
+  opacity: 1;
+}
+
+/* ===========================================
+   CATEGORY DOT — task-row category affordance
+   ===========================================
+   Renders as a 6×6 hue swatch at rest; on row hover or focus-within the
+   swatch morphs into the full lowercase mono chip — width / padding /
+   chrome animate together. `--category-hue` is set inline per row; theme
+   branching lives below under html.light. The reduced-motion media query
+   at the bottom of this file neutralises transitions. */
+.category-dot {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 1rem;
+  width: 6px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 1.5px;
+  overflow: hidden;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: transparent;
+  background-color: transparent;
+  transition:
+    width 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    padding 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-radius 180ms ease,
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 140ms ease 40ms;
+}
+.category-dot::before {
+  content: "";
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 1.5px;
+  background-color: hsl(var(--category-hue) 70% 60%);
+  box-shadow: 0 0 6px hsl(var(--category-hue) 70% 60% / 0.35);
+  transition:
+    width 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 120ms ease;
+}
+.category-dot > .category-name {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  transition: max-width 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:where(.group:hover, .group:focus-within) .category-dot {
+  width: max-content;
+  padding: 0 6px;
+  border-radius: 4px;
+  background-color: hsl(var(--category-hue) 70% 45% / 0.14);
+  border-color: hsl(var(--category-hue) 70% 60% / 0.25);
+  color: hsl(var(--category-hue) 75% 78%);
+}
+:where(.group:hover, .group:focus-within) .category-dot::before {
+  width: 0;
+  opacity: 0;
+}
+:where(.group:hover, .group:focus-within) .category-dot > .category-name {
+  max-width: 96px;
+}
+
+/* Light-mode chip — saturated dark text on pale tinted background, matches
+   the existing chip palette pattern (DESIGN_2.md §1.2). */
+html.light .category-dot::before {
+  background-color: hsl(var(--category-hue) 55% 50%);
+  box-shadow: 0 0 6px hsl(var(--category-hue) 55% 50% / 0.35);
+}
+html.light :where(.group:hover, .group:focus-within) .category-dot {
+  background-color: hsl(var(--category-hue) 65% 92%);
+  border-color: hsl(var(--category-hue) 45% 62% / 0.5);
+  color: hsl(var(--category-hue) 55% 28%);
+}
+
+/* ===========================================
+   SCROLLBAR
+   =========================================== */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.15);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.25);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.15) transparent;
+}
+html.light * {
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+html.light ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+}
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+/* ===========================================
+   SELECTION
+   =========================================== */
+::selection {
+  background: rgba(129, 140, 248, 0.25);
+  color: inherit;
+}
+
+/* ===========================================
+   GRADIENT TEXT
+   =========================================== */
+.text-gradient {
+  color: var(--color-accent-light);
+  background: linear-gradient(
+    135deg,
+    var(--color-accent-light) 0%,
+    var(--color-accent) 50%,
+    #6366f1 100%
+  );
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ===========================================
+   ANIMATED BORDER
+   =========================================== */
+@property --angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.animated-border {
+  border: 1px solid transparent;
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  background-image:
+    linear-gradient(var(--color-surface), var(--color-surface)),
+    linear-gradient(
+      135deg,
+      transparent 60%,
+      rgba(129, 140, 248, 0.3) 75%,
+      rgba(99, 102, 241, 0.2) 85%,
+      transparent 95%
+    );
+}
+
+@supports (background: conic-gradient(from 0deg, red, red)) {
+  .animated-border {
+    --angle: 0deg;
+    background-image:
+      linear-gradient(var(--color-surface), var(--color-surface)),
+      conic-gradient(
+        from var(--angle),
+        transparent 60%,
+        rgba(129, 140, 248, 0.3) 75%,
+        rgba(99, 102, 241, 0.2) 85%,
+        transparent 95%
+      );
+    animation: spin-border 6s linear infinite;
+  }
+}
+
+@keyframes spin-border {
+  to {
+    --angle: 360deg;
+  }
+}
+
+/* ===========================================
+   SPEC MARKDOWN prose styling
+   =========================================== */
+.prose-spec {
+  line-height: 1.5;
+  letter-spacing: 0.012em;
+}
+.prose-spec p {
+  margin: 0 0 0.25em;
+}
+.prose-spec p:last-child {
+  margin-bottom: 0;
+}
+.prose-spec strong {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+.prose-spec em {
+  color: var(--color-text-secondary);
+}
+.prose-spec ul {
+  list-style-type: disc;
+  margin: 0.25em 0;
+  padding-left: 1.4em;
+}
+.prose-spec ol {
+  list-style-type: decimal;
+  margin: 0.25em 0;
+  padding-left: 1.4em;
+}
+.prose-spec li {
+  margin: 0.15em 0;
+}
+.prose-spec li::marker {
+  color: var(--color-accent);
+}
+.prose-spec h1,
+.prose-spec h2,
+.prose-spec h3 {
+  color: var(--color-text-primary);
+  margin: 0.5em 0 0.2em;
+  font-weight: 600;
+}
+.prose-spec h1 {
+  font-size: 1.1em;
+}
+.prose-spec h2 {
+  font-size: 1em;
+}
+.prose-spec h3 {
+  font-size: 0.95em;
+}
+.prose-spec hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 0.5em 0;
+}
+.prose-spec code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+}
+html:not(.light) .prose-spec code {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-accent-light);
+}
+html.light .prose-spec code {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--color-accent);
+}
+.prose-spec pre {
+  border-radius: 8px;
+  padding: 0.6em 0.8em;
+  overflow-x: auto;
+}
+html:not(.light) .prose-spec pre {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+html.light .prose-spec pre {
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+.prose-spec pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.8em;
+}
+.prose-spec a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: rgba(129, 140, 248, 0.3);
+}
+.prose-spec blockquote {
+  border-left: 2px solid var(--color-accent);
+  margin: 0.3em 0;
+  padding-left: 0.75em;
+}
+.prose-spec a:hover {
+  text-decoration-color: rgba(129, 140, 248, 0.8);
+}
+
+/* Tables (GFM) */
+.prose-spec table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.95em;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.prose-spec th,
+.prose-spec td {
+  padding: 0.4em 0.7em;
+  text-align: left;
+  vertical-align: top;
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+.prose-spec th:last-child,
+.prose-spec td:last-child {
+  border-right: 0;
+}
+.prose-spec tr:last-child td {
+  border-bottom: 0;
+}
+.prose-spec th {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  background: var(--color-surface-raised);
+  border-bottom: 1px solid var(--color-border-strong);
+}
+.prose-spec td {
+  color: var(--color-text-secondary);
+}
+
+/* Mute all prose-spec children when parent has line-through (checked criteria) */
+.line-through .prose-spec strong,
+.line-through .prose-spec em,
+.line-through .prose-spec code {
+  color: inherit;
+}
+
+/* ===========================================
+   SECTION LABELS
+   =========================================== */
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 8px;
+}
+
+/* ===========================================
+   STATUS PULSE (in_progress tasks)
+   =========================================== */
+@keyframes status-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.6;
+  }
+}
+.status-pulse {
+  animation: status-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Progress bar shimmer sweep */
+@keyframes progress-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+.progress-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.progress-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 100%
+  );
+  animation: progress-shimmer 2.5s ease-in-out infinite;
+}
+html.light .progress-shimmer::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.4) 50%,
+    transparent 100%
+  );
+}
+
+/* ===========================================
+   LOADING DOTS
+   =========================================== */
+@keyframes gentle-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+.loading-dot {
+  animation: gentle-pulse 1.2s ease-in-out infinite;
+}
+.loading-dot:nth-child(2) {
+  animation-delay: 150ms;
+}
+.loading-dot:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+@keyframes loading-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.loading-fade-in {
+  animation: loading-fade-in 220ms ease-out both;
+}
+
+/* ===========================================
+   SKELETON LOADING
+   ===========================================
+   Placeholder bars for body content while a detail fetch resolves.
+   A single accent-tinted sheen sweeps each bar; `--skeleton-delay`
+   staggers both the entrance and the sweep so the wave travels down
+   the panel instead of twinkling at random. The sheen rests off-canvas
+   between passes, so the reduced-motion clamp freezes bars flat. */
+:root {
+  --skeleton-base: rgba(255, 255, 255, 0.05);
+  --skeleton-sheen: rgba(165, 180, 252, 0.09);
+}
+html.light {
+  --skeleton-base: rgba(15, 17, 26, 0.06);
+  --skeleton-sheen: rgba(67, 56, 202, 0.08);
+}
+
+@keyframes skeleton-wave {
+  0% {
+    background-position: 135% 0;
+  }
+  55%,
+  100% {
+    background-position: -65% 0;
+  }
+}
+
+.skeleton-bar {
+  border-radius: var(--skeleton-radius, 4px);
+  background-color: var(--skeleton-base);
+  background-image: linear-gradient(
+    100deg,
+    transparent 36%,
+    var(--skeleton-sheen) 50%,
+    transparent 64%
+  );
+  background-repeat: no-repeat;
+  background-size: 220% 100%;
+  background-position: 135% 0;
+  animation: skeleton-wave 2.2s ease-in-out infinite;
+  animation-delay: var(--skeleton-delay, 0ms);
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rise-in {
+  animation: rise-in 280ms ease-out both;
+  animation-delay: var(--skeleton-delay, 0ms);
+}
+
+/* ===========================================
+   REDUCED MOTION
+   =========================================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ===========================================
+   iOS INPUT ZOOM PREVENTION
+   =========================================== */
+@supports (-webkit-touch-callout: none) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em);
+  }
+}
+
+/* ===========================================
+   shadcn/ui compatibility bridge
+   Maps shadcn semantic tokens onto the piyaz palette so shadcn primitives
+   (components/ui/*) inherit the look. piyaz `--color-accent` (indigo) stays
+   the real accent; shadcn components that use `bg-accent` as a muted hover
+   will read indigo-tinted — acceptable, the cloned UI uses piyaz utilities.
+   =========================================== */
+:root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --background: var(--color-base);
+  --foreground: var(--color-text-primary);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-text-primary);
+  --popover: var(--color-surface-raised);
+  --popover-foreground: var(--color-text-primary);
+  --primary: var(--color-accent);
+  --primary-foreground: #0b0c10;
+  --secondary: var(--color-surface-raised);
+  --secondary-foreground: var(--color-text-primary);
+  --muted: var(--color-surface);
+  --muted-foreground: var(--color-text-muted);
+  --destructive: var(--color-danger);
+  --destructive-foreground: #ffffff;
+  --border: var(--color-border);
+  --input: var(--color-border-strong);
+  --ring: var(--color-accent);
 }
-
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+html.light {
+  --primary-foreground: #ffffff;
 }
-
 @theme inline {
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -65,20 +848,97 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-foreground: var(--color-text-primary);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
 }
-
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
   body {
     @apply bg-background text-foreground;
   }
 }
+
+/* ===========================================
+   ompsq-55 primitive compat layer
+   Token NAMES from squad/ompsq-55, VALUES mapped to the piyaz palette so the
+   lifted shadcn primitives (components/ui/*, components/agent/*) render in the
+   piyaz skin. Color tokens reference piyaz vars -> they inherit the html.light
+   flip for free; only --attention/--overlay get explicit light overrides.
+   =========================================== */
+:root {
+  --surface-0: var(--color-base);
+  --surface-1: var(--color-surface);
+  --surface-2: var(--color-surface-raised);
+  --surface-3: var(--color-surface-hover);
+  --border-strong: var(--color-border-strong);
+  --text-1: var(--color-text-primary);
+  --text-2: var(--color-text-secondary);
+  --text-3: var(--color-text-muted);
+  --accent: var(--color-accent);
+  --accent-hover: var(--color-accent-light);
+  --accent-subtle: var(--color-accent-glow);
+  --on-accent: var(--primary-foreground);
+  --success: var(--color-done);
+  --success-subtle: var(--color-done-bg);
+  --warning: var(--color-progress);
+  --warning-subtle: var(--color-progress-bg);
+  --attention: #f0883e;
+  --attention-subtle: rgba(240, 136, 62, 0.12);
+  --danger: var(--color-danger);
+  --danger-subtle: var(--color-cancelled-bg);
+  --neutral: var(--color-text-muted);
+  --neutral-subtle: var(--color-todo-bg);
+  --ring: var(--color-accent);
+  --overlay: rgba(0, 0, 0, 0.66);
+  --shadow-1: var(--shadow-card);
+  --shadow-2: var(--shadow-float);
+  --shadow-3: var(--shadow-float);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-15: 15px;
+  --text-16: 16px;
+  --text-20: 20px;
+  --text-24: 24px;
+  --leading-tight: 1.2;
+  --leading-base: 1.45;
+  --leading-relaxed: 1.6;
+}
+html.light {
+  --attention: #b5460c;
+  --attention-subtle: rgba(181, 70, 12, 0.1);
+  --overlay: rgba(16, 24, 40, 0.32);
+}
+@theme inline {
+  --font-sans: var(--font-body);
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-text-1: var(--text-1);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-on-accent: var(--on-accent);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-attention: var(--attention);
+  --color-attention-subtle: var(--attention-subtle);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-neutral: var(--neutral);
+  --color-neutral-subtle: var(--neutral-subtle);
+}
+@keyframes toastIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes skel { from { background-position: 200% 0; } to { background-position: -200% 0; } }
