@@ -14,10 +14,18 @@
  * while still briefly alive, so we wait out a short handoff window for it to exit
  * before giving up.
  *
- * ponytail: liveness is pid + signal-0, which only means anything ON THE SAME
- * HOST. A lock file authored by a different host can't be probed, so we treat it
- * as live and refuse — correct for a shared state dir, conservative for a stale
- * one. Upgrade path: a same-host NFS/foreign mount.
+ * Signal 0 only proves a pid EXISTS, not that it's still OUR daemon: after a
+ * crash the kernel recycles the pid, and an unrelated process wearing it would
+ * look "live" and wedge startup forever. So the record also pins the owner's
+ * OS-level start time (Linux /proc/<pid>/stat field 22); on probe we re-read it
+ * and a mismatch means the pid was reused → the original owner is gone → stale.
+ *
+ * ponytail: pid liveness only means anything ON THE SAME HOST, and the reuse
+ * guard needs /proc, so it's Linux-only — elsewhere we fall back to bare signal-0
+ * (reuse-blind, the prior behaviour). A cross-host lock can't be probed at all, so
+ * we treat it as live and refuse — correct for a shared state dir, conservative
+ * for a stale one. Upgrade path: a same-host NFS/foreign mount; a portable
+ * start-time source for non-Linux.
  */
 
 import { openSync, writeSync, closeSync, readFileSync, unlinkSync } from "node:fs";
@@ -37,6 +45,8 @@ interface LockRecord {
 	/** Launcher pid + command line, so a daemon started outside up.sh (a rogue) is traceable. */
 	ppid?: number;
 	argv?: string;
+	/** OS-level process start time (Linux /proc/<pid>/stat field 22, clock ticks since boot), to distinguish a reused pid from the original owner. */
+	proc?: number;
 }
 
 export interface StateLock {
@@ -64,15 +74,42 @@ function lockPath(stateDir: string): string {
 	return path.join(stateDir, LOCK_FILE);
 }
 
+/** Linux process start time (clock ticks since boot, /proc/<pid>/stat field 22), or null when /proc is unavailable or the pid is gone. */
+function procStartTime(pid: number): number | null {
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		// comm (field 2) is parenthesized and may itself contain spaces or ')',
+		// so anchor parsing after the LAST ')': what follows is "state ppid …".
+		const after = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+		// field 3 (state) is after[0]; field 22 (starttime) is after[19].
+		const start = Number(after[19]);
+		return Number.isFinite(start) ? start : null;
+	} catch {
+		return null;
+	}
+}
+
 function selfRecord(): LockRecord {
-	return { pid: process.pid, ppid: process.ppid, host: os.hostname(), startedAt: Date.now(), argv: process.argv.slice(1).join(" ") };
+	return {
+		pid: process.pid,
+		ppid: process.ppid,
+		host: os.hostname(),
+		startedAt: Date.now(),
+		proc: procStartTime(process.pid) ?? undefined,
+		argv: process.argv.slice(1).join(" "),
+	};
 }
 
 function readRecord(file: string): LockRecord | null {
 	try {
 		const rec = JSON.parse(readFileSync(file, "utf8")) as Partial<LockRecord>;
 		if (typeof rec.pid === "number" && typeof rec.host === "string") {
-			return { pid: rec.pid, host: rec.host, startedAt: rec.startedAt ?? 0 };
+			return {
+				pid: rec.pid,
+				host: rec.host,
+				startedAt: rec.startedAt ?? 0,
+				proc: typeof rec.proc === "number" ? rec.proc : undefined,
+			};
 		}
 	} catch {
 		// Missing or garbage lock file — treat as no owner so a corrupt lock never wedges startup.
@@ -86,11 +123,19 @@ function ownerAlive(rec: LockRecord): boolean {
 	if (rec.pid === process.pid) return false; // our own stale record from a previous incarnation
 	try {
 		process.kill(rec.pid, 0); // signal 0: existence/permission probe, sends nothing
-		return true;
 	} catch (err) {
-		// ESRCH → gone. EPERM → alive but not ours (still a live daemon).
-		return (err as NodeJS.ErrnoException).code === "EPERM";
+		// ESRCH → gone. EPERM → exists but owned by another user; fall through to the reuse check.
+		if ((err as NodeJS.ErrnoException).code !== "EPERM") return false;
 	}
+	// The pid exists, but after a crash the kernel may have recycled it onto an
+	// unrelated process. If we pinned the owner's OS start time, a mismatch proves
+	// the pid was reused and the original daemon is gone. (No pin / no /proc → keep
+	// the conservative "alive" answer rather than risk reclaiming a live lock.)
+	if (rec.proc != null) {
+		const cur = procStartTime(rec.pid);
+		if (cur != null && cur !== rec.proc) return false;
+	}
+	return true;
 }
 
 /** Atomically create the lock file with our record. Returns false on EEXIST, throws on other errors. */

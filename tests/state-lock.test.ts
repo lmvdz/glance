@@ -56,3 +56,23 @@ test("a corrupt lock file is treated as stale and reclaimed", async () => {
 	const rec = JSON.parse(await fs.readFile(lock.file, "utf8"));
 	expect(rec.pid).toBe(process.pid);
 });
+
+test("a live pid with a mismatched recorded start time (pid reuse) is reclaimed", async () => {
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	// pid 1 (init) always exists, so signal-0 alone would call this "live" forever.
+	// A recorded `proc` start time that can't match init's proves the pid was recycled.
+	writeFileSync(file, JSON.stringify({ pid: 1, host: os.hostname(), startedAt: 0, proc: -1 }));
+	// Reuse detection needs /proc; on a host without it the lock stays live (prior behaviour).
+	let hasProc = true;
+	try {
+		await fs.stat("/proc/1/stat");
+	} catch {
+		hasProc = false;
+	}
+	if (!hasProc) return;
+	const lock = await acquireStateLock(dir, { handoffMs: 150 });
+	cleanups.push(() => lock.release());
+	const rec = JSON.parse(await fs.readFile(lock.file, "utf8"));
+	expect(rec.pid).toBe(process.pid);
+});
