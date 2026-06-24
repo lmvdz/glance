@@ -65,9 +65,13 @@ describe("GIT_HARDEN_ARGS signing", () => {
 			await fsp.writeFile(path.join(dir, "a.txt"), "1");
 			await run("git", ["add", "-A"], { cwd: dir });
 
-			// Plain signed commit must fail: git invokes /bin/false as the signer.
+			// Plain signed commit must fail: git invokes /bin/false as the signer. Strip any ambient
+			// GIT_CONFIG_* overrides (the squad harness exports commit.gpgsign=false) so the repo's
+			// signing config actually applies — otherwise the env would silently disable signing here.
+			const cleanEnv = { ...process.env };
+			for (const k of Object.keys(cleanEnv)) if (k.startsWith("GIT_CONFIG_")) delete cleanEnv[k];
 			let plainFailed = false;
-			await run("git", ["commit", "-m", "plain"], { cwd: dir }).catch(() => {
+			await run("git", ["commit", "-m", "plain"], { cwd: dir, env: cleanEnv }).catch(() => {
 				plainFailed = true;
 			});
 			expect(plainFailed).toBe(true);
