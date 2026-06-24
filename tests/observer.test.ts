@@ -122,6 +122,32 @@ test("(b) a red gate files exactly one regression finding", async () => {
 	expect(filed[0]).toContain("regression: auth.test.ts > login");
 });
 
+test("(b) a flaky gate (red then green on the confirm re-run) files NOTHING — no false regression (OMPSQ-184)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	let calls = 0;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => (++calls === 1 ? { ok: false, firstFailure: "a parked spawn is visible to the orchestrator's drain" } : { ok: true }),
+	});
+	await new Observer(deps).tick();
+	expect(calls).toBe(2); // a red run is re-run once to confirm
+	expect(filed).toEqual([]); // confirm came back green ⇒ flaky ⇒ no issue filed
+});
+
+test("(b) a reproduced red gate (red twice) files exactly one regression, named by the confirming run", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	let calls = 0;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => {
+			calls++;
+			return { ok: false, firstFailure: calls === 1 ? "flaky-first" : "real-regression" };
+		},
+	});
+	await new Observer(deps).tick();
+	expect(calls).toBe(2);
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("regression: real-regression"); // the reproduced run names the finding
+});
+
 test("(b) an idle ahead=0 agent whose issue is Done does NOT file a reap (housekeeping, not backlog)", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	const done = { id: "done-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;

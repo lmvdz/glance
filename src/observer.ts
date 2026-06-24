@@ -288,8 +288,10 @@ export class Observer {
 			}
 
 			// Confirm-resolved: a previously-filed fingerprint that no longer reproduces is cleared.
-			// ponytail: a flaky gate could clear+refile a transient regression; acceptable for v1 — the
-			// dispatcher's proof gate still catches premature work. Upgrade path: require N clean ticks.
+			// The gate-backed regression finding is double-confirmed before filing (see confirmedGate),
+			// so a single flaky red no longer files a false bug. ponytail: the clear side is still
+			// single-shot — a transient green can close-then-refile a real regression; acceptable
+			// (the dispatcher's proof gate catches premature work). Upgrade path: require N clean ticks.
 			for (const fp of Object.keys(this.seen)) {
 				if (reproduced.has(fp)) continue;
 				const entry = this.seen[fp];
@@ -305,13 +307,32 @@ export class Observer {
 		}
 	}
 
+	/**
+	 * Acceptance gate with single-retry confirmation: a regression is only real if it REPRODUCES.
+	 * A single red run is treated as suspect — the gate runs on a busy host while the fleet spawns
+	 * real-omp agents and lands branches, so a transient flake (an integration test that "exited
+	 * before ready" under load, a gate-vs-land race) routinely turns one tick red. Filing on that
+	 * single red files a `regression:` bug naming a test that is actually green (OMPSQ-184). So when
+	 * the first run is red, re-run once; only a second red is reported (with the reproduced run's
+	 * firstFailure). A green confirm ⇒ flaky ⇒ reported green, nothing filed.
+	 * ponytail: one extra gate run, and only on the rare red path; the green (common) path is unchanged.
+	 */
+	private async confirmedGate(): Promise<{ ok: boolean; firstFailure?: string }> {
+		const safe = () => this.deps.runGate().catch(() => ({ ok: true }) as { ok: boolean; firstFailure?: string });
+		const first = await safe();
+		if (first.ok) return first;
+		const confirm = await safe();
+		if (!confirm.ok) return confirm; // reproduced — a real regression, named by the confirming run
+		(this.deps.log ?? (() => {}))(`gate red then green on re-run — flaky, not filing (first failure was: ${first.firstFailure ?? "gate"})`);
+		return { ok: true };
+	}
+
 	/** Run every audit check over the current injected state. */
 	private async collect(open: IssueRef[]): Promise<Finding[]> {
 		const agents = this.deps.listAgents();
 		const openIds = new Set(open.map((i) => i.id));
 		const findings: Finding[] = [];
-		const gate = await this.deps.runGate().catch(() => ({ ok: true }) as { ok: boolean; firstFailure?: string });
-		findings.push(...auditTestsGreen(gate));
+		findings.push(...auditTestsGreen(await this.confirmedGate()));
 		findings.push(...auditLandedSurvivors(agents, openIds, this.deps.gitAheadOfMain, this.deps.removeAgent));
 		findings.push(...auditStaleDone(agents, openIds, this.deps.gitAheadOfMain));
 		// Union of files across in-flight agent branches — the set an auto-land would touch.

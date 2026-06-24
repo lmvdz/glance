@@ -299,7 +299,11 @@ upgrade continuity, the rest are suffixed `observer-seen.<repo>.json`).
 The acceptance-gate check runs the repo's own verify command (`detectVerify`) against main *serialized behind any
 in-flight land* (`withRepoLandLock`): the gate reads the same checkout a land mutates (merge / rollback),
 so running them concurrently used to `(fail)` against a half-merged tree and file a false `regression:`
-bug (OMPSQ-168).
+bug (OMPSQ-168). A single red gate is also **double-confirmed before filing**: the gate runs on a busy
+host while the fleet spawns real-`omp` agents, so a transient flake (an integration test that exits
+before ready under load, a residual gate-vs-land race) can turn one tick red even though the named test
+is green. On a red run the observer re-runs the gate once and files `regression:` only if it reproduces;
+a red-then-green pair is logged as flaky and nothing is filed (OMPSQ-184).
 
 | Env | Meaning |
 |---|---|
