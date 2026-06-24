@@ -855,3 +855,86 @@ html.light {
     @apply bg-background text-foreground;
   }
 }
+
+/* ===========================================
+   ompsq-55 primitive compat layer
+   Token NAMES from squad/ompsq-55, VALUES mapped to the piyaz palette so the
+   lifted shadcn primitives (components/ui/*, components/agent/*) render in the
+   piyaz skin. Color tokens reference piyaz vars -> they inherit the html.light
+   flip for free; only --attention/--overlay get explicit light overrides.
+   =========================================== */
+:root {
+  --surface-0: var(--color-base);
+  --surface-1: var(--color-surface);
+  --surface-2: var(--color-surface-raised);
+  --surface-3: var(--color-surface-hover);
+  --border-strong: var(--color-border-strong);
+  --text-1: var(--color-text-primary);
+  --text-2: var(--color-text-secondary);
+  --text-3: var(--color-text-muted);
+  --accent: var(--color-accent);
+  --accent-hover: var(--color-accent-light);
+  --accent-subtle: var(--color-accent-glow);
+  --on-accent: var(--primary-foreground);
+  --success: var(--color-done);
+  --success-subtle: var(--color-done-bg);
+  --warning: var(--color-progress);
+  --warning-subtle: var(--color-progress-bg);
+  --attention: #f0883e;
+  --attention-subtle: rgba(240, 136, 62, 0.12);
+  --danger: var(--color-danger);
+  --danger-subtle: var(--color-cancelled-bg);
+  --neutral: var(--color-text-muted);
+  --neutral-subtle: var(--color-todo-bg);
+  --ring: var(--color-accent);
+  --overlay: rgba(0, 0, 0, 0.66);
+  --shadow-1: var(--shadow-card);
+  --shadow-2: var(--shadow-float);
+  --shadow-3: var(--shadow-float);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-15: 15px;
+  --text-16: 16px;
+  --text-20: 20px;
+  --text-24: 24px;
+  --leading-tight: 1.2;
+  --leading-base: 1.45;
+  --leading-relaxed: 1.6;
+}
+html.light {
+  --attention: #b5460c;
+  --attention-subtle: rgba(181, 70, 12, 0.1);
+  --overlay: rgba(16, 24, 40, 0.32);
+}
+@theme inline {
+  --font-sans: var(--font-body);
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-text-1: var(--text-1);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-on-accent: var(--on-accent);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-attention: var(--attention);
+  --color-attention-subtle: var(--attention-subtle);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-neutral: var(--neutral);
+  --color-neutral-subtle: var(--neutral-subtle);
+}
+@keyframes toastIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes skel { from { background-position: 200% 0; } to { background-position: -200% 0; } }
