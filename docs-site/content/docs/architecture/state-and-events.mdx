@@ -97,9 +97,11 @@ agent is already accounted for, so it never trips the WIP cap):
 
 - a **`flue-service`** member is restored via its own path (no live process to
   reattach — it is re-onboarded);
-- a **`workflow`** run only resumes if its inner omp thread is still alive **and** a
-  `workflowState` checkpoint exists — otherwise the orchestration is unrecoverable and
-  it is not respawned;
+- a **`workflow`** run resumes from its persisted `workflowState` checkpoint: if the inner
+  omp thread is still alive it reattaches in place, otherwise it is respawned and the graph
+  continues from the last completed node boundary (a fresh inner thread) — completed stages
+  are **not** re-run and their commits are not duplicated. A run with no checkpoint cannot
+  resume; the checkpoint is what makes restart safe (OMPSQ-165);
 - an **`omp-operator`** is re-created, and because the agent's `agent-host` survived
   the restart, `RpcAgent.start()` simply reconnects to the live socket and replays the
   ring buffer — the agent kept running with full context the whole time.

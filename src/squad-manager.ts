@@ -442,6 +442,9 @@ export class SquadManager extends EventEmitter {
 				owns: p.owns,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
+				// Resume the graph from its checkpoint; without this the adopted workflow restarts from
+				// scratch — re-running completed stages and re-committing their work (OMPSQ-165).
+				workflowState: p.workflowState,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -928,6 +931,9 @@ export class SquadManager extends EventEmitter {
 			kind,
 			runtime: opts.runtime,
 			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify } } : undefined,
+			// Carry the resumable checkpoint so an adopted/restored workflow continues its graph from the
+			// last node boundary instead of re-running completed stages (and duplicating their commits).
+			workflowState: opts.workflowState,
 			sandbox: opts.sandbox,
 			parentId: opts.parentId,
 			featureId: opts.featureId,
@@ -1819,6 +1825,7 @@ export class SquadManager extends EventEmitter {
 				owns: p.owns,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
+				workflowState: p.workflowState, // resume the graph from its checkpoint, never restart from scratch (OMPSQ-165)
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap
