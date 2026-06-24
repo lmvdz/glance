@@ -156,26 +156,40 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 
 	// Verify the merged main; if the gate fails, reset main to head0 so it stays green. The
 	// worktree branch keeps its commit (only main is reset), so it can be re-landed after a fix.
-	const verifyMerged = async (detail: string): Promise<LandResult> => {
+	const verifyMerged = async (detail: string, reMerge: () => Promise<GitRun>): Promise<LandResult> => {
 		if (!gate) return { ok: true, committed, merged: true, message, detail };
 		const v = await runGate(gate, repo);
 		if (v.code === 0) return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
+		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
 		await git(["reset", "--hard", head0], repo).catch(() => {});
-		return {
-			ok: false,
-			committed,
-			merged: false,
-			message,
-			detail: `merged ${branch} but verification failed (${gate}) — rolled main back to keep it green:\n${truncate(v.output, 800)}`,
-		};
+		const base = await runGate(gate, repo); // main == head0 now
+		if (base.code === 0) {
+			// Base was green ⇒ the branch introduced the failure ⇒ keep main green, block (unchanged).
+			return {
+				ok: false,
+				committed,
+				merged: false,
+				message,
+				detail: `merged ${branch} but verification failed (${gate}) — rolled main back to keep it green:\n${truncate(v.output, 800)}`,
+			};
+		}
+		// Base was already red ⇒ main was never green; refusing would wedge every land on a brownfield
+		// repo. Re-apply the merge and land, recording that we landed onto a red baseline.
+		// ponytail: binary gate can't tell "still red" from "redder" — a branch that worsens an already
+		// red base still lands. Upgrade path: per-framework failing-test diffing if that ever bites.
+		const rm = await reMerge();
+		if (rm.code !== 0) {
+			return { ok: false, committed, merged: false, message, detail: `base already red (${gate}); re-merging ${branch} failed: ${rm.stderr || rm.stdout}` };
+		}
+		return { ok: true, committed, merged: true, message, detail: `${detail}; landed onto a red baseline — main was not green at head0 (${gate})` };
 	};
 
 	const ff = await git(["merge", "--ff-only", branch], repo);
-	if (ff.code === 0) return verifyMerged(`merged ${branch} (fast-forward)`);
+	if (ff.code === 0) return verifyMerged(`merged ${branch} (fast-forward)`, () => git(["merge", "--ff-only", branch], repo));
 
 	// Diverged → real merge commit.
 	const merge = await git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo);
-	if (merge.code === 0) return verifyMerged(`merged ${branch}`);
+	if (merge.code === 0) return verifyMerged(`merged ${branch}`, () => git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo));
 
 	// Conflict — abort to leave main clean at head0, then try automated resolution (#12) if armed.
 	await git(["merge", "--abort"], repo).catch(() => undefined);

@@ -1,6 +1,6 @@
 # Base-aware land gate in verifyMerged
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

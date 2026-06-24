@@ -58,7 +58,9 @@ test("landAgent: gate failure rolls back the merge, main stays green", async () 
 	const mainHead0 = await out(repo, "rev-parse", "HEAD");
 	const branchHead = await out(repo, "rev-parse", "feat");
 
-	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "exit 1" });
+	// Base-green gate: passes at head0 (no feature.txt yet), fails once the branch merges feature.txt
+	// in — i.e. the branch regressed a green base, so the merge must roll back.
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "test ! -f feature.txt" });
 
 	expect(res.ok).toBe(false);
 	expect(res.merged).toBe(false);
