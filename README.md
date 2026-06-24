@@ -677,11 +677,20 @@ lands its own branch the moment it goes green. With both on, the loop closes end
 build → verify → **land** → resolve-on-conflict — and a human is needed only when a resolution
 can't be proven.
 
+**Confirm hold for auto-resolved conflicts.** A *clean* auto-land merges as soon as it goes green,
+but a land that had to **auto-resolve a conflict** is held by default (`OMP_SQUAD_AUTORESOLVE_CONFIRM`):
+the branch is rebased + resolved, the merge is **not** kept, and the agent is flagged **✓ ready to
+land** for a human one-tap Land. The blast radius of a semantically-wrong LLM merge is `main`, so a
+resolved conflict earns a human ack while a clean land stays fully autonomous. The orchestrator treats
+this *staged* outcome as a hold — never a blocked land — so it neither re-merges nor parks it
+(OMPSQ-138 / OMPSQ-175). Set `OMP_SQUAD_AUTORESOLVE_CONFIRM=0` to auto-merge resolved conflicts too.
+
 | Env var | Effect |
 |---|---|
 | `OMP_SQUAD_AUTORESOLVE` | `landAgent`'s in-process rebase conflict resolver, distinct from the manual `resolve-conflict` workflow (on by default; `=0` to disable) |
 | `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (on by default; `=0` to disable) |
 | `OMP_SQUAD_LAND_CONFIRM` | Safety valve: the auto-land loop still verifies idle agents, but a GREEN verify only marks them **✓ ready to land** (no merge) — the operator merges via the existing one-tap Land (off by default) |
+| `OMP_SQUAD_AUTORESOLVE_CONFIRM` | An AUTO land that had to auto-resolve a conflict is **staged** for a one-tap Land instead of merged with no human (on by default; `=0` to auto-merge resolved conflicts). A clean auto land still merges; operator lands always merge |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 | `OMP_SQUAD_AUTOLAND_FAIL_CAP` | Consecutive failed auto-lands before a branch is parked instead of re-merged (default `3`); restart-safe via a persisted, branch-keyed ledger (`<stateDir>/land-failures.json`). Operator land bypasses it; the Observer files a bug for the parked branch |
 

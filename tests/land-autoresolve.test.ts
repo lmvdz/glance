@@ -112,3 +112,27 @@ test("autoresolve ON: a resolver that gives up aborts cleanly", async () => {
 	expect(res.merged).toBe(false);
 	expect(await mainFile(repo)).toBe("main"); // rebase aborted, main intact
 });
+
+test("confirmResolved: a resolved conflict is STAGED, not merged — main untouched, then operator land fast-forwards (OMPSQ-138)", async () => {
+	process.env.OMP_SQUAD_AUTORESOLVE = "1";
+	const { repo, wt } = await conflictRepo();
+	let reviewed = false;
+	const watchReviewer: ResolutionReviewer = async () => {
+		reviewed = true;
+		return true;
+	};
+	// Auto land with the confirm hold: resolve on the branch, but hold the merge for a one-tap Land.
+	const staged = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true", confirmResolved: true, resolver: writeResolution, reviewer: watchReviewer });
+	expect(staged.ok).toBe(false);
+	expect(staged.staged).toBe(true);
+	expect(staged.merged).toBe(false);
+	expect(reviewed).toBe(false); // the human is the gate in confirm mode — no LLM reviewer call
+	expect(await mainFile(repo)).toBe("main"); // NOT merged — main is exactly where it was
+
+	// The operator's one-tap Land (confirmResolved:false) keeps the resolved merge: the branch is
+	// already rebased onto main, so this fast-forwards cleanly without a second resolve.
+	const landed = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true", resolver: writeResolution, reviewer: approve });
+	expect(landed.ok).toBe(true);
+	expect(landed.merged).toBe(true);
+	expect(await mainFile(repo)).toBe("resolved");
+});

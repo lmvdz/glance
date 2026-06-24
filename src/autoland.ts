@@ -35,6 +35,7 @@ export async function autoLandOnSuccess(
 	if (!enabled || outcome !== "succeeded") return null;
 	const res = await deps.land(agent.id);
 	if (res.ok) deps.log(`auto-landed ${agent.name}: ${res.detail ?? "merged"}`);
+	else if (res.staged) deps.log(`auto-land staged ${agent.name}: ${res.detail ?? "conflict auto-resolved"} — ready for one-tap Land`);
 	else deps.log(`auto-land blocked on ${agent.name}: ${res.detail ?? "land failed"} — needs conflict resolution`);
 	return res;
 }
