@@ -1,11 +1,14 @@
 /**
- * Git supply-chain hardening for read-only git invocations.
+ * Git supply-chain hardening, spread onto every daemon `git` call (read and write).
  *
  * A repo's own config can hijack plain git to run arbitrary code
- * (core.fsmonitor, diff.external, hooks, a pager). When we only ever read an
- * untrusted clone, spread these args/env onto every `git` call to neutralize
- * those vectors and never prompt or page. Ported from recall's _GIT_HARDENING /
- * _GIT_ENV.
+ * (core.fsmonitor, diff.external, hooks, a pager). When we touch an untrusted
+ * clone, these args/env neutralize those vectors and never prompt or page.
+ * They also force commit/tag signing OFF: a global commit.gpgsign=true would
+ * otherwise block the daemon's own commits (e.g. worktree WIP preservation) on
+ * an interactive GPG pinentry with no TTY. `-c` beats any config file, and a
+ * gpgsign override is a harmless no-op on read-only commands.
+ * Ported from recall's _GIT_HARDENING / _GIT_ENV.
  */
 
 export const GIT_HARDEN_ARGS: string[] = [
@@ -17,6 +20,10 @@ export const GIT_HARDEN_ARGS: string[] = [
 	"core.hooksPath=/dev/null",
 	"-c",
 	"core.pager=cat",
+	"-c",
+	"commit.gpgsign=false",
+	"-c",
+	"tag.gpgsign=false",
 ];
 
 export const GIT_HARDEN_ENV: Record<string, string> = {

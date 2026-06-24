@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { gitNoSignEnv } from "../src/agent-host.ts";
+import { GIT_HARDEN_ARGS } from "../src/git-harden.ts";
 
 const run = promisify(execFile);
 
@@ -38,6 +39,43 @@ describe("gitNoSignEnv", () => {
 				env: { ...process.env, ...gitNoSignEnv },
 			});
 			expect(off.stdout.trim()).toBe("false");
+		} finally {
+			await fsp.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("GIT_HARDEN_ARGS signing", () => {
+	test("forces commit + tag signing off", () => {
+		expect(GIT_HARDEN_ARGS).toContain("commit.gpgsign=false");
+		expect(GIT_HARDEN_ARGS).toContain("tag.gpgsign=false");
+	});
+
+	// Real git: a repo with commit.gpgsign=true and a guaranteed-failing signer. A plain
+	// commit fails (git runs the broken gpg.program); the hardened commit succeeds and is
+	// unsigned — proving GIT_HARDEN_ARGS disables signing without a TTY/pinentry prompt.
+	test("a hardened commit succeeds unsigned where a plain signed commit fails", async () => {
+		const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "gpgharden-"));
+		try {
+			await run("git", ["init", "-q"], { cwd: dir });
+			await run("git", ["config", "user.email", "t@example.com"], { cwd: dir });
+			await run("git", ["config", "user.name", "Test"], { cwd: dir });
+			await run("git", ["config", "commit.gpgsign", "true"], { cwd: dir });
+			await run("git", ["config", "gpg.program", "/bin/false"], { cwd: dir });
+			await fsp.writeFile(path.join(dir, "a.txt"), "1");
+			await run("git", ["add", "-A"], { cwd: dir });
+
+			// Plain signed commit must fail: git invokes /bin/false as the signer.
+			let plainFailed = false;
+			await run("git", ["commit", "-m", "plain"], { cwd: dir }).catch(() => {
+				plainFailed = true;
+			});
+			expect(plainFailed).toBe(true);
+
+			// Hardened commit: signing forced off, no signer invoked -> succeeds, unsigned.
+			await run("git", [...GIT_HARDEN_ARGS, "commit", "-m", "hardened"], { cwd: dir });
+			const sig = await run("git", ["log", "-1", "--format=%G?"], { cwd: dir });
+			expect(sig.stdout.trim()).toBe("N");
 		} finally {
 			await fsp.rm(dir, { recursive: true, force: true });
 		}

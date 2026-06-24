@@ -82,8 +82,8 @@ interface GitRun {
 }
 
 async function git(args: string[], cwd: string): Promise<GitRun> {
-	// ponytail: untrusted repo config can exec code via core.fsmonitor/diff.external/hooks/pager — these neutralize it.
-	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, "-c", "commit.gpgsign=false", ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "pipe" });
+	// ponytail: untrusted repo config can exec code via core.fsmonitor/diff.external/hooks/pager — GIT_HARDEN_ARGS neutralizes it AND forces commit/tag signing off.
+	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "pipe" });
 	const [stdout, stderr, code] = await Promise.all([
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
