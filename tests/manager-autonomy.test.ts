@@ -70,6 +70,10 @@ class TestManager extends SquadManager {
 		const rec = this.agents.get(id);
 		if (rec) this.onUi(rec, req);
 	}
+	/** Expose the production orchestrator-wiring seam (start() arms the live daemon, so it can't run here). */
+	makeOrchestrator(): Orchestrator {
+		return this.buildOrchestrator();
+	}
 }
 
 async function freshManager(planeBase?: string): Promise<TestManager> {
@@ -228,13 +232,14 @@ test("a parked spawn is visible to the orchestrator's drain (manager + orchestra
 	const dto = await mgr.create({ repo: "/x/repo", name: "parked" });
 	expect(dto.queued).toBe(true);
 
-	// The manager parks into its private scheduler; the orchestrator is wired to that exact instance
-	// (start() passes `scheduler: this.scheduler`). Before the fix the orchestrator owned a different
-	// Scheduler, so this request was stranded forever. Mirror the production wiring and confirm the
-	// drain side sees the parked request.
+	// The manager parks into its private scheduler; the orchestrator start() builds is wired to THAT
+	// exact instance (buildOrchestrator passes `scheduler: this.scheduler`). Before the fix the
+	// orchestrator owned a different Scheduler, so this request was stranded forever. Exercise the REAL
+	// production seam (not a hand-mirrored Orchestrator) so a regression on that one wiring line — the
+	// exact regression this guards — actually fails the test.
 	const schedulerMgrParkedInto = (mgr as unknown as { scheduler: import("../src/scheduler.ts").Scheduler }).scheduler;
 	expect(schedulerMgrParkedInto.queued).toBe(1);
-	const orch = new Orchestrator({ listAgents: () => mgr.list(), spawn: (o) => mgr.create(o), verify: async () => false, land: async () => false, scheduler: schedulerMgrParkedInto });
+	const orch = mgr.makeOrchestrator();
 	expect(orch.scheduler).toBe(schedulerMgrParkedInto); // same instance — not a private copy
 	expect(orch.scheduler.dequeue()?.name).toBe("parked"); // the drain side pops what create() parked
 });

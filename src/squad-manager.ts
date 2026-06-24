@@ -320,24 +320,7 @@ export class SquadManager extends EventEmitter {
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
 		}
-		this.orchestrator = new Orchestrator({
-			listAgents: () => this.list(),
-			spawn: (opts) => this.create(opts),
-			verify: async (id) => (await this.verifyFeature(id))?.ok ?? false,
-			land: async (id) => (await this.landFeature(id)).ok,
-			verifyAgent: (id) => this.verifyAgentWork(id),
-			landAgentWork: async (id) => {
-				const r = await this.land(id);
-				return r.staged ? "staged" : r.ok; // OMPSQ-175: staged ⇒ orchestrator holds, never parks
-			},
-			agentHasWork: (id) => this.agentHasUnlandedWork(id),
-			holdForConfirm: this.landConfirm,
-			notifyReady: (id) => this.markLandReady(id),
-			onCatastrophe: (id, detail) => this.markCatastrophe(id, detail),
-			log: (m) => this.log("info", `orchestrator: ${m}`),
-			persist: openOrchestratorState(this.stateDir), // OMPSQ-139: halted/landed/staged survive restart, keyed by branch
-			scheduler: this.scheduler, // OMPSQ-134: drain the SAME queue create() parks into (OMP_SQUAD_QUEUE_ON_FULL)
-		});
+		this.orchestrator = this.buildOrchestrator();
 		this.orchestrator.start();
 
 		// Observer (OMPSQ-52) — periodic self-audit sibling to the orchestrator. One per configured Plane
@@ -392,6 +375,33 @@ export class SquadManager extends EventEmitter {
 			});
 			this.log("info", `scout on (harvesting reasoning → ${observeRepos.join(", ")})`);
 		}
+	}
+
+	/**
+	 * Build the auto-drive Orchestrator wired to the manager's shared Scheduler (OMPSQ-134): the same
+	 * instance `create()` parks cap-denied spawns into, so the loop's admission-drain actually dequeues
+	 * them. Extracted from `start()` (which arms the live daemon — bus/federation/timers) so this single
+	 * load-bearing wiring is unit-testable in isolation. NEVER call `.start()` here — that's `start()`'s job.
+	 */
+	protected buildOrchestrator(): Orchestrator {
+		return new Orchestrator({
+			listAgents: () => this.list(),
+			spawn: (opts) => this.create(opts),
+			verify: async (id) => (await this.verifyFeature(id))?.ok ?? false,
+			land: async (id) => (await this.landFeature(id)).ok,
+			verifyAgent: (id) => this.verifyAgentWork(id),
+			landAgentWork: async (id) => {
+				const r = await this.land(id);
+				return r.staged ? "staged" : r.ok; // OMPSQ-175: staged ⇒ orchestrator holds, never parks
+			},
+			agentHasWork: (id) => this.agentHasUnlandedWork(id),
+			holdForConfirm: this.landConfirm,
+			notifyReady: (id) => this.markLandReady(id),
+			onCatastrophe: (id, detail) => this.markCatastrophe(id, detail),
+			log: (m) => this.log("info", `orchestrator: ${m}`),
+			persist: openOrchestratorState(this.stateDir), // OMPSQ-139: halted/landed/staged survive restart, keyed by branch
+			scheduler: this.scheduler, // OMPSQ-134: drain the SAME queue create() parks into (OMP_SQUAD_QUEUE_ON_FULL)
+		});
 	}
 
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
