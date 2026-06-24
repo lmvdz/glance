@@ -318,6 +318,7 @@ export class SquadManager extends EventEmitter {
 			agentHasWork: (id) => this.agentHasUnlandedWork(id),
 			holdForConfirm: this.landConfirm,
 			notifyReady: (id) => this.markLandReady(id),
+			onCatastrophe: (id, detail) => this.markCatastrophe(id, detail),
 			log: (m) => this.log("info", `orchestrator: ${m}`),
 			persist: openOrchestratorState(this.stateDir), // OMPSQ-139: halted/landed/staged survive restart, keyed by branch
 		});
@@ -716,6 +717,26 @@ export class SquadManager extends EventEmitter {
 		rec.dto.landReady = true;
 		this.emitAgent(rec);
 		this.log("info", `land-confirm: ${id} verified — ready to land`);
+	}
+
+	/**
+	 * Catastrophe (#14 / OMPSQ-135): the orchestrator summoned a human for this agent (repair budget
+	 * exhausted or a catastrophe tripwire). The auto-loop has already halted it; here we make the
+	 * summon *visible* — drive the agent into a sticky `error` state so it surfaces in the attention
+	 * Queue and fires the existing background push (escalationPayload handles the idle→error
+	 * transition). Without this the summon was a log line only — invisible once the operator looked
+	 * away. The `CATASTROPHE:` prefix distinguishes a summon from a plain agent crash in the UI.
+	 */
+	private markCatastrophe(id: string, detail: string): void {
+		const rec = this.agents.get(id);
+		if (!rec) return;
+		rec.streaming = false;
+		rec.dto.status = "error";
+		rec.dto.error = `CATASTROPHE: ${detail}`;
+		rec.dto.lastActivity = Date.now();
+		this.emitAgent(rec);
+		this.log("warn", `catastrophe: ${id} — ${detail}`);
+		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
 	}
 
 	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
