@@ -3,6 +3,7 @@ import type { AuditEntry } from "@/lib/dto";
 import { apiGet } from "@/lib/api";
 import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
 import { RelativeTime } from "@/components/agent/relative-time";
 
 // ponytail: 4s poll (matches the live SPA's feature cadence). Upgrade path:
@@ -23,7 +24,15 @@ export function AuditView() {
     };
   }, []);
 
-  if (entries === null) return <div className="p-4 text-sm text-text-muted">Loading audit…</div>;
+  if (entries === null) {
+    return (
+      <div className="space-y-2 p-4">
+        {Array.from({ length: 8 }).map((_, i) => (
+          <Skeleton key={i} className="h-6 w-full" />
+        ))}
+      </div>
+    );
+  }
   if (entries.length === 0) {
     return (
       <div className="p-3">

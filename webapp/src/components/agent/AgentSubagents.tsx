@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface SubEntry {
   status: string;
@@ -21,7 +22,15 @@ export function AgentSubagents({ agentId }: { agentId: string }) {
     };
   }, [agentId]);
 
-  if (subs === null) return <div className="p-4 text-sm text-text-muted">Loading…</div>;
+  if (subs === null) {
+    return (
+      <div className="space-y-2 p-4">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-5 w-2/3" />
+        ))}
+      </div>
+    );
+  }
   if (subs.length === 0) return <div className="p-4 text-sm text-text-muted">No subagents.</div>;
   return (
     <div className="flex flex-col gap-1.5 overflow-y-auto p-4">

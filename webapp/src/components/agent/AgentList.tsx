@@ -2,6 +2,7 @@ import type { AgentDTO, AgentStatus } from "@/lib/dto";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/agent/status-dot";
 import { RelativeTime } from "@/components/agent/relative-time";
+import { EmptyState } from "@/components/ui/empty-state";
 
 const ORDER: Record<AgentStatus, number> = {
   input: 0,
@@ -20,7 +21,11 @@ interface AgentListProps {
 
 export function AgentList({ agents, selectedId, onSelect }: AgentListProps) {
   if (agents.length === 0) {
-    return <div className="p-6 text-sm text-text-muted">No agents. Spawn one to get started.</div>;
+    return (
+      <div className="p-3">
+        <EmptyState title="No agents">Spawn one with the New button to get started.</EmptyState>
+      </div>
+    );
   }
   const sorted = [...agents].sort((a, b) => ORDER[a.status] - ORDER[b.status] || b.lastActivity - a.lastActivity);
   return (
@@ -31,7 +36,7 @@ export function AgentList({ agents, selectedId, onSelect }: AgentListProps) {
           type="button"
           onClick={() => onSelect(a.id)}
           className={cn(
-            "flex w-full items-center gap-2.5 rounded px-2 py-2 text-left hover:bg-surface-hover",
+            "flex w-full items-center gap-2.5 rounded px-2 py-2 text-left transition-colors hover:bg-surface-hover",
             selectedId === a.id && "bg-surface-hover",
           )}
         >

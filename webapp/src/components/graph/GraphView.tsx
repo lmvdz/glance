@@ -1,12 +1,11 @@
 import type { ReactNode } from "react";
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ForceGraph } from "@/components/graph/ForceGraph";
 import type { GraphModel } from "@/lib/graph-model";
 import type { FeatureStage } from "@/lib/dto";
 import { STAGE_LABEL, stageColorVar } from "@/lib/status";
 
 const OVERLAY_W = 520;
-const TRANSITION = { duration: 0.24, ease: [0.16, 1, 0.3, 1] } as const;
 const LEGEND: FeatureStage[] = ["planned", "in-progress", "review", "landed", "diverged"];
 
 interface GraphViewProps {
@@ -23,8 +22,10 @@ interface GraphViewProps {
  * the camera so the focused node stays clear of the overlay).
  */
 export function GraphView({ model, selectedId, onSelect, onDeselect, detail }: GraphViewProps) {
+  const reduce = useReducedMotion();
   const overlayOpen = Boolean(detail && selectedId);
   const rightInset = overlayOpen ? OVERLAY_W : 0;
+  const transition = reduce ? { duration: 0 } : { duration: 0.24, ease: [0.16, 1, 0.3, 1] as const };
   return (
     <div className="relative h-full w-full overflow-hidden bg-base">
       <ForceGraph
@@ -53,7 +54,7 @@ export function GraphView({ model, selectedId, onSelect, onDeselect, detail }: G
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
-            transition={TRANSITION}
+            transition={transition}
             className="absolute bottom-0 right-0 top-0 z-20 flex bg-base shadow-[var(--shadow-float)]"
             style={{ width: OVERLAY_W }}
           >

@@ -1,5 +1,4 @@
 import type { AgentDTO, FeatureDTO, FeatureStage } from "@/lib/dto";
-import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { cn } from "@/lib/utils";
 import { STAGE_LABEL, stageColorVar } from "@/lib/status";
@@ -38,10 +37,14 @@ export function FeatureBoard({ features, agentsByFeature, selectedId, onSelect }
               const ags = agentsByFeature.get(f.id) ?? [];
               const waiting = ags.some((a) => a.status === "input" || a.status === "error");
               return (
-                <Card
+                <button
                   key={f.id}
+                  type="button"
                   onClick={() => onSelect(f.id)}
-                  className={cn("cursor-pointer p-2.5 hover:border-border-strong", selectedId === f.id && "border-accent")}
+                  className={cn(
+                    "w-full rounded-[var(--radius-md)] border border-border bg-card p-2.5 text-left shadow-[var(--shadow-1)] transition-colors hover:border-border-strong",
+                    selectedId === f.id && "border-accent",
+                  )}
                 >
                   <div className="text-sm text-text-1">{f.title}</div>
                   <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-text-3">
@@ -50,7 +53,7 @@ export function FeatureBoard({ features, agentsByFeature, selectedId, onSelect }
                     {waiting ? <span style={{ color: "var(--color-progress)" }}>needs you</span> : null}
                     {f.divergent ? <span style={{ color: "var(--color-cancelled)" }}>diverged</span> : null}
                   </div>
-                </Card>
+                </button>
               );
             })}
           </div>

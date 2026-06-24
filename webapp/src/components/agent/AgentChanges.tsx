@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface DiffEntry {
   path?: string;
@@ -21,7 +22,15 @@ export function AgentChanges({ agentId }: { agentId: string }) {
     };
   }, [agentId]);
 
-  if (files === null) return <div className="p-4 text-sm text-text-muted">Loading changes…</div>;
+  if (files === null) {
+    return (
+      <div className="space-y-2 p-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} className="h-3.5 w-full" />
+        ))}
+      </div>
+    );
+  }
   if (files.length === 0) return <div className="p-4 text-sm text-text-muted">No uncommitted changes.</div>;
   return (
     <ul className="overflow-y-auto p-4">
