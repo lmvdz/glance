@@ -412,6 +412,37 @@ test("blocked land is retried under a cap, then parked — never an infinite mer
 	expect(landCalls).toBe(3);
 });
 
+test("a retryable land (dirty main checkout) is retried every tick — never block-counted, never parked/halted", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	let landCalls = 0;
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [agent("dirty", "idle")],
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => {
+			throw new Error("feature verify must not run for a plain agent");
+		},
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async () => true,
+		verifyAgent: async () => true,
+		landAgentWork: async () => {
+			landCalls++;
+			return "retryable"; // main checkout was dirty — environmental, not a branch defect
+		},
+		log: (m) => logs.push(m),
+	});
+
+	for (let i = 0; i < 5; i++) await orch.tick();
+	expect(landCalls).toBe(5); // retried EVERY tick — never parked/halted past a cap
+	expect(logs.some((l) => l.includes("land deferred") && l.includes("dirty"))).toBe(true);
+	expect(logs.some((l) => l.includes("land blocked"))).toBe(false); // not counted as a blocked land
+	expect(logs.some((l) => l.includes("parked"))).toBe(false); // never parked
+});
+
 // ── OMPSQ-164: a re-adopted idle agent's complete work is auto-landed after a relaunch ──
 // adoptOrphanedAgents re-creates such an agent (committed work, clean worktree, never re-run), so the
 // event-driven auto-land (workflow_done) never fires. The orchestrator must land it DIRECTLY, using

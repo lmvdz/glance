@@ -392,7 +392,9 @@ export class SquadManager extends EventEmitter {
 			verifyAgent: (id) => this.verifyAgentWork(id),
 			landAgentWork: async (id) => {
 				const r = await this.land(id);
-				return r.staged ? "staged" : r.ok; // OMPSQ-175: staged ⇒ orchestrator holds, never parks
+				if (r.staged) return "staged"; // OMPSQ-175: staged ⇒ orchestrator holds, never parks
+				if (r.retryable) return "retryable"; // dirty main ⇒ retry next tick, never park/halt
+				return r.ok;
 			},
 			agentHasWork: (id) => this.agentHasUnlandedWork(id),
 			holdForConfirm: this.landConfirm,
@@ -749,7 +751,9 @@ export class SquadManager extends EventEmitter {
 		}
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
-		if (auto || result.ok) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
+		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
+		// never bump the streak for it, else transient dirty windows park a healthy branch.
+		if (!result.retryable && (auto || result.ok)) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 		if (result.ok) {
 			rec.dto.landReady = false; // merged ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
