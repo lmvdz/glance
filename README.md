@@ -247,6 +247,15 @@ even when a re-adopted worktree gets a fresh agent id. Without it, the in-memory
 restart and a bad branch churned main indefinitely. Operator one-tap Land is never blocked; the
 Observer files a bug for the parked branch.
 
+**Re-adopted work lands itself (relaunch recovery).** After a relaunch, surviving worktrees whose
+work was already complete (commits ahead, clean worktree) are re-adopted as idle agents that never
+re-run — so the event-driven auto-land (which fires when a run finishes) never fires for them. The
+control loop now lands such a re-adopted agent **directly** on its next tick: it skips the isolated
+worktree pre-verify (which gives a false negative on a stale-but-mergeable branch that lacks newer
+main code) and uses the land path's own merge → gate → rollback-on-red as the gate. In confirm mode
+(`OMP_SQUAD_LAND_CONFIRM`) it is staged for a one-tap Land instead. The auto-land failure cap above
+still applies, so a branch whose *merged* gate genuinely fails parks rather than retrying forever.
+
 **Plane API throttle (shared rate limiter + read cache).** Plane cloud rate-limits per workspace
 token, and many in-process callers share it (dispatcher poll, observer poll + filing, worktree
 reaper, scout). They route through one chokepoint — `src/plane-throttle.ts` — so the daemon never

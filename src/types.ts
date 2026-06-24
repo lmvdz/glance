@@ -209,6 +209,11 @@ export interface AgentDTO {
 	owns?: string[];
 	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
 	landReady?: boolean;
+	/** Re-adopted from a surviving worktree on relaunch and not yet re-run (OMPSQ-164): its work was
+	 *  complete before the stop, so the event-driven auto-land never fires. The orchestrator lands such
+	 *  an agent directly (merge→gate→rollback) instead of an isolated worktree pre-verify. Cleared the
+	 *  moment it actually runs again (a turn starts). */
+	adopted?: boolean;
 	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
 	queued?: boolean;
 }
@@ -338,6 +343,10 @@ export interface CreateAgentOptions {
 	track?: boolean;
 	/** Skip the global live-agent WIP cap (restore / fan-out paths that recreate already-accounted-for agents). */
 	bypassCap?: boolean;
+	/** Re-created from a surviving worktree during restart adoption (OMPSQ-164). Marks the agent so the
+	 *  orchestrator auto-lands its already-complete work directly, since the event-driven auto-land that
+	 *  fires on a run-to-completion never re-fires for an adopted agent that doesn't re-run. */
+	adopted?: boolean;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

@@ -153,6 +153,24 @@ export class Orchestrator {
 				continue;
 			}
 
+			// Re-adopted idle agent (OMPSQ-164): its work was COMPLETE before a relaunch — committed
+			// (ahead>0, gated above by agentHasWork for plain agents), clean worktree — but it never
+			// re-ran, so the event-driven auto-land (autoLandOnSuccess on workflow_done) never fired.
+			// An isolated worktree pre-verify gives a FALSE NEGATIVE here (a stale-but-mergeable branch
+			// lacks newer main code), so skip it: land DIRECTLY and let the land path's own merge → gate
+			// → rollback-on-red be the gate. Confirm mode stages it for a one-tap Land instead. The
+			// blocked-land cap in tryLand still applies, so a genuinely-failing MERGED gate parks.
+			if (a.adopted) {
+				if (this.deps.holdForConfirm) {
+					this.deps.notifyReady?.(a.id);
+					this.staged.add(workId);
+					log(`ready to land ${workId} (${a.id}) — re-adopted`);
+				} else {
+					await this.tryLand(a, plain, feat, workId, " — re-adopted", log);
+				}
+				continue;
+			}
+
 			if (plain ? await this.deps.verifyAgent!(a.id) : await this.deps.verify(feat!)) {
 				// Safety valve: confirm mode holds a GREEN verify for the operator's one-tap Land.
 				if (this.deps.holdForConfirm) {
@@ -163,24 +181,7 @@ export class Orchestrator {
 					continue;
 				}
 				// Step 1: green gate → land (the land path closes the tracking Plane issue).
-				if (plain ? await this.deps.landAgentWork!(a.id) : await this.deps.land(feat!)) {
-					this.landed.add(workId);
-					this.attempts.delete(a.id);
-					this.landBlocks.delete(a.id);
-					log(`landed ${workId} (${a.id})`);
-				} else {
-					// Land blocked (diverged / conflict / dirty main). Retrying the identical merge won't
-					// help until main or the branch changes — cap retries then park, never an infinite
-					// merge→reset loop. ponytail: in-memory; a daemon restart resets the counter.
-					const blocks = (this.landBlocks.get(a.id) ?? 0) + 1;
-					this.landBlocks.set(a.id, blocks);
-					if (blocks >= LAND_RETRY_CAP) {
-						this.halted.add(a.id);
-						log(`land blocked for ${workId} (${a.id}) ${blocks}× — parked; resolve/land manually`);
-					} else {
-						log(`land blocked for ${workId} (${a.id}) — will retry (${blocks}/${LAND_RETRY_CAP})`);
-					}
-				}
+				await this.tryLand(a, plain, feat, workId, "", log);
 				continue;
 			}
 
@@ -210,6 +211,32 @@ export class Orchestrator {
 			if (!req) break;
 			await this.deps.spawn(req);
 			log(`admitted queued spawn ${req.name ?? req.repo}`);
+		}
+	}
+
+	/**
+	 * Land one agent's work and apply the blocked-land cap. On success: mark landed, clear the
+	 * per-agent attempt + block counters. On a blocked land (diverged / conflict / dirty main):
+	 * retrying the identical merge won't help until main or the branch changes, so cap retries at
+	 * LAND_RETRY_CAP then park — never an infinite merge→reset loop. ponytail: in-memory; a daemon
+	 * restart resets the counter (the manager's persisted, branch-keyed ledger holds across restarts).
+	 * `label` annotates the log line (e.g. " — re-adopted").
+	 */
+	private async tryLand(a: AgentDTO, plain: boolean, feat: string | undefined, workId: string, label: string, log: (m: string) => void): Promise<void> {
+		if (plain ? await this.deps.landAgentWork!(a.id) : await this.deps.land(feat!)) {
+			this.landed.add(workId);
+			this.attempts.delete(a.id);
+			this.landBlocks.delete(a.id);
+			log(`landed ${workId} (${a.id})${label}`);
+			return;
+		}
+		const blocks = (this.landBlocks.get(a.id) ?? 0) + 1;
+		this.landBlocks.set(a.id, blocks);
+		if (blocks >= LAND_RETRY_CAP) {
+			this.halted.add(a.id);
+			log(`land blocked for ${workId} (${a.id}) ${blocks}× — parked; resolve/land manually`);
+		} else {
+			log(`land blocked for ${workId} (${a.id}) — will retry (${blocks}/${LAND_RETRY_CAP})`);
 		}
 	}
 

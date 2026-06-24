@@ -346,3 +346,123 @@ test("blocked land is retried under a cap, then parked — never an infinite mer
 	expect(verifyCalls).toBe(3);
 	expect(landCalls).toBe(3);
 });
+
+// ── OMPSQ-164: a re-adopted idle agent's complete work is auto-landed after a relaunch ──
+// adoptOrphanedAgents re-creates such an agent (committed work, clean worktree, never re-run), so the
+// event-driven auto-land (workflow_done) never fires. The orchestrator must land it DIRECTLY, using
+// the land path's own merge→gate→rollback as the gate — NOT an isolated worktree pre-verify, which
+// gives a false negative on a stale-but-mergeable branch.
+const adopted = (id: string, featureId?: string): AgentDTO => ({ ...agent(id, "idle", featureId), adopted: true });
+
+test("re-adopted idle agent is landed directly within a tick, skipping the isolated worktree pre-verify (OMPSQ-164)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const verified: string[] = [];
+	const landed: string[] = [];
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [adopted("ag")], // plain, re-adopted with committed work
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => {
+			throw new Error("feature verify must not run for a plain agent");
+		},
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async () => true,
+		// Stale branch: the ISOLATED worktree verify is RED (lacks newer main code) — must be skipped.
+		verifyAgent: async (id) => {
+			verified.push(id);
+			return false;
+		},
+		landAgentWork: async (id) => {
+			landed.push(id); // the MERGED gate (merge→verify→rollback-on-red) passes
+			return true;
+		},
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick();
+	expect(verified).toEqual([]); // isolated pre-verify skipped — the false-negative this fixes
+	expect(landed).toEqual(["ag"]); // landed via the merged gate
+	expect(logs.some((l) => l.includes("landed agent:ag") && l.includes("re-adopted"))).toBe(true);
+
+	await orch.tick(); // already landed ⇒ no churn
+	expect(verified).toEqual([]);
+	expect(landed).toEqual(["ag"]);
+});
+
+test("re-adopted idle agent whose MERGED gate fails is parked under the land cap, not retried forever (OMPSQ-164)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	let landCalls = 0;
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [adopted("blk")],
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => {
+			throw new Error("feature verify must not run for a plain agent");
+		},
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async () => true,
+		verifyAgent: async () => {
+			throw new Error("isolated pre-verify must not run for a re-adopted agent");
+		},
+		landAgentWork: async () => {
+			landCalls++;
+			return false; // the merged gate genuinely fails (conflict / red after merge)
+		},
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick(); // blocks=1 → retry (1/3)
+	await orch.tick(); // blocks=2 → retry (2/3)
+	await orch.tick(); // blocks=3 → parked
+	expect(landCalls).toBe(3);
+	expect(logs.some((l) => l.includes("parked") && l.includes("blk"))).toBe(true);
+
+	await orch.tick(); // parked ⇒ halted ⇒ no further land attempt
+	expect(landCalls).toBe(3);
+});
+
+test("holdForConfirm: a re-adopted idle agent is staged for a one-tap Land, not blind-merged (OMPSQ-164)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const ready: string[] = [];
+	const landed: string[] = [];
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [adopted("ag")],
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => {
+			throw new Error("feature verify must not run for a plain agent");
+		},
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async () => true,
+		verifyAgent: async () => {
+			throw new Error("isolated pre-verify must not run for a re-adopted agent");
+		},
+		landAgentWork: async () => {
+			landed.push("ag");
+			return true;
+		},
+		holdForConfirm: true,
+		notifyReady: (id) => ready.push(id),
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick();
+	expect(ready).toEqual(["ag"]); // staged for the operator's one-tap Land
+	expect(landed).toEqual([]); // NOT blind-merged
+	expect(logs.some((l) => l.includes("ready to land agent:ag") && l.includes("re-adopted"))).toBe(true);
+
+	await orch.tick(); // staged ⇒ no re-attempt
+	expect(landed).toEqual([]);
+});
