@@ -239,6 +239,13 @@ exhaustion or a catastrophe tripwire (infra failure, safety violation, regressio
 oscillation), and drains cap-parked spawns back in under the WIP ceiling. On by default; set
 `OMP_SQUAD_AUTODRIVE=0` to disable — then the daemon arms no timer and the tick is fully inert.
 
+**Terminal decisions survive restart.** The loop's per-agent terminal state — *halted* (a human-summoned
+catastrophe or a parked verify/land), *landed*, and *staged* (held for one-tap Land) — is mirrored to a
+**branch-keyed** ledger (`<stateDir>/orchestrator-state.json`), so a daemon restart no longer re-drives a
+parked agent: re-running the acceptance suite, re-spending the repair budget, and re-tripping `CATASTROPHE`
+every cycle. Like `land-failures.json`, it keys on the branch (stable even when a re-adopted worktree gets a
+fresh agent id) and clears nothing automatically — a parked branch stays parked until an operator acts.
+
 **Auto-land failure cap (restart-safe).** A branch whose merge keeps failing the gate is *parked*
 after `OMP_SQUAD_AUTOLAND_FAIL_CAP` (default `3`) consecutive failed auto-lands instead of being
 merged + rolled-back forever. The streak lives in a persisted, **branch-keyed** ledger
@@ -799,6 +806,7 @@ delegation/availability policy plus the outbound command frame — is the rest o
 | `src/scheduler.ts` | Admission + global WIP ceiling, with a FIFO park queue for spawns past the cap |
 | `src/resolver.ts` | Failure-routing policy — retry / hold / escalate by a bounded repair budget |
 | `src/land-ledger.ts` | Branch-keyed auto-land failure ledger — the restart-safe retry cap that parks a gate-failing branch |
+| `src/orchestrator-state.ts` | Branch-keyed, restart-safe ledger of the loop's terminal decisions — halted / landed / staged survive a daemon restart |
 | `src/supervisor.ts` | Auto-supervisor — answers low-risk pending requests via a one-shot omp agent |
 | `src/autoland.ts` | Auto-land policy — a successful workflow run lands its own branch (pure decision) |
 

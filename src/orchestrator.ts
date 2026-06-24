@@ -17,6 +17,7 @@
  *                          allows (the manager enqueues on cap-deny; the loop drains).
  */
 
+import type { OrchestratorPersistence } from "./orchestrator-state.ts";
 import { routeFailure, type FailureContext, type FailureKind, type FailureRoute } from "./resolver.ts";
 import { liveAgents, Scheduler } from "./scheduler.ts";
 import type { AgentDTO, CreateAgentOptions } from "./types.ts";
@@ -62,6 +63,13 @@ export interface OrchestratorDeps {
 	notifyReady?: (agentId: string) => void;
 	/** Log sink (defaults to no-op). */
 	log?: (msg: string) => void;
+	/**
+	 * Branch-keyed, restart-safe ledger of terminal decisions (OMPSQ-139). When present, halted /
+	 * landed / staged are mirrored to disk by branch and consulted on the next boot, so a daemon
+	 * restart no longer re-summons a human-parked agent or re-verifies already-landed/staged work.
+	 * Omitted ⇒ in-memory only (tests, or an agent with no branch).
+	 */
+	persist?: OrchestratorPersistence;
 }
 
 /** On by default; set OMP_SQUAD_AUTODRIVE=0 to disable the self-driving control loop. */
@@ -80,12 +88,15 @@ export class Orchestrator {
 	private readonly attempts = new Map<string, number>();
 	/**
 	 * Work ids already merged — skip them so the loop never re-verifies/re-lands landed work each
-	 * tick. ponytail: in-memory, so a daemon restart costs at most one redundant verify per feature.
+	 * tick. Within-session keyed by workId (feature OR `agent:<id>`); mirrored across restarts via
+	 * `deps.persist` keyed by branch (OMPSQ-139).
 	 */
 	private readonly landed = new Set<string>();
-	/** Agents handed to a human (catastrophe) — the auto-loop stops acting on them until restart. */
+	/** Agent ids handed to a human (catastrophe / parked) — the auto-loop stops acting on them.
+	 *  Mirrored across restarts via `deps.persist` keyed by branch so a restart doesn't re-drive them. */
 	private readonly halted = new Set<string>();
-	/** Confirm-mode: work ids verified GREEN but held for a one-tap Land — skipped so the loop never re-verifies. */
+	/** Confirm-mode: work ids verified GREEN but held for a one-tap Land — skipped so the loop never
+	 *  re-verifies. Mirrored across restarts via `deps.persist` keyed by branch (OMPSQ-139). */
 	private readonly staged = new Set<string>();
 	/** Per-agent blocked-land retries; parked after LAND_RETRY_CAP so a failing land never loops forever. */
 	private readonly landBlocks = new Map<string, number>();
@@ -133,7 +144,7 @@ export class Orchestrator {
 		//    or escalated. featureId is the verify/land key + "has landable work" signal. ──
 		for (const a of this.deps.listAgents()) {
 			if (a.status !== "idle") continue;
-			if (this.halted.has(a.id)) continue; // escalated / parked — the auto-loop no longer acts on it
+			if (this.halted.has(a.id) || (a.branch !== undefined && this.deps.persist?.isHalted(a.branch))) continue; // escalated / parked (this session or a prior boot) — the auto-loop no longer acts on it
 			// Resolve the work unit + its verify/land edges. A feature-linked agent lands via the feature
 			// path; a plain (typed-prompt) agent lands its OWN branch, so it auto-lands too — no manual
 			// Land. Plain agents are gated on agentHasWork so the acceptance suite never runs on an idle
@@ -141,7 +152,7 @@ export class Orchestrator {
 			const feat = a.featureId;
 			const plain = feat === undefined;
 			const workId = feat ?? `agent:${a.id}`;
-			if (this.landed.has(workId) || this.staged.has(workId)) continue; // already merged, or held for one-tap Land
+			if (this.landed.has(workId) || this.staged.has(workId) || (a.branch !== undefined && (this.deps.persist?.isLanded(a.branch) || this.deps.persist?.isStaged(a.branch)))) continue; // already merged, or held for one-tap Land (this session or a prior boot)
 			if (plain) {
 				if (!this.deps.verifyAgent || !this.deps.landAgentWork || !this.deps.agentHasWork) continue;
 				if (!(await this.deps.agentHasWork(a.id))) continue;
@@ -149,7 +160,7 @@ export class Orchestrator {
 
 			// Step 3 (guard): a tripwire fires ⇒ summon a human now, before touching verify/land.
 			if (this.deps.isCatastrophic?.(a)) {
-				this.catastrophe(log, `tripwire fired for ${a.id} (${workId})`, a.id);
+				this.catastrophe(log, `tripwire fired for ${a.id} (${workId})`, a);
 				continue;
 			}
 
@@ -163,7 +174,7 @@ export class Orchestrator {
 			if (a.adopted) {
 				if (this.deps.holdForConfirm) {
 					this.deps.notifyReady?.(a.id);
-					this.staged.add(workId);
+					this.markStaged(workId, a);
 					log(`ready to land ${workId} (${a.id}) — re-adopted`);
 				} else {
 					await this.tryLand(a, plain, feat, workId, " — re-adopted", log);
@@ -175,7 +186,7 @@ export class Orchestrator {
 				// Safety valve: confirm mode holds a GREEN verify for the operator's one-tap Land.
 				if (this.deps.holdForConfirm) {
 					this.deps.notifyReady?.(a.id);
-					this.staged.add(workId);
+					this.markStaged(workId, a);
 					this.attempts.delete(a.id);
 					log(`ready to land ${workId} (${a.id})`);
 					continue;
@@ -196,11 +207,11 @@ export class Orchestrator {
 			} else if (plain) {
 				// An ad-hoc agent that can't pass its gate isn't a catastrophe — park it (stop re-running
 				// the suite each tick) and leave it for a manual Land. No human summon.
-				this.halted.add(a.id);
+				this.markHalted(a);
 				log(`parked ${a.id} (${workId}) — verify failed after ${attempts} attempt(s); land manually`);
 			} else {
 				// Step 3 (budget): repair budget exhausted → catastrophe.
-				this.catastrophe(log, `repair budget exhausted for ${a.id} (${workId}) after ${attempts} attempt(s)`, a.id);
+				this.catastrophe(log, `repair budget exhausted for ${a.id} (${workId}) after ${attempts} attempt(s)`, a);
 			}
 		}
 
@@ -225,6 +236,7 @@ export class Orchestrator {
 	private async tryLand(a: AgentDTO, plain: boolean, feat: string | undefined, workId: string, label: string, log: (m: string) => void): Promise<void> {
 		if (plain ? await this.deps.landAgentWork!(a.id) : await this.deps.land(feat!)) {
 			this.landed.add(workId);
+			if (a.branch !== undefined) this.deps.persist?.markLanded(a.branch);
 			this.attempts.delete(a.id);
 			this.landBlocks.delete(a.id);
 			log(`landed ${workId} (${a.id})${label}`);
@@ -233,20 +245,34 @@ export class Orchestrator {
 		const blocks = (this.landBlocks.get(a.id) ?? 0) + 1;
 		this.landBlocks.set(a.id, blocks);
 		if (blocks >= LAND_RETRY_CAP) {
-			this.halted.add(a.id);
+			this.markHalted(a);
 			log(`land blocked for ${workId} (${a.id}) ${blocks}× — parked; resolve/land manually`);
 		} else {
 			log(`land blocked for ${workId} (${a.id}) — will retry (${blocks}/${LAND_RETRY_CAP})`);
 		}
 	}
 
+	/** Mark an agent halted (this session) and mirror the decision to disk by branch so a restart
+	 *  doesn't re-drive it (OMPSQ-139). */
+	private markHalted(a: AgentDTO): void {
+		this.halted.add(a.id);
+		if (a.branch !== undefined) this.deps.persist?.markHalted(a.branch);
+	}
+
+	/** Mark work staged for one-tap Land (this session) and mirror to disk by branch (OMPSQ-139). */
+	private markStaged(workId: string, a: AgentDTO): void {
+		this.staged.add(workId);
+		if (a.branch !== undefined) this.deps.persist?.markStaged(a.branch);
+	}
+
 	/**
 	 * The ONLY place a human is summoned (#14): emit a clear `CATASTROPHE:` line and stop the
 	 * auto-loop from acting on this agent. Tripwires: repair budget exhausted, or `isCatastrophic`
-	 * (infra failure / safety violation / regression oscillation). Never a silent drop.
+	 * (infra failure / safety violation / regression oscillation). Never a silent drop. The halt is
+	 * persisted by branch so a restart doesn't re-summon (OMPSQ-139).
 	 */
-	private catastrophe(log: (m: string) => void, detail: string, agentId: string): void {
-		this.halted.add(agentId);
+	private catastrophe(log: (m: string) => void, detail: string, a: AgentDTO): void {
+		this.markHalted(a);
 		log(`CATASTROPHE: ${detail}`);
 	}
 }
