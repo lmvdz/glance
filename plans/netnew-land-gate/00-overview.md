@@ -15,6 +15,10 @@ None — single concern. No BLOCKED_BY.
 ## Batch order
 One unit, dispatched to the fleet (worktree-isolated, lands via proven merge).
 
+## Plane tracking
+- Project: omp-squad (OMPSQ) — the daemon's autodispatch target for this repo
+- Issue: [01-base-aware-gate](https://app.plane.so/inkwell-finance/browse/OMPSQ-166/) — OMPSQ-166 (Todo, high)
+
 ## Deferred (not built — see DESIGN.md for rationale)
 - "Didn't make a red repo *worse*" granularity (needs per-framework test-output parsing).
 - Deterministic conflict-reviewer swap (RedTeamScope Slice A) — orthogonal; build on demonstrated need.

@@ -5,6 +5,7 @@ PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/land.ts, tests/land-base-gate.test.ts, README.md
+PLANE: OMPSQ-166 — https://app.plane.so/inkwell-finance/browse/OMPSQ-166/
 
 ## Goal
 Today `verifyMerged` (src/land.ts) resets main to `head0` on *any* non-zero merged gate, so a
