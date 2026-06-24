@@ -266,6 +266,21 @@ main code) and uses the land path's own merge → gate → rollback-on-red as th
 (`OMP_SQUAD_LAND_CONFIRM`) it is staged for a one-tap Land instead. The auto-land failure cap above
 still applies, so a branch whose *merged* gate genuinely fails parks rather than retrying forever.
 
+**Dedicated land checkout (don't author in the land target).** Auto-land merges a branch *into the
+main checkout* (`PLANE_PROJECT_MAP`'s repo path), runs the gate there, and `git reset --hard` on a red
+gate. So it **refuses to land while that checkout has uncommitted tracked changes** — a rollback would
+discard them. If you edit code (or run `/plan`) *in the daemon's own checkout*, every land defers until
+you commit or stash. To **guarantee** lands always progress, give the daemon a **dedicated checkout no
+human edits**: point `PLANE_PROJECT_MAP` at a clone reserved for the fleet, do your own work in a
+separate clone, and sync via the git remote (the standard CI/CD separation). The daemon logs a loud
+`land target … has N uncommitted tracked file(s)` warning at boot when its target is hand-dirtied, and
+a dirty target no longer *bricks* a branch — the land is marked retryable and re-attempted once the
+checkout is clean (it never counts against the auto-land failure cap). Note a related hazard for
+*untracked* files: a `plans/<name>/` dir (or any untracked file) created directly in the land target
+collides with a branch that adds the same path — the merge can't overwrite it. The Observer flags this
+as `commit/remove <files> — blocks auto-land`; commit the plan (the Features board tracks `plans/<x>/`)
+or remove it.
+
 **Plane API throttle (shared rate limiter + read cache).** Plane cloud rate-limits per workspace
 token, and many in-process callers share it (dispatcher poll, observer poll + filing, worktree
 reaper, scout). They route through one chokepoint — `src/plane-throttle.ts` — so the daemon never

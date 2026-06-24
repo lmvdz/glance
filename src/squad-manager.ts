@@ -38,7 +38,7 @@ import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
-import { landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
+import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
 import { proofGate, runProof, sweepProofs } from "./proof.ts";
@@ -323,6 +323,11 @@ export class SquadManager extends EventEmitter {
 		}
 		this.orchestrator = this.buildOrchestrator();
 		this.orchestrator.start();
+
+		// Boot guard: warn loudly when a land target is hand-dirtied — auto-lands DEFER on a dirty main
+		// (a rollback would discard the changes), and the durable fix is a dedicated checkout no human
+		// edits (README → "Dedicated land checkout").
+		for (const w of dirtyLandTargetWarnings(planeRepos(), (repo) => this.trackedDirtyCount(repo))) this.log("warn", w);
 
 		// Observer (OMPSQ-52) — periodic self-audit sibling to the orchestrator. One per configured Plane
 		// repo (OMPSQ-137) so every repo's backlog is audited, not just the first. Each gets a repo-scoped
@@ -868,6 +873,13 @@ export class SquadManager extends EventEmitter {
 		if (!a.branch) return -1;
 		const r = hardenedGitSync(["-C", a.repo, "rev-list", "--count", `HEAD..${a.branch}`]);
 		return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+	}
+
+	/** Count of uncommitted TRACKED files in a checkout — the land-blocking set (matches the land path's
+	 *  `--untracked-files=no` precondition). 0 ⇒ clean ⇒ a land is never refused for dirtiness. */
+	private trackedDirtyCount(repo: string): number {
+		const r = hardenedGitSync(["-C", repo, "status", "--porcelain", "--untracked-files=no"]);
+		return r.code === 0 ? r.stdout.split("\n").filter((l) => l.trim().length > 0).length : 0;
 	}
 
 	/** Untracked file paths in the main checkout (the auto-land hazard surface). */

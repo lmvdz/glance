@@ -9,7 +9,7 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { landAgent } from "../src/land.ts";
+import { dirtyLandTargetWarnings, landAgent } from "../src/land.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -78,4 +78,13 @@ test("landAgent: nothing to land is reported, not failed", async () => {
 	const res = await landAgent({ repo, worktree: repo, branch: "main", message: "noop", commitWip: false });
 	expect(res.ok).toBe(true);
 	expect(res.merged).toBe(false);
+});
+
+test("dirtyLandTargetWarnings: flags only targets with uncommitted tracked changes", () => {
+	const counts: Record<string, number> = { "/clean": 0, "/dirty": 3 };
+	const warns = dirtyLandTargetWarnings(["/clean", "/dirty"], (r) => counts[r] ?? 0);
+	expect(warns.length).toBe(1); // the clean target is silent
+	expect(warns[0]).toContain("/dirty");
+	expect(warns[0]).toContain("3 uncommitted");
+	expect(warns[0]).toContain("DEDICATED checkout"); // points at the durable fix
 });

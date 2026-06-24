@@ -35,6 +35,27 @@ export interface LandResult {
 }
 
 /**
+ * Boot-time warnings for land targets that carry uncommitted TRACKED changes. The land path refuses to
+ * merge into a dirty main (a failed-gate rollback would `git reset --hard` and discard them), so
+ * auto-lands DEFER (retryable) until it's clean. A target that STAYS dirty means the daemon is sharing
+ * its checkout with a human editor — the durable fix is a DEDICATED checkout no one hand-edits. Pure +
+ * injectable (`dirtyCount` reads git) so it's testable without a real repo.
+ */
+export function dirtyLandTargetWarnings(repos: string[], dirtyCount: (repo: string) => number): string[] {
+	const warnings: string[] = [];
+	for (const repo of repos) {
+		const n = dirtyCount(repo);
+		if (n > 0) {
+			warnings.push(
+				`land target ${repo} has ${n} uncommitted tracked file(s) — auto-lands will DEFER until it is clean. ` +
+					`Run the daemon against a DEDICATED checkout that no human edits (README → "Dedicated land checkout").`,
+			);
+		}
+	}
+	return warnings;
+}
+
+/**
  * Resolve the conflicted files in a rebasing worktree (#12). Returns true once it has left the
  * files edited (the caller stages + continues the rebase); the verify gate + reviewer below are
  * what actually prove the result. Injectable so tests need no real omp.
