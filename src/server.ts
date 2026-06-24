@@ -316,12 +316,18 @@ export class SquadServer {
 			port: this.opts.port ?? 7878,
 			hostname: this.opts.hostname ?? "127.0.0.1",
 			tls: this.opts.tls ? { cert: Bun.file(this.opts.tls.cert), key: Bun.file(this.opts.tls.key) } : undefined,
+			// seconds. Bun's default is 10s — too short for an idle dashboard socket or a handler stalled
+			// under fan-out load; both got dropped, spamming "[Bun.serve]: request timed out after 10s".
+			idleTimeout: 120,
 			fetch: async (req, server) => {
 				const resp = await this.handle(req, server);
 				if (resp) for (const [k, v] of Object.entries(securityHeaders())) resp.headers.set(k, v);
 				return resp;
 			},
 			websocket: {
+				// Max (255s). Idle dashboards send no commands for minutes; sendPings (default on) keeps the
+				// socket warm so it doesn't 1006-drop and trigger the client's error/reconnect loop.
+				idleTimeout: 255,
 				open: async (ws) => {
 					const m = await this.registerSocket(ws);
 					const agents = m?.list() ?? [];
@@ -410,6 +416,8 @@ export class SquadServer {
 		if (url.pathname === "/" || url.pathname === "/index.html") {
 			return new Response(indexFile, { headers: { "content-type": "text/html; charset=utf-8" } });
 		}
+		// No favicon is bundled; 204 (public, pre-auth) beats the 401 the auth gate would otherwise log.
+		if (url.pathname === "/favicon.ico") return new Response(null, { status: 204 });
 		const asset = PUBLIC_ASSETS[url.pathname];
 		if (asset) return new Response(Bun.file(path.join(WEB_DIR, url.pathname.slice(1))), { headers: { "content-type": asset } });
 		// Inert webapp seam: serve Vite's content-hashed bundle tokenless (like the shell) when enabled.

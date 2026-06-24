@@ -596,7 +596,9 @@ export class SquadManager extends EventEmitter {
 	async features(repo?: string): Promise<FeatureDTO[]> {
 		const list = this.list();
 		const persisted = [...this.featureStore.values()];
-		const repos = repo !== undefined ? [repo] : [...new Set([...list.map((a) => a.repo), ...persisted.map((f) => f.repo)])];
+		// Include the configured Plane repos so the planner shows a project (repo) + its plan-dir features
+		// even before any agent runs — otherwise a fresh daemon (0 agents) renders an empty planner.
+		const repos = repo !== undefined ? [repo] : [...new Set([...list.map((a) => a.repo), ...persisted.map((f) => f.repo), ...planeRepos()])];
 		const out: FeatureDTO[] = [];
 		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r), persisted)));
 		return out;
