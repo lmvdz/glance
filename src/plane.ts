@@ -17,8 +17,9 @@
  */
 
 import * as path from "node:path";
-import type { IssueRef, PlaneTicket } from "./types.ts";
+import type { IssueRef, PlaneTicket, TaskDetail } from "./types.ts";
 import { makeCache, throttledFetch } from "./plane-throttle.ts";
+import { parseTier2 } from "./tier2.ts";
 
 interface PlaneConfig {
 	apiKey: string;
@@ -144,6 +145,80 @@ async function listPlaneIssuesUncached(repo: string): Promise<IssueRef[] | null>
 	// requests per poll; fine for a normal backlog, add bounded concurrency if one ever runs large.
 	for (const ref of open) ref.blockedBy = await fetchBlockedBy(base, headers, ref.id);
 	return open;
+}
+
+interface PlaneIssueDetail {
+	id: string;
+	name?: string;
+	sequence_id?: number;
+	description_stripped?: string;
+	description_html?: string;
+	state?: string;
+	state_detail?: { group?: string };
+	priority?: string;
+	labels?: string[];
+	project_detail?: { identifier?: string };
+}
+
+const issueDetailCache = makeCache<TaskDetail | null>();
+
+/** Fetch one Plane issue WITH its body, parsed into a `TaskDetail` (promote-issue Tier-2 sections +
+ *  display properties). `null` ⇒ Plane not configured / no project / unreachable. Cached briefly,
+ *  like `listPlaneIssues`, keyed by repo+issue. */
+export async function fetchIssueDetail(repo: string, issueId: string): Promise<TaskDetail | null> {
+	const ttl = Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000;
+	return issueDetailCache.get(`${repo}\u0000${issueId}`, ttl, () => fetchIssueDetailUncached(repo, issueId), (v) => v !== null);
+}
+
+async function fetchIssueDetailUncached(repo: string, issueId: string): Promise<TaskDetail | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { cfg, headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	const res = await throttledFetch(`${base}/issues/${encodeURIComponent(issueId)}/`, { headers });
+	if (!res || !res.ok) return null;
+	const raw = (await res.json().catch(() => null)) as PlaneIssueDetail | null;
+	if (!raw || !raw.id) return null;
+	// state id → group, label ids → names, and blockers: independent reads, run together.
+	const [groups, labelNames, blockedBy] = await Promise.all([
+		fetchStateGroups(base, headers),
+		fetchLabelNames(base, headers),
+		fetchBlockedBy(base, headers, raw.id),
+	]);
+	const ident = raw.project_detail?.identifier;
+	const body = raw.description_stripped ?? "";
+	return {
+		id: raw.id,
+		identifier: ident && raw.sequence_id != null ? `${ident}-${raw.sequence_id}` : undefined,
+		name: raw.name ?? "(untitled)",
+		state: raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined),
+		priority: raw.priority && raw.priority !== "none" ? raw.priority : undefined,
+		labels: (raw.labels ?? []).map((id) => labelNames.get(id)).filter((x): x is string => !!x),
+		url: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/issues/${raw.id}`,
+		blockedBy,
+		// Parse the structured HTML body for Tier-2 sections; fall back to the stripped text.
+		tier2: parseTier2(raw.description_html ?? body),
+		body,
+	};
+}
+
+/** Map a project's label ids → names (for the task properties row). Empty map on any failure. */
+async function fetchLabelNames(base: string, headers: Record<string, string>): Promise<Map<string, string>> {
+	const map = new Map<string, string>();
+	const data = await getJson(`${base}/labels/?per_page=100`, headers);
+	const items: unknown[] = Array.isArray(data)
+		? data
+		: data && typeof data === "object" && "results" in data && Array.isArray((data as { results?: unknown[] }).results)
+			? (data as { results: unknown[] }).results
+			: [];
+	for (const l of items) {
+		if (l && typeof l === "object" && "id" in l && "name" in l) {
+			const id = (l as { id: unknown }).id;
+			const name = (l as { name: unknown }).name;
+			if (typeof id === "string" && typeof name === "string") map.set(id, name);
+		}
+	}
+	return map;
 }
 
 /** Issue ids blocking `issueId` (Plane `blocked_by`). Retries on 429 (Plane rate limit); `[]` when none,

@@ -13,8 +13,10 @@ import { InboxView } from "@/components/views/InboxView";
 import { AuditView } from "@/components/views/AuditView";
 import { NetworkView } from "@/components/views/NetworkView";
 import { CommandPalette } from "@/components/palette/CommandPalette";
+import { groupProjects } from "@/lib/projects";
+import { ProjectView } from "@/components/views/ProjectView";
 
-const VIEWS = ["inbox", "agents", "features", "graph", "audit", "network"] as const;
+const VIEWS = ["inbox", "agents", "features", "graph", "audit", "network", "project"] as const;
 
 function readHash(): { view: View; sel: string | null } {
   const raw = location.hash.replace(/^#\/?/, "");
@@ -65,6 +67,7 @@ export function App() {
   };
 
   const waiting = squad.agents.filter((a) => a.status === "input" || a.status === "error").length;
+  const projects = groupProjects(squad.features, squad.agents);
 
   return (
     <TickProvider>
@@ -84,6 +87,9 @@ export function App() {
                 view={view}
                 onView={go}
                 counts={{ inbox: waiting, agents: squad.agents.length, features: squad.features.length }}
+                projects={projects}
+                activeRepo={view === "project" ? sel : null}
+                onProject={(repo) => selectIn("project", repo)}
               />
               <main className="min-w-0 flex-1 overflow-hidden">
                 {view === "agents" && <AgentsView squad={squad} selectedId={sel} onSelect={select} />}
@@ -92,6 +98,7 @@ export function App() {
                 {view === "inbox" && <InboxView squad={squad} />}
                 {view === "audit" && <AuditView />}
                 {view === "network" && <NetworkView squad={squad} />}
+                {view === "project" && sel ? <ProjectView repo={sel} squad={squad} /> : null}
               </main>
             </div>
           </div>
