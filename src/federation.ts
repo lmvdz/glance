@@ -238,6 +238,21 @@ async function tailscaleWhois(ip: string): Promise<Actor | undefined> {
 }
 
 /**
+ * Stamp the actor for an inbound federation COMMAND. The wire is untrusted: a peer
+ * controls every byte of the command frame, so its claimed `role` and `origin` are
+ * authority forgeries we MUST drop — otherwise a peer self-grants `admin`/`local`
+ * and drives the local fleet (OMPSQ-162). Identity comes only from the tailnet
+ * (`verified`, from `whois`); without it we keep the claimed id for audit but the
+ * actor stays `origin:"remote"` and role-less, which `effectiveRole` reads as the
+ * read-only `viewer` tier. NEVER copy `role`/`origin` off the frame.
+ */
+export function remoteCommandActor(claimed: Actor | undefined, verified: Actor | undefined): Actor {
+	if (verified !== undefined) return { id: verified.id, displayName: verified.displayName, origin: "remote" };
+	const id = typeof claimed?.id === "string" && claimed.id !== "" ? claimed.id : "unknown";
+	return { id, origin: "remote" };
+}
+
+/**
  * Tailnet-backed federation bus (Phase 2).
  *
  * REQUIRES a reachable coordinator on the tailnet at `coordinatorUrl` — a
@@ -399,11 +414,14 @@ export class TailnetFederationBus implements FederationBus {
 		}
 	}
 
-	/** Prefer a tailnet-verified identity when the frame carries the peer IP; fall back to the coordinator-stamped actor. */
+	/**
+	 * Resolve the actor for an inbound command. The frame's claimed `role`/`origin` are
+	 * NEVER trusted (a peer would self-grant admin); identity comes only from the tailnet
+	 * via `whois`. Without a verifiable IP the actor stays remote + role-less ⇒ viewer.
+	 */
 	private async resolveActor(frame: { actor: Actor; ip?: string }): Promise<Actor> {
-		if (frame.ip === undefined) return frame.actor;
-		const verified = await this.whois(frame.ip).catch(() => undefined);
-		return verified ?? frame.actor;
+		const verified = frame.ip !== undefined ? await this.whois(frame.ip).catch(() => undefined) : undefined;
+		return remoteCommandActor(frame.actor, verified);
 	}
 }
 

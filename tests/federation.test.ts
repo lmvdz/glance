@@ -14,8 +14,10 @@ import {
 	mergeRosters,
 	PEER_PRESENCE_TTL_MS,
 	PeerRoster,
+	remoteCommandActor,
 	TailnetFederationBus,
 } from "../src/federation.ts";
+import { effectiveRole } from "../src/auth.ts";
 import type { Actor, AgentDTO, Availability, OperatorPresence } from "../src/types.ts";
 
 function agent(over: Partial<AgentDTO> = {}): AgentDTO {
@@ -255,4 +257,48 @@ test("PeerRoster prunes a peer once it goes quiet past the TTL", () => {
 	expect(roster.live(1000 + PEER_PRESENCE_TTL_MS)).toHaveLength(1); // still within TTL
 	expect(roster.live(1000 + PEER_PRESENCE_TTL_MS + 1)).toHaveLength(0); // past TTL → pruned
 	expect(roster.live(1000)).toHaveLength(0); // and forgotten (not just hidden)
+});
+
+// ── remoteCommandActor (OMPSQ-162: receive-path must not trust wire-asserted role/origin) ──
+
+test("remoteCommandActor strips a peer's self-asserted admin role and local origin", () => {
+	const forged: Actor = { id: "mallory", origin: "local", role: "admin" };
+	const actor = remoteCommandActor(forged, undefined);
+	expect(actor.origin).toBe("remote");
+	expect(actor.role).toBeUndefined();
+	expect(effectiveRole(actor)).toBe("viewer"); // ⇒ cannot mutate the fleet
+});
+
+test("remoteCommandActor takes identity from the verified actor, never the wire claim", () => {
+	const forged: Actor = { id: "alice", origin: "local", role: "admin" };
+	const verified: Actor = { id: "mallory@corp", displayName: "Mallory", origin: "remote" };
+	const actor = remoteCommandActor(forged, verified);
+	expect(actor.id).toBe("mallory@corp"); // verified id wins over the spoofed "alice"
+	expect(actor.displayName).toBe("Mallory");
+	expect(actor.origin).toBe("remote");
+	expect(actor.role).toBeUndefined();
+	expect(effectiveRole(actor)).toBe("viewer");
+});
+
+test("remoteCommandActor falls back to a sanitized claimed id when unverified", () => {
+	expect(remoteCommandActor(undefined, undefined)).toEqual({ id: "unknown", origin: "remote" });
+	expect(remoteCommandActor({ id: "", origin: "remote" }, undefined)).toEqual({ id: "unknown", origin: "remote" });
+	expect(remoteCommandActor({ id: "bob", origin: "remote", role: "operator" }, undefined)).toEqual({ id: "bob", origin: "remote" });
+});
+
+test("the bus receive-path resolves a forged-admin command frame to a viewer actor", async () => {
+	const bus = new TailnetFederationBus({
+		coordinatorUrl: "ws://127.0.0.1:1/omp-squad",
+		operator: { id: "me", origin: "local" },
+		whois: async () => undefined, // no tailnet verification available
+	});
+	const seen: Actor[] = [];
+	bus.onRemoteCommand((r) => seen.push(r.actor));
+	// A peer crafts a command claiming admin/local with a privileged "kill".
+	const frame = { kind: "command", cmd: { type: "kill", id: "a1" }, actor: { id: "mallory", origin: "local", role: "admin" } };
+	await (bus as unknown as { handleFrame(d: unknown): Promise<void> }).handleFrame(JSON.stringify(frame));
+	expect(seen).toHaveLength(1);
+	expect(seen[0]?.origin).toBe("remote");
+	expect(seen[0]?.role).toBeUndefined();
+	expect(effectiveRole(seen[0] as Actor)).toBe("viewer");
 });

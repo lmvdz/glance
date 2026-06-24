@@ -81,6 +81,24 @@ or there is nothing remote to show. Best-effort throughout: with the coordinator
 unset the feed is absent, the endpoint returns just `self` (no peers, no
 collisions), and nothing errors.
 
+## 4. Remote commands are viewer-only (trust boundary)
+
+The coordinator is a content-blind relay, so **every byte of a `{kind:"command"}`
+frame is peer-controlled** — including the `actor.role` and `actor.origin` fields.
+The receive path therefore NEVER trusts them. `TailnetFederationBus.resolveActor`
+stamps the actor via `remoteCommandActor`, which:
+
+- forces `origin: "remote"` and drops any wire-asserted `role`, so `effectiveRole`
+  resolves the peer to the read-only **`viewer`** tier (reads + transcript
+  subscription only — never kill/restart/remove/create/commission);
+- takes identity **only** from the tailnet (`tailscale whois <peer-ip>`); the
+  claimed id is kept solely for audit when no IP can be verified.
+
+The manager's single `applyCommand` chokepoint then enforces the tier, so a peer
+cannot self-grant `admin`/`local` and drive the local fleet (OMPSQ-162). Granting
+a remote peer more than `viewer` requires a transport that *verifies* a role — the
+wire claim alone is ignored.
+
 ## Status
 
 - ✅ Coordinator relay — built, tested.
