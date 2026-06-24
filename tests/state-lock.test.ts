@@ -76,3 +76,18 @@ test("a live pid with a mismatched recorded start time (pid reuse) is reclaimed"
 	const rec = JSON.parse(await fs.readFile(lock.file, "utf8"));
 	expect(rec.pid).toBe(process.pid);
 });
+
+test("concurrent acquirers never both own the lock (no empty-file TOCTOU window)", async () => {
+	// Race many separate processes on one state dir. Each child acquires, then
+	// reads the lock file back and exits 3 if it holds a lock file containing
+	// someone else's pid — the exact corruption the openSync(wx)+writeSync window
+	// allowed (a racer unlinks a just-created empty lock and writes its own).
+	// link()-based acquire publishes the record atomically, so this can't happen.
+	const dir = await tmpdir();
+	const child = path.join(import.meta.dir, "fixtures", "lock-race-child.ts");
+	const procs = Array.from({ length: 12 }, () =>
+		Bun.spawn(["bun", child, dir], { stdout: "ignore", stderr: "inherit" }),
+	);
+	const codes = await Promise.all(procs.map((p) => p.exited));
+	expect(codes).not.toContain(3); // 0 = won or cleanly refused; 3 = double-owned a corrupted lock
+});

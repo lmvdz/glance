@@ -7,9 +7,10 @@
  * bind happens AFTER `manager.start()` has already touched disk). So `up`
  * acquires this lock before touching the dir and releases it on shutdown.
  *
- * The lock is a file holding the owner's pid + host + start time. Acquire is an
- * atomic create (`wx`); on EEXIST we read the record and probe liveness with
- * signal 0. A dead owner's lock is stale and reclaimed. A LIVE owner blocks —
+ * The lock is a file holding the owner's pid + host + start time. Acquire writes
+ * the record to a private temp file then atomically `link`s it into place (so the
+ * lock is never observable empty); on EEXIST we read the record and probe
+ * liveness with signal 0. A dead owner's lock is stale and reclaimed. A LIVE owner blocks —
  * except during self-upgrade, where the outgoing daemon re-execs its replacement
  * while still briefly alive, so we wait out a short handoff window for it to exit
  * before giving up.
@@ -28,7 +29,7 @@
  * start-time source for non-Linux.
  */
 
-import { openSync, writeSync, closeSync, readFileSync, unlinkSync } from "node:fs";
+import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -140,19 +141,33 @@ function ownerAlive(rec: LockRecord): boolean {
 
 /** Atomically create the lock file with our record. Returns false on EEXIST, throws on other errors. */
 function tryCreate(file: string): boolean {
-	let fd: number;
-	try {
-		fd = openSync(file, "wx");
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
-		throw err;
-	}
+	// Write our record to a private temp file, then atomically link it into place.
+	// link() fails with EEXIST when `file` already exists, and the instant `file`
+	// becomes visible it already holds the full record. openSync(wx)+writeSync had
+	// an empty-file window between create and write: a racing daemon could see the
+	// empty file, JSON.parse it to null, judge the lock corrupt/stale, unlink it,
+	// and create its own — both daemons then "own" the dir (TOCTOU). link() closes
+	// that window because the lock file is never observable in an empty state.
+	const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}`;
+	const fd = openSync(tmp, "wx");
 	try {
 		writeSync(fd, JSON.stringify(selfRecord()));
 	} finally {
 		closeSync(fd);
 	}
-	return true;
+	try {
+		linkSync(tmp, file);
+		return true;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+		throw err;
+	} finally {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// Best-effort cleanup of our temp file; a leftover is harmless.
+		}
+	}
 }
 
 /**
