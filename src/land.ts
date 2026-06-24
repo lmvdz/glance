@@ -51,11 +51,14 @@ export interface LandOpts {
 }
 
 /**
- * Per-repo land serialization. Two lands racing the same main checkout interleave
- * `git merge` and corrupt the index; chaining them also makes each land re-read
- * HEAD when it runs, so it sees the commits prior lands just merged.
- * ponytail: in-process map — one squad daemon owns a checkout. Add a file lock if
- * lands ever race across processes/hosts.
+ * Per-repo serialization of every operation that mutates OR reads the shared main checkout.
+ * Two lands racing the same checkout interleave `git merge` and corrupt the index; chaining them
+ * also makes each land re-read HEAD when it runs, so it sees the commits prior lands just merged.
+ * The Observer's acceptance gate (`bun test` on main) reads that same tree, so it joins this queue
+ * too — otherwise it can `(fail)` transiently against a half-merged / mid-rollback main and file a
+ * false `regression:` bug (OMPSQ-168).
+ * ponytail: in-process map — one squad daemon owns a checkout. Add a file lock if work ever races
+ * across processes/hosts.
  */
 const repoLands = new Map<string, Promise<unknown>>();
 
@@ -97,11 +100,20 @@ function truncate(s: string, n: number): string {
 	return s.length <= n ? s : `${s.slice(0, n)}…`;
 }
 
-export function landAgent(opts: LandOpts): Promise<LandResult> {
-	const prev = repoLands.get(opts.repo) ?? Promise.resolve();
-	const run = prev.catch(() => {}).then(() => landAgentLocked(opts));
-	repoLands.set(opts.repo, run.catch(() => {}));
+/**
+ * Run `fn` serialized against this repo's lands (and any other work already queued on the same
+ * checkout). Use it for anything that reads or writes the shared main tree concurrently with lands —
+ * e.g. the Observer's acceptance gate — so it never observes a half-merged / mid-rollback main.
+ */
+export function withRepoLandLock<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+	const prev = repoLands.get(repo) ?? Promise.resolve();
+	const run = prev.catch(() => {}).then(fn);
+	repoLands.set(repo, run.catch(() => {}));
 	return run;
+}
+
+export function landAgent(opts: LandOpts): Promise<LandResult> {
+	return withRepoLandLock(opts.repo, () => landAgentLocked(opts));
 }
 
 async function landAgentLocked(opts: LandOpts): Promise<LandResult> {

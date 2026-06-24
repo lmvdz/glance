@@ -283,6 +283,10 @@ branch whose **auto-land keeps failing the gate** — from the branch-keyed land
 work is re-done on a fresh branch (`auto-land failing for <branch>`). Findings
 are deduped by fingerprint (persisted to `<stateDir>/observer-seen.json`, never re-filed across
 ticks/restarts); a finding that stops reproducing is confirmed resolved and its fingerprint cleared.
+The acceptance-gate check runs `bun run check && bun test` against main *serialized behind any
+in-flight land* (`withRepoLandLock`): the gate reads the same checkout a land mutates (merge / rollback),
+so running them concurrently used to `(fail)` against a half-merged tree and file a false `regression:`
+bug (OMPSQ-168).
 
 | Env | Meaning |
 |---|---|
