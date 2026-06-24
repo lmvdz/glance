@@ -479,6 +479,13 @@ force-graph is one view. Deferred (P3): federation, presence, leases, deep Plane
 `OMP_SQUAD_WEBAPP=1`, so the live `index.html` dashboard is untouched until cutover. Plan + parity
 matrix: `plans/omp-dashboard/`.
 
+Transcripts render via [streamdown](https://github.com/vercel/streamdown) (MIT) — the streaming-
+markdown engine behind assistant-ui / AI Elements — with Shiki code highlighting, lazy-loaded so
+its grammars stay out of the initial bundle. P3 surfaces are now in: a **Network** view
+(federation · presence · file leases · Plane issues, repo-scoped) and **web push** (the Notify
+button + `public/sw.js`). Push works under `bun run dev`/`preview`; behind the daemon
+`OMP_SQUAD_WEBAPP` flag the serve seam must also serve `/sw.js` (one-line `src/server.ts` follow-up).
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`

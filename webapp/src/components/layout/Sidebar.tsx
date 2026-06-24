@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
-import { Bot, Inbox, Layers, Network, ScrollText } from "lucide-react";
+import { Bot, Inbox, Layers, Network, ScrollText, Share2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type View = "inbox" | "agents" | "features" | "graph" | "audit";
+export type View = "inbox" | "agents" | "features" | "graph" | "audit" | "network";
 
 const ITEMS: { id: View; label: string; icon: ReactNode }[] = [
   { id: "inbox", label: "Inbox", icon: <Inbox size={16} /> },
@@ -10,6 +10,7 @@ const ITEMS: { id: View; label: string; icon: ReactNode }[] = [
   { id: "features", label: "Features", icon: <Layers size={16} /> },
   { id: "graph", label: "Graph", icon: <Network size={16} /> },
   { id: "audit", label: "Audit", icon: <ScrollText size={16} /> },
+  { id: "network", label: "Network", icon: <Share2 size={16} /> },
 ];
 
 interface SidebarProps {

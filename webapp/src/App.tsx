@@ -11,9 +11,10 @@ import { FeaturesView } from "@/components/views/FeaturesView";
 import { GraphPane } from "@/components/views/GraphPane";
 import { InboxView } from "@/components/views/InboxView";
 import { AuditView } from "@/components/views/AuditView";
+import { NetworkView } from "@/components/views/NetworkView";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 
-const VIEWS = ["inbox", "agents", "features", "graph", "audit"] as const;
+const VIEWS = ["inbox", "agents", "features", "graph", "audit", "network"] as const;
 
 function readHash(): { view: View; sel: string | null } {
   const raw = location.hash.replace(/^#\/?/, "");
@@ -90,6 +91,7 @@ export function App() {
                 {view === "graph" && <GraphPane squad={squad} selectedId={sel} onSelect={select} onClose={clear} />}
                 {view === "inbox" && <InboxView squad={squad} />}
                 {view === "audit" && <AuditView />}
+                {view === "network" && <NetworkView squad={squad} />}
               </main>
             </div>
           </div>

@@ -1,5 +1,6 @@
 import type { AgentDTO, FeatureDTO } from "@/lib/dto";
 import { NewWork } from "@/components/spawn/NewWork";
+import { PushToggle } from "@/components/layout/PushToggle";
 
 interface TopBarProps {
   agents: AgentDTO[];
@@ -45,6 +46,7 @@ export function TopBar({ agents, features, connected, light, onToggleTheme, onOp
         ) : null}
         <span>{features.length} features</span>
         <NewWork />
+        <PushToggle />
         <button type="button" onClick={onToggleTheme} className="rounded px-2 py-0.5 hover:bg-surface-hover" title="Toggle theme">
           {light ? "Dark" : "Light"}
         </button>
