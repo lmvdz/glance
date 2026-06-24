@@ -65,20 +65,24 @@ describe("GIT_HARDEN_ARGS signing", () => {
 			await fsp.writeFile(path.join(dir, "a.txt"), "1");
 			await run("git", ["add", "-A"], { cwd: dir });
 
-			// Plain signed commit must fail: git invokes /bin/false as the signer. Strip any ambient
-			// GIT_CONFIG_* overrides (the squad harness exports commit.gpgsign=false) so the repo's
-			// signing config actually applies — otherwise the env would silently disable signing here.
+			// The daemon sets gitNoSignEnv (GIT_CONFIG_* disabling signing) process-wide, which the
+			// test runner (and the squad harness exporting commit.gpgsign=false) inherits — that would
+			// silently disable signing for the "plain" commit too. Strip any ambient GIT_CONFIG_*
+			// overrides so the plain commit reflects the repo config (signing on, broken signer) and the
+			// hardened commit's success is attributable to GIT_HARDEN_ARGS alone, not the ambient env.
 			const cleanEnv = { ...process.env };
 			for (const k of Object.keys(cleanEnv)) if (k.startsWith("GIT_CONFIG_")) delete cleanEnv[k];
+
+			// Plain signed commit must fail: git invokes /bin/false as the signer.
 			let plainFailed = false;
 			await run("git", ["commit", "-m", "plain"], { cwd: dir, env: cleanEnv }).catch(() => {
 				plainFailed = true;
 			});
 			expect(plainFailed).toBe(true);
 
-			// Hardened commit: signing forced off, no signer invoked -> succeeds, unsigned.
-			await run("git", [...GIT_HARDEN_ARGS, "commit", "-m", "hardened"], { cwd: dir });
-			const sig = await run("git", ["log", "-1", "--format=%G?"], { cwd: dir });
+			// Hardened commit: signing forced off by GIT_HARDEN_ARGS, no signer invoked -> succeeds, unsigned.
+			await run("git", [...GIT_HARDEN_ARGS, "commit", "-m", "hardened"], { cwd: dir, env: cleanEnv });
+			const sig = await run("git", ["log", "-1", "--format=%G?"], { cwd: dir, env: cleanEnv });
 			expect(sig.stdout.trim()).toBe("N");
 		} finally {
 			await fsp.rm(dir, { recursive: true, force: true });
