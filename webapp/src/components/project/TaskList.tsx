@@ -22,16 +22,18 @@ interface TaskListProps {
   issues: IssueRef[];
   agentByIssueId: Map<string, AgentDTO>;
   selectedId: string | null;
+  focusedId?: string | null;
   onSelect: (id: string) => void;
 }
 
-export function TaskList({ issues, agentByIssueId, selectedId, onSelect }: TaskListProps) {
+export function TaskList({ issues, agentByIssueId, selectedId, focusedId, onSelect }: TaskListProps) {
   if (issues.length === 0) return <p className="px-2 py-1 text-xs text-text-muted">No tasks.</p>;
   return (
     <ul className="flex flex-col gap-0.5">
       {issues.map((i) => {
         const agent = agentByIssueId.get(i.id);
         const active = selectedId === i.id;
+        const focused = focusedId === i.id;
         const blocked = i.blockedBy?.length ?? 0;
         return (
           <li key={i.id}>
@@ -42,6 +44,7 @@ export function TaskList({ issues, agentByIssueId, selectedId, onSelect }: TaskL
               className={cn(
                 "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-surface-hover",
                 active && "bg-surface-hover",
+                focused && "ring-1 ring-accent ring-inset",
               )}
             >
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: stateColor(i.state) }} title={i.state ?? "unknown"} />

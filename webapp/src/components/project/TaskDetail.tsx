@@ -1,11 +1,17 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import type { TaskDetail as TaskDetailDTO } from "@/lib/dto";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SkeletonRow } from "@/components/ui/skeleton";
 import { CommentsPanel } from "@/components/project/CommentsPanel";
+import type { SquadState } from "@/hooks/useSquad";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
+import { AgentActions } from "@/components/agent/AgentActions";
+import { Transcript } from "@/components/agent/Transcript";
+import { AnswerControls } from "@/components/agent/AnswerControls";
 
 type Tone = "success" | "warning" | "attention" | "danger" | "accent" | "neutral";
 
@@ -31,9 +37,22 @@ function Pre({ children }: { children: string }) {
   return <pre className="whitespace-pre-wrap break-words font-mono text-xs text-text-secondary">{children}</pre>;
 }
 
-export function TaskDetail({ repo, taskId, onClose }: { repo: string; taskId: string; onClose: () => void }) {
+export function TaskDetail({ repo, taskId, onClose, squad }: { repo: string; taskId: string; onClose: () => void; squad: SquadState }) {
   const [task, setTask] = useState<TaskDetailDTO | null>(null);
   const [loading, setLoading] = useState(true);
+  const { toast } = useToast();
+  const [starting, setStarting] = useState(false);
+  // The agent advancing this task, if any (matched by the Plane issue it carries).
+  const agent = squad.agents.find((a) => a.issue !== undefined && (a.issue.id === taskId || (task?.identifier !== undefined && a.issue.identifier === task.identifier)));
+  useEffect(() => {
+    if (agent) squad.subscribe(agent.id);
+  }, [agent?.id, squad.subscribe]);
+  const start = async (): Promise<void> => {
+    setStarting(true);
+    const r = await apiPost<{ agentId: string }>(`/api/tasks/${encodeURIComponent(taskId)}/start`, { repo });
+    setStarting(false);
+    toast({ title: r ? "Agent started" : "Start failed", tone: r ? "success" : "danger" });
+  };
 
   useEffect(() => {
     let alive = true;
@@ -89,6 +108,34 @@ export function TaskDetail({ repo, taskId, onClose }: { repo: string; taskId: st
               ))}
               {task.blockedBy.length > 0 ? <Badge tone="warning">blocked ×{task.blockedBy.length}</Badge> : null}
             </div>
+
+            {agent ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Agent · {agent.status}</CardTitle>
+                  {agent.activity ? <span className="ml-2 min-w-0 truncate normal-case text-text-muted">{agent.activity}</span> : null}
+                </CardHeader>
+                <CardContent className="flex flex-col p-0">
+                  {agent.pending.map((req) => (
+                    <div key={req.id} className="border-b border-border p-3">
+                      <div className="mb-1 text-sm font-medium text-text-primary">{req.title}</div>
+                      <AnswerControls request={req} onAnswer={(v) => squad.send({ type: "answer", id: agent.id, requestId: req.id, value: v })} />
+                    </div>
+                  ))}
+                  <AgentActions agent={agent} squad={squad} />
+                  <div className="h-72 border-t border-border">
+                    <Transcript entries={squad.transcripts.get(agent.id) ?? []} />
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="flex items-center justify-between rounded-md border border-border bg-surface p-3">
+                <span className="text-sm text-text-secondary">No agent on this task yet.</span>
+                <Button variant="primary" size="sm" disabled={starting} onClick={() => void start()}>
+                  {starting ? "Starting…" : "▶ Start agent"}
+                </Button>
+              </div>
+            )}
 
             {task.tier2.description || task.body ? (
               <section>

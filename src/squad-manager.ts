@@ -418,6 +418,14 @@ export class SquadManager extends EventEmitter {
 		await this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true, approvalMode: "yolo" });
 	}
 
+	/** Start (or return the existing) agent advancing a Plane issue — the web "Start task" action. */
+	async startTask(repo: string, issue: IssueRef, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		const existing = [...this.agents.values()].find((r) => r.dto.issue?.id === issue.id);
+		if (existing) return existing.dto;
+		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
+		return this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true, approvalMode: "yolo" }, actor);
+	}
+
 	async stop(): Promise<void> {
 		clearInterval(this.pollTimer);
 		this.dispatcher?.stop();

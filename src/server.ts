@@ -675,6 +675,19 @@ export class SquadServer {
 			if (issues === null) return new Response("plane not configured", { status: 501 });
 			return Response.json(issues);
 		}
+		const mstart = url.pathname.match(/^\/api\/tasks\/([^/]+)\/start$/);
+		if (mstart && req.method === "POST") {
+			const id = decodeURIComponent(mstart[1]);
+			if (!id) return new Response("task id required", { status: 400 });
+			const body: unknown = await req.json().catch(() => null);
+			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const issues = await listPlaneIssues(repo);
+			if (issues === null) return new Response("plane not configured", { status: 501 });
+			const issue = issues.find((i) => i.id === id);
+			if (!issue) return new Response("issue not found or not open", { status: 404 });
+			const dto = await manager.startTask(repo, issue, actor);
+			return Response.json({ agentId: dto.id });
+		}
 		if (url.pathname.startsWith("/api/tasks/")) {
 			const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
 			if (!id) return new Response("task id required", { status: 400 });

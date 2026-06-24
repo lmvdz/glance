@@ -8,11 +8,15 @@ import { apiPost } from "@/lib/api";
 export function AgentActions({ agent, squad }: { agent: AgentDTO; squad: SquadState }) {
   const { toast } = useToast();
   const [msg, setMsg] = useState("");
+  const [history, setHistory] = useState<string[]>([]);
+  const [hi, setHi] = useState(-1); // -1 = live draft; >=0 = browsing prior sends
 
   const submit = (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
     squad.send({ type: "prompt", id: agent.id, message: trimmed });
+    setHistory((h) => [...h, trimmed]);
+    setHi(-1);
     setMsg("");
   };
 
@@ -43,9 +47,25 @@ export function AgentActions({ agent, squad }: { agent: AgentDTO; squad: SquadSt
           rows={1}
           placeholder="Send a message or steer…"
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            // Enter sends (Shift+Enter = newline); Cmd/Ctrl+Enter always sends. Up/Down recall prior sends.
+            if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               submit(msg);
+            } else if (e.key === "ArrowUp" && history.length > 0 && (msg === "" || hi >= 0)) {
+              e.preventDefault();
+              const ni = hi < 0 ? history.length - 1 : Math.max(0, hi - 1);
+              setHi(ni);
+              setMsg(history[ni]);
+            } else if (e.key === "ArrowDown" && hi >= 0) {
+              e.preventDefault();
+              const ni = hi + 1;
+              if (ni >= history.length) {
+                setHi(-1);
+                setMsg("");
+              } else {
+                setHi(ni);
+                setMsg(history[ni]);
+              }
             }
           }}
           className="min-h-[40px] flex-1 resize-none rounded-[var(--radius-sm)] border border-border bg-secondary px-3 py-2 text-sm text-text-1 outline-none focus:border-accent"
