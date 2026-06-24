@@ -960,8 +960,10 @@ export class SquadManager extends EventEmitter {
 		this.wire(rec);
 		this.emitAgent(rec);
 
+		let started = false;
 		try {
 			await agent.start();
+			started = true;
 			rec.dto.status = "idle";
 			if (agent.setSessionName) await agent.setSessionName(`squad:${name}`).catch(() => {});
 			this.emitAgent(rec);
@@ -973,6 +975,10 @@ export class SquadManager extends EventEmitter {
 				await agent.prompt(opts.task).catch((err) => this.fail(rec, err));
 			}
 		} catch (err) {
+			// start() (or its handshake) threw: the driver may have spawned a backing
+			// child/container before failing. Tear it down so it doesn't leak — nothing
+			// reaps ACP children or sandbox containers (OMPSQ-163, OMPSQ-146).
+			if (!started) await agent.stop().catch(() => {});
 			this.fail(rec, err);
 		}
 
