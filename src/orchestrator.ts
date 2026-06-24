@@ -70,6 +70,14 @@ export interface OrchestratorDeps {
 	 * Omitted ⇒ in-memory only (tests, or an agent with no branch).
 	 */
 	persist?: OrchestratorPersistence;
+	/**
+	 * Admission queue shared with the manager (OMPSQ-134). The manager parks cap-denied spawns
+	 * (OMP_SQUAD_QUEUE_ON_FULL) into THIS instance; the loop's admission-drain step (step 4)
+	 * dequeues + spawns them once a slot frees. Omitted ⇒ the loop owns a private Scheduler
+	 * (tests that drive `orch.scheduler` directly). Wiring both to one instance is the whole fix:
+	 * parking into a different Scheduler than the loop drains stranded every queued spawn.
+	 */
+	scheduler?: Scheduler;
 }
 
 /** On by default; set OMP_SQUAD_AUTODRIVE=0 to disable the self-driving control loop. */
@@ -105,10 +113,12 @@ export class Orchestrator {
 	 * Admission queue the manager parks cap-denied spawns into; drained here under the WIP cap (#13).
 	 * Public so the manager (and tests) can `enqueue` into the same instance the loop drains.
 	 */
-	readonly scheduler = new Scheduler();
+	readonly scheduler: Scheduler;
 
 	constructor(deps: OrchestratorDeps) {
 		this.deps = deps;
+		// Share the manager's Scheduler when wired (OMPSQ-134), else own a private one (tests).
+		this.scheduler = deps.scheduler ?? new Scheduler();
 	}
 
 	/**

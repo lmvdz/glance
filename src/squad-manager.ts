@@ -321,6 +321,7 @@ export class SquadManager extends EventEmitter {
 			notifyReady: (id) => this.markLandReady(id),
 			log: (m) => this.log("info", `orchestrator: ${m}`),
 			persist: openOrchestratorState(this.stateDir), // OMPSQ-139: halted/landed/staged survive restart, keyed by branch
+			scheduler: this.scheduler, // OMPSQ-134: drain the SAME queue create() parks into (OMP_SQUAD_QUEUE_ON_FULL)
 		});
 		this.orchestrator.start();
 
