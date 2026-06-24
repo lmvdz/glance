@@ -448,6 +448,7 @@ export class SquadManager extends EventEmitter {
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
+				adopted: true, // OMPSQ-164: re-adopted with complete work ⇒ orchestrator auto-lands it directly
 			}).then(() => { n++; }).catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
 		if (n || skipped) this.log("info", `took over ${n} orphaned worktree(s) with work; skipped ${skipped} (done/clean or over the ${hardAgentCeiling()}-agent cap)`);
@@ -958,6 +959,7 @@ export class SquadManager extends EventEmitter {
 			parentId: opts.parentId,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			adopted: opts.adopted,
 		};
 
 		const agent = this.makeDriver(persisted);
@@ -1350,6 +1352,7 @@ export class SquadManager extends EventEmitter {
 			case "agent_start":
 			case "turn_start":
 				rec.streaming = true;
+				rec.dto.adopted = false; // OMPSQ-164: it ran ⇒ no longer a never-re-run adopted agent; resume normal verify→land
 				if (!rec.run) {
 					rec.run = new RunAccumulator({
 						agentId: rec.dto.id,
