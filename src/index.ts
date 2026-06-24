@@ -68,7 +68,7 @@ COMMISSION FLAGS
   --purpose <s>            What the worker does (required)
   --model <spec>           Model specifier, or "false" for a deterministic worker (default: false)
   --target <t>             node | cloudflare (default: node)
-  --capabilities <a,b>     Least-privilege tool allowlist (recorded in the manifest)
+  --capabilities <a,b>     Least-privilege allowlist (recorded). An env:NAME entry grants that one daemon env var to the scrubbed acceptance run; all other secrets denied
   --accept-payload <json>  Acceptance input · pair with --accept-expect <json> (expected result subset)
 
 GLOBAL

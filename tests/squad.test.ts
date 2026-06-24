@@ -18,7 +18,7 @@ import { addWorktree, removeWorktree, repoRoot, worktreeStatus } from "../src/wo
 import { TemplateArchitect } from "../src/architect.ts";
 import { FlueServiceDriver } from "../src/flue-service-driver.ts";
 import type { CommissionSpec } from "../src/types.ts";
-import { validateWorker } from "../src/validate.ts";
+import { acceptanceEnv, validateWorker } from "../src/validate.ts";
 import { generateWorkerFiles } from "../src/worker-template.ts";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 
@@ -418,6 +418,35 @@ test("ponytail gate: an over-built workflow fails the size budget", async () => 
 	expect(check?.status).toBe("fail");
 	expect(check?.detail).toContain("non-blank lines");
 	expect(report.ok).toBe(false);
+});
+
+// ── acceptance env scrub (deny-by-default; enforces the capabilities allowlist) ──
+
+test("acceptanceEnv: denies the daemon's secrets, passes only the non-secret baseline", () => {
+	const src = { PATH: "/usr/bin", HOME: "/home/d", ANTHROPIC_API_KEY: "sk-leak", PLANE_API_KEY: "plane-leak", OMP_SQUAD_TOKEN: "bearer-leak" };
+	const env = acceptanceEnv(emailSpec(), src);
+	expect(env.PATH).toBe("/usr/bin");
+	expect(env.HOME).toBe("/home/d");
+	expect("ANTHROPIC_API_KEY" in env).toBe(false);
+	expect("PLANE_API_KEY" in env).toBe(false);
+	expect("OMP_SQUAD_TOKEN" in env).toBe(false);
+});
+
+test("acceptanceEnv: a model-backed worker gets ONLY its own provider credential", () => {
+	const src = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-anthropic", OPENAI_API_KEY: "sk-openai" };
+	const env = acceptanceEnv({ name: "w", purpose: "p", model: "anthropic/claude-opus" }, src);
+	expect(env.ANTHROPIC_API_KEY).toBe("sk-anthropic");
+	expect("OPENAI_API_KEY" in env).toBe(false); // a different provider's key never leaks
+});
+
+test("acceptanceEnv: an env:NAME capability is the only way an extra var passes — enforcing the allowlist", () => {
+	const src = { PATH: "/usr/bin", STRIPE_KEY: "sk-stripe", UNDECLARED: "nope" };
+	const granted = acceptanceEnv({ name: "w", purpose: "p", model: false, capabilities: ["env:STRIPE_KEY", "some-tool"] }, src);
+	expect(granted.STRIPE_KEY).toBe("sk-stripe");
+	expect("UNDECLARED" in granted).toBe(false);
+	// Without the capability the same var is denied.
+	const denied = acceptanceEnv({ name: "w", purpose: "p", model: false, capabilities: [] }, src);
+	expect("STRIPE_KEY" in denied).toBe(false);
 });
 
 test("buildBoard spinner advances with the frame for working agents", () => {

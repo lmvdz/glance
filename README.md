@@ -472,8 +472,12 @@ omp-squad commission extract-emails \
   (`--model <spec>` makes the worker itself model-backed.)
 - **Acceptance gate** (`src/validate.ts`) — tiered + degrading: **lint** (always) →
   **typecheck** → **`flue run` acceptance** (when the worker's toolchain is installed),
-  deep-matching the result against `--accept-expect`. A failed gate **re-authors** (bounded),
-  feeding the failure forward; still failing → onboards nothing.
+  deep-matching the result against `--accept-expect`. The acceptance tier runs model-authored
+  code with a **deny-by-default scrubbed env** (`acceptanceEnv`): only a non-secret baseline,
+  the worker's own `<PROVIDER>_API_KEY`, and each `env:NAME` it declares in `--capabilities`
+  reach it — the daemon's other secrets are denied, which makes the capability allowlist
+  enforced. A failed gate **re-authors** (bounded), feeding the failure forward; still
+  failing → onboards nothing.
 - **Onboard** — a passing worker becomes a `flue-service` member via `FlueServiceDriver`,
   which adapts `flue run` into the same omp event frames the manager already derives
   status from. It shows in the roster (and federates) like any other agent.

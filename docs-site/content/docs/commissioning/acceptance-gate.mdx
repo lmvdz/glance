@@ -51,6 +51,18 @@ A non-zero exit is `fail`. On success it extracts the workflow result from stdou
 result against it (`deepSubset`): every key/value in `expect` must be present and deep-equal
 in the result; arrays must match element-for-element by length. A mismatch is `fail` with the
 actual result in `detail`.
+
+<Callout type="warn">
+This tier executes **model-authored code unsandboxed on the daemon host**, so it runs with a
+**deny-by-default, scrubbed environment** (`acceptanceEnv`), never `process.env`. Only three
+things reach the worker: a fixed baseline of non-secret operational vars (`PATH`, `HOME`,
+`TMPDIR`, …); the single `<PROVIDER>_API_KEY` the worker's own declared `model` implies; and
+each variable its [`capabilities`](/docs/commissioning) allowlist **explicitly grants** via an
+`env:NAME` entry. The daemon's other secrets — Plane/GitHub tokens, the dashboard bearer
+secret, every other provider key — are denied. This is what makes the recorded allowlist
+*enforced* rather than decorative: a worker that needs `STRIPE_KEY` must declare
+`--capabilities env:STRIPE_KEY`, and nothing else flows through.
+</Callout>
 </Step>
 
 <Step>

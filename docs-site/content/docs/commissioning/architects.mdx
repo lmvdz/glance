@@ -124,8 +124,10 @@ versions are pinned to what this repo verified against (`@flue/runtime`, `@flue/
   <File name=".env.example" annotation="model workers only" />
 </Files>
 
-The `flue.worker.json` manifest records `capabilities` (the recorded allowlist — auditable,
-not yet enforced) and the `accept` block, so a worker's contract is inspectable on disk.
+The `flue.worker.json` manifest records `capabilities` (the least-privilege allowlist —
+auditable on disk, and **enforced** at the [acceptance gate](/docs/commissioning/acceptance-gate):
+an `env:NAME` capability is the only way a daemon environment variable reaches the worker's
+unsandboxed acceptance run) and the `accept` block, so a worker's contract is inspectable on disk.
 
 ## Next
 

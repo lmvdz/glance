@@ -89,17 +89,56 @@ async function typecheckWorker(dir: string): Promise<GateCheck> {
 		: { name: "typecheck", status: "fail", detail: (out + err).trim().split("\n").slice(0, 8).join("\n") };
 }
 
+/**
+ * Fixed baseline of non-secret operational vars the Node/Bun toolchain needs to locate
+ * binaries and a temp dir. No credentials — secrets only flow through capability grants.
+ */
+const ENV_BASELINE = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ"];
+
+/**
+ * Deny-by-default environment for the acceptance run. The daemon's full env — every provider
+ * key, the Plane/GitHub tokens, the dashboard bearer secret — MUST NOT reach model-authored
+ * worker code. Only three things pass:
+ *   1. ENV_BASELINE (non-secret operational vars);
+ *   2. the ONE provider credential the worker's own declared model implies (`<PROVIDER>_API_KEY`);
+ *   3. each var the worker's `capabilities` allowlist explicitly grants via an `env:NAME` entry.
+ * This is what makes the recorded capabilities allowlist enforced rather than decorative.
+ */
+export function acceptanceEnv(spec: CommissionSpec, source: Record<string, string | undefined> = process.env): Record<string, string> {
+	const allow = new Set(ENV_BASELINE);
+	if (typeof spec.model === "string") {
+		const provider = spec.model.split("/")[0]?.trim().toUpperCase().replace(/[^A-Z0-9]/g, "_");
+		if (provider) allow.add(`${provider}_API_KEY`);
+	}
+	for (const cap of spec.capabilities ?? []) {
+		const m = /^env:([A-Za-z_][A-Za-z0-9_]*)$/.exec(cap.trim());
+		if (m) allow.add(m[1]);
+	}
+	const env: Record<string, string> = {};
+	for (const key of allow) {
+		const v = source[key];
+		if (typeof v === "string") env[key] = v;
+	}
+	return env;
+}
+
 async function acceptanceWorker(dir: string, spec: CommissionSpec): Promise<{ check: GateCheck; result?: unknown }> {
 	if (!spec.accept) return { check: { name: "acceptance", status: "skip", detail: "no acceptance check in spec" } };
 	const flueBin = path.join(dir, "node_modules", ".bin", "flue");
 	if (!existsSync(flueBin)) return { check: { name: "acceptance", status: "skip", detail: "flue not installed in worker" } };
 
 	const target = spec.deployTarget ?? "node";
+	// The acceptance tier executes model-authored worker code UNSANDBOXED on the daemon host.
+	// It MUST NOT inherit the daemon's full env — acceptanceEnv() denies by default and passes
+	// only the capability-allowed vars, so the recorded allowlist actually gates secret access.
+	// ponytail: env is scrubbed but the process still shares the daemon's filesystem/network as
+	// the daemon user. Upgrade path: run this spawn under the existing --sandbox container seam
+	// (src/sandbox-agent-driver.ts) when full isolation is required.
 	const proc = Bun.spawn([flueBin, "run", spec.name, "--target", target, "--payload", JSON.stringify(spec.accept.payload)], {
 		cwd: dir,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: { ...process.env },
+		env: acceptanceEnv(spec),
 	});
 	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	const code = await proc.exited;

@@ -81,7 +81,7 @@ worker dir; on a failed gate it exits non-zero and leaves the worker on disk for
     '--purpose': { description: 'What the worker does — the job description.', type: 'string', default: '(required)' },
     '--model': { description: 'Model specifier (provider/model), or "false" for a deterministic worker.', type: 'spec | false', default: 'false' },
     '--target': { description: 'Deploy/run target.', type: 'node | cloudflare', default: 'node' },
-    '--capabilities': { description: 'Comma-separated least-privilege tool allowlist, recorded in the manifest.', type: 'a,b,c', default: '[]' },
+    '--capabilities': { description: 'Comma-separated least-privilege allowlist, recorded in the manifest. An `env:NAME` entry grants that one daemon env var to the worker\'s scrubbed acceptance run; all other secrets are denied.', type: 'a,b,c', default: '[]' },
     '--accept-payload': { description: 'Acceptance input (JSON). Pair with --accept-expect.', type: 'json', default: '(none)' },
     '--accept-expect': { description: 'Expected result subset (JSON), deep-matched against the run output.', type: 'json', default: '(none)' },
   }}
