@@ -450,6 +450,20 @@ with `OMP_SQUAD_WEBAPP=1` — the server then serves `webapp/dist` (the content-
 at `/` and `/assets/*` instead of the live HTML. The flag is OFF unless **both** set **and** a
 build exists; unset it (or skip the build) to get the current dashboard exactly as before.
 
+**omp-graph view (in `webapp/`).** The new SPA renders the fleet as a force-directed graph
+("omp-graph"): `FeatureDTO` nodes (stage-colored, dependency edges derived from
+`IssueRef.blockedBy`) with live `AgentDTO` presence overlaid on the feature each agent is
+executing, alongside a Structure list. Its canvas force-graph engine and design tokens are adapted
+from [FrkAk/piyaz](https://github.com/FrkAk/piyaz) under **AGPL-3.0**, so `webapp/` is licensed
+AGPL-3.0 (see [`webapp/LICENSE`](webapp/LICENSE), [`webapp/NOTICE`](webapp/NOTICE)). Serving it
+(`OMP_SQUAD_WEBAPP=1`) triggers AGPL §13 — the corresponding source must be offered to users.
+
+Smoke-test it: `cd webapp && bun install && bun run build`, then `OMP_SQUAD_WEBAPP=1 omp-squad up`.
+Spawn 2-3 agents across a repo that has a `plans/<name>/` directory, open the dashboard, and toggle
+Structure <-> Graph. Feature nodes render stage-colored with dependency edges where `blockedBy`
+resolves; each agent shows as a status ring on the feature it is executing (a `needs-input` agent
+rings amber and glows); selecting a node slides in the detail panel listing that feature's agents.
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`
