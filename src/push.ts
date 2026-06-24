@@ -162,16 +162,28 @@ export class PushService {
 		await this.persist();
 	}
 
-	/** Encrypt + dispatch `payload` to every subscription. Prunes gone endpoints (404/410). Returns count accepted. */
+	/** Encrypt + dispatch `payload` to every subscription. Prunes endpoints the push service has
+	 *  dropped (404/410) and subscriptions whose keys can no longer be encrypted to (a permanent
+	 *  failure — bad/garbage p256dh|auth — would otherwise be retried forever). Returns count accepted. */
 	async notify(payload: PushPayload): Promise<number> {
 		if (!this.vapid || this.subs.length === 0) return 0;
 		const body = Buffer.from(JSON.stringify(payload));
 		const dead: string[] = [];
 		let sent = 0;
 		for (const sub of this.subs) {
+			// Phase 1: encrypt + sign. Deterministic over the subscription's keys, so a throw here is
+			// permanent (malformed/corrupt keys) — prune, don't retry.
+			let encrypted: Buffer;
+			let authorization: string;
 			try {
-				const encrypted = await encryptPayload(sub, body);
-				const authorization = await vapidAuthHeader(sub.endpoint, this.vapid.publicKey, this.vapid.privateKeyJwk, this.subject);
+				encrypted = await encryptPayload(sub, body);
+				authorization = await vapidAuthHeader(sub.endpoint, this.vapid.publicKey, this.vapid.privateKeyJwk, this.subject);
+			} catch {
+				dead.push(sub.endpoint);
+				continue;
+			}
+			// Phase 2: network send. Failures here are transient — keep the subscription, retry next time.
+			try {
 				const { status } = await this.send(sub.endpoint, { "content-encoding": "aes128gcm", "content-type": "application/octet-stream", ttl: "2419200", authorization }, encrypted);
 				if (status === 404 || status === 410) dead.push(sub.endpoint);
 				else if (status >= 200 && status < 300) sent++;

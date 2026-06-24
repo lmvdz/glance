@@ -112,6 +112,34 @@ test("PushService dispatches encrypted+authed posts and prunes gone endpoints", 
 	expect(calls[0].endpoint).toBe("https://push.example.com/a");
 });
 
+test("notify prunes a subscription whose keys can never be encrypted (no infinite retry)", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pushbad-"));
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+	const calls: string[] = [];
+	const send: PushSend = async (endpoint) => {
+		calls.push(endpoint);
+		return { status: 201 };
+	};
+	const svc = new PushService(dir, { send });
+	await svc.init();
+
+	const good = await makeSubscription();
+	await svc.subscribe({ ...good.sub, endpoint: "https://push.example.com/good" });
+	// Valid base64url, but not a P-256 point — passes subscribe(), throws in encryptPayload's importKey.
+	await svc.subscribe({ endpoint: "https://push.example.com/bad", keys: { p256dh: "AAAA", auth: "AAAAAAAAAAAAAAAAAAAAAA" } });
+	expect(svc.subscriptionCount).toBe(2);
+
+	const sent = await svc.notify({ title: "t", body: "x" });
+	expect(sent).toBe(1); // only the good one delivered
+	expect(calls).toEqual(["https://push.example.com/good"]); // bad never reached the network
+	expect(svc.subscriptionCount).toBe(1); // permanently-broken sub pruned, not retried
+
+	// A second round never re-touches the pruned endpoint.
+	calls.length = 0;
+	await svc.notify({ title: "t", body: "x" });
+	expect(calls).toEqual(["https://push.example.com/good"]);
+});
+
 test("subscriptions + VAPID key persist across instances", async () => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pushp-"));
 	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
