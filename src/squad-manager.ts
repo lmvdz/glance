@@ -990,6 +990,7 @@ export class SquadManager extends EventEmitter {
 		let cwd: string;
 		let resolvedBranch: string | undefined;
 		let repo: string;
+		let createdWorktree = false;
 		if (opts.existingPath) {
 			cwd = opts.existingPath;
 			repo = opts.repo;
@@ -999,6 +1000,7 @@ export class SquadManager extends EventEmitter {
 			cwd = wt.cwd;
 			repo = wt.repo;
 			resolvedBranch = wt.branch;
+			createdWorktree = !wt.inPlace;
 			if (wt.inPlace) {
 				// Non-git target dir: no isolation, but "spawn anywhere" still works. A real git checkout
 				// that fails worktree creation now throws instead (OMPSQ-40) — never run on the shared tree.
@@ -1074,7 +1076,12 @@ export class SquadManager extends EventEmitter {
 			// start() (or its handshake) threw: the driver may have spawned a backing
 			// child/container before failing. Tear it down so it doesn't leak — nothing
 			// reaps ACP children or sandbox containers (OMPSQ-163, OMPSQ-146).
-			if (!started) await agent.stop().catch(() => {});
+			if (!started) {
+				await agent.stop().catch(() => {});
+				// The worktree was created before start() failed; nothing else reaps it, so a failed start
+				// leaks it forever (the gate's own failed-start test orphaned 500+ "squad-leaky" worktrees).
+				if (createdWorktree) await removeWorktree(repo, cwd).catch(() => {});
+			}
 			this.fail(rec, err);
 		}
 

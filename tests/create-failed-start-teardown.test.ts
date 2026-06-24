@@ -70,9 +70,10 @@ test("create(): a driver whose start() throws is torn down (stop() called), agen
 	delete process.env.OMP_SQUAD_RESOURCE_GATE;
 	const repo = await makeRepo();
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "ftd-state-"));
-	tmps.push(stateDir);
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "ftd-wt-"));
+	tmps.push(stateDir, worktreeBase);
 
-	const mgr = new SquadManager({ stateDir });
+	const mgr = new SquadManager({ stateDir, worktreeBase });
 	await mgr.start();
 
 	const driver = new FailStartDriver();
@@ -83,6 +84,9 @@ test("create(): a driver whose start() throws is torn down (stop() called), agen
 
 	expect(dto.status).toBe("error");
 	expect(driver.stopped).toBe(1); // backing process/container reaped, not leaked
+	// The worktree created before start() failed must be reaped too, not orphaned in the base —
+	// the gate ran this test every cycle and each leak orphaned a "squad-leaky" worktree (500+).
+	expect(await fs.readdir(worktreeBase)).toEqual([]);
 
 	await mgr.stop();
 });
