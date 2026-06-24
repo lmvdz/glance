@@ -234,9 +234,10 @@ export class SquadManager extends EventEmitter {
 	 *  auto_retry_start usage-limit events; consulted by the dispatcher before it spawns. */
 	private readonly rateLimit = new RateLimitGate();
 	private orchestrator?: Orchestrator;
-	private observer?: Observer;
-	/** Scout (sibling to the Observer) — semantic backlog harvester over agent reasoning. */
-	private scout?: Scout;
+	/** Observers — one per configured Plane repo so every repo's backlog is audited (OMPSQ-137). */
+	private readonly observers: Observer[] = [];
+	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
+	private readonly scouts = new Map<string, Scout>();
 	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning. */
 	private readonly scoutCursor = new Map<string, number>();
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
@@ -321,49 +322,57 @@ export class SquadManager extends EventEmitter {
 		});
 		this.orchestrator.start();
 
-		// Observer (OMPSQ-52) — periodic self-audit sibling to the orchestrator. File mode only for now:
-		// it observes the first configured Plane repo. ponytail: a multi-repo / per-org observer (one per
-		// SquadManager in DB mode) is a later follow-up — wire per-org Plane config through and loop repos.
+		// Observer (OMPSQ-52) — periodic self-audit sibling to the orchestrator. One per configured Plane
+		// repo (OMPSQ-137) so every repo's backlog is audited, not just the first. Each gets a repo-scoped
+		// seen-map (the first keeps the legacy filename for upgrade continuity; the rest are suffixed).
 		const observeRepos = planeRepos();
+		const slug = (repo: string) => repo.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 		if (process.env.OMP_SQUAD_OBSERVE !== "0" && observeRepos.length > 0) {
-			const repo = observeRepos[0];
-			this.observer = new Observer({
-				listAgents: () => this.list(),
-				listIssues: () => listPlaneIssues(repo),
-				fileIssue: (title) => createPlaneIssue(repo, title),
-				closeIssue: (ref) => closePlaneIssue(ref),
-				removeAgent: (id) => this.remove(id, false),
-				runGate: () => this.runMainGate(repo),
-				gitAheadOfMain: (a) => this.aheadOfMain(a),
-				untrackedInMain: () => this.untrackedInMain(repo),
-				filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
-				landLedger: () => readLandLedger(this.stateDir),
-				stateDir: this.stateDir,
-				log: (m) => this.log("info", `observer: ${m}`),
+			observeRepos.forEach((repo, i) => {
+				const observer = new Observer({
+					listAgents: () => this.list(),
+					listIssues: () => listPlaneIssues(repo),
+					fileIssue: (title) => createPlaneIssue(repo, title),
+					closeIssue: (ref) => closePlaneIssue(ref),
+					removeAgent: (id) => this.remove(id, false),
+					runGate: () => this.runMainGate(repo),
+					gitAheadOfMain: (a) => this.aheadOfMain(a),
+					untrackedInMain: () => this.untrackedInMain(repo),
+					filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
+					landLedger: () => readLandLedger(this.stateDir),
+					stateDir: this.stateDir,
+					seenFile: i === 0 ? undefined : `observer-seen.${slug(repo)}.json`,
+					log: (m) => this.log("info", `observer[${repo}]: ${m}`),
+				});
+				observer.start();
+				this.observers.push(observer);
 			});
-			this.observer.start();
-			this.log("info", `observer on (auditing ${repo})`);
+			this.log("info", `observer on (auditing ${observeRepos.join(", ")})`);
 		}
 
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
-		// reasoning and files the latent items they surfaced but didn't do. Mid-run via the periodic sweep
-		// (liveReasoning) + run-end via finalizeRun. On when Plane is configured; OMP_SQUAD_SCOUT=0 to disable.
+		// reasoning and files the latent items they surfaced but didn't do. One per configured Plane repo
+		// (OMPSQ-137); each only harvests agents whose repo it owns (scoutFor), so a finding lands in the
+		// right tracker. Mid-run via the periodic sweep (liveReasoning) + run-end via finalizeRun.
 		if (process.env.OMP_SQUAD_SCOUT !== "0" && observeRepos.length > 0) {
-			const repo = observeRepos[0];
-			this.scout = new Scout({
-				extract: ompClassify(this.bin),
-				listIssues: () => listPlaneIssues(repo),
-				fileIssue: (title, body) => createPlaneIssue(repo, title, body),
-				liveReasoning: () =>
-					[...this.agents.values()]
-						.filter((r) => r.dto.status === "working")
-						.map((r) => ({ agent: r.dto.name, task: r.options.task, issue: r.dto.issue?.identifier ?? r.dto.issue?.name, text: this.takeScoutReasoning(r) }))
-						.filter((s) => s.text.length > 0),
-				stateDir: this.stateDir,
-				log: (m) => this.log("info", `scout: ${m}`),
+			observeRepos.forEach((repo, i) => {
+				const scout: Scout = new Scout({
+					extract: ompClassify(this.bin),
+					listIssues: () => listPlaneIssues(repo),
+					fileIssue: (title, body) => createPlaneIssue(repo, title, body),
+					liveReasoning: () =>
+						[...this.agents.values()]
+							.filter((r) => r.dto.status === "working" && this.scoutFor(r.dto.repo) === scout)
+							.map((r) => ({ agent: r.dto.name, task: r.options.task, issue: r.dto.issue?.identifier ?? r.dto.issue?.name, text: this.takeScoutReasoning(r) }))
+							.filter((s) => s.text.length > 0),
+					stateDir: this.stateDir,
+					seenFile: i === 0 ? undefined : `scout-seen.${slug(repo)}.json`,
+					log: (m) => this.log("info", `scout[${repo}]: ${m}`),
+				});
+				scout.start();
+				this.scouts.set(repo, scout);
 			});
-			this.scout.start();
-			this.log("info", `scout on (harvesting reasoning → ${repo})`);
+			this.log("info", `scout on (harvesting reasoning → ${observeRepos.join(", ")})`);
 		}
 	}
 
@@ -377,13 +386,23 @@ export class SquadManager extends EventEmitter {
 		clearInterval(this.pollTimer);
 		this.dispatcher?.stop();
 		this.orchestrator?.stop();
-		this.observer?.stop();
-		this.scout?.stop();
+		for (const o of this.observers) o.stop();
+		for (const s of this.scouts.values()) s.stop();
 		await this.persist();
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
 		for (const r of this.agents.values()) r.agent.detach?.();
 		await this.bus.stop();
+	}
+
+	/** The scout that owns an agent's repo — exact key, else basename match, else the first configured
+	 *  repo as catch-all (so an unmapped/manual agent still gets harvested). `undefined` ⇒ scout disabled. */
+	private scoutFor(agentRepo: string): Scout | undefined {
+		const keys = [...this.scouts.keys()];
+		if (keys.length === 0) return undefined;
+		const base = path.basename(agentRepo);
+		const key = keys.find((r) => r === agentRepo) ?? keys.find((r) => path.basename(r) === base) ?? keys[0];
+		return this.scouts.get(key);
 	}
 
 	/** On daemon start, reattach to any agent whose detached host survived (upgrade/restart). */
@@ -1477,10 +1496,11 @@ export class SquadManager extends EventEmitter {
 		}
 		// Scout: harvest latent backlog items from this run's final reasoning delta. Fire-and-forget +
 		// best-effort — must never block or break run completion (scan() also catches internally).
-		if (this.scout) {
+		const scout = this.scoutFor(rec.dto.repo);
+		if (scout) {
 			const reasoning = this.takeScoutReasoning(rec);
 			if (reasoning)
-				void this.scout
+				void scout
 					.scan(reasoning, { agent: rec.dto.name, task: rec.options.task, issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name })
 					.catch((err) => this.log("warn", `scout scan failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		}
