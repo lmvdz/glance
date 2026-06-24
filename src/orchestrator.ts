@@ -39,7 +39,12 @@ export interface OrchestratorDeps {
 	 * When absent, plain agents are left untouched (back-compat with feature-only callers/tests).
 	 */
 	verifyAgent?: (agentId: string) => Promise<boolean>;
-	landAgentWork?: (agentId: string) => Promise<boolean>;
+	/**
+	 * Land a plain agent's OWN branch. true ⇒ merged; false ⇒ blocked (retry, then park); "staged" ⇒
+	 * the conflict was auto-resolved and held for a one-tap Land (OMPSQ-138/175) — stage it, never
+	 * re-attempt the merge, never park.
+	 */
+	landAgentWork?: (agentId: string) => Promise<boolean | "staged">;
 	agentHasWork?: (agentId: string) => Promise<boolean>;
 	/**
 	 * Failure router. Defaults to the resolver's `routeFailure` seam (escalate-everything until
@@ -234,7 +239,19 @@ export class Orchestrator {
 	 * `label` annotates the log line (e.g. " — re-adopted").
 	 */
 	private async tryLand(a: AgentDTO, plain: boolean, feat: string | undefined, workId: string, label: string, log: (m: string) => void): Promise<void> {
-		if (plain ? await this.deps.landAgentWork!(a.id) : await this.deps.land(feat!)) {
+		const outcome = plain ? await this.deps.landAgentWork!(a.id) : await this.deps.land(feat!);
+		// Staged (OMPSQ-138/175): the conflict was auto-resolved and held for a one-tap Land. It is
+		// neither merged nor blocked — stage it (like a confirm-mode hold) so the loop stops acting on
+		// it: no merge-retry, no park. The operator's one-tap Land keeps the resolved merge.
+		if (outcome === "staged") {
+			this.deps.notifyReady?.(a.id);
+			this.markStaged(workId, a);
+			this.attempts.delete(a.id);
+			this.landBlocks.delete(a.id);
+			log(`ready to land ${workId} (${a.id})${label} — conflict auto-resolved, awaiting confirm`);
+			return;
+		}
+		if (outcome) {
 			this.landed.add(workId);
 			if (a.branch !== undefined) this.deps.persist?.markLanded(a.branch);
 			this.attempts.delete(a.id);

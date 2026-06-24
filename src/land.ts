@@ -19,6 +19,12 @@ export interface LandResult {
 	merged: boolean;
 	message: string;
 	detail?: string;
+	/**
+	 * Auto-resolve confirm hold (OMPSQ-138): the conflict was auto-resolved on the branch but the
+	 * merge was NOT kept — it is staged for a one-tap Land. `ok` stays false (nothing merged) but the
+	 * caller must treat this as "staged", not "blocked": no merge-retry, no park (OMPSQ-175).
+	 */
+	staged?: boolean;
 }
 
 /**
@@ -48,6 +54,13 @@ export interface LandOpts {
 	resolver?: ConflictResolver;
 	/** Resolution reviewer override (#12). undefined ⇒ default one-shot `omp -p` reviewer. */
 	reviewer?: ResolutionReviewer;
+	/**
+	 * Auto-resolve confirm hold (OMPSQ-138, OMP_SQUAD_AUTORESOLVE_CONFIRM): when true, a conflicting
+	 * land is auto-resolved on the branch (rebased onto main) but NOT merged — it returns
+	 * `{ ok:false, staged:true }` so a human one-tap Land keeps the resolved merge. A clean
+	 * (non-conflicting) land still merges. Off (operator land) ⇒ resolve + merge as before.
+	 */
+	confirmResolved?: boolean;
 }
 
 /**
@@ -212,6 +225,7 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	if (autoresolve() && wtClean) {
 		return attemptAutoResolve({
 			repo, worktree, branch, head0, gate, message, committed,
+			confirmResolved: opts.confirmResolved ?? false,
 			resolver: opts.resolver ?? defaultResolver(),
 			reviewer: opts.reviewer ?? defaultReviewer(),
 		});
@@ -239,12 +253,16 @@ const RESOLVE_TIMEOUT_MS = 600_000;
  * textually clean and compiles but is semantically wrong (two sides edited disjoint code that
  * interacts at runtime); a test suite misses what it doesn't assert. Upgrade path: gate auto-landed
  * resolutions behind a human ack or a property/integration suite in high-stakes repos.
+ *
+ * confirmResolved (OMPSQ-138): when set, stop after a successful rebase+resolve and return
+ * { ok:false, staged:true } WITHOUT merging — a human one-tap Land keeps the resolved merge.
  */
 async function attemptAutoResolve(a: {
 	repo: string; worktree: string; branch: string; head0: string; gate: string | undefined; message: string; committed: boolean;
+	confirmResolved: boolean;
 	resolver: ConflictResolver; reviewer: ResolutionReviewer;
 }): Promise<LandResult> {
-	const { repo, worktree, branch, head0, gate, message, committed, resolver, reviewer } = a;
+	const { repo, worktree, branch, head0, gate, message, committed, confirmResolved, resolver, reviewer } = a;
 	const fail = (detail: string): LandResult => ({ ok: false, committed, merged: false, message, detail });
 
 	// (a) Rebase the branch onto main; (b) the resolver clears each conflicted step.
@@ -265,6 +283,15 @@ async function attemptAutoResolve(a: {
 	if (r.code !== 0) {
 		await git(["rebase", "--abort"], worktree).catch(() => undefined);
 		return fail(`auto-resolve: rebase of ${branch} failed: ${r.stderr || r.stdout}`);
+	}
+
+	// Confirm hold (OMPSQ-138): the conflict is resolved on the rebased branch, but the merge is held
+	// for a human one-tap Land. Main is untouched (the original merge was aborted), so nothing reaches
+	// it without an operator. The operator's land (confirmResolved:false) fast-forwards the already-
+	// rebased branch — no second resolve — and runs the gate then. ponytail: if main advances before
+	// the operator confirms, that ff fails and the branch re-resolves on the next land; acceptable.
+	if (confirmResolved) {
+		return { ok: false, staged: true, committed, merged: false, message, detail: `auto-resolved conflict on ${branch} — staged for one-tap Land (OMP_SQUAD_AUTORESOLVE_CONFIRM)` };
 	}
 
 	// Rebased clean ⇒ the branch now fast-forwards into main.

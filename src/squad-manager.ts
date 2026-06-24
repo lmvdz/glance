@@ -102,6 +102,17 @@ function autoLandFailCap(): number {
 	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
 }
 
+/**
+ * Auto-resolve confirm hold (OMPSQ-138). When ON (default), an AUTO land that had to auto-resolve a
+ * conflict is STAGED for a one-tap Land instead of being merged with no human — the blast radius of a
+ * semantically-wrong LLM merge is `main`, so a resolved conflict gets a human ack. A clean
+ * (non-conflicting) auto land still merges. Operator lands always merge. Set =0 to auto-merge
+ * resolved conflicts too.
+ */
+function autoresolveConfirm(): boolean {
+	return process.env.OMP_SQUAD_AUTORESOLVE_CONFIRM !== "0";
+}
+
 // liveAgents + the WIP cap live in ./scheduler.ts now; re-export keeps the public import path stable.
 export { liveAgents };
 
@@ -315,7 +326,10 @@ export class SquadManager extends EventEmitter {
 			verify: async (id) => (await this.verifyFeature(id))?.ok ?? false,
 			land: async (id) => (await this.landFeature(id)).ok,
 			verifyAgent: (id) => this.verifyAgentWork(id),
-			landAgentWork: async (id) => (await this.land(id)).ok,
+			landAgentWork: async (id) => {
+				const r = await this.land(id);
+				return r.staged ? "staged" : r.ok; // OMPSQ-175: staged ⇒ orchestrator holds, never parks
+			},
 			agentHasWork: (id) => this.agentHasUnlandedWork(id),
 			holdForConfirm: this.landConfirm,
 			notifyReady: (id) => this.markLandReady(id),
@@ -711,7 +725,16 @@ export class SquadManager extends EventEmitter {
 			branch: dto.branch,
 			message: message ?? `squad(${dto.name}): land ${dto.branch ?? "changes"}`,
 			commitWip: !busy,
+			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
 		});
+		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
+		// (never bump the fail streak) and not landed — surface the ready-to-land flag and return.
+		if (result.staged) {
+			rec.dto.landReady = true;
+			this.emitAgent(rec);
+			this.log("info", `land-confirm: ${id} auto-resolved a conflict — ready to land`);
+			return result;
+		}
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		if (auto || result.ok) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);

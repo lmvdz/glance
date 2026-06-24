@@ -146,6 +146,47 @@ test("holdForConfirm: green plain agent is staged for one-tap Land, not auto-lan
 	expect(landed).toEqual([]);
 });
 
+test("landAgentWork returning 'staged' stages the work — notify, no re-attempt, never parked (OMPSQ-175)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const landCalls: string[] = [];
+	const ready: string[] = [];
+	const logs: string[] = [];
+	const orch = new Orchestrator({
+		listAgents: () => [agent("ag", "idle")], // plain (no featureId)
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => true,
+		land: async () => {
+			throw new Error("feature land must not run for a plain agent");
+		},
+		agentHasWork: async () => true,
+		verifyAgent: async () => true,
+		landAgentWork: async (id) => {
+			landCalls.push(id);
+			return "staged"; // auto-resolve confirm hold: resolved on the branch, awaiting one-tap Land
+		},
+		holdForConfirm: false, // auto-merge mode — the staged signal comes from the land path, not verify
+		notifyReady: (id) => ready.push(id),
+		log: (m) => logs.push(m),
+	});
+
+	await orch.tick();
+	expect(landCalls).toEqual(["ag"]); // land attempted once
+	expect(ready).toEqual(["ag"]); // staged for a one-tap Land
+	expect(logs.some((l) => l.includes("ready to land agent:ag") && l.includes("auto-resolved"))).toBe(true);
+	expect(logs.some((l) => l.includes("parked"))).toBe(false); // never parked
+	expect(logs.some((l) => l.includes("land blocked"))).toBe(false); // not treated as a blocked land
+
+	// Staged ⇒ the loop holds: no re-attempt across ticks, and never parks.
+	await orch.tick();
+	await orch.tick();
+	await orch.tick();
+	expect(landCalls).toEqual(["ag"]); // still exactly one land attempt
+	expect(ready).toEqual(["ag"]);
+	expect(logs.some((l) => l.includes("parked"))).toBe(false);
+});
+
 test("featureless agent that fails its gate is parked, not escalated to a human", async () => {
 	process.env.OMP_SQUAD_AUTODRIVE = "1";
 	let verifyCalls = 0;
