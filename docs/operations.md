@@ -56,6 +56,23 @@ setsid bash scripts/squad-supervisor.sh >/dev/null 2>&1 &   # supervises ~/.omp/
 ss -ltnp | grep :7878                                        # confirm one daemon, stable pid
 ```
 
+### squadctl — start / stop / restart / status
+
+`scripts/squadctl.sh` wraps the launcher + supervisor so you never hand-roll `pkill`:
+
+```bash
+scripts/squadctl.sh start     # supervisor -> up.sh -> daemon (detached, crash-restarting)
+scripts/squadctl.sh status    # daemon pid (from the state lock) + supervisor + HTTP probe
+scripts/squadctl.sh restart   # stop, then start — the way to pick up self-landed code (below)
+scripts/squadctl.sh stop      # stop supervisor FIRST (so it can't relaunch), then the daemon
+```
+
+`stop` kills the supervisor before the daemon so the watchdog can't immediately respawn it, then
+`SIGTERM`s the daemon (clean shutdown releases the state lock) and escalates to `SIGKILL` after 10s.
+`status`/`stop` resolve the daemon pid from `~/.omp/squad/daemon.lock`, so a stale lock (owner gone)
+reads as DOWN. Override `OMP_SQUAD_STATE_DIR` / `OMP_SQUAD_LAUNCHER` / `OMP_SQUAD_PORT` for a
+non-default daemon.
+
 **On-boot OOM guard.** A relaunch re-adopts orphaned worktrees, but only those with *unlanded work*,
 capped at `OMP_SQUAD_MAX_AGENTS` (`adoptOrphanedAgents` / `selectAdoptable`). Before that cap, every
 orphaned worktree was re-spawned at once — N simultaneous `omp` hosts that could exhaust memory and
@@ -63,5 +80,5 @@ take the box (WSL) down. Done/clean agents are dropped on boot; their still-open
 again gradually under the WIP cap.
 
 The daemon does **not** hot-reload its own source — after the fleet lands a change to omp-squad itself,
-relaunch (the supervisor restart, or re-run `up.sh`) to pick it up. (Auto-reload-on-self-landed-code is
-tracked in OMPSQ-130.)
+relaunch (`scripts/squadctl.sh restart`, or re-run `up.sh`) to pick it up. (Auto-reload-on-self-landed-code
+is tracked in OMPSQ-130.)
