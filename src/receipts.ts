@@ -160,7 +160,15 @@ export function receiptPath(baseDir: string, agentId: string): string {
 export async function appendReceipt(baseDir: string, receipt: RunReceipt): Promise<void> {
 	const file = receiptPath(baseDir, receipt.agentId);
 	await fs.mkdir(path.dirname(file), { recursive: true });
-	await fs.appendFile(file, `${JSON.stringify(receipt)}\n`);
+	// Append + fsync so a committed receipt line survives a host crash. The read path
+	// (readReceipts) is per-line tolerant, so fsync only narrows the torn-tail window.
+	const fh = await fs.open(file, "a");
+	try {
+		await fh.writeFile(`${JSON.stringify(receipt)}\n`);
+		await fh.sync();
+	} finally {
+		await fh.close();
+	}
 }
 
 export async function readReceipts(baseDir: string, agentId: string): Promise<RunReceipt[]> {

@@ -78,6 +78,21 @@ account exists.
 5. **If GO:** start the deferred production follow-up (the `OrgStorage`/`ArchilStorage` seam on the layered
    trunk/fork topology). **If NO-GO:** keep local storage; OMPSQ-75's fsync hardening stays as a standalone win.
 
+## Verifying durability (OMPSQ-75 fsync + OMPSQ-76 unclean stop)
+
+The durable-write barrier (`writeFileDurable` in `src/dal/store.ts`, plus the fsynced
+`appendReceipt` in `src/receipts.ts`) is exercised by two artifacts:
+
+- **Local crash-survival (free, no account):** `bun test tests/persist-durability.test.ts`.
+  Spawns a writer subprocess that commits `state.json` + `transcripts.json` + a receipts line,
+  `SIGKILL`s it with no clean shutdown, and asserts the committed bytes survive uncorrupted with
+  no stray `.tmp`. Also spy-checks that `fsync` is on the durable commit path and absent from a
+  plain `writeFile`.
+- **Live remount (needs `ARCHIL_*`):** `bun scripts/durability-archil.ts`. Commits the same
+  fileset + a real git worktree on an exclusive Archil mount, `kill -9`s the writer (NOT a clean
+  `archil unmount`), remounts the disk, and asserts survival. With `ARCHIL_*` unset it prints the
+  creds blocker and exits `2` — it never skips silently and never fakes a pass.
+
 ## Note: `.env.example` was being eaten by `.gitignore`
 
 `.gitignore`'s `.env.*` pattern matched `.env.example`, so the example was ignored, never tracked, and removed
