@@ -109,3 +109,15 @@ test.skipIf(!hasDocker)(
 	},
 	90_000,
 );
+
+test.skipIf(!hasDocker)(
+	"SandboxAgentDriver: start() removes the container when the agent never becomes ready",
+	async () => {
+		// Agent command exits immediately without ever emitting `ready` → start() rejects.
+		const driver = new SandboxAgentDriver({ id: `t${Date.now().toString(36)}leak`, image: IMAGE, agentCommand: () => ["true"] });
+		await expect(driver.start(60_000)).rejects.toThrow();
+		const exists = async () => (await Bun.spawn(["docker", "inspect", driver.container], { stdout: "ignore", stderr: "ignore" }).exited) === 0;
+		expect(await exists()).toBe(false); // no leaked container on the error path
+	},
+	90_000,
+);
