@@ -11,9 +11,26 @@
 
 import type { AgentStatus } from "./types.ts";
 
-/** Strip surrounding slashes/whitespace; "" means "no claim". */
+/**
+ * Canonicalize a claim into a comparable prefix; "" means "no claim".
+ * Collapses duplicate slashes, resolves `.`/`..` segments, strips surrounding
+ * slashes, and lowercases — so `./Src//web`, `src/x/../web`, and `SRC/web` all
+ * compare equal and can't be used to evade the overlap check.
+ *
+ * ponytail: lowercased unconditionally. Linux is case-sensitive so `Foo` and `foo`
+ * are distinct files there, but the safe direction for a spawn guard is to treat
+ * lookalikes as overlapping (refuse) rather than let a case flip slip two agents
+ * onto the same file on macOS/Windows. Upgrade to per-repo case sensitivity only
+ * if a case-sensitive repo hits false conflicts.
+ */
 function norm(p: string): string {
-	return p.trim().replace(/^\/+|\/+$/g, "");
+	const out: string[] = [];
+	for (const seg of p.trim().split("/")) {
+		if (seg === "" || seg === ".") continue;
+		if (seg === "..") out.pop(); // clamp at root: `..` above root is dropped, never escapes
+		else out.push(seg);
+	}
+	return out.join("/").toLowerCase();
 }
 
 /** True if path `a` is the same as, or nested under, path `b` (segment-safe). */

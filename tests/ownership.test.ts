@@ -30,6 +30,19 @@ test("ownershipOverlap: empty/whitespace-only claims never overlap", () => {
 	expect(ownershipOverlap(["  "], ["src/web"])).toEqual([]);
 });
 
+test("ownershipOverlap: canonicalization defeats ./ .. dup-slash and case evasion", () => {
+	// every spelling below resolves to the same prefix as the holder's "src/web"
+	expect(ownershipOverlap(["./src/web"], ["src/web"])).toEqual(["src/web"]);
+	expect(ownershipOverlap(["src//web"], ["src/web"])).toEqual(["src/web"]);
+	expect(ownershipOverlap(["src/x/../web"], ["src/web"])).toEqual(["src/web"]);
+	expect(ownershipOverlap(["SRC/Web"], ["src/web"])).toEqual(["src/web"]);
+	expect(ownershipOverlap(["./SRC//x/..//web/"], ["src/web"])).toEqual(["src/web"]);
+	// holder side is canonicalized too
+	expect(ownershipOverlap(["src/web"], ["./SRC//web/"])).toEqual(["src/web"]);
+	// `..` clamps at root rather than escaping it
+	expect(ownershipOverlap(["../../src/web"], ["src/web"])).toEqual(["src/web"]);
+});
+
 const owner = (over: Partial<Owner> = {}): Owner => ({ repo: "/r", name: "alpha", status: "working", owns: ["src/web"], ...over });
 
 test("ownershipConflict: a live overlapping agent blocks the spawn and names paths", () => {
