@@ -283,6 +283,9 @@ branch whose **auto-land keeps failing the gate** — from the branch-keyed land
 work is re-done on a fresh branch (`auto-land failing for <branch>`). Findings
 are deduped by fingerprint (persisted to `<stateDir>/observer-seen.json`, never re-filed across
 ticks/restarts); a finding that stops reproducing is confirmed resolved and its fingerprint cleared.
+**One Observer runs per configured Plane repo** (OMPSQ-137), so every repo in `PLANE_PROJECT_MAP` is
+audited, not just the first; each gets its own dedup map (the first keeps `observer-seen.json` for
+upgrade continuity, the rest are suffixed `observer-seen.<repo>.json`).
 The acceptance-gate check runs `bun run check && bun test` against main *serialized behind any
 in-flight land* (`withRepoLandLock`): the gate reads the same checkout a land mutates (merge / rollback),
 so running them concurrently used to `(fail)` against a half-merged tree and file a false `regression:`
@@ -312,6 +315,9 @@ so they never block an agent: a **mid-run** periodic sweep scans each working ag
 `[scout] do-not-auto-land: …` Plane issue with a provenance body (which agent, which run-issue, the
 detail). scan() is serialized so the two triggers can't race-file the same item. Scout tickets are
 **always** needs-triage — LLM-extracted work is unvetted, so the dispatcher never auto-spawns the fleet on it.
+**One Scout runs per configured Plane repo** (OMPSQ-137); each only harvests agents whose repo it owns
+(exact key, else basename, else the first repo as catch-all), so a latent item lands in the right
+tracker. Each repo gets its own seen-set (`scout-seen.json` for the first, `scout-seen.<repo>.json` for the rest).
 
 | Env | Meaning |
 |---|---|

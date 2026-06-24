@@ -185,6 +185,23 @@ test("(e) seen-set dedup: same item never re-filed, persisted across a fresh Sco
 	expect(h2.filed).toEqual([]);
 });
 
+test("(OMPSQ-137) distinct seenFile ⇒ independent dedup: a 2nd repo's scout re-files the same item", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	const dir = tmpDir(); // one shared stateDir, as the manager uses for every per-repo scout
+	const payload = json([{ title: "Add idempotency key to webhook handler" }]);
+
+	// Repo A's scout keeps the legacy filename (seenFile undefined) and files the item.
+	const a = makeDeps(dir, { tickets: payload });
+	await new Scout(a.deps).scan(BIG, { agent: "agA" });
+	expect(a.filed.length).toBe(1);
+
+	// Repo B's scout has a distinct seenFile ⇒ does NOT inherit A's seen-map, so the same latent item
+	// is filed into B's tracker too. A shared map (the bug) would suppress this and leave B uncovered.
+	const b = makeDeps(dir, { tickets: payload, seenFile: "scout-seen.repo-b.json" });
+	await new Scout(b.deps).scan(BIG, { agent: "agB" });
+	expect(b.filed.length).toBe(1);
+});
+
 test("(f) fuzzy dedup against an existing OPEN issue (human/observer work) — not re-filed", async () => {
 	process.env.OMP_SQUAD_SCOUT = "1";
 	const open: IssueRef[] = [{ id: "h1", name: "Add retry to RPC client" }]; // plain human issue, no [scout] tag
