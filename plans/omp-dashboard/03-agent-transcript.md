@@ -1,5 +1,5 @@
 # Agent detail + live transcript
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -27,3 +27,6 @@ None. Extends the shared `useSquad`/`ws.ts` (later concerns build the action bar
 - Subscribe to a `working` agent → entries append live; thinking/tool/assistant render distinctly.
 - Switch agents → transcript swaps to the newly-selected agent.
 - Kill the WS (stop/restart the daemon) → on reconnect the open agent re-subscribes and resumes.
+
+## Resolution
+useSquad extended with transcripts + stable subscribe/send (re-subscribe on reconnect); Transcript view renders by kind; AgentDetail header + live transcript. Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

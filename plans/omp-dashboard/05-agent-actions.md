@@ -1,5 +1,5 @@
 # Agent actions — control from the detail pane
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -25,3 +25,6 @@ None. `lib/api.ts` becomes the shared HTTP seam for concerns 06/08/09.
 - Prompt an `idle` agent → it transitions to `working` and the transcript streams.
 - Interrupt a `working` agent → it stops; restart → fresh run; remove → drops from roster.
 - `landReady` agent → Land → success toast; Diff lists changed files; Subagents shows the tree.
+
+## Resolution
+lib/api.ts (authed GET/POST) + AgentActions (composer prompt, interrupt/restart/kill/remove, land) + Changes/Subagents tabs; AnswerControls reused inline in the detail. Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

@@ -7,8 +7,23 @@ export type FeatureStage =
 
 export interface PendingRequest {
   id: string;
-  kind?: string;
-  title?: string;
+  /** "ui" (confirm/input/select/editor) or "tool" (host tool name). */
+  source: "ui" | "tool";
+  /** UI method (confirm/input/select/editor) or the host tool name. */
+  kind: string;
+  title: string;
+  message?: string;
+  options?: string[];
+  placeholder?: string;
+  createdAt: number;
+}
+
+export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";
+
+export interface TranscriptEntry {
+  kind: TranscriptKind;
+  text: string;
+  ts: number;
 }
 
 export interface IssueRef {
@@ -57,22 +72,43 @@ export interface AgentDTO {
   featureId?: string;
 }
 
+/** One fleet-action audit record (subset of src/types.ts AuditEntry). */
+export interface AuditEntry {
+  at: number;
+  actor?: string;
+  action: string;
+  target?: string;
+  outcome?: string;
+  detail?: string;
+}
+
 /** Manager -> surface events (subset; see src/types.ts SquadEvent). */
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
   | { type: "removed"; id: string }
   | { type: "features-changed" }
-  | { type: "transcript"; id: string; entry: unknown }
+  | { type: "transcript"; id: string; entry: TranscriptEntry }
   | { type: "log"; level: "info" | "warn" | "error"; text: string }
-  | { type: "commands"; id: string; commands: unknown[] }
-  | { type: "audit"; entry: unknown };
+  | { type: "commands"; id: string; commands: CommandInfo[] }
+  | { type: "audit"; entry: AuditEntry };
+
+/** A slash command available to an agent (subset of src/types.ts CommandInfo). */
+export interface CommandInfo {
+  name: string;
+  description?: string;
+  aliases?: string[];
+  hint?: string;
+  source?: string;
+}
 
 /** Surface -> manager commands (subset we send). */
 export type ClientCommand =
   | { type: "snapshot" }
+  | { type: "subscribe"; id: string }
   | { type: "prompt"; id: string; message: string }
   | { type: "answer"; id: string; requestId: string; value: string }
   | { type: "interrupt"; id: string }
   | { type: "kill"; id: string }
-  | { type: "restart"; id: string };
+  | { type: "restart"; id: string }
+  | { type: "remove"; id: string; deleteWorktree?: boolean };

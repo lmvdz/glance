@@ -469,6 +469,16 @@ For live-reload development, `cd webapp && bun run dev` serves the SPA with HMR 
 `http://localhost:5173/?token=<dashboard-token>` — the token is captured into localStorage and
 reused for the Bearer header and the `ompsq-token` WS subprotocol, same as the live dashboard.
 
+**Operator dashboard (HumanLayer-shaped).** The `webapp/` SPA is now a full operator console, not
+just the graph: a left sidebar (Inbox · Agents · Features · Graph · Audit), a list/detail center,
+and a command palette (Cmd-K). It reaches parity with `src/web/index.html` over the daemon's
+existing WS + `/api` surface — live transcript (`subscribe`), an approvals **inbox** answering every
+`PendingRequest` kind (`answer`), agent actions (prompt/interrupt/kill/restart/remove + land/diff/
+subagents), spawn / new-feature / auto-feature, a feature **board**, and the **audit** log; the
+force-graph is one view. Deferred (P3): federation, presence, leases, deep Plane, push. Still behind
+`OMP_SQUAD_WEBAPP=1`, so the live `index.html` dashboard is untouched until cutover. Plan + parity
+matrix: `plans/omp-dashboard/`.
+
 ## Commissioning — agents that author agents
 
 A second fleet class lives beside the interactive omp operators: **`flue-service`

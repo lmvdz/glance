@@ -1,5 +1,5 @@
 # Primitive kit — piyaz-skinned shadcn primitives
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -26,3 +26,6 @@ None outside `webapp/`. Establishes the primitive vocabulary every later concern
 - `cd webapp && bun run typecheck && bun run build` green.
 - A throwaway `/dev/primitives` mount renders the kit in piyaz colors (dark + indigo accent), light
   mode flips correctly. (Optional; remove or keep as a dev route.)
+
+## Resolution
+Ported ompsq-55's shadcn primitives (badge/button/card/dialog/input/select/table/toast/tooltip/skeleton/empty/error + agent status comps) into components/ui + components/agent; added a piyaz-valued compat token layer to index.css so they render in the Raycast skin; added radix deps. Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

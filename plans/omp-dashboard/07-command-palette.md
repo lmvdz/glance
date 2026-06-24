@@ -1,5 +1,5 @@
 # Command palette + keyboard navigation
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -24,3 +24,6 @@ None. Reads the view router (concern 02) + `useSquad` actions.
 - `Cmd-K` opens; typing filters fuzzily; selecting a target navigates or fires the action.
 - With an agent open, its slash commands appear and send as a prompt.
 - `n` jumps to the next `input`/`error` agent.
+
+## Resolution
+Cmd-K CommandPalette (fuzzy jump to view/agent/feature + toggle theme); selection lifted into the URL hash so palette + deep-links drive controlled views. Fuzzy matcher extracted to lib/fuzzy.ts (tested). Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

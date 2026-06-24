@@ -1,5 +1,5 @@
 # App shell + IA — sidebar + view router
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -27,3 +27,6 @@ None. Reshapes `App.tsx`; later concerns mount their views into the shell's view
 - Each sidebar item renders its view region; counts update live on `roster`/`agent` events.
 - Selection persists across view switches; deep-link `#agents/<id>` restores selection.
 - Below `lg`, the sidebar is a drawer and the detail takes the screen.
+
+## Resolution
+HumanLayer 3-pane shell: Sidebar (Inbox·Agents·Features·Graph·Audit + counts), TopBar, hash-synced view router; per-view containers. App.tsx is the stable shell. Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

@@ -1,5 +1,5 @@
 # omp-graph as a view
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -21,3 +21,6 @@ None. Reuses the engine + model from `omp-graph-ui` unchanged.
 ## Verify
 - Graph view renders feature nodes + agent overlay; selecting a node opens that feature's detail in
   the shell; switching to another view and back preserves the layout (position cache).
+
+## Resolution
+Satisfied by GraphPane: the omp-graph force engine (with agent overlay) mounts under the shell's Graph route, selecting a node opens the feature detail. No standalone graph app remains. Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

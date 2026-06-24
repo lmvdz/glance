@@ -1,5 +1,5 @@
 # Audit view + liveness / attention signals
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -22,3 +22,6 @@ None.
 ## Verify
 - Audit lists actions and updates live on an `audit` event; action filter works.
 - Title shows `(N) …` when N agents wait; a notification fires on a newly-blocked agent (perm granted).
+
+## Resolution
+AuditView (/api/audit, 4s poll, table) + useLiveness (title waiting-badge + desktop notification on newly-blocked agents). Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

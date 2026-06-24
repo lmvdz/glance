@@ -1,5 +1,5 @@
 # Approvals inbox + AnswerControls
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -30,3 +30,6 @@ None. `AnswerControls` is the shared seam concern 05 reuses inside the agent det
   oldest-first; answering each (confirm / select / text) removes its row live and decrements the badge.
 - Drive one agent to `error` → it appears in the inbox's error section.
 - `select`/`editor`/`input` kinds each render the right control and submit the right `value`.
+
+## Resolution
+AnswerControls (confirm/select/input/editor/host-tool) + InboxView folding pending oldest-first + errored agents, answering in place via the `answer` command. Fold logic extracted to lib/inbox.ts (tested). Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

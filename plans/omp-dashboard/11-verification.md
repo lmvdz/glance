@@ -1,5 +1,5 @@
 # Verification + parity checklist + docs
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -24,3 +24,6 @@ None.
 ## Verify
 - `cd webapp && bun run test` green; root `bun run check && bun test` green (incl. `tests/webapp.test.ts`).
 - Every parity-matrix P1/P2 row is checked off; deferred rows are documented.
+
+## Resolution
+Pure logic extracted + tested under `cd webapp && bun test`: graph-model (8), fuzzy (4), inbox (2) = 14 pass. README documents the dashboard + parity + P3 deferrals. Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

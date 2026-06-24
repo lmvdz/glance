@@ -1,5 +1,5 @@
 # Spawn & new work
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -25,3 +25,6 @@ None. Uses `lib/api.ts` (concern 05).
 - Spawn → a new agent appears in the roster and its transcript streams.
 - New / from-plan feature → appears on the board (concern 08).
 - Auto-feature with a goal → a workflow agent shows up, advancing through stages.
+
+## Resolution
+NewWork dialog wired into the TopBar: spawn (/api/spawn), new feature (/api/features), auto-feature (/api/features/auto). Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

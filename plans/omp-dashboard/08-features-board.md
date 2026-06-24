@@ -1,5 +1,5 @@
 # Features board + feature detail
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -23,3 +23,6 @@ None. Uses `lib/api.ts` (concern 05).
 ## Verify
 - Features render in the right lanes; counts/badges match the roster.
 - Detail shows members + per-branch land readiness; verify/land actions fire and toast.
+
+## Resolution
+FeatureBoard (stage lanes) + motion slide-over feature detail; DetailPanel gained Verify/Land actions. Branch `omp-graph-ui`; gate green (root `bun run check` + `bun test` 492/0; `cd webapp && bun run build` + `bun run test` 14/0; runtime smoke OK).

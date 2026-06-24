@@ -72,5 +72,6 @@ live daemon (`OMP_SQUAD_WEBAPP=1`, agents with `--approval always-ask`), walking
 row by row. Existing gates (`tests/webapp.test.ts`, root `bun run check && bun test`) stay green.
 
 ## Status
-0/11 — planned 2026-06-23. Builds on branch `omp-graph-ui`. Supersedes the graph-only framing of
-`plans/omp-graph-ui/` (the graph becomes concern 10 here).
+11/11 done (2026-06-23) on branch `omp-graph-ui`. The `webapp/` is now a HumanLayer-shaped operator console (sidebar · list/detail · Cmd-K palette) at P1+P2 parity with `src/web/index.html`, piyaz-skinned, behind the default-off `OMP_SQUAD_WEBAPP=1` seam (live `index.html` untouched). P3 (federation/presence/leases/deep-Plane/push) deferred by design.
+
+Gate green: root `bun run check` (tsc) clean; root `bun test` 492 pass / 0 fail (82 files); `cd webapp && bun run typecheck` + `bun run build` clean; `cd webapp && bun run test` 14 pass / 0 fail (graph-model 8 · fuzzy 4 · inbox 2); runtime smoke renders shell + palette with graceful WS degradation. Not merged to main.
