@@ -72,6 +72,20 @@ export interface AgentDTO {
   featureId?: string;
 }
 
+/** Mirrors src/types.ts TaskDetail — a Plane issue with its body parsed into the planner sections. */
+export interface TaskDetail {
+  id: string;
+  identifier?: string;
+  name: string;
+  state?: string;
+  priority?: string;
+  labels: string[];
+  url?: string;
+  blockedBy: string[];
+  body: string;
+  tier2: { description: string; acceptanceCriteria: string; verification: string; scope: string };
+}
+
 /** One fleet-action audit record (subset of src/types.ts AuditEntry). */
 export interface AuditEntry {
   at: number;

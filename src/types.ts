@@ -70,6 +70,24 @@ export interface IssueRef {
 	noAutoDispatch?: boolean;
 }
 
+/** A Plane issue resolved with its body for the planner task view — the promote-issue Tier-2
+ *  schema parsed into the sections the UI shows (description / acceptance criteria / verification /
+ *  scope) plus display properties. Returned by GET /api/tasks/:id. */
+export interface TaskDetail {
+	id: string;
+	identifier?: string;
+	name: string;
+	state?: string;
+	priority?: string;
+	labels: string[];
+	url?: string;
+	blockedBy: string[];
+	/** Clean text of the issue body (Plane `description_stripped`) — fallback render. */
+	body: string;
+	/** Parsed promote-issue Tier-2 sections; each "" when absent (see src/tier2.ts). */
+	tier2: { description: string; acceptanceCriteria: string; verification: string; scope: string };
+}
+
 /** A feature's associated Plane issue, resolved for display: status group + deep link. */
 export interface PlaneTicket {
 	identifier: string;

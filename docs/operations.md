@@ -73,6 +73,10 @@ scripts/squadctl.sh stop      # stop supervisor FIRST (so it can't relaunch), th
 reads as DOWN. Override `OMP_SQUAD_STATE_DIR` / `OMP_SQUAD_LAUNCHER` / `OMP_SQUAD_PORT` for a
 non-default daemon.
 
+For **planning** (vs. the agent/inbox monitor views), use the **project view**: the sidebar drills
+into each repo → its features → their tasks (description / acceptance criteria / context / properties),
+served behind `OMP_SQUAD_WEBAPP=1` like the rest of the SPA.
+
 **On-boot OOM guard.** A relaunch re-adopts orphaned worktrees, but only those with *unlanded work*,
 capped at `OMP_SQUAD_MAX_AGENTS` (`adoptOrphanedAgents` / `selectAdoptable`). Before that cap, every
 orphaned worktree was re-spawned at once — N simultaneous `omp` hosts that could exhaust memory and

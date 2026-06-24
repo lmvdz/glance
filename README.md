@@ -517,6 +517,14 @@ force-graph is one view. Deferred (P3): federation, presence, leases, deep Plane
 `OMP_SQUAD_WEBAPP=1`, so the live `index.html` dashboard is untouched until cutover. Plan + parity
 matrix: `plans/omp-dashboard/`.
 
+**Project view (piyaz-style planning).** The sidebar drills into **projects** (repos); a project
+opens a plannable list of its **features** (plan dirs) and their **tasks** (Plane issues), and the
+task panel shows description + acceptance criteria + a context-bundle preview + properties. Layering
+is `project = repo → feature = plan dir → task = Plane issue`; the issue body is fetched and parsed
+(the `/promote-issue` Tier-2 schema → `src/tier2.ts`) via the new `GET /api/tasks/:id?repo=`.
+The HumanLayer-style generate→review→approve→dispatch flow is **Phase 2** (planned, not yet shipped).
+Plan: `plans/omp-planner/`.
+
 Transcripts render via [streamdown](https://github.com/vercel/streamdown) (MIT) — the streaming-
 markdown engine behind assistant-ui / AI Elements — with Shiki code highlighting, lazy-loaded so
 its grammars stay out of the initial bundle. P3 surfaces are now in: a **Network** view

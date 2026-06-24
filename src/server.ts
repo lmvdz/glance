@@ -17,7 +17,7 @@ import type { Server, ServerWebSocket } from "bun";
 import type { ClientCommand, FeatureStage, IssueRef, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { parsePlanConcerns } from "./features.ts";
-import { listPlaneIssues } from "./plane.ts";
+import { fetchIssueDetail, listPlaneIssues } from "./plane.ts";
 import { proofGate, runProof } from "./proof.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
@@ -666,6 +666,13 @@ export class SquadServer {
 			const issues = await listPlaneIssues(url.searchParams.get("project") ?? "");
 			if (issues === null) return new Response("plane not configured", { status: 501 });
 			return Response.json(issues);
+		}
+		if (url.pathname.startsWith("/api/tasks/")) {
+			const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
+			if (!id) return new Response("task id required", { status: 400 });
+			const detail = await fetchIssueDetail(url.searchParams.get("repo") ?? process.cwd(), id);
+			if (detail === null) return new Response("plane not configured", { status: 501 });
+			return Response.json(detail);
 		}
 		if (url.pathname === "/api/upgrade/status") return Response.json(await gitState(process.cwd()));
 		if (url.pathname === "/api/upgrade" && req.method === "POST") {
