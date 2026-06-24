@@ -234,9 +234,12 @@ request (force-push, delete, deploy, prod, …) and host-tool call for a human. 
 **Self-healing control loop (on by default)** — the orchestrator's periodic tick is armed unless
 `OMP_SQUAD_AUTODRIVE=0`. Each pass it auto-lands idle agents whose work verifies green (closing the
 tracking Plane issue), self-heals red gates through the failure router (retry / hold /
-escalate by repair budget), trips a single human-summoning `CATASTROPHE:` log on budget
+escalate by repair budget), trips a single human-summoning `CATASTROPHE:` on budget
 exhaustion or a catastrophe tripwire (infra failure, safety violation, regression
-oscillation), and drains cap-parked spawns back in under the WIP ceiling. On by default; set
+oscillation), and drains cap-parked spawns back in under the WIP ceiling. A summon is never
+just a log line: the agent is driven into a sticky `error` state, so it surfaces in the
+attention **Queue** and fires the same background **web push** as any other agent that needs a
+human (the notification body carries the `CATASTROPHE:` reason). On by default; set
 `OMP_SQUAD_AUTODRIVE=0` to disable — then the daemon arms no timer and the tick is fully inert.
 
 **Terminal decisions survive restart.** The loop's per-agent terminal state — *halted* (a human-summoned

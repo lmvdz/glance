@@ -61,6 +61,12 @@ export interface OrchestratorDeps {
 	holdForConfirm?: boolean;
 	/** Confirm-mode callback: the agent passed verify and is staged for a one-tap Land. */
 	notifyReady?: (agentId: string) => void;
+	/**
+	 * Catastrophe callback (#14 / OMPSQ-135): a human is being summoned for this agent. The manager
+	 * wires this to surface the agent in the attention Queue and fire a background push — the
+	 * `CATASTROPHE:` log alone is invisible once the operator looks away. `detail` is the reason.
+	 */
+	onCatastrophe?: (agentId: string, detail: string) => void;
 	/** Log sink (defaults to no-op). */
 	log?: (msg: string) => void;
 	/**
@@ -266,13 +272,15 @@ export class Orchestrator {
 	}
 
 	/**
-	 * The ONLY place a human is summoned (#14): emit a clear `CATASTROPHE:` line and stop the
-	 * auto-loop from acting on this agent. Tripwires: repair budget exhausted, or `isCatastrophic`
-	 * (infra failure / safety violation / regression oscillation). Never a silent drop. The halt is
-	 * persisted by branch so a restart doesn't re-summon (OMPSQ-139).
+	 * The ONLY place a human is summoned (#14): emit a clear `CATASTROPHE:` line, surface the agent
+	 * out-of-band (Queue + push) via `onCatastrophe`, and stop the auto-loop from acting on it.
+	 * Tripwires: repair budget exhausted, or `isCatastrophic` (infra failure / safety violation /
+	 * regression oscillation). Never a silent drop — and never an invisible one (OMPSQ-135). The halt
+	 * is persisted by branch so a restart doesn't re-summon (OMPSQ-139).
 	 */
 	private catastrophe(log: (m: string) => void, detail: string, a: AgentDTO): void {
 		this.markHalted(a);
 		log(`CATASTROPHE: ${detail}`);
+		this.deps.onCatastrophe?.(a.id, detail);
 	}
 }

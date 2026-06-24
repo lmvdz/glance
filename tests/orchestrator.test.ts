@@ -244,6 +244,30 @@ test("isCatastrophic tripwire summons a human before verify/land (#14)", async (
 	expect(logs.filter((l) => l.startsWith("CATASTROPHE:")).length).toBe(1);
 });
 
+test("onCatastrophe fires once per summon (Queue + push surface) — OMPSQ-135", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const summons: Array<{ id: string; detail: string }> = [];
+	const orch = new Orchestrator({
+		listAgents: () => [agent("ag", "idle", "F4")],
+		spawn: async () => {
+			throw new Error("no spawn in this test");
+		},
+		verify: async () => true, // green, but the tripwire bypasses verify
+		land: async () => {
+			throw new Error("land must not run when a tripwire fired");
+		},
+		isCatastrophic: () => true,
+		onCatastrophe: (id, detail) => summons.push({ id, detail }),
+	});
+
+	await orch.tick(); // tripwire → catastrophe → onCatastrophe
+	await orch.tick(); // halted ⇒ no second summon
+
+	expect(summons.length).toBe(1); // surfaced exactly once, not re-summoned each tick
+	expect(summons[0].id).toBe("ag");
+	expect(summons[0].detail).toContain("tripwire fired");
+});
+
 test("queued spawns are admitted only while under the WIP cap, draining as slots free (#13)", async () => {
 	process.env.OMP_SQUAD_AUTODRIVE = "1";
 	process.env.OMP_SQUAD_MAX_WIP = "3";
