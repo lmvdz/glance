@@ -642,6 +642,14 @@ The resolver/reviewer are injectable seams (tests use them; the defaults shell o
 Ceiling: a verify gate + reviewer can still miss a *semantic* conflict that is textually clean
 and compiles — see the `ponytail:` note on `attemptAutoResolve`.
 
+**Base-aware land gate.** After a clean merge, `landAgent` runs the repo's verify gate on merged
+`main` and rolls the merge back if it fails — but only when the *base was green*. If the gate also
+fails at the pre-merge HEAD (`head0`), the repo was **already red at its base**, so refusing would
+wedge every land on a brownfield repo. In that case the merge is re-applied and the branch lands,
+with the detail noting it *landed onto a red baseline*. Green-base behavior is unchanged: a branch
+that regresses a green base is still rolled back to keep `main` green. The base gate runs **only when
+the merged gate fails**, so the common green land still runs the gate exactly once.
+
 **Landing it automatically, too.** `OMP_SQUAD_AUTORESOLVE` decides what happens *when* a land
 conflicts; **`OMP_SQUAD_AUTOLAND=1`** decides *that a land happens at all* with no operator: a
 workflow run that finishes successfully (`--verify`, plan-implement, an auto-dispatched issue)
