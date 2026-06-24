@@ -11,7 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Observer, type ObserverDeps, auditLandedSurvivors, landFailureFindings } from "../src/observer.ts";
+import { Observer, type ObserverDeps, auditLandedSurvivors, auditStaleDone, auditTestsGreen, landFailureFindings } from "../src/observer.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
@@ -362,6 +362,37 @@ test("survivor fingerprint is keyed on the stable Plane identifier, not the ephe
 	const f2 = auditLandedSurvivors([agent("ompsq-48-bbbb", "stopped", issue)], new Set<string>(), () => 0, async () => {});
 	expect(f1[0].fingerprint).toBe("survivor:OMPSQ-48");
 	expect(f2[0].fingerprint).toBe(f1[0].fingerprint);
+});
+
+test("auditStaleDone: below the systemic threshold ⇒ one reconcile finding per stranded issue", () => {
+	const mk = (n: number) => ({ id: `i${n}`, name: "x", identifier: `OMPSQ-${n}` }) satisfies IssueRef;
+	const agents = [agent("a1", "stopped", mk(1)), agent("a2", "stopped", mk(2))];
+	const f = auditStaleDone(agents, new Set<string>(), () => 3);
+	expect(f.length).toBe(2);
+	expect(f.map((x) => x.fingerprint).sort()).toEqual(["stale-done:OMPSQ-1", "stale-done:OMPSQ-2"]);
+});
+
+test("auditStaleDone: ≥3 stranded at once ⇒ ONE systemic auto-land finding, not per-issue churn", () => {
+	const mk = (n: number) => ({ id: `i${n}`, name: "x", identifier: `OMPSQ-${n}` }) satisfies IssueRef;
+	const agents = [1, 2, 3, 4].map((n) => agent(`a${n}`, "stopped", mk(n)));
+	const f = auditStaleDone(agents, new Set<string>(), () => 1);
+	expect(f.length).toBe(1);
+	expect(f[0].fingerprint).toBe("autoland-systemic-failure"); // count-independent ⇒ dedups across ticks
+	expect(f[0].severity).toBe("structural");
+	expect(f[0].detail).toContain("OMPSQ-1, OMPSQ-2, OMPSQ-3, OMPSQ-4"); // names the stranded set
+	// The set shifting (one lands, a new one strands) keeps the SAME fingerprint ⇒ no re-file.
+	const f2 = auditStaleDone([2, 3, 4, 5].map((n) => agent(`a${n}`, "stopped", mk(n))), new Set<string>(), () => 1);
+	expect(f2[0].fingerprint).toBe(f[0].fingerprint);
+});
+
+test("regression fingerprint strips bun's per-run duration ⇒ stable across runs (no per-tick re-file)", () => {
+	// Same failing test, two different run durations (a fast run vs a one-off 30s timeout). The duration
+	// must not leak into the fingerprint, else each red tick mints a new Plane issue for the same test.
+	const a = auditTestsGreen({ ok: false, firstFailure: "SquadManager: create reaches idle [795.31ms]" });
+	const b = auditTestsGreen({ ok: false, firstFailure: "SquadManager: create reaches idle [30000.10ms]" });
+	expect(a[0].fingerprint).toBe("regression:SquadManager: create reaches idle");
+	expect(b[0].fingerprint).toBe(a[0].fingerprint);
+	expect(a[0].title).toBe("regression: SquadManager: create reaches idle");
 });
 
 test("a resolved finding CLOSES its Plane issue (self-healing), not just clears the fingerprint", async () => {

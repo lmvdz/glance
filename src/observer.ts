@@ -110,10 +110,18 @@ const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 // ── AUDIT CHECKS v1 — each a small pure fn over injected state (seeded from real gaps 2026-06-23). ──
 
+/** A failing-test identity with bun's per-run duration suffix (e.g. " [1.15ms]") stripped, so the
+ *  regression fingerprint is stable per test, not per run. A jittery duration (1.15ms vs 1.14ms, or a
+ *  one-off 30000ms timeout) was minting a fresh `regression:` Plane issue every red tick for the SAME
+ *  failing test — observer spam, and 429 churn from the cache-clear each filing triggers (OMPSQ). */
+export function stableFailure(firstFailure?: string): string {
+	return (firstFailure ?? "gate").replace(/\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/, "").trim() || "gate";
+}
+
 /** Check 1 — the acceptance gate is red on main ⇒ a regression finding (high). */
 export function auditTestsGreen(gate: { ok: boolean; firstFailure?: string }): Finding[] {
 	if (gate.ok) return [];
-	const fail = gate.firstFailure ?? "gate";
+	const fail = stableFailure(gate.firstFailure);
 	return [
 		{
 			fingerprint: `regression:${fail}`,
@@ -146,21 +154,42 @@ export function auditLandedSurvivors(agents: AgentDTO[], openIds: Set<string>, a
 	return out;
 }
 
-/** Check 4 — a Done Plane issue whose branch is ahead>0 (work not actually landed) ⇒ reconcile (structural). */
+/** ≥ this many Done-but-unlanded issues at once ⇒ a SYSTEMIC auto-land failure, not N independent
+ *  cases. ponytail: a plain threshold; env-ify (OMP_SQUAD_STALE_DONE_SYSTEMIC) only if a repo wants
+ *  to tune it. */
+const STALE_DONE_SYSTEMIC = 3;
+
+/**
+ * Check 4 — Done Plane issues whose branch is ahead>0 (work the fleet marked done but never landed).
+ *
+ * ONE is a special case ⇒ file a per-issue reconcile so it gets landed. But N≥STALE_DONE_SYSTEMIC at
+ * once is the auto-land MECHANISM failing, not N coincidences — filing a reconcile per issue is noise
+ * that nudges a manual force-land each time (treating the symptom, one branch at a time). Above the
+ * threshold, collapse to ONE structural finding that names the pattern and points at the land path, so
+ * the fleet fixes auto-land instead of hand-reconciling every stranded branch. The aggregate keeps a
+ * single count-independent fingerprint so it dedups across ticks even as the stranded set shifts.
+ */
 export function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => number): Finding[] {
-	const out: Finding[] = [];
-	for (const a of agents) {
-		if (!a.issue || openIds.has(a.issue.id)) continue; // open ⇒ not Done
-		if (aheadOf(a) <= 0) continue; // 0 ⇒ landed (survivor); <0 ⇒ unknown
-		const ident = a.issue.identifier ?? a.issue.id;
-		out.push({
-			fingerprint: `stale-done:${ident}`,
-			title: `reconcile Done-but-unlanded ${ident}`,
-			detail: `issue ${ident} is marked Done but branch ${a.branch ?? "?"} is ahead>0 — the work was never landed`,
-			severity: "structural",
-		});
+	const stale = agents.filter((a) => a.issue && !openIds.has(a.issue.id) && aheadOf(a) > 0);
+	if (stale.length === 0) return [];
+	const ident = (a: AgentDTO): string => a.issue!.identifier ?? a.issue!.id;
+	if (stale.length >= STALE_DONE_SYSTEMIC) {
+		const idents = stale.map(ident).sort();
+		return [
+			{
+				fingerprint: "autoland-systemic-failure", // count-independent ⇒ one finding, not one-per-issue churn
+				title: `auto-land is systemically failing — ${stale.length} issues Done-but-unlanded`,
+				detail: `${stale.length} Done issues have unlanded branches (ahead>0): ${idents.join(", ")}.\nThis is one auto-land failure, not ${stale.length} cases — fix the land path, don't hand-reconcile each branch. Likely causes: event-driven land never re-fires for a re-adopted agent that didn't re-run (OMPSQ-164); a conflict-auto-resolved land left "staged" awaits a one-tap Land and is never completed/parked (OMPSQ-138/175); or the orchestrator land tick is off (OMP_SQUAD_AUTODRIVE).`,
+				severity: "structural",
+			},
+		];
 	}
-	return out;
+	return stale.map((a) => ({
+		fingerprint: `stale-done:${ident(a)}`,
+		title: `reconcile Done-but-unlanded ${ident(a)}`,
+		detail: `issue ${ident(a)} is marked Done but branch ${a.branch ?? "?"} is ahead>0 — the work was never landed`,
+		severity: "structural",
+	}));
 }
 
 /** Check 3 — untracked files in the main checkout that also exist on an open agent branch ⇒ land hazard (structural). */
