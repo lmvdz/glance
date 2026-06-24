@@ -38,7 +38,7 @@ import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
 import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
 import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
-import { landAgent, type LandOpts, type LandResult } from "./land.ts";
+import { landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
 import { proofGate, runProof, sweepProofs } from "./proof.ts";
@@ -810,22 +810,27 @@ export class SquadManager extends EventEmitter {
 	/**
 	 * Run the acceptance gate (the repo's `check` + `test` scripts) on main → {ok, firstFailure?}.
 	 * Total by contract: any spawn failure yields ok:false, never a throw (the observer tick must not crash).
+	 * Serialized against lands via withRepoLandLock: the gate reads the same main tree a land mutates
+	 * (merge / reset --hard), so running it concurrently makes it `(fail)` against a half-merged main and
+	 * file a false `regression:` bug (OMPSQ-168). The lock makes the gate and lands mutually exclusive.
 	 * ponytail: runs the full gate per observer tick; the Observer's own overlap guard prevents pile-up,
 	 * but a long suite makes ticks costly — throttle (run every Nth tick) if it ever bites.
 	 */
-	private async runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
-		try {
-			const proc = Bun.spawn(["bash", "-lc", "bun run check && bun test"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-			if (code === 0) return { ok: true };
-			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
-			const text = `${out}\n${err}`;
-			const failLine = text.split("\n").find((l) => l.includes("(fail)"));
-			const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
-			return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
-		} catch (e) {
-			return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
-		}
+	private runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+		return withRepoLandLock(repo, async () => {
+			try {
+				const proc = Bun.spawn(["bash", "-lc", "bun run check && bun test"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+				const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+				if (code === 0) return { ok: true };
+				// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
+				const text = `${out}\n${err}`;
+				const failLine = text.split("\n").find((l) => l.includes("(fail)"));
+				const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
+				return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
+			} catch (e) {
+				return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
+			}
+		});
 	}
 
 	/**
