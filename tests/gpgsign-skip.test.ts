@@ -26,7 +26,11 @@ describe("gitNoSignEnv", () => {
 			await run("git", ["init", "-q"], { cwd: dir });
 			await run("git", ["config", "commit.gpgsign", "true"], { cwd: dir });
 
-			const on = await run("git", ["config", "--get", "commit.gpgsign"], { cwd: dir });
+			// Baseline read with the ambient gitNoSignEnv overrides stripped, so it reflects the
+			// repo config (the test runner may already carry GIT_CONFIG_* in its env).
+			const cleanEnv = { ...process.env };
+			for (const k of Object.keys(cleanEnv)) if (k.startsWith("GIT_CONFIG_")) delete cleanEnv[k];
+			const on = await run("git", ["config", "--get", "commit.gpgsign"], { cwd: dir, env: cleanEnv });
 			expect(on.stdout.trim()).toBe("true");
 
 			const off = await run("git", ["config", "--get", "commit.gpgsign"], {

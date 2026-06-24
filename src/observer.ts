@@ -57,7 +57,7 @@ export interface ObserverDeps {
 	closeIssue?: (ref: IssueRef) => Promise<boolean>;
 	/** Reap a landed-survivor agent (the only autofix; never touches main/code). */
 	removeAgent: (id: string) => Promise<void>;
-	/** Run the acceptance gate (bun run check && bun test) on main; `ok:false` ⇒ red. */
+	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
 	runGate: () => Promise<{ ok: boolean; firstFailure?: string }>;
 	/** Commits on the agent's branch not in main: 0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown. */
 	gitAheadOfMain: (agent: AgentDTO) => number;
@@ -118,7 +118,7 @@ export function auditTestsGreen(gate: { ok: boolean; firstFailure?: string }): F
 		{
 			fingerprint: `regression:${fail}`,
 			title: `regression: ${fail}`,
-			detail: "the acceptance gate (bun run check && bun test) is red on main",
+			detail: "the acceptance gate (the repo's verify command) is red on main",
 			severity: "high",
 		},
 	];

@@ -829,18 +829,21 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Run the acceptance gate (the repo's `check` + `test` scripts) on main → {ok, firstFailure?}.
+	 * Run the acceptance gate (the repo's own verify command, via detectVerify) on main → {ok, firstFailure?}.
 	 * Total by contract: any spawn failure yields ok:false, never a throw (the observer tick must not crash).
+	 * No detectable verify command ⇒ ok:true (nothing to regress against; don't file a false regression).
 	 * Serialized against lands via withRepoLandLock: the gate reads the same main tree a land mutates
 	 * (merge / reset --hard), so running it concurrently makes it `(fail)` against a half-merged main and
 	 * file a false `regression:` bug (OMPSQ-168). The lock makes the gate and lands mutually exclusive.
 	 * ponytail: runs the full gate per observer tick; the Observer's own overlap guard prevents pile-up,
 	 * but a long suite makes ticks costly — throttle (run every Nth tick) if it ever bites.
 	 */
-	private runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+	protected runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
 		return withRepoLandLock(repo, async () => {
 			try {
-				const proc = Bun.spawn(["bash", "-lc", "bun run check && bun test"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+				const command = await detectVerify(repo);
+				if (!command) return { ok: true };
+				const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe" });
 				const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 				if (code === 0) return { ok: true };
 				// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.

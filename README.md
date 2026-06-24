@@ -293,7 +293,7 @@ ticks/restarts); a finding that stops reproducing is confirmed resolved and its 
 **One Observer runs per configured Plane repo** (OMPSQ-137), so every repo in `PLANE_PROJECT_MAP` is
 audited, not just the first; each gets its own dedup map (the first keeps `observer-seen.json` for
 upgrade continuity, the rest are suffixed `observer-seen.<repo>.json`).
-The acceptance-gate check runs `bun run check && bun test` against main *serialized behind any
+The acceptance-gate check runs the repo's own verify command (`detectVerify`) against main *serialized behind any
 in-flight land* (`withRepoLandLock`): the gate reads the same checkout a land mutates (merge / rollback),
 so running them concurrently used to `(fail)` against a half-merged tree and file a false `regression:`
 bug (OMPSQ-168).
