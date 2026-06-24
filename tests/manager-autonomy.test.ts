@@ -13,6 +13,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { SquadManager } from "../src/squad-manager.ts";
+import { Orchestrator } from "../src/orchestrator.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { LandResult } from "../src/land.ts";
@@ -213,6 +214,29 @@ test("create still hard-throws at the cap when the flag is off (default behavior
 	delete process.env.OMP_SQUAD_QUEUE_ON_FULL;
 	delete process.env.OMP_SQUAD_RESOURCE_GATE; // hermetic: assert the count cap, not ambient host-pressure backoff
 	await expect(mgr.create({ repo: "/x/repo", name: "blocked" })).rejects.toThrow(/WIP cap reached \(2\/2\)/);
+});
+
+// ── OMPSQ-134: the manager parks into the SAME Scheduler the orchestrator drains ──
+
+test("a parked spawn is visible to the orchestrator's drain (manager + orchestrator share one Scheduler)", async () => {
+	const mgr = await freshManager();
+	seed(mgr, "live1");
+	seed(mgr, "live2"); // cap 2, both occupying → full
+	for (const id of ["live1", "live2"]) mgr.agents.get(id)!.dto.status = "working";
+	process.env.OMP_SQUAD_MAX_WIP = "2";
+	process.env.OMP_SQUAD_QUEUE_ON_FULL = "1";
+	const dto = await mgr.create({ repo: "/x/repo", name: "parked" });
+	expect(dto.queued).toBe(true);
+
+	// The manager parks into its private scheduler; the orchestrator is wired to that exact instance
+	// (start() passes `scheduler: this.scheduler`). Before the fix the orchestrator owned a different
+	// Scheduler, so this request was stranded forever. Mirror the production wiring and confirm the
+	// drain side sees the parked request.
+	const schedulerMgrParkedInto = (mgr as unknown as { scheduler: import("../src/scheduler.ts").Scheduler }).scheduler;
+	expect(schedulerMgrParkedInto.queued).toBe(1);
+	const orch = new Orchestrator({ listAgents: () => mgr.list(), spawn: (o) => mgr.create(o), verify: async () => false, land: async () => false, scheduler: schedulerMgrParkedInto });
+	expect(orch.scheduler).toBe(schedulerMgrParkedInto); // same instance — not a private copy
+	expect(orch.scheduler.dequeue()?.name).toBe("parked"); // the drain side pops what create() parked
 });
 
 // ── #5 supervised autonomy: bounded, opt-in auto-answer ──────────────────────
