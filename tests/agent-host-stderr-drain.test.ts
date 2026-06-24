@@ -15,11 +15,12 @@ test("draining stderr (runAgentHost pattern) lets a chatty child exit", async ()
 	const proc = Bun.spawn(["bun", "-e", child], { stdout: "ignore", stderr: "pipe" });
 
 	let bytes = 0;
-	void (async () => {
+	const drain = (async () => {
 		for await (const chunk of proc.stderr) bytes += chunk.length;
 	})();
 
 	const code = await proc.exited; // hangs (and fails) if the pipe is never drained
+	await drain; // ensure every byte is counted before asserting (avoids racy bytes check)
 	expect(code).toBe(0);
 	expect(bytes).toBeGreaterThan(64 * 1024); // every byte drained, child unblocked
 });
