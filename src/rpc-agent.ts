@@ -93,15 +93,40 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		return this.hostPid;
 	}
 
-	/** Attach to a live host, or spawn a detached one, then resolve once ready. */
+	/**
+	 * Attach to a live host, or spawn a detached one, then resolve once ready.
+	 *
+	 * The fresh-spawn path is retried within `timeoutMs`: under load a just-spawned host's omp child
+	 * can die during cold start ("exited before ready"), which is transient — the host then removes its
+	 * own socket and exits, so respawning a clean host recovers it. Without this a single load-induced
+	 * cold-start death permanently killed the agent and turned the acceptance gate red against code that
+	 * is actually fine (OMPSQ-188). The ATTACH path stays single-shot: a dead host we attached to is a
+	 * real failure, never something to respawn over.
+	 */
 	async start(timeoutMs = 30_000): Promise<void> {
-		let connected = await this.connect();
-		if (!connected) {
-			this.spawnHost();
-			connected = await this.connectWithRetry(timeoutMs);
-			if (!connected) throw new Error(`agent host for ${this.id} did not come up`);
+		const deadline = Date.now() + timeoutMs;
+		const left = () => Math.max(0, deadline - Date.now());
+		if (await this.connect()) {
+			await this.waitReady(left());
+			return;
 		}
-		await this.waitReady(timeoutMs);
+		let lastErr: unknown;
+		while (left() > 0) {
+			this.resetForRespawn();
+			this.spawnHost();
+			if (!(await this.connectWithRetry(left()))) {
+				lastErr = new Error(`agent host for ${this.id} did not come up`);
+				break; // connectWithRetry exhausted the whole budget — no time left to respawn
+			}
+			try {
+				await this.waitReady(left());
+				return;
+			} catch (e) {
+				lastErr = e; // omp died during cold start — drop the dead socket and respawn if budget remains
+				if (left() > 0) await Bun.sleep(200);
+			}
+		}
+		throw lastErr ?? new Error(`agent host for ${this.id} did not come up`);
 	}
 
 	private spawnHost(): void {
@@ -116,14 +141,21 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 
 	private async connect(): Promise<boolean> {
 		try {
-			this.sock = await Bun.connect<undefined>({
+			// Bind handlers to the resolved socket identity: after a respawn a late close/data event
+			// from a previous (dead) host must not mutate this client's state for the new socket.
+			const sock = await Bun.connect<undefined>({
 				unix: this.socketPath,
 				socket: {
-					data: (_s, chunk) => this.onData(chunk),
-					close: () => this.onClose(),
+					data: (s, chunk) => {
+						if (s === this.sock) this.onData(chunk);
+					},
+					close: (s) => {
+						if (s === this.sock) this.onClose();
+					},
 					error: () => {},
 				},
 			});
+			this.sock = sock;
 			return true;
 		} catch {
 			return false;
@@ -137,6 +169,22 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 			await Bun.sleep(120);
 		}
 		return false;
+	}
+
+	/** Clear per-attempt state (dead socket, ready/exit flags, parse buffer, pending calls) so start()
+	 *  can respawn a fresh host cleanly after a cold-start death. */
+	private resetForRespawn(): void {
+		try {
+			this.sock?.end();
+		} catch {
+			/* ignore */
+		}
+		this.sock = undefined;
+		this.ready = false;
+		this.exited = false;
+		this.buf = "";
+		for (const [, p] of this.pending) p.reject(new Error("agent host respawned"));
+		this.pending.clear();
 	}
 
 	private waitReady(timeoutMs: number): Promise<void> {
