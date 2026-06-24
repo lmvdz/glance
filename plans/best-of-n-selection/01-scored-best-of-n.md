@@ -44,6 +44,26 @@ The antenna article's tell: winners were **fabricated and flown**, not trusted o
 - Soft `score` **only breaks ties among hard-passers** — it can never promote a failing candidate.
 - The Observer's existing `regression: <test>` check on main is the post-land "flight test".
 
+## Maturation path — from `/research https://github.com/mastra-ai/mastra`
+
+The `{ pass, score, axes }` gate is the seed of a general **scorer**. mastra formalizes exactly this
+(numeric 0–1; model-graded + rule-based + statistical) and shows the upgrade path — kept YAGNI-deferred
+here until v1 diff-size demonstrably mis-ranks:
+
+- **Axes roadmap** — beyond v1 diff-size, the next axes are rule-based (lint / typecheck-warning count), then
+  statistical (perf / coverage delta), then model-graded (a one-shot judge on the diff). Add an axis only when
+  a real tournament shows the current axes tie or mis-rank. The hard gate stays immutable regardless.
+- **Sampling rate** — mastra attaches a scorer with `sampling.rate` (0–1) so scoring is partial and never
+  blocks. omp-squad's `best` is already opt-in per fan-out and N×-cost-gated; if scoring ever runs outside a
+  tournament (e.g. on single-shot `--verify` runs for trend data), gate it behind a sample rate so cost stays
+  bounded. `ponytail:` no sampling knob until scoring leaves the fan-out path — fan-out is the rate limiter today.
+- **Score persistence → regression tracking** — mastra stores every score (`mastra_scorers` table) and scores
+  live OR historical runs, incl. in CI. Cheap analog: write each branch's `{ score, axes }` into the existing
+  per-run receipt ledger (`src/receipts.ts`) keyed to the run — no new store — so score trends are queryable and
+  a *score* regression (not just a red gate) becomes visible over time. Reuse receipts; do not build a scores DB.
+- **Datasets / experiments** (A/B a scorer config over a fixed input set) — explicitly far-future YAGNI;
+  noted only so the lineage is recorded.
+
 ## Cross-repo side effects
 None. Internal to omp-squad. `first_success` and `wait_all` paths and their tests stay byte-for-byte behavior.
 

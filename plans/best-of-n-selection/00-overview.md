@@ -41,6 +41,9 @@ N candidates = N× model spend. Evolved antennas were reserved for *mission-crit
 requirements — not routine work. Best-of-N is opt-in per fan-out, gated by the existing
 `OMP_SQUAD_MAX_WIP` / `MAX_AGENTS` caps. Single-shot `--verify` stays the default for ordinary tickets.
 
+**Scorer maturation** (axes roadmap, sampling rate, score persistence) is folded into `01`'s *Maturation path*
+section, sourced from `/research https://github.com/mastra-ai/mastra` — kept YAGNI-deferred behind v1 diff-size.
+
 ## Tracking
 - Plane: **not configured on this box** (no auto-dispatch). If Plane is later wired, file via `/plan-to-plane`
   into module *Workflows* at `priority: low`, BLOCKED_BY edge 01→02.
