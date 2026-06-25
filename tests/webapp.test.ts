@@ -7,7 +7,7 @@
  * KEEP alongside web.test.ts until the dashboard cutover.
  */
 
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -16,7 +16,7 @@ import { SquadServer, webappEnabled } from "../src/server.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
-afterEach(async () => {
+afterAll(async () => {
 	for (const c of cleanups.splice(0)) await c();
 });
 
@@ -34,12 +34,12 @@ async function run(args: string[]): Promise<number> {
 	return code;
 }
 
-// Always install — never a presence-only check. The land gate runs in the MAIN checkout, whose
-// webapp/node_modules already exists from an earlier branch; a branch that ADDS deps to
-// webapp/package.json would then be typechecked/built against stale modules and fail the gate (this
-// is exactly what blocked every dep-adding CC-rewrite branch from landing). `bun install` is a fast
-// no-op when the lockfile is already satisfied, so running it unconditionally is cheap + correct.
-test("webapp deps installed", async () => {
+// Always install before the webapp gate, not as an order-dependent sibling test. The land gate runs
+// in the MAIN checkout, whose webapp/node_modules may already exist from an earlier branch; a branch
+// that ADDS deps to webapp/package.json would then be typechecked/built against stale modules and fail
+// the gate. `bun install` is a fast no-op when the lockfile is already satisfied, so running it
+// unconditionally is cheap + correct, and beforeAll keeps filtered runs like `-t typechecks` hermetic.
+beforeAll(async () => {
 	expect(await run(["install"])).toBe(0);
 }, 320_000);
 
