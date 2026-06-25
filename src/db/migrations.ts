@@ -126,11 +126,22 @@ function rlsMigration(type: DbKind): Migration {
 	};
 }
 
+const usageTraceId: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema.alterTable("usage").addColumn("trace_id", "text").execute();
+		await db.schema.createIndex("usage_org_trace").on("usage").columns(["org_id", "trace_id"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropIndex("usage_org_trace").execute();
+		await db.schema.alterTable("usage").dropColumn("trace_id").execute();
+	},
+};
+
 /** Apply app-table + RLS migrations idempotently via Kysely's Migrator. */
 export async function migrateApp(db: Kysely<any>, type: DbKind): Promise<void> {
 	const provider: MigrationProvider = {
 		async getMigrations(): Promise<Record<string, Migration>> {
-			return { "0001_app_tables": createAppTables, "0002_rls_backstop": rlsMigration(type) };
+			return { "0001_app_tables": createAppTables, "0002_rls_backstop": rlsMigration(type), "0003_usage_trace_id": usageTraceId };
 		},
 	};
 	const migrator = new Migrator({ db, provider });

@@ -177,6 +177,7 @@ The web UI is an **organizational command center**, not a flat list:
   - **Queue** — an attention inbox of every agent blocked on input (and errored) across the whole fleet, answerable in place, oldest-first, so you supervise by exception.
   - **Race** — a race-board: one lane per agent with the workflow's phases as a segmented track, filled by stage progress and labelled with the current phase, so you see who's where in the pipeline and who's stalled at a glance. Fan-out branches nest under their parent.
   - **Audit** — an append-only trail of every actor-initiated fleet action (create / prompt / answer / interrupt / kill / restart / remove / commission / land) with actor, target, and outcome, newest-first, filterable by action and live-updated. Backed by `GET /api/audit` (`?limit=&actor=&action=&target=`); persisted as JSONL under the state dir.
+  - **Trace API** — `GET /api/trace/:id` pulls the North Star audit/diagnostics tree for a feature (`:id` or `feat:<id>`) or run (`run:<agentId>:<runId>`). Receipts keep lossless rollups (tokens/cost/tool counts) for every run; fine spans are tail-sampled, with errors always kept. `land` / comment-resolve lifecycle spans are derived from the audit log at read time, not written as a second store.
 - **Project view** — the agents advancing that project, a *spawn-in-this-project* composer (type a task → agent), and a **Plane issues** panel (open issues; click to spawn an agent on one).
 - **Agent view** — transcript + composer + pending-answer controls, plus side panels:
   - **Subagents** — the live tree of `task`-spawned children (via omp's RPC subagent stream).
@@ -226,6 +227,21 @@ moving without a human. All bounded and **on by default** — set the matching `
 | `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
 | `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates) so blocked agents advance without you — **on by default** (`=0` to disable). Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
 | `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
+
+### Trace export
+
+Tracing is receipt-native: every receipt keeps its cost/token/tool rollup, while `spans[]` detail is tail-sampled (`OMP_SQUAD_TRACE_SAMPLE`, default `0.1`). Error runs and error spans are always kept. Export is best-effort through a bounded in-memory queue; exporter failures drop spans and never block run finalization.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_TRACE` | `=0` disables fine spans/export; receipt rollups still persist |
+| `OMP_SQUAD_TRACE_SAMPLE` | OK-run span sample ratio (default `0.1`); errors ignore this and are kept |
+| `OMP_SQUAD_TRACE_MAX_SPANS` | Per-run span cap (default `500`); oldest OK tool spans shed first |
+| `OMP_SQUAD_TRACE_EXPORT_QUEUE` | Bounded export queue length (default `1000`, drop-oldest) |
+| `OMP_SQUAD_TRACE_EXPORT_TIMEOUT_MS` | Per-export HTTP timeout (default `5000`) |
+| `OMP_SQUAD_TRACE_EXPORT_OTLP_URL` | OTLP/HTTP JSON endpoint, fetched through the SSRF guard |
+| `OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL` | Langfuse ingest endpoint, fetched through the SSRF guard |
+| `OMP_SQUAD_TRACE_EXPORT_DATADOG_URL` | Datadog ingest endpoint, fetched through the SSRF guard |
 
 With auto-land on, work merges without a human in the loop, so the safety net is the **verify gate**
 (build + tests) plus the resolver's reviewer pass — and the risk gate that leaves every destructive

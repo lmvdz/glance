@@ -595,6 +595,12 @@ export class SquadServer {
 				}),
 			);
 		}
+		const mtrace = url.pathname.match(/^\/api\/trace\/([^/]+)$/);
+		if (mtrace && req.method === "GET") {
+			const trace = await manager.trace(decodeURIComponent(mtrace[1]));
+			if (trace.receipts.length === 0 && trace.root.children.length === 0) return new Response("trace not found", { status: 404 });
+			return Response.json(trace);
+		}
 		if (url.pathname === "/api/spawn" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
 			const prompt = body && typeof body === "object" && "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";

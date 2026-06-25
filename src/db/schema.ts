@@ -74,6 +74,7 @@ export interface AuditTable {
 export interface UsageTable {
 	org_id: string;
 	run_id: string;
+	trace_id: string | null;
 	agent_id: string;
 	repo: string;
 	model: string | null;

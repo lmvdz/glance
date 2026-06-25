@@ -80,7 +80,7 @@ import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./
 import { addWorktree, branchAhead, deleteBranchIfMerged, isGitRepo, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
-import { appendReceipt, readReceipts, RunAccumulator } from "./receipts.ts";
+import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { appendCommentEvent, type ArtifactComment, type CommentQuery, listComments as readComments, nextCommentId } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
@@ -88,6 +88,8 @@ import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
+import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
+import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -261,6 +263,7 @@ export class SquadManager extends EventEmitter {
 	private readonly superviseBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
+	private readonly traceExporter?: TraceExportQueue;
 	private idSeq = 0;
 
 	constructor(opts: SquadManagerOptions = {}) {
@@ -274,6 +277,7 @@ export class SquadManager extends EventEmitter {
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.skipGlobalJanitors = opts.skipGlobalJanitors ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
+		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m));
 	}
 
 	async start(): Promise<void> {
@@ -1483,6 +1487,7 @@ export class SquadManager extends EventEmitter {
 	private onAgentEvent(rec: AgentRecord, frame: { type?: string; [k: string]: unknown }): void {
 		if (frame.type?.startsWith("subagent_")) {
 			rec.subs.ingest(frame as { type: string; payload?: unknown });
+			rec.run?.onSubagentFrame(frame as { type: string; payload?: unknown });
 			return;
 		}
 		if (frame.type === "available_commands_update") {
@@ -1501,6 +1506,11 @@ export class SquadManager extends EventEmitter {
 						repo: rec.dto.repo,
 						branch: rec.dto.branch,
 						model: rec.dto.model,
+						featureId: rec.dto.featureId,
+						parentId: rec.dto.parentId,
+						issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name,
+						operator: this.operator.id,
+						org: this.operator.orgId,
 					});
 				}
 				rec.run.start(rec.dto.model);
@@ -1515,6 +1525,7 @@ export class SquadManager extends EventEmitter {
 					| { role?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost?: { total: number } } }
 					| undefined;
 				if (msg?.role === "assistant" && msg.usage) rec.run?.onAssistantUsage(msg.usage);
+				rec.run?.onMessageEnd();
 				if (rec.assistantBuf.trim()) {
 					this.append(rec, "assistant", rec.assistantBuf.trim());
 					rec.assistantBuf = "";
@@ -1524,7 +1535,7 @@ export class SquadManager extends EventEmitter {
 			case "tool_execution_start": {
 				const toolName = typeof frame.toolName === "string" ? frame.toolName : "tool";
 				const intent = typeof frame.intent === "string" ? frame.intent : "";
-				rec.run?.onTool(toolName);
+				rec.run?.onTool(toolName, intent);
 				rec.dto.activity = intent ? `${toolName}: ${truncate(intent, 60)}` : toolName;
 				this.append(rec, "tool", `▸ ${rec.dto.activity}`);
 				break;
@@ -1586,8 +1597,9 @@ export class SquadManager extends EventEmitter {
 		if (!run || run.finalized) return;
 		run.finalized = true;
 		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
-		const receipt = run.snapshot();
+		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
+		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
 		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		// Best-effort cold-start digest: a failure here must never break run completion.
@@ -1626,6 +1638,14 @@ export class SquadManager extends EventEmitter {
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
 	async receipts(id: string): Promise<RunReceipt[]> {
 		return readReceipts(this.stateDir, id);
+	}
+
+	async trace(id: string): Promise<TraceResponse> {
+		const receipts = await readAllReceipts(this.stateDir);
+		for (const rec of this.agents.values()) {
+			if (rec.run && !rec.run.finalized) receipts.push(rec.run.snapshot({ includeSpans: traceSpansEnabled(), maxSpans: traceMaxSpans() }));
+		}
+		return buildTrace(id, receipts, await readAudit(this.stateDir, { limit: 0 }), this.featureStore.keys());
 	}
 
 	/**

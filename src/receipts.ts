@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentStatus, ReceiptRollup, RunReceipt } from "./types.ts";
+import { shouldKeepSpans, SpanCollector, traceMaxSpans, traceSampleRatio } from "./spans.ts";
 
 /** Assistant usage shape we care about (subset of pi-catalog `Usage`). */
 interface AssistantUsage {
@@ -25,6 +26,11 @@ export interface RunSeed {
 	repo: string;
 	branch?: string;
 	model?: string;
+	featureId?: string;
+	parentId?: string;
+	issue?: string;
+	operator?: string;
+	org?: string;
 }
 
 /**
@@ -45,11 +51,13 @@ export class RunAccumulator {
 	private costUsd?: number;
 	private filesTouched: string[] = [];
 	private started = false;
+	private readonly spans: SpanCollector;
 	/** Set once finalizeRun has persisted this run; guards double-append. */
 	finalized = false;
 
 	constructor(seed: RunSeed) {
 		this.seed = { ...seed };
+		this.spans = new SpanCollector(this.seed);
 	}
 
 	/** Begin a run. Idempotent within a live run; refreshes model when given. */
@@ -59,6 +67,7 @@ export class RunAccumulator {
 		this.started = true;
 		this.runId = Date.now().toString(36);
 		this.startedAt = Date.now();
+		this.spans.start(this.runId, this.startedAt, this.seed.model);
 		this.toolCalls = 0;
 		this.toolTally = {};
 		this.tokens = undefined;
@@ -68,9 +77,10 @@ export class RunAccumulator {
 		this.durationMs = undefined;
 	}
 
-	onTool(toolName: string): void {
+	onTool(toolName: string, intent = ""): void {
 		this.toolCalls++;
 		this.toolTally[toolName] = (this.toolTally[toolName] ?? 0) + 1;
+		this.spans.onTool(toolName, intent);
 	}
 
 	/** Accumulate one assistant message's usage; lazily creates the aggregate. */
@@ -84,16 +94,28 @@ export class RunAccumulator {
 		this.costUsd = (this.costUsd ?? 0) + (usage.cost?.total ?? 0);
 	}
 
+	onMessageEnd(): void {
+		this.spans.onMessageEnd();
+	}
+
+	onSubagentFrame(frame: { type: string; payload?: unknown }): void {
+		this.spans.onSubagentFrame(frame);
+	}
+
 	finish(status: AgentStatus, filesTouched: string[]): void {
 		this.endedAt = Date.now();
 		this.durationMs = this.endedAt - this.startedAt;
 		this.status = status;
 		this.filesTouched = filesTouched;
+		this.spans.finish(status, this.endedAt);
 	}
 
 	/** Immutable copy of the current run state. */
-	snapshot(): RunReceipt {
-		return {
+	snapshot(opts: { includeSpans?: boolean; sampleRatio?: number; maxSpans?: number; random?: () => number } = {}): RunReceipt {
+		const includeSpans =
+			opts.includeSpans ??
+			shouldKeepSpans(this.status, this.spans.hasError(), opts.sampleRatio ?? traceSampleRatio(), opts.random);
+		const receipt: RunReceipt = {
 			agentId: this.seed.agentId,
 			name: this.seed.name,
 			repo: this.seed.repo,
@@ -109,7 +131,12 @@ export class RunAccumulator {
 			tokens: this.tokens ? { ...this.tokens } : undefined,
 			costUsd: this.costUsd,
 			filesTouched: [...this.filesTouched],
+			traceId: this.spans.id,
+			featureId: this.seed.featureId,
+			parentId: this.seed.parentId,
 		};
+		if (includeSpans) receipt.spans = this.spans.snapshot(opts.maxSpans ?? traceMaxSpans());
+		return receipt;
 	}
 
 	/** Compact summary for the DTO. */
@@ -137,10 +164,11 @@ export function ingest(acc: RunAccumulator, frame: Frame): void {
 			acc.start();
 			break;
 		case "tool_execution_start":
-			acc.onTool(typeof frame.toolName === "string" ? frame.toolName : "tool");
+			acc.onTool(typeof frame.toolName === "string" ? frame.toolName : "tool", typeof frame.intent === "string" ? frame.intent : "");
 			break;
 		case "message_end":
 			if (frame.message?.role === "assistant" && frame.message.usage) acc.onAssistantUsage(frame.message.usage);
+			acc.onMessageEnd();
 			break;
 		// agent_end / exit carry no run data; finalizeRun calls finish() directly.
 	}
@@ -182,4 +210,21 @@ export async function readReceipts(baseDir: string, agentId: string): Promise<Ru
 		.split("\n")
 		.filter((line) => line.trim())
 		.map((line) => JSON.parse(line) as RunReceipt);
+}
+
+
+export async function readAllReceipts(baseDir: string): Promise<RunReceipt[]> {
+	const dir = path.join(baseDir, "receipts");
+	let entries: string[];
+	try {
+		entries = await fs.readdir(dir);
+	} catch {
+		return [];
+	}
+	const out: RunReceipt[] = [];
+	for (const name of entries) {
+		if (!name.endsWith(".jsonl")) continue;
+		out.push(...(await readReceipts(baseDir, name.slice(0, -".jsonl".length))));
+	}
+	return out;
 }

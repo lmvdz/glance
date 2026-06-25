@@ -244,6 +244,7 @@ export class DbStore implements Store {
 				.values({
 					org_id: this.orgId,
 					run_id: receipt.runId,
+					trace_id: receipt.traceId ?? null,
 					agent_id: receipt.agentId,
 					repo: receipt.repo,
 					model: receipt.model ?? null,

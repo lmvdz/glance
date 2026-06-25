@@ -8,6 +8,7 @@
 
 import type { RpcExtensionUIRequest, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { WorkflowRunState } from "./workflow/types.ts";
+import type { Span } from "./spans.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -256,6 +257,13 @@ export interface RunReceipt {
 	tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
 	costUsd?: number;
 	filesTouched: string[];
+	/** Trace grouping id: `feat:<featureId>` for feature work, else `run:<agentId>:<runId>`. */
+	traceId?: string;
+	/** Fine-grained run spans. Tail-sampled; receipt rollups above are never sampled. */
+	spans?: Span[];
+	/** Feature/parent ids copied onto receipts so trace trees survive agent removal. */
+	featureId?: string;
+	parentId?: string;
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
