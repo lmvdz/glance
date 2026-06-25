@@ -32,6 +32,7 @@ test("commandTier: viewer reads, operator drives, admin destroys", () => {
 	expect(commandTier({ type: "interrupt", id: "a" })).toBe("operator");
 	expect(commandTier({ type: "create", options: { repo: "/x" } })).toBe("operator");
 	expect(commandTier({ type: "commission", spec: { name: "x", purpose: "y" } })).toBe("operator");
+	expect(commandTier({ type: "message", to: "b", text: "hi" })).toBe("operator");
 	expect(commandTier({ type: "kill", id: "a" })).toBe("admin");
 	expect(commandTier({ type: "restart", id: "a" })).toBe("admin");
 	expect(commandTier({ type: "remove", id: "a" })).toBe("admin");

@@ -17,7 +17,7 @@ import type { Server, ServerWebSocket } from "bun";
 import type { ClientCommand, FeatureStage, IssueRef, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { parsePlanConcerns } from "./features.ts";
-import { fetchIssueDetail, listPlaneIssues } from "./plane.ts";
+import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { proofGate, runProof } from "./proof.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
@@ -582,6 +582,15 @@ export class SquadServer {
 			return Response.json(repo ? await who(repo) : await all());
 		}
 		if (url.pathname === "/api/leases") return Response.json(this.registry ? [] : await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
+		if (url.pathname === "/api/fabric") {
+			const repo = url.searchParams.get("repo");
+			return Response.json(await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: !this.registry }));
+		}
+		if (url.pathname === "/api/opportunities") {
+			const repos = url.searchParams.get("repo") ? [url.searchParams.get("repo") as string] : (planeRepos().length ? planeRepos() : manager.projects().map((p) => p.repo));
+			const issues = (await Promise.all(repos.map((repo) => listPlaneIssues(repo).catch(() => null)))).flatMap((x) => x ?? []);
+			return Response.json(issues.filter((i) => i.name.includes("[opportunity]")));
+		}
 		if (url.pathname === "/api/federation") return Response.json(this.registry ? ({ coordinator: null, operators: [], collisions: [] } satisfies FederationSnapshot) : this.federationSnapshot());
 		if (url.pathname === "/api/audit") {
 			const q = url.searchParams;

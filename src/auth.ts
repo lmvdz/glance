@@ -97,10 +97,10 @@ export function resolveRole(req: Request, policy: AuthPolicy): Role | null {
 	return null;
 }
 
-/** The effective tier an actor commands. Explicit role wins; otherwise local surfaces are
- *  trusted (admin) and remote peers default to read-only (viewer). */
+/** The effective tier an actor commands. Explicit role wins for human/federation actors; agent-origin
+ *  actors are kept read-only here and get their one allowed capability in applyCommand's pre-RBAC guard. */
 export function effectiveRole(actor: Actor): Role {
-	return actor.role ?? (actor.origin === "local" ? "admin" : "viewer");
+	return actor.origin === "agent" ? "viewer" : (actor.role ?? (actor.origin === "local" ? "admin" : "viewer"));
 }
 
 // The role↔action permission map lives in authz.ts (OMPSQ-36 / P3). Re-exported here under the

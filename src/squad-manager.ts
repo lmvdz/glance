@@ -33,6 +33,7 @@ import { Dispatcher } from "./dispatch.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
+import { Opportunity } from "./opportunity.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
@@ -43,6 +44,8 @@ import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
 import { proofGate, runProof, sweepProofs } from "./proof.ts";
 import { sweepLeases } from "./leases.ts";
+import { agentActor, scopeFor } from "./agent-scope.ts";
+import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { sweepPresence } from "./presence.ts";
 import { chooseFallback } from "./supervisor.ts";
 import type {
@@ -101,6 +104,17 @@ const POLL_MS = 2500;
  * at all). Override with OMP_SQUAD_AUTOLAND_FAIL_CAP. The Observer turns a parked branch into a
  * dedup'd bug issue so the fleet re-does the work on a fresh branch.
  */
+
+const PEER_MESSAGE_TOOL = "squad_message";
+const PEER_MESSAGE_MAX_CHARS = 2000;
+
+function peerMessageBudget(): number {
+	return Number(process.env.OMP_SQUAD_PEERMSG_BUDGET) || 5;
+}
+
+function commandTarget(cmd: ClientCommand): string | undefined {
+	return cmd.type === "message" ? cmd.to : "id" in cmd ? cmd.id : undefined;
+}
 function autoLandFailCap(): number {
 	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
 }
@@ -253,6 +267,8 @@ export class SquadManager extends EventEmitter {
 	private readonly observers: Observer[] = [];
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
+	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
+	private readonly opportunities: Opportunity[] = [];
 	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning. */
 	private readonly scoutCursor = new Map<string, number>();
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
@@ -261,6 +277,8 @@ export class SquadManager extends EventEmitter {
 	private readonly closedIssues = new Set<string>();
 	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
 	private readonly superviseBudget = new Map<string, number>();
+	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
+	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
 	private readonly traceExporter?: TraceExportQueue;
@@ -374,7 +392,7 @@ export class SquadManager extends EventEmitter {
 					liveReasoning: () =>
 						[...this.agents.values()]
 							.filter((r) => r.dto.status === "working" && this.scoutFor(r.dto.repo) === scout)
-							.map((r) => ({ agent: r.dto.name, task: r.options.task, issue: r.dto.issue?.identifier ?? r.dto.issue?.name, text: this.takeScoutReasoning(r) }))
+							.map((r) => ({ agent: r.dto.id, runId: r.run?.snapshot().runId, task: r.options.task, issue: r.dto.issue?.identifier ?? r.dto.issue?.name, text: this.takeScoutReasoning(r) }))
 							.filter((s) => s.text.length > 0),
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `scout-seen.${slug(repo)}.json`,
@@ -384,6 +402,24 @@ export class SquadManager extends EventEmitter {
 				this.scouts.set(repo, scout);
 			});
 			this.log("info", `scout on (harvesting reasoning → ${observeRepos.join(", ")})`);
+		}
+
+		// Opportunity loop — zero-token clustering over Scout's open issues plus receipt hot areas.
+		if (process.env.OMP_SQUAD_OPPORTUNITY !== "0" && observeRepos.length > 0) {
+			observeRepos.forEach((repo, i) => {
+				const opportunity = new Opportunity({
+					listIssues: () => listPlaneIssues(repo),
+					fileIssue: (title, body) => createPlaneIssue(repo, title, body),
+					scoutFacts: async () => loadScoutFacts(this.stateDir, (await listPlaneIssues(repo).catch(() => null)) ?? []),
+					hotAreas: async () => (await this.fabric(LOCAL_ACTOR, { repos: [repo], includeLeases: false })).hotAreas,
+					stateDir: this.stateDir,
+					seenFile: i === 0 ? undefined : `opportunity-seen.${slug(repo)}.json`,
+					log: (m) => this.log("info", `opportunity[${repo}]: ${m}`),
+				});
+				opportunity.start();
+				this.opportunities.push(opportunity);
+			});
+			this.log("info", `opportunity on (clustering scout patterns → ${observeRepos.join(", ")})`);
 		}
 	}
 
@@ -436,6 +472,7 @@ export class SquadManager extends EventEmitter {
 		this.orchestrator?.stop();
 		for (const o of this.observers) o.stop();
 		for (const s of this.scouts.values()) s.stop();
+		for (const o of this.opportunities) o.stop();
 		await this.persist();
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
@@ -1289,6 +1326,21 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async applyCommand(cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): Promise<void> {
+		// Agent-origin actors are not in the viewer/operator/admin ladder. They get exactly one
+		// capability: bounded advisory messages to their C1 scope.
+		if (actor.origin === "agent") {
+			const target = commandTarget(cmd);
+			if (cmd.type !== "message" || !scopeFor(actor, this.list()).has(cmd.to)) {
+				this.log("warn", `agent-scope: ${actor.id} denied "${cmd.type}"${target ? ` → ${target}` : ""}`);
+				void this.store.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target, detail: { need: "agent:message", have: "agent" } }).catch(() => {});
+				void this.recordAudit(actor, `denied:${cmd.type}`, target ?? null, "error", "agent message-only allowlist");
+				throw new RbacDenied("operator", "viewer", cmd.type);
+			}
+			await this.store.appendAudit({ actor: actor.id, action: cmd.type, target: cmd.to }).catch((err) => this.log("warn", `audit write failed for \"${cmd.type}\": ${err instanceof Error ? err.message : String(err)}`));
+			await this.deliverPeerMessage(actor, cmd.to, cmd.text);
+			return;
+		}
+
 		// RBAC chokepoint: every surface (TUI, web, REST, future federation peers) routes through
 		// here, so the tier check lives here too — nothing can mutate state below its granted tier.
 		const need = commandRole(cmd);
@@ -1296,7 +1348,7 @@ export class SquadManager extends EventEmitter {
 		if (!roleAtLeast(have, need)) {
 			this.log("warn", `rbac: ${actor.id} (${have}) denied "${cmd.type}" — needs ${need}`);
 			void this.store
-				.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target: "id" in cmd ? cmd.id : undefined, detail: { need, have } })
+				.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target: commandTarget(cmd), detail: { need, have } })
 				.catch(() => {});
 			throw new RbacDenied(need, have, cmd.type);
 		}
@@ -1304,8 +1356,8 @@ export class SquadManager extends EventEmitter {
 		// and not audited). DB mode persists to the per-org `audit` table; FileStore is a no-op.
 		if (need !== "viewer") {
 			await this.store
-				.appendAudit({ actor: actor.id, action: cmd.type, target: "id" in cmd ? cmd.id : undefined })
-				.catch((err) => this.log("warn", `audit write failed for "${cmd.type}": ${err instanceof Error ? err.message : String(err)}`));
+				.appendAudit({ actor: actor.id, action: cmd.type, target: commandTarget(cmd) })
+				.catch((err) => this.log("warn", `audit write failed for \"${cmd.type}\": ${err instanceof Error ? err.message : String(err)}`));
 		}
 		if (cmd.type === "create") {
 			await this.create(cmd.options, actor);
@@ -1323,6 +1375,10 @@ export class SquadManager extends EventEmitter {
 		}
 		if (cmd.type === "commission") {
 			await this.commission(cmd.spec, {}, actor);
+			return;
+		}
+		if (cmd.type === "message") {
+			await this.deliverPeerMessage(actor, cmd.to, cmd.text);
 			return;
 		}
 
@@ -1365,6 +1421,37 @@ export class SquadManager extends EventEmitter {
 				void this.recordAudit(actor, "remove", cmd.id, "ok", cmd.deleteWorktree ? "deleted worktree" : undefined);
 				break;
 		}
+	}
+
+	private async deliverPeerMessage(actor: Actor, to: string, text: string): Promise<void> {
+		const target = this.agents.get(to);
+		const trimmed = text.trim();
+		if (!target || target.dto.status === "stopped") {
+			void this.recordAudit(actor, "message", to, "error", "target unavailable");
+			throw new Error(`message target unavailable: ${to}`);
+		}
+		if (!trimmed) {
+			void this.recordAudit(actor, "message", to, "error", "empty message");
+			throw new Error("message text required");
+		}
+		if (trimmed.length > PEER_MESSAGE_MAX_CHARS) {
+			void this.recordAudit(actor, "message", to, "error", "message too large");
+			throw new Error(`message too large (max ${PEER_MESSAGE_MAX_CHARS} chars)`);
+		}
+		if (actor.origin === "agent") {
+			const budget = peerMessageBudget();
+			const used = this.peerMessageBudget.get(actor.id) ?? 0;
+			if (used >= budget) {
+				void this.recordAudit(actor, "message", to, "error", `budget ${budget} spent`);
+				throw new Error(`peer message budget spent (${budget})`);
+			}
+			this.peerMessageBudget.set(actor.id, used + 1);
+		}
+		// ponytail: advisory append only, no queue and no auto-wake. Ceiling: an idle/stopped target may
+		// never act on it; durable/reliable push needs an outbox, which is intentionally out of scope.
+		this.append(target, "system", `Advisory peer message:\n${fenceUntrusted(`peer message from ${actor.id}`, redact(trimmed))}`);
+		this.emitAgent(target);
+		void this.recordAudit(actor, "message", to, "ok", truncate(trimmed, 80));
 	}
 
 	private answerPending(rec: AgentRecord, req: PendingRequest, value: string, actor: Actor): void {
@@ -1616,7 +1703,7 @@ export class SquadManager extends EventEmitter {
 			const reasoning = this.takeScoutReasoning(rec);
 			if (reasoning)
 				void scout
-					.scan(reasoning, { agent: rec.dto.name, task: rec.options.task, issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name })
+					.scan(reasoning, { agent: rec.dto.id, runId: receipt.runId, task: rec.options.task, issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name })
 					.catch((err) => this.log("warn", `scout scan failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		}
 		rec.dto.receipt = run.rollup();
@@ -1646,6 +1733,18 @@ export class SquadManager extends EventEmitter {
 			if (rec.run && !rec.run.finalized) receipts.push(rec.run.snapshot({ includeSpans: traceSpansEnabled(), maxSpans: traceMaxSpans() }));
 		}
 		return buildTrace(id, receipts, await readAudit(this.stateDir, { limit: 0 }), this.featureStore.keys());
+	}
+
+	/** Scoped, read-only context fabric: DTO facts + digests + receipt hot areas + Scout + leases. */
+	async fabric(actor: Actor = LOCAL_ACTOR, opts: { repos?: string[]; includeLeases?: boolean } = {}): Promise<FabricSnapshot> {
+		return buildFabricSnapshot({
+			actor,
+			agents: this.list(),
+			stateDir: this.stateDir,
+			repos: opts.repos ?? planeRepos(),
+			includeLeases: opts.includeLeases,
+			listIssues: (repo) => listPlaneIssues(repo),
+		});
 	}
 
 	/**
@@ -1729,6 +1828,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private onHostTool(rec: AgentRecord, call: { id: string; toolName: string; arguments: unknown }): void {
+		if (call.toolName === PEER_MESSAGE_TOOL) {
+			void this.handlePeerMessageTool(rec, call);
+			return;
+		}
 		const pending: PendingRequest = {
 			id: call.id,
 			source: "tool",
@@ -1741,6 +1844,22 @@ export class SquadManager extends EventEmitter {
 		this.append(rec, "system", `⛔ tool call needs host: ${call.toolName}`);
 		rec.dto.status = this.derive(rec);
 		this.emitAgent(rec);
+	}
+
+	private async handlePeerMessageTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+		const to = typeof args.to === "string" ? args.to.trim() : "";
+		const text = typeof args.text === "string" ? args.text : "";
+		if (!to || !text.trim()) {
+			rec.agent.respondHostTool(call.id, `usage: ${PEER_MESSAGE_TOOL}({ to: string, text: string })`, true);
+			return;
+		}
+		try {
+			await this.applyCommand({ type: "message", to, text }, agentActor(rec.dto.id));
+			rec.agent.respondHostTool(call.id, `delivered advisory message to ${to}`);
+		} catch (err) {
+			rec.agent.respondHostTool(call.id, err instanceof Error ? err.message : String(err), true);
+		}
 	}
 
 	private derive(rec: AgentRecord): AgentStatus {

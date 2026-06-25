@@ -34,6 +34,7 @@ test("commandRole: reads need viewer, driving needs operator, destructive needs 
 	expect(commandRole({ type: "subscribe", id: "a" })).toBe("viewer");
 	expect(commandRole({ type: "prompt", id: "a", message: "hi" })).toBe("operator");
 	expect(commandRole({ type: "create", options: { repo: "/x" } })).toBe("operator");
+	expect(commandRole({ type: "message", to: "b", text: "hi" })).toBe("operator");
 	expect(commandRole({ type: "kill", id: "a" })).toBe("admin");
 	expect(commandRole({ type: "restart", id: "a" })).toBe("admin");
 	expect(commandRole({ type: "remove", id: "a" })).toBe("admin");
@@ -53,10 +54,11 @@ test("requiredRole: GET=viewer, mutation=operator, destructive=admin, auth/push=
 	expect(requiredRole("POST", "/api/push/subscribe")).toBe("viewer");
 });
 
-test("effectiveRole: explicit role wins; else local⇒admin, remote⇒viewer", () => {
+test("effectiveRole: explicit role wins except agent-origin stays viewer; else local⇒admin, remote⇒viewer", () => {
 	expect(effectiveRole({ id: "x", origin: "local", role: "viewer" })).toBe("viewer");
 	expect(effectiveRole({ id: "x", origin: "local" })).toBe("admin"); // trusted in-process surface
 	expect(effectiveRole({ id: "x", origin: "remote" })).toBe("viewer"); // untrusted peer defaults read-only
+	expect(effectiveRole({ id: "x", origin: "agent", role: "admin" })).toBe("viewer"); // message-only allowlist lives in applyCommand
 });
 
 test("resolveRole: auth off ⇒ admin; else highest matching token, null on miss", () => {

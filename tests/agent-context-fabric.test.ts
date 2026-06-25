@@ -1,0 +1,213 @@
+/**
+ * Agent context fabric — scope spine, read-only fabric, advisory peer messages, and opportunities.
+ */
+import { afterEach, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { RbacDenied } from "../src/auth.ts";
+import { agentActor, scopeFor } from "../src/agent-scope.ts";
+import { buildFabricSnapshot, type FabricScoutFact } from "../src/fabric.ts";
+import { Opportunity, opportunityClusters } from "../src/opportunity.ts";
+import { appendReceipt } from "../src/receipts.ts";
+import { writeDigest } from "../src/digest.ts";
+import { SquadManager } from "../src/squad-manager.ts";
+import { SubagentTracker } from "../src/subagents.ts";
+import type { AgentDTO, IssueRef, PersistedAgent, TranscriptEntry } from "../src/types.ts";
+
+const cleanups: Array<() => Promise<void>> = [];
+const savedPeerBudget = process.env.OMP_SQUAD_PEERMSG_BUDGET;
+const savedOpportunity = process.env.OMP_SQUAD_OPPORTUNITY;
+const savedOpportunityMin = process.env.OMP_SQUAD_OPPORTUNITY_MIN;
+
+afterEach(async () => {
+	for (const cleanup of cleanups.splice(0)) await cleanup();
+	if (savedPeerBudget === undefined) delete process.env.OMP_SQUAD_PEERMSG_BUDGET;
+	else process.env.OMP_SQUAD_PEERMSG_BUDGET = savedPeerBudget;
+	if (savedOpportunity === undefined) delete process.env.OMP_SQUAD_OPPORTUNITY;
+	else process.env.OMP_SQUAD_OPPORTUNITY = savedOpportunity;
+	if (savedOpportunityMin === undefined) delete process.env.OMP_SQUAD_OPPORTUNITY_MIN;
+	else process.env.OMP_SQUAD_OPPORTUNITY_MIN = savedOpportunityMin;
+});
+
+interface TestDriver {
+	prompt(message: string): Promise<void>;
+	abort(): Promise<void>;
+	stop(): Promise<void>;
+	detach?(): void;
+	respondHostTool(callId: string, text: string, isError?: boolean): void;
+}
+
+interface TestRecord {
+	dto: AgentDTO;
+	agent: TestDriver;
+	options: PersistedAgent;
+	transcript: TranscriptEntry[];
+	assistantBuf: string;
+	streaming: boolean;
+	subs: SubagentTracker;
+}
+
+interface HostToolHarness {
+	onHostTool(rec: TestRecord, call: { id: string; toolName: string; arguments: unknown }): void;
+}
+
+const tmpDir = async (prefix: string): Promise<string> => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+	return dir;
+};
+
+function dto(id: string, over: Partial<AgentDTO> = {}): AgentDTO {
+	return {
+		id,
+		name: id,
+		status: "idle",
+		kind: "omp-operator",
+		repo: "/repo",
+		worktree: `/wt/${id}`,
+		approvalMode: "write",
+		pending: [],
+		lastActivity: 0,
+		messageCount: 0,
+		...over,
+	};
+}
+
+function record(agent: AgentDTO, replies: Array<{ callId: string; text: string; isError?: boolean }> = []): TestRecord {
+	return {
+		dto: agent,
+		agent: {
+			async prompt() {},
+			async abort() {},
+			async stop() {},
+			detach() {},
+			respondHostTool(callId, text, isError) {
+				replies.push({ callId, text, isError });
+			},
+		},
+		options: { id: agent.id, name: agent.name, repo: agent.repo, worktree: agent.worktree, approvalMode: agent.approvalMode },
+		transcript: [],
+		assistantBuf: "",
+		streaming: false,
+		subs: new SubagentTracker(),
+	};
+}
+
+function addRecord(mgr: SquadManager, rec: TestRecord): void {
+	// Test seam: SquadManager.AgentRecord is intentionally private, but these fields are the runtime shape used by applyCommand/onHostTool.
+	(mgr.agents as unknown as Map<string, TestRecord>).set(rec.dto.id, rec);
+}
+
+test("scopeFor gives agent-origin actors self, feature peers, parents, and children only", () => {
+	const roster = [dto("parent"), dto("a", { parentId: "parent", featureId: "f" }), dto("peer", { featureId: "f" }), dto("child", { parentId: "a" }), dto("other", { featureId: "g" })];
+	expect([...scopeFor(agentActor("a"), roster)].sort()).toEqual(["a", "child", "parent", "peer"]);
+	expect([...scopeFor({ id: "web:viewer", origin: "local", role: "viewer" }, roster)].sort()).toEqual(["a", "child", "other", "parent", "peer"]);
+});
+
+test("agent-origin actors can only send scoped advisory messages", async () => {
+	process.env.OMP_SQUAD_PEERMSG_BUDGET = "1";
+	const dir = await tmpDir("acf-msg-");
+	const mgr = new SquadManager({ stateDir: dir });
+	const sender = record(dto("a", { featureId: "f" }));
+	const target = record(dto("peer", { featureId: "f" }));
+	const other = record(dto("other", { featureId: "g" }));
+	addRecord(mgr, sender);
+	addRecord(mgr, target);
+	addRecord(mgr, other);
+
+	await expect(mgr.applyCommand({ type: "prompt", id: "peer", message: "steer" }, { id: "a", origin: "agent", role: "admin" })).rejects.toThrow(RbacDenied);
+	await mgr.applyCommand({ type: "message", to: "peer", text: "hello from peer" }, agentActor("a"));
+	expect(target.transcript.at(-1)?.kind).toBe("system");
+	expect(target.transcript.at(-1)?.text).toContain("BEGIN peer message from a (untrusted data)");
+	expect(target.dto.status).toBe("idle");
+	await expect(mgr.applyCommand({ type: "message", to: "peer", text: "again" }, agentActor("a"))).rejects.toThrow("budget");
+	await expect(mgr.applyCommand({ type: "message", to: "other", text: "nope" }, agentActor("a"))).rejects.toThrow(RbacDenied);
+});
+
+test("reserved squad_message host tool routes through applyCommand without creating a pending host approval", async () => {
+	const dir = await tmpDir("acf-host-");
+	const mgr = new SquadManager({ stateDir: dir });
+	const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
+	const sender = record(dto("a", { featureId: "f" }), replies);
+	const target = record(dto("peer", { featureId: "f" }));
+	addRecord(mgr, sender);
+	addRecord(mgr, target);
+
+	const delivered = Promise.withResolvers<void>();
+	sender.agent.respondHostTool = (callId, text, isError) => {
+		replies.push({ callId, text, isError });
+		delivered.resolve();
+	};
+	(mgr as unknown as HostToolHarness).onHostTool(sender, { id: "call-1", toolName: "squad_message", arguments: { to: "peer", text: "heads up" } });
+	await delivered.promise;
+
+	expect(sender.dto.pending).toEqual([]);
+	expect(replies).toEqual([{ callId: "call-1", text: "delivered advisory message to peer", isError: undefined }]);
+	expect(target.transcript.at(-1)?.text).toContain("heads up");
+});
+
+test("fabric snapshot is scoped and returns distilled facts with receipt provenance", async () => {
+	const dir = await tmpDir("acf-fabric-");
+	const agents = [dto("a", { featureId: "f" }), dto("peer", { featureId: "f" }), dto("other", { featureId: "g" })];
+	await writeDigest(dir, "a", "## digest a");
+	await writeDigest(dir, "other", "## digest other");
+	await appendReceipt(dir, { agentId: "a", name: "a", repo: "/repo", runId: "run-a", startedAt: 900, endedAt: 950, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: ["src/a.ts"] });
+	await appendReceipt(dir, { agentId: "peer", name: "peer", repo: "/repo", runId: "run-p", startedAt: 800, endedAt: 850, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: ["src/a.ts", "src/p.ts"] });
+	await appendReceipt(dir, { agentId: "other", name: "other", repo: "/repo", runId: "run-o", startedAt: 700, endedAt: 750, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: ["src/secret.ts"] });
+	await fs.writeFile(path.join(dir, "scout-seen.json"), JSON.stringify({ a: { title: "Fix shared bug", issueId: "i-a", filedAt: 1, agent: "a", runId: "run-a" }, o: { title: "Leaky other", issueId: "i-o", filedAt: 2, agent: "other", runId: "run-o" } }));
+
+	const snapshot = await buildFabricSnapshot({
+		actor: agentActor("a"),
+		agents,
+		stateDir: dir,
+		repos: ["/repo"],
+		includeLeases: false,
+		now: () => 1000,
+		listIssues: async () => [
+			{ id: "i-a", name: "[scout] do-not-auto-land: Fix shared bug" },
+			{ id: "i-o", name: "[scout] do-not-auto-land: Leaky other" },
+		],
+	});
+
+	expect(snapshot.scope.sort()).toEqual(["a", "peer"]);
+	expect(snapshot.digests.map((d) => d.source.agentId)).toEqual(["a"]);
+	expect(snapshot.hotAreas.map((h) => h.file)).not.toContain("src/secret.ts");
+	expect(snapshot.hotAreas[0].touchedBy.map((s) => s.runId).sort()).toEqual(["run-a", "run-p"]);
+	expect(snapshot.scout.map((s) => s.issue.id)).toEqual(["i-a"]);
+});
+
+function scoutFact(id: string, title: string, agentId: string, runId: string, filedAt: number): FabricScoutFact {
+	return { type: "scout", title, filedAt, source: { agentId, runId, issueId: id }, issue: { id, name: `[scout] do-not-auto-land: ${title}` } };
+}
+
+test("opportunity loop files one deduped do-not-auto-land issue for a recurring scout cluster", async () => {
+	process.env.OMP_SQUAD_OPPORTUNITY = "1";
+	process.env.OMP_SQUAD_OPPORTUNITY_MIN = "3";
+	const dir = await tmpDir("acf-opp-");
+	const facts = [
+		scoutFact("i1", "Add retry to RPC reconnect", "a", "r1", 3),
+		scoutFact("i2", "Add retry to RPC reconnect", "b", "r2", 2),
+		scoutFact("i3", "Add retry to RPC reconnect", "c", "r3", 1),
+	];
+	expect(opportunityClusters(facts, [], 3).length).toBe(1);
+
+	const filed: Array<{ title: string; body: string }> = [];
+	const opp = new Opportunity({
+		listIssues: async () => facts.map((f) => f.issue),
+		fileIssue: async (title, body) => {
+			filed.push({ title, body });
+			return { id: "opp-1", name: title } satisfies IssueRef;
+		},
+		scoutFacts: async () => facts,
+		hotAreas: async () => [],
+		stateDir: dir,
+		now: () => 10,
+		log: () => {},
+	});
+	await opp.tick();
+	await opp.tick();
+	expect(filed.length).toBe(1);
+	expect(filed[0].title.startsWith("[opportunity] do-not-auto-land:")).toBe(true);
+	expect(filed[0].body).toContain("i1");
+});

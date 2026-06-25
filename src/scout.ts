@@ -46,6 +46,8 @@ export interface ScanContext {
 	task?: string;
 	/** Human identifier (or name) of the run's tracking issue, if any. */
 	issue?: string;
+	/** Receipt run id when the scan is tied to a completed or in-flight run. */
+	runId?: string;
 }
 
 /** A reasoning chunk plus its context — what the mid-run sweep yields per live agent. */
@@ -179,6 +181,9 @@ interface SeenEntry {
 	title: string;
 	issueId: string;
 	filedAt: number;
+	agent?: string;
+	runId?: string;
+	issue?: string;
 }
 type SeenMap = Record<string, SeenEntry>;
 
@@ -271,7 +276,7 @@ export class Scout {
 				openScout++;
 				filed++;
 				changed = true;
-				this.seen[fp] = { title: t.title, issueId: ref.id, filedAt: clock() };
+				this.seen[fp] = { title: t.title, issueId: ref.id, filedAt: clock(), agent: ctx.agent, runId: ctx.runId, issue: ctx.issue };
 				log(`filed ${t.kind} ${ref.identifier ?? ref.id}: ${t.title}`);
 			}
 			if (changed) this.saveSeen();

@@ -492,7 +492,7 @@ export interface AuditEntry {
 	at: number;
 	/** Who initiated it — an `Actor.id` ("local", "web:admin", "auto-supervise", a tailnet login…). */
 	actor: string;
-	/** What they did: create | prompt | answer | interrupt | kill | restart | remove | commission | land. */
+	/** What they did: create | prompt | answer | interrupt | kill | restart | remove | commission | land | message. */
 	action: string;
 	/** What it acted on (agent id, worker name, feature id) — null for fleet-wide actions. */
 	target: string | null;
@@ -512,6 +512,7 @@ export type ClientCommand =
 	| { type: "restart"; id: string }
 	| { type: "remove"; id: string; deleteWorktree?: boolean }
 	| { type: "create"; options: CreateAgentOptions }
+	| { type: "message"; to: string; text: string }
 	| { type: "snapshot" } // request a full roster + recent transcript replay
 	| { type: "subscribe"; id: string } // ask for transcript replay of one agent
 	| { type: "commission"; spec: CommissionSpec };
@@ -529,10 +530,11 @@ export interface Actor {
 	/** Stable id, e.g. tailnet login "bob@company.com" or "local". */
 	id: string;
 	displayName?: string;
-	/** "local" for same-machine surfaces, "remote" for federation peers. */
-	origin: "local" | "remote";
-	/** RBAC tier this actor holds. Absent ⇒ derived from origin: a local surface is
-	 *  trusted (admin), a remote peer is read-only (viewer) until a transport stamps a role. */
+	/** "local" for same-machine surfaces, "remote" for federation peers, "agent" for authenticated agent-host tool calls. */
+	origin: "local" | "remote" | "agent";
+	/** RBAC tier this actor holds. Absent ⇒ derived from origin: local surfaces are
+	 *  trusted (admin), remote peers and agent-origin actors are read-only (viewer).
+	 *  Agents do NOT gain capabilities through this tier; applyCommand has a message-only allowlist. */
 	role?: Role;
 	/** Org whose fleet this actor acts on (DB mode). Absent ⇒ file mode / no active org. */
 	orgId?: string;

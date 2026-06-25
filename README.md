@@ -364,6 +364,28 @@ detail). scan() is serialized so the two triggers can't race-file the same item.
 (exact key, else basename, else the first repo as catch-all), so a latent item lands in the right
 tracker. Each repo gets its own seen-set (`scout-seen.json` for the first, `scout-seen.<repo>.json` for the rest).
 
+
+**Context fabric + peer messages** — `GET /api/fabric` returns scoped, read-only context facts:
+agent state, cold-start digests, receipt-derived hot files, Scout items, and live file leases. Agent-origin
+actors use the hierarchy scope spine (self + same feature peers + parent chain + children); they are not
+operators and cannot call normal commands. The only agent-origin write is the reserved host tool
+`squad_message({to,text})`, routed through `applyCommand` as `{type:"message"}`. Delivery is advisory:
+the target transcript gets a redacted, fenced system note on its next natural turn; no prompt, wake,
+interrupt, kill, queue, broker, or broad RBAC system is involved.
+
+**Pattern opportunities** — the Opportunity loop clusters open `[scout]` issues across distinct
+runs/agents with the same zero-token title Jaccard style Scout uses, enriches the cluster with
+receipt-derived hot files, and files one `[opportunity] do-not-auto-land: …` Plane issue per stable
+cluster fingerprint (`<stateDir>/opportunity-seen.json`). `GET /api/opportunities` lists those issues.
+This is intentionally a query + one seen-map, not a new store.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_PEERMSG_BUDGET` | Per-sender advisory peer-message cap for agent-origin `squad_message` calls (default `5`, process-lifetime like autosupervise) |
+| `OMP_SQUAD_OPPORTUNITY` | Opportunity clustering loop — **on** when Plane is configured (`=0` to disable; then no timer is armed) |
+| `OMP_SQUAD_OPPORTUNITY_MIN` | Minimum recurring Scout items across distinct runs/agents before filing one opportunity (default `3`) |
+| `OMP_SQUAD_OPPORTUNITY_MAX` | Hard cap on opportunity-filed *open* issues (default `5`); past it, log + skip |
+| `OMP_SQUAD_OPPORTUNITY_WINDOW` | Most-recent open Scout items considered per tick (default `50`) |
 | Env | Meaning |
 |---|---|
 | `OMP_SQUAD_SCOUT` | Reasoning harvester — **on** when Plane is configured (`=0` to disable; then no sweep timer is armed) |

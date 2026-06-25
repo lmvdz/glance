@@ -172,3 +172,14 @@ soft-after C2 (pull is the preferred path).
 ## Open Questions
 None blocking. One deferred-by-decision: a persisted/windowed per-sender message budget (the Map is
 process-lifetime, like `superviseBudget`) — add only if cross-restart abuse appears.
+
+## Implementation Status
+
+STATUS: Done — implemented in this worktree.
+
+Resolution:
+- C1 landed via `src/agent-scope.ts`, `Actor.origin: "agent"`, and the `applyCommand` agent-origin message-only guard.
+- C2 landed via `src/fabric.ts`, `SquadManager.fabric()`, and viewer `GET /api/fabric`.
+- C3 landed via `ClientCommand.type === "message"` plus reserved `squad_message` host-tool routing, fenced/redacted advisory transcript append, audit, scope checks, and per-sender budget.
+- C4 landed via `src/opportunity.ts`, the manager Opportunity loop, and viewer `GET /api/opportunities`.
+- Focused coverage lives in `tests/agent-context-fabric.test.ts` plus updated RBAC/authz assertions.
