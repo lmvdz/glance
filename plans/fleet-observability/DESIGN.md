@@ -1,5 +1,8 @@
 # Design: unified fleet execution observability — trace tree + pluggable export
 
+STATUS: Done — implemented in `src/spans.ts`, `src/receipts.ts`, `src/trace-exporter.ts`, `src/squad-manager.ts`, `src/server.ts`, and the DB usage migration.
+RESOLUTION: Receipt-native trace spine shipped: optional `traceId`/sampled `spans[]`, pull `GET /api/trace/:id`, audit-derived lifecycle spans, bounded SSRF-guarded exporters, focused tests, and README/env docs.
+
 > Source: `/research https://github.com/mastra-ai/mastra` → concepts #3 (span hierarchy + sampling +
 > tags/metadata) and #4 (pluggable exporters). We borrow the **pattern** — a span/trace tree, ratio +
 > always-on-error sampling, allowlisted tags, an exporter interface with OTel first — and **reject the

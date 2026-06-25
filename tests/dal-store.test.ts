@@ -106,6 +106,7 @@ test("DbStore: appendUsage lands under the writing org, denormalizes columns, an
 		name: "a1",
 		repo: "/repo",
 		runId: "run-A-1",
+		traceId: "feat:f1",
 		startedAt: 100,
 		endedAt: 200,
 		status: "idle",
@@ -124,6 +125,7 @@ test("DbStore: appendUsage lands under the writing org, denormalizes columns, an
 	expect(rows[0].tokens_total).toBe(3);
 	expect(rows[0].tool_calls).toBe(3);
 	expect(JSON.parse(rows[0].data).runId).toBe("run-A-1");
+	expect(rows[0].trace_id).toBe("feat:f1");
 
 	// Re-finalizing the same run overwrites its single (org, run_id) row.
 	await dbStore("A").appendUsage({ ...r, toolCalls: 9 });
