@@ -1,5 +1,5 @@
 # Data plane — pluggable Store over the DAL
-STATUS: todo
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -118,3 +118,7 @@ be a no-op — single tenant, optional.)
 - Manager-level: construct a manager with `FileStore` (default) → existing persistence tests
   still pass (behavior-preserving); construct with a fake `Store` → `create()` calls
   `saveAgents`, `applyCommand` mutation calls `appendAudit`.
+
+## Resolution
+
+DONE — overview Plane tracking says OMPSQ-37/P2 landed, including OMPSQ-45. P3 OMPSQ-36 also landed, and the recorded gate passed: `bun run check` + `bun test` → 417 pass / 0 fail.

@@ -1,5 +1,5 @@
 # Request routing & per-org WebSocket broadcast
-STATUS: todo
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -124,3 +124,7 @@ the isolation PR) and note (a) as the upgrade. Mark with a `ponytail:` comment.
 - `tests/ws-org-isolation.test.ts`: two sockets (org A, org B) on one server; `create` an agent
   in org A; assert the org-B socket receives **no** `agent`/`roster` event mentioning it, and the
   org-A socket does; `subscribe` to org A's agent id from the org-B socket replays nothing.
+
+## Resolution
+
+DONE — overview Plane tracking says OMPSQ-37/P2 landed, including OMPSQ-46. P3 OMPSQ-36 also landed, and the recorded gate passed: `bun run check` + `bun test` → 417 pass / 0 fail.

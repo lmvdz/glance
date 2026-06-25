@@ -1,5 +1,5 @@
 # State roots — per-tenant filesystem layout & org-scoped worktrees
-STATUS: todo
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -97,3 +97,7 @@ If a future deploy must adopt a flat `<root>/state.json` into an org, it is a on
   `base` omitted falls back to `worktreeBase()` (file-mode parity).
 - Construct two managers with distinct `stateDir`/`worktreeBase`; `create()` an agent in each;
   assert `state.json` (file-mode store) and the worktree dir land under the right org segment.
+
+## Resolution
+
+DONE — overview Plane tracking says OMPSQ-37/P2 landed, including OMPSQ-44. P3 OMPSQ-36 also landed, and the recorded gate passed: `bun run check` + `bun test` → 417 pass / 0 fail.
