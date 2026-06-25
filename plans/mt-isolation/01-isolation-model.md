@@ -1,5 +1,5 @@
 # Isolation model — per-org SquadManager registry
-STATUS: todo
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -108,3 +108,7 @@ chooses single-manager vs registry.)
   `peek` on an unseen org returns `undefined` without creating.
 - Assert a manager for org A and one for org B have disjoint `agents` Maps after `create()` on
   each (structural isolation).
+
+## Resolution
+
+DONE — overview Plane tracking says OMPSQ-37/P2 landed, including OMPSQ-43. P3 OMPSQ-36 also landed, and the recorded gate passed: `bun run check` + `bun test` → 417 pass / 0 fail.

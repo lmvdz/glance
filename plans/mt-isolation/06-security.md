@@ -1,5 +1,5 @@
 # Security — isolation invariants & the P3 seam
-STATUS: todo
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -97,3 +97,7 @@ P3 (OMPSQ-36) plugs into **`applyCommand`** (squad-manager.ts:943). After P2:
 - Audit: a mutation through `applyCommand` writes one `audit` row under the actor's org and none
   under another org.
 - Presence: in DB mode, `/api/presence` / federation snapshot for org A contains no org-B repo.
+
+## Resolution
+
+DONE — overview Plane tracking says OMPSQ-37/P2 landed, including OMPSQ-47. P3 OMPSQ-36 also landed, and the recorded gate passed: `bun run check` + `bun test` → 417 pass / 0 fail.

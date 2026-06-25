@@ -1,5 +1,5 @@
 # Lifecycle — lazy create/evict, locks, janitors, autonomy loops
-STATUS: todo
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -120,3 +120,7 @@ detaches + persists) → `await dbHandle.close()` → `lock.release()`. File mod
 - Janitor union: a fake registry with two managers (org A id-set {a1}, org B {b1}); assert the
   registry computes the reap-protected union {a1,b1} (so a single-org reap can't target the
   other). Boot-seed: union seeded from `loadAgents()` is non-empty before any manager starts.
+
+## Resolution
+
+DONE — overview Plane tracking says OMPSQ-37/P2 landed, including OMPSQ-48. P3 OMPSQ-36 also landed, and the recorded gate passed: `bun run check` + `bun test` → 417 pass / 0 fail.
