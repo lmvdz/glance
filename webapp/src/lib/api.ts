@@ -1,31 +1,44 @@
-import { apiFetch } from "./ws";
+const TOKEN_KEY = "ompsq_token";
 
-// GET/POST helpers for the same-origin omp-squad daemon API. Responses come from
-// our own daemon (trusted boundary), so the caller-declared T is an accepted
-// unchecked shape rather than a schema parse (no validator dep in webapp).
-
-export async function apiGet<T>(path: string): Promise<T | null> {
+export function captureToken(): void {
   try {
-    const r = await apiFetch(path);
-    if (!r.ok) return null;
-    const data = (await r.json()) as T; // caller-declared daemon response shape
-    return data;
+    const url = new URL(location.href);
+    const token = url.searchParams.get("token");
+    if (!token) return;
+    localStorage.setItem(TOKEN_KEY, token);
+    url.searchParams.delete("token");
+    history.replaceState(null, "", url.toString());
   } catch {
-    return null;
+    // ponytail: storage/location can be blocked in tests; unauthenticated fetch still works in db mode.
   }
 }
 
-export async function apiPost<T>(path: string, body: unknown): Promise<T | null> {
+export function token(): string {
   try {
-    const r = await apiFetch(path, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body ?? {}),
-    });
-    if (!r.ok) return null;
-    const data = (await r.json()) as T; // caller-declared daemon response shape
-    return data;
+    return localStorage.getItem(TOKEN_KEY) ?? "";
   } catch {
-    return null;
+    return "";
   }
+}
+
+export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  captureToken();
+  const headers = new Headers(init?.headers);
+  const t = token();
+  if (t) headers.set("Authorization", `Bearer ${t}`);
+  return fetch(path, { ...init, headers });
+}
+
+export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await apiFetch(path, init);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<T>;
+}
+
+export function jsonInit(method: string, body: unknown): RequestInit {
+  return {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
 }

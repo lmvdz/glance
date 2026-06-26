@@ -1,15 +1,9 @@
-// Mirrors the subset of omp-squad's src/types.ts wire types the webapp consumes.
-// Kept as a local copy because webapp/ is a separate package with its own tsconfig.
-
 export type AgentStatus = "starting" | "working" | "idle" | "input" | "error" | "stopped";
-export type FeatureStage =
-  | "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
+export type FeatureStage = "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
 
 export interface PendingRequest {
   id: string;
-  /** "ui" (confirm/input/select/editor) or "tool" (host tool name). */
   source: "ui" | "tool";
-  /** UI method (confirm/input/select/editor) or the host tool name. */
   kind: string;
   title: string;
   message?: string;
@@ -18,48 +12,84 @@ export interface PendingRequest {
   createdAt: number;
 }
 
-export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";
-
-export interface TranscriptEntry {
-  kind: TranscriptKind;
-  text: string;
-  ts: number;
-}
-
 export interface IssueRef {
   id: string;
   identifier?: string;
   name: string;
   state?: string;
+  priority?: "urgent" | "high" | "medium" | "low" | "none" | string;
   url?: string;
   projectId?: string;
-  /** Issue ids that block this one (Plane blocked_by relations). */
   blockedBy?: string[];
   noAutoDispatch?: boolean;
 }
 
-/** A concern doc inside a plan dir (mirrors src/features.ts PlanConcern) — a draft task before filing. */
-export interface PlanConcern {
-  file: string;
-  title: string;
-  status: string;
-  priority?: string;
-  complexity?: string;
-  /** Set once filed to Plane (the PLANE: pointer); absent ⇒ still a local draft. */
-  planeId?: string;
-  open: boolean;
+export interface ProjectDTO {
+  id: string;
+  name: string;
+  repo: string;
+  agentCount: number;
+  statusCounts: Partial<Record<AgentStatus, number>>;
+  pendingCount: number;
+  lastActivity: number;
 }
 
-/** The automation-loop snapshot for a feature (GET /api/features/:id/pipeline). */
-export interface FeaturePipeline {
-  concerns: PlanConcern[];
-  issues: IssueRef[];
-  agentIds: string[];
+export interface FeatureCriterionDTO {
+  id: string;
+  text: string;
+  completed: boolean;
+  source?: "plan" | "ticket" | "workflow" | "manual";
 }
+
+export interface FeatureDecisionDTO {
+  id: string;
+  text: string;
+  source?: "plan" | "human" | "agent";
+  createdAt?: number;
+}
+
+export interface FeatureRelationshipDTO {
+  id: string;
+  targetId: string;
+  targetTitle: string;
+  type?: "issue" | "blocks" | "depends-on" | "related";
+  url?: string;
+}
+
+export interface FeatureContextBundleDTO {
+  spec: string;
+  criteria: string;
+  prerequisites: string;
+  decisions: string;
+  downstream: string;
+}
+
+export interface PlanAnnotationTargetDTO {
+  planPath: string;
+  lineStart?: number;
+  lineEnd?: number;
+  quote?: string;
+}
+
+export interface ArtifactCommentDTO {
+  id: string;
+  repo: string;
+  subject: string;
+  body: string;
+  author: string;
+  urgent?: boolean;
+  createdAt: number;
+  kind?: "comment" | "plan-annotation";
+  annotation?: PlanAnnotationTargetDTO;
+  resolvedAt?: number;
+}
+
 
 export interface FeatureDTO {
   id: string;
   title: string;
+  createdAt?: number;
+  updatedAt?: number;
   repo: string;
   stage: FeatureStage;
   planDir?: string;
@@ -71,6 +101,42 @@ export interface FeatureDTO {
   issueIdentifiers?: string[];
   workflowStage?: string;
   workflowProgress?: { done: number; total: number };
+  description?: string;
+  acceptanceCriteria?: FeatureCriterionDTO[];
+  decisions?: FeatureDecisionDTO[];
+  relationships?: FeatureRelationshipDTO[];
+  contextBundle?: FeatureContextBundleDTO;
+}
+
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+export interface TodoTaskDTO {
+  content: string;
+  status: TodoStatus;
+}
+
+export interface TodoPhaseDTO {
+  name: string;
+  tasks: TodoTaskDTO[];
+}
+
+export interface ReceiptRollupDTO {
+  toolCalls: number;
+  costUsd?: number;
+  durationMs?: number;
+  endedAt?: number;
+  tokens?: number;
+}
+
+export interface AgentSessionSummaryDTO {
+  id?: string;
+  name?: string;
+  file?: string;
+  thinkingLevel?: string;
+  messageCount?: number;
+  queuedMessageCount?: number;
+  isCompacting?: boolean;
+  autoCompactionEnabled?: boolean;
 }
 
 export interface AgentDTO {
@@ -81,66 +147,153 @@ export interface AgentDTO {
   worktree: string;
   branch?: string;
   model?: string;
+  startedAt?: number;
+  contextPct?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+  receipt?: ReceiptRollupDTO;
+  session?: AgentSessionSummaryDTO;
+  profileId?: string;
   activity?: string;
   todo?: { done: number; total: number; active?: string };
-  contextPct?: number;
+  todoPhases?: TodoPhaseDTO[];
   pending: PendingRequest[];
   lastActivity: number;
+  messageCount?: number;
   error?: string;
   issue?: IssueRef;
   featureId?: string;
+  landReady?: boolean;
 }
 
-/** Mirrors src/types.ts TaskDetail — a Plane issue with its body parsed into the planner sections. */
-export interface TaskDetail {
-  id: string;
-  identifier?: string;
+export interface TranscriptTool {
+  callId: string;
   name: string;
-  state?: string;
-  priority?: string;
-  labels: string[];
+  args?: unknown;
+  argsText?: string;
+  partial?: unknown;
+  partialText?: string;
+  result?: unknown;
+  resultText?: string;
+  isError?: boolean;
+  durationMs?: number;
+}
+
+export type TranscriptFormat = "markdown" | "command" | "stage" | "plain";
+
+export interface TranscriptPending {
+  requestId: string;
+  action: "created" | "answered" | "cancelled";
+}
+
+export interface TranscriptEntry {
+  id?: string;
+  seq?: number;
+  kind: "user" | "assistant" | "thinking" | "tool" | "system";
+  text: string;
+  ts: number;
+  clientTurnId?: string;
+  status?: "running" | "ok" | "error" | "cancelled";
+  tool?: TranscriptTool;
+  format?: TranscriptFormat;
+  pending?: TranscriptPending;
+}
+
+export interface CommandInfo {
+  name: string;
+  description?: string;
+  args?: string;
+}
+
+
+export interface PublicCapabilityProfileDTO {
+  id?: string;
+  name: string;
+  description?: string;
+  model?: string;
+}
+
+export interface PublicCapabilityCatalogDTO {
+  id: string;
+  source: string;
+  title: string;
+  description: string;
+  framework: "omp" | "workflow" | "flue" | "external";
+  version: string;
+  slug: string;
+  checksum: string;
+  requiredEnv: string[];
+  profiles: PublicCapabilityProfileDTO[];
+  tools: { name: string; description?: string }[];
+  skills: { name: string; description?: string }[];
+  workflows: { id?: string; label: string; description?: string }[];
+}
+export type CapabilityInstallState = "imported" | "validated" | "approved" | "enabled" | "disabled" | "failed" | "removed";
+
+export interface CapabilitySourceDTO {
+  id: string;
+  name: string;
   url?: string;
-  blockedBy: string[];
-  body: string;
-  tier2: { description: string; acceptanceCriteria: string; verification: string; scope: string };
+  trusted: boolean;
+  updatedAt: number;
 }
 
-/** One fleet-action audit record (subset of src/types.ts AuditEntry). */
-export interface AuditEntry {
-  at: number;
-  actor?: string;
-  action: string;
-  target?: string;
-  outcome?: string;
-  detail?: string;
+export interface CapabilityPackDTO {
+  id: string;
+  sourceId: string;
+  framework: "omp" | "workflow" | "flue" | "external";
+  slug: string;
+  version: string;
+  checksum: string;
+  title: string;
+  description: string;
+  requiredEnv: string[];
+  tools: { name: string; description?: string }[];
+  skills: { name: string; description?: string }[];
+  workflows: { id?: string; label: string; description?: string; path?: string }[];
 }
 
-/** Manager -> surface events (subset; see src/types.ts SquadEvent). */
+export interface CapabilityBindingDTO {
+  id: string;
+  installId: string;
+  type: "profile" | "workflow" | "tool" | "skill" | "driver" | "ui-action" | "preview" | "doc";
+  key: string;
+  enabled: boolean;
+}
+
+export interface CapabilityInstallDTO {
+  id: string;
+  orgId: string;
+  packId: string;
+  version: string;
+  checksum: string;
+  state: CapabilityInstallState;
+  bindings: CapabilityBindingDTO[];
+  updatedAt: number;
+}
+
+export interface CapabilitySnapshotDTO {
+  sources: CapabilitySourceDTO[];
+  packs: CapabilityPackDTO[];
+  installs: CapabilityInstallDTO[];
+}
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
   | { type: "removed"; id: string }
   | { type: "features-changed" }
+  | { type: "comment"; comment: ArtifactCommentDTO }
+  | { type: "comment-resolved"; id: string; resolvedAt: number }
   | { type: "transcript"; id: string; entry: TranscriptEntry }
-  | { type: "log"; level: "info" | "warn" | "error"; text: string }
   | { type: "commands"; id: string; commands: CommandInfo[] }
-  | { type: "audit"; entry: AuditEntry };
+  | { type: "log"; level: "info" | "warn" | "error"; text: string };
 
-/** A slash command available to an agent (subset of src/types.ts CommandInfo). */
-export interface CommandInfo {
-  name: string;
-  description?: string;
-  aliases?: string[];
-  hint?: string;
-  source?: string;
-}
-
-/** Surface -> manager commands (subset we send). */
 export type ClientCommand =
   | { type: "snapshot" }
   | { type: "subscribe"; id: string }
-  | { type: "prompt"; id: string; message: string }
-  | { type: "answer"; id: string; requestId: string; value: string }
+  | { type: "prompt"; id: string; message: string; clientTurnId?: string }
+  | { type: "set-model"; id: string; model: string }
   | { type: "interrupt"; id: string }
   | { type: "kill"; id: string }
   | { type: "restart"; id: string }
