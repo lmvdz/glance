@@ -270,6 +270,50 @@ none requires a new mechanism.
 
 | **Multi-tenant SaaS** | `mt-isolation` plan (6× p0 critical path) | Enterprise tier | Generic managed infra / SaaS hosting |
 
+
+### Claude Tag + Kunchenguid stack — primitives to steal, not products to clone (2026-06-25)
+**Claude Tag read:** Anthropic's Slack surface proves the team-agent category: channel-scoped identity,
+admin-governed access bundles, per-channel memory, proactive check-ins, scheduled/standing work, spend caps,
+and audit trails that link Slack threads to external actions. Steal the primitives, not Slack as the center.
+
+| Source | Primitive to steal | Where it lands in omp-squad | What we skip |
+|---|---|---|---|
+| **Claude Tag** | Place-scoped agent identity: access + memory follows the channel/project, not the individual prompt author | Project/repo-scoped profiles + capability grants; extend `intake`/`smart-spawn` and `applyCommand` audit | Slack as the canonical UI; vendor-hosted ephemeral sandbox |
+| **Claude Tag** | Proactive follow-up: agent checks in when work completes, stalls, or a standing trigger fires | Observer/orchestrator → Queue + web push + future Slack/AXI notifier | Unbounded "assistant watches everything"; every trigger is registered, listed, and revocable |
+| **Claude Tag** | Spend/access controls visible to admins before runaway usage | Existing receipts + WIP/admission caps → per-project/profile budgets | SaaS billing model; budgets are policy gates, not pricing UX |
+| **Claude Tag** | Thread-linked audit: external actions trace back to the request that caused them | Receipts/provenance ledger + audit log deep-links from Plane/GitHub/Slack adapters | Treating Slack transcript as the source of truth |
+| **gnhf** | Overnight loop: small committed iterations, `notes.md` carryover, resume, rollback-on-fail, stop conditions | Workflow durable resume + digest/summarizer + auto-drive repair budgets | Single-agent infinite improvement loop as the main product |
+| **no-mistakes** | Git remote as gate: `git push no-mistakes` means disposable worktree → review/test/docs/lint → PR only when green | Auto-land/verify gate as a first-class "push target" mode for human and agent branches | Building a separate gate daemon beside `applyCommand`/land |
+| **firstmate** | One liaison, many workers: user talks to a captain; crew runs in isolated worktrees; escalates only decisions | Control Tower LLM as conversational config + supervisor over roster/sub-fleets | Prompt-directory/tmux-only orchestration as the architecture |
+| **treehouse** | Reusable worktree pool with leases, dirty/in-use detection, safe prune/destroy | Faster `omp-squad` worktree provisioning and secondmate/profile homes | Replacing current worktree ownership ledger wholesale |
+| **AXI** | Agent-ergonomic CLIs: token-thin TOON output, content-first defaults, structured errors, next-step hints | External adapters (`gh`, browser, Plane, Slack) should expose AXI-shaped shell surfaces for agents | MCP-only integration path or verbose human CLI output |
+
+**Comparison:** Kunchenguid's system is a sharp personal agent OS: `firstmate` is the conversational captain,
+`gnhf` is the walk-away iteration loop, `no-mistakes` is the git/PR quality gate, `treehouse` is the worktree
+substrate, and `AXI` is the low-token tool interface doctrine. `omp-squad` is trying to compress those roles
+into one open control plane: runtime-agnostic drivers, one event spine, one auth/audit chokepoint, workflows,
+auto-dispatch, auto-land, federation, and enterprise isolation. The danger is sprawl; the advantage is one
+governed substrate instead of five cooperating tools.
+
+**Decision:** fold these ideas into existing seams only. If a feature needs a second captain, second gate,
+second memory store, or second worktree ledger, it is probably wrong. The primitives that matter are:
+place-scoped identity/memory, revocable standing triggers, agent-ergonomic adapters, reusable leased
+worktrees, git-push-as-gate, and one conversational supervisor that writes policy into the control plane.
+
+**Focus correction (2026-06-25):** this surface is getting too wide. The one thing is **verified agent
+landing**: turn intent into an isolated branch, prove it with the repo's gate, land it safely, and preserve
+the audit trail. Everything else is subordinate. Slack intake, AXI adapters, profiles, memory, dashboards,
+federation, and triggers matter only if they make verified landing faster, safer, or easier to supervise.
+If they don't, cut or defer them.
+
+**Product-quality correction (2026-06-25):** not close yet. The current web UI has too many named surfaces
+for the amount of working depth behind them. Piyaz works because it has a small number of surfaces that are
+visually dense and behaviorally real. Omp-squad should collapse to the same discipline: **Glance**, **Work**,
+**Review/Land**, and **Audit**. Hide/defer thin pages (`Profiles`, `Best-of-N`, `Conflicts`, `Fleet Health`,
+`Policy`, `Settings`, `Onboarding`, most standalone observability) until each is backed by a real action loop.
+Do not add another sidebar item for a concept that can be a panel, badge, filter, or drill-down inside the
+verified-landing flow.
+
 ### Competitive Landscape — funded market signals (2026-06)
 The meta-harness layer is now a crowded VC category. We differentiate by planting on the "local-first /
 verifiable" corners that centralized SaaS cannot occupy.
