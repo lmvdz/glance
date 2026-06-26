@@ -97,6 +97,64 @@ export interface FederationPeersTable {
 	data: string;
 }
 
+
+/** Per-org capability pack/source/install snapshot records. */
+export interface CapabilityRecordsTable {
+	org_id: string;
+	id: string;
+	kind: "sources" | "packs" | "installs" | "verifications" | "audit";
+	data: string;
+	updated_at: number;
+}
+/** Feedback Loop campaigns, one row per widget token/campaign. */
+export interface FeedbackCampaignsTable {
+	org_id: string;
+	id: string;
+	campaign_id: string;
+	repo: string;
+	status: string;
+	/** Full FeedbackCampaign JSON. */
+	data: string;
+	created_at: number;
+}
+
+/** Feedback Loop submissions. */
+export interface FeedbackItemsTable {
+	org_id: string;
+	id: string;
+	campaign_id: string;
+	repo: string;
+	status: string;
+	/** Full FeedbackItem JSON. */
+	data: string;
+	created_at: number;
+}
+
+/** Validation votes/responses for a feedback item. */
+export interface FeedbackValidationResponsesTable {
+	org_id: string;
+	id: string;
+	campaign_id: string;
+	repo: string;
+	/** Vote value, kept in the common status lookup column. */
+	status: string;
+	/** Full FeedbackValidationResponse JSON. */
+	data: string;
+	created_at: number;
+}
+
+/** Reward ledger entries for feedback. */
+export interface FeedbackRewardsTable {
+	org_id: string;
+	id: string;
+	campaign_id: string;
+	repo: string;
+	status: string;
+	/** Full FeedbackReward JSON. */
+	data: string;
+	created_at: number;
+}
+
 export interface AppDatabase {
 	organization: OrganizationTable;
 	roster_index: RosterIndexTable;
@@ -104,6 +162,11 @@ export interface AppDatabase {
 	audit: AuditTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;
+	capability_records: CapabilityRecordsTable;
+	feedback_campaigns: FeedbackCampaignsTable;
+	feedback_items: FeedbackItemsTable;
+	feedback_validation_responses: FeedbackValidationResponsesTable;
+	feedback_rewards: FeedbackRewardsTable;
 }
 
 export type RosterRow = Selectable<RosterIndexTable>;
@@ -111,3 +174,8 @@ export type FeatureRow = Selectable<FeaturesTable>;
 export type AuditRow = Selectable<AuditTable>;
 export type UsageRow = Selectable<UsageTable>;
 export type FederationPeerRow = Selectable<FederationPeersTable>;
+export type CapabilityRecordRow = Selectable<CapabilityRecordsTable>;
+export type FeedbackCampaignRow = Selectable<FeedbackCampaignsTable>;
+export type FeedbackItemRow = Selectable<FeedbackItemsTable>;
+export type FeedbackValidationResponseRow = Selectable<FeedbackValidationResponsesTable>;
+export type FeedbackRewardRow = Selectable<FeedbackRewardsTable>;

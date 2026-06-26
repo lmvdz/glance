@@ -44,6 +44,8 @@ export interface AgentDriver extends EventEmitter {
 
 	/** Switch the session model to a fuzzy spec (e.g. "opus", "claude-sonnet-4-5"). Optional. */
 	setModel?(spec: string): Promise<unknown>;
+	/** Available runtime models, when the backing harness exposes them. */
+	getAvailableModels?(): Promise<{ models?: unknown[] }>;
 	/** Switch the session reasoning effort (minimal|low|medium|high|xhigh). Optional. */
 	setThinkingLevel?(level: string): Promise<unknown>;
 

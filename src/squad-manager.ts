@@ -8,6 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
@@ -37,8 +38,8 @@ import { Opportunity } from "./opportunity.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
-import { buildFeatures, featureLandStatus, type LandMember, landOrder } from "./features.ts";
+import { addPlaneIssueComment, closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
+import { buildFeatures, featureLandStatus, listPlanDirs, type LandMember, landOrder } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -53,10 +54,14 @@ import type {
 	AuditEntry,
 	IssueRef,
 	PlaneTicket,
+	AgentProfile,
 	AgentDTO,
 	FeatureDTO,
 	PersistedFeature,
 	FeatureStage,
+	FeatureCriterion,
+	FeatureDecision,
+	FeatureRelationship,
 	AgentStatus,
 	CommandInfo,
 	ClientCommand,
@@ -76,6 +81,10 @@ import type {
 	SquadEvent,
 	TranscriptEntry,
 	TranscriptKind,
+	FeedbackCampaign,
+	FeedbackItem,
+	FeedbackReward,
+	FeedbackValidationResponse,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
@@ -85,7 +94,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
-import { appendCommentEvent, type ArtifactComment, type CommentQuery, listComments as readComments, nextCommentId } from "./comments.ts";
+import { appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, nextCommentId } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
@@ -93,6 +102,33 @@ import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
+import {
+	acceptFeedbackSubmission,
+	assertRewardTransition,
+	hashCampaignToken,
+	newCampaignId,
+	normalizeFeedbackValidation,
+	renderFeedbackPlaneIssue,
+	summarizeFeedback,
+	type FeedbackSnapshot,
+	type FeedbackSummary,
+	type FeedbackValidationInput,
+} from "./feedback.ts";
+import {
+	capabilityFederationMetadata,
+	capabilityProfiles,
+	capabilityWorkflowDefinitions,
+	diffCapabilityPacks,
+	emptyCapabilitySnapshot,
+	importCapabilitySource,
+	installCapability,
+	normalizeCapabilitySnapshot,
+	updateCapabilityInstall,
+	type CapabilityImportInput,
+	type CapabilityInstallInput,
+	type CapabilityInstallPatch,
+	type CapabilitySnapshot,
+} from "./capabilities/index.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -190,6 +226,73 @@ const AUTO_ACTOR: Actor = { id: "auto-supervise", displayName: "auto-supervise",
 const RISKY_RE =
 	/force[- ]?push|--force\b|reset --hard|\bdelete\b|\bdestroy\b|\bdrop\b|rm\s+-rf|\bpublish\b|\bdeploy\b|\brelease\b|\bproduction\b|\bprod\b|\bmainnet\b|\bsecret\b|\bcredential\b|\bpassword\b|\bwipe\b|\btruncate\b|\boverwrite\b|push.*\bmain\b|merge.*\bmain\b/i;
 
+export interface RuntimeModelOption {
+	label: string;
+	value: string;
+}
+
+export function modelOptionsFromRuntime(models: unknown): RuntimeModelOption[] {
+	if (!Array.isArray(models)) return [];
+	const seen = new Set<string>();
+	return models.flatMap((item): RuntimeModelOption[] => {
+		if (!item || typeof item !== "object") return [];
+		const rec = item as Record<string, unknown>;
+		const id = typeof rec.id === "string" ? rec.id.trim() : "";
+		if (!id) return [];
+		const provider = typeof rec.provider === "string" ? rec.provider.trim() : "";
+		const value = provider ? `${provider}/${id}` : id;
+		if (seen.has(value)) return [];
+		seen.add(value);
+		return [{ label: value, value }];
+	});
+}
+
+export function profileOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AgentProfile[] {
+	const configured = parseProfiles(env.OMP_SQUAD_PROFILES);
+	const fallback: AgentProfile = {
+		id: "default",
+		name: "Default OMP operator",
+		description: "Live omp --mode rpc session with the daemon's default model and write approvals.",
+		runtime: "omp-operator",
+		approvalMode: "write",
+		default: true,
+	};
+	return configured.length ? configured : [fallback];
+}
+
+function parseProfiles(raw: string | undefined): AgentProfile[] {
+	if (!raw?.trim()) return [];
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		return parsed.flatMap((item): AgentProfile[] => {
+			if (!item || typeof item !== "object") return [];
+			const r = item as Record<string, unknown>;
+			const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : "";
+			const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : id;
+			const runtime = r.runtime === "flue-service" || r.runtime === "workflow" ? r.runtime : "omp-operator";
+			if (!id) return [];
+			return [{
+				id,
+				name,
+				description: typeof r.description === "string" ? r.description : undefined,
+				runtime,
+				model: typeof r.model === "string" ? r.model : undefined,
+				approvalMode: r.approvalMode === "always-ask" || r.approvalMode === "write" || r.approvalMode === "yolo" ? r.approvalMode : undefined,
+				capabilities: Array.isArray(r.capabilities) ? r.capabilities.filter((v): v is string => typeof v === "string") : undefined,
+				memory: typeof r.memory === "string" ? r.memory : undefined,
+				default: r.default === true,
+			}];
+		});
+	} catch {
+		return [];
+	}
+}
+
+function isAgentDisconnected(err: unknown): boolean {
+	return err instanceof Error && /agent (not connected|connection lost)/i.test(err.message);
+}
+
 interface AgentRecord {
 	dto: AgentDTO;
 	agent: AgentDriver;
@@ -197,6 +300,12 @@ interface AgentRecord {
 	transcript: TranscriptEntry[];
 	/** Accumulated streaming text since the last flush. */
 	assistantBuf: string;
+	/** Live assistant transcript row being updated by message_update deltas. */
+	assistantEntry?: TranscriptEntry;
+	/** Accumulated thinking text since the last flush. */
+	thinkingBuf: string;
+	/** Live thinking transcript row being updated by thinking deltas. */
+	thinkingEntry?: TranscriptEntry;
 	/** True between agent_start/turn_start and agent_end. */
 	streaming: boolean;
 	/** Live subagent (task-spawned children) tree for this agent. */
@@ -205,6 +314,8 @@ interface AgentRecord {
 	commands?: CommandInfo[];
 	/** Live receipt accumulator for the in-flight run (one per agent_start..end). */
 	run?: RunAccumulator;
+	/** In-flight rich tool transcript entries keyed by the runtime toolCallId. */
+	toolEntries: Map<string, TranscriptEntry>;
 }
 
 export interface SquadManagerOptions {
@@ -242,6 +353,7 @@ export class SquadManager extends EventEmitter {
 	private availability: OperatorPresence["availability"] = "active";
 	private readonly stateDir: string;
 	private readonly featureStore = new Map<string, PersistedFeature>();
+	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
 	/** Org-scoped worktree base override (DB mode); undefined ⇒ global worktreeBase(). */
@@ -283,6 +395,9 @@ export class SquadManager extends EventEmitter {
 	private readonly reattached = new Set<string>();
 	private readonly traceExporter?: TraceExportQueue;
 	private idSeq = 0;
+	private transcriptSeq = 0;
+	/** Last observed `plans/` signature for repos the feature board scans. */
+	private planFeatureSignature = "";
 
 	constructor(opts: SquadManagerOptions = {}) {
 		super();
@@ -320,6 +435,7 @@ export class SquadManager extends EventEmitter {
 			});
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
+		await this.refreshPlanFeatureSignature();
 		// Auto-dispatch + auto-land (Orchestrator) live in start(), so they are per-org for free in DB
 		// mode (one loop per SquadManager). ponytail: Plane repo config (planeRepos) is still read
 		// daemon-global, so every org would dispatch the same repos — meaningful only for single-org
@@ -492,6 +608,7 @@ export class SquadManager extends EventEmitter {
 
 	/** On daemon start, reattach to any agent whose detached host survived (upgrade/restart). */
 	private async reconnectLive(snapshot: StateSnapshot): Promise<number> {
+		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		let n = 0;
 		for (const p of snapshot.agents) {
@@ -538,6 +655,7 @@ export class SquadManager extends EventEmitter {
 				existingPath: p.worktree,
 				branch: p.branch,
 				model: p.model,
+				profileId: p.profileId,
 				approvalMode: p.approvalMode,
 				thinking: p.thinking,
 				issue: p.issue,
@@ -581,6 +699,7 @@ export class SquadManager extends EventEmitter {
 			worktree: p.worktree,
 			branch: p.branch,
 			model: p.model,
+			profileId: p.profileId,
 			approvalMode: p.approvalMode,
 			pending: [],
 			lastActivity: Date.now(),
@@ -590,9 +709,11 @@ export class SquadManager extends EventEmitter {
 			parentId: p.parentId,
 			featureId: p.featureId,
 			owns: p.owns,
+			workflow: p.workflow,
+			workflowState: p.workflowState,
 		};
 		const agent = this.makeDriver(p);
-		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		dto.messageCount = transcript.length;
 		this.agents.set(p.id, rec);
 		this.wire(rec);
@@ -613,6 +734,259 @@ export class SquadManager extends EventEmitter {
 
 	getAgent(id: string): AgentDTO | undefined {
 		return this.agents.get(id)?.dto;
+	}
+
+	profiles(): AgentProfile[] {
+		const envProfiles = profileOptionsFromEnv();
+		const envIds = new Set(envProfiles.map((p) => p.id));
+		const installed = capabilityProfiles(this.capabilityStore).filter((p) => !envIds.has(p.id));
+		return [...envProfiles, ...installed];
+	}
+
+	capabilities(): CapabilitySnapshot {
+		return this.capabilityStore;
+	}
+
+	importCapability(input: CapabilityImportInput, actor: Actor = LOCAL_ACTOR): { source: CapabilitySnapshot["sources"][number]; pack: CapabilitySnapshot["packs"][number]; warnings: string[] } {
+		const out = importCapabilitySource(this.capabilityStore, input, actor.id);
+		void this.store.appendAudit({ actor: actor.id, action: "capability.source.import", target: out.source.id, detail: { packId: out.pack.id, checksum: out.pack.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
+		void this.persist();
+		this.emitFeaturesChanged();
+		return out;
+	}
+
+	installCapability(input: CapabilityInstallInput, actor: Actor = LOCAL_ACTOR): CapabilitySnapshot["installs"][number] {
+		const install = installCapability(this.capabilityStore, { ...input, orgId: input.orgId ?? actor.orgId ?? "file" }, actor.id);
+		void this.store.appendAudit({ actor: actor.id, action: "capability.install", target: install.id, detail: { packId: install.packId, checksum: install.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
+		void this.persist();
+		this.emitFeaturesChanged();
+		return install;
+	}
+
+	updateCapability(id: string, patch: CapabilityInstallPatch, actor: Actor = LOCAL_ACTOR): CapabilitySnapshot["installs"][number] {
+		const install = updateCapabilityInstall(this.capabilityStore, id, patch, actor.id);
+		void this.store.appendAudit({ actor: actor.id, action: `capability.${install.state}`, target: install.id, detail: { packId: install.packId, checksum: install.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
+		void this.persist();
+		this.emitFeaturesChanged();
+		return install;
+	}
+
+	capabilityDiff(beforeId: string, afterId: string) {
+		const before = this.capabilityStore.packs.find((pack) => pack.id === beforeId);
+		const after = this.capabilityStore.packs.find((pack) => pack.id === afterId);
+		if (!before || !after) throw new Error("capability pack not found");
+		return diffCapabilityPacks(before, after);
+	}
+
+	capabilityFederation() {
+		return capabilityFederationMetadata(this.capabilityStore);
+	}
+
+	capabilityWorkflowDefinitions() {
+		return capabilityWorkflowDefinitions(this.capabilityStore);
+	}
+
+	async runCapability(installId: string, bindingKey: string | undefined, opts: { repo?: string; prompt?: string } = {}, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		const install = this.capabilityStore.installs.find((item) => item.id === installId);
+		if (!install || install.state !== "enabled") throw new Error("enabled capability install not found");
+		const pack = this.capabilityStore.packs.find((item) => item.id === install.packId);
+		if (!pack) throw new Error("capability pack not found");
+		const binding = bindingKey ? install.bindings.find((item) => item.enabled && item.key === bindingKey) : install.bindings.find((item) => item.enabled && (item.type === "profile" || item.type === "workflow" || item.type === "driver"));
+		if (!binding) throw new Error("capability binding not found");
+		const repo = opts.repo ?? process.cwd();
+		const prompt = opts.prompt ?? `Run capability ${binding.key}`;
+		const name = binding.key.replace(/^cap:/, "").replace(/[^a-z0-9-]+/gi, "-").slice(0, 24) || "capability";
+		if (binding.type === "driver" && binding.config.runtime === "flue-service") {
+			const dir = path.join(this.stateDir, "capabilities", install.id);
+			await fs.mkdir(dir, { recursive: true });
+			await Promise.all(pack.files.map(async (file) => {
+				if (file.content === undefined) return;
+				const target = path.join(dir, file.path);
+				if (!target.startsWith(dir + path.sep)) throw new Error("capability file path escapes install dir");
+				await fs.mkdir(path.dirname(target), { recursive: true });
+				await fs.writeFile(target, file.content);
+			}));
+			const workflow = typeof binding.config.workflow === "string" ? binding.config.workflow : pack.workflows[0]?.path ?? pack.workflows[0]?.id ?? pack.slug;
+			const target = binding.config.target === "cloudflare" ? "cloudflare" : "node";
+			return this.create({ repo, name, task: prompt, autoRoute: false, flue: { dir, workflow, target } }, actor);
+		}
+		if (binding.type === "workflow") return this.create({ repo, name, workflow: binding.sourcePath, task: prompt, autoRoute: false }, actor);
+		return this.create({ repo, name, profileId: binding.key, task: prompt, autoRoute: false }, actor);
+	}
+
+	private profileFor(id: string | undefined): AgentProfile | undefined {
+		if (!id) return undefined;
+		return this.profiles().find((p) => p.id === id);
+	}
+
+	async modelOptions(): Promise<RuntimeModelOption[]> {
+		for (const rec of this.agents.values()) {
+			if (!rec.agent.isAlive || !rec.agent.getAvailableModels) continue;
+			try {
+				const result = await rec.agent.getAvailableModels();
+				const options = modelOptionsFromRuntime(result.models);
+				if (options.length) return options;
+			} catch {
+				/* fall back to configured models */
+			}
+		}
+		return [];
+	}
+
+	async listFeedbackCampaigns(): Promise<FeedbackCampaign[]> {
+		return (await this.store.loadFeedback()).campaigns;
+	}
+
+	async listFeedbackItems(): Promise<{ items: FeedbackSummary[]; raw: FeedbackItem[]; validations: FeedbackValidationResponse[]; rewards: FeedbackReward[] }> {
+		const snap = await this.store.loadFeedback();
+		return {
+			items: snap.items.map((item) => summarizeFeedback(item, snap.validations, snap.rewards.find((r) => r.feedbackId === item.id))),
+			raw: snap.items,
+			validations: snap.validations,
+			rewards: snap.rewards,
+		};
+	}
+
+	async seedFeedbackCampaign(opts: { id?: string; name: string; repo: string; token: string; allowedOrigins?: string[]; rewardCents?: number; rewardCurrency?: string }): Promise<FeedbackCampaign> {
+		const snap = await this.store.loadFeedback();
+		const now = Date.now();
+		const id = opts.id?.trim() || newCampaignId();
+		const campaign: FeedbackCampaign = {
+			id,
+			name: opts.name.trim() || "Feedback campaign",
+			repo: opts.repo.trim() || process.cwd(),
+			tokenHash: hashCampaignToken(opts.token),
+			allowedOrigins: opts.allowedOrigins?.length ? opts.allowedOrigins : ["*"],
+			rewardCents: opts.rewardCents,
+			rewardCurrency: opts.rewardCurrency,
+			createdAt: snap.campaigns.find((c) => c.id === id)?.createdAt ?? now,
+		};
+		const i = snap.campaigns.findIndex((c) => c.id === id);
+		if (i >= 0) snap.campaigns[i] = campaign;
+		else snap.campaigns.push(campaign);
+		await this.store.saveFeedback(snap);
+		return campaign;
+	}
+
+	async submitFeedbackItem(body: unknown, origin?: string | null, now = Date.now()): Promise<FeedbackItem> {
+		const snap = await this.store.loadFeedback();
+		const accepted = acceptFeedbackSubmission({ campaigns: snap.campaigns, body, origin, now, maxImageBytes: feedbackMaxImageBytes() });
+		if (accepted.attachmentBytes && accepted.item.attachment && accepted.attachmentExt) {
+			const rel = path.join("feedback", "attachments", accepted.item.id, `${accepted.item.attachment.id}.${accepted.attachmentExt}`);
+			const full = path.join(this.stateDir, rel);
+			await fs.mkdir(path.dirname(full), { recursive: true });
+			const tmp = `${full}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+			await fs.writeFile(tmp, accepted.attachmentBytes);
+			await fs.rename(tmp, full);
+			accepted.item.attachment = { ...accepted.item.attachment, path: rel };
+		}
+		snap.items.push(accepted.item);
+		if (accepted.reward) snap.rewards.push(accepted.reward);
+		await this.store.saveFeedback(snap);
+		return accepted.item;
+	}
+
+	async acceptFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
+		const snap = await this.store.loadFeedback();
+		const item = feedbackItemOrThrow(snap.items, id);
+		if (item.status === "rejected") throw new Error("rejected feedback cannot be accepted");
+		if (item.status !== "promoted") item.status = "accepted";
+		item.updatedAt = Date.now();
+		await this.store.saveFeedback(snap);
+		await this.recordFeedbackAudit(actor, "feedback.accept", id);
+		return item;
+	}
+
+	async rejectFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
+		const snap = await this.store.loadFeedback();
+		const item = feedbackItemOrThrow(snap.items, id);
+		if (item.status === "promoted") throw new Error("promoted feedback cannot be rejected");
+		item.status = "rejected";
+		item.updatedAt = Date.now();
+		await this.store.saveFeedback(snap);
+		await this.recordFeedbackAudit(actor, "feedback.reject", id);
+		return item;
+	}
+
+	async promoteFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
+		const snap = await this.store.loadFeedback();
+		const item = feedbackItemOrThrow(snap.items, id);
+		if (item.planeIssue) return item;
+		if (item.status === "rejected") throw new Error("rejected feedback cannot be promoted");
+		if (item.status !== "accepted" && item.status !== "needs-validation") throw new Error("feedback must be accepted or needs-validation before promotion");
+		const rendered = renderFeedbackPlaneIssue(item, snap.validations.filter((v) => v.feedbackId === id), snap.rewards.find((r) => r.feedbackId === id));
+		const issue = await createPlaneIssue(item.repo, rendered.title, rendered.descriptionHtml);
+		if (!issue) throw new Error("plane issue create failed");
+		item.planeIssue = issue;
+		item.status = "promoted";
+		item.updatedAt = Date.now();
+		await this.store.saveFeedback(snap);
+		await this.recordFeedbackAudit(actor, "feedback.promote", id, issue.identifier ?? issue.id);
+		return item;
+	}
+
+	async addFeedbackValidation(id: string, input: FeedbackValidationInput, actor: Actor = LOCAL_ACTOR): Promise<FeedbackValidationResponse> {
+		const snap = await this.store.loadFeedback();
+		const item = feedbackItemOrThrow(snap.items, id);
+		const validation = normalizeFeedbackValidation(input, item);
+		snap.validations.push(validation);
+		if (item.status === "new") {
+			item.status = "needs-validation";
+			item.updatedAt = Date.now();
+		}
+		await this.store.saveFeedback(snap);
+		await this.recordFeedbackAudit(actor, "feedback.validation", id);
+		return validation;
+	}
+
+	async listFeedbackValidations(id: string): Promise<FeedbackValidationResponse[]> {
+		const snap = await this.store.loadFeedback();
+		feedbackItemOrThrow(snap.items, id);
+		return snap.validations.filter((v) => v.feedbackId === id);
+	}
+
+	async approveFeedbackReward(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
+		const snap = await this.store.loadFeedback();
+		const { item, reward } = rewardRecordOrThrow(snap, id);
+		assertRewardTransition(reward.status, "approved");
+		reward.status = "approved";
+		reward.reviewer = actor.id;
+		reward.updatedAt = Date.now();
+		item.rewardStatus = "approved";
+		item.updatedAt = reward.updatedAt;
+		await this.store.saveFeedback(snap);
+		await this.recordFeedbackAudit(actor, "feedback.reward.approve", id);
+		return reward;
+	}
+
+	async voidFeedbackReward(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
+		const snap = await this.store.loadFeedback();
+		const { item, reward } = rewardRecordOrThrow(snap, id);
+		assertRewardTransition(reward.status, "void");
+		reward.status = "void";
+		reward.reviewer = actor.id;
+		reward.updatedAt = Date.now();
+		item.rewardStatus = "void";
+		item.updatedAt = reward.updatedAt;
+		await this.store.saveFeedback(snap);
+		await this.recordFeedbackAudit(actor, "feedback.reward.void", id);
+		return reward;
+	}
+
+	async markFeedbackRewardPaid(id: string, opts: { provider?: string; externalRef?: string } = {}, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
+		const snap = await this.store.loadFeedback();
+		const { item, reward } = rewardRecordOrThrow(snap, id);
+		assertRewardTransition(reward.status, "paid");
+		reward.status = "paid";
+		reward.provider = opts.provider ?? reward.provider;
+		reward.externalRef = opts.externalRef ?? reward.externalRef;
+		reward.reviewer = actor.id;
+		reward.updatedAt = Date.now();
+		item.rewardStatus = "paid";
+		item.updatedAt = reward.updatedAt;
+		await this.store.saveFeedback(snap);
+		await this.recordFeedbackAudit(actor, "feedback.reward.paid", id);
+		return reward;
 	}
 
 	subagents(id: string): SubagentNode[] {
@@ -673,14 +1047,49 @@ export class SquadManager extends EventEmitter {
 		return { feature: pf, agent };
 	}
 
-	updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean }): PersistedFeature | undefined {
-		const pf = this.featureStore.get(id);
+	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
+		const pf = this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, patch.repo);
 		if (!pf) return undefined;
 		if (patch.title !== undefined) pf.title = patch.title;
 		if (patch.stageOverride !== undefined) pf.stageOverride = patch.stageOverride ?? undefined;
 		if (patch.archived !== undefined) pf.archived = patch.archived;
+		if (patch.description !== undefined) pf.description = patch.description;
+		if (patch.acceptanceCriteria !== undefined) pf.acceptanceCriteria = patch.acceptanceCriteria;
+		if (patch.decisions !== undefined) pf.decisions = patch.decisions;
+		if (patch.relationships !== undefined) pf.relationships = patch.relationships;
+		if (patch.contextBundle !== undefined) pf.contextBundle = patch.contextBundle;
 		pf.updatedAt = Date.now();
 		this.emitFeaturesChanged();
+		return pf;
+	}
+
+	private async adoptDerivedFeature(id: string, repo?: string): Promise<PersistedFeature | undefined> {
+		const found = (await this.features(repo)).find((feature) => feature.id === id);
+		if (!found) return undefined;
+		const now = Date.now();
+		const pf: PersistedFeature = {
+			id: found.id,
+			title: found.title,
+			repo: found.repo,
+			origin: found.planDir ? { planDir: found.planDir } : undefined,
+			plane: found.issueIdentifiers?.length ? { issueIdentifiers: found.issueIdentifiers } : undefined,
+			description: found.description,
+			acceptanceCriteria: found.acceptanceCriteria,
+			decisions: found.decisions,
+			relationships: found.relationships,
+			contextBundle: found.contextBundle,
+			createdAt: now,
+			updatedAt: now,
+		};
+		this.featureStore.set(pf.id, pf);
+		for (const agentId of found.agentIds) {
+			const rec = this.agents.get(agentId);
+			if (rec) {
+				rec.dto.featureId = pf.id;
+				rec.options.featureId = pf.id;
+				this.emitAgent(rec);
+			}
+		}
 		return pf;
 	}
 
@@ -875,6 +1284,7 @@ export class SquadManager extends EventEmitter {
 			worktree: opts.existingPath ?? opts.repo,
 			branch: opts.branch ?? `squad/${name}`,
 			model: opts.model,
+			profileId: opts.profileId,
 			approvalMode: opts.approvalMode ?? "write",
 			pending: [],
 			lastActivity: Date.now(),
@@ -1001,6 +1411,16 @@ export class SquadManager extends EventEmitter {
 	// ── Roster mutation ───────────────────────────────────────────────────────
 
 	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		const profile = this.profileFor(opts.profileId);
+		if (profile) {
+			opts = {
+				...opts,
+				profileId: profile.id,
+				model: opts.model ?? profile.model,
+				approvalMode: opts.approvalMode ?? profile.approvalMode,
+				appendSystemPrompt: [profile.memory, opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+			};
+		}
 		if (opts.owns?.length) {
 			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
 			if (conflict) throw new Error(`path ownership conflict: ${conflict.paths.join(", ")} held by agent "${conflict.agent}" — narrow the scope or stop that agent`);
@@ -1047,9 +1467,10 @@ export class SquadManager extends EventEmitter {
 				void startPlaneIssue(ref); // backlog → started immediately; best-effort, never throws
 			}
 		}
+		const profileId = opts.profileId;
 		const approvalMode = opts.approvalMode ?? "write";
 		const thinking = opts.thinking ?? "low";
-		const kind = opts.workflow || opts.verify ? "workflow" : "omp-operator";
+		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
 		let cwd: string;
 		let resolvedBranch: string | undefined;
@@ -1079,12 +1500,15 @@ export class SquadManager extends EventEmitter {
 			worktree: cwd,
 			branch: resolvedBranch,
 			model: opts.model,
+			profileId,
 			approvalMode,
 			task: opts.task,
 			thinking,
+			appendSystemPrompt: opts.appendSystemPrompt,
 			issue: opts.issue,
 			kind,
 			runtime: opts.runtime,
+			flue: opts.flue,
 			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify } } : undefined,
 			// Carry the resumable checkpoint so an adopted/restored workflow continues its graph from the
 			// last node boundary instead of re-running completed stages (and duplicating their commits).
@@ -1104,6 +1528,7 @@ export class SquadManager extends EventEmitter {
 			worktree: cwd,
 			branch: resolvedBranch,
 			model: opts.model,
+			profileId,
 			approvalMode,
 			pending: [],
 			lastActivity: Date.now(),
@@ -1113,11 +1538,13 @@ export class SquadManager extends EventEmitter {
 			parentId: opts.parentId,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			workflow: persisted.workflow,
+			workflowState: persisted.workflowState,
 			adopted: opts.adopted,
 		};
 
 		const agent = this.makeDriver(persisted);
-		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(id, rec);
 		this.wire(rec);
 		this.emitAgent(rec);
@@ -1179,7 +1606,7 @@ export class SquadManager extends EventEmitter {
 		if (p.runtime === "acp") {
 			return new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model });
 		}
-		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin });
+		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, appendSystemPrompt: p.appendSystemPrompt, bin: this.bin });
 	}
 
 	/** Spawn a real roster agent for a workflow's parallel branch, run the task, resolve with its result. The agent stays in the roster. */
@@ -1293,7 +1720,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 		};
-		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(id, rec);
 		this.wire(rec);
 		await rec.agent.start();
@@ -1314,15 +1741,38 @@ export class SquadManager extends EventEmitter {
 			worktree: p.worktree,
 			approvalMode: p.approvalMode,
 			model: p.model,
+			profileId: p.profileId,
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
 		};
-		const rec: AgentRecord = { dto, agent: this.makeDriver(p), options: p, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() };
+		const rec: AgentRecord = { dto, agent: this.makeDriver(p), options: p, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(p.id, rec);
 		this.wire(rec);
 		await rec.agent.start();
 		this.emitAgent(rec);
+	}
+
+	private async ensureConnected(rec: AgentRecord): Promise<void> {
+		if (rec.agent.isAlive && rec.agent.isReady) return;
+		rec.dto.error = undefined;
+		rec.dto.status = "starting";
+		this.emitAgent(rec);
+		await rec.agent.start();
+		if (rec.agent.setSessionName) await rec.agent.setSessionName(`squad:${rec.dto.name}`).catch(() => {});
+		rec.dto.status = "idle";
+		this.emitAgent(rec);
+	}
+
+	private async promptConnected(rec: AgentRecord, message: string): Promise<void> {
+		await this.ensureConnected(rec);
+		try {
+			await rec.agent.prompt(message);
+		} catch (err) {
+			if (!isAgentDisconnected(err)) throw err;
+			await this.ensureConnected(rec);
+			await rec.agent.prompt(message);
+		}
 	}
 
 	async applyCommand(cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): Promise<void> {
@@ -1387,13 +1837,31 @@ export class SquadManager extends EventEmitter {
 
 		switch (cmd.type) {
 			case "prompt": {
+				await this.ensureConnected(rec);
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
-				this.append(rec, "user", cmd.message);
+				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId });
 				rec.streaming = true;
 				rec.dto.status = "working";
 				this.emitAgent(rec);
-				await rec.agent.prompt(cmd.message).catch((err) => this.fail(rec, err));
+				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
 				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncate(cmd.message, 80));
+				break;
+			}
+			case "set-model": {
+				const model = cmd.model.trim();
+				if (!model || !rec.agent.setModel) break;
+				try {
+					await this.ensureConnected(rec);
+					await rec.agent.setModel(model);
+					rec.dto.model = model;
+					this.append(rec, "system", `model set to ${model}`);
+					this.emitAgent(rec);
+					void this.recordAudit(actor, "set-model", cmd.id, "ok", model);
+				} catch (err) {
+					const detail = err instanceof Error ? err.message : String(err);
+					this.append(rec, "system", `model change failed: ${detail}`);
+					void this.recordAudit(actor, "set-model", cmd.id, "error", detail);
+				}
 				break;
 			}
 			case "answer": {
@@ -1462,7 +1930,7 @@ export class SquadManager extends EventEmitter {
 			rec.agent.respondHostTool(req.id, value);
 		}
 		rec.dto.pending = rec.dto.pending.filter((p) => p.id !== req.id);
-		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncate(value, 60)}`);
+		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncate(value, 60)}`, { pending: { requestId: req.id, action: "answered" }, status: "ok" });
 		rec.streaming = true;
 		rec.dto.status = this.derive(rec);
 		this.emitAgent(rec);
@@ -1559,6 +2027,8 @@ export class SquadManager extends EventEmitter {
 		a.on("stderr", (line: string) => this.log("warn", `[${rec.dto.name}] ${line}`));
 		a.on("checkpoint", (state: WorkflowRunState) => {
 			rec.options.workflowState = state;
+			rec.dto.workflowState = state;
+			this.emitAgent(rec);
 			void this.persist();
 		});
 		a.on("exit", ({ code }: { code: number }) => {
@@ -1585,6 +2055,9 @@ export class SquadManager extends EventEmitter {
 			case "agent_start":
 			case "turn_start":
 				rec.streaming = true;
+				rec.assistantEntry = undefined;
+				rec.thinkingEntry = undefined;
+				rec.thinkingBuf = "";
 				rec.dto.adopted = false; // OMPSQ-164: it ran ⇒ no longer a never-re-run adopted agent; resume normal verify→land
 				if (!rec.run) {
 					rec.run = new RunAccumulator({
@@ -1604,7 +2077,12 @@ export class SquadManager extends EventEmitter {
 				break;
 			case "message_update": {
 				const ev = frame.assistantMessageEvent as { type?: string; delta?: string } | undefined;
-				if (ev?.type === "text_delta" && typeof ev.delta === "string") rec.assistantBuf += ev.delta;
+				if (ev?.type === "text_delta" && typeof ev.delta === "string") this.updateAssistantStream(rec, ev.delta);
+				else if (ev?.type === "thinking_delta" && typeof ev.delta === "string") this.updateThinkingStream(rec, ev.delta);
+				break;
+			}
+			case "thinking_delta": {
+				if (typeof frame.delta === "string") this.updateThinkingStream(rec, frame.delta);
 				break;
 			}
 			case "message_end": {
@@ -1613,25 +2091,28 @@ export class SquadManager extends EventEmitter {
 					| undefined;
 				if (msg?.role === "assistant" && msg.usage) rec.run?.onAssistantUsage(msg.usage);
 				rec.run?.onMessageEnd();
-				if (rec.assistantBuf.trim()) {
-					this.append(rec, "assistant", rec.assistantBuf.trim());
-					rec.assistantBuf = "";
-				}
+				this.finishThinkingStream(rec);
+				this.finishAssistantStream(rec);
 				break;
 			}
 			case "tool_execution_start": {
 				const toolName = typeof frame.toolName === "string" ? frame.toolName : "tool";
 				const intent = typeof frame.intent === "string" ? frame.intent : "";
 				rec.run?.onTool(toolName, intent);
-				rec.dto.activity = intent ? `${toolName}: ${truncate(intent, 60)}` : toolName;
-				this.append(rec, "tool", `▸ ${rec.dto.activity}`);
+				this.upsertToolEntry(rec, frame, "running");
+				break;
+			}
+			case "tool_execution_update": {
+				this.upsertToolEntry(rec, frame, "running");
+				break;
+			}
+			case "tool_execution_end": {
+				this.upsertToolEntry(rec, frame, frame.isError ? "error" : "ok");
 				break;
 			}
 			case "agent_end": {
-				if (rec.assistantBuf.trim()) {
-					this.append(rec, "assistant", rec.assistantBuf.trim());
-					rec.assistantBuf = "";
-				}
+				this.finishThinkingStream(rec);
+				this.finishAssistantStream(rec);
 				rec.streaming = false;
 				rec.dto.activity = undefined;
 				void this.finalizeRun(rec);
@@ -1659,6 +2140,82 @@ export class SquadManager extends EventEmitter {
 		rec.dto.status = this.derive(rec);
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
+	}
+
+	private updateThinkingStream(rec: AgentRecord, delta: string): void {
+		rec.thinkingBuf += delta;
+		if (!rec.thinkingBuf.trim()) return;
+		if (!rec.thinkingEntry) {
+			rec.thinkingEntry = this.append(rec, "thinking", rec.thinkingBuf, { status: "running" });
+			return;
+		}
+		Object.assign(rec.thinkingEntry, { text: redact(rec.thinkingBuf), status: "running", ts: Date.now() });
+		this.emit("event", { type: "transcript", id: rec.dto.id, entry: rec.thinkingEntry } satisfies SquadEvent);
+	}
+
+	private finishThinkingStream(rec: AgentRecord): void {
+		if (!rec.thinkingBuf.trim()) return;
+		if (!rec.thinkingEntry) {
+			this.append(rec, "thinking", rec.thinkingBuf.trim(), { status: "ok" });
+		} else {
+			Object.assign(rec.thinkingEntry, { text: redact(rec.thinkingBuf.trim()), status: "ok", ts: Date.now() });
+			this.emit("event", { type: "transcript", id: rec.dto.id, entry: rec.thinkingEntry } satisfies SquadEvent);
+		}
+		rec.thinkingBuf = "";
+		rec.thinkingEntry = undefined;
+	}
+
+	private updateAssistantStream(rec: AgentRecord, delta: string): void {
+		rec.assistantBuf += delta;
+		if (!rec.assistantBuf.trim()) return;
+		if (!rec.assistantEntry) {
+			rec.assistantEntry = this.append(rec, "assistant", rec.assistantBuf, { status: "running" });
+			return;
+		}
+		Object.assign(rec.assistantEntry, { text: redact(rec.assistantBuf), status: "running", ts: Date.now() });
+		this.emit("event", { type: "transcript", id: rec.dto.id, entry: rec.assistantEntry } satisfies SquadEvent);
+	}
+
+	private finishAssistantStream(rec: AgentRecord): void {
+		if (!rec.assistantBuf.trim()) return;
+		if (!rec.assistantEntry) {
+			this.append(rec, "assistant", rec.assistantBuf.trim(), { status: "ok" });
+		} else {
+			Object.assign(rec.assistantEntry, { text: redact(rec.assistantBuf.trim()), status: "ok", ts: Date.now() });
+			this.emit("event", { type: "transcript", id: rec.dto.id, entry: rec.assistantEntry } satisfies SquadEvent);
+		}
+		rec.assistantBuf = "";
+		rec.assistantEntry = undefined;
+	}
+
+	private upsertToolEntry(rec: AgentRecord, frame: { [k: string]: unknown }, status: "running" | "ok" | "error"): void {
+		const toolName = typeof frame.toolName === "string" ? frame.toolName : "tool";
+		const callId = typeof frame.toolCallId === "string" ? frame.toolCallId : `${toolName}:${Date.now()}`;
+		const intent = typeof frame.intent === "string" ? frame.intent : "";
+		const existing = rec.toolEntries.get(callId);
+		if (!existing) rec.run?.onTool(toolName);
+		rec.dto.activity = intent ? `${toolName}: ${truncate(intent, 60)}` : toolName;
+		const tool = {
+			...(existing?.tool ?? { callId, name: toolName }),
+			callId,
+			name: toolName,
+			args: frame.args ?? existing?.tool?.args,
+			argsText: safeJson(frame.args ?? existing?.tool?.args),
+			partial: frame.partialResult ?? existing?.tool?.partial,
+			partialText: safeJson(frame.partialResult ?? existing?.tool?.partial),
+			result: frame.result ?? existing?.tool?.result,
+			resultText: safeJson(frame.result ?? existing?.tool?.result),
+			isError: frame.isError === true,
+			durationMs: existing ? Date.now() - existing.ts : undefined,
+		};
+		const text = intent ? `▸ ${toolName}: ${intent}` : `▸ ${toolName}`;
+		if (!existing) {
+			rec.toolEntries.set(callId, this.append(rec, "tool", text, { status, tool, format: toolName === "stage" ? "stage" : "command" }));
+			return;
+		}
+		Object.assign(existing, { text: redact(text), status, tool });
+		this.emit("event", { type: "transcript", id: rec.dto.id, entry: existing } satisfies SquadEvent);
+		if (status !== "running") rec.toolEntries.delete(callId);
 	}
 
 	/**
@@ -1741,7 +2298,7 @@ export class SquadManager extends EventEmitter {
 			actor,
 			agents: this.list(),
 			stateDir: this.stateDir,
-			repos: opts.repos ?? planeRepos(),
+			repos: opts.repos,
 			includeLeases: opts.includeLeases,
 			listIssues: (repo) => listPlaneIssues(repo),
 		});
@@ -1764,19 +2321,33 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	private async recordFeedbackAudit(actor: Actor, action: string, target: string, detail?: string): Promise<void> {
+		await this.recordAudit(actor, action, target, "ok", detail);
+		await this.store.appendAudit({ actor: actor.id, action, target, detail: detail ? { detail } : undefined }).catch((err) => this.log("warn", `feedback audit write failed: ${err instanceof Error ? err.message : String(err)}`));
+	}
+
 	/** Fleet-action audit log, newest first (server reads this; keeps stateDir private). */
 	async auditLog(query: AuditQuery = {}): Promise<AuditEntry[]> {
 		return readAudit(this.stateDir, query);
 	}
 
-	/** Add a review comment on a subject (a planner task's Plane issue id, or a plan-dir file). */
-	async addComment(input: { repo: string; subject: string; body: string; urgent?: boolean }, actor: Actor | string = LOCAL_ACTOR): Promise<ArtifactComment> {
+	private async commentPlaneTargets(repo: string, subject: string): Promise<string[]> {
+		if (/^[A-Z0-9]+-\d+$/i.test(subject)) return [subject.toUpperCase()];
+		const feature = (await this.features(repo)).find((item) => item.id === subject);
+		return feature?.issueIdentifiers ?? [];
+	}
+
+	/** Add a review comment or anchored plan annotation on a subject. */
+	async addComment(input: { repo: string; subject: string; body: string; urgent?: boolean; kind?: "comment" | "plan-annotation"; annotation?: PlanAnnotationTarget }, actor: Actor | string = LOCAL_ACTOR): Promise<ArtifactComment> {
 		const author = typeof actor === "string" ? actor : actor.id;
 		const at = Date.now();
 		const id = nextCommentId(at);
-		await appendCommentEvent(this.stateDir, { type: "add", id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, at });
-		void this.recordAudit(actor, "comment", input.subject, "ok", truncate(input.body, 80));
-		return { id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, createdAt: at };
+		await appendCommentEvent(this.stateDir, { type: "add", id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, at, kind: input.kind, annotation: input.annotation });
+		const comment: ArtifactComment = { id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, createdAt: at, kind: input.kind, annotation: input.annotation };
+		this.emit("event", { type: "comment", comment } satisfies SquadEvent);
+		for (const issue of await this.commentPlaneTargets(input.repo, input.subject)) void addPlaneIssueComment(input.repo, issue, input.body).catch((err) => this.log("warn", `plane comment sync failed: ${err instanceof Error ? err.message : String(err)}`));
+		void this.recordAudit(actor, input.kind === "plan-annotation" ? "plan-annotate" : "comment", input.subject, "ok", truncate(input.body, 80));
+		return comment;
 	}
 
 	/** Review comments on a subject (server reads this; keeps stateDir private). */
@@ -1786,7 +2357,9 @@ export class SquadManager extends EventEmitter {
 
 	/** Resolve (close) a review comment. */
 	async resolveComment(id: string, actor: Actor | string = LOCAL_ACTOR): Promise<void> {
-		await appendCommentEvent(this.stateDir, { type: "resolve", id, at: Date.now() });
+		const at = Date.now();
+		await appendCommentEvent(this.stateDir, { type: "resolve", id, at });
+		this.emit("event", { type: "comment-resolved", id, resolvedAt: at } satisfies SquadEvent);
 		void this.recordAudit(actor, "comment-resolve", id, "ok");
 	}
 
@@ -1805,6 +2378,7 @@ export class SquadManager extends EventEmitter {
 		let added: PendingRequest | undefined;
 		if (req.method === "cancel") {
 			rec.dto.pending = rec.dto.pending.filter((p) => p.id !== req.targetId);
+			if (req.targetId) this.append(rec, "system", "input request cancelled", { pending: { requestId: req.targetId, action: "cancelled" }, status: "cancelled" });
 		} else if (req.method === "notify") {
 			this.append(rec, "system", `(${req.notifyType ?? "info"}) ${req.message}`);
 		} else if (BLOCKING_UI_METHODS[req.method]) {
@@ -1819,7 +2393,7 @@ export class SquadManager extends EventEmitter {
 				createdAt: Date.now(),
 			};
 			rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== req.id), added];
-			this.append(rec, "system", `⛔ needs input: ${added.title}`);
+			this.append(rec, "system", `⛔ needs input: ${added.title}`, { pending: { requestId: added.id, action: "created" }, status: "running" });
 		}
 		rec.dto.status = this.derive(rec);
 		rec.dto.lastActivity = Date.now();
@@ -1841,7 +2415,7 @@ export class SquadManager extends EventEmitter {
 			createdAt: Date.now(),
 		};
 		rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== call.id), pending];
-		this.append(rec, "system", `⛔ tool call needs host: ${call.toolName}`);
+		this.append(rec, "system", `⛔ tool call needs host: ${call.toolName}`, { pending: { requestId: pending.id, action: "created" }, status: "running", tool: { callId: call.id, name: call.toolName, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.dto.status = this.derive(rec);
 		this.emitAgent(rec);
 	}
@@ -1897,6 +2471,7 @@ export class SquadManager extends EventEmitter {
 				}
 			}),
 		);
+		void this.refreshPlanFeatureSignature();
 		this.publishPresence();
 		// Periodically (~every 30s) reap detached hosts the roster no longer owns. Safe because an
 		// agent is in this.agents before its host spawns, so a just-spawned agent is never reaped.
@@ -1915,6 +2490,28 @@ export class SquadManager extends EventEmitter {
 			if (key && key !== this.lastWarnKey) this.log("warn", `watchdog: ${h.warnings.join("; ")}`);
 			this.lastWarnKey = key;
 		});
+	}
+
+	private featureRepos(): string[] {
+		return [...new Set([process.cwd(), ...planeRepos(), ...[...this.featureStore.values()].map((f) => f.repo), ...[...this.agents.values()].map((r) => r.dto.repo)].filter((repo) => repo && !repo.startsWith("(")))].sort();
+	}
+
+	private async planFeatureSignatureFor(repo: string): Promise<string> {
+		const dirs = await listPlanDirs(repo).catch(() => []);
+		return `${repo}\0${dirs.map((dir) => `${dir.dir}:${dir.updatedAt}:${dir.issueIds.join(",")}`).join("|")}`;
+	}
+
+	/** Detect direct `plans/` filesystem edits and wake web clients that already reload on features-changed. */
+	private async refreshPlanFeatureSignature(): Promise<void> {
+		const next = (await Promise.all(this.featureRepos().map((repo) => this.planFeatureSignatureFor(repo)))).join("\n");
+		if (this.planFeatureSignature === "") {
+			this.planFeatureSignature = next;
+			return;
+		}
+		if (next !== this.planFeatureSignature) {
+			this.planFeatureSignature = next;
+			this.emitFeaturesChanged();
+		}
 	}
 
 	/** Snapshot daemon health (memory/load/agents/detached hosts) and judge it. Polled + served at /api/health. */
@@ -2004,12 +2601,18 @@ export class SquadManager extends EventEmitter {
 		const active = tasks.find((t) => t.status === "in_progress")?.content;
 		const next: AgentDTO["todo"] = tasks.length ? { done, total: tasks.length, active } : undefined;
 		rec.dto.todo = next;
+		rec.dto.todoPhases = state.todoPhases;
+		rec.dto.session = summarizeSession(state);
 		// Rough completion estimate from progress rate (tasks done/total over elapsed). A hint, not a deadline.
 		const elapsed = rec.dto.startedAt ? Date.now() - rec.dto.startedAt : 0;
 		const remaining = next ? estimateEta(next.done, next.total, elapsed) : undefined;
 		rec.dto.etaAt = remaining !== undefined ? Date.now() + remaining : undefined;
 		// RpcSessionState.contextUsage.percent is a 0..100 percentage; AgentDTO.contextPct is a 0..1 fraction.
-		rec.dto.contextPct = state.contextUsage ? state.contextUsage.percent / 100 : rec.dto.contextPct;
+		if (state.contextUsage) {
+			rec.dto.contextPct = state.contextUsage.percent / 100;
+			rec.dto.contextTokens = state.contextUsage.tokens;
+			rec.dto.contextWindow = state.contextUsage.contextWindow;
+		}
 		if (state.model) rec.dto.model = `${state.model.provider}/${state.model.id}`;
 		// Reconcile streaming truth without clobbering a pending-input state.
 		if (rec.dto.pending.length === 0) {
@@ -2021,15 +2624,17 @@ export class SquadManager extends EventEmitter {
 
 	// ── Transcript + emission ─────────────────────────────────────────────────
 
-	private append(rec: AgentRecord, kind: TranscriptKind, text: string): void {
+	private append(rec: AgentRecord, kind: TranscriptKind, text: string, patch: Partial<TranscriptEntry> = {}): TranscriptEntry {
 		// ponytail: append() is the single transcript chokepoint — redact here so secrets reach
 		// neither the in-memory buffer, persisted state.json, nor the emitted transcript event.
 		// Receipt fields carry paths/tallies (not free text), so they need no separate redaction.
-		const entry: TranscriptEntry = { kind, text: redact(text), ts: Date.now() };
+		const seq = ++this.transcriptSeq;
+		const entry: TranscriptEntry = { ...patch, id: patch.id ?? `${rec.dto.id}:${seq}`, seq, kind, text: redact(text), ts: Date.now() };
 		rec.transcript.push(entry);
 		if (rec.transcript.length > MAX_TRANSCRIPT) rec.transcript.shift();
 		rec.dto.messageCount = rec.transcript.length;
 		this.emit("event", { type: "transcript", id: rec.dto.id, entry } satisfies SquadEvent);
+		return entry;
 	}
 
 	private emitAgent(rec: AgentRecord): void {
@@ -2108,12 +2713,13 @@ export class SquadManager extends EventEmitter {
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
-		await this.store.save({ agents, transcripts, features });
+		await this.store.save({ agents, transcripts, features, capabilities: this.capabilityStore });
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
 	async loadPersisted(): Promise<number> {
 		const snapshot = await this.store.load();
+		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		const list = snapshot.agents;
 		for (const p of list) {
@@ -2127,6 +2733,7 @@ export class SquadManager extends EventEmitter {
 				existingPath: p.worktree,
 				branch: p.branch,
 				model: p.model,
+				profileId: p.profileId,
 				approvalMode: p.approvalMode,
 				thinking: p.thinking,
 				issue: p.issue,
@@ -2145,9 +2752,54 @@ export class SquadManager extends EventEmitter {
 	}
 }
 
+function feedbackMaxImageBytes(): number {
+	const n = Number(process.env.OMP_SQUAD_FEEDBACK_MAX_IMAGE_BYTES);
+	return Number.isFinite(n) && n > 0 ? n : 2_000_000;
+}
+
+function feedbackItemOrThrow(items: FeedbackItem[], id: string): FeedbackItem {
+	const item = items.find((x) => x.id === id);
+	if (!item) throw new Error("feedback item not found");
+	return item;
+}
+
+function rewardRecordOrThrow(snap: FeedbackSnapshot, id: string): { item: FeedbackItem; reward: FeedbackReward } {
+	const item = feedbackItemOrThrow(snap.items, id);
+	const reward = snap.rewards.find((r) => r.feedbackId === id);
+	if (!reward || item.rewardStatus === "none") throw new Error("feedback item has no reward");
+	return { item, reward };
+}
+
 function truncate(s: string, n: number): string {
 	const flat = s.replace(/\s+/g, " ").trim();
 	return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
+}
+
+function safeJson(value: unknown, max = 2000): string | undefined {
+	if (value === undefined) return undefined;
+	try {
+		return truncate(redact(JSON.stringify(value, null, 2)), max);
+	} catch {
+		return truncate(redact(String(value)), max);
+	}
+}
+
+function summarizeSession(state: RpcSessionState): AgentDTO["session"] {
+	return {
+		id: state.sessionId,
+		name: state.sessionName,
+		file: state.sessionFile,
+		thinkingLevel: state.thinkingLevel === "minimal" || state.thinkingLevel === "low" || state.thinkingLevel === "medium" || state.thinkingLevel === "high" || state.thinkingLevel === "xhigh" ? state.thinkingLevel : undefined,
+		steeringMode: state.steeringMode,
+		followUpMode: state.followUpMode,
+		interruptMode: state.interruptMode,
+		isCompacting: state.isCompacting,
+		autoCompactionEnabled: state.autoCompactionEnabled,
+		messageCount: state.messageCount,
+		queuedMessageCount: state.queuedMessageCount,
+		systemPromptLines: state.systemPrompt?.length,
+		tools: state.dumpTools?.map((t) => ({ name: t.name, description: t.description })),
+	};
 }
 
 /** Map omp's raw command metadata (from `available_commands_update` / `get_available_commands`) to CommandInfo. */

@@ -118,6 +118,8 @@ test("protectedIds is boot-seeded from persisted rosters before any manager star
 		hasState: async () => true,
 		load: async () => rosters[orgId] ?? { agents: [], transcripts: {}, features: [] },
 		save: async () => {},
+		loadFeedback: async () => ({ campaigns: [], items: [], validations: [], rewards: [] }),
+		saveFeedback: async () => {},
 		appendAudit: async () => {},
 		appendUsage: async () => {},
 	});

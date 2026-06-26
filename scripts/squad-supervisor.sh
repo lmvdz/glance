@@ -14,6 +14,17 @@ set -uo pipefail
 LAUNCHER="${OMP_SQUAD_LAUNCHER:-$HOME/.omp/squad/up.sh}"
 LOG="${OMP_SQUAD_DAEMON_LOG:-$HOME/.omp/squad/daemon.log}"
 
+# Force git signing off for the launcher, daemon, and every child it spawns.
+GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-0}"
+case "$GIT_CONFIG_COUNT" in
+	*[!0-9]*) GIT_CONFIG_COUNT=0 ;;
+esac
+base="$GIT_CONFIG_COUNT"
+export "GIT_CONFIG_KEY_$base=commit.gpgsign" "GIT_CONFIG_VALUE_$base=false"
+base=$((base + 1))
+export "GIT_CONFIG_KEY_$base=tag.gpgsign" "GIT_CONFIG_VALUE_$base=false"
+export GIT_CONFIG_COUNT=$((base + 1))
+
 if [ ! -f "$LAUNCHER" ]; then
 	echo "[supervisor] launcher not found: $LAUNCHER" >&2
 	exit 1

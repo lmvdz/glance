@@ -24,6 +24,7 @@ export interface RpcAgentOptions {
 	model?: string;
 	approvalMode?: ApprovalMode;
 	thinking?: ThinkingLevel;
+	appendSystemPrompt?: string;
 	/** Override the omp binary the host launches (defaults to `omp` on PATH). */
 	bin?: string;
 	/** Socket path override (defaults to socketPathFor(id)). */
@@ -134,6 +135,7 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		if (this.opts.model) cmd.push("--model", this.opts.model);
 		if (this.opts.approvalMode) cmd.push("--approval", this.opts.approvalMode);
 		if (this.opts.thinking) cmd.push("--thinking", this.opts.thinking);
+		if (this.opts.appendSystemPrompt) cmd.push("--append-system-prompt", this.opts.appendSystemPrompt);
 		if (this.opts.bin) cmd.push("--bin", this.opts.bin);
 		const proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
 		proc.unref();
@@ -364,6 +366,10 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		const m = pickModel(models, spec);
 		if (!m) throw new Error(`no available model matches "${spec}"`);
 		return this.send({ type: "set_model", provider: m.provider, modelId: m.id });
+	}
+
+	getAvailableModels(): Promise<{ models?: unknown[] }> {
+		return this.send<{ models?: unknown[] }>({ type: "get_available_models" });
 	}
 
 	setThinkingLevel(level: string): Promise<unknown> {

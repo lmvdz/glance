@@ -33,6 +33,10 @@ test("applyCommand audits RBAC denials and accepted mutations", async () => {
 			return { agents: [], transcripts: {}, features: [] };
 		},
 		async save() {},
+		async loadFeedback() {
+			return { campaigns: [], items: [], validations: [], rewards: [] };
+		},
+		async saveFeedback() {},
 		async appendAudit(e) {
 			audits.push({ actor: e.actor, action: e.action });
 		},

@@ -86,3 +86,67 @@ again gradually under the WIP cap.
 The daemon does **not** hot-reload its own source — after the fleet lands a change to omp-squad itself,
 relaunch (`scripts/squadctl.sh restart`, or re-run `up.sh`) to pick it up. (Auto-reload-on-self-landed-code
 is tracked in OMPSQ-130.)
+
+## Feedback Loop operations
+
+Public intake is off unless `OMP_SQUAD_FEEDBACK=1`. Keep it off for daemons that are not meant to
+receive user reports from product pages. When enabled, `/feedback/widget.js` is public and
+`/api/feedback/items` accepts public POSTs; operator review APIs stay behind the normal dashboard auth.
+Campaigns, items, validations, and reward records are durable; public screenshots are written as files
+under the daemon state dir.
+
+### Campaign setup
+
+Create one campaign per product/site/repo with `POST /api/feedback/campaigns`:
+
+- `name`, `repo`, and a long random `token` are required.
+- `allowedOrigins` should be exact HTTPS origins (`https://app.example.com`), not `*`, except for
+  local testing. Submissions whose browser `Origin` is not on the campaign are rejected.
+- `rewardCents` / `rewardCurrency` only create a reward ledger entry; they do not trigger payout.
+
+Embed the campaign on the product page:
+
+```html
+<script
+  src="https://squad.example.com/feedback/widget.js"
+  data-campaign="fc_..."
+  data-token="long-random-token">
+</script>
+```
+
+The raw campaign token is necessarily visible to that page's browser. Treat it as a scoped intake
+secret: do not commit it to reusable docs/examples, do not reuse it across campaigns, keep
+`allowedOrigins` tight, and replace the campaign if the token leaks outside the intended site.
+
+The public widget submits only `POST /api/feedback/items`. All other feedback endpoints are operator
+surface: list/create campaigns, list/read items, `accept`, `reject`, `promote`, validation, and reward
+state changes.
+
+### Review flow
+
+1. Read the queue with `GET /api/feedback/items`; inspect screenshots before trusting a report.
+2. Add validation responses when a report needs more signal (`POST /api/feedback/items/:id/validation`).
+3. `accept` real work, `reject` noise/spam, then `promote` accepted or needs-validation items to Plane.
+   Promotion creates and links one Plane issue; rejected items cannot be promoted.
+4. For reward campaigns, use the reward endpoints as an audit ledger: `pending` can become `approved`
+   or `void`; `approved` can become `paid` or `void`. Call `mark-paid` only after the human payout
+   happens elsewhere. It can store `provider` and `externalRef`, but omp-squad never sends money.
+   Reconcile `paid` entries against the external payout system periodically; the ledger is the audit
+   trail, not the payment rail.
+
+### Safety limits
+
+- Serve off-box widgets over HTTPS only; reports can include email, URL, browser metadata, and screenshots.
+- Put internet-facing daemons behind a trusted reverse proxy/tunnel that terminates TLS and preserves
+  the real client IP for rate limiting; do not expose a raw `0.0.0.0` listener directly to the internet.
+- Screenshots often contain PII/secrets. Review before promotion; Plane issue bodies include screenshot
+  metadata/path, so keep Plane access scoped to the team that may see it.
+- Public intake has an in-process per-campaign/IP rate limit
+  (`OMP_SQUAD_FEEDBACK_RATE_LIMIT_PER_MIN`, default `30`; restart resets it). Keep another edge limit in
+  front for internet-facing daemons.
+- Screenshot uploads are capped by `OMP_SQUAD_FEEDBACK_MAX_IMAGE_BYTES` (default `2000000`); title
+  (160 chars), description (5000), validation notes (1000), and metadata (20 fields) are clamped.
+  Only one PNG/JPEG screenshot is accepted.
+- File-mode attachments are written under `<stateDir>/feedback/attachments/...`; DB mode stores the
+  records in DB tables but file attachments still consume daemon disk. Monitor/prune disk on long-running
+  or high-volume campaigns.

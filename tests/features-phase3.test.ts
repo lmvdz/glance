@@ -21,11 +21,27 @@ afterEach(async () => {
 
 const PLAN_DIR = path.join("plans", "auth");
 
+function onceFeatureChange(mgr: SquadManager, timeoutMs = 5_000): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			mgr.off("event", onEvent);
+			reject(new Error("timed out waiting for features-changed"));
+		}, timeoutMs);
+		const onEvent = (event: { type?: string }) => {
+			if (event.type !== "features-changed") return;
+			clearTimeout(timer);
+			mgr.off("event", onEvent);
+			resolve();
+		};
+		mgr.on("event", onEvent);
+	});
+}
+
 async function seedPlan(repo: string): Promise<void> {
 	const dir = path.join(repo, PLAN_DIR);
 	await fs.mkdir(dir, { recursive: true });
 	await fs.writeFile(path.join(dir, "00-overview.md"), "# Overview\nSTATUS: open\n");
-	await fs.writeFile(path.join(dir, "01-login.md"), "# Login flow\nPLANE: AUTH-12 — https://x/AUTH-12/\nSTATUS: open\nPRIORITY: p1\nCOMPLEXITY: moderate\nTOUCHES:\n  - src/login.ts\n");
+	await fs.writeFile(path.join(dir, "01-login.md"), "# Login flow\nPLANE: AUTH-12 — https://x/AUTH-12/\nSTATUS: open\nPRIORITY: p1\nCOMPLEXITY: moderate\nBLOCKED_BY: 00-overview.md\nTOUCHES:\n  - src/login.ts\n");
 	await fs.writeFile(path.join(dir, "02-logout.md"), "# Logout\nSTATUS: done\n");
 	await fs.writeFile(path.join(dir, "notes.md"), "# Notes\njust notes, no status line\n");
 }
@@ -43,6 +59,8 @@ test("parsePlanConcerns: extracts frontmatter, skips overview + status-less docs
 	expect(login?.complexity).toBe("moderate");
 	expect(login?.planeId).toBe("AUTH-12");
 	expect(login?.open).toBe(true);
+	expect(login?.prerequisites).toContain("Blocked by 00-overview.md");
+	expect(login?.touches).toEqual(["src/login.ts"]);
 	const logout = concerns.find((c) => c.file === "02-logout.md");
 	expect(logout?.open).toBe(false); // "done" is a closed status
 	expect(logout?.planeId).toBeUndefined();
@@ -53,13 +71,16 @@ test("buildFeatures: a persisted feature derives PLANE links live from its plan 
 	tmps.push(repo);
 	await seedPlan(repo);
 	// pf.plane is intentionally unset — the link must come from scanning the plan dir.
-	const pf: PersistedFeature = { id: "f1", title: "Auth", repo, origin: { planDir: PLAN_DIR }, createdAt: 0, updatedAt: 0 };
+	const pf: PersistedFeature = { id: "f1", title: "Auth", repo, origin: { planDir: PLAN_DIR }, description: `Stage: DONE\nRepo: ${repo}\nPlan: ${PLAN_DIR}`, createdAt: 11, updatedAt: 22 };
 	const feats = await buildFeatures(repo, [], [pf]);
 	const f = feats.find((x) => x.id === "f1");
 	expect(f).toBeDefined();
 	expect(f?.issueIdentifiers).toContain("AUTH-12");
 	expect(f?.stage).toBe("issues-created"); // plan dir + issues, no agents working
 	expect(f?.persisted).toBe(true);
+	expect(f?.description).not.toContain("Stage: DONE");
+	expect(f?.createdAt).toBe(11);
+	expect(f?.updatedAt).toBe(22);
 });
 
 test("from-plan ingest: createFeature + features() adopts the dir and de-dupes the derived feature", async () => {
@@ -78,4 +99,22 @@ test("from-plan ingest: createFeature + features() adopts the dir and de-dupes t
 	expect(got?.persisted).toBe(true);
 	// The adopted dir must NOT also surface as a derived `plan:` feature.
 	expect(feats.some((f) => f.id === `plan:${repo}:${PLAN_DIR}`)).toBe(false);
+});
+
+test("manager emits features-changed when a tracked repo gains a plan dir on disk", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p3-watch-state-"));
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p3-watch-repo-"));
+	tmps.push(stateDir, repo);
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	mgr.createFeature({ title: "Tracked repo", repo });
+	await mgr.start();
+
+	const changed = onceFeatureChange(mgr);
+	await fs.mkdir(path.join(repo, "plans", "fresh"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "fresh", "00-overview.md"), "# Fresh\nSTATUS: open\n");
+
+	await changed;
+	const id = `plan:${repo}:plans/fresh`;
+	expect((await mgr.features(repo)).some((feature) => feature.id === id)).toBe(true);
 });

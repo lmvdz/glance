@@ -11,7 +11,7 @@
  */
 
 import { detectVerify } from "./intake.ts";
-import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
+import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
 export interface LandResult {
 	ok: boolean;
@@ -353,7 +353,7 @@ async function attemptAutoResolve(a: {
 function defaultResolver(): ConflictResolver {
 	return async ({ worktree, files }) => {
 		const prompt = `You are resolving git rebase conflicts in this repository. These files contain conflict markers (<<<<<<<, =======, >>>>>>>): ${files.join(", ")}. Edit each file into a correct, compiling resolution that preserves the intent of BOTH sides and removes every conflict marker. Do not run git or commit — just leave the files resolved.`;
-		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: worktree, stdout: "ignore", stderr: "ignore", env: { ...process.env }, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
+		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: worktree, stdout: "ignore", stderr: "ignore", env: { ...process.env, ...gitNoSignEnv() }, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
 		return (await proc.exited.catch(() => 1)) === 0;
 	};
 }
@@ -371,7 +371,7 @@ export function parseApproval(raw: string): boolean {
 function defaultReviewer(): ResolutionReviewer {
 	return async ({ repo, branch }) => {
 		const prompt = `An automated tool just rebased and merged branch "${branch}" into main in this repository. Inspect the result (e.g. \`git show HEAD\`, \`git diff HEAD~1\`) for semantic conflicts a test suite might not catch. Reply with exactly the single word APPROVE if the merge is correct, otherwise reply REJECT.`;
-		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: repo, stdout: "pipe", stderr: "ignore", env: { ...process.env }, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
+		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: repo, stdout: "pipe", stderr: "ignore", env: { ...process.env, ...gitNoSignEnv() }, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
 		const text = await new Response(proc.stdout).text();
 		await proc.exited.catch(() => undefined);
 		return parseApproval(text);

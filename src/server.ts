@@ -14,9 +14,9 @@ import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
-import type { ClientCommand, FeatureStage, IssueRef, SquadEvent } from "./types.ts";
+import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
-import { parsePlanConcerns } from "./features.ts";
+import { listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { proofGate, runProof } from "./proof.ts";
 import { runVisionPass } from "./vision.ts";
@@ -32,11 +32,16 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
-import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role } from "./types.ts";
+import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./federation.ts";
+import { workflowSnapshot } from "./workflow-catalog.ts";
+import { featureFlagStates, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
+import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
+import type { CapabilityInstallState } from "./capabilities/index.ts";
 
 const INDEX_HTML = path.join(import.meta.dir, "web", "index.html");
 const WEB_DIR = path.join(import.meta.dir, "web");
+const FEEDBACK_WIDGET = path.join(import.meta.dir, "web", "feedback-widget.js");
 /** Vite SPA build output (CC-rewrite). Served only via the inert opt-in seam below. */
 const WEBAPP_DIST = path.join(import.meta.dir, "..", "webapp", "dist");
 const WEBAPP_INDEX = path.join(WEBAPP_DIST, "index.html");
@@ -49,6 +54,10 @@ const ASSET_TYPES: Record<string, string> = {
 	".woff2": "font/woff2",
 };
 
+export const CONSOLE_SYSTEM_PROMPT = `You are the omp-squad interactive console agent.
+
+Default to chat, diagnosis, and concise guidance. Do not create features, issues, worktrees, workflows, files, commits, or other durable changes unless the user explicitly asks you to start/implement/change something. When the user asks a question, answer the question directly. When current feature context is included, use it as background, not as an instruction to mutate state. Keep replies terse and operator-focused.`;
+
 /**
  * Inert opt-in serve seam for the Vite SPA rewrite. DEFAULT OFF: requires BOTH the explicit
  * `OMP_SQUAD_WEBAPP=1` flag AND an existing built `webapp/dist/index.html`. Until cutover the live
@@ -57,6 +66,10 @@ const ASSET_TYPES: Record<string, string> = {
  */
 export function webappEnabled(): boolean {
 	return process.env.OMP_SQUAD_WEBAPP === "1" && existsSync(WEBAPP_INDEX);
+}
+
+export function feedbackEnabled(): boolean {
+	return process.env.OMP_SQUAD_FEEDBACK === "1";
 }
 /** Files served without a token so the PWA can install + bootstrap before sign-in. */
 const PUBLIC_ASSETS: Record<string, string> = {
@@ -67,6 +80,103 @@ const PUBLIC_ASSETS: Record<string, string> = {
 	"/icon-512.png": "image/png",
 	"/icon-maskable-512.png": "image/png",
 };
+
+export interface ModelOption {
+	label: string;
+	value: string;
+}
+
+export function modelOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): ModelOption[] {
+	const seen = new Set<string>();
+	const models = (env.OMP_SQUAD_MODELS ?? "")
+		.split(/[,\n]/)
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.filter((value) => {
+			if (seen.has(value)) return false;
+			seen.add(value);
+			return true;
+		});
+	return [{ label: "omp default", value: "" }, ...models.map((value) => ({ label: value, value }))];
+}
+
+export function mergeModelOptions(...groups: ModelOption[][]): ModelOption[] {
+	const seen = new Set<string>();
+	return groups.flat().filter((option) => {
+		const value = option.value || "__default__";
+		if (seen.has(value)) return false;
+		seen.add(value);
+		return true;
+	});
+}
+function capabilityInstallState(value: unknown): CapabilityInstallState | undefined {
+	return value === "imported" || value === "validated" || value === "approved" || value === "enabled" || value === "disabled" || value === "failed" || value === "removed" ? value : undefined;
+}
+
+function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value.flatMap((item): FeatureCriterion[] => {
+		if (!item || typeof item !== "object") return [];
+		const rec = item as Record<string, unknown>;
+		const id = typeof rec.id === "string" ? rec.id : undefined;
+		const text = typeof rec.text === "string" ? rec.text.trim() : "";
+		if (!id || !text) return [];
+		return [{ id, text, completed: rec.completed === true, source: rec.source === "plan" || rec.source === "ticket" || rec.source === "workflow" || rec.source === "manual" ? rec.source : "manual" }];
+	});
+}
+
+function featureDecisions(value: unknown): FeatureDecision[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value.flatMap((item): FeatureDecision[] => {
+		if (!item || typeof item !== "object") return [];
+		const rec = item as Record<string, unknown>;
+		const id = typeof rec.id === "string" ? rec.id : undefined;
+		const text = typeof rec.text === "string" ? rec.text.trim() : "";
+		if (!id || !text) return [];
+		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
+	});
+}
+
+function featureRelationships(value: unknown): FeatureRelationship[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value.flatMap((item): FeatureRelationship[] => {
+		if (!item || typeof item !== "object") return [];
+		const rec = item as Record<string, unknown>;
+		const targetId = typeof rec.targetId === "string" ? rec.targetId.trim() : "";
+		const id = typeof rec.id === "string" ? rec.id : targetId;
+		if (!id || !targetId) return [];
+		const type = rec.type === "issue" || rec.type === "blocks" || rec.type === "depends-on" || rec.type === "related" ? rec.type : "related";
+		return [{ id, targetId, targetTitle: typeof rec.targetTitle === "string" && rec.targetTitle.trim() ? rec.targetTitle.trim() : targetId, type, url: typeof rec.url === "string" ? rec.url : undefined }];
+	});
+}
+
+function planAnnotationTarget(value: unknown): PlanAnnotationTarget | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const rec = value as Record<string, unknown>;
+	const planPath = typeof rec.planPath === "string" ? rec.planPath.trim() : "";
+	if (!planPath) return undefined;
+	const lineStart = typeof rec.lineStart === "number" && Number.isInteger(rec.lineStart) && rec.lineStart > 0 ? rec.lineStart : undefined;
+	const lineEnd = typeof rec.lineEnd === "number" && Number.isInteger(rec.lineEnd) && rec.lineEnd > 0 ? rec.lineEnd : lineStart;
+	const quote = typeof rec.quote === "string" && rec.quote.trim() ? rec.quote.trim().slice(0, 4000) : undefined;
+	return { planPath, lineStart, lineEnd, quote };
+}
+
+function planAnnotationPrompt(feature: FeatureDTO, comment: ArtifactCommentDTO): string {
+	const a = comment.annotation;
+	const where = a ? `${a.planPath}${a.lineStart ? `:${a.lineStart}${a.lineEnd && a.lineEnd !== a.lineStart ? `-${a.lineEnd}` : ""}` : ""}` : "the linked plan";
+	const quote = a?.quote ? `\n\nSelected plan text:\n> ${a.quote.replace(/\n/g, "\n> ")}` : "";
+	return `Update the plan for feature "${feature.title}" (${feature.id}).
+
+Reviewer annotation at ${where}:${quote}
+
+Requested change:
+${comment.body}
+
+Apply the smallest coherent markdown change to the plan docs. Preserve existing plan structure, update acceptance criteria/prerequisites/decisions when relevant, and stop after the plan revision is complete.`;
+}
+
+
+
 
 interface SocketData {
 	id: number;
@@ -121,6 +231,8 @@ export interface SquadServerOptions {
 	/** DB-registry mode: a per-org SquadManager fleet. Set ⇒ route every request/WS to the caller's
 	 *  org manager (org from the session) and fan WS events out per org. Unset ⇒ single-manager / file mode. */
 	registry?: ManagerRegistry;
+	/** Runtime feature-flag settings persisted under the state dir and applied to process.env. */
+	runtimeSettings?: RuntimeSettingsStore;
 }
 
 /** Pure: a short, stable fingerprint of the served UI. Changes whenever index.html changes,
@@ -198,6 +310,8 @@ export class SquadServer {
 	private readonly db: DbHandle | undefined;
 	/** Origins allowed to mutate the squad's own routes in DB mode (cross-site defense). */
 	private readonly trustedOrigins: Set<string>;
+	/** ponytail: in-process public intake limiter; restart resets it, campaign token + origin + byte caps are the real controls. */
+	private readonly feedbackRate = new Map<string, { minute: number; count: number }>();
 
 	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
 		this.singleManager = manager;
@@ -255,6 +369,21 @@ export class SquadServer {
 		const origin = req.headers.get("origin");
 		if (!origin) return true;
 		return this.trustedOrigins.has(origin);
+	}
+
+	private feedbackRateAllowed(req: Request, server: Server<SocketData>, campaignId: string): boolean {
+		const limit = Number(process.env.OMP_SQUAD_FEEDBACK_RATE_LIMIT_PER_MIN) || 30;
+		if (limit <= 0) return true;
+		const minute = Math.floor(Date.now() / 60_000);
+		const ip = server.requestIP(req)?.address ?? "unknown";
+		const key = `${campaignId || "unknown"}:${ip}`;
+		const rec = this.feedbackRate.get(key);
+		if (!rec || rec.minute !== minute) {
+			this.feedbackRate.set(key, { minute, count: 1 });
+			return true;
+		}
+		rec.count++;
+		return rec.count <= limit;
 	}
 
 	/** Resolve the fleet a request/socket acts on. Single-manager mode: the root manager. DB-registry
@@ -430,8 +559,29 @@ export class SquadServer {
 			}
 			return new Response("not found", { status: 404 });
 		}
+		if (url.pathname === "/feedback/widget.js") {
+			if (!feedbackEnabled() || !existsSync(FEEDBACK_WIDGET)) return new Response("not found", { status: 404 });
+			return new Response(Bun.file(FEEDBACK_WIDGET), { headers: { "content-type": "text/javascript; charset=utf-8" } });
+		}
+		if (url.pathname === "/api/feedback/items" && req.method === "POST") {
+			if (!feedbackEnabled()) return new Response("not found", { status: 404 });
+			if (!this.singleManager) return new Response("feedback unavailable", { status: 404 });
+			const body: unknown = await req.json().catch(() => null);
+			const campaignId = body && typeof body === "object" && !Array.isArray(body) && "campaignId" in body && typeof body.campaignId === "string" ? body.campaignId : "";
+			if (!this.feedbackRateAllowed(req, server, campaignId)) return new Response("rate limited", { status: 429 });
+			try {
+				const item = await this.singleManager.submitFeedbackItem(body, req.headers.get("origin"));
+				return Response.json({ item }, { status: 201 });
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				const status = /token|origin/.test(message) ? 403 : 400;
+				return Response.json({ error: message }, { status });
+			}
+		}
 		// Public mode probe — lets the SPA pick its auth style before any login. No auth required.
 		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file" });
+		if (url.pathname === "/llms.txt") return new Response("# omp-squad capability API\n\n- GET /api/capability-discovery\n- GET /api/capability-catalog\n- GET /api/capability-packs\n- POST /api/capability-sources\n- POST /api/capability-installs\n- GET /api/federation/capabilities\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
+		if (url.pathname === "/openapi.json") return Response.json({ openapi: "3.1.0", info: { title: "omp-squad capability API", version: this.uiVersion }, paths: { "/api/capability-discovery": { get: {} }, "/api/capability-catalog": { get: {} }, "/api/capability-packs": { get: {} }, "/api/capability-sources": { get: {}, post: {} }, "/api/capability-installs": { get: {}, post: {} }, "/api/federation/capabilities": { get: {} } } });
 		// DB mode: better-auth owns the rest of /api/auth/* (sign-in/up/out, org, members). Reachable
 		// unauthenticated so login works; /api/auth/check stays our own (excluded here), handled below.
 		if (this.auth && url.pathname.startsWith("/api/auth/") && url.pathname !== "/api/auth/check") {
@@ -477,6 +627,19 @@ export class SquadServer {
 			await this.opts.push.subscribe({ endpoint: sub.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } });
 			return Response.json({ ok: true });
 		}
+		if (url.pathname === "/api/settings" && req.method === "GET") {
+			const flags = this.opts.runtimeSettings ? await this.opts.runtimeSettings.states() : featureFlagStates();
+			return Response.json({ featureFlags: flags });
+		}
+		if (url.pathname === "/api/settings/feature-flags" && req.method === "POST") {
+			if (!this.opts.runtimeSettings) return new Response("settings persistence unavailable", { status: 501 });
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object" || !("key" in body) || typeof body.key !== "string" || !isFeatureFlagKey(body.key) || !("enabled" in body) || typeof body.enabled !== "boolean") {
+				return new Response("feature flag key and enabled boolean required", { status: 400 });
+			}
+			const flags = await this.opts.runtimeSettings.setFeatureFlag(body.key, body.enabled);
+			return Response.json({ featureFlags: flags });
+		}
 		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: the
 		// org's manager (org from the session, never the request). No active org ⇒ empty reads / 403 mutations.
 		const orgId = this.registry ? (session?.session.activeOrganizationId ?? undefined) : undefined;
@@ -486,8 +649,114 @@ export class SquadServer {
 				: actorForRole(role);
 		const manager = await this.managerFor(actor);
 		if (!manager) return this.noFleet(req, url);
+		if (url.pathname === "/api/feedback/campaigns" && req.method === "GET") return Response.json(await manager.listFeedbackCampaigns());
+		if (url.pathname === "/api/feedback/campaigns" && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object") return new Response("campaign body required", { status: 400 });
+			if (!("name" in body) || typeof body.name !== "string" || !("repo" in body) || typeof body.repo !== "string" || !("token" in body) || typeof body.token !== "string") return new Response("name, repo, token required", { status: 400 });
+			const allowedOrigins = "allowedOrigins" in body && Array.isArray(body.allowedOrigins) ? body.allowedOrigins.filter((x): x is string => typeof x === "string") : undefined;
+			const rewardCents = "rewardCents" in body && typeof body.rewardCents === "number" ? body.rewardCents : undefined;
+			const rewardCurrency = "rewardCurrency" in body && typeof body.rewardCurrency === "string" ? body.rewardCurrency : undefined;
+			const id = "id" in body && typeof body.id === "string" ? body.id : undefined;
+			return Response.json(await manager.seedFeedbackCampaign({ id, name: body.name, repo: body.repo, token: body.token, allowedOrigins, rewardCents, rewardCurrency }));
+		}
+		if (url.pathname === "/api/feedback/items" && req.method === "GET") return Response.json(await manager.listFeedbackItems());
+		const mfitem = url.pathname.match(/^\/api\/feedback\/items\/([^/]+)(?:\/(.+))?$/);
+		if (mfitem) {
+			const id = decodeURIComponent(mfitem[1]);
+			const action = mfitem[2] ?? "";
+			try {
+				if (!action && req.method === "GET") {
+					const list = await manager.listFeedbackItems();
+					const item = list.raw.find((x) => x.id === id);
+					return item ? Response.json(item) : new Response("feedback item not found", { status: 404 });
+				}
+				if (action === "validate" && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => ({}));
+					const input = body && typeof body === "object" ? {
+						respondent: "respondent" in body ? body.respondent : undefined,
+						vote: "vote" in body ? body.vote : undefined,
+						wouldUse: "wouldUse" in body ? body.wouldUse : undefined,
+						pain: "pain" in body ? body.pain : undefined,
+						note: "note" in body ? body.note : undefined,
+					} : {};
+					return Response.json(await manager.addFeedbackValidation(id, input, actor));
+				}
+				if (action === "reward/approve" && req.method === "POST") return Response.json(await manager.approveFeedbackReward(id, actor));
+				if (action === "reward/void" && req.method === "POST") return Response.json(await manager.voidFeedbackReward(id, actor));
+				if (action === "reward/mark-paid" && req.method === "POST") {
+					const body: unknown = await req.json().catch(() => ({}));
+					const provider = body && typeof body === "object" && "provider" in body && typeof body.provider === "string" && ["manual", "stripe", "tremendous"].includes(body.provider) ? body.provider : undefined;
+					const externalRef = body && typeof body === "object" && "externalRef" in body && typeof body.externalRef === "string" ? body.externalRef : undefined;
+					return Response.json(await manager.markFeedbackRewardPaid(id, { provider, externalRef }, actor));
+				}
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				return new Response(message, { status: /not found/.test(message) ? 404 : 400 });
+			}
+		}
 		if (url.pathname === "/api/agents") return Response.json(manager.list());
 		if (url.pathname === "/api/projects") return Response.json(manager.projects());
+		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(manager.list(), manager.capabilityWorkflowDefinitions()));
+		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
+		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
+		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
+		if (url.pathname === "/api/capability-audit") return Response.json({ audit: manager.capabilities().audit });
+		if (url.pathname === "/api/capability-verifications") return Response.json({ verifications: manager.capabilities().verifications });
+		if (url.pathname === "/api/capability-catalog") return Response.json({ catalog: publicCapabilityCatalog() });
+		if (url.pathname === "/api/capability-sources" && req.method === "GET") return Response.json({ sources: manager.capabilities().sources });
+		if (url.pathname === "/api/capability-sources" && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object") return new Response("manifest or catalogId required", { status: 400 });
+			const rec = body as Record<string, unknown>;
+			const catalogId = typeof rec.catalogId === "string" ? rec.catalogId : undefined;
+			const catalogEntry = catalogId ? publicCapabilityManifest(catalogId) : undefined;
+			const manifest = catalogEntry?.manifest ?? rec.manifest;
+			if (!manifest) return new Response(catalogId ? "catalog capability not found" : "manifest required", { status: 400 });
+			const name = typeof rec.name === "string" ? rec.name : catalogEntry?.source;
+			const sourceUrl = typeof rec.url === "string" ? rec.url : catalogId ? `catalog:${catalogId}` : undefined;
+			const trusted = typeof rec.trusted === "boolean" ? rec.trusted : catalogId ? true : undefined;
+			return Response.json(manager.importCapability({ name, url: sourceUrl, trusted, manifest }, actor));
+		}
+		if (url.pathname === "/api/capability-packs" && req.method === "GET") return Response.json({ packs: manager.capabilities().packs });
+		const mcpack = url.pathname.match(/^\/api\/capability-packs\/([^/]+)(?:\/diff\/([^/]+))?$/);
+		if (mcpack && req.method === "GET") {
+			const id = decodeURIComponent(mcpack[1]);
+			if (mcpack[2]) return Response.json({ changes: manager.capabilityDiff(id, decodeURIComponent(mcpack[2])) });
+			const pack = manager.capabilities().packs.find((item) => item.id === id);
+			return pack ? Response.json(pack) : new Response("capability pack not found", { status: 404 });
+		}
+		if (url.pathname === "/api/capability-installs" && req.method === "GET") return Response.json({ installs: manager.capabilities().installs });
+		if (url.pathname === "/api/capability-installs" && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object" || !("packId" in body) || typeof body.packId !== "string") return new Response("packId required", { status: 400 });
+			const rec = body as Record<string, unknown>;
+			const overrides = rec.overrides && typeof rec.overrides === "object" && !Array.isArray(rec.overrides) ? rec.overrides as Record<string, unknown> : undefined;
+			const enable = typeof rec.enable === "boolean" ? rec.enable : undefined;
+			return Response.json(manager.installCapability({ packId: body.packId, overrides, enable }, actor));
+		}
+		const mcinstall = url.pathname.match(/^\/api\/capability-installs\/([^/]+)(?:\/(run))?$/);
+		if (mcinstall && req.method === "PATCH" && !mcinstall[2]) {
+			const body: unknown = await req.json().catch(() => null);
+			const patch = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+			return Response.json(manager.updateCapability(decodeURIComponent(mcinstall[1]), {
+				state: capabilityInstallState(patch.state),
+				enabled: typeof patch.enabled === "boolean" ? patch.enabled : undefined,
+				removed: patch.removed === true,
+				rollback: patch.rollback === true,
+				upgradeToPackId: typeof patch.upgradeToPackId === "string" ? patch.upgradeToPackId : undefined,
+				overrides: patch.overrides && typeof patch.overrides === "object" && !Array.isArray(patch.overrides) ? patch.overrides as Record<string, unknown> : undefined,
+			}, actor));
+		}
+		if (mcinstall && req.method === "POST" && mcinstall[2] === "run") {
+			const body: unknown = await req.json().catch(() => ({}));
+			const rec = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+			const bindingKey = typeof rec.bindingKey === "string" ? rec.bindingKey : undefined;
+			const repo = typeof rec.repo === "string" && rec.repo ? rec.repo : undefined;
+			const prompt = typeof rec.prompt === "string" && rec.prompt.trim() ? rec.prompt.trim() : undefined;
+			const agent = await manager.runCapability(decodeURIComponent(mcinstall[1]), bindingKey, { repo, prompt }, actor);
+			return Response.json({ agent, installId: decodeURIComponent(mcinstall[1]), bindingKey });
+		}
 		if (url.pathname === "/api/features" && req.method === "GET") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
 		if (url.pathname === "/api/features" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
@@ -501,8 +770,12 @@ export class SquadServer {
 			const body: unknown = await req.json().catch(() => null);
 			if (!body || typeof body !== "object" || !("planDir" in body) || typeof body.planDir !== "string") return new Response("planDir required", { status: 400 });
 			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
-			const title = "title" in body && typeof body.title === "string" && body.title.trim() ? body.title.trim() : path.basename(body.planDir);
-			const pf = manager.createFeature({ title, repo, planDir: body.planDir });
+			const planDir = body.planDir.replace(/\/+$/, "");
+			const planTitle = (await listPlanDirs(repo)).find((pd) => pd.dir === planDir)?.title;
+			const fallbackTitle = "title" in body && typeof body.title === "string" && body.title.trim() ? body.title.trim() : path.basename(planDir).replace(/[-_]+/g, " ");
+			const title = planTitle ?? fallbackTitle;
+			const existing = (await manager.features(repo)).find((f) => f.planDir === planDir);
+			const pf = existing ?? manager.createFeature({ title, repo, planDir });
 			return Response.json(pf);
 		}
 		if (url.pathname === "/api/features/auto" && req.method === "POST") {
@@ -517,13 +790,18 @@ export class SquadServer {
 		const mfpatch = url.pathname.match(/^\/api\/features\/([^/]+)$/);
 		if (mfpatch && req.method === "PATCH") {
 			const body: unknown = await req.json().catch(() => null);
-			const patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean } = {};
+			const patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[] } = {};
 			if (body && typeof body === "object") {
+				if ("repo" in body && typeof body.repo === "string") patch.repo = body.repo;
 				if ("title" in body && typeof body.title === "string") patch.title = body.title;
+				if ("description" in body && typeof body.description === "string") patch.description = body.description;
 				if ("archived" in body && typeof body.archived === "boolean") patch.archived = body.archived;
 				if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
+				if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
+				if ("decisions" in body) patch.decisions = featureDecisions(body.decisions);
+				if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			}
-			const pf = manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
+			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
 		}
 		const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
@@ -541,6 +819,8 @@ export class SquadServer {
 			const unlink = "unlink" in body && body.unlink === true;
 			return Response.json({ ok: manager.linkAgent(id, body.agentId, unlink) });
 		}
+		if (url.pathname === "/api/federation/capabilities") return Response.json({ capabilities: manager.capabilityFederation() });
+		if (url.pathname === "/api/capability-discovery") return Response.json({ name: "omp-squad capabilities", routes: ["/api/capability-catalog", "/api/capability-sources", "/api/capability-packs", "/api/capability-installs", "/api/federation/capabilities"], privateTenantData: false });
 		const mfland = url.pathname.match(/^\/api\/features\/([^/]+)\/land$/);
 		if (mfland && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
@@ -561,20 +841,70 @@ export class SquadServer {
 			const f = list.find((x) => x.id === decodeURIComponent(mfpipe[1]));
 			if (!f) return new Response("no such feature", { status: 404 });
 			const concerns = f.planDir ? await parsePlanConcerns(f.repo, f.planDir) : [];
+			const documents = f.planDir ? await parsePlanDocuments(f.repo, f.planDir) : [];
 			const ids = f.issueIdentifiers;
 			let issues: IssueRef[] = [];
 			if (ids && ids.length) {
 				const planeIssues = await listPlaneIssues(f.repo);
 				if (planeIssues) issues = planeIssues.filter((i) => i.identifier !== undefined && ids.includes(i.identifier));
 			}
-			return Response.json({ concerns, issues, agentIds: f.agentIds });
+			const comments = await manager.listComments({ repo: f.repo, subject: f.id });
+			return Response.json({ feature: f, concerns, documents, issues, comments, agentIds: f.agentIds });
 		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
+		const mann = url.pathname.match(/^\/api\/features\/([^/]+)\/annotations$/);
+		if (mann && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(mann[1]);
+			const comments = await manager.listComments({ repo, subject: featureId });
+			return Response.json(comments.filter((comment) => comment.kind === "plan-annotation" && comment.annotation));
+		}
+		if (mann && req.method === "POST") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(mann[1]);
+			const body: unknown = await req.json().catch(() => null);
+			const text = body && typeof body === "object" && "body" in body && typeof body.body === "string" ? body.body.trim() : "";
+			const annotation = planAnnotationTarget(body);
+			if (!text || !annotation) return new Response("body and planPath required", { status: 400 });
+			const feature = (await manager.features(repo)).find((x) => x.id === featureId);
+			if (!feature) return new Response("no such feature", { status: 404 });
+			return Response.json(await manager.addComment({ repo, subject: featureId, body: text, kind: "plan-annotation", annotation }, actor));
+		}
+		const mannr = url.pathname.match(/^\/api\/features\/([^/]+)\/annotations\/([^/]+)\/resolve$/);
+		if (mannr && req.method === "POST") {
+			await manager.resolveComment(decodeURIComponent(mannr[2]), actor);
+			return Response.json({ ok: true });
+		}
+		const manns = url.pathname.match(/^\/api\/features\/([^/]+)\/annotations\/([^/]+)\/send$/);
+		if (manns && req.method === "POST") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(manns[1]);
+			const annotationId = decodeURIComponent(manns[2]);
+			const body: unknown = await req.json().catch(() => null);
+			const mode = body && typeof body === "object" && "mode" in body && body.mode === "agent" ? "agent" : "planner";
+			const feature = (await manager.features(repo)).find((x) => x.id === featureId);
+			if (!feature) return new Response("no such feature", { status: 404 });
+			const comment = (await manager.listComments({ repo, subject: featureId })).find((item) => item.id === annotationId);
+			if (!comment || comment.kind !== "plan-annotation") return new Response("annotation not found", { status: 404 });
+			const message = planAnnotationPrompt(feature, comment);
+			if (mode === "agent") {
+				const agentId = body && typeof body === "object" && "agentId" in body && typeof body.agentId === "string" ? body.agentId : "";
+				if (!agentId) return new Response("agentId required", { status: 400 });
+				await manager.applyCommand({ type: "prompt", id: agentId, message }, actor);
+				return Response.json({ agentId, mode });
+			}
+			const dto = await manager.create({ repo, name: "plan-reviser", task: message, featureId, approvalMode: "write", autoRoute: false, track: true, owns: feature.planDir ? [feature.planDir] : undefined }, actor);
+			return Response.json({ agentId: dto.id, mode });
+		}
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
 		if (url.pathname === "/api/health") {
 			const h = await manager.sampleHealth();
 			return Response.json({ ok: h.warnings.length === 0, warnings: h.warnings, ...h.sample, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()), at: h.at });
 		}
+		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
+		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
+		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
+		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/presence") {
 			// risk #6: the global presence registry is machine-wide; never serve it in DB-registry mode.
 			if (this.registry) return Response.json([]);
@@ -614,10 +944,11 @@ export class SquadServer {
 			const body: unknown = await req.json().catch(() => null);
 			const prompt = body && typeof body === "object" && "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";
 			if (prompt.length === 0) return new Response("empty prompt", { status: 400 });
+			const profileId = body && typeof body === "object" && "profileId" in body && typeof body.profileId === "string" ? body.profileId : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
 			try {
-				const dto = await manager.create({ ...plan, track: true }, actor);
+				const dto = await manager.create({ ...plan, profileId, track: true }, actor);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
@@ -625,11 +956,10 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/console" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
-			const message = body && typeof body === "object" && "message" in body && typeof body.message === "string" ? body.message.trim() : "";
-			if (!message) return new Response("empty message", { status: 400 });
 			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
-			// A plain conversational omp agent: no smart-spawn routing, no workflow, not filed to Plane.
-			const dto = await manager.create({ repo, task: message }, actor);
+			const model = body && typeof body === "object" && "model" in body && typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+			const profileId = body && typeof body === "object" && "profileId" in body && typeof body.profileId === "string" ? body.profileId : undefined;
+			const dto = await manager.create({ repo, name: "chat", model, profileId, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
 			return Response.json({ agentId: dto.id });
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
@@ -891,4 +1221,188 @@ export class SquadServer {
 		void this.peerPresence?.stop();
 		this.server?.stop(true);
 	}
+}
+
+async function usagePayload(manager: SquadManager, url: URL): Promise<{
+	runs: RunReceipt[];
+	receipts: RunReceipt[];
+	toolCalls: number;
+	costUsd?: number;
+	tokens?: number;
+	durationMs?: number;
+	agents: number;
+	since?: number;
+}> {
+	const limit = boundedNumber(url.searchParams.get("limit"), 100, 1, 1000);
+	const repo = url.searchParams.get("repo") ?? undefined;
+	const agentId = url.searchParams.get("agentId") ?? undefined;
+	const since = boundedNumber(url.searchParams.get("since"), 0, 0, Number.MAX_SAFE_INTEGER) || undefined;
+	const agents = manager.list().filter((a) => (!repo || a.repo === repo) && (!agentId || a.id === agentId));
+	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat().filter((r) => !since || (r.endedAt ?? r.startedAt) >= since);
+	const runs = receipts.sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt)).slice(0, limit);
+	const totals = runs.reduce((acc, r) => {
+		acc.toolCalls += r.toolCalls;
+		acc.costUsd += r.costUsd ?? 0;
+		acc.tokens += r.tokens?.total ?? 0;
+		acc.durationMs += r.durationMs ?? 0;
+		return acc;
+	}, { toolCalls: 0, costUsd: 0, tokens: 0, durationMs: 0 });
+	return {
+		runs,
+		receipts: runs,
+		toolCalls: totals.toolCalls,
+		costUsd: totals.costUsd || undefined,
+		tokens: totals.tokens || undefined,
+		durationMs: totals.durationMs || undefined,
+		agents: agents.length,
+		since,
+	};
+}
+
+async function heatPayload(manager: SquadManager, url: URL): Promise<{
+	days: string[];
+	tree: { id: string; name: string; type: "file"; depth: number; heat: number[] }[];
+	hotAreas: { path: string; heat: number }[];
+	insights: string[];
+	source: string;
+	generatedAt: number;
+}> {
+	const count = boundedNumber(url.searchParams.get("days"), 8, 1, 31);
+	const repo = url.searchParams.get("repo") ?? undefined;
+	const end = new Date();
+	const days = Array.from({ length: count }, (_, i) => {
+		const d = new Date(end);
+		d.setDate(end.getDate() - (count - i - 1));
+		return d.toISOString().slice(0, 10);
+	});
+	const indexByDay = new Map(days.map((d, i) => [d, i]));
+	const agents = manager.list().filter((a) => !repo || a.repo === repo);
+	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat();
+	const byFile = new Map<string, number[]>();
+	for (const r of receipts) {
+		const day = new Date(r.endedAt ?? r.startedAt).toISOString().slice(0, 10);
+		const idx = indexByDay.get(day);
+		if (idx === undefined) continue;
+		for (const file of r.filesTouched) {
+			const heat = byFile.get(file) ?? Array(count).fill(0);
+			heat[idx] += 1;
+			byFile.set(file, heat);
+		}
+	}
+	const tree = [...byFile.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([id, heat]) => ({
+		id,
+		name: path.basename(id),
+		type: "file" as const,
+		depth: Math.max(0, id.split(/[\\/]/).length - 1),
+		heat,
+	}));
+	const hotAreas = tree.map((n) => ({ path: n.id, heat: n.heat.reduce((a, b) => a + b, 0) })).filter((n) => n.heat > 0).sort((a, b) => b.heat - a.heat).slice(0, 8);
+	return {
+		days,
+		tree,
+		hotAreas,
+		insights: hotAreas.length ? [`${hotAreas.length} files touched in recent receipts`] : ["No receipt-backed file writes in this window"],
+		source: "receipts.filesTouched",
+		generatedAt: Date.now(),
+	};
+}
+
+
+async function governancePayload(manager: SquadManager, role: Role, dbMode: boolean, dbRegistry: boolean): Promise<{
+	authMode: "db" | "file";
+	role: Role;
+	wipCap: number;
+	maxAgents: number;
+	health: Awaited<ReturnType<SquadManager["sampleHealth"]>>;
+	federation: { coordinator: boolean; dbRegistry: boolean };
+	audit: { available: true };
+}> {
+	return {
+		authMode: dbMode ? "db" : "file",
+		role,
+		wipCap: Number(process.env.OMP_SQUAD_WIP_CAP) || 3,
+		maxAgents: Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3),
+		health: await manager.sampleHealth(),
+		federation: { coordinator: !!process.env.OMP_SQUAD_COORDINATOR, dbRegistry },
+		audit: { available: true },
+	};
+}
+async function actionItemsPayload(manager: SquadManager, url: URL): Promise<{ items: ActionItem[]; generatedAt: number }> {
+	const repo = url.searchParams.get("repo") ?? undefined;
+	const agents = manager.list().filter((a) => !repo || a.repo === repo);
+	const health = await manager.sampleHealth();
+	const items: ActionItem[] = [];
+	for (const a of agents) {
+		for (const p of a.pending) {
+			items.push({
+				id: `pending:${a.id}:${p.id}`,
+				severity: p.source === "tool" ? "high" : "medium",
+				source: p.source,
+				subject: `${a.name}: ${p.title}`,
+				rootCause: p.message ?? "Agent is waiting for operator input.",
+				nextAction: p.source === "tool" ? "Review and answer the host-tool request" : "Answer the pending prompt",
+				targetRoute: `#/console/${encodeURIComponent(a.id)}`,
+				agentId: a.id,
+				requestId: p.id,
+			});
+		}
+		if (a.status === "error") {
+			items.push({
+				id: `error:${a.id}`,
+				severity: "high",
+				source: "agent",
+				subject: `${a.name} errored`,
+				rootCause: a.error ?? "Agent reported an error.",
+				nextAction: "Open transcript, then restart or remove the agent",
+				targetRoute: `#/console/${encodeURIComponent(a.id)}`,
+				agentId: a.id,
+			});
+		}
+		if (a.landReady) {
+			items.push({
+				id: `land:${a.id}`,
+				severity: "medium",
+				source: "land",
+				subject: `${a.name} is ready to land`,
+				rootCause: "Verification passed and auto-land is holding for confirmation.",
+				nextAction: "Review proof and land the branch",
+				targetRoute: `#/agent/${encodeURIComponent(a.id)}`,
+				agentId: a.id,
+			});
+		}
+	}
+	for (const warning of health.warnings) {
+		items.push({
+			id: `health:${warning}`,
+			severity: "medium",
+			source: "health",
+			subject: "Fleet health warning",
+			rootCause: warning,
+			nextAction: "Open Fleet Health and reduce load before spawning more agents",
+			targetRoute: "#/observability",
+		});
+	}
+	items.sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || a.id.localeCompare(b.id));
+	return { items, generatedAt: Date.now() };
+}
+
+type ActionItem = {
+	id: string;
+	severity: "low" | "medium" | "high";
+	source: "ui" | "tool" | "agent" | "land" | "health";
+	subject: string;
+	rootCause: string;
+	nextAction: string;
+	targetRoute: string;
+	agentId?: string;
+	requestId?: string;
+};
+
+function severityRank(s: ActionItem["severity"]): number {
+	return s === "high" ? 3 : s === "medium" ? 2 : 1;
+}
+
+function boundedNumber(raw: string | null, fallback: number, min: number, max: number): number {
+	const n = raw === null ? fallback : Number(raw);
+	return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : fallback;
 }

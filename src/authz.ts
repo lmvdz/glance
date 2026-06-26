@@ -57,6 +57,9 @@ export function commandTier(cmd: ClientCommand): Role {
  *  inside `applyCommand`, the SAME single chokepoint the WS surface uses. No second authz site. */
 export function restActionTier(method: string, pathname: string): Role {
 	if (pathname === "/api/upgrade") return "admin";
+	if (pathname === "/api/settings/feature-flags") return "admin";
+	if (pathname.startsWith("/api/capability-sources") || pathname.startsWith("/api/capability-installs")) return method === "GET" ? "viewer" : "admin";
+	if (pathname.startsWith("/api/capability-packs")) return method === "GET" ? "viewer" : "admin";
 	// Destructive direct-manager mutations whose server.ts handlers bypass applyCommand, plus vision
 	// (OMPSQ-152): it drives the daemon's browser off-box, so it is admin-only — not operator.
 	if (/^\/api\/agents\/[^/]+\/(land|vision)$/.test(pathname) || /^\/api\/features\/[^/]+\/(land|verify)$/.test(pathname)) {

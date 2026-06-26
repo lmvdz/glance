@@ -17,6 +17,7 @@ import { commandTier, restActionTier } from "../src/authz.ts";
 import type { StateSnapshot, Store } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
+import { RuntimeSettingsStore } from "../src/runtime-settings.ts";
 import type { Actor } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -46,6 +47,8 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("POST", "/api/command")).toBe("operator");
 	expect(restActionTier("POST", "/api/spawn")).toBe("operator");
 	expect(restActionTier("POST", "/api/upgrade")).toBe("admin");
+	expect(restActionTier("GET", "/api/settings")).toBe("viewer");
+	expect(restActionTier("POST", "/api/settings/feature-flags")).toBe("admin");
 	expect(restActionTier("POST", "/api/agents/a1/land")).toBe("admin");
 	expect(restActionTier("POST", "/api/features/f1/land")).toBe("admin");
 	expect(restActionTier("POST", "/api/features/f1/verify")).toBe("admin");
@@ -69,6 +72,10 @@ test("applyCommand: operator denied destructive ops (RbacDenied + audited); admi
 			return { agents: [], transcripts: {}, features: [] };
 		},
 		async save() {},
+		async loadFeedback() {
+			return { campaigns: [], items: [], validations: [], rewards: [] };
+		},
+		async saveFeedback() {},
 		async appendAudit(e) {
 			audits.push({ actor: e.actor, action: e.action });
 		},
@@ -139,4 +146,25 @@ test("REST vision route: operator 403 at the gate, admin passes through (OMPSQ-1
 	expect((await vision(tokens.operator)).status).toBe(403);
 	// Admin clears the gate; the handler then 404s (no such agent) — proving authz passed, not denied.
 	expect((await vision(tokens.admin)).status).toBe(404);
+});
+
+test("REST settings flags: viewer reads, operator denied, admin persists", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "authz-settings-"));
+	const tokens = { admin: "admin-token-xxxxxxxx", operator: "operator-token-xxxxxx", viewer: "viewer-token-xxxxxxxx" };
+	const runtimeSettings = new RuntimeSettingsStore(dir);
+	const server = new SquadServer(undefined, { port: 0, token: tokens.admin, roleTokens: { operator: tokens.operator, viewer: tokens.viewer }, runtimeSettings });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	const headers = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
+	const body = JSON.stringify({ key: "OMP_SQUAD_OBSERVE_AUTOFIX", enabled: true });
+
+	expect((await fetch(`${url}/api/settings`, { headers: headers(tokens.viewer) })).status).toBe(200);
+	expect((await fetch(`${url}/api/settings/feature-flags`, { method: "POST", headers: headers(tokens.operator), body })).status).toBe(403);
+	const saved = await fetch(`${url}/api/settings/feature-flags`, { method: "POST", headers: headers(tokens.admin), body });
+	expect(saved.status).toBe(200);
+	expect(await saved.text()).toContain("\"OMP_SQUAD_OBSERVE_AUTOFIX\"");
+	expect(await runtimeSettings.load()).toMatchObject({ featureFlags: { OMP_SQUAD_OBSERVE_AUTOFIX: true } });
 });

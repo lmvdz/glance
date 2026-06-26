@@ -5,12 +5,12 @@
  */
 
 import { expect, test } from "bun:test";
-import { Dispatcher, type DispatchDeps } from "../src/dispatch.ts";
+import { Dispatcher, dispatchOrder, type DispatchDeps } from "../src/dispatch.ts";
 import { noAutoDispatchName } from "../src/plane.ts";
 import { occupyingAgents } from "../src/scheduler.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
-const issue = (id: string): IssueRef => ({ id, name: `issue ${id}` });
+const issue = (id: string, priority?: IssueRef["priority"]): IssueRef => ({ id, name: `issue ${id}`, priority });
 
 const dto = (status: AgentStatus): AgentDTO => ({
 	id: status, name: status, status, kind: "omp-operator",
@@ -164,4 +164,17 @@ test("dispatcher: WIP cap counts only occupying agents (idle/stopped don't pin i
 	});
 	expect(await new Dispatcher(deps).tick()).toBe(1); // 2 occupying < cap 3 → exactly 1 slot before the cap binds
 	expect(got.length).toBe(1);
+});
+
+test("dispatcher: dispatches higher-priority Plane issues first without bypassing caps", async () => {
+	const { deps, spawned } = harness({
+		maxActive: 2,
+		listIssues: async () => [issue("low", "low"), issue("urgent", "urgent"), issue("high", "high")],
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(2);
+	expect(spawned).toEqual(["urgent", "high"]);
+});
+
+test("dispatchOrder ranks known priorities before plain issues", () => {
+	expect([issue("B"), issue("A", "urgent"), issue("C", "high")].sort(dispatchOrder).map((i) => i.id)).toEqual(["A", "C", "B"]);
 });

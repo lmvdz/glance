@@ -4,6 +4,8 @@
  * (infer/parsePlanJson), and supervisor.ts (decide/extractJsonObject).
  */
 
+import { gitNoSignEnv } from "./git-harden.ts";
+
 /**
  * Run a one-shot `omp` invocation and capture stdout. Never throws: a spawn
  * error or `timeoutMs` abort degrades to `{ out: "", code: 1 }`, so callers can
@@ -15,7 +17,7 @@ export async function ompOneShot(args: string[], opts: { bin?: string; timeoutMs
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "ignore",
-			env: { ...process.env },
+			env: { ...process.env, ...gitNoSignEnv() },
 			...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
 		});
 		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);

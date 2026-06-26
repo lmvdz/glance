@@ -12,21 +12,30 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+export interface PlanAnnotationTarget {
+  planPath: string;
+  lineStart?: number;
+  lineEnd?: number;
+  quote?: string;
+}
+
 export interface ArtifactComment {
   id: string;
   repo: string;
-  /** Review target: a task's Plane issue identifier or a plan-dir file path. */
+  /** Review target: a task's Plane issue identifier, feature id, or plan-dir file path. */
   subject: string;
   body: string;
   author: string;
   urgent?: boolean;
   createdAt: number;
+  kind?: "comment" | "plan-annotation";
+  annotation?: PlanAnnotationTarget;
   /** Folded in from a later resolve event; absent ⇒ still open. */
   resolvedAt?: number;
 }
 
 type CommentEvent =
-  | { type: "add"; id: string; repo: string; subject: string; body: string; author: string; urgent?: boolean; at: number }
+  | { type: "add"; id: string; repo: string; subject: string; body: string; author: string; urgent?: boolean; at: number; kind?: "comment" | "plan-annotation"; annotation?: PlanAnnotationTarget }
   | { type: "resolve"; id: string; at: number };
 
 export function commentsPath(baseDir: string): string {
@@ -73,7 +82,7 @@ export async function listComments(baseDir: string, q: CommentQuery): Promise<Ar
     }
     if (ev.type === "add") {
       if (!byId.has(ev.id)) order.push(ev.id);
-      byId.set(ev.id, { id: ev.id, repo: ev.repo, subject: ev.subject, body: ev.body, author: ev.author, urgent: ev.urgent, createdAt: ev.at });
+      byId.set(ev.id, { id: ev.id, repo: ev.repo, subject: ev.subject, body: ev.body, author: ev.author, urgent: ev.urgent, createdAt: ev.at, kind: ev.kind, annotation: ev.annotation });
     } else {
       const c = byId.get(ev.id);
       if (c) c.resolvedAt = ev.at;

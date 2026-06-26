@@ -9,6 +9,7 @@
 
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { gitNoSignEnv } from "./git-harden.ts";
 
 /** Drives a browser against `url`, leaving screenshots + notes.md under `dir`. Injectable so
  *  tests need no real omp/browser; the default spawns a one-shot `omp -p`. */
@@ -35,6 +36,7 @@ const ompProducer: VisionProducer = async ({ worktree, url, dir }) => {
 		cwd: worktree,
 		stdout: "ignore",
 		stderr: "ignore",
+		env: { ...process.env, ...gitNoSignEnv() },
 		signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
 	});
 	await proc.exited;

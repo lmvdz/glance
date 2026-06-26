@@ -660,12 +660,14 @@ const agents = new Map();        // id -> AgentDTO
 const transcripts = new Map();   // id -> TranscriptEntry[]
 const commandsByAgent = new Map();// id -> CommandInfo[] (slash commands + skills + extensions)
 const composerDraft = new Map();  // id -> in-progress composer text (survives re-renders)
-let view = "project";            // "project" | "agent" | "board" | "feature" | "queue" | "race" | "settings"
+let view = "project";            // "project" | "agent" | "board" | "feature" | "queue" | "race" | "workflows" | "settings"
 let showChanges = localStorage.getItem("squad.showChanges") === "1";
 let selProject = null;           // repo path
 let selAgent = null;             // agent id
 const features = new Map();       // id -> FeatureDTO
 let selFeature = null;            // feature id
+let workflowDefs = [];
+let workflowsLoaded = false, workflowsError = false;
 let spawnCwd = ".";
 let ws = null;
 
@@ -872,6 +874,7 @@ function renderAll() { renderSidebar(); renderCrumb(); renderBody(); renderCount
 let routed = false;
 function pushRoute() {
   const h = view === "settings" ? "#/settings"
+    : view === "workflows" ? "#/workflows"
     : view === "race" ? "#/race"
     : view === "queue" ? "#/queue"
     : view === "board" ? "#/board"
@@ -885,6 +888,7 @@ function applyRoute() {
   if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
   if (location.hash === "#/queue") { view = "queue"; selAgent = null; renderAll(); return; }
   if (location.hash === "#/race") { view = "race"; selAgent = null; renderAll(); return; }
+  if (location.hash === "#/workflows") { view = "workflows"; selAgent = null; renderAll(); loadWorkflows(); return; }
   if (location.hash === "#/settings") { view = "settings"; selAgent = null; renderAll(); return; }
   const mf = location.hash.match(/^#\/feature\/(.+)$/);
   if (mf) { selFeature = safeDecode(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
@@ -912,6 +916,7 @@ function renderNav() {
     { id:"home",  ico:"⌂",  lbl:"Overview", sel: view === "project" && !selProject, on: () => { selProject = null; selAgent = null; view = "project"; renderAll(); } },
     { id:"board", ico:"▦",  lbl:"Features", sel: view === "board" || view === "feature", on: openBoard },
     { id:"queue", ico:"⛔", lbl:"Queue",    sel: view === "queue", ct: need, attn: need > 0, on: openQueue },
+    { id:"workflows", ico:"⚙", lbl:"Workflows", sel: view === "workflows", on: openWorkflows },
     { id:"race",  ico:"⇶",  lbl:"Race",     sel: view === "race", on: openRace },
     { id:"audit", ico:"📜", lbl:"Audit",    sel: view === "audit", on: openAudit },
     { id:"settings", ico:"⚙", lbl:"Settings", sel: view === "settings", on: openSettings },
@@ -944,6 +949,7 @@ function renderSidebar() {
 function renderCrumb() {
   const c = $("#crumb"); const p = projects().find(x => x.id === selProject);
   if (view === "settings") { c.innerHTML = `<span class="cur">Settings</span>`; return; }
+  if (view === "workflows") { c.innerHTML = `<span class="cur">Workflows</span>`; return; }
   if (!p) { c.innerHTML = `<span class="cur">Overview</span>`; return; }
   const a = selAgent ? agents.get(selAgent) : null;
   c.innerHTML = `<span class="seg" id="cbProj">Projects</span> <span style="color:var(--dim)">/</span> `
@@ -957,6 +963,7 @@ function renderBody() {
   const body = $("#body");
   if (view === "settings") return renderSettings(body);
   if (view === "board") return renderBoard(body);
+  if (view === "workflows") return renderWorkflows(body);
   if (view === "queue") return renderQueue(body);
   if (view === "race") return renderRace(body);
   if (view === "audit") return renderAudit(body);
@@ -1226,8 +1233,66 @@ function renderQueue(body) {
     for (const { agent:a, req:p } of reqs) { const node = box.querySelector(`[data-req="${CSS.escape(p.id)}"]`); if (node) wireReq(node, a.id, p); }
     for (const el of box.querySelectorAll(".qopen")) clickable(el, () => openAgent(el.dataset.aid), "open agent");
   }
+
   const eb = $("#qerrs");
   if (eb) { eb.innerHTML = errs.map(a => `<div class="subnode" data-aid="${esc(a.id)}" style="cursor:pointer"><span class="badge b-error">error</span> ${esc(a.name)} <span style="color:var(--dim)">${esc(a.error||"")}</span></div>`).join(""); for (const el of eb.querySelectorAll("[data-aid]")) clickable(el, () => openAgent(el.dataset.aid), "open agent"); }
+}
+
+// ── Workflow inspector ───────────────────────────────────────────────────────
+function openWorkflows() { view = "workflows"; selAgent = null; renderAll(); loadWorkflows(); }
+async function loadWorkflows() {
+  try {
+    workflowsError = false;
+    const r = await fetch("/api/workflows");
+    if (!r.ok) throw new Error("bad status");
+    const data = await r.json();
+    workflowDefs = Array.isArray(data.definitions) ? data.definitions : [];
+    workflowsLoaded = true;
+  } catch {
+    workflowsError = true;
+  }
+  if (view === "workflows") renderBody();
+}
+function workflowRuns() {
+  return [...agents.values()].filter(a => a.kind === "workflow" || a.parentId || a.workflowState);
+}
+function pillList(items) {
+  return (items || []).length ? items.map(x => `<span class="chip">${esc(x)}</span>`).join("") : `<span style="color:var(--dim)">none declared</span>`;
+}
+function renderWorkflowDef(w) {
+  const steps = (w.steps || []).map((s, i) => `<div class="treeitem"><strong>${i + 1}. ${esc(s.label)}</strong><div class="sub">${esc(s.owner)}${s.next?.length ? ` → ${s.next.map(esc).join(", ")}` : ""}</div><div class="chips">allow ${pillList(s.allowed)}<br/>deny ${pillList(s.disallowed)}</div></div>`).join("");
+  return `<div class="section"><h3>${esc(w.label)} <span class="badge b-kind">${esc(w.kind)}</span></h3><div class="inner">
+    <div class="sub">${esc(w.description)}</div>
+    <div class="treeitem"><strong>Assigned</strong><div class="chips">${pillList(w.assigned)}</div></div>
+    <div class="treeitem"><strong>Allowed</strong><div class="chips">${pillList(w.allowed)}</div></div>
+    <div class="treeitem"><strong>Disallowed</strong><div class="chips">${pillList(w.disallowed)}</div></div>
+    ${steps ? `<div class="treeitem"><strong>Order</strong>${steps}</div>` : ""}
+  </div></div>`;
+}
+function renderWorkflowRun(a) {
+  const state = a.workflowState;
+  const roll = state?.rollup || [];
+  const done = roll.filter(r => r.status === "completed").length;
+  const active = roll.find(r => r.status === "in_progress")?.label || state?.currentNode || "";
+  return `<div class="rlane" data-aid="${esc(a.id)}"><div><strong>${esc(a.name)}</strong> <span class="badge b-${a.status}">${esc(a.status)}</span>${a.issue ? ` <span class="sub">${esc(a.issue.identifier || a.issue.name)}</span>` : ""}</div>
+    <div class="sub">${esc(a.workflow?.path || a.workflow?.verify?.command || "workflow")} ${roll.length ? `· ${done}/${roll.length}` : ""}${active ? ` · now: ${esc(active)}` : ""}</div>
+    ${roll.length ? `<div class="racebar">${roll.map(r => `<span class="seg ${r.status === "completed" ? "done" : ""}" title="${esc(r.label)}"></span>`).join("")}</div>` : ""}
+  </div>`;
+}
+function renderWorkflows(body) {
+  const runs = workflowRuns();
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Workflows</h2><div class="sub">Definitions, meta-workflows, allowed/disallowed capabilities, and live runs</div></div><button id="wfRefresh" class="navbtn" title="Refresh">↻</button></div>
+    <div class="section"><h3>Live runs</h3><div class="inner" id="wfruns"></div></div>
+    <div id="wfdefs">${!workflowsLoaded && !workflowsError ? skel(3, "skelcard") : ""}</div>
+  </div>`;
+  $("#wfRefresh").onclick = loadWorkflows;
+  const rb = $("#wfruns");
+  rb.innerHTML = runs.length ? runs.map(renderWorkflowRun).join("") : estate("⇶", "No live workflow runs", "Workflow agents and branch runs will appear here as they checkpoint.", "");
+  rb.querySelectorAll("[data-aid]").forEach(el => clickable(el, () => openAgent(el.dataset.aid), `Open ${el.dataset.aid}`));
+  const defs = $("#wfdefs");
+  if (workflowsError) { defs.innerHTML = errstate("workflow definitions unavailable", "wfRetry"); $("#wfRetry").onclick = loadWorkflows; return; }
+  if (workflowsLoaded) defs.innerHTML = workflowDefs.length ? workflowDefs.map(renderWorkflowDef).join("") : estate("⚙", "No workflow definitions", "The daemon has not published workflow definitions.", "");
 }
 
 // ── Race board (OMPSQ-8) ─────────────────────────────────────────────────────
@@ -1796,6 +1861,7 @@ function paletteItems() {
     { label: "Home", hint: "overview", run: () => { selProject = null; selAgent = null; view = "project"; renderAll(); } },
     { label: "Attention queue", hint: "blocked agents", run: openQueue },
     { label: "Feature board", hint: "", run: openBoard },
+    { label: "Workflows", hint: "definitions + live runs", run: openWorkflows },
     { label: "Race board", hint: "per-agent pipeline", run: openRace },
     { label: "Audit log", hint: "fleet actions", run: openAudit },
     { label: "New agent", hint: "spawn", run: () => $("#addBtn").click() },
@@ -2028,7 +2094,7 @@ function patchAgentView(a) {
 function refreshShell() {
   renderSidebar(); renderCrumb(); renderCounts();
   if (view === "settings") return;   // settings is fetch-driven; don't rebuild it on live roster events
-  if (view === "queue" || view === "race") { renderBody(); return; }
+  if (view === "queue" || view === "race" || view === "workflows") { renderBody(); return; }
   if (view === "feature") { renderBody(); scheduleFeatures(); return; }
   // The Features board reflects only feature data — never agent/roster state — so a live
   // agent tick must NOT rebuild its horizontal lanes (that resets scroll + flashes the

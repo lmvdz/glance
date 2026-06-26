@@ -34,6 +34,8 @@ import { openDatabase } from "./db/index.ts";
 import { DbStore } from "./dal/store.ts";
 import type { OrgContext } from "./dal/context.ts";
 import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
+import { curatePlaneIssues, renderClusterReport } from "./plane-curator.ts";
+import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
@@ -45,11 +47,12 @@ USAGE
   omp-squad add <repo> [flags]                     Spawn an agent in a new worktree
   omp-squad list                                   Show the roster
   omp-squad prompt <id> <message...>               Send an instruction to an agent
+  omp-squad kill <id>                              Stop an agent but keep it in the roster
   omp-squad rm <id> [--delete-worktree]            Remove an agent
   omp-squad who [repo]                             Who/what is working a repo (any omp agent)
   omp-squad logs <id> [--limit N]                  Print an agent's recent transcript
   omp-squad open                                   Print the dashboard URL
-  omp-squad commission <name> --purpose <s> [flags]  Author + validate a Flue worker; onboard if it passes
+  omp-squad curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
 
 ADD FLAGS
   --name <s>        Agent name (default: agent-N)
@@ -70,6 +73,9 @@ COMMISSION FLAGS
   --target <t>             node | cloudflare (default: node)
   --capabilities <a,b>     Least-privilege allowlist (recorded). An env:NAME entry grants that one daemon env var to the scrubbed acceptance run; all other secrets denied
   --accept-payload <json>  Acceptance input · pair with --accept-expect <json> (expected result subset)
+
+CURATE-PLANE FLAGS
+  --file                    File one [curator] do-not-auto-land issue per cluster
 
 GLOBAL
   --port <N>        Daemon port (default: ${DEFAULT_PORT}, or $OMP_SQUAD_PORT)
@@ -191,6 +197,8 @@ async function cmdUp(args: string[]): Promise<void> {
 	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
 	const host = process.env.OMP_SQUAD_HOST || (typeof flags.host === "string" ? flags.host : undefined) || "127.0.0.1";
 	const stateDir = stateDirPath();
+	const runtimeSettings = new RuntimeSettingsStore(stateDir);
+	await runtimeSettings.apply();
 	const tls = process.env.OMP_SQUAD_TLS_CERT && process.env.OMP_SQUAD_TLS_KEY ? { cert: process.env.OMP_SQUAD_TLS_CERT, key: process.env.OMP_SQUAD_TLS_KEY } : undefined;
 	if (bindIsInsecure(host, Boolean(tls)) && process.env.OMP_SQUAD_INSECURE !== "1") {
 		process.stderr.write(
@@ -297,7 +305,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	const push = new PushService(stateDir);
 	await push.init();
 	const roleTokens = { operator: process.env.OMP_SQUAD_OPERATOR_TOKEN || undefined, viewer: process.env.OMP_SQUAD_VIEWER_TOKEN || undefined };
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry });
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
@@ -426,6 +434,17 @@ async function cmdRm(args: string[]): Promise<void> {
 	process.stdout.write(res.ok ? "removed\n" : `failed: ${await res.text()}\n`);
 }
 
+async function cmdKill(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const id = positional[0];
+	if (!id) {
+		process.stderr.write("usage: omp-squad kill <id>\n");
+		process.exit(1);
+	}
+	const res = await postCommand(flags, { type: "kill", id });
+	process.stdout.write(res.ok ? "killed\n" : `failed: ${await res.text()}\n`);
+}
+
 async function cmdLogs(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	const id = positional[0];
@@ -502,6 +521,20 @@ async function cmdCommission(args: string[]): Promise<void> {
 	}
 }
 
+async function cmdCuratePlane(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	loadEnvFile(path.join(os.homedir(), ".claude", "secrets", "plane.env"));
+	const rawRepo = positional[0];
+	const repo = rawRepo ? (rawRepo === "." || rawRepo.startsWith("./") || rawRepo.startsWith("../") || rawRepo.startsWith("/") ? path.resolve(rawRepo) : rawRepo) : process.cwd();
+	const report = await curatePlaneIssues(repo, { file: flags.file === true });
+	if (!report) {
+		process.stderr.write("Plane is not configured or unreachable\n");
+		process.exit(1);
+	}
+	process.stdout.write(`${renderClusterReport(report)}\n`);
+}
+
+
 async function cmdWho(args: string[]): Promise<void> {
 	const { positional } = parseArgs(args);
 	const repo = positional[0];
@@ -538,6 +571,10 @@ async function main(): Promise<void> {
 		case "say":
 			await cmdPrompt(rest);
 			break;
+		case "kill":
+		case "stop":
+			await cmdKill(rest);
+			break;
 		case "rm":
 		case "remove":
 			await cmdRm(rest);
@@ -548,6 +585,10 @@ async function main(): Promise<void> {
 		case "commission":
 		case "hire":
 			await cmdCommission(rest);
+			break;
+		case "curate-plane":
+		case "plane-curator":
+			await cmdCuratePlane(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

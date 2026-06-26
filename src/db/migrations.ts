@@ -19,7 +19,20 @@ import { Kysely, sql } from "kysely";
 import { Migrator, type Migration, type MigrationProvider } from "kysely/migration";
 import type { DbKind } from "./index.ts";
 
-const APP_TABLES = ["roster_index", "features", "audit", "usage", "federation_peers"] as const;
+const APP_TABLES = [
+	"roster_index",
+	"features",
+	"audit",
+	"usage",
+	"federation_peers",
+	"capability_records",
+	"feedback_campaigns",
+	"feedback_items",
+	"feedback_validation_responses",
+	"feedback_rewards",
+] as const;
+const BASE_APP_TABLES = APP_TABLES.slice(0, 6);
+const FEEDBACK_TABLES = APP_TABLES.slice(6);
 
 const createAppTables: Migration = {
 	async up(db: Kysely<any>) {
@@ -95,18 +108,89 @@ const createAppTables: Migration = {
 			.addColumn("data", "text", (c) => c.notNull())
 			.addPrimaryKeyConstraint("federation_peers_pk", ["org_id", "operator_id"])
 			.execute();
+
+		await db.schema
+			.createTable("capability_records")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("kind", "text", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addColumn("updated_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("capability_records_pk", ["org_id", "id"])
+			.execute();
 	},
 	async down(db: Kysely<any>) {
-		for (const t of [...APP_TABLES].reverse()) await db.schema.dropTable(t).ifExists().execute();
+		for (const t of [...BASE_APP_TABLES].reverse()) await db.schema.dropTable(t).ifExists().execute();
+	},
+};
+
+const createFeedbackTables: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("feedback_campaigns")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("campaign_id", "text", (c) => c.notNull())
+			.addColumn("repo", "text", (c) => c.notNull())
+			.addColumn("status", "text", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("feedback_campaigns_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("feedback_campaigns_org_repo").on("feedback_campaigns").columns(["org_id", "repo"]).execute();
+
+		await db.schema
+			.createTable("feedback_items")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("campaign_id", "text", (c) => c.notNull())
+			.addColumn("repo", "text", (c) => c.notNull())
+			.addColumn("status", "text", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("feedback_items_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("feedback_items_org_campaign").on("feedback_items").columns(["org_id", "campaign_id"]).execute();
+		await db.schema.createIndex("feedback_items_org_repo_status").on("feedback_items").columns(["org_id", "repo", "status"]).execute();
+
+		await db.schema
+			.createTable("feedback_validation_responses")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("campaign_id", "text", (c) => c.notNull())
+			.addColumn("repo", "text", (c) => c.notNull())
+			.addColumn("status", "text", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("feedback_validation_responses_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("feedback_validation_responses_org_campaign").on("feedback_validation_responses").columns(["org_id", "campaign_id"]).execute();
+
+		await db.schema
+			.createTable("feedback_rewards")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("campaign_id", "text", (c) => c.notNull())
+			.addColumn("repo", "text", (c) => c.notNull())
+			.addColumn("status", "text", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("feedback_rewards_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("feedback_rewards_org_campaign").on("feedback_rewards").columns(["org_id", "campaign_id"]).execute();
+		await db.schema.createIndex("feedback_rewards_org_repo_status").on("feedback_rewards").columns(["org_id", "repo", "status"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		for (const t of [...FEEDBACK_TABLES].reverse()) await db.schema.dropTable(t).ifExists().execute();
 	},
 };
 
 /** Postgres-only: enable + force RLS and install the per-org isolation policy on every app table. */
-function rlsMigration(type: DbKind): Migration {
+function rlsMigration(type: DbKind, tables: readonly string[]): Migration {
 	return {
 		async up(db: Kysely<any>) {
 			if (type !== "postgres") return; // SQLite has no RLS; DAL org-scoping is the only guard there.
-			for (const t of APP_TABLES) {
+			for (const t of tables) {
 				await sql`alter table ${sql.ref(t)} enable row level security`.execute(db);
 				await sql`alter table ${sql.ref(t)} force row level security`.execute(db);
 				await sql`
@@ -118,7 +202,7 @@ function rlsMigration(type: DbKind): Migration {
 		},
 		async down(db: Kysely<any>) {
 			if (type !== "postgres") return;
-			for (const t of APP_TABLES) {
+			for (const t of tables) {
 				await sql`drop policy if exists org_isolation on ${sql.ref(t)}`.execute(db);
 				await sql`alter table ${sql.ref(t)} disable row level security`.execute(db);
 			}
@@ -141,7 +225,13 @@ const usageTraceId: Migration = {
 export async function migrateApp(db: Kysely<any>, type: DbKind): Promise<void> {
 	const provider: MigrationProvider = {
 		async getMigrations(): Promise<Record<string, Migration>> {
-			return { "0001_app_tables": createAppTables, "0002_rls_backstop": rlsMigration(type), "0003_usage_trace_id": usageTraceId };
+			return {
+				"0001_app_tables": createAppTables,
+				"0002_rls_backstop": rlsMigration(type, BASE_APP_TABLES),
+				"0003_usage_trace_id": usageTraceId,
+				"0004_feedback_tables": createFeedbackTables,
+				"0005_feedback_rls": rlsMigration(type, FEEDBACK_TABLES),
+			};
 		},
 	};
 	const migrator = new Migrator({ db, provider });

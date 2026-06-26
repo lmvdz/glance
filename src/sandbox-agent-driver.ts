@@ -18,6 +18,7 @@ import type { Subprocess } from "bun";
 import type { AgentDriver } from "./agent-driver.ts";
 import { pickModel } from "./rpc-agent.ts";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
+import { gitNoSignEnv } from "./git-harden.ts";
 
 export interface SandboxAgentOptions {
 	/** Roster id; names the container `omp-sbx-<id>`. */
@@ -88,7 +89,8 @@ export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
 		try {
 			const build = this.opts.agentCommand ?? defaultAgentCommand;
 			const cmd = build({ workdir: this.workdir, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking });
-			const proc = Bun.spawn([this.docker, "exec", "-i", "-e", "PI_RPC_EMIT_TITLE=0", this.container, ...cmd], {
+			const noSign = Object.entries(gitNoSignEnv({})).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+			const proc = Bun.spawn([this.docker, "exec", "-i", "-e", "PI_RPC_EMIT_TITLE=0", ...noSign, this.container, ...cmd], {
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",
@@ -276,6 +278,10 @@ export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
 		const m = pickModel(models, spec);
 		if (!m) throw new Error(`no available model matches "${spec}"`);
 		return this.send({ type: "set_model", provider: m.provider, modelId: m.id });
+	}
+
+	getAvailableModels(): Promise<{ models?: unknown[] }> {
+		return this.send<{ models?: unknown[] }>({ type: "get_available_models" });
 	}
 
 	setThinkingLevel(level: string): Promise<unknown> {

@@ -90,11 +90,18 @@ test("listPlanDirs finds plan dirs and their PLANE pointers", async () => {
 	await fs.mkdir(path.join(repo, "plans", "auth"), { recursive: true });
 	await fs.writeFile(path.join(repo, "plans", "auth", "01-login.md"), "# Login\nPLANE: ACME-12\nsome text\n");
 	await fs.writeFile(path.join(repo, "plans", "auth", "02-tokens.md"), "PLANE: ACME-13\n");
+	await fs.writeFile(path.join(repo, "plans", "auth", "00-overview.md"), "# Auth plan\n");
+	await fs.mkdir(path.join(repo, "plans", "billing-flow"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "billing-flow", "00-overview.md"), "# Overview\n");
 	await fs.mkdir(path.join(repo, "plans", "empty"), { recursive: true }); // no markdown → skipped
 
 	const dirs = await listPlanDirs(repo);
-	expect(dirs.map((d) => d.dir)).toEqual(["plans/auth"]);
+	expect(dirs.map((d) => d.dir)).toEqual(["plans/auth", "plans/billing-flow"]);
 	expect(dirs[0].issueIds.sort()).toEqual(["ACME-12", "ACME-13"]);
+	expect(dirs[0].title).toBe("Auth plan");
+	expect(dirs[1].title).toBe("Billing Flow");
+	expect(dirs[0].createdAt).toBeGreaterThan(0);
+	expect(dirs[0].updatedAt).toBeGreaterThan(0);
 });
 
 test("buildFeatures: plan dir → planned/issues-created feature; agent → in-flight feature", async () => {
@@ -120,4 +127,49 @@ test("buildFeatures: plan dir → planned/issues-created feature; agent → in-f
 	expect(ag?.stage).toBe("review"); // ahead commit, not merged → needs land
 	expect(ag?.agentIds).toEqual(["a1"]);
 	expect(ag?.worktrees[0].readiness).toBe("ahead");
+});
+
+test("buildFeatures derives task context from plan docs", async () => {
+	const repo = await baseRepo();
+	await fs.mkdir(path.join(repo, "plans", "context"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "context", "01-api.md"), [
+		"# API work",
+		"STATUS: todo",
+		"PLANE: ACME-7",
+		"## Acceptance Criteria",
+		"- Handles empty input",
+		"## Prerequisites",
+		"- Decide auth mode",
+		"## Decisions",
+		"- Use boring REST",
+		"",
+	].join("\n"));
+
+	const [feature] = await buildFeatures(repo, [], []);
+	expect(feature.acceptanceCriteria?.map((item) => item.text)).toContain("Handles empty input");
+	expect(feature.decisions?.map((item) => item.text)).toContain("Use boring REST");
+	expect(feature.relationships?.[0]?.targetId).toBe("ACME-7");
+	expect(feature.contextBundle?.criteria).toBe("API work: Handles empty input");
+	expect(feature.contextBundle?.prerequisites).toBe("API work: Decide auth mode");
+	expect(feature.contextBundle?.decisions).toBe("Use boring REST");
+});
+
+test("buildFeatures does not turn verify commands into acceptance criteria", async () => {
+	const repo = await baseRepo();
+	await fs.mkdir(path.join(repo, "plans", "verify-is-not-criteria"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "verify-is-not-criteria", "01-api.md"), [
+		"# API work",
+		"STATUS: open",
+		"## Acceptance Criteria",
+		"- Operators see a human-readable success condition",
+		"## Verify",
+		"- `bun test tests/features.test.ts`",
+		"",
+	].join("\n"));
+
+	const [feature] = await buildFeatures(repo, [], []);
+	const criteria = feature.acceptanceCriteria?.map((item) => item.text) ?? [];
+	expect(criteria).toContain("Operators see a human-readable success condition");
+	expect(criteria).not.toContain("`bun test tests/features.test.ts`");
+	expect(feature.contextBundle?.criteria).toBe("API work: Operators see a human-readable success condition");
 });

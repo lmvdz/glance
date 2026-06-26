@@ -44,6 +44,18 @@ describe("comment store", () => {
     }
   });
 
+  test("preserves plan annotation anchors", async () => {
+    const dir = await tmp();
+    try {
+      await appendCommentEvent(dir, { type: "add", id: "a", repo: "/r", subject: "feat", body: "tighten criteria", author: "u", at: 1, kind: "plan-annotation", annotation: { planPath: "plans/x/01.md", lineStart: 12, lineEnd: 14, quote: "| A | B |" } });
+      const got = await listComments(dir, { repo: "/r", subject: "feat" });
+      expect(got[0]?.kind).toBe("plan-annotation");
+      expect(got[0]?.annotation).toEqual({ planPath: "plans/x/01.md", lineStart: 12, lineEnd: 14, quote: "| A | B |" });
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a torn trailing line is skipped, not thrown", async () => {
     const dir = await tmp();
     try {

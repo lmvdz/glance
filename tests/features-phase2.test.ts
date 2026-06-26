@@ -76,3 +76,54 @@ test("createFeature round-trips through state.json", async () => {
 	expect(got?.persisted).toBe(true);
 	expect(got?.title).toBe("Auth");
 });
+
+test("updateFeature adopts a derived plan feature and persists task-detail edits", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-plan-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\nSTATUS: todo\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-edit-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	const id = `plan:${repo}:plans/ctx`;
+	const edited = await mgr.updateFeature(id, {
+		repo,
+		description: "Editable description",
+		acceptanceCriteria: [{ id: "manual", text: "Manual criterion", completed: false, source: "manual" }],
+		decisions: [{ id: "decision", text: "Keep it small", source: "human", createdAt: 1 }],
+		relationships: [{ id: "REL-1", targetId: "REL-1", targetTitle: "REL-1", type: "related" }],
+	});
+	expect(edited?.id).toBe(id);
+	await mgr.stop();
+	managers.length = 0;
+
+	const restored = new SquadManager({ stateDir });
+	managers.push(restored);
+	await restored.loadPersisted();
+	const got = (await restored.features(repo)).find((feature) => feature.id === id);
+	expect(got?.description).toBe("Editable description");
+	expect(got?.acceptanceCriteria?.[0]?.text).toBe("Manual criterion");
+	expect(got?.decisions?.[0]?.text).toBe("Keep it small");
+});
+
+test("archiving a derived plan feature suppresses the scanned plan dir", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-archive-plan-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-archive-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	const id = `plan:${repo}:plans/ctx`;
+	expect((await mgr.features(repo)).some((feature) => feature.id === id)).toBe(true);
+
+	const archived = await mgr.updateFeature(id, { repo, archived: true });
+	expect(archived?.archived).toBe(true);
+	expect((await mgr.features(repo)).some((feature) => feature.id === id)).toBe(false);
+});

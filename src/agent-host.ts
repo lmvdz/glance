@@ -24,6 +24,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Socket } from "bun";
 import type { ApprovalMode, ThinkingLevel } from "./types.ts";
+import { gitNoSignEnv } from "./git-harden.ts";
 
 export interface AgentHostOptions {
 	id: string;
@@ -32,27 +33,12 @@ export interface AgentHostOptions {
 	model?: string;
 	approvalMode?: ApprovalMode;
 	thinking?: ThinkingLevel;
+	appendSystemPrompt?: string;
 	bin?: string;
 }
 
 const RING_MAX = 4000;
 const SQ_SHUTDOWN = '{"__sq":"shutdown"}';
-
-/**
- * GIT_CONFIG_* overrides that force commit/tag signing OFF for daemon-spawned
- * agents. A global commit.gpgsign=true would otherwise block an agent on an
- * interactive pinentry prompt with no TTY. These env vars beat any config file.
- * ponytail: count=2 clobbers a pre-existing GIT_CONFIG_COUNT in the parent env;
- * the daemon never sets one, so this is safe in practice.
- */
-export const gitNoSignEnv: Record<string, string> = {
-	GIT_CONFIG_COUNT: "2",
-	GIT_CONFIG_KEY_0: "commit.gpgsign",
-	GIT_CONFIG_VALUE_0: "false",
-	GIT_CONFIG_KEY_1: "tag.gpgsign",
-	GIT_CONFIG_VALUE_1: "false",
-};
-
 
 /** Directory holding one Unix socket per live agent host. */
 export function squadSocketDir(): string {
@@ -154,6 +140,7 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 	if (opts.model) args.push("--model", opts.model);
 	if (opts.approvalMode) args.push("--approval-mode", opts.approvalMode);
 	if (opts.thinking) args.push("--thinking", opts.thinking);
+	if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
 	// Squad agents participate in soft file leasing (claim on edit, ⚠ on conflict).
 	args.push("-e", path.join(import.meta.dir, "lease-hook.ts"));
 
@@ -164,7 +151,7 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
-		env: { ...process.env, PI_RPC_EMIT_TITLE: "0", ...gitNoSignEnv },
+		env: { ...process.env, PI_RPC_EMIT_TITLE: "0", ...gitNoSignEnv() },
 	});
 
 	let ready = false;

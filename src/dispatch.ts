@@ -11,6 +11,15 @@
 
 import type { IssueRef } from "./types.ts";
 
+const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
+
+export function dispatchOrder(a: IssueRef, b: IssueRef): number {
+	const ap = PRIORITY_RANK[(a.priority ?? "none").toLowerCase()] ?? PRIORITY_RANK.none;
+	const bp = PRIORITY_RANK[(b.priority ?? "none").toLowerCase()] ?? PRIORITY_RANK.none;
+	return ap - bp || (a.identifier ?? a.name).localeCompare(b.identifier ?? b.name);
+}
+
+
 export interface DispatchDeps {
 	/** Repos wired to Plane (poll targets). */
 	repos: () => string[];
@@ -82,7 +91,8 @@ export class Dispatcher {
 				// Issue ids still open in THIS project this tick. A blocker absent here is completed/cancelled
 				// (or gone), so it no longer blocks. Cross-project blockers aren't visible — see ceiling note.
 				const openIds = new Set(issues.map((i) => i.id));
-				for (const issue of issues) {
+				const ordered = [...issues].sort(dispatchOrder);
+				for (const issue of ordered) {
 					if (budget <= 0) break;
 					if (this.atGlobalCap()) break; // recheck per spawn: each spawned agent counts toward the global cap
 					if (claimed.has(issue.id) || this.dispatched.has(issue.id)) continue;

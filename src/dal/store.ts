@@ -18,6 +18,8 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
+import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
+import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
 import { type OrgContext, withOrg } from "./context.ts";
 
 /**
@@ -68,6 +70,8 @@ export interface StateSnapshot {
 	agents: PersistedAgent[];
 	transcripts: Record<string, TranscriptEntry[]>;
 	features: PersistedFeature[];
+	feedback?: FeedbackSnapshot;
+	capabilities?: CapabilitySnapshot;
 }
 
 /** One accountability record at the mutation chokepoint. */
@@ -85,6 +89,10 @@ export interface Store {
 	load(): Promise<StateSnapshot>;
 	/** Persist the full snapshot atomically. */
 	save(snapshot: StateSnapshot): Promise<void>;
+	/** Load durable feedback loop data. */
+	loadFeedback(): Promise<FeedbackSnapshot>;
+	/** Persist durable feedback loop data. */
+	saveFeedback(snapshot: FeedbackSnapshot): Promise<void>;
 	/** Append one audit row (no-op for single-tenant file mode). */
 	appendAudit(entry: AuditEntry): Promise<void>;
 	/** Append/replace one run usage row (no-op for file mode — receipts already on disk). */
@@ -96,8 +104,10 @@ const EMPTY: StateSnapshot = { agents: [], transcripts: {}, features: [] };
 /** Today's file-backed behavior: one `state.json` per stateDir, written temp+rename. */
 export class FileStore implements Store {
 	private readonly stateFile: string;
+	private readonly feedbackFile: string;
 	constructor(private readonly stateDir: string) {
 		this.stateFile = path.join(stateDir, "state.json");
+		this.feedbackFile = path.join(stateDir, "feedback.json");
 	}
 
 	async hasState(): Promise<boolean> {
@@ -112,15 +122,36 @@ export class FileStore implements Store {
 			return { ...EMPTY };
 		}
 		const parsed = JSON.parse(raw) as Partial<StateSnapshot>;
-		return { agents: parsed.agents ?? [], transcripts: parsed.transcripts ?? {}, features: parsed.features ?? [] };
+		const state: StateSnapshot = { agents: parsed.agents ?? [], transcripts: parsed.transcripts ?? {}, features: parsed.features ?? [] };
+		if (parsed.capabilities) state.capabilities = normalizeCapabilitySnapshot(parsed.capabilities);
+		if (existsSync(this.feedbackFile)) state.feedback = await this.loadFeedback();
+		return state;
 	}
 
 	async save(snapshot: StateSnapshot): Promise<void> {
 		// Durable atomic write (temp → fsync → rename → fsync dir). Behavior-preserving:
 		// swallow write errors as the old inline temp+rename did, leaving no stray `.tmp`.
 		try {
-			await writeFileDurable(this.stateFile, JSON.stringify({ version: 1, ...snapshot }, null, 2));
+			const { feedback, ...state } = snapshot;
+			const cap = normalizeCapabilitySnapshot(snapshot.capabilities);
+			const body: StateSnapshot & { version: 1 } = { version: 1, agents: state.agents, transcripts: state.transcripts, features: state.features };
+			if (cap.sources.length || cap.packs.length || cap.installs.length || cap.verifications.length || cap.audit.length) body.capabilities = cap;
+			await writeFileDurable(this.stateFile, JSON.stringify(body, null, 2));
+			if (feedback) await this.saveFeedback(feedback);
 		} catch {}
+	}
+
+	async loadFeedback(): Promise<FeedbackSnapshot> {
+		try {
+			const parsed = JSON.parse(await fs.readFile(this.feedbackFile, "utf8")) as Partial<FeedbackSnapshot>;
+			return { campaigns: parsed.campaigns ?? [], items: parsed.items ?? [], validations: parsed.validations ?? [], rewards: parsed.rewards ?? [] };
+		} catch {
+			return emptyFeedbackSnapshot();
+		}
+	}
+
+	async saveFeedback(snapshot: FeedbackSnapshot): Promise<void> {
+		await writeFileDurable(this.feedbackFile, JSON.stringify(snapshot, null, 2));
 	}
 
 	// Single-tenant file mode: audit/usage live in the on-disk receipts; the DB ledger is DB-mode only.
@@ -156,20 +187,36 @@ export class DbStore implements Store {
 			const r = await trx.selectFrom("roster_index").select("id").where("org_id", "=", this.orgId).limit(1).executeTakeFirst();
 			if (r) return true;
 			const f = await trx.selectFrom("features").select("id").where("org_id", "=", this.orgId).limit(1).executeTakeFirst();
-			return !!f;
+			if (f) return true;
+			const c = await trx.selectFrom("capability_records").select("id").where("org_id", "=", this.orgId).limit(1).executeTakeFirst();
+			return !!c;
 		});
 	}
 
 	async load(): Promise<StateSnapshot> {
-		const { agents, features } = await withOrg(this.ctx, this.orgId, async (trx) => {
+		const { agents, features, capabilities } = await withOrg(this.ctx, this.orgId, async (trx) => {
 			const rosterRows = await trx.selectFrom("roster_index").select("data").where("org_id", "=", this.orgId).execute();
 			const featureRows = await trx.selectFrom("features").select("data").where("org_id", "=", this.orgId).execute();
+			const capabilityRows = await trx.selectFrom("capability_records").select(["kind", "data"]).where("org_id", "=", this.orgId).execute();
+			const cap: Partial<CapabilitySnapshot> = {};
+			for (const row of capabilityRows) {
+				const data = JSON.parse(row.data) as unknown;
+				if (row.kind === "sources" && Array.isArray(data)) cap.sources = data as CapabilitySnapshot["sources"];
+				else if (row.kind === "packs" && Array.isArray(data)) cap.packs = data as CapabilitySnapshot["packs"];
+				else if (row.kind === "installs" && Array.isArray(data)) cap.installs = data as CapabilitySnapshot["installs"];
+				else if (row.kind === "verifications" && Array.isArray(data)) cap.verifications = data as CapabilitySnapshot["verifications"];
+				else if (row.kind === "audit" && Array.isArray(data)) cap.audit = data as CapabilitySnapshot["audit"];
+			}
 			return {
 				agents: rosterRows.map((r) => JSON.parse(r.data) as PersistedAgent),
 				features: featureRows.map((r) => JSON.parse(r.data) as PersistedFeature),
+				capabilities: normalizeCapabilitySnapshot(cap),
 			};
 		});
-		return { agents, features, transcripts: await this.loadTranscripts() };
+		const state: StateSnapshot = { agents, features, capabilities, transcripts: await this.loadTranscripts() };
+		const feedback = await this.loadFeedback();
+		if (feedback.campaigns.length || feedback.items.length || feedback.validations.length || feedback.rewards.length) state.feedback = feedback;
+		return state;
 	}
 
 	async save(snapshot: StateSnapshot): Promise<void> {
@@ -214,8 +261,99 @@ export class DbStore implements Store {
 					})))
 					.execute();
 			}
+			await trx.deleteFrom("capability_records").where("org_id", "=", this.orgId).execute();
+			const cap = normalizeCapabilitySnapshot(snapshot.capabilities);
+			await trx.insertInto("capability_records").values([
+				{ org_id: this.orgId, id: "sources", kind: "sources", data: JSON.stringify(cap.sources), updated_at: now },
+				{ org_id: this.orgId, id: "packs", kind: "packs", data: JSON.stringify(cap.packs), updated_at: now },
+				{ org_id: this.orgId, id: "installs", kind: "installs", data: JSON.stringify(cap.installs), updated_at: now },
+				{ org_id: this.orgId, id: "verifications", kind: "verifications", data: JSON.stringify(cap.verifications), updated_at: now },
+				{ org_id: this.orgId, id: "audit", kind: "audit", data: JSON.stringify(cap.audit), updated_at: now },
+			]).execute();
 		});
 		await this.saveTranscripts(snapshot.transcripts);
+		if (snapshot.feedback) await this.saveFeedback(snapshot.feedback);
+	}
+
+	async loadFeedback(): Promise<FeedbackSnapshot> {
+		const rows = await withOrg(this.ctx, this.orgId, async (trx) => {
+			const campaigns = await trx.selectFrom("feedback_campaigns").select("data").where("org_id", "=", this.orgId).orderBy("created_at").execute();
+			const items = await trx.selectFrom("feedback_items").select("data").where("org_id", "=", this.orgId).orderBy("created_at").execute();
+			const validations = await trx.selectFrom("feedback_validation_responses").select("data").where("org_id", "=", this.orgId).orderBy("created_at").execute();
+			const rewards = await trx.selectFrom("feedback_rewards").select("data").where("org_id", "=", this.orgId).orderBy("created_at").execute();
+			return { campaigns, items, validations, rewards };
+		});
+		return {
+			campaigns: rows.campaigns.map((r) => JSON.parse(r.data)),
+			items: rows.items.map((r) => JSON.parse(r.data)),
+			validations: rows.validations.map((r) => JSON.parse(r.data)),
+			rewards: rows.rewards.map((r) => JSON.parse(r.data)),
+		};
+	}
+
+	async saveFeedback(snapshot: FeedbackSnapshot): Promise<void> {
+		await withOrg(this.ctx, this.orgId, async (trx) => {
+			await trx.deleteFrom("feedback_rewards").where("org_id", "=", this.orgId).execute();
+			await trx.deleteFrom("feedback_validation_responses").where("org_id", "=", this.orgId).execute();
+			await trx.deleteFrom("feedback_items").where("org_id", "=", this.orgId).execute();
+			await trx.deleteFrom("feedback_campaigns").where("org_id", "=", this.orgId).execute();
+			if (snapshot.campaigns.length) {
+				await trx
+					.insertInto("feedback_campaigns")
+					.values(snapshot.campaigns.map((c) => ({
+						org_id: this.orgId,
+						id: c.id,
+						campaign_id: c.id,
+						repo: c.repo,
+						status: c.archived ? "archived" : "active",
+						data: JSON.stringify(c),
+						created_at: c.createdAt,
+					})))
+					.execute();
+			}
+			if (snapshot.items.length) {
+				await trx
+					.insertInto("feedback_items")
+					.values(snapshot.items.map((i) => ({
+						org_id: this.orgId,
+						id: i.id,
+						campaign_id: i.campaignId,
+						repo: i.repo,
+						status: i.status,
+						data: JSON.stringify(i),
+						created_at: i.createdAt,
+					})))
+					.execute();
+			}
+			if (snapshot.validations.length) {
+				await trx
+					.insertInto("feedback_validation_responses")
+					.values(snapshot.validations.map((v) => ({
+						org_id: this.orgId,
+						id: v.id,
+						campaign_id: v.campaignId,
+						repo: v.repo,
+						status: v.vote,
+						data: JSON.stringify(v),
+						created_at: v.createdAt,
+					})))
+					.execute();
+			}
+			if (snapshot.rewards.length) {
+				await trx
+					.insertInto("feedback_rewards")
+					.values(snapshot.rewards.map((r) => ({
+						org_id: this.orgId,
+						id: r.id,
+						campaign_id: r.campaignId,
+						repo: r.repo,
+						status: r.status,
+						data: JSON.stringify(r),
+						created_at: r.createdAt,
+					})))
+					.execute();
+			}
+		});
 	}
 
 	async appendAudit(entry: AuditEntry): Promise<void> {

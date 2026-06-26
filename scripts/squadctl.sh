@@ -22,6 +22,25 @@ PORT="${OMP_SQUAD_PORT:-7878}"
 LOCK="$STATE_DIR/daemon.lock"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUPERVISOR="$SCRIPT_DIR/squad-supervisor.sh"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+launcher_enables_webapp() {
+	[ "${OMP_SQUAD_WEBAPP:-}" = "1" ] && return 0
+	[ -f "$LAUNCHER" ] || return 1
+	local line
+	while IFS= read -r line; do
+		[ "$line" = "export OMP_SQUAD_WEBAPP=1" ] && return 0
+	done < "$LAUNCHER"
+	return 1
+}
+
+build_webapp_if_enabled() {
+	launcher_enables_webapp || return 0
+	[ "${OMP_SQUAD_SKIP_WEBAPP_BUILD:-}" = "1" ] && { echo "skipping webapp build (OMP_SQUAD_SKIP_WEBAPP_BUILD=1)"; return 0; }
+	[ -f "$REPO_DIR/webapp/package.json" ] || return 0
+	echo "building webapp/dist for OMP_SQUAD_WEBAPP=1"
+	( cd "$REPO_DIR/webapp" && bun run build )
+}
 
 # Parse the daemon pid out of the JSON lock record written by acquireStateLock
 # (state-lock.ts). The record's first field is "pid"; "ppid" never matches the
@@ -59,6 +78,7 @@ cmd_start() {
 	if pid="$(daemon_pid)"; then echo "already up (pid $pid); use 'restart' to cycle." >&2; return 0; fi
 	[ -f "$LAUNCHER" ] || { echo "launcher not found: $LAUNCHER" >&2; return 1; }
 	[ -f "$SUPERVISOR" ] || { echo "supervisor not found: $SUPERVISOR" >&2; return 1; }
+	build_webapp_if_enabled
 	echo "starting: supervisor -> $LAUNCHER"
 	OMP_SQUAD_LAUNCHER="$LAUNCHER" setsid bash "$SUPERVISOR" >/dev/null 2>&1 &
 	# Wait (up to ~15s) for the daemon to acquire the lock.

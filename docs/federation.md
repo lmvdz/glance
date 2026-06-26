@@ -100,6 +100,19 @@ or there is nothing remote to show. Best-effort throughout: with the coordinator
 unset the feed is absent, the endpoint returns just `self` (no peers, no
 collisions), and nothing errors.
 
+Capability metadata is a separate, safer surface: **`GET /api/federation/capabilities`**
+returns enabled pack id/source/framework/slug/version/checksum/title/description,
+compatibility, and declared context summary only. It deliberately excludes source
+files, tenant install bindings, transcripts, and exported context. Context sharing
+requires an enabled `CapabilityContextPolicy` with explicit namespaces, redaction,
+retention, peer allowlists, and audit.
+
+Public capability discovery is intentionally separate from federation:
+`GET /api/capability-catalog` returns built-in catalog metadata — profiles,
+workflows, tools, skills, required env, checksums, and descriptions — that an
+admin can import into the local trusted source list. Catalog visibility does not
+enable a capability, install it, or expose tenant files.
+
 ## 4. Remote commands are viewer-only (trust boundary)
 
 The coordinator is a content-blind relay, so **every byte of a `{kind:"command"}`

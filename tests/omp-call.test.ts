@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { decideTyped, extractJsonObject, ompOneShot } from "../src/omp-call.ts";
+import { gitNoSignEnv } from "../src/git-harden.ts";
 
 describe("extractJsonObject", () => {
 	test("parses a plain object", () => {
@@ -33,6 +34,26 @@ describe("ompOneShot", () => {
 		const { out, code } = await ompOneShot(["-p", "x"], { bin: "omp-squad-nonexistent-binary-xyz" });
 		expect(code).not.toBe(0);
 		expect(out).toBe("");
+	});
+
+	test("disables git signing for one-shot supervisor calls", async () => {
+		const { out, code } = await ompOneShot([], { bin: "env" });
+		expect(code).toBe(0);
+		const env = Object.fromEntries(out.trim().split("\n").map((line) => line.split("=", 2))) as Record<string, string>;
+		const key = Object.entries(env).find(([, v]) => v === "commit.gpgsign")?.[0];
+		expect(key).toBeDefined();
+		const slot = key!.slice("GIT_CONFIG_KEY_".length);
+		expect(env[`GIT_CONFIG_VALUE_${slot}`]).toBe("false");
+	});
+
+	test("gitNoSignEnv preserves existing GIT_CONFIG entries", () => {
+		expect(gitNoSignEnv({ GIT_CONFIG_COUNT: "1" })).toEqual({
+			GIT_CONFIG_COUNT: "3",
+			GIT_CONFIG_KEY_1: "commit.gpgsign",
+			GIT_CONFIG_VALUE_1: "false",
+			GIT_CONFIG_KEY_2: "tag.gpgsign",
+			GIT_CONFIG_VALUE_2: "false",
+		});
 	});
 });
 

@@ -85,6 +85,7 @@ interface PlaneIssue {
 	state_detail?: { name?: string; group?: string };
 	state?: string;
 	project_detail?: { identifier?: string };
+	priority?: string;
 }
 
 /** True when an issue's name flags it for human review / do-NOT-auto-land. The dispatcher skips these,
@@ -101,6 +102,7 @@ function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string, prefix
 		identifier: ident && raw.sequence_id != null ? `${ident}-${raw.sequence_id}` : undefined,
 		name,
 		state: raw.state_detail?.group ?? raw.state,
+		priority: raw.priority,
 		url: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/issues/${raw.id}`,
 		projectId,
 		noAutoDispatch: noAutoDispatchName(name),
@@ -300,6 +302,34 @@ export async function createPlaneIssue(repo: string, name: string, descriptionHt
 	issueListCache.clear(); // a new issue changes the open set
 	const raw = (await res.json().catch(() => null)) as PlaneIssue | null;
 	return raw?.id ? toIssueRef(raw, cfg, projectId) : null;
+}
+
+/** Add a comment to a Plane issue by UUID or human identifier (e.g. OMPSQ-42). Best-effort; false when Plane is not configured. */
+export async function addPlaneIssueComment(repo: string, issue: string, comment: string): Promise<boolean> {
+	const ctx = planeContext(repo);
+	if (!ctx) return false;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return false;
+	const issueId = await resolveIssueId(base, headers, issue);
+	if (!issueId) return false;
+	const body = JSON.stringify({ comment_html: `<p>${escapeHtml(comment).replace(/\n/g, "<br/>")}</p>` });
+	const res = await throttledFetch(`${base}/issues/${encodeURIComponent(issueId)}/comments/`, { method: "POST", headers, body });
+	return !!res?.ok;
+}
+
+async function resolveIssueId(base: string, headers: Record<string, string>, issue: string): Promise<string | undefined> {
+	if (/^[0-9a-f-]{20,}$/i.test(issue)) return issue;
+	const prefix = await projectPrefix(base, headers);
+	const want = issue.toUpperCase();
+	for (const raw of await allIssues(base, headers)) {
+		const ident = prefix && raw.sequence_id != null ? `${prefix}-${raw.sequence_id}`.toUpperCase() : undefined;
+		if (ident === want) return raw.id;
+	}
+	return undefined;
+}
+
+function escapeHtml(value: string): string {
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /** Web-app base for deep links — Plane cloud's app host differs from the API host. */

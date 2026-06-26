@@ -112,13 +112,16 @@ omp-squad list
 # Send a follow-up instruction
 omp-squad prompt auth-refactor-<id> "Also update the tests."
 
+# Emergency-stop an agent but keep its worktree/roster entry
+omp-squad kill auth-refactor-<id>
+
 # Remove it (and delete its worktree)
 omp-squad rm auth-refactor-<id> --delete-worktree
 ```
 
 Open the dashboard in a browser: `omp-squad open` prints the URL (default
 `http://127.0.0.1:7878`). The **+ Add agent** button and per-agent composer/answer
-controls do everything the CLI does.
+controls do everything the CLI does, including interrupt/restart/kill/remove controls. Task detail keeps lifecycle status as a dedicated status card (not buried in the description), renders a linked plan's `00-overview.md` as the description, and shows created/updated timestamps for both the plan and the selected markdown doc. The Assistant chat is backed by the same live transcript stream as the TUI: assistant and thinking text update while streaming, thinking is shown in a foldable **Thinking** row, agent todos render as a persistent collapsible plan panel above the transcript, and tool rows show human-first command/output/status views with the raw args/partial/result payload tucked under **Raw payload** for debugging. When chat-created tool output references `plans/<name>/...`, the dashboard promotes that plan into the plannable list immediately so its markdown and linked work can be reviewed without waiting for another refresh. The Settings gear persists daemon feature flags to `<stateDir>/settings.json`; restart-tagged flags are saved immediately and fully apply on the next daemon boot. The Control Tower model selector is populated from live `omp` model discovery when an agent is connected, plus any configured `OMP_SQUAD_MODELS="anthropic/claude-opus,openai/gpt-5.2"` fallback values.
 
 ### `add` flags
 
@@ -172,9 +175,10 @@ cat ~/.omp/squad/worktrees/<repo>-squad-demo/proof.txt   # → OK
 The web UI is an **organizational command center**, not a flat list:
 
 - **Projects** (sidebar) — agents grouped by repo, each with a live status rollup and a needs-input badge.
-- **Global views** (sidebar) — four fleet-wide surfaces, each deep-linkable and reachable via the ⌘K command palette:
+- **Global views** (sidebar) — fleet-wide surfaces, each deep-linkable and reachable via the ⌘K command palette:
   - **Features** — a kanban of in-flight features by lifecycle stage (planned → review → landed → done); spawn a research→plan→implement workflow that tracks itself across the columns.
   - **Queue** — an attention inbox of every agent blocked on input (and errored) across the whole fleet, answerable in place, oldest-first, so you supervise by exception.
+  - **Workflows** — definitions for workflows and meta-workflows (assigned owners, allowed/disallowed capabilities, ordered steps) plus live workflow runs with checkpoint progress.
   - **Race** — a race-board: one lane per agent with the workflow's phases as a segmented track, filled by stage progress and labelled with the current phase, so you see who's where in the pipeline and who's stalled at a glance. Fan-out branches nest under their parent.
   - **Audit** — an append-only trail of every actor-initiated fleet action (create / prompt / answer / interrupt / kill / restart / remove / commission / land) with actor, target, and outcome, newest-first, filterable by action and live-updated. Backed by `GET /api/audit` (`?limit=&actor=&action=&target=`); persisted as JSONL under the state dir.
   - **Trace API** — `GET /api/trace/:id` pulls the North Star audit/diagnostics tree for a feature (`:id` or `feat:<id>`) or run (`run:<agentId>:<runId>`). Receipts keep lossless rollups (tokens/cost/tool counts) for every run; fine spans are tail-sampled, with errors always kept. `land` / comment-resolve lifecycle spans are derived from the audit log at read time, not written as a second store.
@@ -197,9 +201,59 @@ Set on the daemon to pull real work items into the command center:
 
 Unset → the issues panel shows "Plane not connected" and everything else works.
 
+Run the issue curator when the backlog starts repeating itself:
+
+```bash
+omp-squad curate-plane [repo]        # print recurring clusters
+omp-squad curate-plane [repo] --file # also file one [curator] do-not-auto-land issue per cluster
+```
+
+It groups open Plane issues that point at the same root cause (for example dirty auto-land,
+Plane throttle/json failures, or test-env leaks) so the fleet fixes one unified issue instead of
+dispatching duplicates.
+
+### Feedback Loop (opt-in)
+
+Feedback Loop is a public intake module for user bugs, feature requests, and friction reports.
+Enable it on the daemon, create a campaign, then embed the widget on the product page:
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_FEEDBACK` | `=1` enables the public widget and public submission endpoint |
+| `OMP_SQUAD_FEEDBACK_RATE_LIMIT_PER_MIN` | Public submissions per campaign/IP/minute (default `30`; `0` disables) |
+| `OMP_SQUAD_FEEDBACK_MAX_IMAGE_BYTES` | Max screenshot upload size (default `2000000`) |
+
+Campaigns are operator-created with `POST /api/feedback/campaigns` (`name`, `repo`, `token`,
+optional `allowedOrigins`, `rewardCents`, `rewardCurrency`). The daemon stores only the token hash;
+the widget must send the raw token, so use a long random token, bind `allowedOrigins` to exact HTTPS
+origins (avoid `*` outside local testing), and rotate by replacing the campaign if it leaks.
+
+```html
+<script
+  src="https://squad.example.com/feedback/widget.js"
+  data-campaign="fc_..."
+  data-token="long-random-token">
+</script>
+<script>
+  window.FeedbackLoop?.identify({ userId: "u_123", userEmail: "user@example.com" });
+</script>
+```
+
+Operators use the authenticated feedback API to review `GET /api/feedback/items`, add validation
+votes, accept or reject, then promote accepted / needs-validation items to Plane with
+`POST /api/feedback/items/:id/promote`. Rewards are a ledger only: reward campaigns create `pending`
+entries; operators can approve, void, and mark paid with a manual/provider reference, but omp-squad
+never pays users automatically.
+
+Safety notes: serve the widget over HTTPS; screenshots may contain PII; text/metadata/screenshot sizes
+are capped, feedback records persist to file/DB storage, and screenshot files live under the state dir —
+prune/monitor disk growth for high-volume campaigns.
+
 **Auto-dispatch (on by default when Plane is configured)** — the daemon polls the mapped repos
 and spawns a routed agent per new open issue (issue → routed run → verify → land → close), so work
-starts with nobody typing. Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so a backlog can't storm:
+starts with nobody typing. Dispatch is ordered by Plane priority (`urgent` → `high` → `medium` →
+`low` → `none`), while `blocked_by`, `do-not-auto-land`, WIP caps, and rate-limit pauses still win.
+Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so a backlog can't storm:
 
 | Env | Meaning |
 |---|---|
@@ -207,6 +261,7 @@ starts with nobody typing. Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so
 | `OMP_SQUAD_DISPATCH_INTERVAL_MS` | Poll interval (default `60000`) |
 | `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
 | `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate (on by default; `=0` to disable) |
+| Web Settings | The Settings screen can persist boolean feature flags (`OMP_SQUAD_AUTODISPATCH`, `OMP_SQUAD_AUTOCLOSE`, `OMP_SQUAD_AUTOLAND`, `OMP_SQUAD_AUTODRIVE`, supervisor, Observer, Scout, feedback, webapp) to `<stateDir>/settings.json`; explicit env vars still show as `env` until saved. |
 
 **Rate-limit pause** — when an agent's model subscription hits a usage cap (the 5-hour / weekly
 limit, a `429`, "too many requests"), the daemon sees omp's `auto_retry_start` and **pauses
@@ -473,7 +528,7 @@ mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-a
 - **Organizations, members, roles.** The bootstrap admin creates orgs, invites members by email,
   and assigns roles (`owner` > `admin` > `member`).
 - **Settings surface** (gear in the nav): Account, Organization, Members, Roles & Permissions —
-  plus Appearance / Notifications / Daemon, which also show in file mode.
+  plus Appearance / Notifications / Daemon. The Daemon panel includes persisted feature-flag toggles backed by `/api/settings`.
 - **Storage.** `postgres(ql)://…` ⇒ Postgres (with row-level-security backstops); anything else
   (`sqlite:<path>` or a bare path) ⇒ SQLite. Auth + app tables migrate on boot.
 - **Auto-supervisor is file mode only.** The external auto-supervisor (answers blocked agents
@@ -533,62 +588,80 @@ with changed assets) the socket drops, the client auto-reconnects, sees a new ve
 **refreshes itself** ("Updated — reloading…") — so an open tab or installed PWA never runs
 stale UI without anyone touching it.
 
-**Web framework rewrite (in progress).** A new Vite + React 19 + TS + Tailwind v4 + shadcn SPA
-is being scaffolded under [`webapp/`](webapp/), to replace the single-file `src/web/index.html`
-dashboard at a later cutover. It is **inert by default**: the live dashboard is unchanged. To
-preview the new shell, build it (`cd webapp && bun install && bun run build`) and start the daemon
-with `OMP_SQUAD_WEBAPP=1` — the server then serves `webapp/dist` (the content-hashed Vite bundle)
-at `/` and `/assets/*` instead of the live HTML. The flag is OFF unless **both** set **and** a
-build exists; unset it (or skip the build) to get the current dashboard exactly as before.
+**Web framework rewrite (in progress).** [`webapp/`](webapp/) is now the active
+Vite + React 19 + TS + Tailwind v4 starter UI for the future dashboard. The
+previous React dashboard has been kept under [`webapp-legacy/`](webapp-legacy/)
+for historical reference so useful pieces can be ripped forward before that old
+implementation is deleted.
 
-**omp-graph view (in `webapp/`).** The new SPA renders the fleet as a force-directed graph
-("omp-graph"): `FeatureDTO` nodes (stage-colored, dependency edges derived from
-`IssueRef.blockedBy`) with live `AgentDTO` presence overlaid on the feature each agent is
-executing, alongside a Structure list. Its canvas force-graph engine and design tokens are adapted
-from [FrkAk/piyaz](https://github.com/FrkAk/piyaz) under **AGPL-3.0**, so `webapp/` is licensed
-AGPL-3.0 (see [`webapp/LICENSE`](webapp/LICENSE), [`webapp/NOTICE`](webapp/NOTICE)). Serving it
-(`OMP_SQUAD_WEBAPP=1`) triggers AGPL §13 — the corresponding source must be offered to users.
+The starter's look stays canonical. Live omp-squad data is adapted underneath it:
+the new webapp captures `?token=...`, adds Bearer auth for `/api/*`, connects to
+`/ws` with the `ompsq-token` subprotocol, and maps projects/features/agents into
+the starter task model. Legacy React code is a protocol reference only, not a UI
+source.
+Assistant chat is backed by `/api/console`, not task auto-creation. Console
+agents receive a chat-first appended system prompt so ordinary messages stay
+interactive; durable work starts only when the operator explicitly asks.
 
-Smoke-test it: `cd webapp && bun install && bun run build`, then `OMP_SQUAD_WEBAPP=1 omp-squad up`.
-Spawn 2-3 agents across a repo that has a `plans/<name>/` directory, open the dashboard, and toggle
-Structure <-> Graph. Feature nodes render stage-colored with dependency edges where `blockedBy`
-resolves; each agent shows as a status ring on the feature it is executing (a `needs-input` agent
-rings amber and glows); selecting a node slides in the detail panel listing that feature's agents.
+Capabilities are first-class now. Admins can import trusted agentcn-style source
+manifests with `POST /api/capability-sources`, or browse the built-in public
+catalog with `GET /api/capability-catalog` and import one by posting
+`{ "catalogId": "..." }` to the same source route. Packs are not installed just
+because they appear in the catalog: install/enable still goes through
+`POST /api/capability-installs` and the **Capabilities** view. Installed packs are
+checksum-pinned and materialize into runtime profiles/workflows through existing
+`RpcAgent`, `WorkflowDriver`, and `FlueServiceDriver` seams; federation exposes
+only metadata at `GET /api/federation/capabilities` until explicit context policy
+allows more. Machine-readable discovery lives at `/llms.txt`, `/openapi.json`,
+and `GET /api/capability-discovery`.
 
-For live-reload development, `cd webapp && bun run dev` serves the SPA with HMR and proxies
-`/api` + `/ws` to a daemon on `127.0.0.1:7878` (override with `OMP_SQUAD_PROXY`). Open
-`http://localhost:5173/?token=<dashboard-token>` — the token is captured into localStorage and
-reused for the Bearer header and the `ompsq-token` WS subprotocol, same as the live dashboard.
+The public catalog now includes the recurring omp-squad recipes we keep reusing:
+`verified-feature-delivery`, `parallel-solution-race`,
+`conflict-resolution-doctor`, `agent-factory-architect`, and
+`fleet-autonomy-steward`, alongside the planning/context recipes. Catalog
+metadata includes each recipe's profiles, workflow, tools, skills, and required
+environment so an operator can decide what to trust before importing.
+The React task detail view is a context assembly surface. Feature descriptions,
+acceptance criteria, decisions, and relationships persist through
+`PATCH /api/features/:id`; derived plan/agent tasks are adopted on first edit so
+changes survive reloads. The context bundle preview is derived from the linked
+plan docs: concern titles/statuses, acceptance or verification bullets,
+prerequisites/`BLOCKED_BY`, decisions, and `TOUCHES` files are distilled into
+the rows agents see first, with manual fallback only when no plan is linked.
+`GET /api/features/:id/pipeline` returns the linked plan tree, concern docs,
+Plane issues, comments, and agent ids so operators can drill from the context
+bundle into the actual documents an implementation agent will see; selecting a
+plan document renders its GitHub-flavored markdown in a draggable split reading
+pane beside the editable task context. The left pane no longer duplicates
+`00-overview.md`; the right pane opens that overview by default when present and
+adds previous/next plus a document strip for moving between plan markdown files.
+The workspace pane and task list pane can collapse to rails when the plan needs
+more room. Anchored plan annotations are created inline by selecting markdown text,
+written through
+`/api/features/:id/annotations`, highlighted in the document with stable
+per-author colors, broadcast live over the dashboard WebSocket (`comment` /
+`comment-resolved` events), and can be sent to an existing agent or to a new
+planner agent. Task comments are stored through `/api/comments`, fed into
+feature workflow prompts, and best-effort mirrored to linked Plane issues when
+Plane is configured. The public capability catalog includes a
+`collaborative-plan-reviser` planning loop for annotation → plan-revision →
+context-refresh workflows, plus verified delivery, fan-out race, conflict
+resolution, worker commissioning, and fleet stewardship recipes distilled from
+the built-in workflows.
 
-**Operator dashboard (HumanLayer-shaped).** The `webapp/` SPA is now a full operator console, not
-just the graph: a left sidebar (Inbox · Agents · Features · Graph · Audit), a list/detail center,
-and a command palette (Cmd-K). It reaches parity with `src/web/index.html` over the daemon's
-existing WS + `/api` surface — live transcript (`subscribe`), an approvals **inbox** answering every
-`PendingRequest` kind (`answer`), agent actions (prompt/interrupt/kill/restart/remove + land/diff/
-subagents), spawn / new-feature / auto-feature, a feature **board**, and the **audit** log; the
-force-graph is one view. Deferred (P3): federation, presence, leases, deep Plane, push. Still behind
-`OMP_SQUAD_WEBAPP=1`, so the live `index.html` dashboard is untouched until cutover. Plan + parity
-matrix: `plans/omp-dashboard/`.
+The Vite UI is still **inert by default**: the live single-file dashboard at
+`src/web/index.html` remains the default. To preview the new shell manually,
+build it (`cd webapp && bun install && bun run build`) and start the daemon with
+`OMP_SQUAD_WEBAPP=1` — the server then serves `webapp/dist` at `/` and
+`/assets/*`. `scripts/squadctl.sh start|restart` rebuilds `webapp/dist` first
+when the launcher exports `OMP_SQUAD_WEBAPP=1` (set
+`OMP_SQUAD_SKIP_WEBAPP_BUILD=1` to skip). The flag is OFF unless **both** set
+**and** a build exists; unset it (or skip the build) to get the current
+single-file dashboard exactly as before.
 
-**Project view (piyaz-style planning).** The sidebar drills into **projects** (repos); a project
-opens a plannable list of its **features** (plan dirs) and their **tasks** (Plane issues), and the
-task panel shows description + acceptance criteria + a context-bundle preview + properties. Layering
-is `project = repo → feature = plan dir → task = Plane issue`; the issue body is fetched and parsed
-(the `/promote-issue` Tier-2 schema → `src/tier2.ts`) via the new `GET /api/tasks/:id?repo=`.
-Reviewers comment on a task before it's dispatched (**review the plan, not the diff**) via the
-planner's **Review** panel + `GET/POST /api/comments` (append-only `comments.jsonl`, resolve folded
-at read). The **gated review flow** is now live too: an auto-feature (`Plan & review`) runs
-research → plan → **pauses at a review gate on the feature** — comment + Approve/Revise from the
-feature detail — and the unresolved comments are fed into the next workflow phase (Revise → re-plan,
-Approve → file/implement) via the executor's `decoratePrompt` seam.
-Plan: `plans/omp-planner/`.
-
-Transcripts render via [streamdown](https://github.com/vercel/streamdown) (MIT) — the streaming-
-markdown engine behind assistant-ui / AI Elements — with Shiki code highlighting, lazy-loaded so
-its grammars stay out of the initial bundle. P3 surfaces are now in: a **Network** view
-(federation · presence · file leases · Plane issues, repo-scoped) and **web push** (the Notify
-button + `public/sw.js`). Push works under `bun run dev`/`preview`; behind the daemon
-`OMP_SQUAD_WEBAPP` flag the serve seam must also serve `/sw.js` (one-line `src/server.ts` follow-up).
+For live-reload development, `cd webapp && bun run dev` serves the starter with
+HMR and proxies `/api` + `/ws` to a daemon on `127.0.0.1:7878` (override with
+`OMP_SQUAD_PROXY`).
 
 ## Commissioning — agents that author agents
 
@@ -880,6 +953,7 @@ delegation/availability policy plus the outbound command frame — is the rest o
 | `src/types.ts` | Shared domain + wire types — `AgentRecord`/`AgentDTO`, `SquadEvent`, `ClientCommand` |
 | `src/squad-manager.ts` | Roster, status derivation, transcript, persistence, `applyCommand` |
 | `src/server.ts` | HTTP + WebSocket bridge (web dashboard + REST) |
+| `src/capabilities/` | Capability pack schema, manifest import, install bindings, upgrade/diff, federation metadata, and context policy helpers |
 | `src/auth.ts` | Bearer-token gate for the HTTP + WS surface (constant-time, persisted mode 0600) |
 | `src/audit.ts` | Append-only fleet-action audit log (JSONL) — actor/action/target/outcome, behind `GET /api/audit` |
 
@@ -888,7 +962,8 @@ delegation/availability policy plus the outbound command frame — is the rest o
 | File | Role |
 |---|---|
 | `src/web/index.html` | Single-page web dashboard |
-| `webapp/` | Vite + React + Tailwind v4 + shadcn SPA (rewrite-in-progress; inert behind `OMP_SQUAD_WEBAPP=1`) |
+| `webapp/` | Vite + React + Tailwind v4 starter UI (rewrite-in-progress; inert behind `OMP_SQUAD_WEBAPP=1`) |
+| `webapp-legacy/` | Previous React dashboard kept as reference during the cutover |
 | `src/tui.ts` | Terminal dashboard — `buildBoard` chrome + pi-tui `Editor` input, two-level nav |
 | `src/index.ts` | CLI |
 

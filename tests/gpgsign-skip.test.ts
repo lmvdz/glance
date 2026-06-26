@@ -4,19 +4,19 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { gitNoSignEnv } from "../src/agent-host.ts";
-import { GIT_HARDEN_ARGS } from "../src/git-harden.ts";
+import { GIT_HARDEN_ARGS, gitNoSignEnv } from "../src/git-harden.ts";
 
 const run = promisify(execFile);
 
 describe("gitNoSignEnv", () => {
 	test("declares both signing keys disabled", () => {
-		expect(gitNoSignEnv.GIT_CONFIG_COUNT).toBe("2");
-		const keys = [gitNoSignEnv.GIT_CONFIG_KEY_0, gitNoSignEnv.GIT_CONFIG_KEY_1];
+		const env = gitNoSignEnv({});
+		expect(env.GIT_CONFIG_COUNT).toBe("2");
+		const keys = [env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_KEY_1];
 		expect(keys).toContain("commit.gpgsign");
 		expect(keys).toContain("tag.gpgsign");
-		expect(gitNoSignEnv.GIT_CONFIG_VALUE_0).toBe("false");
-		expect(gitNoSignEnv.GIT_CONFIG_VALUE_1).toBe("false");
+		expect(env.GIT_CONFIG_VALUE_0).toBe("false");
+		expect(env.GIT_CONFIG_VALUE_1).toBe("false");
 	});
 
 	// Real git: a repo with commit.gpgsign=true in its config must still report
@@ -36,7 +36,7 @@ describe("gitNoSignEnv", () => {
 
 			const off = await run("git", ["config", "--get", "commit.gpgsign"], {
 				cwd: dir,
-				env: { ...process.env, ...gitNoSignEnv },
+				env: { ...process.env, ...gitNoSignEnv() },
 			});
 			expect(off.stdout.trim()).toBe("false");
 		} finally {

@@ -47,10 +47,42 @@ export interface PendingRequest {
 
 export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";
 
+export type TranscriptStatus = "running" | "ok" | "error" | "cancelled";
+
+export interface TranscriptTool {
+	callId?: string;
+	name: string;
+	args?: unknown;
+	argsText?: string;
+	result?: unknown;
+	resultText?: string;
+	partial?: unknown;
+	partialText?: string;
+	isError?: boolean;
+	durationMs?: number;
+}
+
+export interface TranscriptPending {
+	requestId: string;
+	action: "created" | "answered" | "cancelled";
+}
+
+export type TranscriptFormat = "markdown" | "command" | "stage" | "plain";
+
 export interface TranscriptEntry {
+	/** Stable append id. Older persisted transcripts may not have one. */
+	id?: string;
+	/** Monotonic manager-local sequence. Older persisted transcripts may not have one. */
+	seq?: number;
 	kind: TranscriptKind;
 	text: string;
 	ts: number;
+	/** Echoes a UI-submitted prompt id so optimistic turns reconcile without text matching. */
+	clientTurnId?: string;
+	status?: TranscriptStatus;
+	tool?: TranscriptTool;
+	format?: TranscriptFormat;
+	pending?: TranscriptPending;
 }
 
 /** A work item (e.g. a Plane issue) an agent is advancing. */
@@ -61,6 +93,8 @@ export interface IssueRef {
 	identifier?: string;
 	name: string;
 	state?: string;
+	/** Provider priority when present. Dispatcher uses this only for ordering, never as a safety override. */
+	priority?: "urgent" | "high" | "medium" | "low" | "none" | string;
 	url?: string;
 	/** Provider project id this issue belongs to. */
 	projectId?: string;
@@ -69,6 +103,82 @@ export interface IssueRef {
 	/** Name flags this issue for human review / do-NOT-auto-land (e.g. SECURITY-CRITICAL). The dispatcher
 	 *  skips it (never auto-dispatched/auto-landed), but it still appears in the UI's issue list. */
 	noAutoDispatch?: boolean;
+}
+
+// ── Feedback Loop domain/wire types ─────────────────────────────────────────
+
+export type FeedbackStatus = "new" | "needs-validation" | "accepted" | "promoted" | "rejected";
+export type FeedbackKind = "bug" | "feature" | "friction";
+export type FeedbackRewardStatus = "none" | "pending" | "approved" | "paid" | "void";
+export type FeedbackValidationVote = "valid" | "invalid" | "unsure";
+
+export interface FeedbackCampaign {
+	id: string;
+	name: string;
+	repo: string;
+	tokenHash: string;
+	allowedOrigins: string[];
+	rewardCents?: number;
+	rewardCurrency?: string;
+	createdAt: number;
+	archived?: boolean;
+}
+
+export interface FeedbackAttachment {
+	id: string;
+	kind: "screenshot";
+	contentType: "image/png" | "image/jpeg";
+	bytes: number;
+	path?: string;
+	sha256: string;
+}
+
+export interface FeedbackItem {
+	id: string;
+	campaignId: string;
+	repo: string;
+	kind: FeedbackKind;
+	title: string;
+	description: string;
+	url?: string;
+	userId?: string;
+	userEmail?: string;
+	browser?: string;
+	viewport?: string;
+	metadata: Record<string, string>;
+	attachment?: FeedbackAttachment;
+	status: FeedbackStatus;
+	rewardStatus: FeedbackRewardStatus;
+	planeIssue?: IssueRef;
+	createdAt: number;
+	updatedAt: number;
+}
+
+export interface FeedbackValidationResponse {
+	id: string;
+	feedbackId: string;
+	campaignId: string;
+	repo: string;
+	respondent: string;
+	vote: FeedbackValidationVote;
+	pain?: number;
+	note?: string;
+	createdAt: number;
+}
+
+export interface FeedbackReward {
+	id: string;
+	feedbackId: string;
+	campaignId: string;
+	repo: string;
+	amount: number;
+	currency: string;
+	status: FeedbackRewardStatus;
+	provider?: string;
+	externalRef?: string;
+	reviewer?: string;
+	createdAt: number;
+	updatedAt: number;
 }
 
 /** A Plane issue resolved with its body for the planner task view — the promote-issue Tier-2
@@ -144,6 +254,36 @@ export interface FeatureWorktreeStatus {
 	proof?: WorktreeProofSummary;
 }
 
+export interface FeatureCriterion {
+	id: string;
+	text: string;
+	completed: boolean;
+	source?: "plan" | "ticket" | "workflow" | "manual";
+}
+
+export interface FeatureDecision {
+	id: string;
+	text: string;
+	source?: "plan" | "human" | "agent";
+	createdAt?: number;
+}
+
+export interface FeatureRelationship {
+	id: string;
+	targetId: string;
+	targetTitle: string;
+	type?: "issue" | "blocks" | "depends-on" | "related";
+	url?: string;
+}
+
+export interface FeatureContextSummary {
+	spec: string;
+	criteria: string;
+	prerequisites: string;
+	decisions: string;
+	downstream: string;
+}
+
 /**
  * A Feature — a cross-cutting unit of work spanning a plan dir and/or a set of agents/worktrees.
  * Phase 1: fully DERIVED at read time (no persistence) from plan dirs + the roster + live git.
@@ -152,6 +292,8 @@ export interface FeatureDTO {
 	/** Stable derived id: `plan:<repo>:<dir>` or `agent:<agentId>`. */
 	id: string;
 	title: string;
+	createdAt?: number;
+	updatedAt?: number;
 	repo: string;
 	stage: FeatureStage;
 	/** Repo-relative plan dir this feature originated from, if any. */
@@ -180,6 +322,65 @@ export interface FeatureDTO {
 	workflowStage?: string;
 	/** Workflow node rollup (completed/total) for a progress bar. */
 	workflowProgress?: { done: number; total: number };
+	/** Human-readable description exposed in the React task detail pane. */
+	description?: string;
+	/** Acceptance criteria from plan docs / tickets / workflow / manual edits. */
+	acceptanceCriteria?: FeatureCriterion[];
+	/** Durable decision log entries that should be fed to agents. */
+	decisions?: FeatureDecision[];
+	/** Linked issues/features/docs. */
+	relationships?: FeatureRelationship[];
+	/** Precomputed context bundle summary for task-detail display and agent prompts. */
+	contextBundle?: FeatureContextSummary;
+}
+
+export interface PlanAnnotationTarget {
+	planPath: string;
+	lineStart?: number;
+	lineEnd?: number;
+	quote?: string;
+}
+
+export interface ArtifactCommentDTO {
+	id: string;
+	repo: string;
+	subject: string;
+	body: string;
+	author: string;
+	urgent?: boolean;
+	createdAt: number;
+	kind?: "comment" | "plan-annotation";
+	annotation?: PlanAnnotationTarget;
+	resolvedAt?: number;
+}
+
+
+export interface AgentProfile {
+	id: string;
+	name: string;
+	description?: string;
+	runtime: AgentKind;
+	model?: string;
+	approvalMode?: ApprovalMode;
+	capabilities?: string[];
+	memory?: string;
+	default?: boolean;
+}
+
+export interface AgentSessionSummary {
+	id?: string;
+	name?: string;
+	file?: string;
+	thinkingLevel?: ThinkingLevel;
+	steeringMode?: "all" | "one-at-a-time";
+	followUpMode?: "all" | "one-at-a-time";
+	interruptMode?: "immediate" | "wait";
+	isCompacting?: boolean;
+	autoCompactionEnabled?: boolean;
+	messageCount?: number;
+	queuedMessageCount?: number;
+	systemPromptLines?: number;
+	tools?: { name: string; description?: string }[];
 }
 
 /** Serializable per-agent snapshot sent to surfaces. */
@@ -199,6 +400,7 @@ export interface AgentDTO {
 	worktree: string;
 	branch?: string;
 	model?: string;
+	profileId?: string;
 	approvalMode: ApprovalMode;
 	/** One-line description of what it's doing right now (tool name / activity). */
 	activity?: string;
@@ -210,8 +412,16 @@ export interface AgentDTO {
 	etaAt?: number;
 	/** Context window usage 0..1. */
 	contextPct?: number;
+	/** Approximate tokens currently in the context window. */
+	contextTokens?: number;
+	/** Model context window size in tokens. */
+	contextWindow?: number;
 	/** Compact rollup of the latest/in-flight run (tools, cost, duration); live/derived. */
 	receipt?: ReceiptRollup;
+	/** Compact live RPC session metadata for Control Tower parity with the TUI. */
+	session?: AgentSessionSummary;
+	/** Current todo phases from the backing harness, preserved for rich web rendering. */
+	todoPhases?: RpcSessionState["todoPhases"];
 	/** Pending human-input requests (status === "input" when non-empty). */
 	pending: PendingRequest[];
 	/** ms epoch of last activity of any kind. */
@@ -226,6 +436,10 @@ export interface AgentDTO {
 	featureId?: string;
 	/** Repo-relative path prefixes this agent owns — overlapping spawns are refused (partition). */
 	owns?: string[];
+	/** Workflow definition backing this agent, when kind === "workflow". */
+	workflow?: WorkflowMemberConfig;
+	/** Live workflow checkpoint/rollup, emitted on every stage boundary. */
+	workflowState?: WorkflowRunState;
 	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
 	landReady?: boolean;
 	/** Re-adopted from a surviving worktree on relaunch and not yet re-run (OMPSQ-164): its work was
@@ -288,9 +502,12 @@ export interface PersistedAgent {
 	worktree: string;
 	branch?: string;
 	model?: string;
+	profileId?: string;
 	approvalMode: ApprovalMode;
 	/** Initial task prompt, if the agent was created with one. */
 	task?: string;
+	/** Extra system-prompt text appended for specialized surfaces, e.g. console chat. */
+	appendSystemPrompt?: string;
 	thinking?: ThinkingLevel;
 	issue?: IssueRef;
 	featureId?: string;
@@ -331,6 +548,11 @@ export interface PersistedFeature {
 	archived?: boolean;
 	/** When Fabro-driven: the research-plan-implement workflow agent running this feature. */
 	workflowAgentId?: string;
+	description?: string;
+	acceptanceCriteria?: FeatureCriterion[];
+	decisions?: FeatureDecision[];
+	relationships?: FeatureRelationship[];
+	contextBundle?: Partial<FeatureContextSummary>;
 }
 
 /** Options when adding an agent to the squad. */
@@ -344,9 +566,12 @@ export interface CreateAgentOptions {
 	/** Reuse an existing path as the cwd instead of cutting a worktree. */
 	existingPath?: string;
 	model?: string;
+	profileId?: string;
 	approvalMode?: ApprovalMode;
 	/** Prompt to send immediately once the agent is ready. */
 	task?: string;
+	/** Extra system-prompt text appended for specialized surfaces, e.g. console chat. */
+	appendSystemPrompt?: string;
 	/** Reasoning effort for this agent (defaults to "low" so fleet agents stay responsive). */
 	thinking?: ThinkingLevel;
 	/** Work item to advance (shown in the command center; e.g. a Plane issue). */
@@ -355,6 +580,8 @@ export interface CreateAgentOptions {
 	featureId?: string;
 	/** Path to a workflow graph (`.fabro`) to run as the agent's process; `task` becomes the goal. */
 	workflow?: string;
+	/** Capability-backed flue-service invocation. */
+	flue?: FlueMemberConfig;
 	/** Resumable workflow checkpoint to continue from instead of restarting the graph (adopt/restore paths). */
 	workflowState?: WorkflowRunState;
 	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
@@ -482,6 +709,8 @@ export type SquadEvent =
 	| { type: "log"; level: "info" | "warn" | "error"; text: string }
 	| { type: "commands"; id: string; commands: CommandInfo[] }
 	| { type: "features-changed" }
+	| { type: "comment"; comment: ArtifactCommentDTO }
+	| { type: "comment-resolved"; id: string; resolvedAt: number }
 	| { type: "audit"; entry: AuditEntry };
 
 /** One append-only fleet-action audit record (actor / action / target / outcome). */
@@ -505,7 +734,8 @@ export interface AuditEntry {
 // ── Surface → manager commands ──────────────────────────────────────────────
 
 export type ClientCommand =
-	| { type: "prompt"; id: string; message: string }
+	| { type: "prompt"; id: string; message: string; clientTurnId?: string }
+	| { type: "set-model"; id: string; model: string }
 	| { type: "answer"; id: string; requestId: string; value: string }
 	| { type: "interrupt"; id: string }
 	| { type: "kill"; id: string }

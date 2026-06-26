@@ -2,7 +2,7 @@
 /**
  * Thin entry for a detached agent-host process (kept separate from index.ts so a
  * host doesn't load the daemon/TUI/server module graph). Launched by RpcAgent:
- *   bun agent-host-main.ts --id <id> --cwd <dir> --socket <path> [--model --approval --thinking --bin]
+ *   bun agent-host-main.ts --id <id> --cwd <dir> --socket <path> [--model --approval --thinking --append-system-prompt --bin]
  */
 
 import { runAgentHost } from "./agent-host.ts";
@@ -28,6 +28,7 @@ await runAgentHost({
 	model: flag("model"),
 	approvalMode: flag("approval") as ApprovalMode | undefined,
 	thinking: flag("thinking") as ThinkingLevel | undefined,
+	appendSystemPrompt: flag("append-system-prompt"),
 	bin: flag("bin"),
 });
 process.exit(0);

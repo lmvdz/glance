@@ -32,6 +32,18 @@ export const GIT_HARDEN_ENV: Record<string, string> = {
 	PAGER: "cat",
 };
 
+export function gitNoSignEnv(base: Record<string, string | undefined> = process.env): Record<string, string> {
+	const raw = base.GIT_CONFIG_COUNT;
+	const start = raw && /^\d+$/.test(raw) ? Number(raw) : 0;
+	return {
+		GIT_CONFIG_COUNT: String(start + 2),
+		[`GIT_CONFIG_KEY_${start}`]: "commit.gpgsign",
+		[`GIT_CONFIG_VALUE_${start}`]: "false",
+		[`GIT_CONFIG_KEY_${start + 1}`]: "tag.gpgsign",
+		[`GIT_CONFIG_VALUE_${start + 1}`]: "false",
+	};
+}
+
 export interface HardenedGitResult {
 	code: number;
 	stdout: string;

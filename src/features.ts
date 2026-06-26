@@ -16,7 +16,7 @@ import * as path from "node:path";
 import { hardenedGitSync } from "./git-harden.ts";
 import { worktreeDiff } from "./explore.ts";
 import { headCommit, isFresh, proofFor } from "./proof.ts";
-import type { AgentDTO, AgentStatus, FeatureDTO, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
+import type { AgentDTO, AgentStatus, FeatureContextSummary, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
 	try {
@@ -88,12 +88,44 @@ export async function featureLandStatus(members: LandMember[]): Promise<FeatureW
 }
 
 const PLANE_RE = /\bPLANE:\s*([A-Z0-9]+-\d+)/g;
+const PLAN_TITLE_FILES = ["00-overview.md", "overview.md", "README.md", "readme.md", "DESIGN.md"];
+const GENERIC_PLAN_TITLES = new Set(["overview", "design", "research", "status", "goal", "summary", "plan"]);
+const GENERIC_META_DESCRIPTION_RE = /^Stage:\s*.+\nRepo:\s*.+(?:\n(?:Plan|Issues|Agents|Workflow|Blocked|Diverged):\s*.*)*\s*$/i;
+
+
+
+function humanPlanTitle(dir: string): string {
+	return path.basename(dir).replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function planTitleFromText(text: string, fallback: string): string {
+	const title = C_TITLE.exec(text)?.[1]?.trim();
+	return title && !GENERIC_PLAN_TITLES.has(title.toLowerCase()) ? title : fallback;
+}
+
+
+function weakPlanTitle(title: string, dir: string): boolean {
+	const base = path.basename(dir);
+	const norm = (value: string) => value.trim().toLowerCase();
+	return new Set([base, humanPlanTitle(base), humanPlanTitle(dir)].map(norm)).has(norm(title));
+}
+function fileTimes(stat: { birthtimeMs: number; ctimeMs: number; mtimeMs: number }): { createdAt: number; updatedAt: number } {
+	const createdAt = Math.round(stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs);
+	return { createdAt, updatedAt: Math.round(stat.mtimeMs) };
+}
+
+function persistedDescription(text: string | undefined): string | undefined {
+	return text && !GENERIC_META_DESCRIPTION_RE.test(text.trim()) ? text : undefined;
+}
+
+
 
 export interface PlanDirInfo {
 	/** Repo-relative dir, e.g. "plans/auth". */
 	dir: string;
 	title: string;
 	issueIds: string[];
+	createdAt: number;
+	updatedAt: number;
 }
 
 /** Scan the repo's plans/ directory for plan dirs (each containing markdown), extracting any PLANE: pointers. */
@@ -115,12 +147,15 @@ export async function listPlanDirs(repo: string): Promise<PlanDirInfo[]> {
 			continue;
 		}
 		if (files.length === 0) continue;
+		const times = fileTimes(await fs.stat(dirAbs));
 		const issueIds = new Set<string>();
 		for (const f of files) {
 			const text = await fs.readFile(path.join(dirAbs, f), "utf8").catch(() => "");
 			for (const m of text.matchAll(PLANE_RE)) issueIds.add(m[1]);
 		}
-		out.push({ dir: path.join("plans", name), title: name, issueIds: [...issueIds] });
+		const titleFile = PLAN_TITLE_FILES.find((file) => files.includes(file)) ?? files[0];
+		const titleText = titleFile ? await fs.readFile(path.join(dirAbs, titleFile), "utf8").catch(() => "") : "";
+		out.push({ dir: path.join("plans", name), title: planTitleFromText(titleText, humanPlanTitle(name)), issueIds: [...issueIds], ...times });
 	}
 	return out;
 }
@@ -141,15 +176,32 @@ async function planeIdsIn(dirAbs: string): Promise<string[]> {
 	return [...ids];
 }
 
+/** One markdown doc inside a plan dir. */
+export interface PlanDocument {
+	file: string;
+	path: string;
+	title: string;
+	content: string;
+	concern: boolean;
+	createdAt: number;
+	updatedAt: number;
+}
+
 /** One concern doc inside a plan dir (a `plans/<x>/NN-*.md` with a STATUS frontmatter line). */
 export interface PlanConcern {
 	file: string;
+	path: string;
 	title: string;
 	status: string;
 	priority?: string;
 	complexity?: string;
 	planeId?: string;
 	open: boolean;
+	acceptanceCriteria: string[];
+	prerequisites: string[];
+	decisions: string[];
+	touches: string[];
+	content: string;
 }
 
 const C_STATUS = /^STATUS:\s*([\w-]+)/im;
@@ -161,6 +213,55 @@ const C_PLANE_LINE = /^PLANE:\s*([A-Z0-9]+-\d+)/m;
 const C_TITLE = /^#\s+(.+?)\s*$/m;
 const CONCERN_SKIP = new Set(["00-overview.md", "overview.md", "design.md", "readme.md"]);
 const CLOSED_STATUS = new Set(["closed", "done", "complete", "completed", "cancelled", "canceled"]);
+const C_BLOCKED_BY = /^BLOCKED_BY:\s*(.+)$/im;
+
+
+function markdownSectionItems(text: string, names: string[]): string[] {
+	const wanted = new Set(names.map((name) => name.toLowerCase()));
+	const lines = text.split(/\r?\n/);
+	const out: string[] = [];
+	let inSection = false;
+	for (const line of lines) {
+		const heading = /^(#{2,6})\s+(.+?)\s*$/.exec(line);
+		if (heading) {
+			inSection = wanted.has(heading[2].replace(/[:#]+$/g, "").trim().toLowerCase());
+			continue;
+		}
+		if (!inSection) continue;
+		const bullet = /^\s*(?:[-*]|\d+\.)\s+(.+?)\s*$/.exec(line);
+		if (bullet?.[1]) out.push(bullet[1].trim());
+		else if (line.trim() && !line.startsWith("STATUS:") && !line.startsWith("PRIORITY:") && !line.startsWith("COMPLEXITY:")) out.push(line.trim());
+	}
+	return out;
+}
+function planTouches(text: string): string[] {
+	const lines = text.split(/\r?\n/);
+	const out: string[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const match = /^TOUCHES:\s*(.*?)\s*$/i.exec(lines[i]);
+		if (!match) continue;
+		if (match[1]) out.push(...splitTouches(match[1]));
+		for (let j = i + 1; j < lines.length; j++) {
+			const line = lines[j];
+			if (!line.trim()) break;
+			if (/^(#{1,6}\s+|[A-Z_]+:)/.test(line)) break;
+			const item = line.replace(/^\s*(?:[-*]|\d+\.)\s+/, "").trim();
+			if (item) out.push(...splitTouches(item));
+		}
+	}
+	return [...new Set(out)];
+}
+
+function splitTouches(value: string): string[] {
+	return value.split(",").map((item) => item.replace(/[`"'[\]]/g, "").trim()).filter(Boolean);
+}
+
+function planPrerequisites(text: string): string[] {
+	const items = markdownSectionItems(text, ["Prerequisites", "Dependencies", "Blocked By", "Blockers"]);
+	const blocked = C_BLOCKED_BY.exec(text)?.[1]?.trim();
+	return blocked && blocked !== "—" && blocked !== "-" ? [`Blocked by ${blocked}`, ...items] : items;
+}
+
 
 /** Parse the concern docs in a plan dir (files carrying a STATUS line); skips overview/design docs. */
 export async function parsePlanConcerns(repo: string, planDir: string): Promise<PlanConcern[]> {
@@ -180,15 +281,44 @@ export async function parsePlanConcerns(repo: string, planDir: string): Promise<
 		const status = sm[1].toLowerCase().replace(/_/g, "-");
 		out.push({
 			file: f,
+			path: path.join(planDir, f),
 			title: C_TITLE.exec(text)?.[1] ?? f.replace(/\.md$/, ""),
 			status,
 			priority: C_PRIORITY.exec(text)?.[1]?.toLowerCase(),
 			complexity: C_COMPLEXITY.exec(text)?.[1]?.toLowerCase(),
 			planeId: C_PLANE_LINE.exec(text)?.[1],
 			open: !CLOSED_STATUS.has(status),
+			acceptanceCriteria: markdownSectionItems(text, ["Acceptance Criteria", "Acceptance"]),
+			prerequisites: planPrerequisites(text),
+			decisions: markdownSectionItems(text, ["Decisions", "Decision Log", "Rationale"]),
+			touches: planTouches(text),
+			content: text,
 		});
 	}
 	return out;
+}
+
+export async function parsePlanDocuments(repo: string, planDir: string): Promise<PlanDocument[]> {
+	const dirAbs = path.join(repo, planDir);
+	let files: string[];
+	try {
+		files = (await fs.readdir(dirAbs)).filter((f) => f.endsWith(".md"));
+	} catch {
+		return [];
+	}
+	return Promise.all(files.sort().map(async (file): Promise<PlanDocument> => {
+		const content = await fs.readFile(path.join(dirAbs, file), "utf8").catch(() => "");
+		const times = fileTimes(await fs.stat(path.join(dirAbs, file)));
+		const sm = C_STATUS.exec(content) ?? C_STATUS_BOLD.exec(content) ?? C_STATUS_H2.exec(content);
+		return {
+			file,
+			path: path.join(planDir, file),
+			title: C_TITLE.exec(content)?.[1] ?? file.replace(/\.md$/, ""),
+			content,
+			concern: !CONCERN_SKIP.has(file.toLowerCase()) && !!sm,
+			...times,
+		};
+	}));
 }
 
 function countStatuses(agents: AgentDTO[]): Partial<Record<AgentStatus, number>> {
@@ -218,15 +348,80 @@ const WF_STAGE: Record<string, FeatureStage> = {
 	Fixup: "review",
 };
 
+function planCriteria(concerns: PlanConcern[], progress?: { done: number; total: number }): FeatureCriterion[] {
+	const fromPlan = concerns.flatMap((concern) => {
+		const items = concern.acceptanceCriteria.length ? concern.acceptanceCriteria : [`${concern.title} reaches ${concern.status}`];
+		return items.map((text, index): FeatureCriterion => ({ id: `${concern.file}:${index}`, text, completed: !concern.open, source: "plan" }));
+	});
+	return progress && progress.total > 0
+		? [{ id: "workflow-progress", text: `Workflow progress ${progress.done} / ${progress.total}`, completed: progress.done >= progress.total, source: "workflow" }, ...fromPlan]
+		: fromPlan;
+}
+
+function planDecisions(concerns: PlanConcern[]): FeatureDecision[] {
+	return concerns.flatMap((concern) => concern.decisions.map((text, index): FeatureDecision => ({ id: `${concern.file}:decision:${index}`, text, source: "plan" })));
+}
+
+function issueRelationships(issueIds: string[]): FeatureRelationship[] {
+	return issueIds.map((identifier) => ({ id: identifier, targetId: identifier, targetTitle: identifier, type: "issue" }));
+}
+
+function derivedDescription(opts: { stage: FeatureStage; repo: string; planDir?: string; issueIds: string[]; agents: AgentDTO[]; workflowStage?: string; blocked: boolean; divergent: boolean }): string {
+	const lines = [`Repo: ${opts.repo}`];
+	if (opts.planDir) lines.push(`Plan: ${opts.planDir}`);
+	if (opts.issueIds.length) lines.push(`Issues: ${opts.issueIds.join(", ")}`);
+	if (opts.agents.length) lines.push(`Agents: ${opts.agents.map((agent) => `${agent.name} (${agent.status})`).join(", ")}`);
+	if (opts.workflowStage) lines.push(`Workflow: ${opts.workflowStage}`);
+	if (opts.blocked) lines.push("Blocked: yes");
+	if (opts.divergent) lines.push("Diverged: yes");
+	return lines.join("\n");
+}
+
+function contextSummary(opts: { planDir?: string; concerns: PlanConcern[]; issueIds: string[]; agents: AgentDTO[]; workflowProgress?: { done: number; total: number }; workflowStage?: string; blocked: boolean; decisions: FeatureDecision[]; override?: Partial<FeatureContextSummary> }): FeatureContextSummary {
+	if (opts.concerns.length) return planContextSummary(opts);
+	const blockedAgents = opts.agents.filter((agent) => agent.status === "input").length;
+	return {
+		spec: opts.override?.spec ?? opts.planDir ?? "live feature",
+		criteria: opts.override?.criteria ?? (opts.workflowProgress ? `${opts.workflowProgress.done} / ${opts.workflowProgress.total} workflow steps` : `${opts.issueIds.length} linked issues`),
+		prerequisites: opts.override?.prerequisites ?? (blockedAgents ? `${blockedAgents} agent${blockedAgents === 1 ? "" : "s"} waiting for input` : opts.blocked ? "blocked" : "no known blockers"),
+		decisions: opts.override?.decisions ?? (opts.decisions.length ? `${opts.decisions.length} recorded decision${opts.decisions.length === 1 ? "" : "s"}` : opts.workflowStage ?? "no recorded decisions"),
+		downstream: opts.override?.downstream ?? (opts.agents.length ? `${opts.agents.length} active agent${opts.agents.length === 1 ? "" : "s"}` : "no active agents"),
+	};
+}
+
+function planContextSummary(opts: { planDir?: string; concerns: PlanConcern[]; issueIds: string[]; agents: AgentDTO[]; workflowProgress?: { done: number; total: number }; workflowStage?: string; blocked: boolean; decisions: FeatureDecision[] }): FeatureContextSummary {
+	const open = opts.concerns.filter((concern) => concern.open);
+	const titles = summarizeItems(open.map((concern) => concern.title), "all plan concerns closed");
+	const criteria = summarizeItems(opts.concerns.flatMap((concern) => concern.acceptanceCriteria.map((item) => `${concern.title}: ${item}`)), "no acceptance criteria in plan");
+	const prerequisites = summarizeItems(opts.concerns.flatMap((concern) => concern.prerequisites.map((item) => `${concern.title}: ${item}`)), opts.blocked ? "blocked" : "no plan blockers");
+	const decisions = summarizeItems(opts.decisions.map((decision) => decision.text), opts.workflowStage ?? "no plan decisions");
+	const touches = summarizeItems(opts.concerns.flatMap((concern) => concern.touches), opts.issueIds.length ? opts.issueIds.join(", ") : "no downstream files listed");
+	return {
+		spec: `${opts.planDir ?? "plan"} · ${open.length}/${opts.concerns.length} open · ${titles}`,
+		criteria: opts.workflowProgress ? `${opts.workflowProgress.done}/${opts.workflowProgress.total} workflow steps · ${criteria}` : criteria,
+		prerequisites,
+		decisions,
+		downstream: opts.agents.length ? `${touches} · ${opts.agents.length} active agent${opts.agents.length === 1 ? "" : "s"}` : touches,
+	};
+}
+
+function summarizeItems(items: string[], empty: string): string {
+	const uniq = [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+	return uniq.length > 2 ? `${uniq.slice(0, 2).join("; ")}; +${uniq.length - 2} more` : (uniq.join("; ") || empty);
+}
+
 /** Build the feature list for one repo: persisted features (explicit membership) + unadopted plan dirs + unassigned agents. */
 export async function buildFeatures(repo: string, agents: AgentDTO[], persisted: PersistedFeature[] = []): Promise<FeatureDTO[]> {
 	const features: FeatureDTO[] = [];
 	const assigned = new Set<string>();
 	const adoptedDirs = new Set<string>();
+	const planDirs = await listPlanDirs(repo);
+	const planDirByPath = new Map(planDirs.map((pd) => [pd.dir, pd]));
 
 	for (const pf of persisted) {
-		if (pf.repo !== repo || pf.archived) continue;
+		if (pf.repo !== repo) continue;
 		if (pf.origin?.planDir) adoptedDirs.add(pf.origin.planDir);
+		if (pf.archived) continue;
 		const members = agents.filter((a) => a.featureId === pf.id);
 		for (const m of members) assigned.add(m.id);
 		// Live members + cached branches for members no longer in the roster (so land status survives agent removal).
@@ -244,34 +439,56 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 		const wfAgent = pf.workflowAgentId ? members.find((a) => a.id === pf.workflowAgentId) : undefined;
 		const wfActive = wfAgent?.todo?.active;
 		const wfStage = wfActive ? WF_STAGE[wfActive] : undefined;
+		const concerns = pf.origin?.planDir ? await parsePlanConcerns(repo, pf.origin.planDir) : [];
+		const workflowProgress = wfAgent?.todo ? { done: wfAgent.todo.done, total: wfAgent.todo.total } : undefined;
+		const decisions = pf.decisions ?? planDecisions(concerns);
+		const relationships = pf.relationships ?? issueRelationships(issueIds);
+		const stage = pf.stageOverride ?? wfStage ?? deriveStage({ agents: members, worktrees, unlanded: unlandedFiles, planDir: pf.origin?.planDir, hasIssues });
+		const divergent = worktrees.some((w) => w.readiness === "diverged");
+		const blocked = members.some((a) => a.status === "input");
+		const planTitle = pf.origin?.planDir ? planDirByPath.get(pf.origin.planDir)?.title : undefined;
+		const title = planTitle && weakPlanTitle(pf.title, pf.origin?.planDir ?? "") ? planTitle : pf.title;
+		const description = persistedDescription(pf.description) ?? derivedDescription({ stage, repo, planDir: pf.origin?.planDir, issueIds, agents: members, workflowStage: wfActive, blocked, divergent });
 		features.push({
 			id: pf.id,
-			title: pf.title,
+			title,
+			createdAt: pf.createdAt,
+			updatedAt: pf.updatedAt,
 			repo,
-			stage: pf.stageOverride ?? wfStage ?? deriveStage({ agents: members, worktrees, unlanded: unlandedFiles, planDir: pf.origin?.planDir, hasIssues }),
+			stage,
 			planDir: pf.origin?.planDir,
 			agentIds: members.map((a) => a.id),
 			worktrees,
 			unlandedFiles,
-			divergent: worktrees.some((w) => w.readiness === "diverged"),
-			blocked: members.some((a) => a.status === "input"),
+			divergent,
+			blocked,
 			statusCounts: countStatuses(members),
 			issueIdentifiers: hasIssues ? issueIds : undefined,
 			persisted: true,
 			stageOverride: pf.stageOverride,
 			workflowAgentId: pf.workflowAgentId,
 			workflowStage: wfActive,
-			workflowProgress: wfAgent?.todo ? { done: wfAgent.todo.done, total: wfAgent.todo.total } : undefined,
+			workflowProgress,
+			description,
+			acceptanceCriteria: pf.acceptanceCriteria ?? planCriteria(concerns, workflowProgress),
+			decisions,
+			relationships,
+			contextBundle: contextSummary({ planDir: pf.origin?.planDir, concerns, issueIds, agents: members, workflowProgress, workflowStage: wfActive, blocked, decisions, override: pf.contextBundle }),
 		});
 	}
 
-	for (const pd of await listPlanDirs(repo)) {
+	for (const pd of planDirs) {
 		if (adoptedDirs.has(pd.dir)) continue;
+		const concerns = await parsePlanConcerns(repo, pd.dir);
+		const decisions = planDecisions(concerns);
+		const stage = deriveStage({ agents: [], worktrees: [], unlanded: 0, planDir: pd.dir, hasIssues: pd.issueIds.length > 0 });
 		features.push({
 			id: `plan:${repo}:${pd.dir}`,
 			title: pd.title,
+			createdAt: pd.createdAt,
+			updatedAt: pd.updatedAt,
 			repo,
-			stage: deriveStage({ agents: [], worktrees: [], unlanded: 0, planDir: pd.dir, hasIssues: pd.issueIds.length > 0 }),
+			stage,
 			planDir: pd.dir,
 			agentIds: [],
 			worktrees: [],
@@ -280,6 +497,11 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			blocked: false,
 			statusCounts: {},
 			issueIdentifiers: pd.issueIds.length > 0 ? pd.issueIds : undefined,
+			description: derivedDescription({ stage, repo, planDir: pd.dir, issueIds: pd.issueIds, agents: [], blocked: false, divergent: false }),
+			acceptanceCriteria: planCriteria(concerns),
+			decisions,
+			relationships: issueRelationships(pd.issueIds),
+			contextBundle: contextSummary({ planDir: pd.dir, concerns, issueIds: pd.issueIds, agents: [], blocked: false, decisions }),
 		});
 	}
 
@@ -287,18 +509,28 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 		if (assigned.has(a.id)) continue;
 		const worktrees = await featureLandStatus([{ agentId: a.id, agentName: a.name, branch: a.branch, worktree: a.worktree, repo }]);
 		const unlandedFiles = worktrees.reduce((s, w) => s + w.changedFiles, 0);
+		const issueIds = a.issue?.identifier ? [a.issue.identifier] : [];
+		const stage = deriveStage({ agents: [a], worktrees, unlanded: unlandedFiles, hasIssues: false });
+		const divergent = worktrees.some((w) => w.readiness === "diverged");
+		const blocked = a.status === "input";
+		const decisions: FeatureDecision[] = [];
 		features.push({
 			id: `agent:${a.id}`,
 			title: a.name,
 			repo,
-			stage: deriveStage({ agents: [a], worktrees, unlanded: unlandedFiles, hasIssues: false }),
+			stage,
 			agentIds: [a.id],
 			worktrees,
 			unlandedFiles,
-			divergent: worktrees.some((w) => w.readiness === "diverged"),
-			blocked: a.status === "input",
+			divergent,
+			blocked,
 			statusCounts: countStatuses([a]),
-			issueIdentifiers: a.issue?.identifier ? [a.issue.identifier] : undefined,
+			issueIdentifiers: issueIds.length ? issueIds : undefined,
+			description: derivedDescription({ stage, repo, issueIds, agents: [a], blocked, divergent }),
+			acceptanceCriteria: [],
+			decisions,
+			relationships: issueRelationships(issueIds),
+			contextBundle: contextSummary({ issueIds, concerns: [], agents: [a], blocked, decisions }),
 		});
 	}
 
