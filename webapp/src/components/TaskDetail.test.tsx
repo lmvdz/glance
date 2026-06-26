@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { adjacentPlanPath, isOverviewDoc, planDocKind, PlanMarkdown, resetPlanScroll, safePlanIndex } from "./TaskDetail";
+import { adjacentPlanPath, isOverviewDoc, planDocKind, PlanMarkdown, PlanMarkdownLoading, resetPlanScroll, safePlanIndex } from "./TaskDetail";
 
 test("PlanMarkdown renders plan markdown with prose/table styling", () => {
   const html = renderToStaticMarkup(<PlanMarkdown content={"# Overview\n\n| A | B |\n| - | - |\n| 1 | 2 |"} />);
@@ -17,6 +17,14 @@ test("PlanMarkdown uses a light code-block background outside dark mode", () => 
   expect(html).toContain("prose-pre:bg-gray-50");
   expect(html).toContain("dark:prose-pre:bg-gray-950");
   expect(html).not.toContain(" prose-pre:bg-gray-950 ");
+});
+
+test("PlanMarkdownLoading visibly reports that plan documents are loading", () => {
+  const html = renderToStaticMarkup(<PlanMarkdownLoading />);
+
+  expect(html).toContain('role="status"');
+  expect(html).toContain('aria-busy="true"');
+  expect(html).toContain("Loading plan documents");
 });
 
 test("isOverviewDoc only accepts 00-overview.md", () => {
