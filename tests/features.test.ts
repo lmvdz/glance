@@ -7,8 +7,8 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildFeatures, featureLandStatus, listPlanDirs } from "../src/features.ts";
-import type { AgentDTO } from "../src/types.ts";
+import { buildFeatures, featureLandStatus, featureReadiness, listPlanDirs } from "../src/features.ts";
+import type { AgentDTO, FeatureDTO, FeatureWorktreeStatus } from "../src/types.ts";
 
 const tmps: string[] = [];
 afterEach(async () => {
@@ -36,6 +36,25 @@ async function baseRepo(): Promise<string> {
 function agent(over: Partial<AgentDTO> & { id: string; worktree: string }): AgentDTO {
 	return { name: over.id, status: "idle", kind: "omp-operator", repo: "", approvalMode: "yolo", pending: [], lastActivity: 0, messageCount: 0, ...over };
 }
+
+function readinessOf(worktrees: FeatureWorktreeStatus[], over: Partial<Pick<FeatureDTO, "stage" | "blocked">> = {}) {
+	return featureReadiness({ stage: over.stage ?? "review", blocked: over.blocked ?? false, worktrees });
+}
+
+function worktree(readiness: FeatureWorktreeStatus["readiness"], proof?: FeatureWorktreeStatus["proof"]): FeatureWorktreeStatus {
+	return { branch: "feat", worktree: "/tmp/feat", changedFiles: 0, ahead: readiness === "ahead" ? 1 : 0, behind: readiness === "diverged" ? 1 : 0, readiness, proof };
+}
+
+test("featureReadiness distinguishes missing, failed, stale, fresh, and blocking states", () => {
+	expect(readinessOf([]).state).toBe("no-candidate");
+	expect(readinessOf([worktree("ahead", { state: "none", artifacts: 0 })])).toMatchObject({ ready: false, state: "needs-proof", blockers: ["needs-proof"] });
+	expect(readinessOf([worktree("ahead", { state: "failed", artifacts: 0 })])).toMatchObject({ ready: false, state: "proof-failed", blockers: ["proof-failed"] });
+	expect(readinessOf([worktree("ahead", { state: "stale", artifacts: 0 })])).toMatchObject({ ready: false, state: "proof-stale", blockers: ["proof-stale"] });
+	expect(readinessOf([worktree("ahead", { state: "fresh", artifacts: 0 })])).toMatchObject({ ready: true, state: "ready", blockers: [] });
+	expect(readinessOf([worktree("uncommitted", { state: "fresh", artifacts: 0 })])).toMatchObject({ ready: false, state: "needs-proof", blockers: ["uncommitted"] });
+	expect(readinessOf([worktree("diverged", { state: "fresh", artifacts: 0 })])).toMatchObject({ ready: false, state: "diverged", blockers: ["diverged"] });
+	expect(readinessOf([worktree("ahead", { state: "fresh", artifacts: 0 })], { blocked: true })).toMatchObject({ ready: false, state: "blocked-input", blockers: ["blocked-input"] });
+});
 
 test("featureLandStatus: no-branch when worktree === repo", async () => {
 	const repo = await baseRepo();

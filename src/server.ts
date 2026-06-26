@@ -869,7 +869,7 @@ export class SquadServer {
 				if (planeIssues) issues = planeIssues.filter((i) => i.identifier !== undefined && ids.includes(i.identifier));
 			}
 			const comments = await manager.listComments({ repo: f.repo, subject: f.id });
-			return Response.json({ feature: f, concerns, documents, issues, comments, agentIds: f.agentIds });
+			return Response.json({ feature: f, readiness: f.readiness, concerns, documents, issues, comments, agentIds: f.agentIds });
 		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 		const mann = url.pathname.match(/^\/api\/features\/([^/]+)\/annotations$/);

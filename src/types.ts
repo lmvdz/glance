@@ -284,6 +284,18 @@ export interface FeatureContextSummary {
 	downstream: string;
 }
 
+export type FeatureReadinessState = "no-candidate" | "needs-proof" | "proof-failed" | "proof-stale" | "blocked-input" | "diverged" | "ready" | "landed/done";
+
+export interface FeatureReadiness {
+	/** True only when landable branches are cleanly landable and freshly proved. */
+	ready: boolean;
+	state: FeatureReadinessState;
+	/** Short machine-readable blocker codes for filtering and disabled-button reasons. */
+	blockers: string[];
+	/** One operator-facing next step. */
+	nextAction: string;
+}
+
 /**
  * A Feature — a cross-cutting unit of work spanning a plan dir and/or a set of agents/worktrees.
  * Phase 1: fully DERIVED at read time (no persistence) from plan dirs + the roster + live git.
@@ -330,6 +342,8 @@ export interface FeatureDTO {
 	decisions?: FeatureDecision[];
 	/** Linked issues/features/docs. */
 	relationships?: FeatureRelationship[];
+	/** Deterministic promotion/land explanation for operators and API clients. */
+	readiness: FeatureReadiness;
 	/** Precomputed context bundle summary for task-detail display and agent prompts. */
 	contextBundle?: FeatureContextSummary;
 }

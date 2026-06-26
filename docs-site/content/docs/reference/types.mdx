@@ -138,6 +138,7 @@ A cross-cutting unit of work spanning a plan dir and/or a set of agents/worktree
 		divergent: { type: 'boolean', required: true, description: 'Any member worktree readiness is diverged.' },
 		blocked: { type: 'boolean', required: true, description: 'Any member agent is waiting on human input.' },
 		statusCounts: { type: 'Partial<Record<AgentStatus, number>>', required: true },
+		readiness: { type: 'FeatureReadiness', required: true, description: 'Computed promotion/land read model: ready, state, blockers, nextAction.' },
 		issueIdentifiers: { type: 'string[]', description: 'Plane issue identifiers referenced by the plan concerns.' },
 		persisted: { type: 'boolean', description: 'True for a real persisted Feature (vs a derived one).' },
 		stageOverride: { type: 'FeatureStage', description: 'Manual stage pin (persisted features only).' },
