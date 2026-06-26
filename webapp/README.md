@@ -31,6 +31,11 @@ workspaces.
 The task list trash action archives the backing feature; for plan-derived rows,
 the daemon adopts the plan first so stale `plans/<name>` directories stay hidden
 after refresh.
+The proof/provenance panel in task detail renders the structured `FeatureDTO`
+contract: canon source, candidate worktrees, proof aggregate, readiness blocker,
+next action, and plan revision candidates. It keeps raw command output hidden by
+default; proof freshness is distinct from run evidence such as receipts, traces,
+token/cost rollups, screenshots, and artifact counts.
 Theme switching is class-based: `ThemeContext` toggles the `dark` class on the
 document element, and Tailwind's `dark:` variants are bound to that class.
 Assistant chat restores the newest valid local session after reload and queues
@@ -41,7 +46,9 @@ operator selects a task, and stale selections are cleared instead of replaced.
 Operators annotate selected plan text inline from a popover, see highlighted
 ranges with stable per-author colors, watch annotations arrive live from other
 dashboard sessions, resolve them, or send them to an existing agent / new planner
-agent for markdown plan revisions.
+agent for markdown plan revisions. Planner output is registered as a low-trust
+plan revision candidate; the operator can accept, reject, or supersede it while
+preserving producer agent, plan path, summary, timestamps, and reviewer state.
 The Capabilities view renders both the public catalog and imported
 agentcn-style packs, install state, runtime bindings, and run/enable/disable
 actions from daemon APIs; it does not hardcode private recipe data in React.

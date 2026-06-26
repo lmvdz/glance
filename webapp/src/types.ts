@@ -41,6 +41,14 @@ export interface TaskComment {
 }
 
 
+export interface TaskProofProvenance {
+  source: { type: "plan" | "persisted" | "issue" | "agent" | "manual"; label: string; path?: string; issueIdentifiers?: string[] };
+  worktrees: import("./lib/dto").FeatureWorktreeStatusDTO[];
+  proof?: import("./lib/dto").FeatureProofAggregateDTO;
+  readiness?: import("./lib/dto").FeatureReadinessDTO;
+  candidates: import("./lib/dto").PlanRevisionCandidateDTO[];
+}
+
 export interface Task {
   id: string;
   sourceId?: string;
@@ -68,4 +76,5 @@ export interface Task {
   };
   tags: string[];
   comments?: TaskComment[];
+  proofProvenance?: TaskProofProvenance;
 }

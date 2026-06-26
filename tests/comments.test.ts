@@ -77,3 +77,20 @@ describe("comment store", () => {
     }
   });
 });
+
+
+test("plan revision candidates preserve provenance and state transitions", async () => {
+  const dir = await tmp();
+  try {
+    const { addPlanRevisionCandidate, listPlanRevisionCandidates, transitionPlanRevisionCandidate } = await import("../src/comments.ts");
+    const c = await addPlanRevisionCandidate(dir, { repo: "/r", featureId: "feat", planPath: "plans/x/01.md", producerAgentId: "a1", summary: "tighten plan", diffRef: "artifact://diff" });
+    expect(c.state).toBe("candidate");
+    await transitionPlanRevisionCandidate(dir, c.id, "rejected", "reviewer", "wrong scope");
+    const got = await listPlanRevisionCandidates(dir, { repo: "/r", featureId: "feat" });
+    expect(got[0]?.producerAgentId).toBe("a1");
+    expect(got[0]?.state).toBe("rejected");
+    expect(got[0]?.reason).toBe("wrong scope");
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

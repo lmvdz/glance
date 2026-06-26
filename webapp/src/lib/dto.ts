@@ -81,6 +81,15 @@ export interface FeatureContextBundleDTO {
   downstream: string;
 }
 
+export type LandReadinessDTO = "clean" | "uncommitted" | "ahead" | "diverged" | "merged" | "no-branch";
+export interface WorktreeProofSummaryDTO { state: "none" | "failed" | "stale" | "fresh"; ranAt?: number; artifacts: number }
+export interface FeatureWorktreeStatusDTO { agentId?: string; agentName?: string; branch?: string; worktree: string; changedFiles: number; ahead: number; behind: number; readiness: LandReadinessDTO; proof?: WorktreeProofSummaryDTO }
+export interface FeatureProofAggregateDTO { fresh: number; failed: number; stale: number; none: number; latestRanAt?: number; artifacts: number }
+export type FeatureReadinessStateDTO = "no-candidate" | "needs-proof" | "proof-failed" | "proof-stale" | "blocked-input" | "diverged" | "uncommitted" | "ready" | "landed" | "done";
+export interface FeatureReadinessDTO { ready: boolean; state: FeatureReadinessStateDTO; blockers: string[]; nextAction: string }
+export type PlanRevisionCandidateStateDTO = "candidate" | "accepted" | "rejected" | "superseded";
+export interface PlanRevisionCandidateDTO { id: string; featureId: string; repo: string; planPath: string; producerAgentId?: string; runId?: string; traceId?: string; summary: string; diffRef?: string; state: PlanRevisionCandidateStateDTO; reason?: string; reviewer?: string; createdAt: number; updatedAt: number }
+
 export interface PlanAnnotationTargetDTO {
   planPath: string;
   lineStart?: number;
@@ -113,11 +122,13 @@ export interface FeatureDTO {
   stage: FeatureStage;
   planDir?: string;
   agentIds: string[];
+  worktrees: FeatureWorktreeStatusDTO[];
   unlandedFiles: number;
   divergent: boolean;
   blocked: boolean;
   statusCounts: Partial<Record<AgentStatus, number>>;
   issueIdentifiers?: string[];
+  persisted?: boolean;
   workflowStage?: string;
   workflowProgress?: { done: number; total: number };
   workflowProof?: WorktreeProofSummaryDTO;
@@ -127,6 +138,9 @@ export interface FeatureDTO {
   relationships?: FeatureRelationshipDTO[];
   readiness: FeatureReadinessDTO;
   contextBundle?: FeatureContextBundleDTO;
+  proof?: FeatureProofAggregateDTO;
+  readiness?: FeatureReadinessDTO;
+  planRevisionCandidates?: PlanRevisionCandidateDTO[];
 }
 
 export type TodoStatus = "pending" | "in_progress" | "completed";

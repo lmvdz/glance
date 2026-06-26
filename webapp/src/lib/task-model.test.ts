@@ -48,3 +48,17 @@ test("taskRef returns null for a bare synthetic id with no plan dir — no UUID 
   expect(taskRef({ id: "a1b2c3d4-9999", planDir: undefined })).toBeNull();
   expect(taskRef({ id: "plan:repo:something", planDir: undefined })).toBeNull();
 });
+
+test("taskFromFeature preserves proof provenance and readiness", () => {
+  const task = taskFromFeature({ ...feature, worktrees: [{ agentId: "a1", agentName: "Agent", branch: "squad/a1", worktree: "/tmp/wt", changedFiles: 2, ahead: 1, behind: 0, readiness: "ahead", proof: { state: "fresh", ranAt: 123, artifacts: 1 } }], proof: { fresh: 1, failed: 0, stale: 0, none: 0, latestRanAt: 123, artifacts: 1 }, readiness: { ready: true, state: "ready", blockers: [], nextAction: "Land the verified candidate." }, planRevisionCandidates: [{ id: "c1", featureId: "feat-1", repo: feature.repo, planPath: "plans/web-dashboard/01.md", summary: "Tighten acceptance", state: "candidate", createdAt: 1, updatedAt: 1 }] }, [], {
+    id: feature.repo,
+    name: "omp-squad",
+    shortCode: "OS",
+    colorClass: "bg-blue-500",
+  });
+
+  expect(task.proofProvenance?.source.path).toBe("plans/web-dashboard");
+  expect(task.proofProvenance?.worktrees[0]?.proof?.state).toBe("fresh");
+  expect(task.proofProvenance?.readiness?.state).toBe("ready");
+  expect(task.proofProvenance?.candidates[0]?.summary).toBe("Tighten acceptance");
+});

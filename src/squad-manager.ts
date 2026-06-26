@@ -66,6 +66,8 @@ import type {
 	FeatureCriterion,
 	FeatureDecision,
 	FeatureRelationship,
+	PlanRevisionCandidate,
+	PlanRevisionCandidateState,
 	AgentStatus,
 	AutomationEvent,
 	CommandInfo,
@@ -100,7 +102,7 @@ import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
-import { appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, nextCommentId } from "./comments.ts";
+import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
@@ -1330,6 +1332,7 @@ export class SquadManager extends EventEmitter {
 		const repos = repo !== undefined ? [repo] : [...new Set([...list.map((a) => a.repo), ...persisted.map((f) => f.repo), ...planeRepos()])];
 		const out: FeatureDTO[] = [];
 		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r), persisted)));
+		for (const feature of out) feature.planRevisionCandidates = await this.listPlanRevisionCandidates({ repo: feature.repo, featureId: feature.id });
 		return out;
 	}
 
@@ -2932,6 +2935,25 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Unresolved comments on a subject — consumed by the Slice-2 RPI feed-forward. */
+	async addPlanRevisionCandidate(input: Omit<PlanRevisionCandidate, "id" | "state" | "createdAt" | "updatedAt"> & { id?: string; state?: PlanRevisionCandidateState; createdAt?: number; updatedAt?: number }, actor: Actor | string = LOCAL_ACTOR): Promise<PlanRevisionCandidate> {
+		const candidate = await addPlanRevisionCandidate(this.stateDir, input);
+		this.emitFeaturesChanged();
+		void this.recordAudit(actor, "plan-candidate-add", candidate.featureId, "ok", candidate.summary);
+		return candidate;
+	}
+
+	async listPlanRevisionCandidates(q: { repo?: string; featureId?: string; state?: PlanRevisionCandidateState } = {}): Promise<PlanRevisionCandidate[]> {
+		return readPlanRevisionCandidates(this.stateDir, q);
+	}
+
+	async transitionPlanRevisionCandidate(id: string, state: PlanRevisionCandidateState, reviewer: Actor | string = LOCAL_ACTOR, reason?: string): Promise<PlanRevisionCandidate | undefined> {
+		const name = typeof reviewer === "string" ? reviewer : reviewer.id;
+		const candidate = await transitionPlanRevisionCandidate(this.stateDir, id, state, name, reason);
+		if (candidate) this.emitFeaturesChanged();
+		void this.recordAudit(reviewer, `plan-candidate-${state}`, id, candidate ? "ok" : "error", reason);
+		return candidate;
+	}
+
 	async getUnresolvedComments(repo: string, subject: string): Promise<ArtifactComment[]> {
 		return readComments(this.stateDir, { repo, subject, unresolved: true });
 	}

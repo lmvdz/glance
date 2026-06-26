@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
-import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, SquadEvent } from "./types.ts";
+import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanRevisionCandidateState, PlanAnnotationTarget, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
@@ -911,9 +911,33 @@ export class SquadServer {
 				if (planeIssues) issues = planeIssues.filter((i) => i.identifier !== undefined && ids.includes(i.identifier));
 			}
 			const comments = await manager.listComments({ repo: f.repo, subject: f.id });
-			return Response.json({ feature: f, readiness: f.readiness, concerns, documents, issues, comments, agentIds: f.agentIds });
+			const candidates = await manager.listPlanRevisionCandidates({ repo: f.repo, featureId: f.id });
+			return Response.json({ feature: f, readiness: f.readiness, concerns, documents, issues, comments, candidates, agentIds: f.agentIds });
 		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
+		const mcand = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates$/);
+		if (mcand && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			return Response.json(await manager.listPlanRevisionCandidates({ repo, featureId: decodeURIComponent(mcand[1]) }));
+		}
+		if (mcand && req.method === "POST") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(mcand[1]);
+			const body: unknown = await req.json().catch(() => null);
+			const rec = body && typeof body === "object" ? body as Record<string, unknown> : {};
+			const planPath = typeof rec.planPath === "string" && rec.planPath.trim() ? rec.planPath.trim() : "";
+			const summary = typeof rec.summary === "string" && rec.summary.trim() ? rec.summary.trim() : "";
+			if (!planPath || !summary) return new Response("planPath and summary required", { status: 400 });
+			return Response.json(await manager.addPlanRevisionCandidate({ repo, featureId, planPath, summary, producerAgentId: typeof rec.producerAgentId === "string" ? rec.producerAgentId : undefined, runId: typeof rec.runId === "string" ? rec.runId : undefined, traceId: typeof rec.traceId === "string" ? rec.traceId : undefined, diffRef: typeof rec.diffRef === "string" ? rec.diffRef : undefined }, actor));
+		}
+		const mcandState = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates\/([^/]+)\/(accept|reject|supersede)$/);
+		if (mcandState && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const state = ({ accept: "accepted", reject: "rejected", supersede: "superseded" } as Record<string, PlanRevisionCandidateState>)[mcandState[3]];
+			const candidate = await manager.transitionPlanRevisionCandidate(decodeURIComponent(mcandState[2]), state, actor, reason);
+			return candidate ? Response.json(candidate) : new Response("candidate not found", { status: 404 });
+		}
 		const mann = url.pathname.match(/^\/api\/features\/([^/]+)\/annotations$/);
 		if (mann && req.method === "GET") {
 			const repo = url.searchParams.get("repo") ?? process.cwd();
@@ -956,6 +980,7 @@ export class SquadServer {
 				return Response.json({ agentId, mode });
 			}
 			const dto = await manager.create({ repo, name: "plan-reviser", task: message, featureId, approvalMode: "write", autoRoute: false, track: true, owns: feature.planDir ? [feature.planDir] : undefined }, actor);
+			await manager.addPlanRevisionCandidate({ repo, featureId, planPath: comment.annotation?.planPath ?? feature.planDir ?? "plans", producerAgentId: dto.id, summary: comment.body, diffRef: comment.annotation?.planPath }, actor);
 			return Response.json({ agentId: dto.id, mode });
 		}
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });

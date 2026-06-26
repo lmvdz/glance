@@ -16,7 +16,7 @@ import * as path from "node:path";
 import { hardenedGitSync } from "./git-harden.ts";
 import { worktreeDiff } from "./explore.ts";
 import { isFresh, proofFingerprint, proofFor } from "./proof.ts";
-import type { AgentDTO, AgentStatus, FeatureContextSummary, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureReadiness, FeatureRelationship, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
+import type { AgentDTO, AgentStatus, FeatureContextSummary, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureProofAggregate, FeatureReadiness, FeatureRelationship, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
 	try {
@@ -666,28 +666,6 @@ function deriveStage(opts: { agents: AgentDTO[]; worktrees: FeatureWorktreeStatu
 	return "planned";
 }
 
-export function featureReadiness(feature: Pick<FeatureDTO, "stage" | "worktrees" | "blocked">): FeatureReadiness {
-	const landable = feature.worktrees.filter((w) => w.readiness === "ahead");
-	const hasCandidate = feature.worktrees.some((w) => w.readiness === "ahead" || w.readiness === "uncommitted" || w.readiness === "diverged");
-	const blockers: string[] = [];
-	if (feature.worktrees.some((w) => w.readiness === "diverged")) blockers.push("diverged");
-	if (feature.worktrees.some((w) => w.readiness === "uncommitted")) blockers.push("uncommitted");
-	if (feature.blocked) blockers.push("blocked-input");
-	if (landable.some((w) => w.proof?.state === "failed")) blockers.push("proof-failed");
-	if (landable.some((w) => w.proof?.state === "stale")) blockers.push("proof-stale");
-	if (landable.some((w) => !w.proof || w.proof.state === "none")) blockers.push("needs-proof");
-
-	if (feature.stage === "done" || feature.stage === "landed") return { ready: false, state: "landed/done", blockers, nextAction: "No landing action needed." };
-	if (!hasCandidate) return { ready: false, state: "no-candidate", blockers, nextAction: "Start or attach a candidate worktree." };
-	if (blockers.includes("diverged")) return { ready: false, state: "diverged", blockers, nextAction: "Resolve branch divergence before landing." };
-	if (blockers.includes("blocked-input")) return { ready: false, state: "blocked-input", blockers, nextAction: "Answer the blocked agent before promoting." };
-	if (blockers.includes("uncommitted")) return { ready: false, state: "needs-proof", blockers, nextAction: "Commit or discard uncommitted work, then verify." };
-	if (blockers.includes("proof-failed")) return { ready: false, state: "proof-failed", blockers, nextAction: "Fix the failure and re-run Verify." };
-	if (blockers.includes("proof-stale")) return { ready: false, state: "proof-stale", blockers, nextAction: "Re-run Verify against the current HEAD." };
-	if (blockers.includes("needs-proof")) return { ready: false, state: "needs-proof", blockers, nextAction: "Run Verify before landing." };
-	return { ready: true, state: "ready", blockers, nextAction: "Land the verified candidate branch." };
-}
-
 /** Map a research-plan-implement workflow node label to the coarse board stage (the granular node label rides FeatureDTO.workflowStage). */
 const WF_STAGE: Record<string, FeatureStage> = {
 	Research: "planned",
@@ -773,6 +751,33 @@ function summarizeItems(items: string[], empty: string): string {
 	return uniq.length > 2 ? `${uniq.slice(0, 2).join("; ")}; +${uniq.length - 2} more` : (uniq.join("; ") || empty);
 }
 
+export function featureProofAggregate(worktrees: FeatureWorktreeStatus[]): FeatureProofAggregate {
+	const out: FeatureProofAggregate = { fresh: 0, failed: 0, stale: 0, none: 0, artifacts: 0 };
+	for (const wt of worktrees) {
+		const proof = wt.proof;
+		out[proof?.state ?? "none"] += 1;
+		out.artifacts += proof?.artifacts ?? 0;
+		if (proof?.ranAt && (!out.latestRanAt || proof.ranAt > out.latestRanAt)) out.latestRanAt = proof.ranAt;
+	}
+	return out;
+}
+
+export function featureReadiness(feature: Pick<FeatureDTO, "stage" | "blocked" | "worktrees">): FeatureReadiness {
+	if (feature.stage === "done") return { ready: false, state: "done", blockers: [], nextAction: "Feature is already done." };
+	if (feature.stage === "landed") return { ready: false, state: "landed", blockers: [], nextAction: "Review landed work and mark done." };
+	if (!feature.worktrees.length) return { ready: false, state: "no-candidate", blockers: ["no-candidate"], nextAction: "Start or attach candidate work." };
+	if (feature.blocked) return { ready: false, state: "blocked-input", blockers: ["blocked-input"], nextAction: "Answer the blocked agent request." };
+	const bad = feature.worktrees.find((wt) => wt.readiness === "diverged" || wt.readiness === "uncommitted" || wt.readiness === "no-branch");
+	if (bad?.readiness === "diverged") return { ready: false, state: "diverged", blockers: ["diverged"], nextAction: "Resolve branch divergence before landing." };
+	if (bad?.readiness === "uncommitted") return { ready: false, state: "uncommitted", blockers: ["uncommitted"], nextAction: "Commit or discard worktree changes." };
+	if (bad?.readiness === "no-branch") return { ready: false, state: "diverged", blockers: ["no-branch"], nextAction: "Put candidate work on a branch." };
+	const proof = featureProofAggregate(feature.worktrees.filter((wt) => wt.readiness === "ahead" || wt.readiness === "clean" || wt.readiness === "merged"));
+	if (proof.failed) return { ready: false, state: "proof-failed", blockers: ["proof-failed"], nextAction: "Fix the failing proof command." };
+	if (proof.stale) return { ready: false, state: "proof-stale", blockers: ["proof-stale"], nextAction: "Re-run proof against current HEAD." };
+	if (proof.none) return { ready: false, state: "needs-proof", blockers: ["needs-proof"], nextAction: "Run feature verification proof." };
+	return { ready: true, state: "ready", blockers: [], nextAction: "Land the verified candidate." };
+}
+
 /** Build the feature list for one repo: persisted features (explicit membership) + unadopted plan dirs + unassigned agents. */
 export async function buildFeatures(repo: string, agents: AgentDTO[], persisted: PersistedFeature[] = []): Promise<FeatureDTO[]> {
 	const features: FeatureDTO[] = [];
@@ -841,6 +846,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			relationships,
 			readiness,
 			contextBundle: contextSummary({ planDir: pf.origin?.planDir, concerns, issueIds, agents: members, workflowProgress, workflowStage: wfActive, blocked, decisions, override: pf.contextBundle }),
+			proof: featureProofAggregate(worktrees),
 		});
 	}
 
@@ -871,6 +877,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			relationships: issueRelationships(pd.issueIds),
 			readiness,
 			contextBundle: contextSummary({ planDir: pd.dir, concerns, issueIds: pd.issueIds, agents: [], blocked: false, decisions }),
+			proof: featureProofAggregate([]),
 		});
 	}
 
@@ -902,9 +909,11 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			relationships: issueRelationships(issueIds),
 			readiness,
 			contextBundle: contextSummary({ issueIds, concerns: [], agents: [a], blocked, decisions }),
+			proof: featureProofAggregate(worktrees),
 		});
 	}
 
+	for (const feature of features) feature.readiness = featureReadiness(feature);
 	return features;
 }
 

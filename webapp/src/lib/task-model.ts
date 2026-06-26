@@ -53,6 +53,13 @@ function stageLabel(stage: FeatureStage): string {
   return stage.replace(/-/g, " ").toUpperCase();
 }
 
+function sourceForFeature(feature: FeatureDTO) {
+  if (feature.planDir) return { type: "plan" as const, label: feature.planDir, path: feature.planDir, issueIdentifiers: feature.issueIdentifiers };
+  if (feature.issueIdentifiers?.length) return { type: "issue" as const, label: feature.issueIdentifiers.join(", "), issueIdentifiers: feature.issueIdentifiers };
+  if (feature.agentIds.length) return { type: "agent" as const, label: feature.agentIds.join(", ") };
+  return { type: feature.persisted ? "persisted" as const : "manual" as const, label: feature.persisted ? "persisted feature" : "manual feature" };
+}
+
 function fallbackDescription(feature: FeatureDTO, agents: AgentDTO[]): string {
   const lines = [`Repo: ${feature.repo}`];
   if (feature.planDir) lines.push(`Plan: ${feature.planDir}`);
@@ -97,7 +104,8 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
       createdAt: feature.createdAt,
       updatedAt: feature.updatedAt,
     },
-    tags: [feature.stage, repoName(feature.repo), ...(feature.blocked ? ["blocked"] : []), ...(feature.divergent ? ["diverged"] : []), ...activeAgents.map((agent) => agent.status)],
+    tags: [feature.stage, repoName(feature.repo), ...(feature.blocked ? ["blocked"] : []), ...(feature.divergent ? ["diverged"] : []), ...(feature.readiness?.blockers ?? []), ...activeAgents.map((agent) => agent.status)],
+    proofProvenance: { source: sourceForFeature(feature), worktrees: feature.worktrees ?? [], proof: feature.proof, readiness: feature.readiness, candidates: feature.planRevisionCandidates ?? [] },
   };
 }
 

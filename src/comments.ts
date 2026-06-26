@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { PlanRevisionCandidate, PlanRevisionCandidateState } from "./types.ts";
 
 export interface PlanAnnotationTarget {
   planPath: string;
@@ -41,8 +42,16 @@ type CommentEvent =
   | { type: "add"; id: string; repo: string; subject: string; body: string; author: string; urgent?: boolean; at: number; kind?: "comment" | "plan-annotation"; annotation?: PlanAnnotationTarget }
   | { type: "resolve"; id: string; at: number };
 
+type CandidateEvent =
+  | { type: "add"; candidate: PlanRevisionCandidate }
+  | { type: "state"; id: string; state: PlanRevisionCandidateState; at: number; reviewer: string; reason?: string };
+
 export function commentsPath(baseDir: string): string {
   return path.join(baseDir, "comments.jsonl");
+}
+
+export function planRevisionCandidatesPath(baseDir: string): string {
+  return path.join(baseDir, "plan-revision-candidates.jsonl");
 }
 
 // Monotonic id, strictly increasing per process even within one ms — the stable sort + resolve key.
@@ -99,4 +108,42 @@ export async function listComments(baseDir: string, q: CommentQuery): Promise<Ar
     out.push(c);
   }
   return out;
+}
+
+
+async function appendCandidateEvent(baseDir: string, ev: CandidateEvent): Promise<void> {
+  await fs.mkdir(baseDir, { recursive: true });
+  await fs.appendFile(planRevisionCandidatesPath(baseDir), JSON.stringify(ev) + "\n", "utf8");
+}
+
+export interface CandidateQuery { repo?: string; featureId?: string; state?: PlanRevisionCandidateState }
+
+export async function addPlanRevisionCandidate(baseDir: string, input: Omit<PlanRevisionCandidate, "id" | "state" | "createdAt" | "updatedAt"> & { id?: string; state?: PlanRevisionCandidateState; createdAt?: number; updatedAt?: number }): Promise<PlanRevisionCandidate> {
+  const now = Date.now();
+  const candidate: PlanRevisionCandidate = { ...input, id: input.id ?? nextCommentId(now), state: input.state ?? "candidate", createdAt: input.createdAt ?? now, updatedAt: input.updatedAt ?? now };
+  await appendCandidateEvent(baseDir, { type: "add", candidate });
+  return candidate;
+}
+
+export async function transitionPlanRevisionCandidate(baseDir: string, id: string, state: PlanRevisionCandidateState, reviewer: string, reason?: string): Promise<PlanRevisionCandidate | undefined> {
+  const at = Date.now();
+  await appendCandidateEvent(baseDir, { type: "state", id, state, at, reviewer, reason });
+  return (await listPlanRevisionCandidates(baseDir, {})).find((candidate) => candidate.id === id);
+}
+
+export async function listPlanRevisionCandidates(baseDir: string, q: CandidateQuery = {}): Promise<PlanRevisionCandidate[]> {
+  let text = "";
+  try { text = await fs.readFile(planRevisionCandidatesPath(baseDir), "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+  const map = new Map<string, PlanRevisionCandidate>();
+  for (const line of text.split(/\n/)) {
+    if (!line.trim()) continue;
+    let ev: CandidateEvent;
+    try { ev = JSON.parse(line) as CandidateEvent; } catch { continue; }
+    if (ev.type === "add") map.set(ev.candidate.id, ev.candidate);
+    if (ev.type === "state") {
+      const cur = map.get(ev.id);
+      if (cur) map.set(ev.id, { ...cur, state: ev.state, updatedAt: ev.at, reviewer: ev.reviewer, reason: ev.reason });
+    }
+  }
+  return [...map.values()].filter((c) => (!q.repo || c.repo === q.repo) && (!q.featureId || c.featureId === q.featureId) && (!q.state || c.state === q.state));
 }

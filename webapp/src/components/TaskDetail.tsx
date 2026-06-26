@@ -4,6 +4,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MarkdownComponents, PlanBlockContext } from './PlanBlocks';
 import { TaskProperties } from './TaskProperties';
+import { ProofProvenancePanel } from './ProofProvenancePanel';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
@@ -1240,6 +1241,8 @@ export const TaskDetail = () => {
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan created</div><div className="mt-1">{formatWhen(task.properties.createdAt ?? pipeline?.feature?.createdAt)}</div></div>
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan updated</div><div className="mt-1">{formatWhen(task.properties.updatedAt ?? pipeline?.feature?.updatedAt)}</div></div>
               </div>
+
+              <div className="mb-7"><ProofProvenancePanel task={task} /></div>
 
               {!overviewDoc && (
                 <div className="mb-10">

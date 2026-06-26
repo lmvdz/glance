@@ -285,7 +285,16 @@ export interface FeatureContextSummary {
 	downstream: string;
 }
 
-export type FeatureReadinessState = "no-candidate" | "needs-proof" | "proof-failed" | "proof-stale" | "blocked-input" | "diverged" | "ready" | "landed/done";
+export interface FeatureProofAggregate {
+	fresh: number;
+	failed: number;
+	stale: number;
+	none: number;
+	latestRanAt?: number;
+	artifacts: number;
+}
+
+export type FeatureReadinessState = "no-candidate" | "needs-proof" | "proof-failed" | "proof-stale" | "blocked-input" | "diverged" | "uncommitted" | "ready" | "landed" | "done";
 
 export interface FeatureReadiness {
 	/** True only when landable branches are cleanly landable and freshly proved. */
@@ -297,6 +306,24 @@ export interface FeatureReadiness {
 	nextAction: string;
 }
 
+export type PlanRevisionCandidateState = "candidate" | "accepted" | "rejected" | "superseded";
+
+export interface PlanRevisionCandidate {
+	id: string;
+	featureId: string;
+	repo: string;
+	planPath: string;
+	producerAgentId?: string;
+	runId?: string;
+	traceId?: string;
+	summary: string;
+	diffRef?: string;
+	state: PlanRevisionCandidateState;
+	reason?: string;
+	reviewer?: string;
+	createdAt: number;
+	updatedAt: number;
+}
 /**
  * A Feature — a cross-cutting unit of work spanning a plan dir and/or a set of agents/worktrees.
  * Phase 1: fully DERIVED at read time (no persistence) from plan dirs + the roster + live git.
@@ -349,6 +376,8 @@ export interface FeatureDTO {
 	readiness: FeatureReadiness;
 	/** Precomputed context bundle summary for task-detail display and agent prompts. */
 	contextBundle?: FeatureContextSummary;
+	proof?: FeatureProofAggregate;
+	planRevisionCandidates?: PlanRevisionCandidate[];
 }
 
 export interface PlanAnnotationTarget {
