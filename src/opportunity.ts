@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import type { AutomationRecorder } from "./automation-log.ts";
 import type { FabricHotAreaFact, FabricScoutFact } from "./fabric.ts";
 import { jaccard, titleTokens } from "./scout.ts";
 import type { IssueRef } from "./types.ts";
@@ -13,6 +14,8 @@ export interface OpportunityDeps {
 	seenFile?: string;
 	now?: () => number;
 	log?: (msg: string) => void;
+	/** Observability sink — one report per tick (a no-cluster tick is a heartbeat proving the loop is alive). */
+	record?: AutomationRecorder;
 }
 
 interface SeenEntry {
@@ -133,11 +136,15 @@ export class Opportunity {
 		this.running = true;
 		const log = this.deps.log ?? (() => {});
 		const clock = this.deps.now ?? Date.now;
+		const t0 = clock();
+		let found = 0;
+		let filed = 0;
 		try {
 			const open = (await this.deps.listIssues().catch(() => null)) ?? [];
 			let openOpportunity = open.filter((i) => i.name.includes(OPPORTUNITY_TAG)).length;
 			const max = opportunityMax();
 			const clusters = opportunityClusters(await this.deps.scoutFacts(), await this.deps.hotAreas());
+			found = clusters.length;
 			let changed = false;
 			for (const cluster of clusters) {
 				if (this.seen[cluster.fingerprint]) continue;
@@ -152,6 +159,7 @@ export class Opportunity {
 					continue;
 				}
 				openOpportunity++;
+				filed++;
 				changed = true;
 				this.seen[cluster.fingerprint] = { title: cluster.title, issueId: ref.id, filedAt: clock() };
 				log(`filed opportunity ${ref.identifier ?? ref.id}: ${cluster.title}`);
@@ -159,6 +167,8 @@ export class Opportunity {
 			if (changed) this.saveSeen();
 		} finally {
 			this.running = false;
+			// One report per tick — clusters surfaced/filed are the work; a no-cluster tick is a heartbeat (ring-only).
+			this.deps.record?.({ durationMs: (this.deps.now ?? Date.now)() - t0, found, filed, deduped: Math.max(0, found - filed) });
 		}
 	}
 

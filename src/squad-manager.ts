@@ -63,6 +63,7 @@ import type {
 	FeatureDecision,
 	FeatureRelationship,
 	AgentStatus,
+	AutomationEvent,
 	CommandInfo,
 	ClientCommand,
 	CreateAgentOptions,
@@ -94,6 +95,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
+import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, nextCommentId } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
@@ -383,6 +385,10 @@ export class SquadManager extends EventEmitter {
 	private readonly opportunities: Opportunity[] = [];
 	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning. */
 	private readonly scoutCursor = new Map<string, number>();
+	/** Observability spine for the background loops (scout/observer/opportunity/dispatch) — the surface
+	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
+	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
+	private readonly automation: AutomationLog;
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -404,6 +410,7 @@ export class SquadManager extends EventEmitter {
 		this.operator = opts.operator ?? LOCAL_ACTOR;
 		this.bus = opts.bus ?? new NullFederationBus();
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
+		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -455,6 +462,7 @@ export class SquadManager extends EventEmitter {
 				liveCount: () => occupyingAgents(this.list()), // only starting/working/input occupy a slot — idle/done agents must not pin the cap
 				maxWip: this.scheduler.cap(),
 				paused: () => this.rateLimit.paused(),
+				record: this.automation.for("dispatch"),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
@@ -488,6 +496,7 @@ export class SquadManager extends EventEmitter {
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `observer-seen.${slug(repo)}.json`,
 					log: (m) => this.log("info", `observer[${repo}]: ${m}`),
+					record: this.automation.for("observer", repo),
 				});
 				observer.start();
 				this.observers.push(observer);
@@ -513,6 +522,7 @@ export class SquadManager extends EventEmitter {
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `scout-seen.${slug(repo)}.json`,
 					log: (m) => this.log("info", `scout[${repo}]: ${m}`),
+					record: this.automation.for("scout", repo),
 				});
 				scout.start();
 				this.scouts.set(repo, scout);
@@ -531,6 +541,7 @@ export class SquadManager extends EventEmitter {
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `opportunity-seen.${slug(repo)}.json`,
 					log: (m) => this.log("info", `opportunity[${repo}]: ${m}`),
+					record: this.automation.for("opportunity", repo),
 				});
 				opportunity.start();
 				this.opportunities.push(opportunity);
@@ -2329,6 +2340,15 @@ export class SquadManager extends EventEmitter {
 	/** Fleet-action audit log, newest first (server reads this; keeps stateDir private). */
 	async auditLog(query: AuditQuery = {}): Promise<AuditEntry[]> {
 		return readAudit(this.stateDir, query);
+	}
+
+	/**
+	 * Background-loop activity (scout/observer/opportunity/dispatch): the recent event feed plus per-loop
+	 * rollups over a trailing window. The observability surface the audit log never carried — it answers
+	 * "what is running in the background, how often, and what is it costing" (server reads this for /api/automation).
+	 */
+	automationActivity(query: AutomationQuery & { windowMs?: number } = {}): { events: AutomationEvent[]; rollup: ReturnType<AutomationLog["rollup"]> } {
+		return { events: this.automation.recent(query), rollup: this.automation.rollup(query.windowMs) };
 	}
 
 	private async commentPlaneTargets(repo: string, subject: string): Promise<string[]> {

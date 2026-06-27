@@ -9,6 +9,7 @@
  * the selection + concurrency logic is tested without Plane, tokens, or a clock.
  */
 
+import type { AutomationRecorder } from "./automation-log.ts";
 import type { IssueRef } from "./types.ts";
 
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
@@ -41,6 +42,8 @@ export interface DispatchDeps {
 	/** True while the model subscription is rate-limited (5h/weekly cap). When set, a tick spawns nothing —
 	 *  spawning here would only launch agents that immediately stall on the same cap. Self-clears on cooldown. */
 	paused?: () => boolean;
+	/** Observability sink — one report per tick (a no-op poll is a heartbeat proving the loop is alive). */
+	record?: AutomationRecorder;
 }
 
 export class Dispatcher {
@@ -65,6 +68,7 @@ export class Dispatcher {
 	/** One poll: spawn routed agents for new open issues, bounded by `maxActive`. Returns the number spawned. */
 	async tick(): Promise<number> {
 		if (this.running) return 0; // never overlap polls
+		const t0 = Date.now();
 		// Model subscription rate-limited (5h/weekly cap): spawning now only launches agents that immediately
 		// stall on the same cap. Skip the whole poll until the cooldown lifts; issues stay open for a later tick.
 		if (this.deps.paused?.()) {
@@ -72,6 +76,7 @@ export class Dispatcher {
 				this.pauseLogged = true;
 				this.deps.log("paused — model subscription rate-limited (5h/weekly cap); not spawning until it clears");
 			}
+			this.deps.record?.({ durationMs: Date.now() - t0, level: "warn", detail: "paused — model subscription rate-limited" });
 			return 0;
 		}
 		if (this.pauseLogged) {
@@ -80,6 +85,7 @@ export class Dispatcher {
 		}
 		this.running = true;
 		let spawned = 0;
+		let considered = 0;
 		try {
 			const claimed = this.deps.claimed();
 			let budget = this.maxActive - this.deps.activeCount();
@@ -93,6 +99,7 @@ export class Dispatcher {
 				const openIds = new Set(issues.map((i) => i.id));
 				const ordered = [...issues].sort(dispatchOrder);
 				for (const issue of ordered) {
+					considered++;
 					if (budget <= 0) break;
 					if (this.atGlobalCap()) break; // recheck per spawn: each spawned agent counts toward the global cap
 					if (claimed.has(issue.id) || this.dispatched.has(issue.id)) continue;
@@ -130,6 +137,7 @@ export class Dispatcher {
 		} finally {
 			this.running = false;
 		}
+		this.deps.record?.({ durationMs: Date.now() - t0, found: considered, spawned });
 		return spawned;
 	}
 
