@@ -15,13 +15,18 @@ import {
 	type Collision,
 	detectCollisions,
 	federationView,
+	LocalFederationBus,
 	mergeRosters,
 	PEER_PRESENCE_TTL_MS,
 	PeerRoster,
+	type RemoteLeases,
 	remoteCommandActor,
 	stampRepoIds,
 	TailnetFederationBus,
 } from "../src/federation.ts";
+import { runCoordinator } from "../src/coordinator.ts";
+import type { CoordinatorHandle } from "../src/coordinator.ts";
+import type { LeaseEntry } from "../src/leases.ts";
 import { effectiveRole } from "../src/auth.ts";
 import type { Actor, AgentDTO, Availability, OperatorPresence } from "../src/types.ts";
 
@@ -401,4 +406,161 @@ test("the bus receive-path resolves a forged-admin command frame to a viewer act
 	expect(seen[0]?.origin).toBe("remote");
 	expect(seen[0]?.role).toBeUndefined();
 	expect(effectiveRole(seen[0] as Actor)).toBe("viewer");
+});
+
+// ── LocalFederationBus: local-only loopback (the single-host default) ──────────
+
+test("LocalFederationBus with no coordinator loops publishes back to local subscribers and never throws", async () => {
+	const bus = new LocalFederationBus({ operator: { id: "me", origin: "local" } });
+	expect(bus.federated).toBe(false);
+	const gotPresence: OperatorPresence[] = [];
+	const gotLeases: RemoteLeases[] = [];
+	bus.onPresence((p) => gotPresence.push(p));
+	bus.onLeases((f) => gotLeases.push(f));
+
+	// start() must resolve immediately with no coordinator and never block.
+	await bus.start();
+
+	const self = presence({ operator: { id: "me", origin: "local" }, updatedAt: 1, agents: [agent({ id: "a1", repo: "/some/path", branch: "main" })] });
+	expect(() => bus.publishPresence(self)).not.toThrow();
+	const lease: LeaseEntry = { id: "l1", repo: "/some/path", file: "src/a.ts", operator: "me", session: "me:1", host: "box", since: 0, heartbeat: 0 };
+	expect(() => bus.publishLeases("github.com/acme/app", [lease])).not.toThrow();
+
+	// Loopback delivered our own publishes synchronously to local subscribers.
+	expect(gotPresence).toHaveLength(1);
+	// repoId was stamped on the way out (the wire-carried cross-host identity).
+	expect(gotPresence[0]?.agents[0]?.repoId).toBe("name:path");
+	expect(gotLeases).toHaveLength(1);
+	expect(gotLeases[0]?.operator.id).toBe("me");
+	expect(gotLeases[0]?.leases[0]?.file).toBe("src/a.ts");
+
+	// Our own presence is NOT recorded as a peer (own-id echo is dropped by the roster).
+	expect(bus.roster.live()).toEqual([]);
+	await bus.stop();
+});
+
+// ── LocalFederationBus: two buses gossiping in-process via a real coordinator ──
+
+let coord: CoordinatorHandle | undefined;
+const liveBuses: LocalFederationBus[] = [];
+
+afterEach(async () => {
+	for (const b of liveBuses.splice(0)) await b.stop().catch(() => {});
+	coord?.stop();
+	coord = undefined;
+});
+
+/** Two LocalFederationBus instances joined to a throwaway in-process coordinator. */
+async function twoBuses(opA: Actor, opB: Actor): Promise<[LocalFederationBus, LocalFederationBus]> {
+	coord = runCoordinator({ port: 0 });
+	const a = new LocalFederationBus({ operator: opA, coordinatorUrl: coord.url });
+	const b = new LocalFederationBus({ operator: opB, coordinatorUrl: coord.url });
+	liveBuses.push(a, b);
+	expect(a.federated).toBe(true);
+	expect(b.federated).toBe(true);
+	await Promise.all([a.start(), b.start()]);
+	// The coordinator only fans out to clients connected at receive time; wait until BOTH sockets are up.
+	await waitFor(() => coord?.clients() === 2);
+	return [a, b];
+}
+
+/** Poll a synchronous predicate to a deadline (drives readiness off real events, not fixed sleeps). */
+async function waitFor(pred: () => boolean, timeoutMs = 5000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!pred()) {
+		if (Date.now() > deadline) throw new Error("waitFor: condition not met before timeout");
+		await new Promise((r) => setTimeout(r, 10));
+	}
+}
+
+test("two LocalFederationBus instances gossip presence + leases through the coordinator", async () => {
+	const [a, b] = await twoBuses({ id: "alice", origin: "local" }, { id: "bob", origin: "local" });
+
+	const gotPresence = Promise.withResolvers<OperatorPresence>();
+	const gotLeases = Promise.withResolvers<RemoteLeases>();
+	// B observes A. (B's onPresence also fires for B's OWN loopback publishes, so filter to alice.)
+	b.onPresence((p) => {
+		if (p.operator.id === "alice") gotPresence.resolve(p);
+	});
+	b.onLeases((f) => {
+		if (f.operator.id === "alice") gotLeases.resolve(f);
+	});
+
+	const alicePresence = presence({
+		operator: { id: "alice", origin: "local" },
+		// A live wall-clock timestamp so the frame survives the PeerRoster TTL (90s) on the receive side.
+		updatedAt: Date.now(),
+		agents: [agent({ id: "a1", name: "auth", repo: "/home/alice/app", repoId: "github.com/acme/app", branch: "main" })],
+	});
+	a.publishPresence(alicePresence);
+
+	const aliceLease: LeaseEntry = { id: "al", repo: "/home/alice/app", file: "src/server.ts", operator: "alice", session: "alice:1", host: "alice-box", since: 1, heartbeat: 1 };
+	a.publishLeases("github.com/acme/app", [aliceLease]);
+
+	const seenPresence = await gotPresence.promise;
+	expect(seenPresence.operator.id).toBe("alice");
+	// The raw onPresence frame carries what the peer published; the PeerRoster is what remaps
+	// origin → "remote" (asserted below). repoId was stamped on the way out.
+	expect(seenPresence.agents[0]?.repoId).toBe("github.com/acme/app");
+
+	const seenLeases = await gotLeases.promise;
+	expect(seenLeases.repoId).toBe("github.com/acme/app");
+	expect(seenLeases.leases[0]?.file).toBe("src/server.ts");
+	expect(seenLeases.leases.every((l) => l.operator === "alice")).toBe(true);
+
+	// B's PeerRoster now holds alice (and not bob/itself), remapped to a remote-origin peer.
+	await waitFor(() => b.roster.live().some((p) => p.operator.id === "alice"));
+	const peers = b.roster.live();
+	expect(peers.map((p) => p.operator.id)).toEqual(["alice"]);
+	expect(peers[0]?.operator.origin).toBe("remote");
+});
+
+test("identity-keyed collision detection fires across two buses for the same repo at different paths", async () => {
+	const [a, b] = await twoBuses({ id: "alice", origin: "local" }, { id: "bob", origin: "local" });
+
+	const aliceSeen = Promise.withResolvers<void>();
+	a.onPresence((p) => {
+		if (p.operator.id === "bob") aliceSeen.resolve();
+	});
+
+	// Bob and Alice work the SAME GitHub repo at DIFFERENT absolute paths, same branch.
+	const repoId = "github.com/acme/app";
+	b.publishPresence(
+		presence({
+			operator: { id: "bob", origin: "local" },
+			// Live wall-clock timestamp so bob's frame survives alice's PeerRoster TTL.
+			updatedAt: Date.now(),
+			agents: [agent({ id: "b1", repo: "/Users/bob/code/app", repoId, branch: "main" })],
+		}),
+	);
+	await aliceSeen.promise;
+
+	// Alice's own roster (self) merged with the peer roster (bob) yields a cross-host collision.
+	const self = presence({
+		operator: { id: "alice", origin: "local" },
+		updatedAt: Date.now(),
+		agents: [agent({ id: "a1", repo: "/home/alice/projects/app", repoId, branch: "main" })],
+	});
+	await waitFor(() => a.roster.live().some((p) => p.operator.id === "bob"));
+	const view = federationView(self, a.roster.live());
+	expect(view.operators.map((o) => o.operator.id)).toEqual(["alice", "bob"]);
+	expect(view.collisions).toHaveLength(1);
+	expect(view.collisions[0]?.repoId).toBe(repoId);
+	expect(view.collisions[0]?.ref).toBe("main");
+	expect(new Set(view.collisions[0]?.operators)).toEqual(new Set(["alice", "bob"]));
+});
+
+test("OMP_SQUAD_FEDERATION opt-out: a bus with no coordinator is local-only and never reaches a peer", async () => {
+	// Two LOCAL-ONLY buses (no coordinator) are fully isolated — nothing crosses between them.
+	const a = new LocalFederationBus({ operator: { id: "alice", origin: "local" } });
+	const b = new LocalFederationBus({ operator: { id: "bob", origin: "local" } });
+	liveBuses.push(a, b);
+	await Promise.all([a.start(), b.start()]);
+	const bSaw: OperatorPresence[] = [];
+	b.onPresence((p) => bSaw.push(p));
+	a.publishPresence(presence({ operator: { id: "alice", origin: "local" }, updatedAt: 1, agents: [agent({ branch: "main" })] }));
+	// No coordinator ⇒ no path from A to B; B's roster + subscribers stay empty.
+	expect(bSaw).toEqual([]);
+	expect(a.roster.live()).toEqual([]);
+	expect(b.roster.live()).toEqual([]);
 });

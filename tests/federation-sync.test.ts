@@ -11,18 +11,20 @@ import { runCoordinator } from "../src/coordinator.ts";
 import type { CoordinatorHandle } from "../src/coordinator.ts";
 import { startFederationSync } from "../src/federation-sync.ts";
 import type { FederationSyncHandle } from "../src/federation-sync.ts";
-import type { RemoteLeases } from "../src/federation.ts";
-import { claimLease, type LeaseEntry, leasesFor, mirrorLease, releaseSession } from "../src/leases.ts";
+import { LocalFederationBus, type RemoteLeases } from "../src/federation.ts";
+import { claimLease, holdersOf, type LeaseEntry, leasesFor, mirrorLease, releaseSession } from "../src/leases.ts";
 import { normalizeGitUrl, repoIdentity } from "../src/repo-identity.ts";
 
 let coordinator: CoordinatorHandle | undefined;
 let sync: FederationSyncHandle | undefined;
 let peer: WebSocket | undefined;
+const liveBuses: LocalFederationBus[] = [];
 const cleanupRepos: Array<{ repo: string; sessions: string[] }> = [];
 
 afterEach(async () => {
 	if (sync) await sync.stop();
 	if (peer) peer.close();
+	for (const b of liveBuses.splice(0)) await b.stop().catch(() => {});
 	if (coordinator) coordinator.stop();
 	sync = undefined;
 	peer = undefined;
@@ -30,6 +32,15 @@ afterEach(async () => {
 	for (const c of cleanupRepos) for (const s of c.sessions) await releaseSession(s, c.repo);
 	cleanupRepos.length = 0;
 });
+
+/** Poll a synchronous predicate to a deadline (readiness off real events, not fixed sleeps). */
+async function waitFor(pred: () => boolean, timeoutMs = 5000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!pred()) {
+		if (Date.now() > deadline) throw new Error("waitFor: condition not met before timeout");
+		await new Promise((r) => setTimeout(r, 10));
+	}
+}
 
 async function gitRepo(origin: string): Promise<string> {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "fed-"));
@@ -117,4 +128,52 @@ test("a sync publishes its own leases and mirrors a peer's leases for the same r
 	// Both Bob's own lease and Alice's mirrored lease now coexist on this repo → the file is contended.
 	const onServer = live.filter((l) => l.file === "src/server.ts");
 	expect(new Set(onServer.map((l) => l.operator))).toEqual(new Set(["bob", "alice"]));
+});
+
+test("a peer's lease gossiped through two LocalFederationBus instances mirrors under the normalized identity and surfaces via holdersOf", async () => {
+	const origin = "git@github.com:acme/twohost.git";
+	// Each "host" has its OWN checkout of the same origin at a different path.
+	const aliceRepo = await gitRepo(origin);
+	const bobRepo = await gitRepo(origin);
+	const repoId = repoIdentity(aliceRepo);
+	expect(repoId).toBe("github.com/acme/twohost");
+	expect(repoIdentity(bobRepo)).toBe(repoId);
+	cleanupRepos.push({ repo: aliceRepo, sessions: ["alice:1"] }, { repo: bobRepo, sessions: ["bob:1", "alice:1"] });
+
+	coordinator = runCoordinator({ port: 0 });
+	const aliceBus = new LocalFederationBus({ operator: { id: "alice", origin: "local" }, coordinatorUrl: coordinator.url });
+	const bobBus = new LocalFederationBus({ operator: { id: "bob", origin: "local" }, coordinatorUrl: coordinator.url });
+	liveBuses.push(aliceBus, bobBus);
+	await Promise.all([aliceBus.start(), bobBus.start()]);
+	await waitFor(() => coordinator?.clients() === 2);
+
+	// Bob's side mirrors any inbound peer lease (not his own) into HIS local registry for the same identity.
+	const mirrored = Promise.withResolvers<RemoteLeases>();
+	bobBus.onLeases((frame) => {
+		if (frame.operator.id === "bob") return; // never mirror our own loopback
+		void (async () => {
+			for (const lease of frame.leases) await mirrorLease(bobRepo, lease);
+			mirrored.resolve(frame);
+		})();
+	});
+
+	// Bob holds his own lease on the repo first.
+	await claimLease({ repo: bobRepo, file: "src/index.ts", session: "bob:1", operator: "bob" });
+
+	// Alice publishes a lease for the SAME repo identity (her own host-local path is irrelevant to bucketing).
+	const aliceLease: LeaseEntry = { id: "al", repo: aliceRepo, file: "src/server.ts", operator: "alice", session: "alice:1", host: "alice-box", since: Date.now(), heartbeat: Date.now() };
+	aliceBus.publishLeases(repoId, [aliceLease]);
+
+	await mirrored.promise;
+
+	// Alice's lease landed in Bob's identity bucket; both surface together via leasesFor (queried by BOB's path).
+	const live = await leasesFor(bobRepo);
+	expect(new Set(live.map((l) => l.file))).toEqual(new Set(["src/index.ts", "src/server.ts"]));
+	const aliceHere = live.find((l) => l.operator === "alice" && l.file === "src/server.ts");
+	expect(aliceHere).toBeDefined();
+	expect(aliceHere?.host).toBe("alice-box");
+
+	// And the lease-hook's contention check (holdersOf) sees the cross-host holder on Bob's box.
+	const contenders = await holdersOf(bobRepo, "src/server.ts", "bob:1");
+	expect(contenders.map((l) => l.operator)).toContain("alice");
 });

@@ -24,7 +24,7 @@ import { checkVisionUrl } from "./ssrf.ts";
 import { detectVerify } from "./intake.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { landAgent } from "./land.ts";
-import { leasesFor } from "./leases.ts";
+import { type LeaseEntry, leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
@@ -931,17 +931,26 @@ export class SquadServer {
 			const repo = url.searchParams.get("repo");
 			return Response.json(repo ? await who(repo) : await all());
 		}
-		if (url.pathname === "/api/leases") return Response.json(this.registry ? [] : await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
+		if (url.pathname === "/api/leases") {
+			const repo = url.searchParams.get("repo");
+			// Single-manager / file mode: serve the requested repo (or cwd) directly.
+			// DB-registry mode: the lease registry is machine-wide, so scope to repos THIS org's
+			// fleet actually works on — never blanket-empty, never leak another org's leases.
+			if (!this.registry) return Response.json(await leasesFor(repo ?? process.cwd()));
+			return Response.json(await this.orgScopedLeases(manager, repo));
+		}
 		if (url.pathname === "/api/fabric") {
 			const repo = url.searchParams.get("repo");
-			return Response.json(await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: !this.registry }));
+			// fabric is org-safe in both modes: leases are keyed to the manager's own agents/repos,
+			// so includeLeases never leaks cross-org. Always include them (real data, even in DB mode).
+			return Response.json(await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: true }));
 		}
 		if (url.pathname === "/api/opportunities") {
 			const repos = url.searchParams.get("repo") ? [url.searchParams.get("repo") as string] : (planeRepos().length ? planeRepos() : manager.projects().map((p) => p.repo));
 			const issues = (await Promise.all(repos.map((repo) => listPlaneIssues(repo).catch(() => null)))).flatMap((x) => x ?? []);
 			return Response.json(issues.filter((i) => i.name.includes("[opportunity]")));
 		}
-		if (url.pathname === "/api/federation") return Response.json(this.registry ? ({ coordinator: null, operators: [], collisions: [] } satisfies FederationSnapshot) : this.federationSnapshot());
+		if (url.pathname === "/api/federation") return Response.json(this.federationSnapshot(manager));
 		if (url.pathname === "/api/audit") {
 			const q = url.searchParams;
 			const limit = Number(q.get("limit"));
@@ -1235,19 +1244,50 @@ export class SquadServer {
 	/**
 	 * Roster-of-rosters for the command center: this host's live roster merged
 	 * with any peer rosters gathered off the coordinator, plus cross-operator
-	 * branch collisions. Best-effort — with no coordinator the feed is absent, so
-	 * only self appears (no peers, no collisions) and the panel stays hidden.
+	 * branch collisions. Single-host with no peers returns the LOCAL operator's own
+	 * presence (its live agents) — never empty, never an error.
+	 *
+	 * Single-manager / file mode: self = the root manager's roster, peers = the
+	 * coordinator feed (absent ⇒ self only). DB-registry mode: self = the calling
+	 * org's manager roster; there's no global federation bus per org, so peers stay
+	 * empty (`coordinator: null`), but the org still sees its OWN operators/agents
+	 * instead of a blanket-empty payload (and never another org's).
 	 */
-	private federationSnapshot(): FederationSnapshot {
+	private federationSnapshot(manager: SquadManager): FederationSnapshot {
 		const self: OperatorPresence = {
 			operator: this.operator,
 			availability: "active",
 			host: os.hostname(),
-			agents: this.singleManager?.list() ?? [],
+			agents: manager.list(),
 			updatedAt: Date.now(),
 		};
-		const peers = this.peerPresence?.live() ?? [];
-		return { coordinator: this.coordinator, ...federationView(self, peers) };
+		// DB-registry mode has no per-org coordinator feed; only single-manager mode gossips peers.
+		const peers = this.registry ? [] : (this.peerPresence?.live() ?? []);
+		const coordinator = this.registry ? null : this.coordinator;
+		return { coordinator, ...federationView(self, peers) };
+	}
+
+	/**
+	 * DB-registry mode lease scope: leases for repos the calling org's fleet actually works on.
+	 * The on-disk lease registry is machine-wide (keyed by cross-host repo identity), so we must
+	 * NOT serve it wholesale in a multi-tenant daemon — that would leak another org's leases. We
+	 * instead derive the repo set from this org manager's live agents and union in an explicit
+	 * `?repo=` only when that org has an agent on it. Empty fleet ⇒ no repos ⇒ no leases.
+	 */
+	private async orgScopedLeases(manager: SquadManager, repo: string | null): Promise<LeaseEntry[]> {
+		const orgRepos = new Set(manager.list().map((a) => a.repo));
+		const repos = repo ? (orgRepos.has(repo) ? [repo] : []) : [...orgRepos];
+		const seen = new Set<string>();
+		const out: LeaseEntry[] = [];
+		for (const r of repos) {
+			for (const lease of await leasesFor(r).catch(() => [])) {
+				const key = `${lease.repo} ${lease.id}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				out.push(lease);
+			}
+		}
+		return out;
 	}
 
 	stop(): void {
