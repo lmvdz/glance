@@ -121,6 +121,11 @@ export class Orchestrator {
 	/** Per-agent blocked-land retries; parked after LAND_RETRY_CAP so a failing land never loops forever. */
 	private readonly landBlocks = new Map<string, number>();
 
+	/** Re-entrancy guard — mirrors the pattern in scout.ts / observer.ts. A verify or land edge can
+	 *  take longer than the 30s interval; without this guard the next tick overlaps the previous one,
+	 *  double-counting attempts and spawning races. When true, the incoming tick skips entirely. */
+	private ticking = false;
+
 	/**
 	 * Admission queue the manager parks cap-denied spawns into; drained here under the WIP cap (#13).
 	 * Public so the manager (and tests) can `enqueue` into the same instance the loop drains.
@@ -156,9 +161,16 @@ export class Orchestrator {
 	/**
 	 * One control-loop step. Inert until OMP_SQUAD_AUTODRIVE is set; then drives the per-tick
 	 * policy (auto-land → self-heal → catastrophe → admission drain) entirely through `deps`.
+	 *
+	 * Re-entrancy guard: if a previous tick's verify/land is still in flight (took > interval),
+	 * the new tick returns immediately. This mirrors the pattern in scout.ts / observer.ts and
+	 * prevents double-counted attempt budgets and overlapping land calls.
 	 */
 	async tick(): Promise<void> {
 		if (!autodrive()) return;
+		if (this.ticking) return; // previous tick still in flight — skip rather than overlap
+		this.ticking = true;
+		try {
 		const log = this.deps.log ?? (() => {});
 		const route = this.deps.route ?? routeFailure;
 
@@ -244,6 +256,17 @@ export class Orchestrator {
 			if (!req) break;
 			await this.deps.spawn(req);
 			log(`admitted queued spawn ${req.name ?? req.repo}`);
+		}
+
+		// ── Step 5: ledger purge (#19). Drop entries for branches that no longer appear in
+		//    the roster so the on-disk ledger doesn't grow unbounded as branches are cleaned up.
+		//    Only branches ABSENT from the current roster are dropped — live branches are safe. ──
+		if (this.deps.persist) {
+			const rosterBranches = this.deps.listAgents().map((a) => a.branch).filter((b): b is string => b !== undefined);
+			this.deps.persist.purgeStale(rosterBranches);
+		}
+		} finally {
+			this.ticking = false;
 		}
 	}
 

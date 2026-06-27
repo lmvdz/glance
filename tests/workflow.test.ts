@@ -7,6 +7,7 @@
  */
 
 import { afterAll, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -363,6 +364,25 @@ test("buildVerifyWorkflow: synthesizes implement → verify(goal_gate) → codef
 	expect(wf.nodes.get("escalate")?.kind).toBe("agent");
 	expect(wf.nodes.get("escalate")?.maxVisits).toBe(2);
 	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->implement", "implement->verify", "verify->exit", "verify->fixup", "codefix->verify", "fixup->verify", "escalate->verify"]);
+});
+
+test("buildVerifyWorkflow/buildTddVerifyWorkflow: codefix node script is an absolute path to an existing codefix.ts (#1)", () => {
+	// Command nodes run with cwd=worktree (the TARGET repo). The codefix.ts file
+	// lives in omp-squad's own src/workflow/ dir and does NOT exist in external repos.
+	// The script must resolve to an absolute path so the target repo's cwd is irrelevant.
+	for (const wf of [buildVerifyWorkflow({ command: "check" }), buildTddVerifyWorkflow({ command: "check" })]) {
+		const script = wf.nodes.get("codefix")?.script ?? "";
+		// Must contain an absolute path (starts with / on unix)
+		expect(script).toMatch(/\/.*codefix\.ts/);
+		// Must NOT use the old bare relative `src/workflow/codefix.ts` (a path rooted at the TARGET repo).
+		// The path must be absolute — detect this by checking it starts with `bun /` (or `bun "/`).
+		expect(script).toMatch(/^bun\s+"?\//);
+		// The resolved file must actually exist on disk (confirms the path arithmetic is correct)
+		const match = script.match(/"?(\/.+codefix\.ts)"?/);
+		expect(match).not.toBeNull();
+		const absPath = match![1].replace(/\\"/g, '"');
+		expect(existsSync(absPath)).toBe(true);
+	}
 });
 
 test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps the verify gate + fixup loop", () => {
