@@ -131,17 +131,36 @@ cannot self-grant `admin`/`local` and drive the local fleet (OMPSQ-162). Grantin
 a remote peer more than `viewer` requires a transport that *verifies* a role — the
 wire claim alone is ignored.
 
+## 5. `LocalFederationBus` — the daemon default
+
+`LocalFederationBus` is the **default bus** since federation shipped. It provides:
+
+- **Single-host loopback** — on every pub/sub call it fires local subscribers immediately
+  (your own roster, presence, and leases are live and observable in-process without any
+  coordinator). The `NullFederationBus` is explicitly opted in with `OMP_SQUAD_FEDERATION=0`.
+- **Cross-host extension** — when `OMP_SQUAD_COORDINATOR` is set it additionally opens a
+  `TailnetFederationBus` to that coordinator; local publishes are forwarded to peers and
+  inbound peer frames fan out to local subscribers + update the `PeerRoster`.
+- **Resilient startup** — a bad/unreachable coordinator never throws or blocks `start()`; the
+  inner Tailnet bus reconnects on its own capped backoff (500 ms → 30 s).
+
+The daemon auto-starts `federation-sync` (cross-host lease gossip) in file mode when a
+coordinator URL is configured — no companion process needed.
+
 ## Status
 
 - ✅ Coordinator relay — built, tested.
 - ✅ Lease gossip protocol + reconnect re-announce — built, tested.
 - ✅ Cross-host repo identity — built, tested.
-- ✅ `federation-sync` publish + mirror — built, tested end to end (a peer's
-  lease blocks a local omp agent's edit, which overrides on re-issue).
-- ✅ Surfacing **remote presence** in the local command center — `GET /api/federation`
-  + the Federation panel, fed by the listener-only `PeerPresenceTracker`. Cross-operator
-  branch collisions key on the host-local repo path (`detectCollisions` over `AgentDTO.repo`),
-  so they fire reliably for same-path checkouts; full cross-host collision matching still
-  wants a normalized `repoId` on `AgentDTO`.
-- ⏳ Daemon auto-start of `federation-sync` is a one-liner in `server.start()`
-  once the daemon entry settles; today run it as the companion process above.
+- ✅ `federation-sync` publish + mirror — built, tested end to end.
+- ✅ `LocalFederationBus` as the daemon default — single-host works with zero config.
+- ✅ Cross-host collision detection keyed on **normalized git origin URL** (`repoId` on
+  `AgentDTO`) — same-GitHub-repo / different-machine checkouts now collide; same-basename
+  unrelated repos no longer false-collide.
+- ✅ `/api/federation`, `/api/leases`, `/api/fabric` — real data (per-org scoped in DB mode).
+- ✅ Daemon auto-start of `federation-sync` when a coordinator is configured.
+- ⏳ Remote steering (sending a command frame to a peer) — receive side exists
+  (`onRemoteCommand` + `applyCommand`); outbound command + delegation/availability policy
+  is the remaining cross-operator capability.
+- ⏳ `tailscale whois` peer identity — resolves only on a real tailnet; requires a deployed
+  coordinator + second physical host.

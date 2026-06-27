@@ -186,6 +186,11 @@ The web UI is an **organizational command center**, not a flat list:
 - **Agent view** — transcript + composer + pending-answer controls, plus side panels:
   - **Subagents** — the live tree of `task`-spawned children (via omp's RPC subagent stream).
   - **Changes** — the agent's worktree git diff, so you can review before merging.
+  - **Agent controls** — interrupt (pause mid-run), restart (re-run from current state), remove (drop the agent; optionally delete its worktree), set model (change the LLM for the next run), and answer a blocked agent inline.
+- **Automation** — what the daemon's background loops (Scout, Observer, orchestrator, Plane poller) have been doing and any failures; driven by `GET /api/automation`.
+- **Fleet Health** — aggregate fleet state: WIP usage, error counts, needs-input counts, and resource pressure indicators.
+- **Heat** — code activity heat map across the fleet's active worktrees.
+- **Federation / Leases** — peer operators, their live agents, shared-branch collision warnings, and cross-host file leases in flight. Backed by `GET /api/federation`, `GET /api/leases`, and `GET /api/fabric`; hidden when no coordinator is configured.
 
 ### Plane integration
 
@@ -241,9 +246,26 @@ origins (avoid `*` outside local testing), and rotate by replacing the campaign 
 
 Operators use the authenticated feedback API to review `GET /api/feedback/items`, add validation
 votes, accept or reject, then promote accepted / needs-validation items to Plane with
-`POST /api/feedback/items/:id/promote`. Rewards are a ledger only: reward campaigns create `pending`
-entries; operators can approve, void, and mark paid with a manual/provider reference, but omp-squad
-never pays users automatically.
+`POST /api/feedback/items/:id/promote`. Rewards are a ledger by default; with the **Tremendous**
+integration configured they can pay out automatically.
+
+**Reward disbursement (opt-in via Tremendous).** Set `OMP_SQUAD_TREMENDOUS_API_KEY` to activate
+real payouts — the daemon delivers rewards via email through [Tremendous](https://www.tremendous.com)
+(gift card / PayPal / ACH / Visa, operator's choice). Idempotent: the reward id is used as the
+Tremendous order `external_id`, so a retried payout for the same reward never creates a second order.
+`markFeedbackRewardPaid` pays out then marks the reward paid; a failed payout leaves the reward
+`approved` (retry manually). Without the API key a manual recorder is used — the existing ledger
+workflow stays unchanged.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_TREMENDOUS_API_KEY` | Bearer token — presence activates Tremendous payouts |
+| `OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID` | Which Tremendous balance/account funds the payout |
+| `OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID` | Redemption-options campaign the recipient sees |
+| `OMP_SQUAD_TREMENDOUS_ENV` | `sandbox` (default) or `production` — use sandbox first |
+
+Go-live checklist: set the four vars (sandbox first), trigger one sandbox order to confirm the
+integration, then switch `OMP_SQUAD_TREMENDOUS_ENV=production`. See `src/payments/` for details.
 
 Safety notes: serve the widget over HTTPS; screenshots may contain PII; text/metadata/screenshot sizes
 are capped, feedback records persist to file/DB storage, and screenshot files live under the state dir —
@@ -282,6 +304,19 @@ moving without a human. All bounded and **on by default** — set the matching `
 | `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
 | `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates) so blocked agents advance without you — **on by default** (`=0` to disable). Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
 | `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
+| `OMP_SQUAD_RESOURCE_GATE` | Set (any value) to enable host-pressure admission gating. When set, a spawn is refused if `load1/ncpu > OMP_SQUAD_MAX_LOAD_PER_CPU` or free-memory ratio drops below `OMP_SQUAD_MIN_FREE_RATIO`. Off by default (use `up.sh` which sets it). |
+| `OMP_SQUAD_MAX_LOAD_PER_CPU` | Block spawns when 1-minute load average / CPU count exceeds this value (default `1.5`). Read per-call, so adjustable without a restart. |
+| `OMP_SQUAD_MAX_RSS_MB` | Watchdog RSS ceiling per agent process (default `1024` MB); the agent is killed and set to error if exceeded. |
+| `OMP_SQUAD_MIN_FREE_RATIO` | Block spawns when host free-memory fraction drops below this value (default `0.1`). Read per-call. |
+| `OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR` | Per-hour LLM-call budget for the Scout backlog harvester (default `30`; `<=0` for unlimited). Bounds spend in verbose multi-agent fleets. |
+| `OMP_SQUAD_AUTO_SUPERVISE` | Start the external file-mode supervisor that answers routine agent prompts hands-free (default on; `=0` or `--no-supervise` to disable). File mode only. |
+| `OMP_SQUAD_SUPERVISE_MODEL` | Model override for the auto-supervisor's LLM calls. |
+
+**Background loop visibility.** The Scout, Observer, and orchestrator loops surface their activity
+and failures through the automation log. Use `omp-squad automation` (or `GET /api/automation`) to
+see what each loop has been doing, how many LLM calls the Scout has spent this hour, and any
+transient failures (Plane poll errors get one automatic retry before they are logged; no silent
+swallowing). The dashboard's **Automation** panel shows the same feed live.
 
 ### Trace export
 
@@ -297,6 +332,7 @@ Tracing is receipt-native: every receipt keeps its cost/token/tool rollup, while
 | `OMP_SQUAD_TRACE_EXPORT_OTLP_URL` | OTLP/HTTP JSON endpoint, fetched through the SSRF guard |
 | `OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL` | Langfuse ingest endpoint, fetched through the SSRF guard |
 | `OMP_SQUAD_TRACE_EXPORT_DATADOG_URL` | Datadog ingest endpoint, fetched through the SSRF guard |
+| `OMP_SQUAD_TRACE_ALLOW_PRIVATE` | `=1` allows trace export to private/loopback collector URLs (OTLP agent, private Langfuse, tailnet Datadog gateway). Default off — the SSRF guard blocks private-range IPs. When set, only the exact origins you configured in the three `OMP_SQUAD_TRACE_EXPORT_*_URL` vars above are exempted; any other private host (redirects, metadata IPs, unconfigured URLs) is still blocked. Set this when your collector runs on `localhost` or an RFC1918 address. |
 
 With auto-land on, work merges without a human in the loop, so the safety net is the **verify gate**
 (build + tests) plus the resolver's reviewer pass — and the risk gate that leaves every destructive
@@ -471,20 +507,39 @@ commit, so the prune can't delete a worktree out from under a running agent. Dis
 `OMP_SQUAD_WORKTREE_REAP=0`; tune the freshness window with `OMP_SQUAD_WORKTREE_GRACE_MS` (default
 120000).
 
-### Federation (opt-in)
+### Federation
 
-`OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
-(or your OS username) via `TailnetFederationBus`; unset → single-operator with `NullFederationBus`.
-The coordinator relay (`bun src/coordinator-main.ts`) binds `127.0.0.1` by default; to expose it
-(`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`) set a shared `OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator
-and every client, or it refuses to start (override with `OMP_SQUAD_INSECURE=1`). Without a token any
-reachable peer can snoop and spoof presence/lease frames.
+Federation is **on by default**. The daemon uses `LocalFederationBus` — a real bus that works
+locally with no config (loopback pub/sub: your own roster and leases are live and observable in
+the command center without any peer). `OMP_SQUAD_FEDERATION=0` is the explicit opt-out back to
+the inert `NullFederationBus` (hides the Federation panel entirely).
 
-When a coordinator is set, the command center surfaces who else is on the tailnet: a
-**Federation** panel (in each project view) lists peer operators, their live agents, and any
-**shared-branch collisions** — repos where agents owned by different operators sit on the same
-branch. It's backed by `GET /api/federation` (`{ coordinator, operators, collisions }`, bearer-gated).
-With no coordinator the panel stays hidden and the endpoint returns just your own roster.
+**Single-host (default, zero config).** The local bus keeps your roster, presence, and leases
+in-process. `/api/federation`, `/api/leases`, and `/api/fabric` return real data (per-org scoped
+in DB mode). No coordinator needed.
+
+**Cross-host.** Set `OMP_SQUAD_COORDINATOR=ws://<coordinator-host>:<port>` to join a team
+coordinator. The daemon starts a `TailnetFederationBus` that gossips presence and file leases
+to peers and receives theirs. The coordinator relay (`bun src/coordinator-main.ts`) binds
+`127.0.0.1` by default; to expose it (`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`), set a shared
+`OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator and every client — a non-loopback bind without
+a token is refused (override with `OMP_SQUAD_INSECURE=1`).
+
+When a coordinator is configured, the command center **Federation** panel lists peer operators,
+their live agents, and any **shared-branch collisions** — repos where agents owned by different
+operators sit on the same branch. Collisions are keyed on the repo's **normalized git origin URL**
+(via `src/repo-identity.ts`), not a host-local path: two operators on different machines checking
+out the same GitHub repo now collide correctly, and unrelated repos that share a basename don't
+false-collide. Each `AgentDTO` carries a `repoId` field for this cross-host identity.
+
+`GET /api/federation` (`{ coordinator, operators, collisions }`, bearer-gated) returns real data.
+With no coordinator the panel stays hidden and the endpoint returns just your own roster (no peers,
+no collisions).
+
+**What remains for full cross-host federation:** a deployed coordinator URL plus a second physical
+host. Remote-command identity uses `tailscale whois <peer-ip>` — this resolves only on a real
+tailnet. Without a verifiable tailnet IP, inbound command actors stay `origin:"remote"` and resolve
+to the read-only `viewer` tier.
 
 ## Remote access & mobile
 
@@ -556,9 +611,14 @@ mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-a
 
 | Env / flag | Meaning | Default |
 |---|---|---|
+| `$OMP_SQUAD_PORT` | HTTP/WS listen port | `7878` |
 | `--host` / `$OMP_SQUAD_HOST` | Bind address; `0.0.0.0` exposes on the LAN/tailnet | `127.0.0.1` |
 | `$OMP_SQUAD_TLS_CERT` + `$OMP_SQUAD_TLS_KEY` | Terminate TLS in-process (PEM paths) | plain HTTP |
 | `$OMP_SQUAD_PUSH_SUBJECT` | VAPID `sub` contact (`mailto:`/`https:`) | `mailto:squad@localhost` |
+| `$OMP_SQUAD_OPERATOR_TOKEN` | Pre-shared bearer token granting operator-tier access (alternative to the generated access token, e.g. for scripts). | _(unset)_ |
+| `$OMP_SQUAD_VIEWER_TOKEN` | Pre-shared bearer token granting read-only viewer-tier access. | _(unset)_ |
+| `$OMP_SQUAD_ORG_IDLE_MS` | TTL before an agent-less org manager is evicted from the registry in DB mode (default `600000` ms = 10 min). | `600000` |
+| `$OMP_SQUAD_REPO_ROOTS` | Comma-separated paths smart-spawn searches for repos (default: `<cwd>/..`, `~/sui`, `~/src`, `~/code`). | _(auto)_ |
 
 **HTTPS is required** to install the PWA and receive background push — browsers only allow
 service workers + Web Push in a secure context (`http://localhost` is exempt, a LAN IP is
@@ -912,37 +972,44 @@ omp-squad add ~/code/myproject --acp --task "Add rate limiting to the public API
   mappings are verified in the test suite against a fake in-process ACP agent — no auggie, no
   account, no tokens.
 
-## Phase 2 — cross-operator federation
+## Cross-operator federation — what's live
 
-The single-operator squad above is built **federation-ready**: the manager already
-programs against a transport-agnostic `FederationBus` (today a no-op `NullFederationBus`),
-carries per-agent collision metadata (repo / branch / worktree), and routes every
-command through one `applyCommand(cmd, actor)` entry point that accepts a remote actor.
+Federation is no longer a stub. The manager programs against a `FederationBus` seam, and
+`LocalFederationBus` is the daemon default — it works on a single host with zero config and
+extends to cross-host gossip once a coordinator URL is set.
 
-The Phase-2 goal: a whole team's squads federate so a coordinator can **see what everyone's
-agents are doing** and **steer a teammate's live agent** when they're away — their session
-already has the fresh context.
+**What is live today:**
 
-- **Transport: Tailscale.** Run the coordinator on the tailnet; identity comes for free
-  from `tailscale whois <peer-ip>` (sourced from your SSO), ACLs gate reachability, and
-  WireGuard encrypts everything — collapsing transport + identity + authz into the network
-  layer. (A `RelayFederationBus` over omp's content-blind `/collab` relay is the zero-infra
-  alternative for small / cross-org rooms.)
-- **What flows:** lightweight **presence** (operator, availability, agents, repos/branches/
-  files-in-flight) by default — not transcripts. Deep view stays opt-in, reusing `/collab`'s
-  view-link vs full-link split.
-- **Remote steering** *(not yet implemented)* — the design: a peer's `{command, actor}` rides
-  the bus to the owning squad, which authorizes it against the operator's **delegation/availability
-  policy** (away/ill can auto-grant to delegates) before applying — and **audits** every
-  cross-operator action. Today only the *receive* side exists (`onRemoteCommand` +
-  `applyCommand(cmd, actor)`); no code yet *sends* a command frame, so driving a teammate's live
-  agent is the remaining Phase-2 work.
-- **Collision avoidance** *(live)* — overlapping repo+path across operators surfaces as a
-  warning, so two people don't have agents editing the same file.
+- **`LocalFederationBus` as the default** — single-host loopback pub/sub; presence, leases,
+  and collision detection work in-process. `OMP_SQUAD_FEDERATION=0` to opt out entirely.
+- **Coordinator relay** (`bun src/coordinator-main.ts`) — dumb WebSocket fan-out; built,
+  tested, token-gated for non-loopback binds.
+- **Cross-host presence gossip + collision detection** — `TailnetFederationBus` publishes this
+  host's roster to the coordinator and receives peers'; `mergeRosters` + `detectCollisions`
+  (in `src/federation.ts`) fold them into a roster-of-rosters. Collisions key on the repo's
+  **normalized git origin URL** (`src/repo-identity.ts`), not a host-local path, so same-GitHub-
+  repo / different-machine checkouts collide and same-basename unrelated repos don't.
+  Each `AgentDTO` carries a `repoId` field stamped before it leaves the local host.
+- **Cross-host file leasing** — `federation-sync` publishes this host's leases (by repo
+  identity) and mirrors peers'; the lease-hook warns before you edit a file a remote teammate
+  holds. In file mode, the daemon auto-starts the sync when a coordinator is configured.
+- **Live API surfaces** — `/api/federation`, `/api/leases`, and `/api/fabric` return real data
+  (per-org scoped in DB mode); the command center Federation/Leases panel is not a placeholder.
+- **Transport security** — remote command actors are verified via `tailscale whois <peer-ip>`;
+  wire-asserted `role`/`origin` are NEVER trusted; an unverified peer stays at the read-only
+  `viewer` tier.
 
-`src/federation.ts` defines the seam. `TailnetFederationBus` is implemented for **presence** and
-**cross-host leases / collision detection** (live today); **remote steering** — the
-delegation/availability policy plus the outbound command frame — is the rest of Phase 2.
+**What still requires setup for true cross-host use:**
+
+- A deployed coordinator URL (`OMP_SQUAD_COORDINATOR=ws://…`) plus a second physical host.
+- `tailscale whois` for peer identity — resolves only on a real tailnet; without it, inbound
+  command actors are unverified and fall back to `viewer`.
+
+**Remote steering** (driving a teammate's live agent from your command center) — the receive
+side exists (`onRemoteCommand` + `applyCommand(cmd, actor)`) but no code yet *sends* a command
+frame to a peer. That remains the principal outstanding cross-operator capability.
+
+See [`docs/federation.md`](docs/federation.md) for the full architecture and runbook.
 
 ## Layout
 

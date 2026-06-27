@@ -150,3 +150,118 @@ state changes.
 - File-mode attachments are written under `<stateDir>/feedback/attachments/...`; DB mode stores the
   records in DB tables but file attachments still consume daemon disk. Monitor/prune disk on long-running
   or high-volume campaigns.
+
+## Enabling Tremendous reward payouts
+
+**What it does:** When `OMP_SQUAD_TREMENDOUS_API_KEY` is set, `markFeedbackRewardPaid` sends a
+real payout via [Tremendous](https://www.tremendous.com) (email delivery; recipient picks gift card,
+PayPal, ACH, Visa, etc.) instead of only updating the ledger. Idempotent: each reward maps to one
+Tremendous order via `external_id`, so retries never double-pay.
+
+**Go-live checklist:**
+
+1. Create a Tremendous account and obtain an API key.
+2. In your Tremendous dashboard, note a funding source id and create a redemption campaign; note its id.
+3. Set the following env vars in `up.sh` (start with `sandbox` to test):
+
+   ```sh
+   OMP_SQUAD_TREMENDOUS_API_KEY=<key>
+   OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID=<funding-source-id>
+   OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID=<campaign-id>
+   OMP_SQUAD_TREMENDOUS_ENV=sandbox     # change to "production" after confirming
+   ```
+
+4. Restart the daemon (`scripts/squadctl.sh restart`).
+5. Approve one feedback reward and trigger `mark-paid` via the API or dashboard. Confirm an order
+   appears in your Tremendous sandbox dashboard.
+6. Once confirmed, change `OMP_SQUAD_TREMENDOUS_ENV=production` and restart.
+
+**Error handling:** a failed payout (network error, bad config, invalid recipient) leaves the reward
+in `approved` state and logs the error — it does not crash the daemon. Retry by calling `mark-paid`
+again (idempotent). Check `OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID` and `OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID`
+are set correctly; missing values surface as a payout failure message, not a startup error.
+
+## Enabling cross-host federation
+
+**What it does:** Connects two or more omp-squad daemons via a WebSocket coordinator so operators
+can see each other's agents and file leases in real time, and cross-repo branch collisions are
+flagged.
+
+**Go-live checklist:**
+
+1. Pick a host on the tailnet to run the coordinator. On that host:
+
+   ```sh
+   export OMP_SQUAD_COORDINATOR_TOKEN=$(openssl rand -hex 32)
+   export OMP_SQUAD_COORDINATOR_HOST=0.0.0.0
+   export OMP_SQUAD_COORDINATOR_PORT=7900
+   bun /path/to/omp-squad/src/coordinator-main.ts
+   # → omp-squad coordinator listening on ws://0.0.0.0:7900 (token-gated)
+   ```
+
+   For a persistent deployment, wrap in a systemd unit or `scripts/squad-supervisor.sh`.
+
+2. On each operator host, add to `up.sh`:
+
+   ```sh
+   export OMP_SQUAD_COORDINATOR=ws://<coordinator-tailnet-ip>:7900
+   export OMP_SQUAD_COORDINATOR_TOKEN=<same token>
+   export OMP_SQUAD_OPERATOR=<your-username>   # or leave unset to use OS username
+   ```
+
+3. Restart each daemon (`scripts/squadctl.sh restart`). The startup log will show:
+   `federation: joined ws://… as <operator>`.
+
+4. Open the command center on either host. The **Federation** panel (in the project view) should
+   list the peer operator and their agents once both daemons have announced presence.
+
+**Notes:**
+- Without Tailscale, WireGuard-level encryption is absent — run the coordinator on loopback
+  or within a trusted private network and rely on `OMP_SQUAD_COORDINATOR_TOKEN` for auth.
+- Peer identity for inbound commands uses `tailscale whois <peer-ip>` — resolves only on a real
+  tailnet. Without it, inbound actors remain `viewer`-tier (read-only).
+- DB mode does not auto-start the global federation sync; each org manager handles its own presence.
+
+## Operational knobs: resource gate, Scout cap, trace private
+
+### Resource gate
+
+Enable host-pressure spawn gating by setting `OMP_SQUAD_RESOURCE_GATE` in `up.sh` (the canonical
+launcher sets it; bare `omp-squad up` does not):
+
+```sh
+OMP_SQUAD_RESOURCE_GATE=1                # enable admission gating
+OMP_SQUAD_MAX_LOAD_PER_CPU=1.5           # block when load1/ncpu exceeds this (default 1.5)
+OMP_SQUAD_MIN_FREE_RATIO=0.1             # block when free-memory fraction < this (default 0.1)
+OMP_SQUAD_MAX_RSS_MB=1024                # kill an agent process if its RSS exceeds this MB (default 1024)
+```
+
+Both `OMP_SQUAD_MAX_LOAD_PER_CPU` and `OMP_SQUAD_MIN_FREE_RATIO` are re-read on every admission
+check, so you can tighten thresholds by editing `up.sh` and restarting without redeploying.
+
+### Scout LLM-call cap
+
+The Scout backlog harvester makes one LLM call per scan. In a busy multi-agent fleet this can add
+up. Cap it:
+
+```sh
+OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR=30   # default; set 0 for unlimited
+```
+
+Monitor current usage via `omp-squad automation` or `GET /api/automation` — the response includes
+the Scout's call count for the trailing window.
+
+### Trace export to a private/loopback collector
+
+Trace collector URLs from `OMP_SQUAD_TRACE_EXPORT_*_URL` env vars (OTLP, Langfuse, Datadog)
+commonly point to `localhost` or an RFC1918 address (a local OTLP agent, a private Langfuse
+instance, a tailnet Datadog gateway). The shared SSRF guard blocks these by default.
+
+To allow it, set `OMP_SQUAD_TRACE_ALLOW_PRIVATE=1`. This exempts **only** the exact origins of
+the collector URLs you configured — not arbitrary private IPs. Any redirect, metadata IP, or
+unconfigured URL is still blocked.
+
+```sh
+OMP_SQUAD_TRACE_ALLOW_PRIVATE=1
+OMP_SQUAD_TRACE_EXPORT_OTLP_URL=http://localhost:4318/v1/traces
+```
