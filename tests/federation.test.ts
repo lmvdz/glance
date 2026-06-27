@@ -6,8 +6,12 @@
  * resilience invariant (never throws without a reachable coordinator).
  */
 
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
+	agentRepoId,
 	type Collision,
 	detectCollisions,
 	federationView,
@@ -15,6 +19,7 @@ import {
 	PEER_PRESENCE_TTL_MS,
 	PeerRoster,
 	remoteCommandActor,
+	stampRepoIds,
 	TailnetFederationBus,
 } from "../src/federation.ts";
 import { effectiveRole } from "../src/auth.ts";
@@ -152,6 +157,79 @@ test("detectCollisions reports all operators and agents when three operators ove
 	expect(new Set(collisions[0]?.agents)).toEqual(new Set(["alice-1", "bob-1", "carol-1"]));
 });
 
+// ── detectCollisions keyed on cross-host repo identity (#9) ───────────────────
+
+test("detectCollisions COLLIDES on the same repo identity even at DIFFERENT host-local paths", () => {
+	// Two operators on the same GitHub repo, checked out at different absolute paths.
+	// Pre-#9 this NEVER fired because the key was the raw path; now the wire-carried
+	// repoId groups them.
+	const id = "github.com/acme/app";
+	const alice = presence({
+		operator: op("alice"),
+		agents: [agent({ id: "a1", repo: "/home/alice/projects/app", repoId: id, branch: "main" })],
+	});
+	const bob = presence({
+		operator: op("bob"),
+		agents: [agent({ id: "b1", repo: "/Users/bob/code/app-clone", repoId: id, branch: "main" })],
+	});
+	const collisions = detectCollisions([alice, bob]);
+	expect(collisions).toHaveLength(1);
+	expect(collisions[0]?.repoId).toBe(id);
+	expect(new Set(collisions[0]?.operators)).toEqual(new Set(["alice", "bob"]));
+	expect(new Set(collisions[0]?.agents)).toEqual(new Set(["a1", "b1"]));
+});
+
+test("detectCollisions does NOT false-collide two different repos that share a basename", () => {
+	// Same basename "app", same path even — but different origins ⇒ different identities.
+	const alice = presence({
+		operator: op("alice"),
+		agents: [agent({ id: "a1", repo: "/work/app", repoId: "github.com/acme/app", branch: "main" })],
+	});
+	const bob = presence({
+		operator: op("bob"),
+		agents: [agent({ id: "b1", repo: "/work/app", repoId: "github.com/widgets/app", branch: "main" })],
+	});
+	expect(detectCollisions([alice, bob])).toEqual([]);
+});
+
+test("agentRepoId prefers the wire-carried repoId and only derives from the path when absent", () => {
+	expect(agentRepoId({ repo: "/anything", repoId: "github.com/acme/app" })).toBe("github.com/acme/app");
+	// No repoId on the DTO ⇒ fall back to the path-derived identity (name:<basename> for a non-git path).
+	const p = "/tmp/some-non-git-checkout";
+	expect(agentRepoId({ repo: p })).toBe(`name:${path.basename(p)}`);
+});
+
+test("detectCollisions derives identity from real git origins when no repoId is on the DTO", async () => {
+	const dirs: string[] = [];
+	const gitRepo = async (origin: string): Promise<string> => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "fed-coll-"));
+		dirs.push(repo);
+		const run = async (args: string[]): Promise<void> => {
+			await Bun.spawn(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "ignore" }).exited;
+		};
+		await run(["init", "-q"]);
+		await run(["remote", "add", "origin", origin]);
+		return repo;
+	};
+	try {
+		const origin = "git@github.com:acme/shared.git";
+		const repoA = await gitRepo(origin); // same origin,
+		const repoB = await gitRepo(origin); // different path
+		const alice = presence({ operator: op("alice"), agents: [agent({ id: "a1", repo: repoA, branch: "main" })] });
+		const bob = presence({ operator: op("bob"), agents: [agent({ id: "b1", repo: repoB, branch: "main" })] });
+		const collisions = detectCollisions([alice, bob]);
+		expect(collisions).toHaveLength(1);
+		expect(collisions[0]?.repoId).toBe("github.com/acme/shared");
+
+		// And two real repos with different origins do not collide.
+		const repoC = await gitRepo("git@github.com:acme/other.git");
+		const carol = presence({ operator: op("carol"), agents: [agent({ id: "c1", repo: repoC, branch: "main" })] });
+		expect(detectCollisions([alice, carol])).toEqual([]);
+	} finally {
+		for (const d of dirs) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
+	}
+});
+
 test("detectCollisions returns one entry per distinct overlapping repo+branch", () => {
 	const alice = presence({
 		operator: op("alice"),
@@ -170,6 +248,28 @@ test("detectCollisions returns one entry per distinct overlapping repo+branch", 
 	const collisions = detectCollisions([alice, bob]);
 	expect(collisions).toHaveLength(2);
 	expect(new Set(collisions.map((c) => c.ref))).toEqual(new Set(["main", "feat"]));
+});
+
+// ── stampRepoIds (outgoing presence carries cross-host identity) ──────────────
+
+test("stampRepoIds fills in repoId for each agent without mutating the input", () => {
+	const presenceIn = presence({
+		operator: { id: "me", origin: "local" },
+		agents: [agent({ id: "a1", repo: "/some/path", branch: "main" })],
+	});
+	const stamped = stampRepoIds(presenceIn);
+	// Non-git path ⇒ name:<basename> identity, derived locally.
+	expect(stamped.agents[0]?.repoId).toBe("name:path");
+	// Input roster untouched (no in-place mutation of the manager's DTOs).
+	expect(presenceIn.agents[0]?.repoId).toBeUndefined();
+});
+
+test("stampRepoIds keeps an already-present repoId", () => {
+	const presenceIn = presence({
+		operator: { id: "me", origin: "local" },
+		agents: [agent({ id: "a1", repo: "/x", repoId: "github.com/acme/app", branch: "main" })],
+	});
+	expect(stampRepoIds(presenceIn).agents[0]?.repoId).toBe("github.com/acme/app");
 });
 
 // ── TailnetFederationBus (no coordinator) ─────────────────────────────────────

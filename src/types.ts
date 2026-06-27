@@ -394,8 +394,13 @@ export interface AgentDTO {
 	parentId?: string;
 	/** flue-service only: passed the acceptance gate at onboard time. */
 	verified?: boolean;
-	/** Repo root the worktree was cut from. */
+	/** Repo root the worktree was cut from (host-local path; for display). */
 	repo: string;
+	/** Cross-host repo identity (normalized git origin — see repo-identity.ts). OPTIONAL: when
+	 *  absent, federation derives it lazily from `repo`. Carrying it on the DTO lets a peer's
+	 *  presence frame, gossiped over the wire, be collision-matched against ours without each host
+	 *  re-running git on the other's path (which it can't reach). */
+	repoId?: string;
 	/** Absolute path of this agent's git worktree (its cwd). */
 	worktree: string;
 	branch?: string;
