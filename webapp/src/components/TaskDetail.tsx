@@ -7,7 +7,7 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { TaskProperties } from './TaskProperties';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
-import { apiJson } from '../lib/api';
+import { apiJson, jsonInit } from '../lib/api';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
 import type { ArtifactCommentDTO } from '../lib/dto';
 
@@ -55,6 +55,31 @@ interface PipelinePayload {
   issues: PipelineIssue[];
   comments: ArtifactCommentDTO[];
   agentIds: string[];
+}
+
+interface FeatureModuleResponse {
+  moduleUrl: string;
+  issueIdentifiers: string[];
+  createdIssues: { id: string; identifier?: string; name: string; url?: string }[];
+}
+
+interface FeatureModuleRepairResponse {
+  moduleUrl: string;
+  issueIdentifiers: string[];
+  linkedIssues: { id: string; identifier?: string; name: string; url?: string }[];
+  closedIssues: { id: string; identifier?: string; name: string; url?: string }[];
+}
+
+interface PlaneTicket {
+  identifier: string;
+  name: string;
+  status: string;
+  url: string;
+}
+
+interface PlaneLinks {
+  tickets: PlaneTicket[] | null;
+  moduleUrl?: string;
 }
 
 const EmptyStateIllustration = () => (
@@ -283,10 +308,11 @@ function highlightQuote(root: HTMLElement, annotation: TaskComment) {
 }
 
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast } = useTaskContext();
+  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
+  const [criteriaFolded, setCriteriaFolded] = React.useState(false);
   const [newDecisionText, setNewDecisionText] = React.useState('');
   const [newRelationshipText, setNewRelationshipText] = React.useState('');
   const [commentText, setCommentText] = React.useState('');
@@ -294,18 +320,22 @@ export const TaskDetail = () => {
   const [expandedContext, setExpandedContext] = React.useState<string | null>(null);
   const [selectedDoc, setSelectedDoc] = React.useState<string | null>(null);
   const [pipeline, setPipeline] = React.useState<PipelinePayload | null>(null);
+  const [planeLinks, setPlaneLinks] = React.useState<PlaneLinks | null>(null);
   const [comments, setComments] = React.useState<TaskComment[]>([]);
 
   const [annotationText, setAnnotationText] = React.useState('');
   const [annotationDraft, setAnnotationDraft] = React.useState<AnnotationDraft | null>(null);
   const [activeAnnotationId, setActiveAnnotationId] = React.useState<string | null>(null);
   const [sendingAnnotationId, setSendingAnnotationId] = React.useState<string | null>(null);
+  const [planAction, setPlanAction] = React.useState<'implement' | 'module' | 'module-tickets' | 'repair' | 'clear-orphans' | null>(null);
   const [targetAgentByAnnotation, setTargetAgentByAnnotation] = React.useState<Record<string, string>>({});
   const [mainPanePercent, setMainPanePercent] = React.useState(() => clamp(storedNumber('omp.taskDetail.mainPanePercent', 48), 30, 72));
   const splitContainerRef = React.useRef<HTMLDivElement | null>(null);
   const planArticleRef = React.useRef<HTMLElement | null>(null);
   const planScrollRef = React.useRef<HTMLDivElement | null>(null);
   const annotationTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const pipelineRequestRef = React.useRef(0);
+  const planeLinksRequestRef = React.useRef(0);
   const task = tasks.find(t => t.id === selectedTaskId);
 
   const selectedPlanDoc = React.useMemo(() => {
@@ -337,19 +367,35 @@ export const TaskDetail = () => {
   }, [planAnnotations, selectedPlanDoc]);
 
 
+  const loadPipeline = React.useCallback(async () => {
+    if (!featureId || !repo) return;
+    const requestId = ++pipelineRequestRef.current;
+    const payload = await apiJson<PipelinePayload>(`/api/features/${encodeURIComponent(featureId)}/pipeline?repo=${encodeURIComponent(repo)}`);
+    if (requestId !== pipelineRequestRef.current) return;
+    setPipeline(payload);
+    setSelectedDoc((current) => current && payload.documents.some((doc) => doc.path === current) ? current : preferredPlanDoc(payload.documents)?.path ?? null);
+    if (payload.comments.length) setComments(payload.comments.map(commentFromApi));
+  }, [featureId, preferredPlanDoc, repo]);
+
+  const loadPlaneLinks = React.useCallback(async () => {
+    if (!featureId) return;
+    const requestId = ++planeLinksRequestRef.current;
+    const payload = await apiJson<PlaneLinks>(`/api/features/${encodeURIComponent(featureId)}/tickets`);
+    if (requestId !== planeLinksRequestRef.current) return;
+    setPlaneLinks(payload);
+  }, [featureId]);
+
   React.useEffect(() => {
+    pipelineRequestRef.current += 1;
+    planeLinksRequestRef.current += 1;
     setPipeline(null);
+    setPlaneLinks(null);
     setComments(task?.comments ?? []);
     setSelectedDoc(null);
     if (!task || !featureId || !repo) return;
-    void apiJson<PipelinePayload>(`/api/features/${encodeURIComponent(featureId)}/pipeline?repo=${encodeURIComponent(repo)}`)
-      .then((payload) => {
-        setPipeline(payload);
-        setSelectedDoc(preferredPlanDoc(payload.documents)?.path ?? null);
-        if (payload.comments.length) setComments(payload.comments.map(commentFromApi));
-      })
-      .catch(() => undefined);
-  }, [task?.id, featureId, repo, preferredPlanDoc]);
+    void loadPipeline().catch(() => undefined);
+    void loadPlaneLinks().catch(() => undefined);
+  }, [loadPipeline, loadPlaneLinks, task?.id, featureId, repo]);
 
   React.useEffect(() => {
     if (!featureId || !repo) return;
@@ -537,6 +583,67 @@ export const TaskDetail = () => {
     setCommentText('');
   };
 
+  const startImplementation = async () => {
+    if (!task || !featureId || !repo) return;
+    setPlanAction('implement');
+    try {
+      await apiJson(`/api/features/${encodeURIComponent(featureId)}/agents`, jsonInit('POST', {
+        repo,
+        name: task.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || undefined,
+        task: [
+          `Implement: ${task.title}`,
+          '',
+          `Feature id: ${featureId}`,
+          task.contextBundle.spec ? `Plan context: ${task.contextBundle.spec}` : '',
+          'Use the plan documents as implementation context. Keep changes scoped to the selected plan and leave verification evidence.',
+        ].filter(Boolean).join('\n'),
+      }));
+      showToast('Implementation agent started', 'success');
+      void reload().catch(() => undefined);
+      void loadPipeline().catch(() => undefined);
+      void loadPlaneLinks().catch(() => undefined);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not start implementation', 'error');
+    } finally {
+      setPlanAction(null);
+    }
+  };
+
+  const createPlaneModule = async (tickets: boolean) => {
+    if (!featureId || !repo) return;
+    setPlanAction(tickets ? 'module-tickets' : 'module');
+    try {
+      const result = await apiJson<FeatureModuleResponse>(`/api/features/${encodeURIComponent(featureId)}/module`, jsonInit('POST', { repo, tickets }));
+      const created = result.createdIssues.length;
+      const linked = result.issueIdentifiers.length;
+      showToast(tickets ? `Plane module ready: ${created || linked} ticket${(created || linked) === 1 ? '' : 's'}` : 'Plane module ready', 'success');
+      if (result.moduleUrl) window.open(result.moduleUrl, '_blank', 'noopener,noreferrer');
+      void reload().catch(() => undefined);
+      void loadPipeline().catch(() => undefined);
+      void loadPlaneLinks().catch(() => undefined);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not create Plane module', 'error');
+    } finally {
+      setPlanAction(null);
+    }
+  };
+
+  const repairPlaneModule = async (closeOrphans: boolean) => {
+    if (!featureId || !repo) return;
+    setPlanAction(closeOrphans ? 'clear-orphans' : 'repair');
+    try {
+      const result = await apiJson<FeatureModuleRepairResponse>(`/api/features/${encodeURIComponent(featureId)}/module/repair`, jsonInit('POST', { repo, closeOrphans }));
+      showToast(closeOrphans ? `Cleared ${result.closedIssues.length} orphan ticket${result.closedIssues.length === 1 ? '' : 's'}` : `Synced ${result.linkedIssues.length} ticket${result.linkedIssues.length === 1 ? '' : 's'}`, 'success');
+      void reload().catch(() => undefined);
+      void loadPipeline().catch(() => undefined);
+      void loadPlaneLinks().catch(() => undefined);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not repair Plane module', 'error');
+    } finally {
+      setPlanAction(null);
+    }
+  };
+
   const renderContextDetail = () => {
     if (!task || !expandedContext) return null;
     if (expandedContext === 'spec') {
@@ -608,29 +715,102 @@ export const TaskDetail = () => {
                   <span>Updated {formatWhen(selectedPlanDoc.updatedAt)}</span>
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-2" aria-label="Plan document navigation">
-                <button
-                  type="button"
-                  disabled={!previousPlanPath}
-                  onClick={() => previousPlanPath && selectPlanDoc(previousPlanPath)}
-                  className={PLAN_NAV_BUTTON_CLASS}
-                  aria-label="Previous plan document"
-                >
-                  <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-                  Prev
-                </button>
-                <button
-                  type="button"
-                  disabled={!nextPlanPath}
-                  onClick={() => nextPlanPath && selectPlanDoc(nextPlanPath)}
-                  className={PLAN_NAV_BUTTON_CLASS}
-                  aria-label="Next plan document"
-                >
-                  Next
-                  <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                </button>
+              <div className="flex shrink-0 flex-col gap-2">
+                <div className="flex items-center gap-2" aria-label="Plan document navigation">
+                  <button
+                    type="button"
+                    disabled={!previousPlanPath}
+                    onClick={() => previousPlanPath && selectPlanDoc(previousPlanPath)}
+                    className={PLAN_NAV_BUTTON_CLASS}
+                    aria-label="Previous plan document"
+                  >
+                    <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!nextPlanPath}
+                    onClick={() => nextPlanPath && selectPlanDoc(nextPlanPath)}
+                    className={PLAN_NAV_BUTTON_CLASS}
+                    aria-label="Next plan document"
+                  >
+                    Next
+                    <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-2" aria-label="Plan actions">
+                  <button
+                    type="button"
+                    disabled={planAction !== null}
+                    onClick={() => void startImplementation()}
+                    className="inline-flex min-h-8 items-center gap-1 rounded-md bg-gray-900 px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200 dark:focus-visible:ring-offset-gray-950"
+                  >
+                    <Bot className="h-4 w-4" aria-hidden="true" />
+                    {planAction === 'implement' ? 'Starting...' : 'Implement'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={planAction !== null}
+                    onClick={() => void createPlaneModule(false)}
+                    className={PLAN_NAV_BUTTON_CLASS}
+                  >
+                    <Box className="h-4 w-4" aria-hidden="true" />
+                    {planAction === 'module' ? 'Creating...' : 'Module'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={planAction !== null}
+                    onClick={() => void createPlaneModule(true)}
+                    className={PLAN_NAV_BUTTON_CLASS}
+                  >
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    {planAction === 'module-tickets' ? 'Creating...' : 'Module + tickets'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={planAction !== null}
+                    onClick={() => void repairPlaneModule(false)}
+                    className={PLAN_NAV_BUTTON_CLASS}
+                  >
+                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                    {planAction === 'repair' ? 'Syncing...' : 'Sync tickets'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={planAction !== null}
+                    onClick={() => void repairPlaneModule(true)}
+                    className={PLAN_NAV_BUTTON_CLASS}
+                  >
+                    <X className="h-4 w-4" aria-hidden="true" />
+                    {planAction === 'clear-orphans' ? 'Clearing...' : 'Clear orphans'}
+                  </button>
+                </div>
               </div>
             </div>
+            {planeLinks && (planeLinks.moduleUrl || planeLinks.tickets === null || (planeLinks.tickets?.length ?? 0) > 0) && (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-900/50 dark:text-gray-300" aria-label="Plane links">
+                <span className="inline-flex items-center gap-1 font-semibold text-gray-700 dark:text-gray-200">
+                  <Box className="h-3.5 w-3.5" aria-hidden="true" />
+                  Plane
+                </span>
+                {planeLinks.moduleUrl && (
+                  <a href={planeLinks.moduleUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-200 bg-white px-2 py-1 font-medium text-blue-700 transition-colors hover:bg-blue-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-blue-300 dark:hover:bg-blue-950/40">
+                    Module linked
+                  </a>
+                )}
+                {planeLinks.tickets === null ? (
+                  <span className="rounded bg-amber-50 px-2 py-1 font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">Tickets unavailable</span>
+                ) : (
+                  <span className="rounded bg-gray-100 px-2 py-1 font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">{planeLinks.tickets.length} ticket{planeLinks.tickets.length === 1 ? '' : 's'}</span>
+                )}
+                {planeLinks.tickets?.slice(0, 4).map((ticket) => (
+                  <a key={ticket.identifier} href={ticket.url} target="_blank" rel="noreferrer" className="max-w-44 truncate rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300 dark:hover:bg-gray-900" title={`${ticket.identifier}: ${ticket.name}`}>
+                    {ticket.identifier}
+                  </a>
+                ))}
+                {(planeLinks.tickets?.length ?? 0) > 4 && <span className="text-gray-400">+{(planeLinks.tickets?.length ?? 0) - 4} more</span>}
+              </div>
+            )}
             <div>
               <div className="mb-2 flex items-center justify-between gap-3">
                 <div className="text-[11px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Documents</div>
@@ -794,10 +974,13 @@ export const TaskDetail = () => {
 
               <div className="mb-7">
                 <div className="flex items-center justify-between mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-                  <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2">Acceptance Criteria <span className="text-gray-500 font-medium">{task.acceptanceCriteria.filter(c => c.completed).length} / {task.acceptanceCriteria.length}</span></div>
-                  <button onClick={() => setIsAddingCriteria(true)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xs font-medium flex items-center gap-1 transition-colors"><Plus className="w-3 h-3" /> Add</button>
+                  <button type="button" onClick={() => setCriteriaFolded((value) => !value)} className="flex min-h-8 items-center gap-2 rounded text-left text-[11px] font-semibold uppercase tracking-widest text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-gray-300" aria-expanded={!criteriaFolded} aria-controls="acceptance-criteria-list">
+                    <ChevronRight className={`h-3.5 w-3.5 transition-transform ${criteriaFolded ? '' : 'rotate-90'}`} aria-hidden="true" />
+                    Acceptance Criteria <span className="text-gray-500 font-medium">{task.acceptanceCriteria.filter(c => c.completed).length} / {task.acceptanceCriteria.length}</span>
+                  </button>
+                  <button onClick={() => { setCriteriaFolded(false); setIsAddingCriteria(true); }} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xs font-medium flex items-center gap-1 transition-colors"><Plus className="w-3 h-3" /> Add</button>
                 </div>
-                <div className="space-y-1.5">
+                {!criteriaFolded && <div id="acceptance-criteria-list" className="space-y-1.5">
                   {task.acceptanceCriteria.length === 0 && !isAddingCriteria ? <div className="text-gray-400 dark:text-gray-500 italic text-sm py-2">No acceptance criteria defined.</div> : task.acceptanceCriteria.map(criteria => (
                     <div key={criteria.id} className="group flex items-start gap-3 p-3 border border-gray-200 dark:border-gray-800 rounded-lg hover:border-gray-300 dark:hover:border-gray-700 bg-white dark:bg-gray-900 transition-colors">
                       <input type="checkbox" checked={criteria.completed} onChange={() => handleToggleCriteria(criteria.id)} className="mt-1 w-4 h-4 text-blue-600 rounded border-gray-300 dark:border-gray-700 focus:ring-blue-500 bg-transparent cursor-pointer" />
@@ -806,7 +989,7 @@ export const TaskDetail = () => {
                     </div>
                   ))}
                   {isAddingCriteria && <div className="flex items-start gap-3 p-3 border border-blue-300 dark:border-blue-700 rounded-lg bg-blue-50/30 dark:bg-blue-900/10"><input type="checkbox" disabled className="mt-1 w-4 h-4 text-gray-300 rounded border-gray-200 bg-transparent" /><input autoFocus type="text" value={newCriteriaText} onChange={(e) => setNewCriteriaText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddCriteria(); if (e.key === 'Escape') setIsAddingCriteria(false); }} placeholder="Add acceptance criteria..." className="flex-1 bg-transparent border-none outline-none text-sm w-full dark:text-gray-200" /><button onClick={handleAddCriteria} className="text-xs px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded font-medium transition-colors">Save</button></div>}
-                </div>
+                </div>}
               </div>
 
               <div className="mb-7">

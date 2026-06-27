@@ -4,8 +4,7 @@
  */
 
 import React from 'react';
-import { Sidebar } from './components/Sidebar';
-import { TaskList } from './components/TaskList';
+import { WorkbenchPane } from './components/WorkbenchPane';
 import { TaskDetail } from './components/TaskDetail';
 import { TaskProvider, useTaskContext } from './context/TaskContext';
 import { GlobalShortcuts } from './components/GlobalShortcuts';
@@ -21,7 +20,7 @@ const readStoredBoolean = (key: string, fallback: boolean) => {
   return stored === null ? fallback : stored === 'true';
 };
 
-const MainContent = ({ taskListCollapsed, onToggleTaskList }: { taskListCollapsed: boolean; onToggleTaskList: () => void }) => {
+const MainContent = () => {
   const { view } = useTaskContext();
   
   if (view === 'capabilities') {
@@ -30,7 +29,6 @@ const MainContent = ({ taskListCollapsed, onToggleTaskList }: { taskListCollapse
   
   return (
     <>
-      <TaskList collapsed={taskListCollapsed} onToggleCollapsed={onToggleTaskList} />
       <TaskDetail />
     </>
   );
@@ -38,21 +36,16 @@ const MainContent = ({ taskListCollapsed, onToggleTaskList }: { taskListCollapse
 
 const AppContent = () => {
   const { isChatOpen, setIsChatOpen } = useTaskContext();
-  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(() => readStoredBoolean('omp.sidebar.collapsed', false));
-  const [taskListCollapsed, setTaskListCollapsed] = React.useState(() => readStoredBoolean('omp.taskList.collapsed', false));
+  const [workbenchCollapsed, setWorkbenchCollapsed] = React.useState(() => readStoredBoolean('omp.workbench.collapsed', false));
 
   React.useEffect(() => {
-    window.localStorage.setItem('omp.sidebar.collapsed', String(sidebarCollapsed));
-  }, [sidebarCollapsed]);
-
-  React.useEffect(() => {
-    window.localStorage.setItem('omp.taskList.collapsed', String(taskListCollapsed));
-  }, [taskListCollapsed]);
+    window.localStorage.setItem('omp.workbench.collapsed', String(workbenchCollapsed));
+  }, [workbenchCollapsed]);
   
   return (
     <div className="h-screen w-full flex overflow-hidden text-sm font-sans bg-[#f7f8f9] dark:bg-gray-950 text-gray-800 dark:text-gray-200 transition-colors duration-200">
-      <Sidebar collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)} />
-      <MainContent taskListCollapsed={taskListCollapsed} onToggleTaskList={() => setTaskListCollapsed((collapsed) => !collapsed)} />
+      <WorkbenchPane collapsed={workbenchCollapsed} onToggleCollapsed={() => setWorkbenchCollapsed((collapsed) => !collapsed)} />
+      <MainContent />
       {isChatOpen && (
         <AssistantChat onClose={() => setIsChatOpen(false)} />
       )}

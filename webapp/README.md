@@ -17,15 +17,17 @@ Live agent turns render as a compact work timeline: the prompt stays separate,
 the current action shimmers while the agent is thinking or calling tools, tool
 payloads expand on demand, and completed work folds behind a "Worked for..."
 summary with an inline `/api/agents/:id/diff` review panel for changed files.
-The task detail view persists description, acceptance criteria, decisions,
+The task detail view persists description, foldable acceptance criteria, decisions,
 relationships, and comments back to daemon APIs; the context bundle rows drill
 into plan documents, linked issues, prerequisites, decisions, and downstream
 agents. Selecting a plan document renders GitHub-flavored markdown, including
 tables, in a draggable split reading pane so operators can review the source plan
-without losing the editable task context. The workspace pane and task list pane
-can collapse to compact rails when the plan needs more room. The task/detail
-split and assistant chat keep keyboard-accessible drag handles with persisted
-widths and double-click reset defaults, tuned for denser laptop-sized workspaces.
+without losing the editable task context. The left workbench pane combines
+project context, task status buckets, workspace progress, filters, search, and
+task selection into one collapsible surface when the plan needs more room. The
+task/detail split and assistant chat keep keyboard-accessible drag handles with
+persisted widths and double-click reset defaults, tuned for denser laptop-sized
+workspaces.
 The task list trash action archives the backing feature; for plan-derived rows,
 the daemon adopts the plan first so stale `plans/<name>` directories stay hidden
 after refresh.
