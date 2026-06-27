@@ -81,11 +81,17 @@ export class AutomationLog {
 	private readonly ring: AutomationEvent[] = [];
 	private readonly max: number;
 	private readonly onEvent?: (e: AutomationEvent) => void;
+	/** Where failures (spool/hydrate) surface. Defaults to console.warn so a silently-failing spool is at
+	 *  least visible; the manager can inject its own structured logger. */
+	private readonly log: (msg: string) => void;
+	/** Spool failures are logged once per error episode (not per event) so a wedged disk doesn't flood. */
+	private spoolFailing = false;
 
-	constructor(baseDir: string, opts: { max?: number; onEvent?: (e: AutomationEvent) => void } = {}) {
+	constructor(baseDir: string, opts: { max?: number; onEvent?: (e: AutomationEvent) => void; log?: (msg: string) => void } = {}) {
 		this.baseDir = baseDir;
 		this.max = opts.max ?? RING_MAX;
 		this.onEvent = opts.onEvent;
+		this.log = opts.log ?? ((m) => console.warn(`[automation-log] ${m}`));
 		this.hydrate();
 	}
 
@@ -95,8 +101,10 @@ export class AutomationLog {
 		return (report: AutomationReport) => {
 			try {
 				this.record({ ...report, loop, repo });
-			} catch {
-				/* recording must never break the loop it observes */
+			} catch (err) {
+				// Recording must never break the loop it observes — but a swallowed recorder error means the
+				// loop's activity went unrecorded, so surface it (non-fatally) instead of dropping it silently.
+				this.log(`failed to record ${loop} event (loop continues): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		};
 	}
@@ -116,8 +124,18 @@ export class AutomationLog {
 			const file = automationPath(this.baseDir);
 			await fs.mkdir(path.dirname(file), { recursive: true });
 			await fs.appendFile(file, `${JSON.stringify(e)}\n`);
-		} catch {
-			/* best-effort — the ring still has it for the live feed */
+			if (this.spoolFailing) {
+				this.spoolFailing = false;
+				this.log("automation spool recovered — meaningful events are persisting again");
+			}
+		} catch (err) {
+			// Best-effort persistence — the ring still has it for the live feed — but a silently-failing spool
+			// means the meaningful/costly history is being LOST on restart, which the operator must know about.
+			// Surface it once per failure episode (not per event) so a wedged disk doesn't flood the log.
+			if (!this.spoolFailing) {
+				this.spoolFailing = true;
+				this.log(`automation spool failed (meaningful events are NOT persisting): ${err instanceof Error ? err.message : String(err)}`);
+			}
 		}
 	}
 
@@ -126,8 +144,11 @@ export class AutomationLog {
 		let text: string;
 		try {
 			text = readFileSync(automationPath(this.baseDir), "utf8");
-		} catch {
-			return; // no spool yet
+		} catch (err) {
+			// A missing spool is the normal first-boot case; any OTHER read error (permissions, I/O) means the
+			// persisted history exists but couldn't be loaded — surface it rather than silently starting empty.
+			if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") this.log(`automation spool unreadable on hydrate — starting with empty history: ${err instanceof Error ? err.message : String(err)}`);
+			return;
 		}
 		const lines = text.split("\n").filter((l) => l.trim());
 		for (const line of lines.slice(-this.max)) {

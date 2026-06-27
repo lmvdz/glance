@@ -138,6 +138,12 @@ export function isBlockedIp(ip: string): boolean {
  * Validate a vision target URL against SSRF. Allows only http(s); allowlisted origins
  * (`OMP_SQUAD_APP_URL`) pass without a range check; everything else is DNS-resolved and rejected
  * if ANY resolved address is private/loopback/link-local/reserved.
+ *
+ * `allow` is the set of origins exempt from the private-range block. It defaults to the
+ * operator-configured `OMP_SQUAD_APP_URL` origin (the vision pass's one exception). Callers whose
+ * URL comes from TRUSTED daemon config — not an untrusted agent/user — can pass a wider allow set
+ * (e.g. the configured trace-collector origins). DO NOT pass a user-supplied URL's own origin into
+ * `allow`: that would defeat the guard. See `trace-exporter.ts` for the trusted-collector path.
  */
 export async function checkVisionUrl(raw: string, allow: Set<string> = allowlistOrigins()): Promise<UrlCheck> {
 	let url: URL;

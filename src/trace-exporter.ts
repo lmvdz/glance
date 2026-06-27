@@ -1,6 +1,6 @@
 /** Bounded trace export seam. No SDK, no durable retry: receipts are source of truth. */
 
-import { checkVisionUrl } from "./ssrf.ts";
+import { allowlistOrigins, checkVisionUrl } from "./ssrf.ts";
 import type { Span } from "./spans.ts";
 
 export interface TraceResource {
@@ -24,8 +24,53 @@ function timeoutMs(): number {
 	return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
 }
 
-async function guardedPost(url: string, body: unknown, headers: Record<string, string>, fetcher: FetchLike): Promise<void> {
-	const checked = await checkVisionUrl(url);
+/**
+ * Trace collectors normally live on loopback/RFC1918 (a local OTLP agent, a private Langfuse, a
+ * tailnet Datadog gateway), which the shared SSRF guard blocks by default. Unlike the vision pass —
+ * whose target URL is supplied by an untrusted caller — the collector URL comes from TRUSTED daemon
+ * config/env, so it's safe to exempt it from the private-range block. We do that ONLY when the
+ * operator opts in via `OMP_SQUAD_TRACE_ALLOW_PRIVATE=1`, and ONLY for the exact origin(s) the
+ * operator configured — never a blanket bypass. An empty set ⇒ the strict guard applies unchanged.
+ */
+function traceAllowPrivate(): boolean {
+	return process.env.OMP_SQUAD_TRACE_ALLOW_PRIVATE === "1";
+}
+
+/** Origin of a configured collector URL, or undefined if malformed/empty. */
+function originOf(url: string | undefined): string | undefined {
+	if (!url) return undefined;
+	try {
+		return new URL(url).origin;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The allow set for the trace-export SSRF check. Always includes the vision pass's default
+ * (`OMP_SQUAD_APP_URL`). When `OMP_SQUAD_TRACE_ALLOW_PRIVATE=1`, additionally exempts the exact
+ * origins of the OPERATOR-CONFIGURED collector endpoints (the three `OMP_SQUAD_TRACE_EXPORT_*_URL`
+ * env vars) so a private/loopback collector is reached — while any OTHER private host (a redirect, a
+ * stray non-configured URL, a metadata IP) is STILL blocked. We exempt only origins the operator put
+ * in config, never the URL-being-posted's own origin, so the trust is anchored to config, not to the
+ * request. An empty/no-opt-in set ⇒ the strict guard applies unchanged.
+ */
+export function traceCollectorAllow(): Set<string> {
+	const allow = allowlistOrigins();
+	if (!traceAllowPrivate()) return allow;
+	for (const env of [
+		process.env.OMP_SQUAD_TRACE_EXPORT_OTLP_URL,
+		process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL,
+		process.env.OMP_SQUAD_TRACE_EXPORT_DATADOG_URL,
+	]) {
+		const origin = originOf(env);
+		if (origin) allow.add(origin);
+	}
+	return allow;
+}
+
+async function guardedPost(url: string, body: unknown, headers: Record<string, string>, fetcher: FetchLike, allow: Set<string> = traceCollectorAllow()): Promise<void> {
+	const checked = await checkVisionUrl(url, allow);
 	if (!checked.ok) throw new Error(checked.reason);
 	const res = await fetcher(checked.url.href, {
 		method: "POST",

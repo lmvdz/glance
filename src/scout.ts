@@ -89,6 +89,56 @@ export const MIN_SCAN_CHARS = 200;
 const MAX_TEXT = 8000; // cap LLM input to the most recent chars (conclusions/deferrals live at the end)
 const DEDUP_THRESHOLD = 0.6; // title-token Jaccard above which a candidate is a dup of existing work
 
+/** Default global cap on Scout LLM calls per rolling hour — a verbose multi-agent fleet can otherwise
+ *  burn dozens of scout one-shots/hour (one per scan). Bounds spend regardless of how many issues get
+ *  filed (the OMP_SQUAD_SCOUT_MAX/PER_RUN caps bound FILINGS, not CALLS). 0 / negative ⇒ unlimited. */
+export const DEFAULT_SCOUT_MAX_CALLS_PER_HOUR = 30;
+
+/** Resolved per-hour LLM-call budget from OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR (default 30; <=0 ⇒ unlimited). */
+export function scoutMaxCallsPerHour(): number {
+	const raw = process.env.OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR;
+	if (raw === undefined || raw === "") return DEFAULT_SCOUT_MAX_CALLS_PER_HOUR;
+	const n = Number(raw);
+	return Number.isFinite(n) ? Math.floor(n) : DEFAULT_SCOUT_MAX_CALLS_PER_HOUR;
+}
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * Sliding-window limiter over Scout LLM calls. Records each call's timestamp; `tryConsume` admits a
+ * call only if fewer than `max` calls fall within the trailing hour. Self-contained (no manager
+ * dependency) and clock-injectable so it tests headless. `max <= 0` ⇒ unlimited (always admits).
+ */
+export class ScoutCallBudget {
+	private readonly stamps: number[] = [];
+	constructor(
+		private readonly maxPerHour: () => number,
+		private readonly now: () => number = Date.now,
+	) {}
+
+	/** Drop stamps older than the trailing hour, then report how many calls remain in the window. */
+	private prune(t: number): void {
+		const cutoff = t - HOUR_MS;
+		while (this.stamps.length && this.stamps[0] <= cutoff) this.stamps.shift();
+	}
+
+	/** Calls made in the trailing hour (for observability / tests). */
+	used(t: number = this.now()): number {
+		this.prune(t);
+		return this.stamps.length;
+	}
+
+	/** Admit + record one call if under budget; return false (and record nothing) when the hour is full. */
+	tryConsume(): boolean {
+		const max = this.maxPerHour();
+		const t = this.now();
+		this.prune(t);
+		if (max > 0 && this.stamps.length >= max) return false;
+		this.stamps.push(t);
+		return true;
+	}
+}
+
 const PROMPT_HEAD = `You are a backlog scout reading an AI software engineer's work session.
 Extract ONLY concrete, file-worthy work items the engineer SURFACED but did NOT complete here:
 bugs noticed in passing, deferred follow-ups, tech debt called out, design risks, "out of scope" notes.
@@ -169,6 +219,25 @@ function fingerprint(title: string): string {
 const esc = (s: string): string =>
 	s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
+/**
+ * Run a transient external (Plane) call with ONE retry, then surface-and-swallow. A thrown Plane
+ * error used to be caught silently with `() => null`, degrading the dedup-against-open-issues pass
+ * (the scan would file against an empty open-set) with no signal. This retries once; if both throw it
+ * runs `onFail` and returns `fallback`, keeping the scan non-fatal.
+ */
+async function withRetry<T>(fn: () => Promise<T>, fallback: T, onFail: (e: unknown) => void): Promise<T> {
+	try {
+		return await fn();
+	} catch {
+		try {
+			return await fn();
+		} catch (e) {
+			onFail(e);
+			return fallback;
+		}
+	}
+}
+
 /** Ticket body HTML — provenance first (so triage knows where it came from), then the detail. */
 function buildBody(t: ScoutTicket, ctx: ScanContext): string {
 	const where = ctx.issue ? ` while working <code>${esc(ctx.issue)}</code>` : "";
@@ -200,11 +269,14 @@ export class Scout {
 	private running = false;
 	/** Serializes scan() bodies so the seen-set check/write is race-free across mid-run + run-end. */
 	private queue: Promise<void> = Promise.resolve();
+	/** Global per-hour cap on Scout LLM calls — bounds spend across the whole fleet (OMPSQ #16). */
+	private readonly budget: ScoutCallBudget;
 
 	constructor(deps: ScoutDeps) {
 		this.deps = deps;
 		this.seenPath = path.join(deps.stateDir, deps.seenFile ?? "scout-seen.json");
 		this.seen = this.loadSeen();
+		this.budget = new ScoutCallBudget(scoutMaxCallsPerHour, deps.now ?? Date.now);
 	}
 
 	/** Arm the periodic mid-run sweep. No-op (arms no timer) when disabled or without a liveReasoning dep. */
@@ -247,6 +319,15 @@ export class Scout {
 		if (process.env.OMP_SQUAD_SCOUT === "0" || text.length < MIN_SCAN_CHARS) return;
 		const log = this.deps.log ?? (() => {});
 		const clock = this.deps.now ?? Date.now;
+		// Global per-hour LLM-call budget (OMPSQ #16): a verbose fleet can otherwise burn dozens of scout
+		// one-shots/hour. When the window is full, skip the (costly) extraction for this scan — recording a
+		// non-error skip heartbeat so the throttling is observable, NOT an error (it's expected, by design).
+		// No fingerprint/cursor is consumed, so the same reasoning is re-harvested once the window reopens.
+		if (!this.budget.tryConsume()) {
+			log(`scout LLM budget reached (${scoutMaxCallsPerHour()}/h) — skipping extraction for ${ctx.agent}`);
+			this.deps.record?.({ agent: ctx.agent, durationMs: 0, llmCalls: 0, level: "warn", detail: `scout LLM budget reached (${scoutMaxCallsPerHour()}/h) — extraction skipped` });
+			return;
+		}
 		// t0 spans the LLM call: an event is emitted on EVERY path past here (even no-tickets / error) because
 		// the one-shot already cost a call — that spend is the whole reason the operator wants this visible.
 		const t0 = clock();
@@ -256,7 +337,15 @@ export class Scout {
 			const tickets = parseTickets(await this.deps.extract(buildPrompt(ctx.task, text)));
 			found = tickets.length;
 			if (tickets.length) {
-				const open = (await this.deps.listIssues().catch(() => null)) ?? [];
+				// Open-issue list is a transient external (Plane) call: retry once, then warn instead of silently
+				// degrading dedup. `null` (Plane unreachable) is a clean signal; only a THROW retries/warns. A
+				// failed list ⇒ we proceed with [] (the seen-set still prevents the worst re-files).
+				const open =
+					(await withRetry(
+						() => this.deps.listIssues(),
+						null,
+						(e) => log(`listIssues failed after retry — dedup-against-open degraded for this scan: ${e instanceof Error ? e.message : String(e)}`),
+					)) ?? [];
 				const openTokens = open.map((i) => titleTokens(i.name));
 				let openScout = open.filter((i) => i.name.includes(SCOUT_TAG)).length;
 				const max = Number(process.env.OMP_SQUAD_SCOUT_MAX) || 20; // cap on scout-filed OPEN issues
@@ -300,8 +389,11 @@ export class Scout {
 			if (!existsSync(this.seenPath)) return {};
 			const raw = JSON.parse(readFileSync(this.seenPath, "utf8")) as unknown;
 			return raw && typeof raw === "object" ? (raw as SeenMap) : {};
-		} catch {
-			return {}; // corrupt/unreadable ⇒ start fresh (worst case: one redundant re-file)
+		} catch (e) {
+			// Corrupt/unreadable ⇒ start fresh (worst case: one redundant re-file) — but surface it: a wiped
+			// seen-map means dedup is silently degraded and the scout may re-file already-filed tickets.
+			(this.deps.log ?? (() => {}))(`scout seen-map unreadable — starting fresh (dedup degraded): ${e instanceof Error ? e.message : String(e)}`);
+			return {};
 		}
 	}
 
