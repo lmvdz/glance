@@ -24,9 +24,11 @@ Make proof and provenance visible in the feature/task detail view without making
 
 ## Acceptance Criteria
 
-- Operators can see what the feature's source of truth is and which branches or plan edits are candidates.
-- Operators can tell at a glance whether proof is fresh, stale, failed, or absent.
-- The panel gives a clear next action without exposing raw command output by default.
+- Operators can see the feature's source of truth, linked Plane tickets, candidate branches, and plan revision candidates in one place.
+- Operators can tell at a glance whether proof is fresh, stale, failed, or absent, and what blocks landing.
+- Operators can start implementation from a plan-backed feature without leaving the detail view.
+- Operators can create a Plane module, or create a Plane module plus concern tickets, from the plan detail view.
+- Raw command output stays hidden by default; evidence links and concise readiness summaries are visible.
 
 ## Cross-Repo Side Effects
 

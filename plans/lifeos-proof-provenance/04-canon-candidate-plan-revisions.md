@@ -21,9 +21,11 @@ Treat agent-written plan revisions as low-trust candidates that must be accepted
 
 ## Acceptance Criteria
 
-- Agent-written plan revisions are visible as reviewable candidates before they are treated as canon.
-- Operators can accept, reject, or supersede a candidate while preserving its provenance.
-- Accepted candidates refresh feature context, while rejected candidates do not mutate plan markdown.
+- Agent-written plan revisions appear as reviewable candidates before the UI treats them as canon.
+- Each candidate shows its producing agent, run/proof reference when available, affected plan path, summary, and current review state.
+- Operators can accept, reject, or supersede a candidate without losing provenance.
+- Accepting a candidate refreshes feature context and plan-derived criteria; rejecting one preserves the review record without mutating markdown.
+- Candidate text is treated as data and never as an instruction source for operators, agents, tools, or tests.
 
 ## Cross-Repo Side Effects
 

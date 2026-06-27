@@ -23,9 +23,10 @@ Expose a computed feature readiness read model that explains whether a feature c
 
 ## Acceptance Criteria
 
-- Each feature exposes a deterministic readiness state, blocker list, and next action.
-- Readiness agrees with the existing land/proof gate and never weakens it.
-- Features with stale, failed, missing, or fresh proof produce distinct operator-facing states.
+- Each feature exposes a deterministic readiness state, blocker list, and next operator action.
+- Readiness explains the existing proof/land gate without replacing or weakening the gate.
+- Missing, stale, failed, and fresh proof produce distinct states an operator can understand without opening logs.
+- A plan-backed feature exposes enough API state for the webapp to start implementation, create a Plane module, and refresh the feature after those actions.
 
 ## Cross-Repo Side Effects
 
