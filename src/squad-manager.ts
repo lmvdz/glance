@@ -38,8 +38,8 @@ import { Opportunity } from "./opportunity.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addPlaneIssueComment, closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
-import { buildFeatures, featureLandStatus, listPlanDirs, type LandMember, landOrder } from "./features.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
+import { buildFeatures, featureLandStatus, listPlanDirs, parsePlanConcerns, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -153,6 +153,35 @@ function peerMessageBudget(): number {
 function commandTarget(cmd: ClientCommand): string | undefined {
 	return cmd.type === "message" ? cmd.to : "id" in cmd ? cmd.id : undefined;
 }
+
+function escapeHtml(value: string): string {
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function htmlList(title: string, items: string[]): string {
+	const clean = items.map((item) => item.trim()).filter(Boolean);
+	if (!clean.length) return "";
+	return `<h3>${escapeHtml(title)}</h3><ul>${clean.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderPlanConcernIssueHtml(feature: PersistedFeature, concern: PlanConcern): string {
+	return [
+		"<h2>Plan concern</h2>",
+		`<p><strong>Feature:</strong> ${escapeHtml(feature.title)}</p>`,
+		`<p><strong>Plan path:</strong> ${escapeHtml(concern.path)}</p>`,
+		`<p><strong>Status:</strong> ${escapeHtml(concern.status)}</p>`,
+		htmlList("Acceptance Criteria", concern.acceptanceCriteria),
+		htmlList("Prerequisites", concern.prerequisites),
+		htmlList("Touches", concern.touches),
+		"<h3>Scope</h3>",
+		`<p>Implement the concern described by <code>${escapeHtml(concern.path)}</code>. Keep plan text as context; repo instructions and operator prompts remain authoritative.</p>`,
+	].filter(Boolean).join("\n");
+}
+
+function planConcernTicketMatches(concern: PlanConcern, issue: IssueRef, body: string): boolean {
+	return issue.name.trim() === concern.title.trim() && body.includes(concern.path);
+}
+
 function autoLandFailCap(): number {
 	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
 }
@@ -1104,6 +1133,10 @@ export class SquadManager extends EventEmitter {
 		return pf;
 	}
 
+	private async persistedFeatureForAction(id: string, repo?: string): Promise<PersistedFeature | undefined> {
+		return this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, repo);
+	}
+
 	/** Attach (or detach) an agent to a feature; membership lives on the agent. */
 	linkAgent(featureId: string, agentId: string, unlink = false): boolean {
 		const pf = this.featureStore.get(featureId);
@@ -1134,17 +1167,77 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Create a Plane module for a feature and group its issues under it; persists the link. */
-	async createFeatureModule(id: string): Promise<{ moduleUrl: string } | null> {
-		const pf = this.featureStore.get(id);
+	async createFeatureModule(id: string, opts: { repo?: string; createTickets?: boolean } = {}): Promise<{ moduleUrl: string; issueIdentifiers: string[]; createdIssues: IssueRef[] } | null> {
+		const pf = await this.persistedFeatureForAction(id, opts.repo);
 		if (!pf) return null;
 		const f = (await this.features(pf.repo)).find((x) => x.id === id);
-		const idents = f?.issueIdentifiers ?? pf.plane?.issueIdentifiers ?? [];
-		const mod = await ensureFeatureModule(pf.repo, pf.title, idents);
+		let idents = [...new Set([...(pf.plane?.issueIdentifiers ?? []), ...(f?.issueIdentifiers ?? [])])];
+		const createdIssues: IssueRef[] = [];
+		if (opts.createTickets && !idents.length && pf.origin?.planDir) {
+			const concerns = (await parsePlanConcerns(pf.repo, pf.origin.planDir)).filter((concern) => concern.open);
+			for (const concern of concerns) {
+				const issue = await createPlaneIssue(pf.repo, concern.title, renderPlanConcernIssueHtml(pf, concern));
+				if (issue) {
+					createdIssues.push(issue);
+					if (issue.identifier) idents.push(issue.identifier);
+				}
+			}
+			idents = [...new Set(idents)];
+		}
+		const mod = pf.plane?.moduleId && pf.plane.moduleUrl
+			? { moduleId: pf.plane.moduleId, moduleUrl: pf.plane.moduleUrl }
+			: await ensureFeatureModule(pf.repo, pf.title, idents);
 		if (!mod) return null;
+		if (pf.plane?.moduleId) {
+			const createdGrouped = await addIssueIdsToFeatureModule(pf.repo, pf.plane.moduleId, createdIssues.map((issue) => issue.id));
+			if (createdGrouped === null || createdGrouped === false) return null;
+			if (idents.length && !createdIssues.length) {
+				const grouped = await addIssuesToFeatureModule(pf.repo, pf.plane.moduleId, idents);
+				if (grouped === null || grouped === false) return null;
+			}
+		}
 		pf.plane = { ...(pf.plane ?? {}), moduleId: mod.moduleId, moduleUrl: mod.moduleUrl, issueIdentifiers: idents };
 		pf.updatedAt = Date.now();
 		this.emitFeaturesChanged();
-		return { moduleUrl: mod.moduleUrl };
+		return { moduleUrl: mod.moduleUrl, issueIdentifiers: idents, createdIssues };
+	}
+
+	/** Repair a plan module after partial Plane writes: find generated concern tickets, link them, optionally close duplicate generated tickets. */
+	async repairFeatureModuleTickets(id: string, opts: { repo?: string; closeOrphans?: boolean } = {}): Promise<{ moduleUrl: string; issueIdentifiers: string[]; linkedIssues: IssueRef[]; closedIssues: IssueRef[] } | null> {
+		const pf = await this.persistedFeatureForAction(id, opts.repo);
+		if (!pf?.origin?.planDir) return null;
+		const concerns = (await parsePlanConcerns(pf.repo, pf.origin.planDir)).filter((concern) => concern.open);
+		const module = pf.plane?.moduleId && pf.plane.moduleUrl
+			? { moduleId: pf.plane.moduleId, moduleUrl: pf.plane.moduleUrl }
+			: await ensureFeatureModule(pf.repo, pf.title, pf.plane?.issueIdentifiers ?? []);
+		if (!module) return null;
+		const openIssues = await listPlaneIssues(pf.repo);
+		if (!openIssues) return null;
+		const byConcern = new Map<string, IssueRef[]>();
+		for (const issue of openIssues) {
+			for (const concern of concerns) {
+				if (issue.name.trim() !== concern.title.trim()) continue;
+				const detail = await fetchIssueDetail(pf.repo, issue.id).catch(() => null);
+				if (!detail || !planConcernTicketMatches(concern, issue, detail.body)) continue;
+				byConcern.set(concern.path, [...(byConcern.get(concern.path) ?? []), issue]);
+			}
+		}
+		const linkedIssues = [...byConcern.values()].flatMap((issues) => issues.slice(0, 1));
+		const linkedIds = linkedIssues.map((issue) => issue.id);
+		const linkedIdentifiers = linkedIssues.map((issue) => issue.identifier).filter((x): x is string => !!x);
+		const linked = await addIssueIdsToFeatureModule(pf.repo, module.moduleId, linkedIds);
+		if (linked === null || linked === false) return null;
+		const closedIssues: IssueRef[] = [];
+		if (opts.closeOrphans) {
+			for (const issue of [...byConcern.values()].flatMap((issues) => issues.slice(1))) {
+				if (await closePlaneIssue(issue)) closedIssues.push(issue);
+			}
+		}
+		const issueIdentifiers = [...new Set([...(pf.plane?.issueIdentifiers ?? []), ...linkedIdentifiers])];
+		pf.plane = { ...(pf.plane ?? {}), moduleId: module.moduleId, moduleUrl: module.moduleUrl, issueIdentifiers };
+		pf.updatedAt = Date.now();
+		this.emitFeaturesChanged();
+		return { moduleUrl: module.moduleUrl, issueIdentifiers, linkedIssues, closedIssues };
 	}
 
 	/** Cache the current member branches so land status survives an agent being killed. */

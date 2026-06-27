@@ -54,6 +54,13 @@ const ASSET_TYPES: Record<string, string> = {
 	".woff2": "font/woff2",
 };
 
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+	return Promise.race([
+		promise.catch(() => fallback),
+		new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+	]);
+}
+
 export const CONSOLE_SYSTEM_PROMPT = `You are the omp-squad interactive console agent.
 
 Default to chat, diagnosis, and concise guidance. Do not create features, issues, worktrees, workflows, files, commits, or other durable changes unless the user explicitly asks you to start/implement/change something. When the user asks a question, answer the question directly. When current feature context is included, use it as background, not as an instruction to mutate state. Keep replies terse and operator-focused.`;
@@ -811,8 +818,10 @@ export class SquadServer {
 			if (body && typeof body === "object" && "task" in body && typeof body.task === "string" && body.task.trim()) {
 				const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 				const name = "name" in body && typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-				const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: id, approvalMode: "yolo", track: true }, actor);
-				manager.linkAgent(id, dto.id);
+				const feature = await manager.updateFeature(id, { repo });
+				if (!feature) return new Response("no such feature", { status: 404 });
+				const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: feature.id, approvalMode: "yolo", track: true }, actor);
+				manager.linkAgent(feature.id, dto.id);
 				return Response.json({ agent: dto });
 			}
 			if (!body || typeof body !== "object" || !("agentId" in body) || typeof body.agentId !== "string") return new Response("agentId required", { status: 400 });
@@ -828,11 +837,22 @@ export class SquadServer {
 			return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force));
 		}
 		const mftickets = url.pathname.match(/^\/api\/features\/([^/]+)\/tickets$/);
-		if (mftickets && req.method === "GET") return Response.json(await manager.featurePlaneTickets(decodeURIComponent(mftickets[1])));
+		if (mftickets && req.method === "GET") return Response.json(await withTimeout(manager.featurePlaneTickets(decodeURIComponent(mftickets[1])), 1500, { tickets: null }));
 		const mfmodule = url.pathname.match(/^\/api\/features\/([^/]+)\/module$/);
 		if (mfmodule && req.method === "POST") {
-			const out = await manager.createFeatureModule(decodeURIComponent(mfmodule[1]));
+			const body: unknown = await req.json().catch(() => null);
+			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const createTickets = !!(body && typeof body === "object" && "tickets" in body && body.tickets === true);
+			const out = await manager.createFeatureModule(decodeURIComponent(mfmodule[1]), { repo, createTickets });
 			return out ? Response.json(out) : new Response("module create failed (Plane not configured?)", { status: 501 });
+		}
+		const mfmoduleRepair = url.pathname.match(/^\/api\/features\/([^/]+)\/module\/repair$/);
+		if (mfmoduleRepair && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const closeOrphans = !!(body && typeof body === "object" && "closeOrphans" in body && body.closeOrphans === true);
+			const out = await manager.repairFeatureModuleTickets(decodeURIComponent(mfmoduleRepair[1]), { repo, closeOrphans });
+			return out ? Response.json(out) : new Response("module repair failed (Plane not configured?)", { status: 501 });
 		}
 		const mfpipe = url.pathname.match(/^\/api\/features\/([^/]+)\/pipeline$/);
 		if (mfpipe && req.method === "GET") {
@@ -845,7 +865,7 @@ export class SquadServer {
 			const ids = f.issueIdentifiers;
 			let issues: IssueRef[] = [];
 			if (ids && ids.length) {
-				const planeIssues = await listPlaneIssues(f.repo);
+				const planeIssues = await withTimeout(listPlaneIssues(f.repo), 1500, null);
 				if (planeIssues) issues = planeIssues.filter((i) => i.identifier !== undefined && ids.includes(i.identifier));
 			}
 			const comments = await manager.listComments({ repo: f.repo, subject: f.id });

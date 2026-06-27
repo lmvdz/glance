@@ -366,6 +366,18 @@ function issueRelationships(issueIds: string[]): FeatureRelationship[] {
 	return issueIds.map((identifier) => ({ id: identifier, targetId: identifier, targetTitle: identifier, type: "issue" }));
 }
 
+function mergeIssueRelationships(existing: FeatureRelationship[] | undefined, issueIds: string[]): FeatureRelationship[] {
+	const out = [...(existing ?? [])];
+	const seen = new Set(out.flatMap((rel) => [rel.id, rel.targetId]));
+	for (const rel of issueRelationships(issueIds)) {
+		if (seen.has(rel.id) || seen.has(rel.targetId)) continue;
+		out.push(rel);
+		seen.add(rel.id);
+		seen.add(rel.targetId);
+	}
+	return out;
+}
+
 function derivedDescription(opts: { stage: FeatureStage; repo: string; planDir?: string; issueIds: string[]; agents: AgentDTO[]; workflowStage?: string; blocked: boolean; divergent: boolean }): string {
 	const lines = [`Repo: ${opts.repo}`];
 	if (opts.planDir) lines.push(`Plan: ${opts.planDir}`);
@@ -442,7 +454,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 		const concerns = pf.origin?.planDir ? await parsePlanConcerns(repo, pf.origin.planDir) : [];
 		const workflowProgress = wfAgent?.todo ? { done: wfAgent.todo.done, total: wfAgent.todo.total } : undefined;
 		const decisions = pf.decisions ?? planDecisions(concerns);
-		const relationships = pf.relationships ?? issueRelationships(issueIds);
+		const relationships = mergeIssueRelationships(pf.relationships, issueIds);
 		const stage = pf.stageOverride ?? wfStage ?? deriveStage({ agents: members, worktrees, unlanded: unlandedFiles, planDir: pf.origin?.planDir, hasIssues });
 		const divergent = worktrees.some((w) => w.readiness === "diverged");
 		const blocked = members.some((a) => a.status === "input");

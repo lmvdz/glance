@@ -12,11 +12,19 @@ import type { FeatureWorktreeStatus, LandReadiness, PersistedFeature } from "../
 
 const tmps: string[] = [];
 const managers: SquadManager[] = [];
+const PLANE_ENV = ["PLANE_API_KEY", "PLANE_API_TOKEN", "PLANE_WORKSPACE", "PLANE_WORKSPACE_SLUG", "PLANE_PROJECT_MAP", "PLANE_BASE_URL", "PLANE_PROJECT_ID", "PLANE_APP_URL"] as const;
+const savedPlaneEnv: Record<string, string | undefined> = {};
+for (const key of PLANE_ENV) savedPlaneEnv[key] = process.env[key];
+
 afterEach(async () => {
 	for (const m of managers) await m.stop().catch(() => {});
 	managers.length = 0;
 	for (const t of tmps) await fs.rm(t, { recursive: true, force: true }).catch(() => {});
 	tmps.length = 0;
+	for (const key of PLANE_ENV) {
+		if (savedPlaneEnv[key] === undefined) delete process.env[key];
+		else process.env[key] = savedPlaneEnv[key];
+	}
 });
 
 async function git(repo: string, ...a: string[]): Promise<void> {
@@ -127,3 +135,149 @@ test("archiving a derived plan feature suppresses the scanned plan dir", async (
 	expect(archived?.archived).toBe(true);
 	expect((await mgr.features(repo)).some((feature) => feature.id === id)).toBe(false);
 });
+
+test("createFeatureModule can adopt a plan and fan out open concerns into Plane tickets", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-module-plan-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "00-overview.md"), "# Module Plan\n");
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01-api.md"), [
+		"# API slice",
+		"STATUS: open",
+		"TOUCHES: src/api.ts",
+		"",
+		"## Acceptance Criteria",
+		"- API exposes the plan action.",
+	].join("\n"));
+	await fs.writeFile(path.join(repo, "plans", "ctx", "02-done.md"), "# Done slice\nSTATUS: done\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-module-state-"));
+	tmps.push(stateDir);
+
+	const issues: { id: string; sequence_id: number; name: string }[] = [];
+	const moduleIssues: string[][] = [];
+	let moduleCreates = 0;
+	let issueBody = "";
+	const server = Bun.serve({
+		port: 0,
+		fetch: async (req) => {
+			const url = new URL(req.url);
+			if (req.method === "POST" && url.pathname.endsWith("/issues/")) {
+				const body = await req.json() as { name: string; description_html?: string };
+				issueBody = body.description_html ?? "";
+				const issue = { id: `iss-${issues.length + 1}`, sequence_id: issues.length + 1, name: body.name };
+				issues.push(issue);
+				return Response.json(issue, { status: 201 });
+			}
+			if (req.method === "POST" && url.pathname.endsWith("/modules/")) {
+				moduleCreates += 1;
+				return Response.json({ id: "mod-1" }, { status: 201 });
+			}
+			if (req.method === "POST" && url.pathname.endsWith("/module-issues/")) {
+				const body = await req.json() as { issues?: string[] };
+				moduleIssues.push(body.issues ?? []);
+				return Response.json({ ok: true }, { status: 201 });
+			}
+			if (req.method === "GET" && url.pathname.endsWith("/issues/")) return Response.json({ results: [] });
+			if (req.method === "GET" && url.pathname.endsWith("/projects/proj-9/")) return Response.json({ identifier: "OMPSQ" });
+			return new Response("no", { status: 404 });
+		},
+	});
+	try {
+		process.env.PLANE_API_KEY = "secret";
+		process.env.PLANE_WORKSPACE = "acme";
+		process.env.PLANE_BASE_URL = `http://127.0.0.1:${server.port}`;
+		process.env.PLANE_APP_URL = "https://app.acme.test";
+		process.env.PLANE_PROJECT_MAP = JSON.stringify({ [repo]: "proj-9" });
+
+		const mgr = new SquadManager({ stateDir });
+		managers.push(mgr);
+		const id = `plan:${repo}:plans/ctx`;
+		const moduleOnly = await mgr.createFeatureModule(id, { repo });
+		const out = await mgr.createFeatureModule(id, { repo, createTickets: true });
+
+		expect(moduleOnly?.moduleUrl).toBe("https://app.acme.test/acme/projects/proj-9/modules/mod-1");
+		expect(out?.moduleUrl).toBe("https://app.acme.test/acme/projects/proj-9/modules/mod-1");
+		expect(out?.createdIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-1"]);
+		expect(out?.issueIdentifiers).toEqual(["OMPSQ-1"]);
+		expect(moduleIssues).toEqual([["iss-1"]]);
+		expect(moduleCreates).toBe(1);
+		expect(issueBody).toContain("API exposes the plan action.");
+		const feature = (await mgr.features(repo)).find((item) => item.id === id);
+		expect(feature?.persisted).toBe(true);
+		expect(feature?.issueIdentifiers).toEqual(["OMPSQ-1"]);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("repairFeatureModuleTickets links existing generated tickets and closes duplicates", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-repair-plan-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01-api.md"), [
+		"# API slice",
+		"STATUS: open",
+		"",
+		"## Acceptance Criteria",
+		"- API exposes the plan action.",
+	].join("\n"));
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-repair-state-"));
+	tmps.push(stateDir);
+
+	const issues = [
+		{ id: "iss-1", sequence_id: 1, name: "API slice", state: "s-open", body: "Plan path: plans/ctx/01-api.md" },
+		{ id: "iss-2", sequence_id: 2, name: "API slice", state: "s-open", body: "Plan path: plans/ctx/01-api.md" },
+	];
+	const moduleIssues: string[][] = [];
+	const closed: string[] = [];
+	const server = Bun.serve({
+		port: 0,
+		fetch: async (req) => {
+			const url = new URL(req.url);
+			if (req.method === "POST" && url.pathname.endsWith("/modules/")) return Response.json({ id: "mod-1" }, { status: 201 });
+			if (req.method === "POST" && url.pathname.endsWith("/module-issues/")) {
+				const body = await req.json() as { issues?: string[] };
+				moduleIssues.push(body.issues ?? []);
+				return Response.json({ ok: true }, { status: 201 });
+			}
+			if (req.method === "GET" && url.pathname.endsWith("/issues/")) return Response.json({ results: issues });
+			if (req.method === "GET" && url.pathname.endsWith("/states/")) return Response.json({ results: [{ id: "s-open", group: "backlog" }, { id: "s-done", group: "completed" }] });
+			if (req.method === "GET" && url.pathname.endsWith("/labels/")) return Response.json({ results: [] });
+			if (req.method === "GET" && url.pathname.endsWith("/relations/")) return Response.json({ blocked_by: [] });
+			if (req.method === "GET" && url.pathname.endsWith("/projects/proj-9/")) return Response.json({ identifier: "OMPSQ" });
+			const issueMatch = url.pathname.match(/\/issues\/([^/]+)\/$/);
+			if (req.method === "GET" && issueMatch) {
+				const issue = issues.find((item) => item.id === issueMatch[1]);
+				return issue ? Response.json({ ...issue, description_stripped: issue.body, project_detail: { identifier: "OMPSQ" } }) : new Response("no", { status: 404 });
+			}
+			if (req.method === "PATCH" && issueMatch) {
+				closed.push(issueMatch[1]);
+				return Response.json({ ok: true });
+			}
+			return new Response("no", { status: 404 });
+		},
+	});
+	try {
+		process.env.PLANE_API_KEY = "secret";
+		process.env.PLANE_WORKSPACE = "acme";
+		process.env.PLANE_BASE_URL = `http://127.0.0.1:${server.port}`;
+		process.env.PLANE_APP_URL = "https://app.acme.test";
+		process.env.PLANE_PROJECT_MAP = JSON.stringify({ [repo]: "proj-9" });
+
+		const mgr = new SquadManager({ stateDir });
+		managers.push(mgr);
+		const feature = mgr.createFeature({ title: "Repair", repo, planDir: "plans/ctx" });
+		const out = await mgr.repairFeatureModuleTickets(feature.id, { repo, closeOrphans: true });
+
+		expect(out?.linkedIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-1"]);
+		expect(out?.closedIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-2"]);
+		expect(moduleIssues).toEqual([["iss-1"]]);
+		expect(closed).toEqual(["iss-2"]);
+		const repaired = (await mgr.features(repo)).find((item) => item.id === feature.id);
+		expect(repaired?.issueIdentifiers).toEqual(["OMPSQ-1"]);
+	} finally {
+		server.stop(true);
+	}
+}, 12000);

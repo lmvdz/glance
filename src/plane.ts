@@ -301,7 +301,9 @@ export async function createPlaneIssue(repo: string, name: string, descriptionHt
 	if (!res || !res.ok) return null;
 	issueListCache.clear(); // a new issue changes the open set
 	const raw = (await res.json().catch(() => null)) as PlaneIssue | null;
-	return raw?.id ? toIssueRef(raw, cfg, projectId) : null;
+	if (!raw?.id) return null;
+	const prefix = raw.project_detail?.identifier || raw.sequence_id == null ? undefined : await projectPrefix(base, headers);
+	return toIssueRef(raw, cfg, projectId, prefix);
 }
 
 /** Add a comment to a Plane issue by UUID or human identifier (e.g. OMPSQ-42). Best-effort; false when Plane is not configured. */
@@ -386,6 +388,33 @@ export async function featureTickets(repo: string, identifiers: string[]): Promi
 	return tickets;
 }
 
+/** Group existing Plane issue identifiers under an existing module. `null` ⇒ not configured / failed. */
+export async function addIssuesToFeatureModule(repo: string, moduleId: string, identifiers: string[]): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	if (!identifiers.length) return true;
+	const [prefix, issues] = await Promise.all([projectPrefix(base, headers), allIssues(base, headers)]);
+	const want = new Set(identifiers.map((s) => s.toUpperCase()));
+	const ids = issues.filter((i) => prefix && i.sequence_id != null && want.has(`${prefix}-${i.sequence_id}`.toUpperCase())).map((i) => i.id);
+	if (!ids.length) return true;
+	const res = await throttledFetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) });
+	return !!res?.ok;
+}
+
+/** Group known Plane issue UUIDs under an existing module. `null` ⇒ not configured / failed. */
+export async function addIssueIdsToFeatureModule(repo: string, moduleId: string, issueIds: string[]): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	const ids = [...new Set(issueIds.filter(Boolean))];
+	if (!ids.length) return true;
+	const res = await throttledFetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) });
+	return !!res?.ok;
+}
+
 /** Create a Plane module for a feature and group its issues under it. `null` ⇒ not configured / failed. */
 export async function ensureFeatureModule(repo: string, name: string, identifiers: string[]): Promise<{ moduleId: string; moduleUrl: string } | null> {
 	const ctx = planeContext(repo);
@@ -397,11 +426,6 @@ export async function ensureFeatureModule(repo: string, name: string, identifier
 	const mod: unknown = await res.json().catch(() => null);
 	if (!mod || typeof mod !== "object" || !("id" in mod) || typeof mod.id !== "string") return null;
 	const moduleId = mod.id;
-	if (identifiers.length) {
-		const [prefix, issues] = await Promise.all([projectPrefix(base, headers), allIssues(base, headers)]);
-		const want = new Set(identifiers.map((s) => s.toUpperCase()));
-		const ids = issues.filter((i) => prefix && i.sequence_id != null && want.has(`${prefix}-${i.sequence_id}`.toUpperCase())).map((i) => i.id);
-		if (ids.length) await throttledFetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) });
-	}
+	await addIssuesToFeatureModule(repo, moduleId, identifiers);
 	return { moduleId, moduleUrl: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/modules/${moduleId}` };
 }

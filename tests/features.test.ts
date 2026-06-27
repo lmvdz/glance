@@ -154,6 +154,36 @@ test("buildFeatures derives task context from plan docs", async () => {
 	expect(feature.contextBundle?.decisions).toBe("Use boring REST");
 });
 
+test("buildFeatures merges persisted relationships with Plane issue relationships", async () => {
+	const repo = await baseRepo();
+	const [feature] = await buildFeatures(repo, [], [{
+		id: "f1",
+		title: "Persisted",
+		repo,
+		plane: { issueIdentifiers: ["ACME-7", "ACME-8"] },
+		relationships: [{ id: "DOC-1", targetId: "DOC-1", targetTitle: "Design doc", type: "related" }],
+		createdAt: 0,
+		updatedAt: 0,
+	}]);
+
+	expect(feature.relationships?.map((item) => item.targetId)).toEqual(["DOC-1", "ACME-7", "ACME-8"]);
+});
+
+test("buildFeatures derives Plane issue relationships when persisted relationships are empty", async () => {
+	const repo = await baseRepo();
+	const [feature] = await buildFeatures(repo, [], [{
+		id: "f1",
+		title: "Persisted",
+		repo,
+		plane: { issueIdentifiers: ["ACME-7"] },
+		relationships: [],
+		createdAt: 0,
+		updatedAt: 0,
+	}]);
+
+	expect(feature.relationships?.map((item) => item.targetId)).toEqual(["ACME-7"]);
+});
+
 test("buildFeatures does not turn verify commands into acceptance criteria", async () => {
 	const repo = await baseRepo();
 	await fs.mkdir(path.join(repo, "plans", "verify-is-not-criteria"), { recursive: true });
