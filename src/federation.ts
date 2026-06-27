@@ -14,8 +14,9 @@
  *    zero-infra / cross-org rooms (E2E key-is-trust).
  */
 
-import type { Actor, ClientCommand, OperatorPresence } from "./types.ts";
+import type { Actor, AgentDTO, ClientCommand, OperatorPresence } from "./types.ts";
 import type { LeaseEntry } from "./leases.ts";
+import { repoIdentity } from "./repo-identity.ts";
 
 export const LOCAL_ACTOR: Actor = { id: "local", origin: "local" };
 
@@ -80,10 +81,45 @@ export class NullFederationBus implements FederationBus {
 
 /** Two or more agents owned by DIFFERENT operators sharing one repo + ref. */
 export interface Collision {
+	/** Cross-host repo identity the collision is keyed on (normalized git origin / `name:<dir>`). */
+	repoId: string;
+	/** A host-local path for ONE of the colliding agents — display only; peers have their own. */
 	repo: string;
 	ref: string;
 	operators: string[];
 	agents: string[];
+}
+
+/**
+ * Cross-host repo identity for an agent: its wire-carried `repoId` when a peer
+ * already computed it (we can't reach the peer's path to run git ourselves), else
+ * derived from the host-local `repo` path. Memoized per path so detection over a
+ * roster never shells out to git more than once per distinct checkout.
+ */
+export function agentRepoId(agent: Pick<AgentDTO, "repo" | "repoId">, cache?: Map<string, string>): string {
+	if (typeof agent.repoId === "string" && agent.repoId.length > 0) return agent.repoId;
+	const cached = cache?.get(agent.repo);
+	if (cached !== undefined) return cached;
+	const id = repoIdentity(agent.repo);
+	cache?.set(agent.repo, id);
+	return id;
+}
+
+/** Process-wide path→identity memo: a repo's origin is stable for the process lifetime. */
+const REPO_ID_MEMO = new Map<string, string>();
+
+/**
+ * Stamp every agent's cross-host `repoId` onto an OUTGOING presence frame, derived
+ * locally (only this host can run git on its own paths). A peer can't reach our
+ * paths to derive identity itself, so without this its `detectCollisions` would
+ * fall back to `name:<basename>` and miss / mis-key cross-host overlaps. Returns a
+ * shallow copy; the caller's roster is never mutated.
+ */
+export function stampRepoIds(presence: OperatorPresence): OperatorPresence {
+	return {
+		...presence,
+		agents: presence.agents.map((a) => (typeof a.repoId === "string" && a.repoId.length > 0 ? a : { ...a, repoId: agentRepoId(a, REPO_ID_MEMO) })),
+	};
 }
 
 /**
@@ -108,22 +144,30 @@ export function mergeRosters(self: OperatorPresence, peers: OperatorPresence[]):
  * (the `ref`) — so two people don't unknowingly run agents over the same
  * checkout. Same-operator overlaps never collide; agents with no branch are
  * skipped (no known ref to compare against).
+ *
+ * Keyed on the repo's CROSS-HOST identity (normalized git origin — see
+ * repo-identity.ts), NOT the host-local `agent.repo` path: two operators working
+ * the same GitHub repo at different absolute paths now collide, and two unrelated
+ * repos that merely share a basename no longer false-collide.
  */
 export function detectCollisions(presences: OperatorPresence[]): Collision[] {
 	interface CollisionGroup {
+		repoId: string;
 		repo: string;
 		ref: string;
 		operators: Set<string>;
 		agents: Set<string>;
 	}
+	const idCache = new Map<string, string>();
 	const groups = new Map<string, CollisionGroup>();
 	for (const presence of presences) {
 		for (const agent of presence.agents) {
 			if (agent.branch === undefined) continue;
-			const key = `${agent.repo}\u0000${agent.branch}`;
+			const repoId = agentRepoId(agent, idCache);
+			const key = `${repoId}\u0000${agent.branch}`;
 			let group = groups.get(key);
 			if (group === undefined) {
-				group = { repo: agent.repo, ref: agent.branch, operators: new Set(), agents: new Set() };
+				group = { repoId, repo: agent.repo, ref: agent.branch, operators: new Set(), agents: new Set() };
 				groups.set(key, group);
 			}
 			group.operators.add(presence.operator.id);
@@ -133,7 +177,7 @@ export function detectCollisions(presences: OperatorPresence[]): Collision[] {
 	const collisions: Collision[] = [];
 	for (const group of groups.values()) {
 		if (group.operators.size < 2) continue;
-		collisions.push({ repo: group.repo, ref: group.ref, operators: [...group.operators], agents: [...group.agents] });
+		collisions.push({ repoId: group.repoId, repo: group.repo, ref: group.ref, operators: [...group.operators], agents: [...group.agents] });
 	}
 	return collisions;
 }
@@ -157,9 +201,9 @@ export interface FederationSnapshot extends FederationView {
 /**
  * Compose the two cross-operator primitives into the surface the UI/API wants:
  * merge self + peer rosters, then flag the branches different operators share.
- * ponytail: collisions key on `agent.repo` (a host-local path) via detectCollisions,
- * so cross-host collisions only fire when two hosts use the same checkout path;
- * full cross-host detection waits on a normalized `repoId` on AgentDTO (see docs/federation.md).
+ * Collisions key on each agent's cross-host repo identity (via detectCollisions →
+ * agentRepoId), so two operators on the same GitHub repo at different checkout
+ * paths now collide and same-basename-but-unrelated repos don't false-collide.
  */
 export function federationView(self: OperatorPresence, peers: OperatorPresence[]): FederationView {
 	const operators = mergeRosters(self, peers);
@@ -315,8 +359,11 @@ export class TailnetFederationBus implements FederationBus {
 	}
 
 	publishPresence(presence: OperatorPresence): void {
-		this.lastPresence = presence;
-		this.send({ kind: "presence", presence });
+		// Stamp cross-host repoId on each agent before it leaves this host — only we can
+		// derive identity from our own paths, and peers key collisions on it (#9).
+		const stamped = stampRepoIds(presence);
+		this.lastPresence = stamped;
+		this.send({ kind: "presence", presence: stamped });
 	}
 
 	onPresence(cb: (presence: OperatorPresence) => void): void {
