@@ -14,6 +14,25 @@ import type { IssueRef } from "./types.ts";
 
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
 
+/**
+ * Run a transient external (Plane) call with ONE retry, then surface-and-swallow. A thrown Plane
+ * error on the poll used to be unhandled (it would reject the whole tick); a `null` return was
+ * dropped silently. This retries once and, if both throw, runs `onFail` and returns `fallback`,
+ * keeping the poll non-fatal — one repo's Plane blip never wedges the dispatcher.
+ */
+async function withRetry<T>(fn: () => Promise<T>, fallback: T, onFail: (e: unknown) => void): Promise<T> {
+	try {
+		return await fn();
+	} catch {
+		try {
+			return await fn();
+		} catch (e) {
+			onFail(e);
+			return fallback;
+		}
+	}
+}
+
 export function dispatchOrder(a: IssueRef, b: IssueRef): number {
 	const ap = PRIORITY_RANK[(a.priority ?? "none").toLowerCase()] ?? PRIORITY_RANK.none;
 	const bp = PRIORITY_RANK[(b.priority ?? "none").toLowerCase()] ?? PRIORITY_RANK.none;
@@ -92,7 +111,14 @@ export class Dispatcher {
 			for (const repo of this.deps.repos()) {
 				if (this.atGlobalCap()) break; // global WIP ceiling reached — leave remaining issues for a later tick
 				if (budget <= 0) break;
-				const issues = await this.deps.listIssues(repo);
+				// Poll is a transient external (Plane) call: retry once, then warn instead of letting a throw
+				// reject the whole tick or dropping a repo silently. `null` (Plane unreachable / unconfigured)
+				// is a clean skip; only a THROW retries/warns.
+				const issues = await withRetry(
+					() => this.deps.listIssues(repo),
+					null,
+					(e) => this.deps.log(`listIssues failed for ${repo} after retry — skipping this repo this tick: ${e instanceof Error ? e.message : String(e)}`),
+				);
 				if (!issues) continue;
 				// Issue ids still open in THIS project this tick. A blocker absent here is completed/cancelled
 				// (or gone), so it no longer blocks. Cross-project blockers aren't visible — see ceiling note.

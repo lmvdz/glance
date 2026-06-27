@@ -32,6 +32,13 @@ export interface OrchestratorPersistence {
 	markHalted(branch: string): void;
 	markLanded(branch: string): void;
 	markStaged(branch: string): void;
+	/**
+	 * Purge ledger entries for branches that no longer exist in the current roster.
+	 * Only branches absent from `liveBranches` are dropped — live branches are never touched.
+	 * Call this once per tick (after the agent loop) to bound ledger growth: branches that
+	 * were deleted/cleaned up leave stale entries otherwise accumulating forever.
+	 */
+	purgeStale(liveBranches: string[]): void;
 }
 
 /** Open (or create) the on-disk ledger under `stateDir`, loading any prior decisions into memory. */
@@ -64,6 +71,20 @@ export function openOrchestratorState(stateDir: string): OrchestratorPersistence
 		}
 	};
 
+	const purgeStale = (liveBranches: string[]): void => {
+		const live = new Set(liveBranches.filter(Boolean));
+		let changed = false;
+		for (const k of KINDS) {
+			for (const branch of [...sets[k]]) {
+				if (!live.has(branch)) {
+					sets[k].delete(branch);
+					changed = true;
+				}
+			}
+		}
+		if (changed) flush();
+	};
+
 	return {
 		isHalted: (b) => !!b && sets.halted.has(b),
 		isLanded: (b) => !!b && sets.landed.has(b),
@@ -71,5 +92,6 @@ export function openOrchestratorState(stateDir: string): OrchestratorPersistence
 		markHalted: (b) => mark("halted", b),
 		markLanded: (b) => mark("landed", b),
 		markStaged: (b) => mark("staged", b),
+		purgeStale,
 	};
 }

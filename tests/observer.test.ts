@@ -11,6 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AutomationReport } from "../src/automation-log.ts";
 import { Observer, type ObserverDeps, auditLandedSurvivors, auditStaleDone, auditTestsGreen, landFailureFindings } from "../src/observer.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
@@ -406,4 +407,41 @@ test("a resolved finding CLOSES its Plane issue (self-healing), not just clears 
 	red = false;
 	await obs.tick(); // green ⇒ resolved ⇒ the filed issue is closed, not left open
 	expect(h.closed).toEqual(["i-1"]);
+});
+
+// #17: a transient (thrown) Plane list is retried once and recovers silently; a persistent failure is
+// surfaced (log + warn record) instead of silently dropping the tick — and the tick never throws.
+test("(#17) a transient listIssues throw is retried once and recovers (no warning)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const events: AutomationReport[] = [];
+	let attempts = 0;
+	const h = makeDeps(tmpDir(), {
+		record: (r) => events.push(r),
+		runGate: async () => ({ ok: false, firstFailure: "y.test.ts" }), // one finding so the tick has work to do
+		listIssues: async () => {
+			attempts++;
+			if (attempts === 1) throw new Error("429 rate limited");
+			return [];
+		},
+	});
+	await new Observer(h.deps).tick();
+	expect(attempts).toBe(2); // first threw, retry succeeded
+	expect(h.filed.length).toBe(1); // the tick's filing still happened
+	expect(events.some((e) => e.level === "warn")).toBe(false); // recovered ⇒ no warn
+});
+
+test("(#17) a persistent listIssues failure is surfaced (warn record), and the tick stays non-fatal", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const events: AutomationReport[] = [];
+	const logs: string[] = [];
+	const h = makeDeps(tmpDir(), {
+		record: (r) => events.push(r),
+		log: (m) => logs.push(m),
+		listIssues: async () => {
+			throw new Error("plane down");
+		},
+	});
+	await new Observer(h.deps).tick(); // must NOT throw
+	expect(logs.some((m) => m.includes("listIssues failed after retry"))).toBe(true);
+	expect(events.some((e) => e.level === "warn" && (e.detail ?? "").includes("listIssues failed"))).toBe(true);
 });

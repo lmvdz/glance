@@ -8,7 +8,8 @@ import { TaskProperties } from './TaskProperties';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
-import { stoppableAgents, stopCommand } from '../lib/agent-control';
+import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS } from '../lib/agent-control';
+import { focusTaskSearch } from '../lib/jump';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
 import type { ArtifactCommentDTO } from '../lib/dto';
 
@@ -365,9 +366,20 @@ export const TaskDetail = () => {
   // The webapp could never stop a running agent — the kill command + send path existed but no button
   // sent it. `kill` keeps the agent in the roster (restartable), so this is a safe two-click "Stop".
   const stopTargets = React.useMemo(() => stoppableAgents(activeAgents), [activeAgents]);
+  const interruptTargets = React.useMemo(() => interruptibleAgents(activeAgents), [activeAgents]);
+  const restartTargets = React.useMemo(() => restartableAgents(activeAgents), [activeAgents]);
   const [stopConfirm, setStopConfirm] = React.useState(false);
   const stopConfirmTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  React.useEffect(() => { setStopConfirm(false); }, [selectedTaskId]);
+  // Remove confirm state
+  const [removeTarget, setRemoveTarget] = React.useState<string | null>(null);
+  const [removeDeleteWorktree, setRemoveDeleteWorktree] = React.useState(false);
+  // Model picker state
+  const [modelPickerAgentId, setModelPickerAgentId] = React.useState<string | null>(null);
+  const [modelPickerValue, setModelPickerValue] = React.useState('');
+  // Answer (pending input) state
+  const [answerValues, setAnswerValues] = React.useState<Record<string, string>>({});
+
+  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); }, [selectedTaskId]);
   const handleStopAgents = () => {
     if (!stopTargets.length) return;
     if (!stopConfirm) {
@@ -380,6 +392,35 @@ export const TaskDetail = () => {
     setStopConfirm(false);
     for (const agent of stopTargets) sendConsoleCommand(stopCommand(agent.id));
     showToast(stopTargets.length === 1 ? `Stopping ${stopTargets[0].name}…` : `Stopping ${stopTargets.length} agents…`, 'info');
+  };
+  const handleInterruptAgents = () => {
+    for (const agent of interruptTargets) sendConsoleCommand(interruptCommand(agent.id));
+    if (interruptTargets.length) showToast(interruptTargets.length === 1 ? `Interrupting ${interruptTargets[0].name}…` : `Interrupting ${interruptTargets.length} agents…`, 'info');
+  };
+  const handleRestartAgents = () => {
+    for (const agent of restartTargets) sendConsoleCommand(restartCommand(agent.id));
+    if (restartTargets.length) showToast(restartTargets.length === 1 ? `Restarting ${restartTargets[0].name}…` : `Restarting ${restartTargets.length} agents…`, 'info');
+  };
+  const handleRemoveConfirm = () => {
+    if (!removeTarget) return;
+    sendConsoleCommand(removeCommand(removeTarget, removeDeleteWorktree));
+    showToast(`Removing agent${removeDeleteWorktree ? ' + worktree' : ''}…`, 'info');
+    setRemoveTarget(null);
+    setRemoveDeleteWorktree(false);
+  };
+  const handleSetModel = (agentId: string, model: string) => {
+    if (!model.trim()) return;
+    sendConsoleCommand(setModelCommand(agentId, model.trim()));
+    showToast(`Model set to ${model.trim()}`, 'info');
+    setModelPickerAgentId(null);
+    setModelPickerValue('');
+  };
+  const handleAnswer = (agentId: string, requestId: string) => {
+    const value = answerValues[requestId]?.trim();
+    if (!value) return;
+    sendConsoleCommand(answerCommand(agentId, requestId, value));
+    setAnswerValues((prev) => { const next = { ...prev }; delete next[requestId]; return next; });
+    showToast('Answer sent', 'info');
   };
   const selectedDocAnnotations = React.useMemo(() => {
     if (!selectedPlanDoc) return [];
@@ -950,12 +991,58 @@ export const TaskDetail = () => {
   return (
     <main className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-gray-950 z-0 transition-colors duration-200">
       <div className="h-10 border-b border-gray-200 dark:border-gray-800 flex items-center justify-end px-3 gap-2 bg-white dark:bg-gray-950 z-10 flex-shrink-0 transition-colors duration-200">
+        {interruptTargets.length > 0 && (
+          <button type="button" onClick={handleInterruptAgents} title={`Interrupt current turn for ${interruptTargets.length} agent(s)`} aria-label="Interrupt agent" className="min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30">
+            <span className="inline-block h-2.5 w-2.5 rounded-full border-2 border-current" aria-hidden="true" /> Interrupt{interruptTargets.length > 1 ? ` (${interruptTargets.length})` : ''}
+          </button>
+        )}
         {stopTargets.length > 0 && (
           <button type="button" onClick={handleStopAgents} title={stopConfirm ? 'Click again to stop' : `Stop ${stopTargets.length} running agent(s)`} aria-label="Stop agent" className={`min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${stopConfirm ? 'bg-red-600 text-white hover:bg-red-700' : 'text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/30'}`}>
             <span className="inline-block h-2.5 w-2.5 rounded-[2px] bg-current" aria-hidden="true" /> {stopConfirm ? 'Confirm stop' : `Stop${stopTargets.length > 1 ? ` (${stopTargets.length})` : ''}`}
           </button>
         )}
-        <button className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-blue-500"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
+        {restartTargets.length > 0 && (
+          <button type="button" onClick={handleRestartAgents} title={`Restart ${restartTargets.length} stopped agent(s)`} aria-label="Restart agent" className="min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-emerald-500 text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/30">
+            ↺ Restart{restartTargets.length > 1 ? ` (${restartTargets.length})` : ''}
+          </button>
+        )}
+        {/* Remove confirm dialog */}
+        {removeTarget && (
+          <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1 dark:border-red-900 dark:bg-red-950/30">
+            <label className="flex items-center gap-1 text-xs text-red-700 dark:text-red-300 cursor-pointer">
+              <input type="checkbox" checked={removeDeleteWorktree} onChange={(e) => setRemoveDeleteWorktree(e.target.checked)} className="h-3 w-3 rounded border-red-300" />
+              del worktree
+            </label>
+            <button type="button" onClick={handleRemoveConfirm} className="text-xs font-medium text-red-700 dark:text-red-300 hover:text-red-900 focus-visible:ring-2 focus-visible:ring-red-500">Confirm remove</button>
+            <button type="button" onClick={() => { setRemoveTarget(null); setRemoveDeleteWorktree(false); }} className="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">✕</button>
+          </div>
+        )}
+        {/* Per-agent model picker — opens when the model button is clicked */}
+        {modelPickerAgentId && (
+          <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 dark:border-gray-700 dark:bg-gray-900">
+            <select
+              autoFocus
+              value={modelPickerValue}
+              onChange={(e) => setModelPickerValue(e.target.value)}
+              className="text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 cursor-pointer"
+              aria-label="Select model"
+            >
+              <option value="">pick model…</option>
+              {KNOWN_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <input
+              type="text"
+              value={modelPickerValue}
+              onChange={(e) => setModelPickerValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(modelPickerAgentId, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }}
+              placeholder="or type model id…"
+              className="w-36 text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 placeholder:text-gray-400"
+            />
+            <button type="button" onClick={() => handleSetModel(modelPickerAgentId, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium text-blue-600 dark:text-blue-400 disabled:opacity-40 hover:text-blue-800 focus-visible:ring-2 focus-visible:ring-blue-500">Set</button>
+            <button type="button" onClick={() => { setModelPickerAgentId(null); setModelPickerValue(''); }} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
+          </div>
+        )}
+        <button onClick={() => focusTaskSearch()} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-blue-500" title="Focus task search (⌘K)" aria-label="Jump to search"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
         <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
         <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${isChatOpen ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
       </div>
@@ -977,8 +1064,8 @@ export const TaskDetail = () => {
               <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-xs mb-2"><span className="font-medium text-gray-700 dark:text-gray-300">{task.id}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties"><PanelRight className="w-3.5 h-3.5" /></button>
-                  <button className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors"><Copy className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties" aria-label="Toggle properties panel" aria-expanded={showProperties}><PanelRight className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => { navigator.clipboard.writeText(`${task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
 
@@ -1042,6 +1129,97 @@ export const TaskDetail = () => {
                 <div className="space-y-3 mb-3">{task.relationships.map(rel => <div key={rel.id} className="flex items-start gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5" /><div><span className="text-gray-500 font-medium mr-2">{rel.targetId}</span><span className="text-gray-800 dark:text-gray-200 font-medium">{rel.targetTitle}</span></div></div>)}</div>
                 <div className="flex gap-2"><input value={newRelationshipText} onChange={(e) => setNewRelationshipText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addRelationship()} placeholder="Link issue, feature, or doc id..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addRelationship} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
+
+              {activeAgents.length > 0 && (
+                <div className="mb-6">
+                  <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
+                    Agents <span className="text-gray-500 font-medium">{activeAgents.length}</span>
+                  </div>
+                  <div className="space-y-2">
+                    {activeAgents.map((agent) => {
+                      const isTerminal = agent.status === 'stopped' || agent.status === 'error';
+                      const isWorking = agent.status === 'working' || agent.status === 'starting';
+                      const isAwaiting = agent.status === 'input' || agent.pending.length > 0;
+                      const statusColor = agent.status === 'working' ? 'text-emerald-600 dark:text-emerald-400' : agent.status === 'error' ? 'text-red-500' : agent.status === 'input' ? 'text-amber-500' : agent.status === 'stopped' ? 'text-gray-400' : 'text-blue-500';
+                      return (
+                        <div key={agent.id} className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+                          <div className="flex items-center justify-between gap-2 px-3 py-2">
+                            <div className="min-w-0 flex items-center gap-2">
+                              <span className={`text-[11px] font-semibold uppercase rounded px-1.5 py-0.5 border ${agent.status === 'working' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400' : agent.status === 'error' ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400' : agent.status === 'input' ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-400' : agent.status === 'stopped' ? 'border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400' : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-400'}`}>{agent.status}</span>
+                              <span className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{agent.name}</span>
+                              {agent.model && <span className={`hidden sm:block text-[10px] ${statusColor}`}>{agent.model}</span>}
+                            </div>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              {!isTerminal && isWorking && (
+                                <button type="button" onClick={() => sendConsoleCommand(interruptCommand(agent.id))} title="Interrupt current turn" className="min-h-7 rounded px-2 text-[11px] font-medium text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
+                                  Interrupt
+                                </button>
+                              )}
+                              {!isTerminal && (
+                                <button type="button" onClick={() => sendConsoleCommand(stopCommand(agent.id))} title="Stop this agent" className="min-h-7 rounded px-2 text-[11px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-red-500">
+                                  Stop
+                                </button>
+                              )}
+                              {isTerminal && (
+                                <button type="button" onClick={() => sendConsoleCommand(restartCommand(agent.id))} title="Restart this agent" className="min-h-7 rounded px-2 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-emerald-500">
+                                  ↺ Restart
+                                </button>
+                              )}
+                              <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${modelPickerAgentId === agent.id ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
+                                Model
+                              </button>
+                              <button type="button" onClick={() => setRemoveTarget(removeTarget === agent.id ? null : agent.id)} title="Remove agent" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${removeTarget === agent.id ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' : 'text-gray-400 hover:bg-gray-100 hover:text-red-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-red-400'}`}>
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                          {/* Inline model picker for this agent */}
+                          {modelPickerAgentId === agent.id && (
+                            <div className="border-t border-gray-100 dark:border-gray-800 px-3 py-2 flex items-center gap-2">
+                              <select value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} className="text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                                <option value="">pick model…</option>
+                                {KNOWN_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+                              </select>
+                              <input type="text" value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(agent.id, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }} placeholder="or type model id…" className="flex-1 text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 placeholder:text-gray-400" />
+                              <button type="button" onClick={() => handleSetModel(agent.id, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-blue-500">Set</button>
+                            </div>
+                          )}
+                          {/* Pending input / Answer section */}
+                          {isAwaiting && agent.pending.map((req) => (
+                            <div key={req.id} className="border-t border-amber-100 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-950/20 px-3 py-2">
+                              <div className="mb-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">Awaiting input: {req.title}</div>
+                              {req.message && <p className="mb-2 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{req.message}</p>}
+                              {req.options && req.options.length > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {req.options.map((opt) => (
+                                    <button key={opt} type="button" onClick={() => { sendConsoleCommand(answerCommand(agent.id, req.id, opt)); showToast('Answer sent', 'info'); }} className="rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
+                                      {opt}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="flex gap-2">
+                                  <input
+                                    type="text"
+                                    value={answerValues[req.id] ?? ''}
+                                    onChange={(e) => setAnswerValues((prev) => ({ ...prev, [req.id]: e.target.value }))}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') handleAnswer(agent.id, req.id); }}
+                                    placeholder={req.placeholder ?? 'Type your answer…'}
+                                    className="flex-1 text-xs rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-900 px-2 py-1 text-gray-700 dark:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-gray-400"
+                                  />
+                                  <button type="button" onClick={() => handleAnswer(agent.id, req.id)} disabled={!answerValues[req.id]?.trim()} className="text-xs font-medium px-2 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-amber-500">
+                                    Send
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="mb-6 pb-6">
                 <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-4 border-b border-gray-100 dark:border-gray-800 pb-2">Comments <span className="text-gray-500 font-medium">{regularComments.length}</span></div>

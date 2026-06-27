@@ -28,12 +28,19 @@ function git(cwd: string, args: string[]): string | undefined {
 	}
 }
 
-/** Commits on `branch` not in main (ahead) and on main not in `branch` (behind). */
-function aheadBehind(repo: string, branch: string): { ahead: number; behind: number } {
+/** Commits on `branch` not in main (ahead) and on main not in `branch` (behind).
+ *
+ * Returns `{ ok: false }` on git error (bad ref, detached HEAD, I/O failure) so callers
+ * can distinguish a real error from a genuine 0/0 (nothing ahead, nothing behind). Silently
+ * returning `{ ahead: 0, behind: 0 }` on error masked "diverged" as "clean", which caused
+ * the UI to show a branch as ready-to-land when git couldn't compute the real count.
+ */
+function aheadBehind(repo: string, branch: string): { ok: true; ahead: number; behind: number } | { ok: false; error: string } {
 	const out = git(repo, ["rev-list", "--left-right", "--count", `HEAD...${branch}`]);
-	if (out === undefined) return { ahead: 0, behind: 0 };
-	const parts = out.split(/\s+/).map((n) => Number.parseInt(n, 10) || 0);
-	return { behind: parts[0] ?? 0, ahead: parts[1] ?? 0 };
+	if (out === undefined) return { ok: false, error: `git rev-list failed for branch ${JSON.stringify(branch)} in ${JSON.stringify(repo)}` };
+	const parts = out.split(/\s+/).map((n) => Number.parseInt(n, 10));
+	if (parts.length < 2 || parts.some((n) => Number.isNaN(n))) return { ok: false, error: `unexpected git output: ${JSON.stringify(out)}` };
+	return { ok: true, behind: parts[0] ?? 0, ahead: parts[1] ?? 0 };
 }
 
 /** True if merging `branch` into main would conflict (git >= 2.38 merge-tree); undefined if unsupported. */
@@ -69,12 +76,19 @@ export async function featureLandStatus(members: LandMember[]): Promise<FeatureW
 			readiness = "no-branch";
 		} else {
 			const ab = aheadBehind(m.repo, m.branch);
-			ahead = ab.ahead;
-			behind = ab.behind;
-			if (behind > 0 && ahead > 0 && (predictsConflict(m.repo, m.branch) ?? true)) readiness = "diverged";
-			else if (changedFiles > 0) readiness = "uncommitted";
-			else if (ahead > 0) readiness = "ahead";
-			else readiness = "clean";
+			if (!ab.ok) {
+				// git failed (bad ref, detached HEAD, I/O failure) — surface as diverged so the
+				// branch is never silently shown as clean / landing-ready when we couldn't compute
+				// the real count. The operator will see it as "needs attention" rather than "done".
+				readiness = "diverged";
+			} else {
+				ahead = ab.ahead;
+				behind = ab.behind;
+				if (behind > 0 && ahead > 0 && (predictsConflict(m.repo, m.branch) ?? true)) readiness = "diverged";
+				else if (changedFiles > 0) readiness = "uncommitted";
+				else if (ahead > 0) readiness = "ahead";
+				else readiness = "clean";
+			}
 		}
 		// ponytail: one proof-file read + one `git rev-parse HEAD` per member. featureLandStatus
 		// already spawns git several times per member, so this marginal cost is acceptable.

@@ -85,6 +85,24 @@ test("featureLandStatus: branch that conflicts with advanced main is 'diverged'"
 	expect(s.readiness).toBe("diverged");
 });
 
+test("featureLandStatus: a git error on a nonexistent branch reports 'diverged', never silently 'clean' (#11)", async () => {
+	// A branch name that does not exist in git causes `rev-list` to fail with a non-zero exit
+	// code. Before the fix, aheadBehind() returned { ahead: 0, behind: 0 } on any error, so a
+	// branch with a bad/unknown ref appeared as "clean" (nothing to land, nothing diverged) —
+	// masking the real problem. After the fix the error is surfaced as "diverged" so the operator
+	// sees a branch that needs attention rather than one that has already been cleanly merged.
+	const repo = await baseRepo();
+	// Use a worktree path distinct from repo so the "worktree===repo → no-branch" short-circuit
+	// doesn't fire, then supply a branch name that does not exist so git rev-list fails.
+	const wt = await fs.mkdtemp(path.join(os.tmpdir(), "feat-err-"));
+	tmps.push(wt);
+	const [s] = await featureLandStatus([{ branch: "nonexistent-branch-xyz", worktree: wt, repo }]);
+	// Must NOT report "clean" (which would mean "nothing to do / already merged")
+	expect(s.readiness).not.toBe("clean");
+	// Must surface as "diverged" — the "needs attention" sentinel for git errors
+	expect(s.readiness).toBe("diverged");
+});
+
 test("listPlanDirs finds plan dirs and their PLANE pointers", async () => {
 	const repo = await baseRepo();
 	await fs.mkdir(path.join(repo, "plans", "auth"), { recursive: true });

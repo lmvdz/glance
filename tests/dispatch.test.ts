@@ -199,3 +199,32 @@ test("dispatcher: dispatches higher-priority Plane issues first without bypassin
 test("dispatchOrder ranks known priorities before plain issues", () => {
 	expect([issue("B"), issue("A", "urgent"), issue("C", "high")].sort(dispatchOrder).map((i) => i.id)).toEqual(["A", "C", "B"]);
 });
+
+// #17: a transient (thrown) Plane poll is retried once and recovers; a persistent failure is surfaced
+// (log) and skipped for that repo instead of rejecting the whole tick.
+test("(#17) a transient listIssues throw is retried once and the poll recovers", async () => {
+	let attempts = 0;
+	const { deps, spawned } = harness({
+		listIssues: async () => {
+			attempts++;
+			if (attempts === 1) throw new Error("429 rate limited");
+			return [issue("A"), issue("B")];
+		},
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(2); // recovered ⇒ both spawned
+	expect(attempts).toBe(2);
+	expect(spawned.sort()).toEqual(["A", "B"]);
+});
+
+test("(#17) a persistent listIssues failure is logged and the repo is skipped (tick stays non-fatal)", async () => {
+	const logs: string[] = [];
+	const { deps, spawned } = harness({
+		log: (m) => logs.push(m),
+		listIssues: async () => {
+			throw new Error("plane down");
+		},
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(0); // no throw, nothing spawned
+	expect(spawned).toEqual([]);
+	expect(logs.some((m) => m.includes("listIssues failed for /r after retry"))).toBe(true);
+});
