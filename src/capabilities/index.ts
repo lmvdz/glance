@@ -198,6 +198,135 @@ export interface CapabilityFederationMetadata {
 
 const EXECUTABLE_TOP_LEVEL = new Set(["scripts", "postinstall", "preinstall", "commands", "hooks", "execute"]);
 
+/** Schema versions this build knows how to materialize. A pack declaring anything else is rejected by
+ *  verification rather than silently mis-bound (forward-incompatible manifests must fail closed). */
+const SUPPORTED_SCHEMA_VERSIONS = new Set(["1"]);
+/** The omp-squad build version verification compatibility ranges are evaluated against. */
+const OMP_SQUAD_BUILD_VERSION = "0.1.0";
+
+export interface CapabilityVerificationResult {
+	ok: boolean;
+	status: CapabilityVerificationStatus;
+	message: string;
+	failures: string[];
+	warnings: string[];
+}
+
+/** Thrown when a verification gate refuses to enable/upgrade a capability. Surfaces include the recorded
+ *  verification reason so the caller (and the audit log) can see exactly why the gate blocked. */
+export class CapabilityVerificationError extends Error {
+	readonly failures: string[];
+	constructor(message: string, failures: string[]) {
+		super(message);
+		this.name = "CapabilityVerificationError";
+		this.failures = failures;
+	}
+}
+
+/**
+ * Real pack verification (replaces the prior hardcoded `status:"passed"` rubber stamp). Validates:
+ *   - required identity fields are present,
+ *   - the declared schema version is one this build can materialize,
+ *   - the compatibility range targets this omp-squad build,
+ *   - no declared file path escapes the install dir (absolute paths / `..` traversal / leading slash),
+ *   - no declared file is an executable manifest field smuggled in as a path.
+ * Returns a structured result; the caller decides whether it gates (enable/upgrade) or merely records
+ * (import). A failure here is what makes a malformed pack un-enableable.
+ */
+export function verifyCapabilityPack(pack: CapabilityPack): CapabilityVerificationResult {
+	const failures: string[] = [];
+	const warnings: string[] = [];
+
+	if (!pack.id) failures.push("pack id missing");
+	if (!pack.slug) failures.push("pack slug missing");
+	if (!pack.version) failures.push("pack version missing");
+	if (!pack.checksum) failures.push("pack checksum missing");
+	if (!pack.title) failures.push("pack title missing");
+
+	if (!SUPPORTED_SCHEMA_VERSIONS.has(pack.schemaVersion)) {
+		failures.push(`unsupported schemaVersion "${pack.schemaVersion}" (supported: ${[...SUPPORTED_SCHEMA_VERSIONS].join(", ")})`);
+	}
+
+	const range = pack.compatibility?.ompSquad;
+	if (!range) warnings.push("pack declares no ompSquad compatibility range");
+	else if (!satisfiesCompatibility(OMP_SQUAD_BUILD_VERSION, range)) {
+		failures.push(`incompatible with omp-squad ${OMP_SQUAD_BUILD_VERSION} (requires "${range}")`);
+	}
+
+	for (const file of pack.files) {
+		const reason = unsafeInstallRelativePath(file.path);
+		if (reason) failures.push(`unsafe file path "${file.path}": ${reason}`);
+	}
+
+	if (pack.files.length === 0) warnings.push("pack declares no files");
+
+	const status: CapabilityVerificationStatus = failures.length ? "failed" : warnings.length ? "warning" : "passed";
+	const message = failures.length
+		? `verification failed: ${failures.join("; ")}`
+		: warnings.length
+			? `verified with ${warnings.length} warning(s): ${warnings.join("; ")}`
+			: "verified";
+	return { ok: failures.length === 0, status, message, failures, warnings };
+}
+
+/** Reject any path that would escape the per-install directory once joined to it. Returns a reason string
+ *  when unsafe, or undefined when the path is a safe install-relative path. Mirrors the runtime guard in
+ *  squad-manager's flue file-write (target.startsWith(dir + sep)) but at verification time. */
+function unsafeInstallRelativePath(p: string): string | undefined {
+	if (typeof p !== "string" || !p.trim()) return "empty path";
+	if (p.startsWith("/") || p.startsWith("\\")) return "absolute path";
+	if (/^[A-Za-z]:[\\/]/.test(p)) return "drive-absolute path";
+	if (p.includes("\0")) return "null byte";
+	const segments = p.split(/[\\/]+/);
+	if (segments.some((seg) => seg === "..")) return "parent-directory traversal";
+	return undefined;
+}
+
+/**
+ * Minimal semver-range check covering the dialect capability manifests actually use: ">=x.y.z", "^x.y.z",
+ * "~x.y.z", "*"/"" (any), or an exact "x.y.z". Conservative: an unparseable range fails closed.
+ */
+function satisfiesCompatibility(version: string, range: string): boolean {
+	const r = range.trim();
+	if (r === "" || r === "*" || r === "x") return true;
+	const v = parseSemver(version);
+	if (!v) return false;
+	if (r.startsWith(">=")) return compareSemver(v, parseSemver(r.slice(2))) >= 0;
+	if (r.startsWith(">")) return compareSemver(v, parseSemver(r.slice(1))) > 0;
+	if (r.startsWith("<=")) return compareSemver(v, parseSemver(r.slice(2))) <= 0;
+	if (r.startsWith("<")) return compareSemver(v, parseSemver(r.slice(1))) < 0;
+	if (r.startsWith("^")) {
+		const base = parseSemver(r.slice(1));
+		if (!base) return false;
+		return base.length > 0 && v[0] === base[0] && compareSemver(v, base) >= 0;
+	}
+	if (r.startsWith("~")) {
+		const base = parseSemver(r.slice(1));
+		if (!base) return false;
+		return v[0] === base[0] && v[1] === base[1] && compareSemver(v, base) >= 0;
+	}
+	const exact = parseSemver(r);
+	return exact ? compareSemver(v, exact) === 0 : false;
+}
+
+function parseSemver(value: string | undefined): number[] | undefined {
+	if (!value) return undefined;
+	const parts = value.trim().replace(/^v/, "").split(".");
+	const nums = parts.slice(0, 3).map((p) => Number.parseInt(p, 10));
+	if (nums.some((n) => !Number.isFinite(n))) return undefined;
+	while (nums.length < 3) nums.push(0);
+	return nums;
+}
+
+function compareSemver(a: number[], b: number[] | undefined): number {
+	if (!b) return -1;
+	for (let i = 0; i < 3; i++) {
+		const diff = (a[i] ?? 0) - (b[i] ?? 0);
+		if (diff !== 0) return diff > 0 ? 1 : -1;
+	}
+	return 0;
+}
+
 export function emptyCapabilitySnapshot(): CapabilitySnapshot {
 	return { sources: [], packs: [], installs: [], verifications: [], audit: [] };
 }
@@ -225,9 +354,13 @@ export function importCapabilitySource(snapshot: CapabilitySnapshot, input: Capa
 	const parsed = parseCapabilityManifest(input.manifest, source.id, now);
 	upsert(snapshot.sources, source, (item) => item.id);
 	upsert(snapshot.packs, parsed.pack, (item) => item.id);
-	recordVerification(snapshot, "pack", parsed.pack.id, "passed", parsed.warnings.length ? `Validated with ${parsed.warnings.length} warning(s)` : "Validated", now);
-	recordAudit(snapshot, actor, "capability.source.import", source.id, { packId: parsed.pack.id, checksum: parsed.pack.checksum }, now);
-	return { source, pack: parsed.pack, warnings: parsed.warnings };
+	// REAL verification (was a hardcoded `passed` stamp): record the actual pack-validation outcome so a
+	// malformed pack is recorded as `failed` here AND blocked from enable/upgrade below.
+	const verdict = verifyCapabilityPack(parsed.pack);
+	const warnings = [...parsed.warnings, ...verdict.warnings];
+	recordVerification(snapshot, "pack", parsed.pack.id, verdict.status, verdict.message, now);
+	recordAudit(snapshot, actor, "capability.source.import", source.id, { packId: parsed.pack.id, checksum: parsed.pack.checksum, verification: verdict.status }, now);
+	return { source, pack: parsed.pack, warnings };
 }
 
 export function parseCapabilityManifest(input: unknown, sourceId: string, now = Date.now()): { pack: CapabilityPack; warnings: string[] } {
@@ -276,6 +409,16 @@ export function installCapability(snapshot: CapabilitySnapshot, input: Capabilit
 	const orgId = input.orgId ?? "file";
 	const existing = snapshot.installs.find((item) => item.packId === pack.id && item.orgId === orgId && item.state !== "removed");
 	if (existing) return existing;
+	// Verification GATE: a pack that fails validation cannot be installed in an enabled state. We still
+	// record the failed verification + audit (visibility), but refuse to materialize live bindings — a
+	// rubber stamp let malformed/incompatible/path-traversing packs go straight to enabled before.
+	const wantEnabled = input.enable !== false;
+	const verdict = verifyCapabilityPack(pack);
+	if (wantEnabled && !verdict.ok) {
+		recordVerification(snapshot, "install", pack.id, "failed", verdict.message, now);
+		recordAudit(snapshot, actor, "capability.install.blocked", pack.id, { packId: pack.id, reason: verdict.message }, now);
+		throw new CapabilityVerificationError(`cannot enable capability: ${verdict.message}`, verdict.failures);
+	}
 	const install: CapabilityInstall = {
 		id: stableId("install", `${orgId}:${pack.id}:${now}`),
 		orgId,
@@ -293,8 +436,8 @@ export function installCapability(snapshot: CapabilitySnapshot, input: Capabilit
 	install.bindings = materializeBindings(pack, install.id, install.state === "enabled");
 	install.contextPolicy = defaultContextPolicy(install.id, pack);
 	snapshot.installs.push(install);
-	recordVerification(snapshot, "install", install.id, "passed", "Install bindings materialized", now);
-	recordAudit(snapshot, actor, "capability.install", install.id, { packId: pack.id, state: install.state }, now);
+	recordVerification(snapshot, "install", install.id, verdict.status, `Install bindings materialized (${verdict.message})`, now);
+	recordAudit(snapshot, actor, "capability.install", install.id, { packId: pack.id, state: install.state, verification: verdict.status }, now);
 	return install;
 }
 
@@ -311,19 +454,41 @@ export function updateCapabilityInstall(snapshot: CapabilitySnapshot, id: string
 		recordAudit(snapshot, actor, "capability.rollback", install.id, { packId: install.packId, checksum: install.checksum }, now);
 	} else if (patch.upgradeToPackId) {
 		const next = getPack(snapshot, patch.upgradeToPackId);
+		// Verification GATE: refuse an upgrade to a pack that fails validation. The current install is left
+		// untouched (no previous snapshot taken, no bindings re-pointed) so a bad upgrade can't strand it.
+		const verdict = verifyCapabilityPack(next);
+		if (!verdict.ok) {
+			recordVerification(snapshot, "upgrade", install.id, "failed", verdict.message, now);
+			recordAudit(snapshot, actor, "capability.upgrade.blocked", install.id, { packId: next.id, reason: verdict.message }, now);
+			throw new CapabilityVerificationError(`cannot upgrade capability: ${verdict.message}`, verdict.failures);
+		}
 		install.previous = { packId: install.packId, version: install.version, checksum: install.checksum, bindings: install.bindings };
 		install.packId = next.id;
 		install.version = next.version;
 		install.checksum = next.checksum;
 		install.bindings = materializeBindings(next, install.id, install.state === "enabled");
 		install.contextPolicy = defaultContextPolicy(install.id, next);
-		recordVerification(snapshot, "upgrade", install.id, "passed", "Upgrade bindings staged", now);
-		recordAudit(snapshot, actor, "capability.upgrade", install.id, { packId: next.id, checksum: next.checksum }, now);
+		recordVerification(snapshot, "upgrade", install.id, verdict.status, `Upgrade bindings staged (${verdict.message})`, now);
+		recordAudit(snapshot, actor, "capability.upgrade", install.id, { packId: next.id, checksum: next.checksum, verification: verdict.status }, now);
 	}
 	if (patch.overrides) install.overrides = { ...install.overrides, ...patch.overrides };
 	if (patch.removed) install.state = "removed";
 	if (patch.enabled !== undefined) install.state = patch.enabled ? "enabled" : "disabled";
 	if (patch.state) install.state = patch.state;
+	// Verification GATE on (re-)enable: moving an install into the `enabled` state re-validates the pack so
+	// a previously-disabled (or freshly-approved) install cannot be flipped live if its pack is malformed.
+	if (install.state === "enabled") {
+		const pack = snapshot.packs.find((item) => item.id === install.packId);
+		const verdict = pack ? verifyCapabilityPack(pack) : { ok: false, status: "failed" as const, message: "capability pack not found", failures: ["capability pack not found"], warnings: [] };
+		if (!verdict.ok) {
+			install.state = "failed";
+			install.bindings = install.bindings.map((binding) => ({ ...binding, enabled: false }));
+			install.updatedAt = now;
+			recordVerification(snapshot, "install", install.id, "failed", verdict.message, now);
+			recordAudit(snapshot, actor, "capability.enable.blocked", install.id, { packId: install.packId, reason: verdict.message }, now);
+			throw new CapabilityVerificationError(`cannot enable capability: ${verdict.message}`, verdict.failures);
+		}
+	}
 	const enabled = install.state === "enabled";
 	install.bindings = install.bindings.map((binding) => ({ ...binding, enabled }));
 	install.updatedAt = now;
@@ -362,20 +527,39 @@ export function diffCapabilityPacks(before: CapabilityPack, after: CapabilityPac
 	});
 }
 
-export function capabilityFederationMetadata(snapshot: CapabilitySnapshot): CapabilityFederationMetadata[] {
-	const installed = new Set(snapshot.installs.filter((install) => install.state === "enabled").map((install) => install.packId));
-	return snapshot.packs.filter((pack) => installed.has(pack.id)).map((pack) => ({
-		packId: pack.id,
-		sourceId: pack.sourceId,
-		framework: pack.framework,
-		slug: pack.slug,
-		version: pack.version,
-		checksum: pack.checksum,
-		title: pack.title,
-		description: pack.description,
-		compatibility: pack.compatibility,
-		context: { shareable: pack.context?.shareable === true, exports: pack.context?.exports ?? [] },
-	}));
+/**
+ * Federation metadata exposed to a peer over `/api/federation/capabilities`. This is THE boundary where a
+ * capability's context crosses to a peer, so the per-install context policy is enforced here (was the only
+ * place `canExportCapabilityContext` / `redactCapabilityContext` would ever fire — previously every enabled
+ * pack's `context.exports` leaked unconditionally, ignoring the policy's default-deny `allowedPeers`):
+ *   - `peer` defaults to "*" (an anonymous/public federation reader); the policy must allow that peer.
+ *   - only export namespaces the policy actually permits for this peer are advertised,
+ *   - the human-facing `description` is redacted per the policy's redaction tokens,
+ *   - a pack whose install policy shares NOTHING to this peer still advertises identity (so peers can see
+ *     a capability exists) but with `shareable:false` and an empty exports list.
+ */
+export function capabilityFederationMetadata(snapshot: CapabilitySnapshot, peer = "*"): CapabilityFederationMetadata[] {
+	const enabled = snapshot.installs.filter((install) => install.state === "enabled");
+	const installByPack = new Map(enabled.map((install) => [install.packId, install] as const));
+	return snapshot.packs.filter((pack) => installByPack.has(pack.id)).map((pack) => {
+		const install = installByPack.get(pack.id)!;
+		const declaredExports = pack.context?.exports ?? [];
+		const allowedExports = declaredExports.filter((namespace) => canExportCapabilityContext(install, namespace, peer));
+		const policy = install.contextPolicy;
+		const description = policy ? redactCapabilityContext(pack.description, policy) : pack.description;
+		return {
+			packId: pack.id,
+			sourceId: pack.sourceId,
+			framework: pack.framework,
+			slug: pack.slug,
+			version: pack.version,
+			checksum: pack.checksum,
+			title: pack.title,
+			description,
+			compatibility: pack.compatibility,
+			context: { shareable: allowedExports.length > 0, exports: allowedExports },
+		};
+	});
 }
 
 export function canExportCapabilityContext(install: CapabilityInstall, namespace: string, peer: string): boolean {
