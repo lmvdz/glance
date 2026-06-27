@@ -476,6 +476,153 @@ export class TailnetFederationBus implements FederationBus {
 }
 
 /**
+ * The DEFAULT bus: a real, always-functioning federation bus.
+ *
+ * Single-host / no-coordinator is the COMMON case and must work with zero
+ * config: this bus then behaves as a local pub/sub — every `publish*` is
+ * delivered straight back to the local `on*` subscribers (loopback), so the
+ * manager's own roster/leases are live and observable in-process without any
+ * peer. It maintains its own {@link PeerRoster} for the merged view.
+ *
+ * When a `coordinatorUrl` IS configured it additionally opens a
+ * {@link TailnetFederationBus} to the coordinator: local publishes are forwarded
+ * to peers, and inbound peer frames fan out to the local subscribers AND update
+ * the roster — so collision detection runs over the merged local+peer roster.
+ *
+ * Resilient by construction: with no coordinator (or an unreachable one) it
+ * NEVER throws and NEVER blocks startup — `start()` resolves immediately and the
+ * inner Tailnet bus reconnects on its own capped backoff. This is what
+ * `NullFederationBus` is the explicit opt-out of (OMP_SQUAD_FEDERATION=0).
+ *
+ * Note on loopback vs. echo: the bus does NOT echo our OWN presence/leases back
+ * to us as if from a peer — loopback fires the same frame we published, tagged
+ * with our own operator id, and {@link PeerRoster.record} drops our own id. The
+ * inner Tailnet bus likewise never receives its own frames (the coordinator
+ * fans out to everyone BUT the sender), so a peer's frame arrives exactly once.
+ */
+export class LocalFederationBus implements FederationBus {
+	private readonly operator: Actor;
+	private readonly presenceCbs: ((presence: OperatorPresence) => void)[] = [];
+	private readonly commandCbs: ((remote: RemoteCommand) => void)[] = [];
+	private readonly messageCbs: ((msg: TeamMessage) => void)[] = [];
+	private readonly leasesCbs: ((frame: RemoteLeases) => void)[] = [];
+	/** Peer transport; created only when a coordinator URL is configured. */
+	private readonly peer?: TailnetFederationBus;
+	/** Merged peer roster (peers only — own echo dropped), surfaced to the federation view. */
+	readonly roster: PeerRoster;
+	private started = false;
+
+	constructor(opts: { operator: Actor; coordinatorUrl?: string | null; token?: string; ttlMs?: number; whois?: (ip: string) => Promise<Actor | undefined> }) {
+		this.operator = opts.operator;
+		this.roster = new PeerRoster(opts.operator.id, opts.ttlMs);
+		const url = opts.coordinatorUrl ?? undefined;
+		if (url !== undefined && url.length > 0) {
+			this.peer = new TailnetFederationBus({ coordinatorUrl: url, operator: opts.operator, token: opts.token, whois: opts.whois });
+			// Inbound peer frames update the roster AND fan out to local subscribers.
+			this.peer.onPresence((p) => {
+				this.roster.record(p);
+				this.fanoutPresence(p);
+			});
+			this.peer.onLeases((f) => this.fanoutLeases(f));
+			this.peer.onMessage((m) => this.fanoutMessage(m));
+			this.peer.onRemoteCommand((c) => this.fanoutCommand(c));
+		}
+	}
+
+	/** True when a coordinator is configured (peer gossip active); false ⇒ local-only loopback. */
+	get federated(): boolean {
+		return this.peer !== undefined;
+	}
+
+	async start(): Promise<void> {
+		this.started = true;
+		// Best-effort: a bad/unreachable coordinator must never throw or block — the
+		// inner bus connects in the background and reconnects on backoff.
+		await this.peer?.start().catch(() => {});
+	}
+
+	async stop(): Promise<void> {
+		this.started = false;
+		await this.peer?.stop().catch(() => {});
+	}
+
+	publishPresence(presence: OperatorPresence): void {
+		// Stamp cross-host repoId locally before it leaves this host (peers key collisions on it).
+		const stamped = stampRepoIds(presence);
+		// Loopback: local subscribers see our own roster immediately, coordinator or not.
+		this.fanoutPresence(stamped);
+		this.peer?.publishPresence(stamped);
+	}
+
+	onPresence(cb: (presence: OperatorPresence) => void): void {
+		this.presenceCbs.push(cb);
+	}
+
+	onRemoteCommand(cb: (remote: RemoteCommand) => void): void {
+		this.commandCbs.push(cb);
+	}
+
+	sendMessage(text: string): void {
+		const msg: TeamMessage = { from: this.operator, text, ts: Date.now() };
+		this.fanoutMessage(msg);
+		this.peer?.sendMessage(text);
+	}
+
+	onMessage(cb: (msg: TeamMessage) => void): void {
+		this.messageCbs.push(cb);
+	}
+
+	publishLeases(repoId: string, leases: LeaseEntry[]): void {
+		this.fanoutLeases({ repoId, operator: this.operator, leases });
+		this.peer?.publishLeases(repoId, leases);
+	}
+
+	onLeases(cb: (frame: RemoteLeases) => void): void {
+		this.leasesCbs.push(cb);
+	}
+
+	private fanoutPresence(presence: OperatorPresence): void {
+		for (const cb of this.presenceCbs) {
+			try {
+				cb(presence);
+			} catch {
+				// swallow: a throwing subscriber must not break the fan-out
+			}
+		}
+	}
+
+	private fanoutLeases(frame: RemoteLeases): void {
+		for (const cb of this.leasesCbs) {
+			try {
+				cb(frame);
+			} catch {
+				// swallow
+			}
+		}
+	}
+
+	private fanoutMessage(msg: TeamMessage): void {
+		for (const cb of this.messageCbs) {
+			try {
+				cb(msg);
+			} catch {
+				// swallow
+			}
+		}
+	}
+
+	private fanoutCommand(remote: RemoteCommand): void {
+		for (const cb of this.commandCbs) {
+			try {
+				cb(remote);
+			} catch {
+				// swallow
+			}
+		}
+	}
+}
+
+/**
  * Listener-only peer-presence feed for a local surface (the command center).
  * Wraps a {@link TailnetFederationBus} purely to RECEIVE presence frames — it
  * never publishes — collecting them into a {@link PeerRoster}. Best-effort: with
