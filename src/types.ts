@@ -711,7 +711,46 @@ export type SquadEvent =
 	| { type: "features-changed" }
 	| { type: "comment"; comment: ArtifactCommentDTO }
 	| { type: "comment-resolved"; id: string; resolvedAt: number }
-	| { type: "audit"; entry: AuditEntry };
+	| { type: "audit"; entry: AuditEntry }
+	| { type: "automation"; event: AutomationEvent };
+
+/** The daemon's periodic background loops — the ones that run without an operator and were, until the
+ *  automation log, invisible. Scout reads agent reasoning (the only token-spending loop); Observer and
+ *  Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch";
+
+/**
+ * One unit of background-loop work, the observability record the audit log never carried (it logs only
+ * operator-initiated mutations). Scout emits one per reasoning scan (each = one LLM call); the other
+ * loops emit one per tick (a no-op tick is a heartbeat that proves the loop is alive). See automation-log.ts.
+ */
+export interface AutomationEvent {
+	/** Strictly-increasing id (epoch millis, bumped on collision); stable sort + dedupe key. */
+	id: number;
+	/** Epoch millis the unit of work finished. */
+	at: number;
+	loop: AutomationLoop;
+	/** Repo the loop is scoped to (Scout/Observer/Opportunity are per-repo); omitted for fleet-wide Dispatch. */
+	repo?: string;
+	/** Scout only: the agent whose reasoning was scanned. */
+	agent?: string;
+	/** Wall-clock the unit took. */
+	durationMs?: number;
+	/** LLM one-shots this unit cost — Scout: 1 per scan; the other loops: 0. The headline cost signal. */
+	llmCalls?: number;
+	/** Candidates/findings surfaced this unit (before dedup). */
+	found?: number;
+	/** Issues/tickets actually filed this unit. */
+	filed?: number;
+	/** Candidates skipped as already-seen / duplicate of open work. */
+	deduped?: number;
+	/** Dispatch only: agents spawned this tick. */
+	spawned?: number;
+	/** Severity of the unit; "warn"/"error" force the event onto disk even with no work done. */
+	level?: "info" | "warn" | "error";
+	/** Optional human-readable detail (a filed title, an error message). */
+	detail?: string;
+}
 
 /** One append-only fleet-action audit record (actor / action / target / outcome). */
 export interface AuditEntry {

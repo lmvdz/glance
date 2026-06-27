@@ -47,3 +47,15 @@ test("control tower read APIs return honest empty data", async () => {
 	expect(governance.authMode).toBe("file");
 	expect(governance.audit.available).toBe(true);
 });
+
+test("/api/automation exposes the background-loop activity shape and accepts its query params", async () => {
+	const url = await server();
+	const a = await fetch(`${url}/api/automation`).then((r) => r.json());
+	expect(Array.isArray(a.events)).toBe(true); // recent feed
+	expect(Array.isArray(a.rollup)).toBe(true); // per-loop rollups
+	// loop / windowMs / limit / meaningful filters are parsed without erroring the route
+	const filtered = await fetch(`${url}/api/automation?loop=scout&windowMs=900000&limit=5&meaningful=1`);
+	expect(filtered.status).toBe(200);
+	const body = await filtered.json();
+	expect(Array.isArray(body.events)).toBe(true);
+});

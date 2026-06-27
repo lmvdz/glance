@@ -36,7 +36,8 @@ import type { OrgContext } from "./dal/context.ts";
 import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
 import { curatePlaneIssues, renderClusterReport } from "./plane-curator.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
-import type { Actor, AgentDTO, ApprovalMode, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
+import type { AutomationRollupRow } from "./automation-log.ts";
+import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
 
@@ -51,6 +52,7 @@ USAGE
   omp-squad rm <id> [--delete-worktree]            Remove an agent
   omp-squad who [repo]                             Who/what is working a repo (any omp agent)
   omp-squad logs <id> [--limit N]                  Print an agent's recent transcript
+  omp-squad automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   omp-squad open                                   Print the dashboard URL
   omp-squad curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
 
@@ -550,6 +552,55 @@ async function cmdWho(args: string[]): Promise<void> {
 	}
 }
 
+const AUTOMATION_WINDOWS: Record<string, number> = { "15m": 900_000, "1h": 3_600_000, "6h": 21_600_000, "24h": 86_400_000 };
+/** Compact "Ns/Nm/Nh ago" for the CLI automation view. */
+function relAgo(ts: number): string {
+	const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+	return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+}
+
+/** `omp-squad automation` — what the daemon's background loops (scout/observer/opportunity/dispatch) are
+ *  doing on their own, and what the Scout is costing in LLM calls. The terminal twin of GET /api/automation. */
+async function cmdAutomation(args: string[]): Promise<void> {
+	const { flags } = parseArgs(args);
+	const winKey = String(flags.window ?? flags.w ?? "1h");
+	const windowMs = AUTOMATION_WINDOWS[winKey] ?? 3_600_000;
+	const loop = typeof flags.loop === "string" ? flags.loop : undefined;
+	const limit = Number(flags.limit) || 20;
+	let data: { events: AutomationEvent[]; rollup: AutomationRollupRow[] };
+	try {
+		const q = new URLSearchParams({ windowMs: String(windowMs), limit: String(limit) });
+		if (loop) q.set("loop", loop);
+		const res = await fetch(`${base(flags)}/api/automation?${q.toString()}`, { headers: tokenHeader() });
+		data = (await res.json()) as { events: AutomationEvent[]; rollup: AutomationRollupRow[] };
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: omp-squad up\n`);
+		process.exit(1);
+		return;
+	}
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+		return;
+	}
+	const winLbl = Object.keys(AUTOMATION_WINDOWS).find((k) => AUTOMATION_WINDOWS[k] === windowMs) ?? `${Math.round(windowMs / 60_000)}m`;
+	process.stdout.write(`background automation — last ${winLbl}\n\n`);
+	const rollup = data.rollup ?? [];
+	if (!rollup.length) process.stdout.write("  (no background activity recorded yet — loops run once agents + Plane repos are configured)\n");
+	for (const r of rollup) {
+		const extra = `${r.spawned ? `  ${r.spawned} spawned` : ""}${r.errors ? `  ${r.errors} err` : ""}`;
+		process.stdout.write(`  ${r.loop.padEnd(12)}${String(r.events).padStart(4)} ev   ${String(r.llmCalls).padStart(3)} LLM   ${String(r.filed).padStart(3)} filed   ${String(r.found).padStart(3)} found${extra}   last ${r.lastAt ? `${relAgo(r.lastAt)} ago` : "—"}\n`);
+	}
+	const evs = data.events ?? [];
+	if (evs.length) {
+		process.stdout.write(`\nrecent (${evs.length}):\n`);
+		for (const e of evs) {
+			const metrics = [e.llmCalls ? `${e.llmCalls} LLM` : "", e.found ? `${e.found} found` : "", e.filed ? `${e.filed} filed` : "", e.spawned ? `${e.spawned} spawned` : "", e.level && e.level !== "info" ? e.level : ""].filter(Boolean).join(" ") || "—";
+			const who = e.agent ?? (e.repo ? (e.repo.split("/").pop() ?? e.repo) : "fleet");
+			process.stdout.write(`  ${`${relAgo(e.at)} ago`.padStart(8)}  ${e.loop.padEnd(11)} ${who.padEnd(22)} ${metrics}${e.detail ? `  — ${e.detail}` : ""}\n`);
+		}
+	}
+}
+
 async function main(): Promise<void> {
 	const [cmd, ...rest] = process.argv.slice(2);
 	switch (cmd) {
@@ -581,6 +632,10 @@ async function main(): Promise<void> {
 			break;
 		case "logs":
 			await cmdLogs(rest);
+			break;
+		case "automation":
+		case "auto":
+			await cmdAutomation(rest);
 			break;
 		case "commission":
 		case "hire":

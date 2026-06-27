@@ -934,6 +934,25 @@ export class SquadServer {
 				}),
 			);
 		}
+		if (url.pathname === "/api/automation") {
+			// Background-loop observability: recent events + per-loop rollups. ?loop= filters one loop,
+			// ?windowMs= sizes the rollup window (default 1h), ?meaningful=1 drops heartbeats, ?limit= caps the feed.
+			const q = url.searchParams;
+			const loopParam = q.get("loop");
+			const loop = loopParam === "scout" || loopParam === "observer" || loopParam === "opportunity" || loopParam === "dispatch" ? loopParam : undefined;
+			const limit = Number(q.get("limit"));
+			const windowMs = Number(q.get("windowMs"));
+			const sinceMs = Number(q.get("sinceMs"));
+			return Response.json(
+				manager.automationActivity({
+					loop,
+					limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+					windowMs: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined,
+					sinceMs: Number.isFinite(sinceMs) && sinceMs > 0 ? sinceMs : undefined,
+					meaningfulOnly: q.get("meaningful") === "1",
+				}),
+			);
+		}
 		const mtrace = url.pathname.match(/^\/api\/trace\/([^/]+)$/);
 		if (mtrace && req.method === "GET") {
 			const trace = await manager.trace(decodeURIComponent(mtrace[1]));

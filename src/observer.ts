@@ -28,6 +28,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import type { AutomationRecorder } from "./automation-log.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import type { AgentDTO, IssueRef } from "./types.ts";
 
@@ -77,6 +78,8 @@ export interface ObserverDeps {
 	now?: () => number;
 	/** Log sink (defaults to no-op). */
 	log?: (msg: string) => void;
+	/** Observability sink — one report per tick (a clean audit is a heartbeat proving the loop is alive). */
+	record?: AutomationRecorder;
 }
 
 /** Marks an observer-filed issue so the cap can count its own OPEN issues without touching others. */
@@ -271,9 +274,14 @@ export class Observer {
 		this.running = true;
 		const log = this.deps.log ?? (() => {});
 		const clock = this.deps.now ?? Date.now;
+		const t0 = clock();
+		let found = 0;
+		let filed = 0;
+		let resolved = 0;
 		try {
 			const open = (await this.deps.listIssues().catch(() => null)) ?? [];
 			const findings = await this.collect(open);
+			found = findings.length;
 			let openObserverCount = open.filter((i) => i.name.includes(OBSERVER_TAG)).length;
 			const max = observeMax();
 			const reproduced = new Set<string>();
@@ -312,6 +320,7 @@ export class Observer {
 					continue;
 				}
 				openObserverCount++;
+				filed++;
 				this.seen[f.fingerprint] = { title: f.title, issueId: ref.id, filedAt: clock() };
 				log(`filed ${triage ? "needs-triage" : "auto-dispatch"} ${f.severity} finding ${ref.identifier ?? ref.id}: ${f.title}`);
 			}
@@ -329,10 +338,13 @@ export class Observer {
 				if (this.deps.closeIssue && entry.issueId) await this.deps.closeIssue({ id: entry.issueId, name: entry.title }).catch((e) => log(`close failed for ${entry.issueId}: ${msg(e)}`));
 				log(`resolved ${fp} (${entry.title}) — clearing fingerprint`);
 				delete this.seen[fp];
+				resolved++;
 			}
 			this.saveSeen();
 		} finally {
 			this.running = false;
+			// One report per tick — found/filed surface real audit work; a clean tick is a heartbeat (ring-only).
+			this.deps.record?.({ durationMs: (this.deps.now ?? Date.now)() - t0, found, filed, deduped: Math.max(0, found - filed), detail: resolved ? `${resolved} resolved` : undefined });
 		}
 	}
 

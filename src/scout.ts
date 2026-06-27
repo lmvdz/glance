@@ -26,6 +26,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import type { AutomationRecorder } from "./automation-log.ts";
 import type { Classify } from "./intake.ts";
 import { extractJsonObject } from "./omp-call.ts";
 import type { IssueRef, TranscriptEntry } from "./types.ts";
@@ -75,6 +76,8 @@ export interface ScoutDeps {
 	now?: () => number;
 	/** Log sink (defaults to no-op). */
 	log?: (msg: string) => void;
+	/** Observability sink — one report per scan (each scan = one LLM call). Omit ⇒ unobserved. */
+	record?: AutomationRecorder;
 }
 
 /** Marks a scout-filed issue so the cap counts its own OPEN issues; also a human-scannable provenance tag. */
@@ -244,44 +247,51 @@ export class Scout {
 		if (process.env.OMP_SQUAD_SCOUT === "0" || text.length < MIN_SCAN_CHARS) return;
 		const log = this.deps.log ?? (() => {});
 		const clock = this.deps.now ?? Date.now;
+		// t0 spans the LLM call: an event is emitted on EVERY path past here (even no-tickets / error) because
+		// the one-shot already cost a call — that spend is the whole reason the operator wants this visible.
+		const t0 = clock();
+		let found = 0;
+		let filed = 0;
 		try {
 			const tickets = parseTickets(await this.deps.extract(buildPrompt(ctx.task, text)));
-			if (!tickets.length) return;
+			found = tickets.length;
+			if (tickets.length) {
+				const open = (await this.deps.listIssues().catch(() => null)) ?? [];
+				const openTokens = open.map((i) => titleTokens(i.name));
+				let openScout = open.filter((i) => i.name.includes(SCOUT_TAG)).length;
+				const max = Number(process.env.OMP_SQUAD_SCOUT_MAX) || 20; // cap on scout-filed OPEN issues
+				const limit = Number(process.env.OMP_SQUAD_SCOUT_PER_RUN) || 3; // cap on tickets from one scan
+				let changed = false;
 
-			const open = (await this.deps.listIssues().catch(() => null)) ?? [];
-			const openTokens = open.map((i) => titleTokens(i.name));
-			let openScout = open.filter((i) => i.name.includes(SCOUT_TAG)).length;
-			const max = Number(process.env.OMP_SQUAD_SCOUT_MAX) || 20; // cap on scout-filed OPEN issues
-			const limit = Number(process.env.OMP_SQUAD_SCOUT_PER_RUN) || 3; // cap on tickets from one scan
-			let filed = 0;
-			let changed = false;
+				for (const t of tickets) {
+					if (filed >= limit) break;
+					if (openScout >= max) {
+						log(`cap reached (${max} open) — skipping "${t.title}"`);
+						break;
+					}
+					const fp = fingerprint(t.title);
+					if (this.seen[fp]) continue; // already filed once — never re-file (even if since closed)
+					const cand = titleTokens(t.title);
+					if (openTokens.some((ot) => jaccard(cand, ot) >= DEDUP_THRESHOLD)) continue; // dup of existing open work
 
-			for (const t of tickets) {
-				if (filed >= limit) break;
-				if (openScout >= max) {
-					log(`cap reached (${max} open) — skipping "${t.title}"`);
-					break;
+					const title = `${SCOUT_TAG} ${TRIAGE_MARKER}: ${t.title}`;
+					const ref = await this.deps.fileIssue(title, buildBody(t, ctx)).catch(() => null);
+					if (!ref) {
+						log(`file failed for "${t.title}"`);
+						continue; // transient — a later scan re-harvests it
+					}
+					openScout++;
+					filed++;
+					changed = true;
+					this.seen[fp] = { title: t.title, issueId: ref.id, filedAt: clock(), agent: ctx.agent, runId: ctx.runId, issue: ctx.issue };
+					log(`filed ${t.kind} ${ref.identifier ?? ref.id}: ${t.title}`);
 				}
-				const fp = fingerprint(t.title);
-				if (this.seen[fp]) continue; // already filed once — never re-file (even if since closed)
-				const cand = titleTokens(t.title);
-				if (openTokens.some((ot) => jaccard(cand, ot) >= DEDUP_THRESHOLD)) continue; // dup of existing open work
-
-				const title = `${SCOUT_TAG} ${TRIAGE_MARKER}: ${t.title}`;
-				const ref = await this.deps.fileIssue(title, buildBody(t, ctx)).catch(() => null);
-				if (!ref) {
-					log(`file failed for "${t.title}"`);
-					continue; // transient — a later scan re-harvests it
-				}
-				openScout++;
-				filed++;
-				changed = true;
-				this.seen[fp] = { title: t.title, issueId: ref.id, filedAt: clock(), agent: ctx.agent, runId: ctx.runId, issue: ctx.issue };
-				log(`filed ${t.kind} ${ref.identifier ?? ref.id}: ${t.title}`);
+				if (changed) this.saveSeen();
 			}
-			if (changed) this.saveSeen();
+			this.deps.record?.({ agent: ctx.agent, durationMs: clock() - t0, llmCalls: 1, found, filed, deduped: found - filed });
 		} catch (e) {
 			log(`scan error (contained): ${e instanceof Error ? e.message : String(e)}`);
+			this.deps.record?.({ agent: ctx.agent, durationMs: clock() - t0, llmCalls: 1, level: "error", detail: e instanceof Error ? e.message : String(e) });
 		}
 	}
 

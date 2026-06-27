@@ -5,6 +5,7 @@
  */
 
 import { expect, test } from "bun:test";
+import type { AutomationReport } from "../src/automation-log.ts";
 import { Dispatcher, dispatchOrder, type DispatchDeps } from "../src/dispatch.ts";
 import { noAutoDispatchName } from "../src/plane.ts";
 import { occupyingAgents } from "../src/scheduler.ts";
@@ -38,6 +39,26 @@ test("dispatcher: spawns one routed agent per new open issue", async () => {
 	const { deps, spawned } = harness();
 	expect(await new Dispatcher(deps).tick()).toBe(3);
 	expect(spawned.sort()).toEqual(["A", "B", "C"]);
+});
+
+test("dispatcher: a tick emits one automation event with the spawned count + issues considered", async () => {
+	const events: AutomationReport[] = [];
+	const { deps } = harness({ record: (r) => events.push(r) });
+	await new Dispatcher(deps).tick();
+	expect(events.length).toBe(1);
+	expect(events[0].spawned).toBe(3);
+	expect(events[0].found).toBe(3); // three open issues considered
+	expect(typeof events[0].durationMs).toBe("number");
+});
+
+test("dispatcher: a paused tick still emits a heartbeat (warn) so the loop stays visible", async () => {
+	const events: AutomationReport[] = [];
+	const { deps, spawned } = harness({ record: (r) => events.push(r), paused: () => true });
+	expect(await new Dispatcher(deps).tick()).toBe(0);
+	expect(spawned).toEqual([]);
+	expect(events.length).toBe(1);
+	expect(events[0].level).toBe("warn");
+	expect(events[0].spawned).toBeUndefined();
 });
 
 test("dispatcher: never double-dispatches a claimed or already-dispatched issue", async () => {

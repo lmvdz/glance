@@ -799,6 +799,7 @@ function handle(ev) {
     case "transcript": { const a = transcripts.get(ev.id) ?? []; a.push(ev.entry); transcripts.set(ev.id, a); if (ev.id === selAgent && view === "agent") appendTranscript(ev.entry); break; }
     case "log": toast(ev.text, ev.level); break;
     case "audit": if (!auditAction || ev.entry.action === auditAction) { auditEntries.unshift(ev.entry); if (auditEntries.length > 200) auditEntries.length = 200; auditLoaded = true; if (view === "audit") renderBody(); } break;
+    case "automation": if (!automationLoop || ev.event.loop === automationLoop) { automationData.events.unshift(ev.event); if (automationData.events.length > 200) automationData.events.length = 200; automationLoaded = true; if (view === "automation") { renderAutomationFeed(); scheduleAutomation(); } } break;
     default: console.warn("unknown event type:", ev && ev.type); break;
   }
 }
@@ -918,6 +919,7 @@ function renderNav() {
     { id:"queue", ico:"⛔", lbl:"Queue",    sel: view === "queue", ct: need, attn: need > 0, on: openQueue },
     { id:"workflows", ico:"⚙", lbl:"Workflows", sel: view === "workflows", on: openWorkflows },
     { id:"race",  ico:"⇶",  lbl:"Race",     sel: view === "race", on: openRace },
+    { id:"automation", ico:"⟳", lbl:"Automation", sel: view === "automation", on: openAutomation },
     { id:"audit", ico:"📜", lbl:"Audit",    sel: view === "audit", on: openAudit },
     { id:"settings", ico:"⚙", lbl:"Settings", sel: view === "settings", on: openSettings },
   ];
@@ -966,6 +968,7 @@ function renderBody() {
   if (view === "workflows") return renderWorkflows(body);
   if (view === "queue") return renderQueue(body);
   if (view === "race") return renderRace(body);
+  if (view === "automation") return renderAutomation(body);
   if (view === "audit") return renderAudit(body);
   if (view === "feature") return renderFeature(body, features.get(selFeature));
   const p = projects().find(x => x.id === selProject);
@@ -1379,6 +1382,92 @@ function renderAudit(body) {
     return;
   }
   box.innerHTML = auditEntries.map(auditRow).join("");
+}
+
+// ── Background automation ───────────────────────────────────────────────────
+// What the daemon's periodic loops (Scout/Observer/Opportunity/Dispatch) are doing
+// on their own — the observability the audit log (operator actions only) never carried.
+// Data: GET /api/automation → { events, rollup }. Live: an "automation" WS event prepends
+// a feed row and debounces a rollup refresh so the cards stay current with no manual poll.
+let automationData = { events: [], rollup: [] };
+let automationLoaded = false;   // first /api/automation response landed — tells "loading" from "empty"
+let automationError = "";       // last /api/automation failure, surfaced when the feed would be blank
+let automationLoop = "";        // active loop filter ("" = all)
+let automationWindowMs = 3600000; // rollup window (default 1h)
+let automationTimer = null;
+const AUTO_LOOPS = {
+  scout:       { ico:"🔭", lbl:"Scout",       unit:"scans", desc:"reads agent reasoning → backlog · LLM" },
+  observer:    { ico:"🩺", lbl:"Observer",    unit:"ticks", desc:"audits fleet & gate health · no LLM" },
+  opportunity: { ico:"🧩", lbl:"Opportunity", unit:"ticks", desc:"clusters scout patterns · no LLM" },
+  dispatch:    { ico:"🚀", lbl:"Dispatch",    unit:"ticks", desc:"spawns agents from Plane · no LLM" },
+};
+const AUTO_WINDOWS = [["15m",900000],["1h",3600000],["6h",21600000],["24h",86400000]];
+function openAutomation() { view = "automation"; selAgent = null; renderAll(); loadAutomation(); }
+function scheduleAutomation() { if (automationTimer) return; automationTimer = setTimeout(() => { automationTimer = null; if (view === "automation") loadAutomation(); }, 3000); }
+async function loadAutomation() {
+  try {
+    const q = "limit=200&windowMs=" + automationWindowMs + (automationLoop ? "&loop=" + encodeURIComponent(automationLoop) : "");
+    const r = await fetch("/api/automation?" + q);
+    if (r.ok) { automationData = await r.json(); automationError = ""; }
+    else automationError = `couldn't load automation activity (${r.status})`;
+  } catch { automationError = "couldn't reach the daemon for automation activity"; }
+  automationLoaded = true;
+  if (view === "automation") renderBody();
+}
+function autoRollupFor(loop) { return (automationData.rollup || []).find(r => r.loop === loop) || { loop, events:0, llmCalls:0, found:0, filed:0, spawned:0, errors:0, lastAt:0 }; }
+function autoCard(loop) {
+  const m = AUTO_LOOPS[loop]; const r = autoRollupFor(loop);
+  const cost = r.llmCalls > 0 ? `<span class="pill bad" title="LLM one-shots — the only token cost">${r.llmCalls} LLM</span>` : `<span class="pill ok">0 LLM</span>`;
+  const last = r.lastAt ? `${ago(r.lastAt)} ago` : `idle`;
+  const stat = (n, lbl) => `<span style="display:inline-flex;gap:4px"><b>${n}</b><span style="color:var(--dim)">${lbl}</span></span>`;
+  return `<div class="section" style="flex:1 1 200px;min-width:190px"><div class="inner" style="display:flex;flex-direction:column;gap:8px">
+    <div style="display:flex;align-items:center;gap:8px"><span style="font-size:18px">${m.ico}</span><b>${m.lbl}</b>${cost}</div>
+    <div class="sub" style="color:var(--dim)">${esc(m.desc)}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px">${stat(r.events, m.unit)}${stat(r.filed, "filed")}${stat(r.found, "found")}${loop==="dispatch"?stat(r.spawned,"spawned"):""}${r.errors?`<span class="pill bad">${r.errors} err</span>`:""}</div>
+    <div class="sub" style="color:var(--dim)">last: <span class="agotime" data-ts="${r.lastAt||0}">${last}</span></div>
+  </div></div>`;
+}
+function automationRow(e) {
+  const m = AUTO_LOOPS[e.loop] || { ico:"•", lbl:e.loop };
+  const who = e.agent ? `<span class="nm">${esc(e.agent)}</span>` : (e.repo ? `<span style="color:var(--dim)">${esc(shortRepo(e.repo))}</span>` : `<span style="color:var(--dim)">fleet</span>`);
+  const bits = [];
+  if (e.llmCalls) bits.push(`<span class="pill bad">${e.llmCalls} LLM</span>`);
+  if (e.found) bits.push(`<span class="badge b-stage">${e.found} found</span>`);
+  if (e.filed) bits.push(`<span class="badge b-stage">${e.filed} filed</span>`);
+  if (e.spawned) bits.push(`<span class="badge b-stage">${e.spawned} spawned</span>`);
+  if (e.level === "error") bits.push(`<span class="pill bad">error</span>`);
+  else if (e.level === "warn") bits.push(`<span class="pill bad">warn</span>`);
+  if (!bits.length) bits.push(`<span style="color:var(--dim)">—</span>`);
+  const dur = typeof e.durationMs === "number" ? `<span style="color:var(--dim)">${e.durationMs>=1000?(e.durationMs/1000).toFixed(1)+"s":e.durationMs+"ms"}</span>` : "";
+  const det = e.detail ? `<div class="sub" style="grid-column:1/-1;color:var(--dim);white-space:pre-wrap;word-break:break-word">${esc(e.detail)}</div>` : "";
+  return `<div class="auditrow"><span class="badge b-stage" title="${esc(m.lbl)}">${m.ico} ${esc(e.loop)}</span>${who}<span style="display:flex;gap:4px;flex-wrap:wrap">${bits.join("")}</span>${dur}<span class="agotime" data-ts="${e.at}" title="${esc(new Date(e.at).toLocaleString())}">${ago(e.at)} ago</span>${det}</div>`;
+}
+function shortRepo(p) { const parts = String(p).split("/"); return parts[parts.length-1] || p; }
+function renderAutomationFeed() {
+  const box = document.getElementById("autolist"); if (!box) return;
+  const evs = automationData.events || [];
+  if (!evs.length) {
+    if (!automationLoaded && !automationError) { box.innerHTML = skel(6, "skelcard"); return; }
+    if (automationError) { box.innerHTML = `<div class="nodetail">${esc(automationError)}</div>`; return; }
+    box.innerHTML = estate("⟳", "No background activity yet", "The loops run on a timer once agents and Plane repos are configured — events show up here.", "");
+    return;
+  }
+  box.innerHTML = evs.map(automationRow).join("");
+}
+function renderAutomation(body) {
+  const wopts = AUTO_WINDOWS.map(([lbl,ms]) => `<option value="${ms}"${ms===automationWindowMs?" selected":""}>${lbl}</option>`).join("");
+  const lopts = `<option value="">all loops</option>` + Object.keys(AUTO_LOOPS).map(l => `<option value="${l}"${l===automationLoop?" selected":""}>${AUTO_LOOPS[l].lbl}</option>`).join("");
+  const totalLlm = (automationData.rollup||[]).reduce((a,r)=>a+(r.llmCalls||0),0);
+  body.innerHTML = `<div class="pv">
+    <div class="bvh"><div><h2>Background automation</h2><div class="sub">what the daemon's loops do on their own · ${totalLlm} LLM call${totalLlm===1?"":"s"} in the last window — Scout is the only one that spends tokens</div></div>
+      <div style="display:flex;gap:6px;align-items:center"><select id="autoWindow" class="sm" aria-label="Rollup window" title="Rollup window">${wopts}</select><select id="autoFilter" class="sm" aria-label="Filter by loop">${lopts}</select><button id="autoRefresh" class="navbtn" title="Refresh">↻</button><button id="autoHome" class="navbtn" title="Back">← Back</button></div></div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:4px" id="autocards">${Object.keys(AUTO_LOOPS).map(autoCard).join("")}</div>
+    <div class="section"><div class="inner" id="autolist" style="display:flex;flex-direction:column;gap:6px"></div></div></div>`;
+  $("#autoHome").onclick = () => { view = "project"; renderAll(); };
+  $("#autoRefresh").onclick = () => loadAutomation();
+  $("#autoWindow").onchange = (ev) => { automationWindowMs = Number(ev.target.value) || 3600000; loadAutomation(); };
+  $("#autoFilter").onchange = (ev) => { automationLoop = ev.target.value; loadAutomation(); };
+  renderAutomationFeed();
 }
 
 // ── Feature board ─────────────────────────────────────────────────────────

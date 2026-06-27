@@ -13,6 +13,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AutomationReport } from "../src/automation-log.ts";
 import { MIN_SCAN_CHARS, Scout, type ScoutDeps, jaccard, parseTickets, titleTokens, unscannedReasoning } from "../src/scout.ts";
 import type { IssueRef, TranscriptEntry } from "../src/types.ts";
 
@@ -133,6 +134,42 @@ test("(a) inert on trivial reasoning (< MIN_SCAN_CHARS) — no LLM call", async 
 	await new Scout(h.deps).scan("too short", { agent: "ag1" });
 	expect(h.calls.extract).toBe(0);
 	expect(h.filed).toEqual([]);
+});
+
+test("(record) one automation event per scan — carries llmCalls=1, found, filed, agent (the cost signal)", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	const events: AutomationReport[] = [];
+	const h = makeDeps(tmpDir(), { tickets: json([{ title: "A brand new delta item" }]), record: (r) => events.push(r) });
+	await new Scout(h.deps).scan(BIG, { agent: "ag1" });
+	expect(events.length).toBe(1);
+	expect(events[0].llmCalls).toBe(1);
+	expect(events[0].found).toBe(1);
+	expect(events[0].filed).toBe(1);
+	expect(events[0].agent).toBe("ag1");
+});
+
+test("(record) a trivial scan costs no LLM call and emits no event (no phantom cost)", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	const events: AutomationReport[] = [];
+	const h = makeDeps(tmpDir(), { tickets: json([{ title: "x" }]), record: (r) => events.push(r) });
+	await new Scout(h.deps).scan("too short", { agent: "ag1" });
+	expect(h.calls.extract).toBe(0);
+	expect(events.length).toBe(0);
+});
+
+test("(record) an LLM/transport error still emits an event marked error with llmCalls=1 (failed calls cost too)", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	const events: AutomationReport[] = [];
+	const h = makeDeps(tmpDir(), {
+		record: (r) => events.push(r),
+		extract: async () => {
+			throw new Error("model unreachable");
+		},
+	});
+	await new Scout(h.deps).scan(BIG, { agent: "ag1" });
+	expect(events.length).toBe(1);
+	expect(events[0].llmCalls).toBe(1);
+	expect(events[0].level).toBe("error");
 });
 
 test("(b) extracted items are filed with a [scout] do-not-auto-land title + provenance body", async () => {
