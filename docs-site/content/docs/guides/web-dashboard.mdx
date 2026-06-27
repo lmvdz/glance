@@ -71,10 +71,18 @@ coordinate work on that repo:
   `/`-command completion against the agent's available slash commands/skills.
 - **Active on this repo** — presence: every squad agent **and** raw `omp` session claiming the
   repo, so you never double-up. Reattached survivors are flagged `↻ reattached`.
-- **Federation** — peer operators on the tailnet and any shared-branch collisions. Hidden
-  unless a coordinator is configured and there is something remote to show.
-- **Files in flight** — active edit leases; files held by more than one holder are flagged
-  contended.
+- **Automation** — a rollup of the background loop activity (scout, observer, opportunity,
+  dispatch): recent event feed, per-loop success/error/skip counts, and a time-window selector.
+  Loads from `GET /api/automation`; the `Refresh` button re-fetches on demand. The `Loop` filter
+  narrows to one loop type; the `Window` selector adjusts the rollup period. See
+  [Autonomy](/docs/architecture/autonomy) for what each loop does.
+- **Fleet Health** — a quick health summary: active agent count, how many need input, feature
+  count. Sourced from `/api/fabric`.
+- **Federation** — peer operators and any shared-branch collisions. Always available (even
+  with no coordinator); shows only remote peers and collisions when a coordinator is configured.
+  See [Federation](/docs/integrations/federation).
+- **Files in flight** — active edit leases sourced from `/api/leases`; files held by more than
+  one holder are flagged contended.
 - **Plane issues** — open issues for the repo, each with a **Spawn** button that launches an
   agent on that issue. Shows _"Plane not connected"_ until `PLANE_API_KEY` + `PLANE_WORKSPACE`
   are set on the daemon. See [Plane integration](/docs/integrations/plane).
@@ -99,8 +107,22 @@ The session view for one agent.
 - **Pending-answer controls** — when the agent blocks, a _"Needs your input"_ block renders the
   request inline: **Yes/No** buttons for a confirm, one button per option for a select, or an
   input + **Submit** for free text. Answered straight from the agent view (or the Queue).
-- **Controls** — **Send**, **Interrupt**, **Restart**, **Kill** (behind a confirm dialog), and
-  **⤳ Land** (merge this agent's work into main — see [Landing](/docs/guides/landing)).
+- **Controls** — a full set of steering actions:
+
+  | Control | What it does |
+  |---|---|
+  | **Send** | Deliver the composer text as a `prompt`. |
+  | **Interrupt** | Send an `interrupt` — the agent stops its current tool and returns to the input loop. |
+  | **Restart** | Send a `restart` — the agent process restarts from the last checkpoint. |
+  | **Kill** | Terminate the agent process (behind a confirm dialog). |
+  | **Remove** | Remove a stopped agent from the roster. |
+  | **Remove + delete worktree** | Remove and delete the agent's git worktree from disk (`--delete-worktree`). |
+  | **Set model** | Change the model for the agent's next turn, without restarting. |
+  | **⤳ Land** | Merge this agent's worktree into main — see [Landing](/docs/guides/landing). |
+
+  When the agent is blocked on a question (**Needs your input**), answer it in place: the pending-answer
+  controls (Yes/No, option buttons, or a free-text input) appear inline and submit the answer without
+  leaving the agent view. You can also answer from the **Queue** global view.
 
 Two side panels sit beside the transcript, toggled by the **⊟ Changes** button (which shows a
 count badge of unlanded files and highlights when work is waiting to land):
@@ -226,7 +248,8 @@ service worker, and icons are public so the PWA can bootstrap; **everything unde
 | `POST /api/agents/<id>/land` · `/verify` · `/vision` | Land, run a proof, capture vision evidence (`/land` + `/vision` are admin-tier; `/vision` SSRF-guards its target URL) |
 | `GET`/`POST` `/api/features…` | Feature board CRUD + `land` / `verify` / `module` |
 | `POST /api/command` · `/api/spawn` | Create / commission / steer; smart-spawn |
-| `GET /api/presence` · `/api/leases` · `/api/federation` | Coordination surfaces |
+| `GET /api/presence` · `/api/leases` · `/api/federation` · `/api/fabric` | Coordination surfaces (real local data in all modes) |
+| `GET /api/automation` | Background-loop event feed + per-loop rollup. `?loop=`, `?windowMs=`, `?limit=`, `?meaningful=1`. |
 | `GET /api/plane/issues` | Open Plane issues for a repo |
 | `GET /api/upgrade/status` · `POST /api/upgrade` | Self-upgrade (pull + re-exec) |
 | `GET /api/push/key` · `POST /api/push/subscribe` | Web Push enrollment |

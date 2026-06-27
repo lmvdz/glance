@@ -28,6 +28,7 @@ bounded, and gated by an environment variable.
     OMP_SQUAD_AUTOSUPERVISE: { type: 'flag', default: 'off', description: 'In-manager deterministic auto-answer of low-risk routine prompts.' },
     OMP_SQUAD_AUTOSUPERVISE_BUDGET: { type: 'number', default: '5', description: 'Per-agent cap on in-manager auto-answers before requests fall back to a human.' },
     OMP_SQUAD_REPAIR_BUDGET: { type: 'number', default: '3', description: 'Red-gate retry budget before the failure router escalates.' },
+    OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR: { type: 'number', default: '30', description: 'Per-hour LLM-call budget for the Scout loop. When the trailing-hour call count reaches this limit, Scout skips the LLM extraction and re-harvests later. Set to 0 or a negative value for unlimited.' },
   }}
 />
 
@@ -64,6 +65,14 @@ start(intervalMs = 30_000): void {
   this.timer.unref?.();
 }
 ```
+
+The orchestrator has two additional guards that prevent runaway or overlapping ticks:
+
+- **Re-entrancy guard** — a `ticking` flag is set at the top of `tick()` and cleared in a
+  `finally` block. If the previous tick is still in-flight when the next interval fires, the
+  new tick returns immediately rather than overlapping.
+- **Bounded ledger purge** — at the end of each tick, the attempt/state ledger is pruned to
+  drop entries for branches that no longer appear in the roster, keeping memory bounded.
 
 ## Scheduler — WIP cap and FIFO park
 
@@ -155,6 +164,48 @@ export function routeFailure(kind: FailureKind, ctx?: FailureContext): FailureRo
 It is only the decision — the orchestrator drives the actual re-attempt, and an
 `escalate` becomes the human-summoning `CATASTROPHE:` log. The budget is re-read per
 call, so ops can retune it live.
+
+## Scout — per-hour LLM-call budget
+
+The Scout loop extracts opportunities from agent transcripts by calling the LLM on each
+new segment. On a large fleet this can be expensive; `OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR`
+(default 30) caps how many LLM calls the Scout loop may make in any trailing 60-minute window.
+
+When the budget is exhausted for the hour:
+- Scout **skips the LLM extraction** for that agent/segment.
+- A `warn`-level automation event is emitted: `"scout LLM budget reached (N/h) — skipping extraction for <agent>"`.
+- The segment is **not discarded** — Scout will re-harvest it once the trailing-hour window slides and budget is available again.
+
+Set `OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR=0` (or any non-positive value) for unlimited calls.
+
+## Background loop observability
+
+All four background loops — **scout**, **observer**, **opportunity**, and **dispatch** — now
+surface failures rather than swallowing them silently:
+
+- **Failures are logged** at the `error` or `warn` level and emitted as automation events
+  (visible in the **Automation** panel and via `omp-squad automation`).
+- **Transient external calls** (Plane API polls) use a **single-retry** pattern: a transient
+  failure retries once immediately; if the retry also fails, the error is surfaced as a warning
+  rather than silently swallowed.
+
+### Inspecting loop activity
+
+```sh title="CLI"
+omp-squad automation            # recent events, all loops
+omp-squad automation --loop scout --window 2h
+```
+
+```sh title="API"
+GET /api/automation
+GET /api/automation?loop=scout&windowMs=7200000&meaningful=1
+```
+
+The response includes:
+- `events` — the raw event feed (timestamped, per-loop, with level and detail).
+- `rollup` — per-loop aggregates: `success`, `error`, `skip`, `llmCalls`, `durationMs`.
+
+The **Automation** panel in the web dashboard visualizes this feed and refreshes on demand.
 
 <Cards>
   <Card title="State & events" href="/docs/architecture/state-and-events" description="The `queued` DTO flag and the command path the loop drives." />

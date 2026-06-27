@@ -1,4 +1,4 @@
 {
   "title": "Integrations",
-  "pages": ["plane", "federation", "intake", "auto-dispatch"]
+  "pages": ["plane", "federation", "intake", "auto-dispatch", "payments", "capabilities"]
 }
