@@ -15,6 +15,7 @@ const feature: FeatureDTO = {
   statusCounts: { working: 1 },
   issueIdentifiers: ["OMP-1"],
   workflowProgress: { done: 2, total: 5 },
+  readiness: { ready: false, state: "needs-proof", blockers: ["needs-proof"], nextAction: "Run Verify before landing." },
 };
 
 test("taskFromFeature preserves the starter task shape with live feature ids", () => {

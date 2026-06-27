@@ -68,7 +68,7 @@ Any other unmatched path returns `404 not found`.
 | GET | `/api/features/:id/tickets` | Resolved Plane tickets. | [`PlaneTicket[]`](/docs/reference/types) |
 | POST | `/api/features/:id/module` | Create a Plane module for the feature. | module; `501` if Plane not configured |
 | POST | `/api/features/:id/verify` | Run the feature's verification. | verify result; `404` if missing |
-| GET | `/api/features/:id/pipeline?repo=` | Plan concerns + linked issues + agent ids. | `{ concerns, issues, agentIds }`; `404` if missing |
+| GET | `/api/features/:id/pipeline?repo=` | Feature, readiness, plan concerns, linked issues, comments, and agent ids. | `{ feature, readiness, concerns, documents, issues, comments, agentIds }`; `404` if missing |
 
 The spawn-and-link branch of `/api/features/:id/agents` creates the agent with `approvalMode: "yolo"` and `track: true` and links it to the feature.
 
