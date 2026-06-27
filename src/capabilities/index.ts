@@ -435,7 +435,14 @@ function materializeBindings(pack: CapabilityPack, installId: string, enabled: b
 
 function bindingToProfile(binding: CapabilityBinding): AgentProfile {
 	const config = binding.config;
-	const id = readString(config.id) ?? binding.key;
+	// The profile id MUST be the binding key (`cap:<slug>:<profile-id>`), not the pack's own
+	// profile id: runCapability spawns with `profileId: binding.key`, and create resolves the
+	// profile by `profiles().find(p => p.id === profileId)`. Using config.id here produced
+	// `plan-reviser` while runCapability asked for `cap:<slug>:plan-reviser` — they never matched,
+	// so a bound capability silently spawned a GENERIC agent with none of its instructions. The
+	// key also keeps ids globally unique across packs that reuse a profile id. (config.name still
+	// drives the human-facing name below.)
+	const id = binding.key;
 	return {
 		id,
 		name: readString(config.name) ?? id,

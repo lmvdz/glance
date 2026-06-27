@@ -72,7 +72,8 @@ test("capability APIs import, install, expose runtime state, and audit", async (
 	expect(installed.state).toBe("enabled");
 
 	const profiles = await fetch(`${url}/api/profiles`, authed()).then((res) => res.json());
-	expect(profiles.profiles.some((profile: { id: string }) => profile.id === "ui-reviewer")).toBe(true);
+	// Capability profile ids are keyed (cap:<slug>:<id>) so runCapability's profileId resolves them.
+	expect(profiles.profiles.some((profile: { id: string }) => profile.id === "cap:ui-review:ui-reviewer")).toBe(true);
 
 	const workflows = await fetch(`${url}/api/workflows`, authed()).then((res) => res.json());
 	expect(workflows.definitions.some((workflow: { id: string }) => workflow.id.includes("review"))).toBe(true);
