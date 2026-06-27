@@ -8,6 +8,7 @@ import { TaskProperties } from './TaskProperties';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
+import { stoppableAgents, stopCommand } from '../lib/agent-control';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
 import type { ArtifactCommentDTO } from '../lib/dto';
 
@@ -308,7 +309,7 @@ function highlightQuote(root: HTMLElement, annotation: TaskComment) {
 }
 
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload } = useTaskContext();
+  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
@@ -361,6 +362,25 @@ export const TaskDetail = () => {
   const planAnnotations = React.useMemo(() => comments.filter((comment) => comment.kind === 'plan-annotation' && comment.annotation), [comments]);
   const regularComments = React.useMemo(() => comments.filter((comment) => comment.kind !== 'plan-annotation'), [comments]);
   const activeAgents = React.useMemo(() => agents.filter((agent) => task && agent.repo === task.properties.project.id && (agent.featureId === featureId || pipeline?.agentIds.includes(agent.id))), [agents, featureId, pipeline?.agentIds, task]);
+  // The webapp could never stop a running agent — the kill command + send path existed but no button
+  // sent it. `kill` keeps the agent in the roster (restartable), so this is a safe two-click "Stop".
+  const stopTargets = React.useMemo(() => stoppableAgents(activeAgents), [activeAgents]);
+  const [stopConfirm, setStopConfirm] = React.useState(false);
+  const stopConfirmTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => { setStopConfirm(false); }, [selectedTaskId]);
+  const handleStopAgents = () => {
+    if (!stopTargets.length) return;
+    if (!stopConfirm) {
+      setStopConfirm(true);
+      if (stopConfirmTimer.current) clearTimeout(stopConfirmTimer.current);
+      stopConfirmTimer.current = setTimeout(() => setStopConfirm(false), 4000); // auto-cancel an unconfirmed stop
+      return;
+    }
+    if (stopConfirmTimer.current) clearTimeout(stopConfirmTimer.current);
+    setStopConfirm(false);
+    for (const agent of stopTargets) sendConsoleCommand(stopCommand(agent.id));
+    showToast(stopTargets.length === 1 ? `Stopping ${stopTargets[0].name}…` : `Stopping ${stopTargets.length} agents…`, 'info');
+  };
   const selectedDocAnnotations = React.useMemo(() => {
     if (!selectedPlanDoc) return [];
     return planAnnotations.filter((comment) => comment.annotation?.planPath === selectedPlanDoc.path);
@@ -930,6 +950,11 @@ export const TaskDetail = () => {
   return (
     <main className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-gray-950 z-0 transition-colors duration-200">
       <div className="h-10 border-b border-gray-200 dark:border-gray-800 flex items-center justify-end px-3 gap-2 bg-white dark:bg-gray-950 z-10 flex-shrink-0 transition-colors duration-200">
+        {stopTargets.length > 0 && (
+          <button type="button" onClick={handleStopAgents} title={stopConfirm ? 'Click again to stop' : `Stop ${stopTargets.length} running agent(s)`} aria-label="Stop agent" className={`min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${stopConfirm ? 'bg-red-600 text-white hover:bg-red-700' : 'text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/30'}`}>
+            <span className="inline-block h-2.5 w-2.5 rounded-[2px] bg-current" aria-hidden="true" /> {stopConfirm ? 'Confirm stop' : `Stop${stopTargets.length > 1 ? ` (${stopTargets.length})` : ''}`}
+          </button>
+        )}
         <button className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-blue-500"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
         <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
         <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${isChatOpen ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
