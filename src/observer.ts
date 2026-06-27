@@ -111,6 +111,25 @@ function landFailCap(): number {
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/**
+ * Run a transient external (Plane) call with ONE retry, then surface-and-swallow. A thrown Plane
+ * error (429/network blip) used to be caught silently with `() => null`, dropping the whole tick's
+ * audit/file work with no signal and no second chance. This retries once; if both attempts throw it
+ * logs a warning and returns `fallback` so the loop stays non-fatal (never crashes a tick).
+ */
+async function withRetry<T>(fn: () => Promise<T>, fallback: T, onFail: (e: unknown) => void): Promise<T> {
+	try {
+		return await fn();
+	} catch {
+		try {
+			return await fn();
+		} catch (e) {
+			onFail(e);
+			return fallback;
+		}
+	}
+}
+
 // ── AUDIT CHECKS v1 — each a small pure fn over injected state (seeded from real gaps 2026-06-23). ──
 
 /** A failing-test identity with bun's per-run duration suffix (e.g. " [1.15ms]") stripped, so the
@@ -279,7 +298,18 @@ export class Observer {
 		let filed = 0;
 		let resolved = 0;
 		try {
-			const open = (await this.deps.listIssues().catch(() => null)) ?? [];
+			// Plane list is a transient external call: retry once, then surface (warn + record) rather than
+			// silently dropping the tick's work. `null` (Plane not configured/unreachable) is a clean signal,
+			// not an error — only a THROW triggers the retry/warn.
+			const open =
+				(await withRetry(
+					() => this.deps.listIssues(),
+					null,
+					(e) => {
+						log(`listIssues failed after retry — skipping this tick's filing: ${msg(e)}`);
+						this.deps.record?.({ durationMs: clock() - t0, level: "warn", detail: `listIssues failed: ${msg(e)}` });
+					},
+				)) ?? [];
 			const findings = await this.collect(open);
 			found = findings.length;
 			let openObserverCount = open.filter((i) => i.name.includes(OBSERVER_TAG)).length;
@@ -410,8 +440,11 @@ export class Observer {
 			if (!existsSync(this.seenPath)) return {};
 			const raw = JSON.parse(readFileSync(this.seenPath, "utf8")) as unknown;
 			return raw && typeof raw === "object" ? (raw as SeenMap) : {};
-		} catch {
-			return {}; // corrupt/unreadable ⇒ start fresh (worst case: one redundant re-file)
+		} catch (e) {
+			// Corrupt/unreadable ⇒ start fresh (worst case: one redundant re-file) — but surface it: a wiped
+			// seen-map means dedup is silently degraded and the observer may re-file already-filed findings.
+			(this.deps.log ?? (() => {}))(`observer seen-map unreadable — starting fresh (dedup degraded): ${msg(e)}`);
+			return {};
 		}
 	}
 
