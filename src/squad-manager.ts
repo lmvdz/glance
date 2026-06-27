@@ -30,6 +30,7 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
+import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
@@ -177,6 +178,18 @@ export function hardAgentCeiling(): number {
 	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3);
 }
 
+/** Render a capability profile's tool-grant allow-list as a hard system-prompt constraint. This is the part
+ *  of capability tool-scoping (#3) that reaches the omp child (via --append-system-prompt); host tool calls
+ *  outside the list are additionally hard-denied at the onHostTool seam. Returns undefined for an empty grant. */
+export function toolGrantsPrompt(grants: string[] | undefined): string | undefined {
+	if (!grants || grants.length === 0) return undefined;
+	return [
+		"--- Capability tool grant (hard constraint) ---",
+		`You are scoped to ONLY these tools: ${grants.join(", ")}.`,
+		"Do not use, request, or attempt any tool outside this list. Tool calls outside the grant are denied by the host.",
+	].join("\n");
+}
+
 /** Persisted agents to take over on restart: not already reattached (live), not flue, and whose worktree
  *  still holds context on disk. Live hosts are reattached by reconnectLive; a gone worktree re-dispatches. */
 export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: string }>(
@@ -318,6 +331,10 @@ interface AgentRecord {
 	run?: RunAccumulator;
 	/** In-flight rich tool transcript entries keyed by the runtime toolCallId. */
 	toolEntries: Map<string, TranscriptEntry>;
+	/** Capability tool-grant allow-list (from the spawning profile's `capabilities`). When present, the
+	 *  agent's declared allow-list is injected into its system prompt AND host tool calls outside the list
+	 *  are hard-denied at the onHostTool seam. Absent ⇒ full tool access (unscoped, the historical default). */
+	toolGrants?: string[];
 }
 
 export interface SquadManagerOptions {
@@ -804,6 +821,14 @@ export class SquadManager extends EventEmitter {
 		if (!pack) throw new Error("capability pack not found");
 		const binding = bindingKey ? install.bindings.find((item) => item.enabled && item.key === bindingKey) : install.bindings.find((item) => item.enabled && (item.type === "profile" || item.type === "workflow" || item.type === "driver"));
 		if (!binding) throw new Error("capability binding not found");
+		// requiredEnv ENFORCEMENT (#5): packs declare env vars they need, but it was parsed and never checked
+		// — an agent would spawn blind and fail opaquely downstream. Refuse up front with a clear error naming
+		// the missing vars, before any worktree/host is created.
+		const missingEnv = pack.requiredEnv.filter((name) => !(process.env[name] && process.env[name]!.trim()));
+		if (missingEnv.length) {
+			void this.recordAudit(actor, "capability.run.blocked", binding.key, "error", `missing required env: ${missingEnv.join(", ")}`);
+			throw new Error(`capability "${pack.slug}" requires environment variable(s) not set: ${missingEnv.join(", ")}`);
+		}
 		const repo = opts.repo ?? process.cwd();
 		const prompt = opts.prompt ?? `Run capability ${binding.key}`;
 		const name = binding.key.replace(/^cap:/, "").replace(/[^a-z0-9-]+/gi, "-").slice(0, 24) || "capability";
@@ -821,8 +846,40 @@ export class SquadManager extends EventEmitter {
 			const target = binding.config.target === "cloudflare" ? "cloudflare" : "node";
 			return this.create({ repo, name, task: prompt, autoRoute: false, flue: { dir, workflow, target } }, actor);
 		}
-		if (binding.type === "workflow") return this.create({ repo, name, workflow: binding.sourcePath, task: prompt, autoRoute: false }, actor);
+		if (binding.type === "workflow") {
+			// WORKFLOW binding execution (#2): previously this passed `workflow: binding.sourcePath`, which is
+			// undefined for inline step-graph bindings → `create` classified the agent as a plain omp-operator
+			// and the step graph never ran. Resolve the workflow path to actually drive a WorkflowDriver:
+			//  - an authored file (binding.sourcePath) is used directly;
+			//  - an inline step-graph binding is materialized to a DOT graph file in the install dir, so the
+			//    same engine that runs authored workflows executes the capability's declared steps.
+			const workflowPath = await this.resolveCapabilityWorkflowPath(install, binding);
+			return this.create({ repo, name, workflow: workflowPath, task: prompt, autoRoute: false }, actor);
+		}
 		return this.create({ repo, name, profileId: binding.key, task: prompt, autoRoute: false }, actor);
+	}
+
+	/**
+	 * Resolve a workflow binding to a graph file path the WorkflowDriver can run. An authored `sourcePath`
+	 * is returned as-is. Otherwise the binding's WorkflowDefinition (resolved by binding key via
+	 * capabilityWorkflowDefinitions) is rendered to a DOT graph and written into the per-install dir, and
+	 * that path is returned — so an inline capability step graph actually executes instead of being dropped.
+	 */
+	private async resolveCapabilityWorkflowPath(install: CapabilitySnapshot["installs"][number], binding: CapabilitySnapshot["installs"][number]["bindings"][number]): Promise<string> {
+		if (binding.sourcePath) return binding.sourcePath;
+		const definition = capabilityWorkflowDefinitions(this.capabilityStore).find((def) => def.id === binding.key);
+		if (!definition || definition.steps.length === 0) {
+			throw new Error(`capability workflow "${binding.key}" has no resolvable steps to run`);
+		}
+		const dir = path.join(this.stateDir, "capabilities", install.id, "workflows");
+		await fs.mkdir(dir, { recursive: true });
+		const dot = capabilityWorkflowToDot(definition);
+		// Validate the synthesized graph round-trips through the same parser the driver uses (exactly one
+		// start/exit, well-formed edges) before persisting it — fail loudly here, not at spawn time.
+		parseWorkflow(dot);
+		const file = path.join(dir, `${slugifyForFile(binding.key)}.fabro`);
+		await fs.writeFile(file, dot);
+		return file;
 	}
 
 	private profileFor(id: string | undefined): AgentProfile | undefined {
@@ -984,19 +1041,35 @@ export class SquadManager extends EventEmitter {
 		return reward;
 	}
 
+	/**
+	 * Record that an already-executed external payout was made for a reward. This does NOT move money — it
+	 * is a manual ledger entry for a disbursement performed out-of-band (no payment-provider integration
+	 * exists; see report). To stay honest it (#6):
+	 *  - requires a non-empty `provider` AND `externalRef` (the proof-of-payment handle) — refuses otherwise,
+	 *  - enforces the state machine via assertRewardTransition (only approved → paid is legal; new/void/paid
+	 *    inputs throw before any state changes),
+	 *  - records an explicit audit entry noting this is a manual record of an externally-executed payment,
+	 *    capturing the provider + externalRef as the audit trail.
+	 */
 	async markFeedbackRewardPaid(id: string, opts: { provider?: string; externalRef?: string } = {}, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
+		const provider = typeof opts.provider === "string" ? opts.provider.trim() : "";
+		const externalRef = typeof opts.externalRef === "string" ? opts.externalRef.trim() : "";
+		if (!provider) throw new Error("provider is required to record a reward payout (e.g. the payment service used)");
+		if (!externalRef) throw new Error("externalRef is required to record a reward payout (the provider's payment/transaction reference)");
 		const snap = await this.store.loadFeedback();
 		const { item, reward } = rewardRecordOrThrow(snap, id);
+		// State-machine gate FIRST, before any mutation: only approved → paid is legal. assertRewardTransition
+		// rejects illegal sources (none/pending/void/paid → paid) so a reward can't jump to paid unapproved.
 		assertRewardTransition(reward.status, "paid");
 		reward.status = "paid";
-		reward.provider = opts.provider ?? reward.provider;
-		reward.externalRef = opts.externalRef ?? reward.externalRef;
+		reward.provider = provider;
+		reward.externalRef = externalRef;
 		reward.reviewer = actor.id;
 		reward.updatedAt = Date.now();
 		item.rewardStatus = "paid";
 		item.updatedAt = reward.updatedAt;
 		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reward.paid", id);
+		await this.recordFeedbackAudit(actor, "feedback.reward.paid", id, `manual record of externally-executed payment via ${provider} (ref ${externalRef}); no funds moved by omp-squad`);
 		return reward;
 	}
 
@@ -1423,13 +1496,22 @@ export class SquadManager extends EventEmitter {
 
 	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
 		const profile = this.profileFor(opts.profileId);
+		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
+		// what tools the spawned agent may use. They were parsed but NEVER applied — every agent got full tool
+		// access regardless. We now (a) inject the allow-list into the agent's system prompt (the path that
+		// actually reaches the omp child via --append-system-prompt) and (b) record it on the AgentRecord so
+		// host tool calls outside the list are hard-denied at the onHostTool seam (see toolGrants below).
+		// FLAG: hard enforcement of omp's *core* tools (read/edit/bash) requires an upstream
+		// `omp --allowed-tools` flag the RpcAgent/agent-host cannot pass today; the prompt constraint + host
+		// tool gate are the strongest enforcement reachable without that upstream change.
+		const toolGrants = profile?.capabilities?.length ? [...new Set(profile.capabilities)] : undefined;
 		if (profile) {
 			opts = {
 				...opts,
 				profileId: profile.id,
 				model: opts.model ?? profile.model,
 				approvalMode: opts.approvalMode ?? profile.approvalMode,
-				appendSystemPrompt: [profile.memory, opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
 		}
 		if (opts.owns?.length) {
@@ -1555,7 +1637,7 @@ export class SquadManager extends EventEmitter {
 		};
 
 		const agent = this.makeDriver(persisted);
-		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
 		this.agents.set(id, rec);
 		this.wire(rec);
 		this.emitAgent(rec);
@@ -1629,6 +1711,18 @@ export class SquadManager extends EventEmitter {
 		const live = liveAgents(this.list());
 		if (live >= hardAgentCeiling()) {
 			return { outcome: "failed", text: `agent ceiling reached (${live}/${hardAgentCeiling()}) — branch "${spec.name}" not spawned` };
+		}
+		// WIP cap for fan-out (#18): a workflow with a high max_parallel previously blew past the configured
+		// WIP cap because every branch spawned with bypassCap:true — only the hard ceiling stopped it. Respect
+		// the same admission decision interactive spawns use (scheduler.canAdmit on occupying agents) so fan-out
+		// is bounded by the configured cap too, with the hard ceiling above as the backstop. When the cap is
+		// reached we refuse this branch gracefully (a failed NodeResult the engine folds into its merge) rather
+		// than overrunning the cap. We still pass bypassCap:true to create() because the admission decision is
+		// made HERE — create's own cap check would otherwise double-gate and could throw.
+		const occupying = occupyingAgents(this.list());
+		if (!this.scheduler.canAdmit(occupying)) {
+			const reason = this.scheduler.pressured() ? "host under resource pressure" : `WIP cap reached (${occupying}/${this.scheduler.cap()})`;
+			return { outcome: "failed", text: `${reason} — branch "${spec.name}" not spawned` };
 		}
 		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false, bypassCap: true });
 		const rec = this.agents.get(dto.id);
@@ -2426,6 +2520,16 @@ export class SquadManager extends EventEmitter {
 			void this.handlePeerMessageTool(rec, call);
 			return;
 		}
+		// Capability tool-grant enforcement (#3): if this agent was spawned from a capability profile that
+		// declared a tool allow-list, hard-deny any host tool call outside it instead of surfacing it for
+		// approval. The built-in peer-message tool above is exempt (it's not a capability tool).
+		if (rec.toolGrants && !rec.toolGrants.includes(call.toolName)) {
+			this.append(rec, "system", `⛔ tool "${call.toolName}" denied — not in this capability's tool grant [${rec.toolGrants.join(", ")}]`, { status: "error", tool: { callId: call.id, name: call.toolName, args: call.arguments, argsText: safeJson(call.arguments) } });
+			rec.agent.respondHostTool(call.id, `tool "${call.toolName}" is not granted to this capability (allowed: ${rec.toolGrants.join(", ") || "none"})`, true);
+			void this.recordAudit(agentActor(rec.dto.id), "tool.denied", rec.dto.id, "error", `${call.toolName} not in grant`);
+			this.emitAgent(rec);
+			return;
+		}
 		const pending: PendingRequest = {
 			id: call.id,
 			source: "tool",
@@ -2854,6 +2958,66 @@ export function resolveWorkflowPath(spec: string): string {
 	const bundledFile = path.join(import.meta.dir, "..", "workflows", spec.endsWith(".fabro") ? spec : `${spec}.fabro`);
 	if (existsSync(bundledFile)) return bundledFile;
 	return spec;
+}
+
+/** Filesystem-safe slug for a capability binding key (`cap:slug:id`) used as a workflow filename. */
+function slugifyForFile(value: string): string {
+	return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "capability-workflow";
+}
+
+/**
+ * Render a capability WorkflowDefinition (inline step graph) into a DOT/`.fabro` source the WorkflowEngine
+ * can run. The capability dialect (steps with id/label/owner/next) has no explicit entry/exit, so we
+ * synthesize a single `start` (Mdiamond) and single `exit` (Msquare):
+ *   - start → every step with no inbound edge (graph roots),
+ *   - each step → its declared `next` steps,
+ *   - every leaf step (no outbound `next`) → exit.
+ * Each step becomes an agent node whose prompt is its label + owner, so the engine executes a real turn.
+ * Step ids are sanitized to valid DOT identifiers with a stable id↔dotId map so edges stay consistent.
+ */
+export function capabilityWorkflowToDot(def: WorkflowDefinition): string {
+	const steps = def.steps;
+	const dotIds = new Map<string, string>();
+	const used = new Set<string>(["start", "exit"]);
+	for (const step of steps) {
+		let base = step.id.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, "");
+		if (!base) base = "step";
+		let id = base;
+		let n = 1;
+		while (used.has(id)) id = `${base}_${n++}`;
+		used.add(id);
+		dotIds.set(step.id, id);
+	}
+	const inbound = new Set<string>();
+	for (const step of steps) for (const nxt of step.next) if (dotIds.has(nxt)) inbound.add(nxt);
+	const roots = steps.filter((step) => !inbound.has(step.id));
+	const leaves = steps.filter((step) => step.next.filter((nxt) => dotIds.has(nxt)).length === 0);
+
+	const lines: string[] = [`digraph ${slugifyForFile(def.id).replace(/[^A-Za-z0-9_]/g, "_") || "capability"} {`];
+	lines.push(`  goal = ${dotString(def.label || def.id)};`);
+	lines.push(`  start [shape=Mdiamond, label="Start"];`);
+	lines.push(`  exit [shape=Msquare, label="Exit"];`);
+	for (const step of steps) {
+		const id = dotIds.get(step.id)!;
+		const owner = step.owner ? ` (owner: ${step.owner})` : "";
+		const prompt = `${step.label}${owner}. Complete this step toward the goal, then stop.`;
+		lines.push(`  ${id} [shape=box, label=${dotString(step.label)}, prompt=${dotString(prompt)}];`);
+	}
+	for (const root of roots.length ? roots : steps.slice(0, 1)) lines.push(`  start -> ${dotIds.get(root.id)};`);
+	for (const step of steps) {
+		for (const nxt of step.next) {
+			const to = dotIds.get(nxt);
+			if (to) lines.push(`  ${dotIds.get(step.id)} -> ${to};`);
+		}
+	}
+	for (const leaf of leaves.length ? leaves : steps.slice(-1)) lines.push(`  ${dotIds.get(leaf.id)} -> exit;`);
+	lines.push("}");
+	return lines.join("\n");
+}
+
+/** Quote a DOT attribute value, escaping `"` and `\` so multi-word labels/prompts parse cleanly. */
+function dotString(value: string): string {
+	return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 let commissionWorkflow: Workflow | undefined;
