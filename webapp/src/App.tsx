@@ -13,6 +13,10 @@ import { ThemeProvider } from './context/ThemeContext';
 import { NotificationManager } from './components/NotificationManager';
 import { AssistantChat } from './components/AssistantChat';
 import { CapabilityPanel } from './components/CapabilityPanel';
+import { AutomationPanel } from './components/AutomationPanel';
+import { FleetHealthPanel } from './components/FleetHealthPanel';
+import { HeatPanel } from './components/HeatPanel';
+import { FederationPanel } from './components/FederationPanel';
 
 const readStoredBoolean = (key: string, fallback: boolean) => {
   if (typeof window === 'undefined') return fallback;
@@ -22,11 +26,13 @@ const readStoredBoolean = (key: string, fallback: boolean) => {
 
 const MainContent = () => {
   const { view } = useTaskContext();
-  
-  if (view === 'capabilities') {
-    return <CapabilityPanel />;
-  }
-  
+
+  if (view === 'capabilities') return <CapabilityPanel />;
+  if (view === 'automation') return <AutomationPanel />;
+  if (view === 'fleet-health') return <FleetHealthPanel />;
+  if (view === 'heat') return <HeatPanel />;
+  if (view === 'federation') return <FederationPanel />;
+
   return (
     <>
       <TaskDetail />

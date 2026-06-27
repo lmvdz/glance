@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Activity,
   AlertCircle,
   Boxes,
   CheckCircle2,
@@ -14,11 +15,14 @@ import {
   ListChecks,
   Menu,
   Mic,
+  Network,
   Plus,
   Search,
   Settings,
   Tag,
+  Thermometer,
   Trash2,
+  Zap,
 } from 'lucide-react';
 import { getCategoryBadge } from '../utils';
 import { useTaskContext, type TaskFilter } from '../context/TaskContext';
@@ -174,6 +178,15 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     }
   };
 
+  const collapsedLabel = view === 'tasks'
+    ? `${filteredTasks.length} tasks${selectedTask ? ` · ${selectedTask.id}` : ''}`
+    : view === 'capabilities' ? `${capabilities.packs.length} packs`
+    : view === 'automation' ? 'Automation'
+    : view === 'fleet-health' ? 'Fleet Health'
+    : view === 'heat' ? 'Heat Map'
+    : view === 'federation' ? 'Federation'
+    : '';
+
   if (collapsed) {
     return (
       <aside className="flex h-full w-12 flex-shrink-0 flex-col items-center border-r border-gray-200 bg-gray-50 py-1.5 dark:border-gray-800 dark:bg-[#18191b]">
@@ -186,9 +199,21 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         <button onClick={() => setView('capabilities')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'capabilities' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Capabilities" title="Capabilities">
           <Boxes className="h-4 w-4" aria-hidden="true" />
         </button>
+        <button onClick={() => setView('automation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'automation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Automation" title="Automation">
+          <Zap className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button onClick={() => setView('fleet-health')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'fleet-health' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Fleet Health" title="Fleet Health">
+          <Activity className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button onClick={() => setView('heat')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'heat' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Heat Map" title="Heat Map">
+          <Thermometer className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button onClick={() => setView('federation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Federation" title="Federation">
+          <Network className="h-4 w-4" aria-hidden="true" />
+        </button>
         <div className="mt-3 flex h-full items-center">
           <div className="-rotate-90 whitespace-nowrap text-xs font-semibold uppercase tracking-widest text-gray-400">
-            {view === 'tasks' ? `${filteredTasks.length} tasks${selectedTask ? ` · ${selectedTask.id}` : ''}` : `${capabilities.packs.length} packs`}
+            {collapsedLabel}
           </div>
         </div>
         <div className={`mb-2 h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-gray-400'}`} title={connected ? 'Daemon live' : 'Daemon offline'} />
@@ -215,15 +240,35 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </button>
         </div>
 
-        <div className="mt-2 flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
-          <button onClick={() => setView('tasks')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-            <Inbox className="h-3.5 w-3.5" aria-hidden="true" />
-            Tasks
-          </button>
-          <button onClick={() => setView('capabilities')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'capabilities' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-            <Boxes className="h-3.5 w-3.5" aria-hidden="true" />
-            Capabilities
-          </button>
+        <div className="mt-2 flex flex-col gap-1">
+          <div className="flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
+            <button onClick={() => setView('tasks')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Inbox className="h-3.5 w-3.5" aria-hidden="true" />
+              Tasks
+            </button>
+            <button onClick={() => setView('capabilities')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'capabilities' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Boxes className="h-3.5 w-3.5" aria-hidden="true" />
+              Capabilities
+            </button>
+          </div>
+          <div className="flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
+            <button onClick={() => setView('automation')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'automation' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Zap className="h-3 w-3" aria-hidden="true" />
+              Auto
+            </button>
+            <button onClick={() => setView('fleet-health')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'fleet-health' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Activity className="h-3 w-3" aria-hidden="true" />
+              Health
+            </button>
+            <button onClick={() => setView('heat')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'heat' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Thermometer className="h-3 w-3" aria-hidden="true" />
+              Heat
+            </button>
+            <button onClick={() => setView('federation')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Network className="h-3 w-3" aria-hidden="true" />
+              Fed
+            </button>
+          </div>
         </div>
 
         <div className="mt-2">
