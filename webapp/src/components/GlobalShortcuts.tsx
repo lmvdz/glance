@@ -1,12 +1,21 @@
 import React, { useEffect } from 'react';
 import { useTaskContext } from '../context/TaskContext';
+import { focusTaskSearch } from '../lib/jump';
 
 export const GlobalShortcuts = () => {
   const { addTask, deleteTask, selectedTaskId } = useTaskContext();
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger shortcuts if user is typing in an input field
+      // ⌘K / Ctrl+K — jump to the task-search box. Handled BEFORE the input guard so it works
+      // from anywhere (including while typing), the conventional behavior for a jump shortcut.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        focusTaskSearch();
+        return;
+      }
+
+      // Don't trigger the remaining shortcuts if user is typing in an input field
       const target = e.target as HTMLElement;
       const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
 
