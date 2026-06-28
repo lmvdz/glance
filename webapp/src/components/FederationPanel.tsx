@@ -1,14 +1,44 @@
 /**
- * Federation / leases panel — mirrors the legacy UI's Coordination + Files-in-flight sections.
+ * FederationPanel — "Coordination" panel.
  *
- * Fetches GET /api/federation and GET /api/leases. Handles the empty/single-operator case
- * gracefully (the DB-mode federation endpoint returns no coordinator when not configured).
+ * LEAD WITH WHAT'S HAPPENING RIGHT NOW, not with what's absent.
+ *
+ * Single-operator (no coordinator):
+ *   Primary content = "In flight · this host": files currently being edited
+ *   by live/working agents, derived from /api/usage runs + /api/leases.
+ *   A warn Callout surfaces any file-level collision (≥2 agents) — useful
+ *   even without federation. Federation gets a small, muted footer nudge.
+ *
+ * Federated (coordinator present):
+ *   Primary content = peer operators with host, availability, agent count.
+ *   Cross-host collisions surface as a critical/warn Callout — the real value
+ *   of federation. In-flight files follow below as supporting context.
+ *
+ * Data sources:
+ *   GET /api/federation  → { coordinator, operators, collisions? }
+ *   GET /api/leases      → Lease[]
+ *   GET /api/usage?limit=200 → { runs: UsageRun[] }
+ *   agents               → from TaskContext (live WS roster)
+ *
+ * Poll: 10 s. Pattern matches AttentionPanel exactly.
  */
 
-import React, { useEffect, useState } from 'react';
-import { Network, RefreshCw } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Network, RefreshCw, ExternalLink } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
+import { detectCollisions, type UsagePayload, type UsageRun } from '../lib/insights';
+import { PanelShell, VerdictBadge, Callout, SectionCard, relativeAge } from './ui';
+
+// ── API shapes ────────────────────────────────────────────────────────────────
+
+interface FedAgent {
+  id: string;
+  name: string;
+  status: string;
+  repo?: string;
+  branch?: string;
+}
 
 interface FedOperator {
   operator?: {
@@ -18,7 +48,7 @@ interface FedOperator {
   };
   host?: string;
   availability?: string;
-  agents?: Array<{ id: string; name: string; status: string; repo?: string; branch?: string }>;
+  agents?: FedAgent[];
 }
 
 interface FedCollision {
@@ -35,182 +65,377 @@ interface FederationResponse {
 
 interface Lease {
   file: string;
+  agentId?: string;
+  agentName?: string;
   operator?: string;
   session?: string;
+  claimedAt?: number;
   [key: string]: unknown;
 }
 
-type LoadState<T> = { status: 'idle' } | { status: 'loading' } | { status: 'ok'; data: T } | { status: 'error' };
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function shortPath(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return p;
+  return `…/${parts.slice(-2).join('/')}`;
+}
 
 function shortBase(p?: string): string {
   const parts = String(p ?? '').split('/').filter(Boolean);
   return parts[parts.length - 1] || String(p ?? '');
 }
 
-export const FederationPanel: React.FC = () => {
-  const { currentProject } = useTaskContext();
-  const [fed, setFed] = useState<LoadState<FederationResponse>>({ status: 'idle' });
-  const [leases, setLeases] = useState<LoadState<Lease[]>>({ status: 'idle' });
+/** Derive "files in flight" from usage runs (status=working) + leases.
+ * Returns a map: file → { agentIds, agentNames, since } */
+function filesInFlight(
+  runs: UsageRun[],
+  leases: Lease[],
+): Map<string, { agentIds: Set<string>; agentNames: string[]; since?: number }> {
+  const byFile = new Map<string, { agentIds: Set<string>; agentNames: string[]; since?: number }>();
 
-  const load = async () => {
-    setFed({ status: 'loading' });
-    setLeases({ status: 'loading' });
-
-    const [fedResult, leasesResult] = await Promise.all([
-      apiJson<FederationResponse>('/api/federation')
-        .then((d): LoadState<FederationResponse> => ({ status: 'ok', data: d }))
-        .catch((): LoadState<FederationResponse> => ({ status: 'error' })),
-      currentProject?.id
-        ? apiJson<Lease[]>(`/api/leases?repo=${encodeURIComponent(currentProject.id)}`)
-            .then((d): LoadState<Lease[]> => ({ status: 'ok', data: d }))
-            .catch((): LoadState<Lease[]> => ({ status: 'error' }))
-        : Promise.resolve<LoadState<Lease[]>>({ status: 'ok', data: [] }),
-    ]);
-
-    setFed(fedResult);
-    setLeases(leasesResult);
+  const upsert = (file: string, agentId: string, agentName: string, since?: number) => {
+    let entry = byFile.get(file);
+    if (!entry) {
+      entry = { agentIds: new Set(), agentNames: [], since };
+      byFile.set(file, entry);
+    }
+    if (!entry.agentIds.has(agentId)) {
+      entry.agentIds.add(agentId);
+      entry.agentNames.push(agentName);
+    }
+    if (since && (!entry.since || since > entry.since)) entry.since = since;
   };
 
-  useEffect(() => { void load(); }, [currentProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Group leases by file
-  const leasesData = leases.status === 'ok' ? leases.data : [];
-  const byFile = new Map<string, Lease[]>();
-  for (const l of leasesData) {
-    const key = l.file;
-    const existing = byFile.get(key);
-    if (existing) existing.push(l);
-    else byFile.set(key, [l]);
+  // Working runs with touched files
+  for (const run of runs) {
+    if (run.status !== 'working') continue;
+    for (const file of run.filesTouched ?? []) {
+      if (file) upsert(file, run.agentId, run.name, run.startedAt);
+    }
   }
 
-  const fedData = fed.status === 'ok' ? fed.data : null;
-  const peers = (fedData?.operators ?? []).filter((o) => o.operator?.origin === 'remote');
-  const collisions = fedData?.collisions ?? [];
-
-  let fedStatus = 'checking…';
-  let fedStatusColor = 'text-gray-400';
-  if (fed.status === 'error') { fedStatus = 'unavailable'; fedStatusColor = 'text-red-500 dark:text-red-400'; }
-  else if (fed.status === 'ok') {
-    if (!fedData?.coordinator) { fedStatus = 'single-operator'; fedStatusColor = 'text-gray-600 dark:text-gray-300'; }
-    else if (peers.length) { fedStatus = 'connected'; fedStatusColor = 'text-emerald-600 dark:text-emerald-400'; }
-    else { fedStatus = 'no peers online'; fedStatusColor = 'text-gray-500'; }
+  // Active leases (complements runs; may have files not yet in usage)
+  for (const lease of leases) {
+    if (lease.file && lease.agentId) {
+      upsert(lease.file, lease.agentId, lease.agentName ?? lease.agentId, lease.claimedAt);
+    }
   }
+
+  return byFile;
+}
+
+// ── component ─────────────────────────────────────────────────────────────────
+
+export const FederationPanel: React.FC = () => {
+  const { agents, currentProject, subscribeConsole, setIsChatOpen } = useTaskContext();
+
+  const [fed, setFed] = useState<FederationResponse | null>(null);
+  const [leases, setLeases] = useState<Lease[]>([]);
+  const [usage, setUsage] = useState<UsagePayload | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const [fedData, leasesData, usageData] = await Promise.all([
+        apiJson<FederationResponse>('/api/federation').catch(() => null),
+        currentProject?.id
+          ? apiJson<Lease[]>(`/api/leases?repo=${encodeURIComponent(currentProject.id)}`).catch(() => [])
+          : Promise.resolve<Lease[]>([]),
+        apiJson<UsagePayload>('/api/usage?limit=200').catch(() => null),
+      ]);
+      setFed(fedData);
+      setLeases(leasesData ?? []);
+      setUsage(usageData);
+      setError('');
+    } catch {
+      setError('Could not reach the daemon for coordination status.');
+    } finally {
+      setLoaded(true);
+    }
+  }, [currentProject?.id]);
+
+  useEffect(() => {
+    void load();
+    const interval = setInterval(() => void load(), 10_000);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const openConsole = useCallback(
+    (agentId?: string) => {
+      if (agentId) subscribeConsole(agentId);
+      setIsChatOpen(true);
+    },
+    [subscribeConsole, setIsChatOpen],
+  );
+
+  // ── derived state ──────────────────────────────────────────────────────────
+
+  const hasCoordinator = Boolean(fed?.coordinator);
+  const peers = useMemo(
+    () => (fed?.operators ?? []).filter((o) => o.operator?.origin === 'remote'),
+    [fed],
+  );
+  const fedCollisions = fed?.collisions ?? [];
+
+  // Local collision detection (same-host, ≥2 live agents on one file)
+  const localCollisions = useMemo(
+    () => detectCollisions(usage?.runs, agents),
+    [usage?.runs, agents],
+  );
+
+  // In-flight file map
+  const inFlight = useMemo(
+    () => filesInFlight(usage?.runs ?? [], leases),
+    [usage, leases],
+  );
+
+  // ── subtitle / verdict ────────────────────────────────────────────────────
+
+  const verdictText = (() => {
+    if (!hasCoordinator) return 'single-operator';
+    if (peers.length === 0) return 'federated · no peers';
+    return `${peers.length} peer${peers.length === 1 ? '' : 's'}`;
+  })();
+
+  const verdictKind: 'healthy' | 'warn' | 'critical' =
+    fedCollisions.length > 0 || localCollisions.length > 0 ? 'warn' : 'healthy';
+
+  const subtitle = (
+    <span className="flex items-center gap-2">
+      <VerdictBadge verdict={verdictKind}>{verdictText}</VerdictBadge>
+      {(fedCollisions.length > 0 || localCollisions.length > 0) && (
+        <>
+          <span className="text-gray-400">·</span>
+          <span className="text-amber-600 dark:text-amber-400 font-medium">
+            {fedCollisions.length + localCollisions.length} collision{fedCollisions.length + localCollisions.length === 1 ? '' : 's'}
+          </span>
+        </>
+      )}
+    </span>
+  );
+
+  const refresh = (
+    <button
+      onClick={() => void load()}
+      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      title="Refresh"
+      aria-label="Refresh"
+    >
+      <RefreshCw className="h-3 w-3" aria-hidden="true" />
+    </button>
+  );
+
+  // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <main className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-gray-950 transition-colors duration-200">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-800 px-5 py-3 flex-shrink-0 bg-white dark:bg-gray-950">
-        <div className="flex items-center gap-2">
-          <Network className="h-4 w-4 text-indigo-500" aria-hidden="true" />
-          <div>
-            <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Coordination</h1>
-            <p className={`mt-0.5 text-xs font-medium ${fedStatusColor}`}>{fedStatus}</p>
-          </div>
+    <PanelShell
+      icon={<Network className="h-4 w-4 text-indigo-500" aria-hidden="true" />}
+      title="Coordination"
+      subtitle={loaded ? subtitle : undefined}
+      actions={refresh}
+    >
+      {/* Loading skeleton */}
+      {!loaded && !error && (
+        <div className="space-y-2 animate-pulse" aria-label="Loading coordination status">
+          {[1, 2, 3].map((n) => (
+            <div key={n} className="h-14 rounded-lg bg-gray-100 dark:bg-gray-800" />
+          ))}
         </div>
-        <button onClick={() => void load()} className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Refresh" aria-label="Refresh">
-          <RefreshCw className="h-3 w-3" aria-hidden="true" />
-        </button>
-      </div>
+      )}
 
-      <div className="flex-1 overflow-y-auto p-5 scrollbar-custom space-y-4">
-        {/* Federation */}
-        <div className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-          <div className="px-4 py-2.5 border-b border-gray-100 dark:border-gray-800 text-[11px] font-semibold uppercase tracking-widest text-gray-400">Federation</div>
-          <div className="p-4">
-            {fed.status === 'loading' && (
-              <div className="space-y-2 animate-pulse">
-                {[1, 2].map((n) => <div key={n} className="h-5 rounded bg-gray-100 dark:bg-gray-800" />)}
-              </div>
-            )}
-            {fed.status === 'error' && (
-              <p className="text-sm text-red-600 dark:text-red-400">Coordination status unavailable right now.</p>
-            )}
-            {fed.status === 'ok' && !fedData?.coordinator && (
-              <div className="flex items-start gap-3">
-                <span className="mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full bg-gray-300 dark:bg-gray-600" aria-hidden="true" />
-                <div>
-                  <div className="text-sm font-medium text-gray-800 dark:text-gray-200">Single-operator</div>
-                  <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">No federation coordinator configured — agents, presence, and file leases stay on this host.</div>
-                </div>
-              </div>
-            )}
-            {fed.status === 'ok' && fedData?.coordinator && (
-              <div className="space-y-2">
-                {peers.length === 0 && (
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Coordinator connected — no peer operators online right now.</p>
-                )}
-                {peers.map((op, i) => {
-                  const who = op.operator?.displayName ?? op.operator?.id ?? 'unknown';
-                  const avDot = op.availability === 'active' ? 'bg-emerald-500' : op.availability === 'away' ? 'bg-amber-400' : 'bg-gray-300';
-                  return (
-                    <div key={i} className="space-y-1">
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${avDot}`} aria-hidden="true" />
-                        <span className="font-medium text-gray-900 dark:text-gray-100">{who}</span>
-                        {op.host && <span className="text-gray-500 dark:text-gray-400">@{op.host}</span>}
-                        <span className="text-gray-400 text-xs">· {(op.agents ?? []).length} agent{(op.agents ?? []).length === 1 ? '' : 's'}</span>
-                      </div>
-                      {(op.agents ?? []).map((a) => (
-                        <div key={a.id} className="ml-6 flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
-                          <span className={`text-[10px] font-semibold rounded px-1 py-0.5 border ${a.status === 'working' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400' : 'border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400'}`}>{a.status}</span>
-                          {a.name} <span className="text-gray-400">{shortBase(a.repo)}{a.branch ? ` · ${a.branch}` : ''}</span>
+      {/* Error state */}
+      {loaded && error && (
+        <div className="rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30 p-4 text-sm text-red-700 dark:text-red-300">
+          {error}
+        </div>
+      )}
+
+      {loaded && !error && (
+        <>
+          {/* ── FEDERATED MODE: lead with peers ─────────────────────────── */}
+          {hasCoordinator && (
+            <>
+              {/* Cross-host collision callout — the high-value federated signal */}
+              {fedCollisions.length > 0 && (
+                <Callout
+                  tone="warn"
+                  title={`${fedCollisions.length} cross-host collision${fedCollisions.length === 1 ? '' : 's'} — same repo touched by multiple operators`}
+                >
+                  {fedCollisions.map((c, i) => (
+                    <div key={i} className="mt-1 font-mono text-[11px] text-gray-700 dark:text-gray-300">
+                      {shortBase(c.repo)}
+                      {c.ref ? <span className="text-gray-400"> @ {c.ref}</span> : null}
+                      {(c.operators ?? []).length > 0 && (
+                        <span className="text-gray-500"> — {c.operators!.join(', ')}</span>
+                      )}
+                    </div>
+                  ))}
+                </Callout>
+              )}
+
+              {/* Peer operators */}
+              <SectionCard
+                title="Peer operators"
+                right={peers.length > 0 ? `${peers.length} online` : undefined}
+              >
+                {peers.length === 0 ? (
+                  <div className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
+                    Coordinator connected — no peer operators online right now.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {peers.map((op, i) => {
+                      const who = op.operator?.displayName ?? op.operator?.id ?? 'unknown';
+                      const avColor =
+                        op.availability === 'active'
+                          ? 'bg-emerald-500'
+                          : op.availability === 'away'
+                            ? 'bg-amber-400'
+                            : 'bg-gray-300 dark:bg-gray-600';
+                      const agentList = op.agents ?? [];
+                      return (
+                        <div key={i} className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`h-2 w-2 flex-shrink-0 rounded-full ${avColor}`}
+                              aria-label={op.availability ?? 'unknown'}
+                            />
+                            <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                              {who}
+                            </span>
+                            {op.host && (
+                              <span className="text-xs text-gray-500 dark:text-gray-400">
+                                @{op.host}
+                              </span>
+                            )}
+                            <span className="ml-auto text-xs text-gray-400">
+                              {agentList.length} agent{agentList.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                          {agentList.length > 0 && (
+                            <div className="mt-1.5 space-y-1 pl-4">
+                              {agentList.map((a) => (
+                                <div
+                                  key={a.id}
+                                  className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400"
+                                >
+                                  <span
+                                    className={`rounded px-1 py-0.5 text-[10px] font-semibold border ${
+                                      a.status === 'working'
+                                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                        : 'border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400'
+                                    }`}
+                                  >
+                                    {a.status}
+                                  </span>
+                                  <span>{a.name}</span>
+                                  {a.repo && (
+                                    <span className="text-gray-400">
+                                      {shortBase(a.repo)}
+                                      {a.branch ? ` · ${a.branch}` : ''}
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  );
-                })}
-                {collisions.length > 0 && (
-                  <div className="mt-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/20 p-3">
-                    <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-400">
-                      <span aria-hidden="true">⚠</span> Shared-branch collisions
-                    </div>
-                    {collisions.map((c, i) => (
-                      <div key={i} className="text-xs text-gray-700 dark:text-gray-300">
-                        {shortBase(c.repo)} <span className="text-gray-400">@ {c.ref} — {(c.operators ?? []).join(', ')}</span>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
-              </div>
-            )}
-          </div>
-        </div>
+              </SectionCard>
+            </>
+          )}
 
-        {/* Files in flight (leases) */}
-        <div className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-          <div className="px-4 py-2.5 border-b border-gray-100 dark:border-gray-800 text-[11px] font-semibold uppercase tracking-widest text-gray-400">
-            Files in flight{currentProject?.name ? ` · ${currentProject.name}` : ''}
-          </div>
-          <div className="p-4">
-            {leases.status === 'loading' && (
-              <div className="space-y-2 animate-pulse">
-                {[1, 2].map((n) => <div key={n} className="h-5 rounded bg-gray-100 dark:bg-gray-800" />)}
+          {/* ── LOCAL COLLISION WARNING (useful in both modes) ────────── */}
+          {localCollisions.length > 0 && (
+            <Callout
+              tone="warn"
+              title={`${localCollisions.length} file${localCollisions.length === 1 ? '' : 's'} touched by multiple agents — merge collision risk`}
+            >
+              {localCollisions.map((c) => (
+                <div key={c.file} className="mt-1 flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-gray-700 dark:text-gray-300">
+                    {shortPath(c.file)}
+                  </span>
+                  <span className="text-gray-400 text-[11px]">
+                    — {c.agents.map((a) => a.name).join(', ')}
+                  </span>
+                  <button
+                    onClick={() => openConsole(c.agents[0]?.id)}
+                    className="ml-auto text-[11px] text-blue-600 dark:text-blue-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    aria-label={`View agent for ${c.file}`}
+                  >
+                    view
+                  </button>
+                </div>
+              ))}
+            </Callout>
+          )}
+
+          {/* ── IN FLIGHT · THIS HOST ─────────────────────────────────── */}
+          <SectionCard
+            title="In flight · this host"
+            right={inFlight.size > 0 ? `${inFlight.size}` : undefined}
+          >
+            {inFlight.size === 0 ? (
+              <div className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
+                No files being edited right now.
               </div>
-            )}
-            {leases.status === 'error' && (
-              <p className="text-sm text-gray-500 dark:text-gray-400">—</p>
-            )}
-            {leases.status === 'ok' && byFile.size === 0 && (
-              <p className="text-sm text-gray-500 dark:text-gray-400">No files claimed.</p>
-            )}
-            {leases.status === 'ok' && byFile.size > 0 && (
-              <div className="space-y-1">
-                {[...byFile.entries()].map(([file, holders]) => {
-                  const holderIds = [...new Set(holders.map((h) => `${h.operator ?? '?'}/${h.session ?? '?'}`))];
-                  const conflict = holderIds.length > 1;
+            ) : (
+              <div className="divide-y divide-gray-100 dark:divide-gray-800">
+                {[...inFlight.entries()].map(([file, info]) => {
+                  const isConflict = info.agentIds.size >= 2;
+                  const firstAgentId = [...info.agentIds][0];
                   return (
-                    <div key={file} className={`flex items-center gap-2 rounded px-2 py-1 text-xs ${conflict ? 'bg-amber-50 dark:bg-amber-950/20 text-amber-800 dark:text-amber-300' : 'text-gray-700 dark:text-gray-300'}`}>
-                      {conflict && <span aria-hidden="true" className="text-amber-500">⚠</span>}
-                      <span className="font-mono truncate flex-1">{file}</span>
-                      <span className="text-gray-400 flex-shrink-0">— {holderIds.join(', ')}</span>
+                    <div
+                      key={file}
+                      className={`flex items-center gap-2 px-4 py-2.5 ${
+                        isConflict ? 'bg-amber-50/60 dark:bg-amber-950/10' : ''
+                      }`}
+                    >
+                      <span className="min-w-0 flex-1 font-mono text-xs text-gray-800 dark:text-gray-200 truncate">
+                        {shortPath(file)}
+                      </span>
+                      <span className="flex-shrink-0 text-xs text-gray-500 dark:text-gray-400 truncate max-w-[120px]">
+                        {info.agentNames.join(', ')}
+                      </span>
+                      {info.since && (
+                        <span
+                          className="flex-shrink-0 text-[11px] text-gray-400 tabular-nums"
+                          title={new Date(info.since).toLocaleTimeString()}
+                        >
+                          {relativeAge(info.since)}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => openConsole(firstAgentId)}
+                        className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        title="View agent"
+                        aria-label={`View agent for ${file}`}
+                      >
+                        <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                      </button>
                     </div>
                   );
                 })}
               </div>
             )}
-          </div>
-        </div>
-      </div>
-    </main>
+          </SectionCard>
+
+          {/* ── FEDERATION FOOTER (single-operator only) ─────────────── */}
+          {!hasCoordinator && (
+            <p className="text-[11px] text-gray-400 dark:text-gray-500 px-1">
+              Federation: off — set{' '}
+              <code className="font-mono text-gray-500 dark:text-gray-400">OMP_SQUAD_COORDINATOR</code>{' '}
+              to see other operators &amp; cross-host collisions.
+            </p>
+          )}
+        </>
+      )}
+    </PanelShell>
   );
 };

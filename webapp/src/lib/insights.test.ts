@@ -1,0 +1,366 @@
+import { expect, test, describe } from 'bun:test';
+import {
+  computeCapacity,
+  detectCollisions,
+  churnHotspots,
+  automationDigest,
+  attentionItems,
+  pushRolling,
+  type GovernancePayload,
+  type HealthSample,
+  type UsageRun,
+  type HeatPayload,
+  type AutomationRollup,
+  type ServerActionItem,
+} from './insights';
+import type { AgentDTO } from './dto';
+
+// ───────────────────────────── fixtures ─────────────────────────────
+
+function gov(sample: Partial<HealthSample>, opts: Partial<GovernancePayload> = {}): GovernancePayload {
+  const full: HealthSample = { rssMb: 150, load1: 1, ncpu: 8, freeRatio: 0.5, agents: 0, hosts: 0, ...sample };
+  return {
+    wipCap: 3,
+    maxAgents: 8,
+    health: { sample: full, warnings: opts.health?.warnings ?? [], at: Date.now() },
+    ...opts,
+  };
+}
+
+function agent(id: string, status: AgentDTO['status'], extra: Partial<AgentDTO> = {}): AgentDTO {
+  return {
+    id,
+    name: id,
+    status,
+    repo: '/r',
+    worktree: '/w',
+    pending: [],
+    lastActivity: 0,
+    messageCount: 0,
+    ...extra,
+  } as AgentDTO;
+}
+
+function run(agentId: string, files: string[], extra: Partial<UsageRun> = {}): UsageRun {
+  return { agentId, name: agentId, repo: '/r', status: 'working', filesTouched: files, ...extra };
+}
+
+// ───────────────────────────── computeCapacity ─────────────────────────────
+
+describe('computeCapacity', () => {
+  test('healthy with room → counts roomFor and predicts the WIP cap as next limit', () => {
+    const c = computeCapacity(gov({ agents: 1, rssMb: 150, load1: 1, ncpu: 8, freeRatio: 0.5 }));
+    expect(c.used).toBe(1);
+    expect(c.cap).toBe(3);
+    expect(c.roomFor).toBe(2);
+    expect(c.verdict).toBe('healthy');
+    expect(c.headline).toContain('room for 2 more agents');
+    expect(c.nextLimit).toContain('WIP cap');
+  });
+
+  test('singular phrasing for room for 1 more agent', () => {
+    const c = computeCapacity(gov({ agents: 2, ncpu: 8, load1: 1 }));
+    expect(c.roomFor).toBe(1);
+    expect(c.headline).toContain('room for 1 more agent');
+    expect(c.headline).not.toContain('1 more agents');
+  });
+
+  test('at WIP cap → warn, roomFor 0, queues headline', () => {
+    const c = computeCapacity(gov({ agents: 3, ncpu: 8, load1: 1 }));
+    expect(c.roomFor).toBe(0);
+    expect(c.verdict).toBe('warn');
+    expect(c.headline).toContain('at WIP cap');
+    expect(c.headline).toContain('new work queues');
+    expect(c.nextLimit).toContain('WIP cap');
+  });
+
+  test('load over 2×/CPU → critical, roomFor 0, names host load as the limit', () => {
+    const c = computeCapacity(gov({ agents: 1, load1: 20, ncpu: 8 })); // 2.5×/cpu
+    expect(c.verdict).toBe('critical');
+    expect(c.roomFor).toBe(0);
+    expect(c.nextLimit).toContain('host load');
+    expect(c.headline).toContain('saturated');
+    expect(c.loadPct).toBeGreaterThan(100);
+  });
+
+  test('low free memory → critical and names free memory', () => {
+    const c = computeCapacity(gov({ agents: 1, freeRatio: 0.05, load1: 1, ncpu: 8 }));
+    expect(c.verdict).toBe('critical');
+    expect(c.nextLimit).toContain('free memory');
+  });
+
+  test('daemon RSS over ceiling → critical and names daemon memory', () => {
+    const c = computeCapacity(gov({ agents: 1, rssMb: 2000, load1: 1, ncpu: 8 }));
+    expect(c.verdict).toBe('critical');
+    expect(c.memPct).toBeGreaterThan(100);
+    expect(c.nextLimit).toContain('daemon memory');
+  });
+
+  test('daemon warnings present → critical even if computed metrics look fine', () => {
+    const c = computeCapacity(gov({ agents: 1, load1: 1, ncpu: 8 }, { health: { sample: {} as HealthSample, warnings: ['custom warning'], at: 0 } }));
+    // note: sample overridden above is empty; rebuild via direct payload to be precise
+    const c2 = computeCapacity({
+      wipCap: 3,
+      maxAgents: 8,
+      health: { sample: { rssMb: 150, load1: 1, ncpu: 8, freeRatio: 0.5, agents: 1, hosts: 0 }, warnings: ['runaway hosts'], at: 0 },
+    });
+    expect(c2.verdict).toBe('critical');
+    expect(c2.nextLimit).toBe('runaway hosts');
+    void c;
+  });
+
+  test('approaching a limit (load 80%) while under cap → warn', () => {
+    const c = computeCapacity(gov({ agents: 0, load1: 12.8, ncpu: 8 })); // 1.6×/cpu = 80% of 2×
+    expect(c.loadPct).toBeGreaterThanOrEqual(75);
+    expect(c.verdict).toBe('warn');
+  });
+
+  test('null governance → safe zeros', () => {
+    const c = computeCapacity(null);
+    expect(c.used).toBe(0);
+    expect(c.cap).toBe(0);
+    expect(c.roomFor).toBe(0);
+  });
+});
+
+// ───────────────────────────── detectCollisions ─────────────────────────────
+
+describe('detectCollisions', () => {
+  test('groups a file touched by 2 distinct live agents', () => {
+    const agents = [agent('a', 'working'), agent('b', 'working')];
+    const runs = [run('a', ['src/x.ts']), run('b', ['src/x.ts'])];
+    const cols = detectCollisions(runs, agents);
+    expect(cols).toHaveLength(1);
+    expect(cols[0].file).toBe('src/x.ts');
+    expect(cols[0].agents.map((a) => a.id)).toEqual(['a', 'b']);
+  });
+
+  test('same agent twice on a file is NOT a collision', () => {
+    const agents = [agent('a', 'working')];
+    const runs = [run('a', ['src/x.ts']), run('a', ['src/x.ts'])];
+    expect(detectCollisions(runs, agents)).toHaveLength(0);
+  });
+
+  test('ignores files touched only by a non-live (stopped/error) agent', () => {
+    const agents = [agent('a', 'working'), agent('b', 'stopped')];
+    const runs = [run('a', ['src/x.ts']), run('b', ['src/x.ts'])];
+    expect(detectCollisions(runs, agents)).toHaveLength(0);
+  });
+
+  test('sorts by colliding-agent count desc', () => {
+    const agents = [agent('a', 'working'), agent('b', 'working'), agent('c', 'working')];
+    const runs = [
+      run('a', ['hot.ts', 'cool.ts']),
+      run('b', ['hot.ts', 'cool.ts']),
+      run('c', ['hot.ts']),
+    ];
+    const cols = detectCollisions(runs, agents);
+    expect(cols[0].file).toBe('hot.ts');
+    expect(cols[0].agents).toHaveLength(3);
+    expect(cols[1].file).toBe('cool.ts');
+    expect(cols[1].agents).toHaveLength(2);
+  });
+
+  test('no live agents → empty', () => {
+    expect(detectCollisions([run('a', ['x'])], [])).toEqual([]);
+    expect(detectCollisions(null, null)).toEqual([]);
+  });
+});
+
+// ───────────────────────────── churnHotspots ─────────────────────────────
+
+describe('churnHotspots', () => {
+  const heat: HeatPayload = {
+    days: ['d1', 'd2', 'd3'],
+    tree: [
+      { id: 'src/a.ts', heat: [1, 2, 0] },
+      { id: 'src/b.ts', heat: [0, 0, 5] },
+      { id: 'src/cold.ts', heat: [0, 0, 0] },
+    ],
+  };
+
+  test('ranks by total heat desc and drops zero-heat files', () => {
+    const rows = churnHotspots(heat, []);
+    expect(rows.map((r) => r.path)).toEqual(['src/b.ts', 'src/a.ts']);
+    expect(rows[0].heat).toBe(5);
+    expect(rows[1].heat).toBe(3);
+  });
+
+  test('enriches each hotspot with distinct agent count', () => {
+    const runs = [run('a', ['src/a.ts']), run('b', ['src/a.ts']), run('a', ['src/b.ts'])];
+    const rows = churnHotspots(heat, runs);
+    const a = rows.find((r) => r.path === 'src/a.ts')!;
+    const b = rows.find((r) => r.path === 'src/b.ts')!;
+    expect(a.agentCount).toBe(2);
+    expect(b.agentCount).toBe(1);
+  });
+
+  test('respects the limit', () => {
+    expect(churnHotspots(heat, [], 1)).toHaveLength(1);
+  });
+
+  test('null heat → empty', () => {
+    expect(churnHotspots(null, [])).toEqual([]);
+  });
+});
+
+// ───────────────────────────── automationDigest ─────────────────────────────
+
+describe('automationDigest', () => {
+  const roll = (loop: string, p: Partial<AutomationRollup> = {}): AutomationRollup => ({
+    loop,
+    events: 0,
+    llmCalls: 0,
+    found: 0,
+    filed: 0,
+    spawned: 0,
+    errors: 0,
+    lastAt: 0,
+    ...p,
+  });
+
+  test('sums totals across loops and carries spend from usage', () => {
+    const d = automationDigest(
+      [roll('scout', { llmCalls: 5, filed: 2, found: 3 }), roll('dispatch', { found: 4, spawned: 1 })],
+      { runs: [], costUsd: 1.23 },
+    );
+    expect(d.llmCalls).toBe(5);
+    expect(d.ticketsFiled).toBe(2);
+    expect(d.agentsSpawned).toBe(1);
+    expect(d.candidates).toBe(7);
+    expect(d.spentUsd).toBe(1.23);
+  });
+
+  test('flags "found >> spawned/filed" anomaly', () => {
+    const d = automationDigest([roll('dispatch', { found: 6, spawned: 0, filed: 0 })], { runs: [] });
+    expect(d.anomalies.length).toBeGreaterThanOrEqual(1);
+    expect(d.anomalies[0].loop).toBe('dispatch');
+    expect(d.anomalies[0].message).toContain('spawned 0');
+    expect(d.anomalies[0].message.toLowerCase()).toContain('cap');
+  });
+
+  test('flags dispatch saw candidates but spawned none even at low counts', () => {
+    const d = automationDigest([roll('dispatch', { found: 1, spawned: 0, filed: 1 })], { runs: [] });
+    expect(d.anomalies.some((a) => a.loop === 'dispatch' && a.message.includes('spawned none'))).toBe(true);
+  });
+
+  test('flags errors and scout budget exhaustion', () => {
+    const d = automationDigest([roll('scout', { errors: 2, llmCalls: 30 })], { runs: [] }, 30);
+    expect(d.anomalies.some((a) => a.message.includes('error'))).toBe(true);
+    expect(d.anomalies.some((a) => a.message.includes('budget'))).toBe(true);
+    expect(d.scoutBudget).toEqual({ used: 30, cap: 30 });
+  });
+
+  test('clean rollups → no anomalies', () => {
+    const d = automationDigest([roll('scout', { llmCalls: 1, filed: 2, found: 2 }), roll('dispatch', { found: 2, spawned: 2 })], { runs: [] });
+    expect(d.anomalies).toEqual([]);
+  });
+
+  test('null inputs → zeros', () => {
+    const d = automationDigest(null, null);
+    expect(d.llmCalls).toBe(0);
+    expect(d.spentUsd).toBe(0);
+    expect(d.anomalies).toEqual([]);
+  });
+});
+
+// ───────────────────────────── attentionItems ─────────────────────────────
+
+describe('attentionItems', () => {
+  test('blocked agent (status input) → critical answer item', () => {
+    const items = attentionItems({ agents: [agent('a', 'input')] });
+    expect(items).toHaveLength(1);
+    expect(items[0].severity).toBe('critical');
+    expect(items[0].kind).toBe('blocked');
+    expect(items[0].action?.kind).toBe('answer');
+  });
+
+  test('blocked agent via pending carries the requestId for the answer flow', () => {
+    const a = agent('a', 'working', {
+      pending: [{ id: 'req1', source: 'tool', kind: 'k', title: 'Approve?', createdAt: 100 }],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items[0].kind).toBe('blocked');
+    expect(items[0].requestId).toBe('req1');
+    expect(items[0].since).toBe(100);
+  });
+
+  test('errored agent → critical restart item', () => {
+    const items = attentionItems({ agents: [agent('a', 'error', { error: 'boom' })] });
+    expect(items[0].kind).toBe('error');
+    expect(items[0].action?.kind).toBe('restart');
+    expect(items[0].detail).toBe('boom');
+  });
+
+  test('landReady agent → warn land item', () => {
+    const items = attentionItems({ agents: [agent('a', 'idle', { landReady: true })] });
+    expect(items[0].kind).toBe('land-ready');
+    expect(items[0].severity).toBe('warn');
+    expect(items[0].action?.kind).toBe('land');
+  });
+
+  test('blocked agent that is also landReady only emits the blocked item', () => {
+    const items = attentionItems({ agents: [agent('a', 'input', { landReady: true })] });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('blocked');
+  });
+
+  test('collisions become warn view items', () => {
+    const items = attentionItems({ collisions: [{ file: 'src/x.ts', agents: [{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }] }] });
+    expect(items[0].kind).toBe('collision');
+    expect(items[0].action?.kind).toBe('view');
+    expect(items[0].title).toContain('2 agents');
+  });
+
+  test('critical capacity → raise-cap resource item', () => {
+    const items = attentionItems({
+      capacity: { used: 1, cap: 3, roomFor: 0, verdict: 'critical', headline: 'saturated', memPct: 50, loadPct: 130 },
+    });
+    expect(items[0].kind).toBe('resource');
+    expect(items[0].severity).toBe('critical');
+    expect(items[0].action?.kind).toBe('raise-cap');
+  });
+
+  test('sorts critical → warn → ok', () => {
+    const items = attentionItems({
+      agents: [agent('land', 'idle', { landReady: true }), agent('err', 'error')],
+    });
+    expect(items.map((i) => i.severity)).toEqual(['critical', 'warn']);
+    expect(items[0].kind).toBe('error');
+    expect(items[1].kind).toBe('land-ready');
+  });
+
+  test('server health action-items fold in; duplicate agent rows are not double-counted', () => {
+    const a = agent('a', 'input');
+    const serverItems: ServerActionItem[] = [
+      { id: 'pending:a:x', severity: 'high', source: 'tool', subject: 'a: blocked', rootCause: 'r', nextAction: 'n', agentId: 'a' },
+      { id: 'health:load', severity: 'medium', source: 'health', subject: 'Fleet health warning', rootCause: 'load high', nextAction: 'n' },
+    ];
+    const items = attentionItems({ agents: [a], actionItems: serverItems });
+    // one blocked (from roster) + one health (from server); the server pending dup is skipped
+    expect(items.filter((i) => i.kind === 'blocked')).toHaveLength(1);
+    expect(items.filter((i) => i.kind === 'resource')).toHaveLength(1);
+    expect(items.find((i) => i.kind === 'resource')?.detail).toBe('load high');
+  });
+
+  test('nothing actionable → empty list', () => {
+    const items = attentionItems({ agents: [agent('a', 'working'), agent('b', 'idle')], capacity: { used: 2, cap: 5, roomFor: 3, verdict: 'healthy', headline: 'ok', memPct: 10, loadPct: 10 } });
+    expect(items).toEqual([]);
+  });
+});
+
+// ───────────────────────────── pushRolling ─────────────────────────────
+
+describe('pushRolling', () => {
+  test('appends within the cap', () => {
+    expect(pushRolling([1, 2], 3, 5)).toEqual([1, 2, 3]);
+  });
+
+  test('drops the oldest when over the cap', () => {
+    expect(pushRolling([1, 2, 3], 4, 3)).toEqual([2, 3, 4]);
+  });
+
+  test('starts from empty', () => {
+    expect(pushRolling([], 1)).toEqual([1]);
+  });
+});

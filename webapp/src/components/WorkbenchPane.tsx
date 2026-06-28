@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Activity,
   AlertCircle,
+  Bell,
   Boxes,
   CheckCircle2,
   ChevronDown,
@@ -60,7 +61,13 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     setTaskFilter,
     capabilities,
     publicCatalog,
+    agents,
   } = useTaskContext();
+  // Lightweight "needs you" count for the nav badge — blocked, errored, or ready to land.
+  // (The Attention panel does the full synthesis; this is just enough for a glanceable badge.)
+  const needsYouCount = agents.filter(
+    (a) => a.status === 'input' || a.status === 'error' || a.pending.length > 0 || a.landReady,
+  ).length;
   const [workspaceOpen, setWorkspaceOpen] = useState(true);
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
@@ -178,7 +185,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     }
   };
 
-  const collapsedLabel = view === 'tasks'
+  const collapsedLabel = view === 'attention'
+    ? `Needs you${needsYouCount ? ` · ${needsYouCount}` : ''}`
+    : view === 'tasks'
     ? `${filteredTasks.length} tasks${selectedTask ? ` · ${selectedTask.id}` : ''}`
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
     : view === 'automation' ? 'Automation'
@@ -193,7 +202,11 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         <button onClick={onToggleCollapsed} className="mb-1 flex min-h-10 w-10 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" aria-label="Expand workbench pane" title="Expand workbench pane">
           <Menu className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('tasks')} className={`flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Tasks" title="Tasks">
+        <button onClick={() => setView('attention')} className={`relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'attention' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Needs you${needsYouCount ? ` (${needsYouCount})` : ''}`} title="Needs you">
+          <Bell className="h-4 w-4" aria-hidden="true" />
+          {needsYouCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-red-500" aria-hidden="true" />}
+        </button>
+        <button onClick={() => setView('tasks')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Tasks" title="Tasks">
           <Inbox className="h-4 w-4" aria-hidden="true" />
         </button>
         <button onClick={() => setView('capabilities')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'capabilities' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Capabilities" title="Capabilities">
@@ -242,6 +255,13 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
 
         <div className="mt-2 flex flex-col gap-1">
           <div className="flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
+            <button onClick={() => setView('attention')} className={`relative flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'attention' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Bell className="h-3.5 w-3.5" aria-hidden="true" />
+              Needs you
+              {needsYouCount > 0 && (
+                <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${view === 'attention' ? 'bg-blue-600 text-white' : 'bg-red-500 text-white'}`}>{needsYouCount}</span>
+              )}
+            </button>
             <button onClick={() => setView('tasks')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
               <Inbox className="h-3.5 w-3.5" aria-hidden="true" />
               Tasks
