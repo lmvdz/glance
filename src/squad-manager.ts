@@ -241,14 +241,16 @@ export function selectAdoptable<T extends { id: string }>(eligible: T[], hasWork
 	return eligible.filter(hasWork).slice(0, cap);
 }
 
+let agentIdSeq = 0;
+
 /**
- * Unique agent id: name + time + random suffix. The branch and worktree derive from this id (NOT the
- * agent's display name), so two agents — even same name, even spawned in the same millisecond or across
- * a daemon restart — never share a branch or worktree. (The name alone collides: dispatched agents fall
- * back to `agent-N` whose counter resets every restart, so "agent-1" gets reused.)
+ * Unique agent id: name + time + process-local sequence + random suffix. The branch and worktree derive
+ * from this id (NOT the agent's display name), so two agents — even same name, even spawned in the same
+ * millisecond or across a daemon restart — never share a branch or worktree. (The name alone collides:
+ * dispatched agents fall back to `agent-N` whose counter resets every restart, so "agent-1" gets reused.)
  */
 export function newAgentId(name: string): string {
-	return `${name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+	return `${name}-${Date.now().toString(36)}-${(++agentIdSeq).toString(36)}-${randomBytes(4).toString("hex")}`;
 }
 
 /** UI methods that block the agent on a human decision. */
