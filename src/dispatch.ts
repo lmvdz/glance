@@ -10,6 +10,7 @@
  */
 
 import type { AutomationRecorder } from "./automation-log.ts";
+import type { DispatchLedger } from "./dispatch-ledger.ts";
 import type { IssueRef } from "./types.ts";
 
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
@@ -63,6 +64,8 @@ export interface DispatchDeps {
 	paused?: () => boolean;
 	/** Observability sink — one report per tick (a no-op poll is a heartbeat proving the loop is alive). */
 	record?: AutomationRecorder;
+	/** Restart-safe issue ids already dispatched by prior daemon boots. Omitted ⇒ in-memory only. */
+	ledger?: DispatchLedger;
 }
 
 export class Dispatcher {
@@ -128,7 +131,7 @@ export class Dispatcher {
 					considered++;
 					if (budget <= 0) break;
 					if (this.atGlobalCap()) break; // recheck per spawn: each spawned agent counts toward the global cap
-					if (claimed.has(issue.id) || this.dispatched.has(issue.id)) continue;
+					if (claimed.has(issue.id) || this.dispatched.has(issue.id) || this.deps.ledger?.has(issue.id)) continue;
 					// Human-review / do-NOT-auto-land: stays visible in the UI's issue list but never auto-dispatched.
 					// Not added to `dispatched`, logged once like the blocked_by deferral.
 					if (issue.noAutoDispatch) {
@@ -149,6 +152,7 @@ export class Dispatcher {
 						continue;
 					}
 					this.dispatched.add(issue.id);
+					this.deps.ledger?.add(issue.id);
 					this.blockedLogged.delete(issue.id); // dispatching ⇒ no longer deferred
 					this.deps.log(`dispatch ${issue.identifier ?? issue.id} — ${issue.name}`);
 					try {

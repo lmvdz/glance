@@ -275,7 +275,9 @@ prune/monitor disk growth for high-volume campaigns.
 and spawns a routed agent per new open issue (issue → routed run → verify → land → close), so work
 starts with nobody typing. Dispatch is ordered by Plane priority (`urgent` → `high` → `medium` →
 `low` → `none`), while `blocked_by`, `do-not-auto-land`, WIP caps, and rate-limit pauses still win.
-Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so a backlog can't storm:
+Spawned issue ids persist in `<stateDir>/dispatch-ledger.json`, so a daemon restart does not re-spawn
+finished/failed agents for still-open issues. Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so
+a backlog can't storm:
 
 | Env | Meaning |
 |---|---|

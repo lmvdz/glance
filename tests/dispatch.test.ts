@@ -5,8 +5,12 @@
  */
 
 import { expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
 import { Dispatcher, dispatchOrder, type DispatchDeps } from "../src/dispatch.ts";
+import { openDispatchLedger } from "../src/dispatch-ledger.ts";
 import { noAutoDispatchName } from "../src/plane.ts";
 import { occupyingAgents } from "../src/scheduler.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
@@ -68,6 +72,21 @@ test("dispatcher: never double-dispatches a claimed or already-dispatched issue"
 	expect(spawned.sort()).toEqual(["A", "C"]); // B is already in the roster
 	await d.tick(); // A,C already dispatched; B still claimed → nothing new
 	expect(spawned.sort()).toEqual(["A", "C"]);
+});
+
+test("dispatcher: persisted ledger prevents restart re-spawn churn", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+	try {
+		const first = harness({ ledger: openDispatchLedger(dir) });
+		expect(await new Dispatcher(first.deps).tick()).toBe(3);
+		expect(first.spawned.sort()).toEqual(["A", "B", "C"]);
+
+		const restarted = harness({ ledger: openDispatchLedger(dir) });
+		expect(await new Dispatcher(restarted.deps).tick()).toBe(0);
+		expect(restarted.spawned).toEqual([]);
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
 });
 
 test("dispatcher: caps per-tick spawns at maxActive (no spawn storm)", async () => {

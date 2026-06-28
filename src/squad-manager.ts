@@ -32,6 +32,7 @@ import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
+import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
@@ -597,6 +598,7 @@ export class SquadManager extends EventEmitter {
 				maxWip: this.scheduler.cap(),
 				paused: () => this.rateLimit.paused(),
 				record: this.automation.for("dispatch"),
+				ledger: openDispatchLedger(this.stateDir),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
