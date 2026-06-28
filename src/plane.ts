@@ -306,6 +306,18 @@ export async function createPlaneIssue(repo: string, name: string, descriptionHt
 	return toIssueRef(raw, cfg, projectId, prefix);
 }
 
+/** Write one Plane `blocked_by` relation (issue is blocked by blocker). Best-effort; false on failure. */
+export async function addPlaneBlockedByRelation(repo: string, issueId: string, blockerId: string): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	const body = JSON.stringify({ relation_type: "blocked_by", related_issue: blockerId });
+	const res = await throttledFetch(`${base}/issues/${encodeURIComponent(issueId)}/relations/`, { method: "POST", headers, body });
+	if (res?.ok) issueListCache.clear();
+	return !!res?.ok;
+}
+
 /** Add a comment to a Plane issue by UUID or human identifier (e.g. OMPSQ-42). Best-effort; false when Plane is not configured. */
 export async function addPlaneIssueComment(repo: string, issue: string, comment: string): Promise<boolean> {
 	const ctx = planeContext(repo);

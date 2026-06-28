@@ -40,8 +40,8 @@ import { Opportunity } from "./opportunity.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
-import { archivePlanDir, buildFeatures, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
+import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -1474,16 +1474,32 @@ export class SquadManager extends EventEmitter {
 		const f = (await this.features(pf.repo)).find((x) => x.id === id);
 		let idents = [...new Set([...(pf.plane?.issueIdentifiers ?? []), ...(f?.issueIdentifiers ?? [])])];
 		const createdIssues: IssueRef[] = [];
+		const createdIssueByConcern = new Map<number, IssueRef>();
 		if (opts.createTickets && !idents.length && pf.origin?.planDir) {
 			const concerns = (await parsePlanConcerns(pf.repo, pf.origin.planDir)).filter((concern) => concern.open);
 			for (const concern of concerns) {
 				const issue = await createPlaneIssue(pf.repo, concern.title, renderPlanConcernIssueHtml(pf, concern));
 				if (issue) {
 					createdIssues.push(issue);
+					const num = concernNumFromFile(concern.file);
+					if (num != null) createdIssueByConcern.set(num, issue);
 					if (issue.identifier) idents.push(issue.identifier);
 				}
 			}
 			idents = [...new Set(idents)];
+			if (createdIssueByConcern.size) {
+				const graph = await parsePlanDependencyGraph(pf.repo, pf.origin.planDir);
+				for (const [num, blockers] of graph) {
+					const issue = createdIssueByConcern.get(num);
+					if (!issue) continue;
+					for (const blocker of blockers) {
+						const blockerIssue = createdIssueByConcern.get(blocker);
+						if (!blockerIssue) continue;
+						const linked = await addPlaneBlockedByRelation(pf.repo, issue.id, blockerIssue.id);
+						if (linked === null || linked === false) return null;
+					}
+				}
+			}
 		}
 		const mod = pf.plane?.moduleId && pf.plane.moduleUrl
 			? { moduleId: pf.plane.moduleId, moduleUrl: pf.plane.moduleUrl }

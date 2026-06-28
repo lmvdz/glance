@@ -482,6 +482,40 @@ export function setOverviewDepRow(overviewText: string, num: number, nums: numbe
 	return lines.join(eol);
 }
 
+/** Parse one dependency-graph BLOCKED_BY cell ("none", "01, 03", "concern #2") into concern numbers. */
+function parseBlockerNums(cell: string): number[] {
+	if (/^(?:none|—|-)?$/i.test(cell.trim())) return [];
+	return [...new Set([...cell.matchAll(/\d{1,3}/g)].map((m) => Number(m[0])).filter((n) => Number.isFinite(n)))].sort((a, b) => a - b);
+}
+
+/** Read a plan's "Dependency graph" table as concern number → blocking concern numbers. */
+export async function parsePlanDependencyGraph(repo: string, planDir: string): Promise<Map<number, number[]>> {
+	const dirAbs = path.join(repo, planDir);
+	const ov = await findOverviewFile(dirAbs);
+	if (!ov) return new Map();
+	const text = await fs.readFile(path.join(dirAbs, ov), "utf8").catch(() => "");
+	const lines = text.split(/\r?\n/);
+	const headingIdx = lines.findIndex((l) => /^#{1,6}\s*Dependency graph/i.test(l.trim()));
+	if (headingIdx < 0) return new Map();
+	let start = -1;
+	let end = -1;
+	for (let i = headingIdx + 1; i < lines.length; i++) {
+		const t = lines[i].trim();
+		if (/^#{1,6}\s/.test(t)) break;
+		if (t.startsWith("|")) { if (start < 0) start = i; end = i; }
+		else if (start >= 0) break;
+	}
+	if (start < 0) return new Map();
+	const out = new Map<number, number[]>();
+	for (let i = start; i <= end; i++) {
+		const cols = lines[i].split("|").slice(1, -1).map((c) => c.trim());
+		if (cols.length < 2 || /concern/i.test(cols[0]) || /^[-:\s]+$/.test(cols[0])) continue;
+		const num = Number((/\d{1,3}/.exec(cols[0]) ?? [])[0]);
+		if (Number.isFinite(num)) out.set(num, parseBlockerNums(cols[1]));
+	}
+	return out;
+}
+
 /** Find a plan dir's overview file (00-overview.md preferred), or null. */
 async function findOverviewFile(dirAbs: string): Promise<string | null> {
 	const files = await fs.readdir(dirAbs).catch(() => [] as string[]);

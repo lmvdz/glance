@@ -6,7 +6,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { archivePlanDir, buildFeatures, deletePlanDir, landOrder, listPlanDirs, restorePlanDir, setConcernBlockedBy, setConcernStatus, setOverviewDepRow, updatePlanConcern } from "../src/features.ts";
+import { archivePlanDir, buildFeatures, deletePlanDir, landOrder, listPlanDirs, parsePlanDependencyGraph, restorePlanDir, setConcernBlockedBy, setConcernStatus, setOverviewDepRow, updatePlanConcern } from "../src/features.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { FeatureWorktreeStatus, LandReadiness, PersistedFeature } from "../src/types.ts";
 
@@ -277,6 +277,19 @@ test("setOverviewDepRow updates the matching row, preserves other columns, appen
 	expect(setOverviewDepRow("# Plan\n\njust prose\n", 1, [2])).toBe("# Plan\n\njust prose\n");
 });
 
+test("parsePlanDependencyGraph reads blocker numbers from the overview table", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-dep-graph-"));
+	tmps.push(repo);
+	const dir = path.join(repo, "plans", "feat");
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(path.join(dir, "00-overview.md"), [
+		"# Feat", "", "## Dependency graph", "",
+		"| Concern | BLOCKED_BY | VERIFY_BLOCKER |", "| --- | --- | --- |",
+		"| 01 runtime | none | ok |", "| 02 api | concern #1, 03 | ok |", "",
+	].join("\n"));
+	expect([...(await parsePlanDependencyGraph(repo, "plans/feat"))]).toEqual([[1, []], [2, [1, 3]]]);
+});
+
 test("updatePlanConcern writes the concern STATUS + BLOCKED_BY and mirrors the overview table", async () => {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-concern-edit-"));
 	tmps.push(repo);
@@ -329,7 +342,10 @@ test("createFeatureModule can adopt a plan and fan out open concerns into Plane 
 	tmps.push(repo);
 	await git(repo, "init", "-q", "-b", "main");
 	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
-	await fs.writeFile(path.join(repo, "plans", "ctx", "00-overview.md"), "# Module Plan\n");
+	await fs.writeFile(path.join(repo, "plans", "ctx", "00-overview.md"), [
+		"# Module Plan", "", "## Dependency graph", "",
+		"| Concern | BLOCKED_BY |", "| --- | --- |", "| 01 | none |", "| 02 | 01 |", "",
+	].join("\n"));
 	await fs.writeFile(path.join(repo, "plans", "ctx", "01-api.md"), [
 		"# API slice",
 		"STATUS: open",
@@ -338,24 +354,29 @@ test("createFeatureModule can adopt a plan and fan out open concerns into Plane 
 		"## Acceptance Criteria",
 		"- API exposes the plan action.",
 	].join("\n"));
-	await fs.writeFile(path.join(repo, "plans", "ctx", "02-done.md"), "# Done slice\nSTATUS: done\n");
+	await fs.writeFile(path.join(repo, "plans", "ctx", "02-worker.md"), "# Worker slice\nSTATUS: open\n");
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-module-state-"));
 	tmps.push(stateDir);
 
 	const issues: { id: string; sequence_id: number; name: string }[] = [];
 	const moduleIssues: string[][] = [];
 	let moduleCreates = 0;
-	let issueBody = "";
+	const issueBodies: string[] = [];
+	const relations: unknown[] = [];
 	const server = Bun.serve({
 		port: 0,
 		fetch: async (req) => {
 			const url = new URL(req.url);
 			if (req.method === "POST" && url.pathname.endsWith("/issues/")) {
 				const body = await req.json() as { name: string; description_html?: string };
-				issueBody = body.description_html ?? "";
+				issueBodies.push(body.description_html ?? "");
 				const issue = { id: `iss-${issues.length + 1}`, sequence_id: issues.length + 1, name: body.name };
 				issues.push(issue);
 				return Response.json(issue, { status: 201 });
+			}
+			if (req.method === "POST" && url.pathname.endsWith("/relations/")) {
+				relations.push(await req.json());
+				return Response.json({ ok: true }, { status: 201 });
 			}
 			if (req.method === "POST" && url.pathname.endsWith("/modules/")) {
 				moduleCreates += 1;
@@ -386,14 +407,15 @@ test("createFeatureModule can adopt a plan and fan out open concerns into Plane 
 
 		expect(moduleOnly?.moduleUrl).toBe("https://app.acme.test/acme/projects/proj-9/modules/mod-1");
 		expect(out?.moduleUrl).toBe("https://app.acme.test/acme/projects/proj-9/modules/mod-1");
-		expect(out?.createdIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-1"]);
-		expect(out?.issueIdentifiers).toEqual(["OMPSQ-1"]);
-		expect(moduleIssues).toEqual([["iss-1"]]);
+		expect(out?.createdIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-1", "OMPSQ-2"]);
+		expect(out?.issueIdentifiers).toEqual(["OMPSQ-1", "OMPSQ-2"]);
+		expect(moduleIssues).toEqual([["iss-1", "iss-2"]]);
+		expect(relations).toEqual([{ relation_type: "blocked_by", related_issue: "iss-1" }]);
 		expect(moduleCreates).toBe(1);
-		expect(issueBody).toContain("API exposes the plan action.");
+		expect(issueBodies[0]).toContain("API exposes the plan action.");
 		const feature = (await mgr.features(repo)).find((item) => item.id === id);
 		expect(feature?.persisted).toBe(true);
-		expect(feature?.issueIdentifiers).toEqual(["OMPSQ-1"]);
+		expect(feature?.issueIdentifiers).toEqual(["OMPSQ-1", "OMPSQ-2"]);
 	} finally {
 		server.stop(true);
 	}
