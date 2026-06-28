@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Sun, Moon, Bot, PanelRight, FileText, GripVertical, MessageSquare } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Sun, Moon, Bot, PanelRight, FileText, GripVertical, MessageSquare, GitBranch } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -10,6 +10,10 @@ import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
 import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS } from '../lib/agent-control';
 import { focusTaskSearch } from '../lib/jump';
+import { summarizeTask } from '../lib/taskStatus';
+import { AgentStatusStrip } from './AgentStatusStrip';
+import { PlanFlowDiagram } from './PlanFlowDiagram';
+import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
 import type { ArtifactCommentDTO } from '../lib/dto';
 
@@ -18,6 +22,7 @@ interface PipelineConcern {
   path: string;
   title: string;
   status: string;
+  complexity?: string;
   open: boolean;
   planeId?: string;
   acceptanceCriteria: string[];
@@ -368,6 +373,18 @@ export const TaskDetail = () => {
   const stopTargets = React.useMemo(() => stoppableAgents(activeAgents), [activeAgents]);
   const interruptTargets = React.useMemo(() => interruptibleAgents(activeAgents), [activeAgents]);
   const restartTargets = React.useMemo(() => restartableAgents(activeAgents), [activeAgents]);
+  const hasPlan = !!overviewDoc || planDocuments.length > 0;
+  const planFlowConcerns = React.useMemo<GraphConcernInput[]>(
+    () => (pipeline?.concerns ?? []).map((c) => ({ file: c.path, title: c.title, status: c.status, open: c.open, complexity: c.complexity, prerequisites: c.prerequisites, touches: c.touches })),
+    [pipeline?.concerns],
+  );
+  const taskStatus = React.useMemo(
+    () => summarizeTask(activeAgents, {
+      hasPlan,
+      criteria: task ? { done: task.acceptanceCriteria.filter((c) => c.completed).length, total: task.acceptanceCriteria.length } : undefined,
+    }),
+    [activeAgents, hasPlan, task],
+  );
   const [stopConfirm, setStopConfirm] = React.useState(false);
   const stopConfirmTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   // Remove confirm state
@@ -1071,6 +1088,34 @@ export const TaskDetail = () => {
 
               <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-gray-900 dark:text-gray-100 mb-5 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
 
+              <AgentStatusStrip
+                status={taskStatus}
+                hasPlan={hasPlan}
+                implementing={planAction === 'implement'}
+                onAnswer={(agentId, requestId, value) => { sendConsoleCommand(answerCommand(agentId, requestId, value)); showToast('Answer sent', 'info'); }}
+                onRestart={(agentId) => { sendConsoleCommand(restartCommand(agentId)); showToast('Restarting…', 'info'); }}
+                onImplement={() => void startImplementation()}
+              />
+
+              {planFlowConcerns.length >= 2 && (
+                <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
+                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 list-none">
+                    <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+                    <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span className="mr-auto">Plan flow</span>
+                    <span className="font-normal normal-case text-gray-400">{planFlowConcerns.length} concerns</span>
+                  </summary>
+                  <div className="border-t border-gray-100 dark:border-gray-800 p-3">
+                    <PlanFlowDiagram
+                      concerns={planFlowConcerns}
+                      overviewText={overviewDoc?.content ?? ''}
+                      selectedId={selectedPlanDoc?.path}
+                      onSelect={(id) => selectPlanDoc(id)}
+                    />
+                  </div>
+                </details>
+              )}
+
               <div className="mb-5 grid gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2.5 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400 sm:grid-cols-3">
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Status</div><div className="mt-1 font-medium text-gray-900 dark:text-gray-100">{task.properties.status}</div></div>
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan created</div><div className="mt-1">{formatWhen(task.properties.createdAt ?? pipeline?.feature?.createdAt)}</div></div>
@@ -1104,7 +1149,14 @@ export const TaskDetail = () => {
                 </div>}
               </div>
 
-              <div className="mb-7">
+              <details className="group mb-7 rounded-lg border border-gray-200 dark:border-gray-800">
+              <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 list-none">
+                <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+                <span className="mr-auto">Plan context, decisions &amp; relationships</span>
+                <span className="font-normal normal-case text-gray-400">{task.decisions.length} decision{task.decisions.length === 1 ? '' : 's'} · {task.relationships.length} link{task.relationships.length === 1 ? '' : 's'}</span>
+              </summary>
+              <div className="space-y-6 border-t border-gray-100 dark:border-gray-800 px-3 py-4">
+              <div className="mb-1">
                 <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 border-b border-gray-100 dark:border-gray-800 pb-2 flex items-center gap-2">Context Bundle From Plan <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 lowercase font-normal">agent input</span></div>
                 <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden bg-white dark:bg-gray-900 transition-colors">
                   <div className="px-3 py-2 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between"><div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300"><Box className="w-4 h-4 text-blue-500" /> planning bundle</div><span className="text-[10px] font-mono bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">MD</span></div>
@@ -1129,6 +1181,8 @@ export const TaskDetail = () => {
                 <div className="space-y-3 mb-3">{task.relationships.map(rel => <div key={rel.id} className="flex items-start gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5" /><div><span className="text-gray-500 font-medium mr-2">{rel.targetId}</span><span className="text-gray-800 dark:text-gray-200 font-medium">{rel.targetTitle}</span></div></div>)}</div>
                 <div className="flex gap-2"><input value={newRelationshipText} onChange={(e) => setNewRelationshipText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addRelationship()} placeholder="Link issue, feature, or doc id..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addRelationship} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
+              </div>
+              </details>
 
               {activeAgents.length > 0 && (
                 <div className="mb-6">

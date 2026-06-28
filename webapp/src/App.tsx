@@ -16,6 +16,7 @@ import { CapabilityPanel } from './components/CapabilityPanel';
 import { AutomationPanel } from './components/AutomationPanel';
 import { FleetHealthPanel } from './components/FleetHealthPanel';
 import { HeatPanel } from './components/HeatPanel';
+import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
 
@@ -33,6 +34,7 @@ const MainContent = () => {
   if (view === 'automation') return <AutomationPanel />;
   if (view === 'fleet-health') return <FleetHealthPanel />;
   if (view === 'heat') return <HeatPanel />;
+  if (view === 'knowledge') return <KnowledgePanel />;
   if (view === 'federation') return <FederationPanel />;
 
   return (

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Activity,
   AlertCircle,
+  Archive,
   Bell,
   Boxes,
   CheckCircle2,
@@ -12,6 +13,8 @@ import {
   Filter,
   GripVertical,
   Inbox,
+  Library,
+  RotateCcw,
   Layers,
   ListChecks,
   Menu,
@@ -26,7 +29,8 @@ import {
   Zap,
 } from 'lucide-react';
 import { getCategoryBadge } from '../utils';
-import { useTaskContext, type TaskFilter } from '../context/TaskContext';
+import { useTaskContext, type TaskFilter, type ArchivedFeature } from '../context/TaskContext';
+import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus';
 import type { Task } from '../types';
 
 const taskFilters: Array<{ key: TaskFilter; label: string }> = [
@@ -43,6 +47,98 @@ interface WorkbenchPaneProps {
   onToggleCollapsed: () => void;
 }
 
+/**
+ * One task row in the rail. The left glyph + row tint + inline pill encode the
+ * agent posture (blocked/errored = red, stopped/land = amber, working = green),
+ * so what needs you reads at a glance — the parent sorts these so they float up.
+ */
+export const TaskRailRow: React.FC<{
+  task: Task;
+  status?: TaskStatus;
+  isActive: boolean;
+  isDone: boolean;
+  dueSoon: boolean;
+  isDraggable: boolean;
+  dragging: boolean;
+  priorityColor: string;
+  onSelect: () => void;
+  onDelete: () => void;
+  onDragStart?: (event: React.DragEvent) => void;
+  onDragOver?: (event: React.DragEvent) => void;
+  onDragEnd?: () => void;
+  onDrop?: (event: React.DragEvent) => void;
+}> = ({ task, status, isActive, isDone, dueSoon, isDraggable, dragging, priorityColor, onSelect, onDelete, onDragStart, onDragOver, onDragEnd, onDrop }) => {
+  // Float-worthy = anything that wants a decision: blocked/errored (critical) or
+  // land-ready / stopped (warn). Working is alive but needs nothing.
+  const attention = !isDone && (status?.posture === 'needs-you' || status?.posture === 'idle');
+  const critical = attention && status?.verdict === 'critical';
+  const isWorking = !isDone && status?.posture === 'working';
+  const attnLabel = status?.posture === 'idle' ? 'stopped' : critical ? 'needs you' : 'land ready';
+  return (
+    <div
+      draggable={isDraggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragEnd={onDragEnd}
+      onDrop={onDrop}
+      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-blue-500 bg-blue-50 dark:bg-blue-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'} ${dragging ? 'opacity-50' : 'opacity-100'}`}
+    >
+      <button onClick={onSelect} className="flex min-w-0 flex-1 items-center py-1 pl-2 text-left focus-visible:ring-2 focus-visible:ring-blue-500">
+        <span className={`flex w-3 justify-center ${isDraggable ? 'cursor-grab text-gray-300 opacity-0 group-hover:opacity-100 group-active:cursor-grabbing' : 'opacity-0'}`}>
+          <GripVertical className="h-3 w-3" aria-hidden="true" />
+        </span>
+        <span className="ml-0.5 flex w-5 flex-shrink-0 justify-center" title={status && status.total > 0 ? status.headline : `Status: ${task.properties.status}`}>
+          {isDone ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+          ) : attention ? (
+            <AlertCircle className={`h-3.5 w-3.5 ${critical ? 'text-red-500' : 'text-amber-500'}`} aria-hidden="true" />
+          ) : isWorking ? (
+            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
+          ) : (
+            <Circle className={`h-3.5 w-3.5 ${isActive ? 'text-blue-400' : 'text-gray-300 dark:text-gray-600'}`} aria-hidden="true" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1 px-2">
+          <span className={`block truncate ${isDone ? 'text-gray-400 line-through dark:text-gray-600' : isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300'}`} title={task.title}>
+            {task.title}
+          </span>
+          <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
+            <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-gray-400 dark:text-gray-600' : isActive ? 'text-blue-700 dark:text-blue-400' : 'text-blue-600 dark:text-blue-500'}`} title={task.id}>
+              {task.id}
+            </span>
+            {dueSoon && (
+              <span title="Due within 24 hours" className="flex">
+                <AlertCircle className="h-3.5 w-3.5 text-red-500" aria-hidden="true" />
+              </span>
+            )}
+            {task.priority && <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${priorityColor}`} title={`Priority: ${task.priority}`} />}
+            <span className={`max-w-[5.5rem] truncate rounded px-1.5 py-0.5 text-[10px] font-medium ${getCategoryBadge(task.category)}`}>
+              {task.category}
+            </span>
+            {attention && (
+              <span className={`flex-shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold ${critical ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                {attnLabel}
+              </span>
+            )}
+            {isWorking && status && status.working.length > 0 && (
+              <span className="flex-shrink-0 text-[9px] font-medium text-emerald-600 dark:text-emerald-400">{status.working.length} working</span>
+            )}
+          </span>
+        </span>
+        <span className={`ml-1 w-8 flex-shrink-0 text-right ${isActive ? 'font-medium text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'}`}>{task.duration}</span>
+      </button>
+      <button
+        className="mr-1 flex min-h-10 w-8 flex-shrink-0 items-center justify-center self-center rounded text-gray-400 opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-blue-500 group-hover:opacity-100 dark:hover:bg-red-900/30"
+        onClick={onDelete}
+        aria-label={`Archive ${task.title}`}
+        title="Archive task"
+      >
+        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
+    </div>
+  );
+};
+
 export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPaneProps) => {
   const {
     tasks,
@@ -52,6 +148,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     selectedTaskId,
     selectTask,
     deleteTask,
+    restoreFeature,
+    hardDeleteFeature,
+    loadArchivedFeatures,
     addTask,
     reorderTasks,
     showToast,
@@ -63,6 +162,19 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     publicCatalog,
     agents,
   } = useTaskContext();
+  // The "garbage bin": archived features, restorable or permanently deletable.
+  const [showArchived, setShowArchived] = useState(false);
+  const [archived, setArchived] = useState<ArchivedFeature[]>([]);
+  const [archivedConfirm, setArchivedConfirm] = useState<string | null>(null);
+  const refreshArchived = React.useCallback(() => { void loadArchivedFeatures().then(setArchived); }, [loadArchivedFeatures]);
+  useEffect(() => {
+    if (view !== 'tasks') return;
+    let alive = true;
+    void loadArchivedFeatures().then((rows) => { if (alive) setArchived(rows); });
+    return () => { alive = false; };
+    // loadArchivedFeatures is a fresh closure each render; re-run only when the view changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
   // Lightweight "needs you" count for the nav badge — blocked, errored, or ready to land.
   // (The Attention panel does the full synthesis; this is just enough for a glanceable badge.)
   const needsYouCount = agents.filter(
@@ -73,7 +185,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<'all' | Task['category']>('all');
-  const [sortBy, setSortBy] = useState<'creation' | 'dueDate'>('creation');
+  const [sortBy, setSortBy] = useState<'attention' | 'creation' | 'dueDate'>('attention');
   const [isListening, setIsListening] = useState(false);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
@@ -83,6 +195,19 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const progressPercentage = totalTasks === 0 ? 0 : Math.round((completedTasks / totalTasks) * 100);
   const allAvailableTags = Array.from(new Set(tasks.flatMap((task) => task.tags || [])));
   const selectedTask = tasks.find((task) => task.id === selectedTaskId);
+
+  // Per-task agent posture — drives the attention sort and the row markers, so a
+  // task whose agent is blocked floats up and reads as urgent at a glance.
+  const taskStatuses = React.useMemo(() => {
+    const map = new Map<string, TaskStatus>();
+    for (const task of tasks) {
+      const featureId = task.sourceId ?? task.id;
+      const taskAgents = agents.filter((a) => a.repo === task.properties.project.id && a.featureId === featureId);
+      map.set(task.id, summarizeTask(taskAgents, { hasPlan: task.contextBundle.spec.startsWith('plans/') }));
+    }
+    return map;
+  }, [tasks, agents]);
+  const statusFor = (task: Task): TaskStatus => taskStatuses.get(task.id) ?? summarizeTask([]);
 
   const taskCount = (filter: TaskFilter) => tasks.filter((task) => {
     if (filter === 'all') return true;
@@ -100,6 +225,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     const matchesTags = selectedTags.length === 0 || selectedTags.every((tag) => task.tags?.includes(tag));
     return matchesSearch && matchesCategory && matchesTags;
   }).sort((a, b) => {
+    if (sortBy === 'attention') {
+      // stable: equal ranks keep their existing order, so this only re-floats what needs you
+      return taskListRank(statusFor(a), a.status === 'done') - taskListRank(statusFor(b), b.status === 'done');
+    }
     if (sortBy !== 'dueDate') return 0;
     if (!a.dueDate && !b.dueDate) return 0;
     if (!a.dueDate) return 1;
@@ -194,6 +323,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     : view === 'fleet-health' ? 'Fleet Health'
     : view === 'heat' ? 'Heat Map'
     : view === 'federation' ? 'Federation'
+    : view === 'knowledge' ? 'Knowledge'
     : '';
 
   if (collapsed) {
@@ -223,6 +353,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         </button>
         <button onClick={() => setView('federation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Federation" title="Federation">
           <Network className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button onClick={() => setView('knowledge')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'knowledge' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Knowledge base" title="Knowledge base">
+          <Library className="h-4 w-4" aria-hidden="true" />
         </button>
         <div className="mt-3 flex h-full items-center">
           <div className="-rotate-90 whitespace-nowrap text-xs font-semibold uppercase tracking-widest text-gray-400">
@@ -287,6 +420,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <button onClick={() => setView('federation')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
               <Network className="h-3 w-3" aria-hidden="true" />
               Fed
+            </button>
+            <button onClick={() => setView('knowledge')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'knowledge' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Library className="h-3 w-3" aria-hidden="true" />
+              KB
             </button>
           </div>
         </div>
@@ -396,7 +533,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                     </label>
                     <label className="space-y-1">
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Sort</span>
-                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'creation' | 'dueDate')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation' | 'dueDate')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                        <option value="attention">Attention</option>
                         <option value="creation">Creation</option>
                         <option value="dueDate">Due date</option>
                       </select>
@@ -416,6 +554,69 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               )}
             </section>
 
+            <button
+              type="button"
+              onClick={() => setShowArchived((value) => !value)}
+              className="flex min-h-9 w-full items-center justify-between border-b border-gray-200 px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-900/70"
+              aria-expanded={showArchived}
+            >
+              <span className="flex items-center gap-1.5">
+                <Archive className="h-3.5 w-3.5" aria-hidden="true" />
+                {showArchived ? 'Hide archived' : 'Archived'}
+              </span>
+              {archived.length > 0 && <span className="rounded-full bg-gray-200 px-1.5 font-mono text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">{archived.length}</span>}
+            </button>
+
+            {showArchived ? (
+              <section aria-label="Archived features">
+                <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-gray-200 bg-gray-50/95 px-3 py-1 text-xs font-medium text-gray-600 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95 dark:text-gray-400">
+                  <Archive className="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+                  ARCHIVED
+                  <span className="font-mono text-[10px] text-gray-400">{archived.length}</span>
+                </div>
+                <div className="flex flex-col text-xs">
+                  {archived.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">Nothing archived. Archived plans land here — restore them or delete permanently.</div>
+                  ) : (
+                    archived.map((feature) => (
+                      <div key={feature.id} className="group flex min-h-12 items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-gray-800/50">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-gray-700 dark:text-gray-300" title={feature.title}>{feature.title}</div>
+                          <div className="truncate font-mono text-[10px] text-gray-400" title={feature.planDir ?? feature.id}>{feature.planDir ?? feature.id}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => { void restoreFeature(feature.id, feature.repo).then(refreshArchived); }}
+                          className="flex min-h-8 items-center gap-1 rounded px-2 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-50 focus-visible:ring-2 focus-visible:ring-emerald-500 dark:text-emerald-400 dark:hover:bg-emerald-900/30"
+                          title="Restore — un-archive and move the plan back"
+                        >
+                          <RotateCcw className="h-3 w-3" aria-hidden="true" /> Restore
+                        </button>
+                        {archivedConfirm === feature.id ? (
+                          <button
+                            type="button"
+                            onClick={() => { void hardDeleteFeature(feature.id, { repo: feature.repo }).then(refreshArchived); setArchivedConfirm(null); }}
+                            className="flex min-h-8 items-center gap-1 rounded bg-red-600 px-2 text-[11px] font-semibold text-white transition-colors hover:bg-red-700 focus-visible:ring-2 focus-visible:ring-red-500"
+                            title="Confirm: permanently delete the feature and its plan files"
+                          >
+                            <Trash2 className="h-3 w-3" aria-hidden="true" /> Confirm
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setArchivedConfirm(feature.id)}
+                            className="flex min-h-8 items-center gap-1 rounded px-2 text-[11px] font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:ring-2 focus-visible:ring-red-500 dark:text-red-400 dark:hover:bg-red-900/30"
+                            title="Delete permanently (plan files removed)"
+                          >
+                            <Trash2 className="h-3 w-3" aria-hidden="true" /> Delete
+                          </button>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            ) : (
             <section>
               <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 bg-gray-50/95 px-3 py-1 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95">
                 <div className="flex items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-400">
@@ -437,78 +638,37 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                 {filteredTasks.length === 0 ? (
                   <div className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">No tasks match your filters.</div>
                 ) : (
-                  filteredTasks.map((task) => {
-                    const isActive = task.id === selectedTaskId;
-                    const isDone = task.status === 'done';
-                    const dueSoon = isDueSoon(task.dueDate) && !isDone;
-                    const isDraggable = sortBy === 'creation' && categoryFilter === 'all' && !searchQuery;
-                    return (
-                      <div
-                        key={task.id}
-                        draggable={isDraggable}
-                        onDragStart={(event) => {
-                          setDraggedTaskId(task.id);
-                          event.dataTransfer.effectAllowed = 'move';
-                        }}
-                        onDragOver={(event) => event.preventDefault()}
-                        onDragEnd={() => setDraggedTaskId(null)}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          if (draggedTaskId && draggedTaskId !== task.id) {
-                            const draggedIdx = tasks.findIndex((item) => item.id === draggedTaskId);
-                            const targetIdx = tasks.findIndex((item) => item.id === task.id);
-                            if (draggedIdx !== -1 && targetIdx !== -1) reorderTasks(draggedIdx, targetIdx);
-                          }
-                          setDraggedTaskId(null);
-                        }}
-                        className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'} ${draggedTaskId === task.id ? 'opacity-50' : 'opacity-100'}`}
-                      >
-                        <button onClick={() => selectTask(task.id)} className="flex min-w-0 flex-1 items-center py-1 pl-2 text-left focus-visible:ring-2 focus-visible:ring-blue-500">
-                          <span className={`flex w-3 justify-center ${isDraggable ? 'cursor-grab text-gray-300 opacity-0 group-hover:opacity-100 group-active:cursor-grabbing' : 'opacity-0'}`}>
-                            <GripVertical className="h-3 w-3" aria-hidden="true" />
-                          </span>
-                          <span className="ml-0.5 flex w-5 flex-shrink-0 justify-center" title={`Status: ${task.properties.status}`}>
-                            {isDone ? (
-                              <CheckCircle2 className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                            ) : (
-                              <Circle className={`h-3.5 w-3.5 ${isActive ? 'text-blue-400' : 'text-gray-300 dark:text-gray-600'}`} aria-hidden="true" />
-                            )}
-                          </span>
-                          <span className="min-w-0 flex-1 px-2">
-                            <span className={`block truncate ${isDone ? 'text-gray-400 line-through dark:text-gray-600' : isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300'}`} title={task.title}>
-                              {task.title}
-                            </span>
-                            <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
-                              <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-gray-400 dark:text-gray-600' : isActive ? 'text-blue-700 dark:text-blue-400' : 'text-blue-600 dark:text-blue-500'}`} title={task.id}>
-                                {task.id}
-                              </span>
-                              {dueSoon && (
-                                <span title="Due within 24 hours" className="flex">
-                                  <AlertCircle className="h-3.5 w-3.5 text-red-500" aria-hidden="true" />
-                                </span>
-                              )}
-                              {task.priority && <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${getPriorityColor(task.priority)}`} title={`Priority: ${task.priority}`} />}
-                              <span className={`max-w-[5.5rem] truncate rounded px-1.5 py-0.5 text-[10px] font-medium ${getCategoryBadge(task.category)}`}>
-                                {task.category}
-                              </span>
-                            </span>
-                          </span>
-                          <span className={`ml-1 w-8 flex-shrink-0 text-right ${isActive ? 'font-medium text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'}`}>{task.duration}</span>
-                        </button>
-                        <button
-                          className="mr-1 flex min-h-10 w-8 flex-shrink-0 items-center justify-center self-center rounded text-gray-400 opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-blue-500 group-hover:opacity-100 dark:hover:bg-red-900/30"
-                          onClick={() => deleteTask(task.id)}
-                          aria-label={`Archive ${task.title}`}
-                          title="Archive task"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        </button>
-                      </div>
-                    );
-                  })
+                  filteredTasks.map((task) => (
+                    <TaskRailRow
+                      key={task.id}
+                      task={task}
+                      status={taskStatuses.get(task.id)}
+                      isActive={task.id === selectedTaskId}
+                      isDone={task.status === 'done'}
+                      dueSoon={isDueSoon(task.dueDate) && task.status !== 'done'}
+                      isDraggable={sortBy === 'creation' && categoryFilter === 'all' && !searchQuery}
+                      dragging={draggedTaskId === task.id}
+                      priorityColor={getPriorityColor(task.priority)}
+                      onSelect={() => selectTask(task.id)}
+                      onDelete={() => deleteTask(task.id)}
+                      onDragStart={(event) => { setDraggedTaskId(task.id); event.dataTransfer.effectAllowed = 'move'; }}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDragEnd={() => setDraggedTaskId(null)}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (draggedTaskId && draggedTaskId !== task.id) {
+                          const draggedIdx = tasks.findIndex((item) => item.id === draggedTaskId);
+                          const targetIdx = tasks.findIndex((item) => item.id === task.id);
+                          if (draggedIdx !== -1 && targetIdx !== -1) reorderTasks(draggedIdx, targetIdx);
+                        }
+                        setDraggedTaskId(null);
+                      }}
+                    />
+                  ))
                 )}
               </div>
             </section>
+            )}
           </>
         ) : (
           <section className="p-3">

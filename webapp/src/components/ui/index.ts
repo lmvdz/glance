@@ -9,7 +9,8 @@
  *   StatTile      — a metric tile (label + value + sub + optional sparkline)
  *   Callout       — insight/anomaly banner with an optional action
  *   SectionCard   — bordered card with an uppercase-tracked header
- *   HeatGrid      — GitHub-style per-day heat matrix
+ *   HeatGrid      — GitHub-style per-day heat matrix (flat)
+ *   HeatTree      — magma folder-tree heat matrix (the Context Heat Graph)
  *   AttentionRow  — severity dot + title + detail + age + action button
  *
  * Color = meaning: emerald=good · amber=warn · red=critical · blue=neutral info.
@@ -22,6 +23,7 @@ export { StatTile, type StatTileProps } from './StatTile';
 export { Callout, type CalloutProps } from './Callout';
 export { SectionCard, type SectionCardProps } from './SectionCard';
 export { HeatGrid, type HeatGridProps, type HeatGridRow } from './HeatGrid';
+export { HeatTree, type HeatTreeProps } from './HeatTree';
 export { AttentionRow, type AttentionRowProps } from './AttentionRow';
 export { toneClasses, type Tone, type ToneLike } from './tokens';
 export { relativeAge } from './time';

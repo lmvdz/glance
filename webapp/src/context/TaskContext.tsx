@@ -11,8 +11,18 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'attention' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'federation';
+export type AppView = 'attention' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'federation' | 'knowledge';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
+
+/** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
+export interface ArchivedFeature {
+  id: string;
+  title: string;
+  repo: string;
+  planDir?: string;
+  moduleUrl?: string;
+  updatedAt: number;
+}
 
 interface ApiComment {
   id: string;
@@ -50,6 +60,9 @@ interface TaskContextType {
   selectTask: (id: string | null) => void;
   addTask: (task: Partial<Task>) => void;
   deleteTask: (id: string) => void;
+  restoreFeature: (id: string, repo?: string) => Promise<void>;
+  hardDeleteFeature: (id: string, opts?: { repo?: string; plane?: 'keep' | 'detach' }) => Promise<void>;
+  loadArchivedFeatures: (repo?: string) => Promise<ArchivedFeature[]>;
   toggleTaskComplete: (id: string) => void;
   updateTask: (id: string, updates: Partial<Task>) => void;
   reorderTasks: (startIndex: number, endIndex: number) => void;
@@ -122,14 +135,39 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       .catch((error: Error) => showToast(error.message || 'Could not create feature', 'error'));
   };
 
+  // Archive = reversible: flips the flag AND (server-side) moves plans/<x>/ → plans/.archive/<x>/.
   const deleteTask = (id: string) => {
     const task = tasks.find((item) => item.id === id);
     const featureId = task?.sourceId ?? id;
     void apiJson(`/api/features/${encodeURIComponent(featureId)}`, jsonInit('PATCH', { repo: task?.properties.project.id, archived: true }))
       .then(() => squad.reload())
-      .then(() => showToast(`Feature archived: ${id}`))
+      .then(() => showToast(`Archived ${id} — restorable from Archived`))
       .catch((error: Error) => showToast(error.message || 'Could not archive feature', 'error'));
   };
+
+  // Restore an archived feature (un-flag + move the plan dir back out of .archive).
+  const restoreFeature = (id: string, repo?: string) =>
+    apiJson(`/api/features/${encodeURIComponent(id)}`, jsonInit('PATCH', { repo, archived: false }))
+      .then(() => squad.reload())
+      .then(() => showToast(`Restored ${id}`))
+      .catch((error: Error) => showToast(error.message || 'Could not restore feature', 'error'));
+
+  // Hard delete = permanent: removes the feature + its plan dir. `plane: "detach"` also drops the
+  // Plane module grouping (issues untouched). Destructive; callers confirm first.
+  const hardDeleteFeature = (id: string, opts: { repo?: string; plane?: 'keep' | 'detach' } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.repo) qs.set('repo', opts.repo);
+    if (opts.plane === 'detach') qs.set('plane', 'detach');
+    return apiJson(`/api/features/${encodeURIComponent(id)}${qs.toString() ? `?${qs}` : ''}`, { method: 'DELETE' })
+      .then(() => squad.reload())
+      .then(() => showToast(`Deleted ${id} permanently`))
+      .catch((error: Error) => showToast(error.message || 'Could not delete feature', 'error'));
+  };
+
+  const loadArchivedFeatures = (repo?: string) =>
+    apiJson<{ features: ArchivedFeature[] }>(`/api/features/archived${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`)
+      .then((r) => r.features)
+      .catch(() => [] as ArchivedFeature[]);
 
   const toggleTaskComplete = (id: string) => {
     const task = tasks.find((item) => item.id === id);
@@ -211,7 +249,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

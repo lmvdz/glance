@@ -1,34 +1,45 @@
 /**
- * HeatPanel — "Activity & hotspots" panel.
+ * HeatPanel — "Activity & hotspots", rebuilt as a Context Heat Graph.
  *
- * LEADS WITH A VERDICT: predicts merge conflicts (≥2 live agents editing the
- * same file) BEFORE they happen, then surfaces churn hotspots as a
- * GitHub-contribution-style matrix instead of the raw JSON array.
+ * LEADS WITH A VERDICT, then shows the codebase heat the way a heat graph should
+ * look: a magma folder-tree matrix (HeatTree) you can fold, scan, and read at a
+ * glance — not a flat top-N list or raw JSON.
  *
- * Primary value:
- *   1. Collision Callout  — files being edited by multiple live agents right now.
- *   2. Churn Callout      — the single loudest thrash hotspot (≥3 agents).
- *   3. HeatGrid           — scannable per-file/per-day matrix of the top hotspots.
- *   4. Raw heat data      — collapsed <details> for power users who want the JSON.
+ * Layout, top to bottom:
+ *   1. Collision callout — files ≥2 LIVE agents are editing right now (the
+ *      omp-squad-specific merge-conflict prediction; nothing else gives you this).
+ *   2. Controls         — time range (wired to /api/heat?days=) + pattern toggle.
+ *   3. Legend           — the magma cold→hot ramp.
+ *   4. HeatTree         — the magma folder-tree heat matrix (the centerpiece).
+ *   5. Top hot areas    — ranked files with an honest 0–100 score + trend tag.
+ *   6. Raw heat data    — collapsed <details> for power users.
+ *
+ * Every number traces to real receipt data — see lib/heatmap.ts. No fabricated
+ * "complexity"/"coupling" metrics.
  *
  * Shared foundation (imported, not reimplemented):
- *   - detectCollisions / churnHotspots / HeatPayload / UsageRun from insights
- *   - PanelShell / VerdictBadge / Callout / SectionCard / HeatGrid / relativeAge from ./ui
- *   - apiJson from ../lib/api
- *   - agents from TaskContext (live roster, same as AttentionPanel)
+ *   - detectCollisions / HeatPayload / UsagePayload from insights
+ *   - buildHeatTree / rankHotAreas / agentsByFileMap / initialExpanded / magma
+ *     / MAGMA_GRADIENT from lib/heatmap
+ *   - PanelShell / VerdictBadge / Callout / SectionCard / HeatTree from ./ui
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Flame, RefreshCw, Users } from 'lucide-react';
+import { Flame, RefreshCw, Users, Sparkles } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
+import { detectCollisions, type HeatPayload, type UsagePayload } from '../lib/insights';
 import {
-  detectCollisions,
-  churnHotspots,
-  type HeatPayload,
-  type UsagePayload,
-} from '../lib/insights';
-import { PanelShell, VerdictBadge, Callout, SectionCard, HeatGrid } from './ui';
+  buildHeatTree,
+  rankHotAreas,
+  agentsByFileMap,
+  initialExpanded,
+  magma,
+  MAGMA_GRADIENT,
+  type HotArea,
+  type HotAreaTag,
+} from '../lib/heatmap';
+import { PanelShell, VerdictBadge, Callout, SectionCard, HeatTree } from './ui';
 import { focusTaskSearch } from '../lib/jump';
 
 // ──────────────────────────────── helpers ────────────────────────────────────
@@ -40,23 +51,68 @@ function shortPath(p: string): string {
   return `…/${parts.slice(-2).join('/')}`;
 }
 
-/** Trim the path to a reasonable column width in the grid label. */
-function gridLabel(p: string): string {
-  // keep up to 3 segments for the grid (wider than callout)
-  const parts = p.split(/[\\/]/).filter(Boolean);
-  if (parts.length <= 3) return p;
-  return `…/${parts.slice(-3).join('/')}`;
+/** Split "a/b/c.ts" into a muted dir prefix + a highlighted filename. */
+function splitPath(p: string): { dir: string; file: string } {
+  const idx = p.lastIndexOf('/');
+  if (idx === -1) return { dir: '', file: p };
+  return { dir: p.slice(0, idx + 1), file: p.slice(idx + 1) };
 }
+
+const TAG_CLASS: Record<HotAreaTag, string> = {
+  'CORE HOTSPOT': 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
+  CONTESTED: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  GROWING: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  STEADY: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
+};
+
+const RANGES = [7, 14, 30] as const;
+
+/** A tiny magma strip showing a file's per-day trend, normalized to its own peak. */
+const MagmaStrip: React.FC<{ daily: number[] }> = ({ daily }) => {
+  const max = Math.max(0, ...daily);
+  return (
+    <span className="flex h-3 gap-px overflow-hidden rounded-sm" aria-hidden="true">
+      {daily.map((v, i) => (
+        <span key={i} className="w-1.5" style={{ backgroundColor: magma(max > 0 ? v / max : 0) }} />
+      ))}
+    </span>
+  );
+};
+
+const HotAreaCard: React.FC<{ area: HotArea }> = ({ area }) => {
+  const { dir, file } = splitPath(area.path);
+  return (
+    <li className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="mt-0.5 text-sm font-semibold tabular-nums text-gray-400">{area.rank}</span>
+          <p className="min-w-0 break-all text-sm font-medium leading-snug" title={area.path}>
+            <span className="text-gray-400 dark:text-gray-500">{dir}</span>
+            <span className="text-orange-600 dark:text-orange-400">{file}</span>
+          </p>
+        </div>
+        <span className="shrink-0 text-base font-semibold tabular-nums text-gray-900 dark:text-gray-100" title={`${area.total} touches`}>
+          {area.score}
+        </span>
+      </div>
+      <p className="mt-2 pl-6 text-xs leading-relaxed text-gray-500 dark:text-gray-400">{area.description}</p>
+      <div className="mt-2 flex items-center justify-between gap-2 pl-6">
+        <span className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${TAG_CLASS[area.tag]}`}>
+          {area.tag}
+        </span>
+        <MagmaStrip daily={area.daily} />
+      </div>
+    </li>
+  );
+};
 
 // ──────────────────────────────── component ──────────────────────────────────
 
-/**
- * Exported for renderToStaticMarkup-based tests.  The panel is purely a
- * display/orchestration layer; all logic lives in insights.ts.
- */
 export const HeatPanel: React.FC = () => {
   const { agents } = useTaskContext();
 
+  const [days, setDays] = useState<(typeof RANGES)[number]>(14);
+  const [showPatterns, setShowPatterns] = useState(true);
   const [heat, setHeat] = useState<HeatPayload | null>(null);
   const [usage, setUsage] = useState<UsagePayload | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -65,7 +121,7 @@ export const HeatPanel: React.FC = () => {
   const load = useCallback(async () => {
     try {
       const [h, u] = await Promise.all([
-        apiJson<HeatPayload>('/api/heat').catch((): null => null),
+        apiJson<HeatPayload>(`/api/heat?days=${days}`).catch((): null => null),
         apiJson<UsagePayload>('/api/usage?limit=200').catch((): null => null),
       ]);
       setHeat(h);
@@ -76,7 +132,7 @@ export const HeatPanel: React.FC = () => {
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [days]);
 
   useEffect(() => {
     void load();
@@ -86,35 +142,35 @@ export const HeatPanel: React.FC = () => {
 
   // ── derived signals ──────────────────────────────────────────────────────
 
-  const collisions = useMemo(
-    () => detectCollisions(usage?.runs, agents),
-    [usage?.runs, agents],
+  const collisions = useMemo(() => detectCollisions(usage?.runs, agents), [usage?.runs, agents]);
+
+  const agentsByFile = useMemo(() => agentsByFileMap(usage?.runs), [usage?.runs]);
+
+  const tree = useMemo(
+    () => buildHeatTree(heat?.tree, heat?.days?.length ?? 0, agentsByFile),
+    [heat?.tree, heat?.days, agentsByFile],
   );
 
-  const hotspots = useMemo(
-    () => churnHotspots(heat, usage?.runs, 8),
-    [heat, usage?.runs],
-  );
+  const defaultExpanded = useMemo(() => initialExpanded(tree), [tree]);
 
-  // Top churn hotspot flagged for splitting: needs ≥3 distinct agents.
-  const topChurn = hotspots.find((h) => h.agentCount >= 3) ?? null;
+  const hotAreas = useMemo(() => rankHotAreas(heat?.tree, agentsByFile, 6), [heat?.tree, agentsByFile]);
+
+  const topContested = hotAreas.find((h) => h.agentCount >= 3) ?? null;
 
   // ── verdict ──────────────────────────────────────────────────────────────
 
   const hasCollisions = collisions.length > 0;
-  const hasChurn = topChurn !== null;
+  const hasContested = topContested !== null;
 
-  const verdictKind: 'critical' | 'warn' | 'healthy' = hasCollisions
-    ? 'critical'
-    : hasChurn
-      ? 'warn'
-      : 'healthy';
+  const verdictKind: 'critical' | 'warn' | 'healthy' = hasCollisions ? 'critical' : hasContested ? 'warn' : 'healthy';
 
   const verdictText = hasCollisions
-    ? `${collisions.length} collision risk${collisions.length === 1 ? '' : 's'}${hasChurn ? ' · 1 churn hotspot' : ''}`
-    : hasChurn
-      ? '1 churn hotspot'
-      : 'No contention';
+    ? `${collisions.length} collision risk${collisions.length === 1 ? '' : 's'}${hasContested ? ' · 1 contested file' : ''}`
+    : hasContested
+      ? '1 contested file'
+      : tree.fileCount > 0
+        ? `${tree.fileCount} file${tree.fileCount === 1 ? '' : 's'} active`
+        : 'No contention';
 
   const subtitle = (
     <span className="flex items-center gap-2">
@@ -133,16 +189,6 @@ export const HeatPanel: React.FC = () => {
     </button>
   );
 
-  // ── grid rows ─────────────────────────────────────────────────────────────
-
-  const gridRows = hotspots.map((hs) => ({
-    label: gridLabel(hs.path),
-    daily: hs.daily,
-    note: hs.agentCount > 0 ? `${hs.agentCount} agent${hs.agentCount === 1 ? '' : 's'}` : undefined,
-  }));
-
-  const days = heat?.days ?? [];
-
   return (
     <PanelShell
       icon={<Flame className="h-4 w-4 text-orange-500" aria-hidden="true" />}
@@ -153,8 +199,8 @@ export const HeatPanel: React.FC = () => {
       {/* Loading skeleton */}
       {!loaded && !error && (
         <div className="space-y-3 animate-pulse" aria-label="Loading heat data">
-          {[1, 2, 3].map((n) => (
-            <div key={n} className="h-12 rounded-lg bg-gray-100 dark:bg-gray-800" />
+          {[1, 2, 3].map((nn) => (
+            <div key={nn} className="h-12 rounded-lg bg-gray-100 dark:bg-gray-800" />
           ))}
         </div>
       )}
@@ -185,10 +231,7 @@ export const HeatPanel: React.FC = () => {
                     className="flex items-start justify-between gap-3 rounded-md border border-red-200/60 dark:border-red-900/40 bg-white/60 dark:bg-gray-950/40 px-3 py-2"
                   >
                     <div className="min-w-0">
-                      <div
-                        className="truncate text-xs font-mono font-medium text-gray-800 dark:text-gray-200"
-                        title={c.file}
-                      >
+                      <div className="truncate text-xs font-mono font-medium text-gray-800 dark:text-gray-200" title={c.file}>
                         {shortPath(c.file)}
                       </div>
                       <div className="mt-0.5 flex flex-wrap gap-1">
@@ -216,47 +259,91 @@ export const HeatPanel: React.FC = () => {
             </Callout>
           )}
 
-          {/* ── CHURN CALLOUT ────────────────────────────────────────────── */}
-          {hasChurn && (
-            <Callout
-              tone="warn"
+          {/* ── CONTROLS ─────────────────────────────────────────────────── */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">Range</span>
+              <div className="flex overflow-hidden rounded-md border border-gray-200 dark:border-gray-700">
+                {RANGES.map((r) => (
+                  <button
+                    key={r}
+                    onClick={() => setDays(r)}
+                    className={`px-2.5 py-1 text-xs font-medium tabular-nums transition-colors ${
+                      days === r
+                        ? 'bg-orange-500 text-white'
+                        : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
+                    }`}
+                    aria-pressed={days === r}
+                  >
+                    {r}d
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+              <span>Show peaks</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showPatterns}
+                aria-label="Show peak markers"
+                onClick={() => setShowPatterns((v) => !v)}
+                className={`relative h-5 w-9 rounded-full border transition-colors ${
+                  showPatterns ? 'border-orange-500 bg-orange-500' : 'border-gray-300 dark:border-gray-600 bg-gray-200 dark:bg-gray-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full bg-white shadow transition-all ${
+                    showPatterns ? 'left-[18px]' : 'left-0.5'
+                  }`}
+                />
+              </button>
+            </label>
+          </div>
+
+          {/* ── LEGEND ───────────────────────────────────────────────────── */}
+          <div className="flex items-center gap-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-4 py-2.5">
+            <span className="text-xs text-gray-500 dark:text-gray-400">Cold</span>
+            <div className="h-2.5 flex-1 rounded-full" style={{ background: MAGMA_GRADIENT }} />
+            <span className="text-xs text-gray-500 dark:text-gray-400">Hot</span>
+          </div>
+
+          {/* ── HEAT TREE (centerpiece) ──────────────────────────────────── */}
+          <HeatTree
+            key={`heat-${days}`}
+            days={heat?.days ?? []}
+            tree={tree}
+            showPatterns={showPatterns}
+            defaultExpanded={defaultExpanded}
+          />
+
+          {/* ── TOP HOT AREAS ────────────────────────────────────────────── */}
+          {hotAreas.length > 0 && (
+            <SectionCard
               title={
-                <>
-                  🔥{' '}
-                  <span className="font-mono">{shortPath(topChurn!.path)}</span>{' '}
-                  is your churn hotspot
-                </>
+                <span className="flex items-center gap-1.5">
+                  <Flame className="h-3.5 w-3.5 text-orange-500" aria-hidden="true" />
+                  Top hot areas
+                </span>
               }
+              right={`${hotAreas.length} ranked`}
             >
-              {topChurn!.agentCount} agents touched it — repeated thrash here often means it wants splitting.
-            </Callout>
+              <ul className="space-y-2.5 p-3">
+                {hotAreas.map((a) => (
+                  <HotAreaCard key={a.path} area={a} />
+                ))}
+              </ul>
+            </SectionCard>
           )}
 
           {/* ── CALM EMPTY STATE ─────────────────────────────────────────── */}
-          {!hasCollisions && !hasChurn && hotspots.length === 0 && (
-            <div className="flex flex-col items-center gap-3 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/20 px-6 py-10 text-center">
-              <Flame className="h-8 w-8 text-gray-300 dark:text-gray-700" aria-hidden="true" />
-              <div className="text-base font-semibold text-gray-600 dark:text-gray-300">
-                No hot files in the last window
-              </div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">
-                No contention or churn detected — all clear.
-              </div>
+          {!hasCollisions && tree.fileCount === 0 && (
+            <div className="flex flex-col items-center gap-2 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/20 px-6 py-8 text-center">
+              <Sparkles className="h-7 w-7 text-emerald-400" aria-hidden="true" />
+              <div className="text-sm font-semibold text-gray-600 dark:text-gray-300">No hot files in the last {days} days</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">No receipt-backed file writes — all clear.</div>
             </div>
-          )}
-
-          {/* ── HEAT GRID ─────────────────────────────────────────────────── */}
-          {hotspots.length > 0 && (
-            <SectionCard
-              title="File activity matrix"
-              right={days.length > 0 ? `${days.length} days` : undefined}
-            >
-              <HeatGrid
-                days={days}
-                rows={gridRows}
-                emptyLabel="No hot files in the last window."
-              />
-            </SectionCard>
           )}
 
           {/* ── RAW HEAT DATA (collapsed) ────────────────────────────────── */}
