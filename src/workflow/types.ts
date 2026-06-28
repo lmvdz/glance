@@ -95,6 +95,44 @@ export interface RunContext {
 	vars: Record<string, string>;
 }
 
+export type WorkflowAutonomyMode = "manual" | "supervised" | "autonomous";
+
+export interface WorkflowProofState {
+	state: "none" | "failed" | "stale" | "fresh";
+	ranAt?: number;
+	artifacts: number;
+}
+
+export interface WorkflowJournalEvent {
+	type:
+		| "workflow.node.start"
+		| "workflow.node.end"
+		| "workflow.human_gate.start"
+		| "workflow.human_gate.end"
+		| "workflow.parallel.start"
+		| "workflow.parallel.end"
+		| "workflow.branch.start"
+		| "workflow.branch.end"
+		| "workflow.verification.start"
+		| "workflow.verification.end"
+		| "workflow.land.start"
+		| "workflow.land.end";
+	at: number;
+	workflow: string;
+	runId: string;
+	nodeId?: string;
+	label?: string;
+	kind?: NodeKind;
+	phase?: "start" | "end";
+	outcome?: Outcome;
+	text?: string;
+	options?: string[];
+	selected?: string;
+	proof?: WorkflowProofState;
+	detail?: string;
+}
+
+
 /** Lifecycle notification for one stage (a single node execution). */
 export interface StageEvent {
 	/** 0-based execution order within the run. */
@@ -136,6 +174,10 @@ export interface EngineCheckpoint {
 /** Persisted run state — an engine checkpoint plus the executor's stage rollup (for the progress view). */
 export interface WorkflowRunState extends EngineCheckpoint {
 	rollup: { label: string; status: "in_progress" | "completed" }[];
+	runId?: string;
+	autonomy?: WorkflowAutonomyMode;
+	sessionId?: string;
+	proof?: WorkflowProofState;
 }
 
 /**

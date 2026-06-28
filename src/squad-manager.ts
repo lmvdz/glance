@@ -1577,6 +1577,19 @@ export class SquadManager extends EventEmitter {
 		return result;
 	}
 
+	private async autoLandWorkflow(rec: AgentRecord, outcome: string | undefined, proof?: { state?: string }): Promise<void> {
+		if (!this.autoLand || this.landConfirm || outcome !== "succeeded") return;
+		this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "workflow.land.start", target: rec.dto.id, detail: { proof: proof?.state ?? "unknown" } }).catch(() => {});
+		const reason = await proofGate(rec.dto.repo, rec.dto.worktree, rec.dto.branch);
+		if (reason) {
+			this.log("warn", `workflow auto-land blocked on ${rec.dto.name}: ${reason}`);
+			this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "workflow.land.end", target: rec.dto.id, detail: { outcome: "blocked", reason } }).catch(() => {});
+			return;
+		}
+		const res = await autoLandOnSuccess(true, outcome, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
+		this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "workflow.land.end", target: rec.dto.id, detail: { outcome: res?.ok ? "ok" : "error", detail: res?.detail ?? res?.message } }).catch(() => {});
+	}
+
 	/**
 	 * Confirm-mode (OMP_SQUAD_LAND_CONFIRM): the auto-land loop verified GREEN but is holding the
 	 * merge. Flag the agent ready-to-land so the UI surfaces a one-tap Land, and emit an update.
@@ -2507,10 +2520,9 @@ export class SquadManager extends EventEmitter {
 				break;
 			}
 			case "workflow_done":
-				// Autonomous loop closer: a successful workflow auto-lands its own branch (no operator) —
-				// UNLESS the LAND_CONFIRM valve is on, where the orchestrator stages a one-tap Land instead.
-				// The valve gates EVERY autonomous land path, not just the orchestrator tick.
-				void autoLandOnSuccess(this.autoLand && !this.landConfirm, frame.outcome as string | undefined, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
+				// Workflow auto-land must satisfy the same fresh-proof invariant surfaced by Land all.
+				// The final land still goes through land(), so merge verification/rollback and issue-close stay one seam.
+				void this.autoLandWorkflow(rec, frame.outcome as string | undefined, frame.proof as { state?: string } | undefined);
 				break;
 			case "auto_retry_start": {
 				// A usage-limit retry means the model subscription is rate-limited (5h/weekly cap). Note it so the

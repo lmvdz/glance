@@ -28,13 +28,16 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
 import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
 import { parseStylesheet, resolveNodeStyle } from "./workflow/stylesheet.ts";
-import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowNode, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowAutonomyMode, WorkflowJournalEvent, WorkflowNode, WorkflowProofState, WorkflowRunState } from "./workflow/types.ts";
 
 /** A branch agent to spawn into the roster (one parallel branch = one fleet agent). */
 export interface BranchSpec {
 	name: string;
 	task: string;
 	model?: string;
+	autonomy?: WorkflowAutonomyMode;
+	proof?: WorkflowProofState;
+	sessionId?: string;
 	/** Aborts when the join short-circuits or a sibling branch threw; the fleet stops the agent so it isn't leaked. */
 	signal?: AbortSignal;
 }
@@ -57,6 +60,9 @@ export interface WorkflowDriverOptions {
 	approvalMode?: ApprovalMode;
 	thinking?: ThinkingLevel;
 	bin?: string;
+	autonomy?: WorkflowAutonomyMode;
+	sessionId?: string;
+	proof?: WorkflowProofState;
 	/** Override inner-thread creation (tests). Default: a real RpcAgent. */
 	createInnerDriver?: () => AgentDriver;
 	/** Override command execution (tests). */
@@ -87,6 +93,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	private runActive = false;
 	private gateSeq = 0;
 	private pendingGate?: PendingGate;
+	private runId = "";
 
 	constructor(opts: WorkflowDriverOptions) {
 		super();
@@ -114,10 +121,15 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			execCommand: this.opts.execCommand,
 			readPromptRef: (ref) => fs.readFile(path.join(wfDir, ref.slice(1)), "utf8"),
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
-			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, signal }) : undefined,
+			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), signal }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
 		});
+		const baseOnStage = this.executor.onStage.bind(this.executor);
+		this.executor.onStage = (ev) => {
+			baseOnStage(ev);
+			this.onStage(ev);
+		};
 		this.engine = new WorkflowEngine(this.wf, this.executor);
 		this.ready = true;
 		this.alive = true;
@@ -197,6 +209,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	// ── internals ──────────────────────────────────────────────────────────────
 
 	private async execRun(goal: string, resume?: WorkflowRunState): Promise<void> {
+		this.runId = resume?.runId ?? `${this.opts.id}:${Date.now().toString(36)}`;
 		this.emit("event", { type: "agent_start" });
 		let outcome: "succeeded" | "failed" = "failed";
 		try {
@@ -212,15 +225,32 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			}
 		} finally {
 			this.runActive = false;
-			// Structured terminal outcome so the manager can auto-land a successful run (no operator).
-			this.emit("event", { type: "workflow_done", outcome });
+			this.emit("event", { type: "workflow_done", outcome, proof: this.opts.proof });
 			this.emit("event", { type: "agent_end" });
 		}
 	}
 
 	/** Forward an engine checkpoint (+ the executor's rollup) so the manager can persist the resumable run position. */
 	private onCheckpoint(c: EngineCheckpoint): void {
-		this.emit("checkpoint", { ...c, rollup: [...(this.executor?.rollup ?? [])] } satisfies WorkflowRunState);
+		this.emit("checkpoint", { ...c, rollup: [...(this.executor?.rollup ?? [])], runId: this.runId, autonomy: this.autonomy(), sessionId: this.sessionId(), proof: this.opts.proof } satisfies WorkflowRunState);
+	}
+
+	private autonomy(): WorkflowAutonomyMode {
+		return this.opts.autonomy ?? this.opts.resumeState?.autonomy ?? "supervised";
+	}
+
+	private sessionId(): string {
+		return this.opts.sessionId ?? this.opts.resumeState?.sessionId ?? this.wf?.name ?? "workflow";
+	}
+
+	private emitJournal(event: Omit<WorkflowJournalEvent, "at" | "workflow" | "runId">): void {
+		this.emit("event", { type: "workflow_journal", event: { at: Date.now(), workflow: this.wf?.name ?? "workflow", runId: this.runId || `${this.opts.id}:pending`, ...event } satisfies WorkflowJournalEvent });
+	}
+
+	private onStage(ev: { nodeId: string; label: string; kind: WorkflowNode["kind"]; phase: "start" | "end"; outcome?: NodeResult["outcome"]; text?: string }): void {
+		const isVerification = ev.kind === "command" || /verify|test|check/i.test(ev.label);
+		this.emitJournal({ type: ev.kind === "parallel" ? `workflow.parallel.${ev.phase}` : `workflow.node.${ev.phase}`, nodeId: ev.nodeId, label: ev.label, kind: ev.kind, phase: ev.phase, outcome: ev.outcome, text: ev.text, proof: ev.phase === "end" && isVerification ? this.opts.proof : undefined });
+		if (isVerification) this.emitJournal({ type: `workflow.verification.${ev.phase}`, nodeId: ev.nodeId, label: ev.label, kind: ev.kind, phase: ev.phase, outcome: ev.outcome, text: ev.text, proof: this.opts.proof });
 	}
 
 	private async acquireInner(): Promise<AgentDriver> {
@@ -249,8 +279,16 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	private raiseGate(node: WorkflowNode, options: string[]): Promise<string> {
 		const id = `gate_${++this.gateSeq}`;
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
-		this.pendingGate = { id, resolve, reject };
+		this.pendingGate = {
+			id,
+			resolve: (label) => {
+				this.emitJournal({ type: "workflow.human_gate.end", nodeId: node.id, label: node.label ?? node.id, kind: node.kind, selected: label });
+				resolve(label);
+			},
+			reject,
+		};
 		const req: RpcExtensionUIRequest = { type: "extension_ui_request", id, method: "select", title: node.label ?? node.id, options };
+		this.emitJournal({ type: "workflow.human_gate.start", nodeId: node.id, label: node.label ?? node.id, kind: node.kind, options });
 		this.emit("ui", req);
 		return promise;
 	}
