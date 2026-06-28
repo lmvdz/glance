@@ -291,6 +291,18 @@ export function newAgentId(name: string): string {
 	return `${name}-${Date.now().toString(36)}-${(++agentIdSeq).toString(36)}-${randomBytes(4).toString("hex")}`;
 }
 
+function slugPart(text: string, max = 60): string {
+	return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
+}
+
+/** Descriptive, stable branch for Plane-driven work: `squad/ompsq-319-short-title`. */
+export function planeIssueBranch(issue: IssueRef): string {
+	const ident = slugPart(issue.identifier ?? issue.id, 32);
+	const title = slugPart(issue.name);
+	return `squad/${[ident, title].filter(Boolean).join("-") || "plane-issue"}`;
+}
+
+
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
 	confirm: true,
@@ -716,7 +728,7 @@ export class SquadManager extends EventEmitter {
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
 	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
-		await this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true, approvalMode: "yolo" });
+		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo" });
 	}
 
 	/** Start (or return the existing) agent advancing a Plane issue — the web "Start task" action. */
@@ -724,7 +736,7 @@ export class SquadManager extends EventEmitter {
 		const existing = [...this.agents.values()].find((r) => r.dto.issue?.id === issue.id);
 		if (existing) return existing.dto;
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
-		return this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true, approvalMode: "yolo" }, actor);
+		return this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo" }, actor);
 	}
 
 	async stop(): Promise<void> {

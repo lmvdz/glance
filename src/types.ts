@@ -596,7 +596,7 @@ export interface CreateAgentOptions {
 	repo: string;
 	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
 	runtime?: "omp" | "acp";
-	/** Branch to create/checkout for the worktree. Defaults to `squad/<name>`. */
+	/** Branch to create/checkout for the worktree. Defaults to a unique `squad/<agent-id>` branch. */
 	branch?: string;
 	/** Reuse an existing path as the cwd instead of cutting a worktree. */
 	existingPath?: string;

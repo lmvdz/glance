@@ -63,7 +63,9 @@ omp-squad up
 3. For each issue not already represented, spawns a routed agent via `dispatchSpawn` →
    `SquadManager.create({ … autoRoute: true, approvalMode: "yolo" })`. The task is
    `"<identifier>: <name>"`, so [intake](/docs/integrations/intake) picks the process per
-   issue — verify loop, plan+approval, or fan-out.
+   issue — verify loop, plan+approval, or fan-out. The branch is descriptive and stable:
+   `squad/<identifier-slug>-<issue-title-slug>` (for example,
+   `squad/ompsq-319-descriptive-branch-names-for-plane-dispatched-agents`).
 
 The spawned agent carries the issue as its tracking ref, and a successful
 [land](/docs/guides/landing) closes that issue — the same `closePlaneIssue` path every landed
