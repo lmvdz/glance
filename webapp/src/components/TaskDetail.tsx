@@ -463,6 +463,18 @@ export const TaskDetail = () => {
     setPlaneLinks(payload);
   }, [featureId]);
 
+  // Persist a flow-diagram concern edit (STATUS and/or blockers), then refresh the pipeline.
+  const editConcern = React.useCallback(async (file: string, patch: { status?: string; blockedBy?: number[] }) => {
+    if (!featureId || !repo) return;
+    try {
+      await apiJson(`/api/features/${encodeURIComponent(featureId)}/concerns`, jsonInit('PATCH', { repo, file, ...patch }));
+      showToast('Concern updated', 'success');
+      await loadPipeline();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not update concern', 'error');
+    }
+  }, [featureId, repo, loadPipeline, showToast]);
+
   React.useEffect(() => {
     pipelineRequestRef.current += 1;
     planeLinksRequestRef.current += 1;
@@ -1111,6 +1123,7 @@ export const TaskDetail = () => {
                       overviewText={overviewDoc?.content ?? ''}
                       selectedId={selectedPlanDoc?.path}
                       onSelect={(id) => selectPlanDoc(id)}
+                      onEdit={editConcern}
                     />
                   </div>
                 </details>
