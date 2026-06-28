@@ -4,6 +4,7 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/orchestrator.ts, src/orchestrator-state.ts, src/scheduler.ts, src/types.ts
+PLANE: OMPSQ-308 — https://app.plane.so/inkwell-finance/browse/OMPSQ-308/
 
 ## Goal
 

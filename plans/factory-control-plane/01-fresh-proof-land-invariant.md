@@ -4,6 +4,7 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/proof.ts, src/land.ts, src/squad-manager.ts, src/server.ts, src/types.ts
+PLANE: OMPSQ-306 — https://app.plane.so/inkwell-finance/browse/OMPSQ-306/
 
 ## Goal
 
