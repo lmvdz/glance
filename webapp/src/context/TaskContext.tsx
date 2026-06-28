@@ -11,7 +11,7 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'federation';
+export type AppView = 'attention' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'federation';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 interface ApiComment {
@@ -89,7 +89,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const projects = useMemo(() => projectsByTeam(squad.projects, squad.features), [squad.projects, squad.features]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastInfo[]>([]);
-  const [view, setView] = useState<AppView>('tasks');
+  const [view, setView] = useState<AppView>('attention');
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
   const [isChatOpen, setIsChatOpen] = useState(false);
 
