@@ -77,6 +77,10 @@ test("AgentMetaBar keeps only compact git branch status at the top", () => {
     receipt: { toolCalls: 4, tokens: 12345, durationMs: 65_000 },
     pending: [],
     lastActivity: 1,
+    autonomyMode: "assist",
+    effectiveMode: "assist",
+    verificationState: "fresh",
+    availableActions: ["prompt", "answer", "interrupt", "verify", "land", "set-mode"],
   };
 
   const html = renderToStaticMarkup(<AgentMetaBar agent={agent} changedFiles={2} />);
@@ -96,6 +100,10 @@ test("ComposerStats renders ultra-compact context, tokens, tools, and time", () 
     receipt: { toolCalls: 8, tokens: 500_200, durationMs: 1_959_000 },
     pending: [],
     lastActivity: 1,
+    autonomyMode: "assist",
+    effectiveMode: "assist",
+    verificationState: "unknown",
+    availableActions: ["set-mode"],
   };
 
   const html = renderToStaticMarkup(<ComposerStats agent={agent} />);

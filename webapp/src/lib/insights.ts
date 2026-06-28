@@ -466,15 +466,16 @@ export function attentionItems(input: AttentionInput): AttentionItem[] {
 
     // Ready to land → land.
     if (a.landReady) {
+      const canLand = a.availableActions === undefined || a.availableActions.includes('land');
       items.push({
         id: `land:${a.id}`,
         severity: 'warn',
         kind: 'land-ready',
         title: `${a.name} is ready to land`,
-        detail: a.issue?.name ? `Verified — ${a.issue.name}` : 'Verification passed; holding for your confirmation.',
+        detail: canLand ? (a.issue?.name ? `Verified — ${a.issue.name}` : 'Verification passed; holding for your confirmation.') : (a.blockedReason ?? `Mode ${a.effectiveMode} cannot land right now.`),
         agentId: a.id,
         since: a.lastActivity,
-        action: { label: 'Land', kind: 'land' },
+        action: canLand ? { label: 'Land', kind: 'land' } : { label: 'View', kind: 'view' },
       });
       mark(a.id, 'land-ready');
     }

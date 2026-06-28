@@ -149,6 +149,10 @@ export interface AgentSessionSummaryDTO {
   autoCompactionEnabled?: boolean;
 }
 
+export type AutonomyMode = "observe" | "assist" | "autodrive";
+export type VerificationState = "unknown" | "none" | "failed" | "stale" | "fresh";
+export type AgentAction = "prompt" | "answer" | "interrupt" | "verify" | "land" | "set-mode";
+
 export interface AgentDTO {
   id: string;
   name: string;
@@ -173,6 +177,12 @@ export interface AgentDTO {
   error?: string;
   issue?: IssueRef;
   featureId?: string;
+  autonomyMode: AutonomyMode;
+  effectiveMode: AutonomyMode;
+  verificationState: VerificationState;
+  proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+  blockedReason?: string;
+  availableActions: AgentAction[];
   landReady?: boolean;
 }
 

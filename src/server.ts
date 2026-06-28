@@ -19,12 +19,9 @@ import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
-import { proofGate, runProof } from "./proof.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
-import { detectVerify } from "./intake.ts";
 import { all, claim, release, who } from "./presence.ts";
-import { landAgent } from "./land.ts";
 import { type LeaseEntry, leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
@@ -36,6 +33,7 @@ import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
+import { validateRequestedMode } from "./autonomy.ts";
 import { featureFlagStates, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
 import type { CapabilityInstallState } from "./capabilities/index.ts";
@@ -1058,32 +1056,38 @@ export class SquadServer {
 		}
 		const mland = url.pathname.match(/^\/api\/agents\/([^/]+)\/land$/);
 		if (mland && req.method === "POST") {
-			const dto = manager.getAgent(decodeURIComponent(mland[1]));
+			const id = decodeURIComponent(mland[1]);
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			let message = `squad(${dto.name}): ${dto.issue?.name ?? "agent changes"}`;
 			const body: unknown = await req.json().catch(() => null);
 			if (body && typeof body === "object" && "message" in body && typeof body.message === "string" && body.message.trim()) {
 				message = body.message.trim();
 			}
-			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
-			if (!force) {
-				const reason = await proofGate(dto.repo, dto.worktree, dto.branch);
-				if (reason) return Response.json({ ok: false, committed: false, merged: false, message, detail: reason }, { status: 409 });
-			}
-			const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
-			const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message, commitWip: !busy });
-			if (result.ok) void manager.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
-			void manager.recordAudit(actor, "land", dto.id, result.ok ? "ok" : "error", result.detail ?? result.message);
-			return Response.json(result);
+			const result = await manager.land(id, message, { auto: false });
+			return Response.json(result, { status: result.ok ? 200 : 409 });
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {
-			const dto = manager.getAgent(decodeURIComponent(mverify[1]));
+			const id = decodeURIComponent(mverify[1]);
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
-			const command = await detectVerify(dto.repo);
-			if (!command) return new Response("no acceptance command detected for this repo", { status: 422 });
-			const proof = await runProof({ repo: dto.repo, worktree: dto.worktree, command });
-			return Response.json(proof);
+			try {
+				const ok = await manager.verifyAgentWork(id, actor);
+				return Response.json({ ok });
+			} catch (err) {
+				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
+			}
+		}
+		const mmode = url.pathname.match(/^\/api\/agents\/([^/]+)\/mode$/);
+		if (mmode && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const mode = validateRequestedMode(body && typeof body === "object" && "mode" in body ? (body as { mode?: unknown }).mode : undefined);
+			if (!mode) return new Response("invalid mode", { status: 400 });
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const dto = await manager.transitionMode(decodeURIComponent(mmode[1]), mode, actor, reason);
+			if (!dto) return new Response("no such agent", { status: 404 });
+			return Response.json(dto);
 		}
 		const mvision = url.pathname.match(/^\/api\/agents\/([^/]+)\/vision$/);
 		if (mvision && req.method === "POST") {

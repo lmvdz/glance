@@ -9,6 +9,7 @@
 import type { RpcExtensionUIRequest, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { WorkflowRunState } from "./workflow/types.ts";
 import type { Span } from "./spans.ts";
+import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -459,6 +460,18 @@ export interface AgentDTO {
 	workflow?: WorkflowMemberConfig;
 	/** Live workflow checkpoint/rollup, emitted on every stage boundary. */
 	workflowState?: WorkflowRunState;
+	/** Requested authority persisted for this run; effectiveMode is capped by daemon policy and blockers. */
+	autonomyMode?: AutonomyMode;
+	/** Actual authority after approval/env caps and blockers. */
+	effectiveMode?: AutonomyMode;
+	/** Current proof freshness summary for this agent's worktree. */
+	verificationState?: VerificationState;
+	/** Stable proof reference/fingerprint for display and audit correlation. */
+	proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+	/** Why authority is currently capped to observe. */
+	blockedReason?: string;
+	/** Actions this surface may offer for the current effective mode. */
+	availableActions?: AgentAction[];
 	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
 	landReady?: boolean;
 	/** Re-adopted from a surviving worktree on relaunch and not yet re-run (OMPSQ-164): its work was
@@ -523,6 +536,7 @@ export interface PersistedAgent {
 	model?: string;
 	profileId?: string;
 	approvalMode: ApprovalMode;
+	autonomyMode?: AutonomyMode;
 	/** Initial task prompt, if the agent was created with one. */
 	task?: string;
 	/** Extra system-prompt text appended for specialized surfaces, e.g. console chat. */
@@ -605,6 +619,7 @@ export interface CreateAgentOptions {
 	workflowState?: WorkflowRunState;
 	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
 	verify?: string;
+	autonomyMode?: AutonomyMode;
 	/** Parent workflow agent id, when spawning a fan-out branch. */
 	parentId?: string;
 	/** Run this agent inside a container (sandboxed execution); mounts the worktree by default. */
@@ -803,7 +818,8 @@ export type ClientCommand =
 	| { type: "message"; to: string; text: string }
 	| { type: "snapshot" } // request a full roster + recent transcript replay
 	| { type: "subscribe"; id: string } // ask for transcript replay of one agent
-	| { type: "commission"; spec: CommissionSpec };
+	| { type: "commission"; spec: CommissionSpec }
+	| { type: "set-mode"; id: string; mode: AutonomyMode; reason?: string };
 
 // ── Federation (Phase 2): cross-operator coordination ───────────────────────
 
