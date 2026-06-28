@@ -1,50 +1,50 @@
 /**
- * Branch-keyed, restart-safe ledger of the Orchestrator's TERMINAL decisions (OMPSQ-139).
+ * Restart-safe ledger of the Orchestrator's verify/land decisions.
  *
- * The loop's halted/landed/staged sets were in-memory only, so a daemon restart reconsidered
- * every parked agent: it re-ran the acceptance suite, re-spent the repair budget, and could
- * re-trip CATASTROPHE on a genuinely-stuck agent every cycle. In a crash-supervised / self-
- * reloading daemon (OMPSQ-130) restarts are routine, so a human-summoned agent was silently
- * re-driven instead of staying parked. These decisions are terminal, so they must survive
- * restart.
- *
- * Keyed on BRANCH — stable across restarts — because create() mints a fresh agent id on every
- * re-adoption of a surviving worktree, the same reason land-ledger.ts keys on branch.
+ * Entries are keyed by repo + branch + current HEAD when HEAD is available. That keeps a restarted
+ * daemon from re-driving the same work, but a branch name reused at a new commit is treated as fresh
+ * work instead of being skipped by a stale branch-only terminal decision.
  *
  * ponytail: one JSON file under <stateDir>, read once into memory, write-through on mutation
- * (the manager is single-writer, single event loop, so no interleave). Ceiling: the file grows
- * one entry per ever-halted/landed/staged branch and is never pruned. Upgrade path: prune to
- * live branches on write, or fold into the sqlite ledger.
+ * (the manager is single-writer, single event loop). Write failures throw so the orchestrator can
+ * fail closed before verify/land rather than continue after losing a critical state transition.
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 
-/** The three terminal-decision classes the loop must not re-litigate after a restart. */
-type Kind = "halted" | "landed" | "staged";
-const KINDS: Kind[] = ["halted", "landed", "staged"];
+/** Decision classes the loop must not re-litigate after a restart. */
+type Kind = "verifying" | "verified" | "blocked" | "halted" | "landed" | "staged";
+const KINDS: Kind[] = ["verifying", "verified", "blocked", "halted", "landed", "staged"];
 
-/** Branch-keyed terminal-decision store consulted by the Orchestrator each tick. */
+/** Identity key built by the orchestrator from repo + branch + HEAD/run identity. */
+export type OrchestratorStateKey = string;
+
+/** Durable decision store consulted by the Orchestrator each tick. */
 export interface OrchestratorPersistence {
-	isHalted(branch: string): boolean;
-	isLanded(branch: string): boolean;
-	isStaged(branch: string): boolean;
-	markHalted(branch: string): void;
-	markLanded(branch: string): void;
-	markStaged(branch: string): void;
+	isVerifying(key: OrchestratorStateKey): boolean;
+	isVerified(key: OrchestratorStateKey): boolean;
+	isBlocked(key: OrchestratorStateKey): boolean;
+	isHalted(key: OrchestratorStateKey): boolean;
+	isLanded(key: OrchestratorStateKey): boolean;
+	isStaged(key: OrchestratorStateKey): boolean;
+	markVerifying(key: OrchestratorStateKey): void;
+	markVerified(key: OrchestratorStateKey): void;
+	markBlocked(key: OrchestratorStateKey): void;
+	markHalted(key: OrchestratorStateKey): void;
+	markLanded(key: OrchestratorStateKey): void;
+	markStaged(key: OrchestratorStateKey): void;
 	/**
-	 * Purge ledger entries for branches that no longer exist in the current roster.
-	 * Only branches absent from `liveBranches` are dropped — live branches are never touched.
-	 * Call this once per tick (after the agent loop) to bound ledger growth: branches that
-	 * were deleted/cleaned up leave stale entries otherwise accumulating forever.
+	 * Purge ledger entries for branch identities that no longer exist in the current roster.
+	 * A stale HEAD for a still-live branch is also dropped because a newer key now represents it.
 	 */
-	purgeStale(liveBranches: string[]): void;
+	purgeStale(liveKeys: OrchestratorStateKey[]): void;
 }
 
 /** Open (or create) the on-disk ledger under `stateDir`, loading any prior decisions into memory. */
 export function openOrchestratorState(stateDir: string): OrchestratorPersistence {
 	const file = path.join(stateDir, "orchestrator-state.json");
-	const sets: Record<Kind, Set<string>> = { halted: new Set(), landed: new Set(), staged: new Set() };
+	const sets: Record<Kind, Set<string>> = { verifying: new Set(), verified: new Set(), blocked: new Set(), halted: new Set(), landed: new Set(), staged: new Set() };
 	try {
 		if (existsSync(file)) {
 			const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<Record<Kind, unknown>>;
@@ -58,26 +58,22 @@ export function openOrchestratorState(stateDir: string): OrchestratorPersistence
 	}
 
 	const flush = (): void => {
-		try {
-			writeFileSync(file, JSON.stringify({ halted: [...sets.halted], landed: [...sets.landed], staged: [...sets.staged] }));
-		} catch {
-			/* best-effort: a disk failure must never break the decision it records */
-		}
+		writeFileSync(file, JSON.stringify({ verifying: [...sets.verifying], verified: [...sets.verified], blocked: [...sets.blocked], halted: [...sets.halted], landed: [...sets.landed], staged: [...sets.staged] }));
 	};
-	const mark = (k: Kind, branch: string): void => {
-		if (branch && !sets[k].has(branch)) {
-			sets[k].add(branch);
+	const mark = (k: Kind, key: string): void => {
+		if (key && !sets[k].has(key)) {
+			sets[k].add(key);
 			flush();
 		}
 	};
 
-	const purgeStale = (liveBranches: string[]): void => {
-		const live = new Set(liveBranches.filter(Boolean));
+	const purgeStale = (liveKeys: string[]): void => {
+		const live = new Set(liveKeys.filter(Boolean));
 		let changed = false;
 		for (const k of KINDS) {
-			for (const branch of [...sets[k]]) {
-				if (!live.has(branch)) {
-					sets[k].delete(branch);
+			for (const key of [...sets[k]]) {
+				if (!live.has(key)) {
+					sets[k].delete(key);
 					changed = true;
 				}
 			}
@@ -86,9 +82,15 @@ export function openOrchestratorState(stateDir: string): OrchestratorPersistence
 	};
 
 	return {
+		isVerifying: (b) => !!b && sets.verifying.has(b),
+		isVerified: (b) => !!b && sets.verified.has(b),
+		isBlocked: (b) => !!b && sets.blocked.has(b),
 		isHalted: (b) => !!b && sets.halted.has(b),
 		isLanded: (b) => !!b && sets.landed.has(b),
 		isStaged: (b) => !!b && sets.staged.has(b),
+		markVerifying: (b) => mark("verifying", b),
+		markVerified: (b) => mark("verified", b),
+		markBlocked: (b) => mark("blocked", b),
 		markHalted: (b) => mark("halted", b),
 		markLanded: (b) => mark("landed", b),
 		markStaged: (b) => mark("staged", b),
