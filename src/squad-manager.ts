@@ -44,13 +44,14 @@ import { archivePlanDir, buildFeatures, deletePlanDir, featureLandStatus, listPl
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
-import { proofGate, runProof, sweepProofs } from "./proof.ts";
+import { headCommit, isFresh, proofFor, proofGate, runProof, sweepProofs } from "./proof.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence } from "./presence.ts";
 import { chooseFallback } from "./supervisor.ts";
+import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
 	Actor,
 	AuditEntry,
@@ -512,6 +513,47 @@ export class SquadManager extends EventEmitter {
 		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
 	}
 
+	private blockedReason(dto: Pick<AgentDTO, "pending" | "error">): string | undefined {
+		if (dto.error) return dto.error;
+		return dto.pending.length ? "waiting for operator input" : undefined;
+	}
+
+	private syncAuthority(dto: AgentDTO): void {
+		const blockedReason = this.blockedReason(dto);
+		const requested = dto.autonomyMode ?? modeFromApproval(dto.approvalMode);
+		dto.autonomyMode = requested;
+		const verificationState = dto.verificationState ?? "unknown";
+		dto.verificationState = verificationState;
+		const effectiveMode = effectiveAutonomyMode({
+			requested,
+			approvalMode: dto.approvalMode,
+			autoLand: this.autoLand,
+			landConfirm: this.landConfirm,
+			blockedReason,
+		});
+		dto.effectiveMode = effectiveMode;
+		dto.blockedReason = blockedReason;
+		dto.availableActions = availableActions(effectiveMode, verificationState, blockedReason);
+	}
+
+	private async refreshProofState(rec: AgentRecord): Promise<void> {
+		const proof = await proofFor(rec.dto.repo, rec.dto.worktree);
+		const head = await headCommit(rec.dto.worktree);
+		let verificationState: VerificationState = "none";
+		if (proof) verificationState = proof.ok ? (isFresh(proof, head) ? "fresh" : "stale") : "failed";
+		rec.dto.verificationState = verificationState;
+		rec.dto.proof = proof ? { commit: proof.commit, command: proof.command, ranAt: proof.ranAt, fingerprint: `${proof.commit}:${proof.command}` } : undefined;
+		this.syncAuthority(rec.dto);
+	}
+
+	private seedAuthority(dto: AgentDTO, requested?: AutonomyMode): void {
+		dto.autonomyMode = requested ?? modeFromApproval(dto.approvalMode);
+		dto.effectiveMode = dto.autonomyMode;
+		dto.verificationState = "unknown";
+		dto.availableActions = [];
+		this.syncAuthority(dto);
+	}
+
 	async start(): Promise<void> {
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
 		// reap, or adopt — and a fresh-state manager must NOT reap the shared sockets dir out from under
@@ -760,6 +802,7 @@ export class SquadManager extends EventEmitter {
 				model: p.model,
 				profileId: p.profileId,
 				approvalMode: p.approvalMode,
+				autonomyMode: p.autonomyMode,
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
@@ -815,6 +858,7 @@ export class SquadManager extends EventEmitter {
 			workflow: p.workflow,
 			workflowState: p.workflowState,
 		};
+		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
 		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		dto.messageCount = transcript.length;
@@ -1532,6 +1576,8 @@ export class SquadManager extends EventEmitter {
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
 		const auto = opts.auto ?? true;
+		await this.refreshProofState(rec);
+		if (dto.effectiveMode === "observe") return { ok: false, committed: false, merged: false, message: "land blocked", detail: "land blocked in observe mode" };
 		// Restart-safe auto-land cap: a branch whose merge keeps failing the gate is parked rather than
 		// re-merged + rolled-back forever. The streak is keyed by BRANCH (stable across re-adoption,
 		// unlike the agent id which create() re-mints) and persisted, so it holds across daemon restarts.
@@ -1608,7 +1654,6 @@ export class SquadManager extends EventEmitter {
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
 		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
 	}
-
 	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
 	protected landBranch(opts: LandOpts): Promise<LandResult> {
 		return landAgent(opts);
@@ -1633,6 +1678,10 @@ export class SquadManager extends EventEmitter {
 			model: opts.model,
 			profileId: opts.profileId,
 			approvalMode: opts.approvalMode ?? "write",
+			autonomyMode: opts.autonomyMode ?? modeFromApproval(opts.approvalMode ?? "write"),
+			effectiveMode: "observe",
+			verificationState: "unknown",
+			availableActions: ["set-mode"],
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
@@ -1707,7 +1756,33 @@ export class SquadManager extends EventEmitter {
 		const r = hardenedGitSync(["-C", a.repo, "ls-tree", "-r", "--name-only", a.branch]);
 		return r.code === 0 ? r.stdout.split("\n").filter((f) => f.length > 0) : [];
 	}
+	async verifyAgentWork(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
+		const rec = this.agents.get(id);
+		if (!rec) return false;
+		this.syncAuthority(rec.dto);
+		if (rec.dto.effectiveMode === "observe") throw new Error("verify blocked in observe mode");
+		const command = await detectVerify(rec.dto.repo);
+		if (!command) return false;
+		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command });
+		await this.refreshProofState(rec);
+		this.emitAgent(rec);
+		void this.recordAudit(actor, "verify", id, proof.ok ? "ok" : "error", proof.detail);
+		return proof.ok;
+	}
 
+	async transitionMode(id: string, mode: AutonomyMode, actor: Actor = LOCAL_ACTOR, reason?: string): Promise<AgentDTO | undefined> {
+		const rec = this.agents.get(id);
+		if (!rec) return undefined;
+		const oldMode = rec.dto.autonomyMode;
+		rec.dto.autonomyMode = mode;
+		rec.options.autonomyMode = mode;
+		this.syncAuthority(rec.dto);
+		this.emitAgent(rec);
+		await this.persist();
+		void this.recordAudit(actor, "set-mode", id, "ok", `${oldMode} → ${mode}; effective ${rec.dto.effectiveMode}${reason ? `; ${reason}` : ""}`);
+		await this.store.appendAudit({ actor: actor.id, action: "set-mode", target: id, detail: { oldMode, requestedMode: mode, effectiveMode: rec.dto.effectiveMode, reason } }).catch(() => {});
+		return rec.dto;
+	}
 	/**
 	 * Run the acceptance gate (the repo's own verify command, via detectVerify) on main → {ok, firstFailure?}.
 	 * Total by contract: any spawn failure yields ok:false, never a throw (the observer tick must not crash).
@@ -1737,18 +1812,6 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
-	/**
-	 * Acceptance gate for a single agent's worktree — the featureless mirror of verifyFeature. No
-	 * acceptance command in the repo ⇒ false, so the loop never auto-merges unverified work.
-	 */
-	async verifyAgentWork(id: string): Promise<boolean> {
-		const rec = this.agents.get(id);
-		if (!rec) return false;
-		const command = await detectVerify(rec.dto.repo);
-		if (!command) return false;
-		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command });
-		return proof.ok;
-	}
 
 	private emitFeaturesChanged(): void {
 		void this.persist();
@@ -1842,6 +1905,9 @@ export class SquadManager extends EventEmitter {
 		}
 		const profileId = opts.profileId;
 		const approvalMode = opts.approvalMode ?? "write";
+		const requestedMode = opts.autonomyMode ?? modeFromApproval(approvalMode);
+		const effectiveAtCreate = effectiveAutonomyMode({ requested: requestedMode, approvalMode, autoLand: this.autoLand, landConfirm: this.landConfirm });
+		if (opts.task && effectiveAtCreate === "observe") throw new Error("create with task is blocked in observe mode");
 		const thinking = opts.thinking ?? "low";
 		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
@@ -1857,7 +1923,6 @@ export class SquadManager extends EventEmitter {
 			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir);
 			cwd = wt.cwd;
 			repo = wt.repo;
-			resolvedBranch = wt.branch;
 			createdWorktree = !wt.inPlace;
 			if (wt.inPlace) {
 				// Non-git target dir: no isolation, but "spawn anywhere" still works. A real git checkout
@@ -1875,6 +1940,7 @@ export class SquadManager extends EventEmitter {
 			model: opts.model,
 			profileId,
 			approvalMode,
+			autonomyMode: requestedMode,
 			task: opts.task,
 			thinking,
 			appendSystemPrompt: opts.appendSystemPrompt,
@@ -1915,6 +1981,7 @@ export class SquadManager extends EventEmitter {
 			workflowState: persisted.workflowState,
 			adopted: opts.adopted,
 		};
+		this.seedAuthority(dto, requestedMode);
 
 		const agent = this.makeDriver(persisted);
 		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
@@ -2105,6 +2172,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 		};
+		this.seedAuthority(dto, "autodrive");
 		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(id, rec);
 		this.wire(rec);
@@ -2214,6 +2282,10 @@ export class SquadManager extends EventEmitter {
 		}
 		if (cmd.type === "message") {
 			await this.deliverPeerMessage(actor, cmd.to, cmd.text);
+			return;
+		}
+		if (cmd.type === "set-mode") {
+			await this.transitionMode(cmd.id, cmd.mode, actor, cmd.reason);
 			return;
 		}
 
@@ -3056,6 +3128,7 @@ export class SquadManager extends EventEmitter {
 		rec.dto.session = summarizeSession(state);
 		// Rough completion estimate from progress rate (tasks done/total over elapsed). A hint, not a deadline.
 		const elapsed = rec.dto.startedAt ? Date.now() - rec.dto.startedAt : 0;
+		this.syncAuthority(rec.dto);
 		const remaining = next ? estimateEta(next.done, next.total, elapsed) : undefined;
 		rec.dto.etaAt = remaining !== undefined ? Date.now() + remaining : undefined;
 		// RpcSessionState.contextUsage.percent is a 0..100 percentage; AgentDTO.contextPct is a 0..1 fraction.
@@ -3089,6 +3162,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private emitAgent(rec: AgentRecord): void {
+		this.syncAuthority(rec.dto);
 		this.emit("event", { type: "agent", agent: rec.dto } satisfies SquadEvent);
 		this.publishPresence();
 	}
