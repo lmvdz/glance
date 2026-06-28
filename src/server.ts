@@ -17,6 +17,7 @@ import type { Server, ServerWebSocket } from "bun";
 import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
+import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { proofGate, runProof } from "./proof.ts";
 import { runVisionPass } from "./vision.ts";
@@ -765,6 +766,7 @@ export class SquadServer {
 			return Response.json({ agent, installId: decodeURIComponent(mcinstall[1]), bindingKey });
 		}
 		if (url.pathname === "/api/features" && req.method === "GET") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
+		if (url.pathname === "/api/features/archived" && req.method === "GET") return Response.json({ features: manager.archivedFeatures(url.searchParams.get("repo") ?? undefined) });
 		if (url.pathname === "/api/features" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
 			if (!body || typeof body !== "object" || !("title" in body) || typeof body.title !== "string") return new Response("title required", { status: 400 });
@@ -810,6 +812,12 @@ export class SquadServer {
 			}
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
+		}
+		if (mfpatch && req.method === "DELETE") {
+			const repo = url.searchParams.get("repo") ?? undefined;
+			const plane = url.searchParams.get("plane") === "detach" ? "detach" : "keep";
+			const result = await manager.deleteFeature(decodeURIComponent(mfpatch[1]), { repo, plane });
+			return result.deleted ? Response.json(result) : new Response("no such feature", { status: 404 });
 		}
 		const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
 		if (mflink && req.method === "POST") {
@@ -944,6 +952,16 @@ export class SquadServer {
 			// fabric is org-safe in both modes: leases are keyed to the manager's own agents/repos,
 			// so includeLeases never leaks cross-org. Always include them (real data, even in DB mode).
 			return Response.json(await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: true }));
+		}
+		if (url.pathname === "/api/fabric/search") {
+			// Ranked search over the SAME scoped snapshot — never widens what the actor can see.
+			const repo = url.searchParams.get("repo");
+			const q = url.searchParams.get("q") ?? "";
+			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
+			const type = (url.searchParams.get("type") ?? undefined) as KbDocType | undefined;
+			const snapshot = await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: true });
+			const results = q.trim() ? searchFabric(snapshot, q, { topK, type }) : [];
+			return Response.json({ query: q, results, counts: { agents: snapshot.agents.length, digests: snapshot.digests.length, hotAreas: snapshot.hotAreas.length, scout: snapshot.scout.length, leases: snapshot.leases.length, decisions: snapshot.decisions.length } });
 		}
 		if (url.pathname === "/api/opportunities") {
 			const repos = url.searchParams.get("repo") ? [url.searchParams.get("repo") as string] : (planeRepos().length ? planeRepos() : manager.projects().map((p) => p.repo));

@@ -429,3 +429,15 @@ export async function ensureFeatureModule(repo: string, name: string, identifier
 	await addIssuesToFeatureModule(repo, moduleId, identifiers);
 	return { moduleId, moduleUrl: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/modules/${moduleId}` };
 }
+
+/** Delete a feature's Plane MODULE grouping (the issues themselves are NOT deleted — they just
+ *  lose this module). Best-effort: `null` when Plane is not configured, else the delete result.
+ *  Used by the feature hard-delete cascade only when the operator opts in. */
+export async function deletePlaneModule(repo: string, moduleId: string): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	const res = await throttledFetch(`${base}/modules/${encodeURIComponent(moduleId)}/`, { method: "DELETE", headers });
+	return !!res?.ok;
+}

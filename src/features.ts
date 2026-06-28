@@ -147,7 +147,7 @@ export async function listPlanDirs(repo: string): Promise<PlanDirInfo[]> {
 	const root = path.join(repo, "plans");
 	let entries: string[];
 	try {
-		entries = (await fs.readdir(root, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+		entries = (await fs.readdir(root, { withFileTypes: true })).filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name);
 	} catch {
 		return [];
 	}
@@ -172,6 +172,55 @@ export async function listPlanDirs(repo: string): Promise<PlanDirInfo[]> {
 		out.push({ dir: path.join("plans", name), title: planTitleFromText(titleText, humanPlanTitle(name)), issueIds: [...issueIds], ...times });
 	}
 	return out;
+}
+
+// ── plan-dir lifecycle (archive / restore / delete) ──────────────────────────
+//
+// "Archive" is reversible: the plan dir is MOVED under `plans/.archive/<name>/`
+// (which listPlanDirs skips, so it disappears from the board but the bytes stay).
+// "Delete" is permanent: the dir is removed from wherever it lives. Both no-op
+// gracefully when the source isn't present, so a double-archive / missing dir
+// never throws and never blocks the feature-flag flip.
+
+/** Repo-relative archive root for plan dirs. */
+export const PLAN_ARCHIVE_DIR = path.join("plans", ".archive");
+
+/** Resolve a plan dir's live and archived absolute paths. `planDir` is repo-relative ("plans/<name>"). */
+function planDirLocations(repo: string, planDir: string): { name: string; live: string; archived: string } {
+	const name = path.basename(planDir);
+	return { name, live: path.join(repo, "plans", name), archived: path.join(repo, PLAN_ARCHIVE_DIR, name) };
+}
+
+async function pathExists(p: string): Promise<boolean> {
+	try { await fs.stat(p); return true; } catch { return false; }
+}
+
+/** Move a plan dir into plans/.archive/ (reversible). Returns true if a move happened. */
+export async function archivePlanDir(repo: string, planDir: string): Promise<boolean> {
+	const { live, archived } = planDirLocations(repo, planDir);
+	if (!(await pathExists(live)) || (await pathExists(archived))) return false; // already archived or nothing to move
+	await fs.mkdir(path.dirname(archived), { recursive: true });
+	await fs.rename(live, archived);
+	return true;
+}
+
+/** Move a plan dir back out of plans/.archive/. Returns true if a move happened. */
+export async function restorePlanDir(repo: string, planDir: string): Promise<boolean> {
+	const { live, archived } = planDirLocations(repo, planDir);
+	if (!(await pathExists(archived)) || (await pathExists(live))) return false; // already live or nothing to restore
+	await fs.mkdir(path.dirname(live), { recursive: true });
+	await fs.rename(archived, live);
+	return true;
+}
+
+/** Permanently remove a plan dir from wherever it lives (live or archived). Returns true if anything was removed. */
+export async function deletePlanDir(repo: string, planDir: string): Promise<boolean> {
+	const { live, archived } = planDirLocations(repo, planDir);
+	let removed = false;
+	for (const target of [live, archived]) {
+		if (await pathExists(target)) { await fs.rm(target, { recursive: true, force: true }); removed = true; }
+	}
+	return removed;
 }
 
 /** PLANE: pointer identifiers found across all markdown in one plan dir. */

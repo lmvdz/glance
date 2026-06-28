@@ -6,7 +6,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildFeatures, landOrder } from "../src/features.ts";
+import { archivePlanDir, buildFeatures, deletePlanDir, landOrder, listPlanDirs, restorePlanDir } from "../src/features.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { FeatureWorktreeStatus, LandReadiness, PersistedFeature } from "../src/types.ts";
 
@@ -134,6 +134,101 @@ test("archiving a derived plan feature suppresses the scanned plan dir", async (
 	const archived = await mgr.updateFeature(id, { repo, archived: true });
 	expect(archived?.archived).toBe(true);
 	expect((await mgr.features(repo)).some((feature) => feature.id === id)).toBe(false);
+});
+
+async function exists(p: string): Promise<boolean> {
+	try { await fs.stat(p); return true; } catch { return false; }
+}
+
+test("archivePlanDir/restorePlanDir round-trips a plan dir through plans/.archive; listPlanDirs skips it", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-plandir-"));
+	tmps.push(repo);
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\n");
+
+	expect(await archivePlanDir(repo, "plans/ctx")).toBe(true);
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(false);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx", "01.md"))).toBe(true);
+	// the archive root must NOT surface as a plan
+	expect((await listPlanDirs(repo)).some((d) => d.dir.includes(".archive"))).toBe(false);
+	// archiving again is a safe no-op
+	expect(await archivePlanDir(repo, "plans/ctx")).toBe(false);
+
+	expect(await restorePlanDir(repo, "plans/ctx")).toBe(true);
+	expect(await exists(path.join(repo, "plans", "ctx", "01.md"))).toBe(true);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx"))).toBe(false);
+});
+
+test("deletePlanDir permanently removes a plan dir from live OR archived location", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-deldir-"));
+	tmps.push(repo);
+	await fs.mkdir(path.join(repo, "plans", "live"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "live", "01.md"), "x\n");
+	await fs.mkdir(path.join(repo, "plans", ".archive", "stowed"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", ".archive", "stowed", "01.md"), "x\n");
+
+	expect(await deletePlanDir(repo, "plans/live")).toBe(true);
+	expect(await exists(path.join(repo, "plans", "live"))).toBe(false);
+	expect(await deletePlanDir(repo, "plans/stowed")).toBe(true); // resolves to the archived copy
+	expect(await exists(path.join(repo, "plans", ".archive", "stowed"))).toBe(false);
+	expect(await deletePlanDir(repo, "plans/missing")).toBe(false); // nothing to remove
+});
+
+test("updateFeature(archived) cascades the plan dir, and unarchive moves it back", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-arch-cascade-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-arch-cascade-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	const pf = mgr.createFeature({ title: "Ctx", repo, planDir: "plans/ctx" });
+
+	await mgr.updateFeature(pf.id, { repo, archived: true });
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(false);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx"))).toBe(true);
+	expect(mgr.archivedFeatures(repo).some((f) => f.id === pf.id && f.planDir === "plans/ctx")).toBe(true);
+
+	await mgr.updateFeature(pf.id, { repo, archived: false });
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(true);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx"))).toBe(false);
+	expect(mgr.archivedFeatures(repo).some((f) => f.id === pf.id)).toBe(false);
+});
+
+test("deleteFeature removes the feature + its plan dir (live or archived)", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-del-feature-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-del-feature-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+
+	// delete a live feature
+	const pf = mgr.createFeature({ title: "Ctx", repo, planDir: "plans/ctx" });
+	const res = await mgr.deleteFeature(pf.id, { repo });
+	expect(res).toMatchObject({ deleted: true, planDirRemoved: true });
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(false);
+	expect((await mgr.features(repo)).some((f) => f.id === pf.id)).toBe(false);
+	expect(mgr.archivedFeatures(repo).some((f) => f.id === pf.id)).toBe(false);
+
+	// archived then hard-deleted: removes the .archive copy too
+	await fs.mkdir(path.join(repo, "plans", "ctx2"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx2", "01.md"), "# Ctx2\n");
+	const pf2 = mgr.createFeature({ title: "Ctx2", repo, planDir: "plans/ctx2" });
+	await mgr.updateFeature(pf2.id, { repo, archived: true });
+	const res2 = await mgr.deleteFeature(pf2.id, { repo });
+	expect(res2.planDirRemoved).toBe(true);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx2"))).toBe(false);
+
+	// deleting a non-existent feature is a clean no-op
+	expect((await mgr.deleteFeature("feat-nope", { repo })).deleted).toBe(false);
 });
 
 test("createFeatureModule can adopt a plan and fan out open concerns into Plane tickets", async () => {

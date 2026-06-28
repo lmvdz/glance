@@ -13,7 +13,7 @@
 import { EventEmitter } from "node:events";
 import * as path from "node:path";
 import type { Socket } from "bun";
-import type { AgentDriver } from "./agent-driver.ts";
+import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { socketPathFor } from "./agent-host.ts";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
 
@@ -382,6 +382,11 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 
 	respondHostTool(callId: string, text: string, isError = false): void {
 		this.sendRaw({ type: "host_tool_result", id: callId, isError, result: { content: [{ type: "text", text }] } });
+	}
+
+	/** Advertise host-executed tools to omp so the model can call them (omp `set_host_tools`). */
+	setHostTools(tools: HostToolDef[]): void {
+		this.sendRaw({ type: "set_host_tools", tools });
 	}
 
 	/** Disconnect but LEAVE the host + omp running (daemon shutdown / upgrade). */

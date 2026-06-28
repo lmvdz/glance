@@ -4,13 +4,14 @@ import { scopeFor } from "./agent-scope.ts";
 import { readDigest } from "./digest.ts";
 import { leasesFor, type LeaseEntry } from "./leases.ts";
 import { readReceipts } from "./receipts.ts";
-import type { Actor, AgentDTO, IssueRef, RunReceipt } from "./types.ts";
+import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "./types.ts";
 
 export interface FactSource {
 	agentId?: string;
 	runId?: string;
 	repo?: string;
 	issueId?: string;
+	featureId?: string;
 	file?: string;
 }
 
@@ -49,6 +50,15 @@ export interface FabricLeaseFact {
 	lease: LeaseEntry;
 }
 
+export interface FabricDecisionFact {
+	type: "decision";
+	source: FactSource;
+	featureTitle: string;
+	text: string;
+	decisionSource?: "plan" | "human" | "agent";
+	createdAt?: number;
+}
+
 export interface FabricSnapshot {
 	actor: string;
 	generatedAt: number;
@@ -58,6 +68,7 @@ export interface FabricSnapshot {
 	hotAreas: FabricHotAreaFact[];
 	scout: FabricScoutFact[];
 	leases: FabricLeaseFact[];
+	decisions: FabricDecisionFact[];
 }
 
 interface ScoutSeenEntry {
@@ -79,6 +90,8 @@ export interface FabricDeps {
 	repos?: string[];
 	includeLeases?: boolean;
 	listIssues?: (repo: string) => Promise<IssueRef[] | null>;
+	/** Persisted features — their decisions become durable KB facts. */
+	features?: PersistedFeature[];
 	now?: () => number;
 }
 
@@ -212,6 +225,23 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		}
 	}
 
+	const decisions: FabricDecisionFact[] = [];
+	for (const f of deps.features ?? []) {
+		if (f.archived) continue;
+		if (deps.repos?.length && !deps.repos.includes(f.repo)) continue;
+		for (const d of f.decisions ?? []) {
+			if (!d.text?.trim()) continue;
+			decisions.push({
+				type: "decision",
+				source: { repo: f.repo, featureId: f.id },
+				featureTitle: f.title,
+				text: d.text,
+				decisionSource: d.source,
+				createdAt: d.createdAt,
+			});
+		}
+	}
+
 	return {
 		actor: deps.actor.id,
 		generatedAt,
@@ -221,5 +251,6 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		hotAreas: hotAreasFromReceipts(receipts, generatedAt),
 		scout,
 		leases,
+		decisions,
 	};
 }

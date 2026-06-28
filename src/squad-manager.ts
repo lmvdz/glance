@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
 import { RpcAgent } from "./rpc-agent.ts";
-import type { AgentDriver } from "./agent-driver.ts";
+import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
 import { estimateEta } from "./eta.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
@@ -39,8 +39,8 @@ import { Opportunity } from "./opportunity.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
-import { buildFeatures, featureLandStatus, listPlanDirs, parsePlanConcerns, type LandMember, landOrder, type PlanConcern } from "./features.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
+import { archivePlanDir, buildFeatures, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, restorePlanDir, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -48,6 +48,7 @@ import { proofGate, runProof, sweepProofs } from "./proof.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
+import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence } from "./presence.ts";
 import { chooseFallback } from "./supervisor.ts";
 import type {
@@ -147,6 +148,42 @@ const POLL_MS = 2500;
 
 const PEER_MESSAGE_TOOL = "squad_message";
 const PEER_MESSAGE_MAX_CHARS = 2000;
+const KB_SEARCH_TOOL = "squad_kb_search";
+
+/**
+ * Reserved host tools advertised to every omp-backed agent via `set_host_tools` on ready (the
+ * registration that was missing — without it omp never surfaces these calls). Both are handled in
+ * onHostTool BEFORE the capability tool-grant gate, so they're always available and read/advisory-safe.
+ */
+const SQUAD_HOST_TOOLS: HostToolDef[] = [
+	{
+		name: KB_SEARCH_TOOL,
+		description:
+			"Search the squad's shared knowledge base — prior decisions, hot files, session digests, latent work, leases, and active agents across the fleet (scoped to what you may see). Use it BEFORE starting work to inherit prior context and avoid re-deciding settled questions.",
+		parameters: {
+			type: "object",
+			properties: {
+				query: { type: "string", description: "What to look up — natural language, a file path, a feature name, or a decision." },
+				type: { type: "string", enum: ["decision", "hot-area", "digest", "agent", "scout", "lease"], description: "Optional: restrict to one fact type." },
+				topK: { type: "number", description: "Optional: max results (default 10, max 50)." },
+			},
+			required: ["query"],
+		},
+	},
+	{
+		name: PEER_MESSAGE_TOOL,
+		description:
+			"Send a short ADVISORY message to another agent by id or name. Advisory only — it never interrupts or steers them; it appears in their transcript. Use sparingly to share a finding or a heads-up.",
+		parameters: {
+			type: "object",
+			properties: {
+				to: { type: "string", description: "Target agent id or name." },
+				text: { type: "string", description: "The message (plain text)." },
+			},
+			required: ["to", "text"],
+		},
+	},
+];
 
 function peerMessageBudget(): number {
 	return Number(process.env.OMP_SQUAD_PEERMSG_BUDGET) || 5;
@@ -1225,6 +1262,7 @@ export class SquadManager extends EventEmitter {
 	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
 		const pf = this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, patch.repo);
 		if (!pf) return undefined;
+		const wasArchived = !!pf.archived;
 		if (patch.title !== undefined) pf.title = patch.title;
 		if (patch.stageOverride !== undefined) pf.stageOverride = patch.stageOverride ?? undefined;
 		if (patch.archived !== undefined) pf.archived = patch.archived;
@@ -1234,8 +1272,65 @@ export class SquadManager extends EventEmitter {
 		if (patch.relationships !== undefined) pf.relationships = patch.relationships;
 		if (patch.contextBundle !== undefined) pf.contextBundle = patch.contextBundle;
 		pf.updatedAt = Date.now();
+		// Archive is reversible AND cascades to the plan files: archiving moves
+		// plans/<x>/ → plans/.archive/<x>/, unarchiving moves it back. Non-fatal: a
+		// missing/already-moved dir just no-ops, and the flag flip still persists.
+		if (patch.archived !== undefined && patch.archived !== wasArchived && pf.origin?.planDir) {
+			try {
+				if (patch.archived) await archivePlanDir(pf.repo, pf.origin.planDir);
+				else await restorePlanDir(pf.repo, pf.origin.planDir);
+			} catch (err) {
+				this.log("warn", `plan dir ${patch.archived ? "archive" : "restore"} failed for ${pf.origin.planDir}: ${String(err)}`);
+			}
+		}
 		this.emitFeaturesChanged();
 		return pf;
+	}
+
+	/** Persisted, archived features (the "garbage bin") — the soft-deleted set the board hides. */
+	archivedFeatures(repo?: string): { id: string; title: string; repo: string; planDir?: string; moduleUrl?: string; updatedAt: number }[] {
+		return [...this.featureStore.values()]
+			.filter((f) => f.archived && (!repo || f.repo === repo))
+			.map((f) => ({ id: f.id, title: f.title, repo: f.repo, planDir: f.origin?.planDir, moduleUrl: f.plane?.moduleUrl, updatedAt: f.updatedAt }))
+			.sort((a, b) => b.updatedAt - a.updatedAt);
+	}
+
+	/**
+	 * Hard-delete a feature: a destructive, NON-reversible cross-system op (vs. updateFeature's
+	 * reversible archive). Removes the persisted feature, permanently deletes its plan dir (live
+	 * OR archived), and detaches member agents (membership only — the agents keep running, they
+	 * just lose the feature link). When `plane: "detach"`, also removes the Plane MODULE grouping
+	 * (the issues themselves are never touched). Returns what actually happened.
+	 */
+	async deleteFeature(id: string, opts: { repo?: string; plane?: "keep" | "detach" } = {}): Promise<{ deleted: boolean; planDirRemoved: boolean; planeModuleRemoved: boolean; detachedAgents: number }> {
+		const pf = this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, opts.repo);
+		if (!pf) return { deleted: false, planDirRemoved: false, planeModuleRemoved: false, detachedAgents: 0 };
+
+		let detachedAgents = 0;
+		for (const rec of this.agents.values()) {
+			if (rec.dto.featureId === id) {
+				rec.dto.featureId = undefined;
+				rec.options.featureId = undefined;
+				this.emitAgent(rec);
+				detachedAgents += 1;
+			}
+		}
+
+		let planDirRemoved = false;
+		if (pf.origin?.planDir) {
+			try { planDirRemoved = await deletePlanDir(pf.repo, pf.origin.planDir); }
+			catch (err) { this.log("warn", `plan dir delete failed for ${pf.origin.planDir}: ${String(err)}`); }
+		}
+
+		let planeModuleRemoved = false;
+		if (opts.plane === "detach" && pf.plane?.moduleId) {
+			try { planeModuleRemoved = (await deletePlaneModule(pf.repo, pf.plane.moduleId)) === true; }
+			catch (err) { this.log("warn", `plane module detach failed for ${pf.plane.moduleId}: ${String(err)}`); }
+		}
+
+		this.featureStore.delete(id);
+		this.emitFeaturesChanged();
+		return { deleted: true, planDirRemoved, planeModuleRemoved, detachedAgents };
 	}
 
 	private async adoptDerivedFeature(id: string, repo?: string): Promise<PersistedFeature | undefined> {
@@ -1668,6 +1763,23 @@ export class SquadManager extends EventEmitter {
 				approvalMode: opts.approvalMode ?? profile.approvalMode,
 				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
+		}
+		// Cold-start KB primer (OMPSQ #8): a fresh agent on a feature inherits the most relevant prior
+		// decisions / hot files / peer context with ZERO turn cost, drawn from the context fabric and
+		// fenced as untrusted (same discipline as the resume digest). Best-effort — never blocks a spawn.
+		if (opts.featureId && (opts.task || opts.name)) {
+			try {
+				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
+				const primer = buildContextPrimer(snapshot, [opts.task, opts.name].filter(Boolean).join(" "));
+				if (primer) {
+					opts = {
+						...opts,
+						appendSystemPrompt: [opts.appendSystemPrompt, fenceUntrusted("context primer", primer)].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+					};
+				}
+			} catch (err) {
+				this.log("warn", `context primer failed: ${String(err)}`);
+			}
 		}
 		if (opts.owns?.length) {
 			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
@@ -2281,7 +2393,10 @@ export class SquadManager extends EventEmitter {
 		const a = rec.agent;
 		a.removeAllListeners();
 		a.on("event", (frame: { type?: string; [k: string]: unknown }) => this.onAgentEvent(rec, frame));
-		a.on("ready", () => this.refreshCommands(rec));
+		a.on("ready", () => {
+			this.refreshCommands(rec);
+			this.registerHostTools(rec);
+		});
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
 		a.on("stderr", (line: string) => this.log("warn", `[${rec.dto.name}] ${line}`));
@@ -2561,6 +2676,7 @@ export class SquadManager extends EventEmitter {
 			repos: opts.repos,
 			includeLeases: opts.includeLeases,
 			listIssues: (repo) => listPlaneIssues(repo),
+			features: [...this.featureStore.values()],
 		});
 	}
 
@@ -2670,7 +2786,22 @@ export class SquadManager extends EventEmitter {
 		if (added) this.maybeAutoSupervise(rec, added); // opt-in bounded auto-answer (registers the request first, above)
 	}
 
+	/** Advertise the reserved squad host tools to an omp-backed agent once it's ready (and on each
+	 *  reconnect/respawn, since omp loses them). Best-effort — never throws into the ready path. */
+	private registerHostTools(rec: AgentRecord): void {
+		if (rec.options.runtime === "acp") return; // non-omp runtime: no host-tool channel
+		try {
+			rec.agent.setHostTools?.(SQUAD_HOST_TOOLS);
+		} catch (err) {
+			this.log("warn", `set_host_tools failed for ${rec.dto.name}: ${String(err)}`);
+		}
+	}
+
 	private onHostTool(rec: AgentRecord, call: { id: string; toolName: string; arguments: unknown }): void {
+		if (call.toolName === KB_SEARCH_TOOL) {
+			void this.handleKbSearchTool(rec, call);
+			return;
+		}
 		if (call.toolName === PEER_MESSAGE_TOOL) {
 			void this.handlePeerMessageTool(rec, call);
 			return;
@@ -2697,6 +2828,34 @@ export class SquadManager extends EventEmitter {
 		this.append(rec, "system", `⛔ tool call needs host: ${call.toolName}`, { pending: { requestId: pending.id, action: "created" }, status: "running", tool: { callId: call.id, name: call.toolName, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.dto.status = this.derive(rec);
 		this.emitAgent(rec);
+	}
+
+	/** squad_kb_search: rank the context fabric (scoped to what this agent may see) and return the
+	 *  hits to the calling agent. Read-only; surfaces a one-line note in the transcript for the operator. */
+	private async handleKbSearchTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+		const query = (typeof args.query === "string" ? args.query : typeof args.q === "string" ? args.q : "").trim();
+		if (!query) {
+			rec.agent.respondHostTool(call.id, `usage: ${KB_SEARCH_TOOL}({ query: string, type?: "decision"|"hot-area"|"digest"|"agent"|"scout"|"lease", topK?: number })`, true);
+			return;
+		}
+		const topK = Math.min(50, Math.max(1, typeof args.topK === "number" && Number.isFinite(args.topK) ? Math.floor(args.topK) : 10));
+		const type = typeof args.type === "string" ? (args.type as KbDocType) : undefined;
+		try {
+			const snapshot = await this.fabric(agentActor(rec.dto.id), { repos: [rec.dto.repo], includeLeases: true });
+			const results = searchFabric(snapshot, query, { topK, type });
+			const body = results.length
+				? results.map((r) => `- [${r.type}] ${r.title}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
+				: "No matching context in the knowledge base.";
+			rec.agent.respondHostTool(call.id, body);
+			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncate(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
+				status: "ok",
+				tool: { callId: call.id, name: KB_SEARCH_TOOL, args: call.arguments, argsText: safeJson(call.arguments), resultText: body },
+			});
+			void this.recordAudit(agentActor(rec.dto.id), "kb.search", rec.dto.id, "ok", `${results.length} hits for "${truncate(query, 60)}"`);
+		} catch (err) {
+			rec.agent.respondHostTool(call.id, err instanceof Error ? err.message : String(err), true);
+		}
 	}
 
 	private async handlePeerMessageTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
