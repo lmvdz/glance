@@ -1356,6 +1356,7 @@ export const TaskDetail = () => {
                   selectedId={selectedPlanDoc?.path}
                   onSelect={(id) => selectPlanDoc(id)}
                   onEdit={editConcern}
+                  orientation="vertical"
                 />
               </div>
             </div>

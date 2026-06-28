@@ -30,7 +30,15 @@ export interface PlanFlowDiagramProps {
   onSelect?: (id: string) => void;
   /** When provided, nodes become editable: returns a promise so the editor can show a saving state. */
   onEdit?: (file: string, patch: ConcernEdit) => void | Promise<void>;
+  /** 'horizontal' (default): batches flow left→right. 'vertical': batches stack top→bottom —
+   *  better use of tall containers (e.g. the full-pane focus view). */
+  orientation?: 'horizontal' | 'vertical';
 }
+
+// per-axis gaps; the cross axis (concerns within a batch) is tighter than the depth axis (between batches)
+const V_GUTTER = 60; // left gutter for batch labels in vertical mode
+const X_GAP_V = 28;
+const Y_GAP_V = 54;
 
 const COL_W = 196;
 const COL_GAP = 64;
@@ -58,20 +66,28 @@ function normStatus(open: boolean, status: string): string {
   return 'open';
 }
 
-export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, overviewText = '', selectedId, onSelect, onEdit }) => {
+export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, overviewText = '', selectedId, onSelect, onEdit, orientation = 'horizontal' }) => {
+  const vertical = orientation === 'vertical';
   const graph = useMemo(() => buildPlanGraph(concerns, overviewText), [concerns, overviewText]);
   const [editId, setEditId] = React.useState<string | null>(null);
   const [statusValue, setStatusValue] = React.useState<string>('open');
   const [blockedSet, setBlockedSet] = React.useState<Set<number>>(new Set());
   const [saving, setSaving] = React.useState(false);
 
+  // depth axis = batch order (n.col); cross axis = position within a batch (n.row). Horizontal maps
+  // depth→x, cross→y; vertical swaps them so batches march downward and use a tall container.
   const pos = useMemo(() => {
+    const gutter = vertical ? V_GUTTER : 0;
+    const xStep = COL_W + (vertical ? X_GAP_V : COL_GAP);
+    const yStep = NODE_H + (vertical ? Y_GAP_V : ROW_GAP);
     const m = new Map<string, { x: number; y: number }>();
     for (const n of graph.nodes) {
-      m.set(n.id, { x: PAD + n.col * (COL_W + COL_GAP), y: PAD + HEADER_H + n.row * (NODE_H + ROW_GAP) });
+      const xi = vertical ? n.row : n.col;
+      const yi = vertical ? n.col : n.row;
+      m.set(n.id, { x: PAD + gutter + xi * xStep, y: PAD + HEADER_H + yi * yStep });
     }
     return m;
-  }, [graph]);
+  }, [graph, vertical]);
 
   // current blockers per node, derived from edges (from = blocker → to = dependent)
   const blockersOf = useMemo(() => {
@@ -108,8 +124,13 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
   const rowsPerCol = new Map<number, number>();
   for (const n of graph.nodes) rowsPerCol.set(n.col, Math.max(rowsPerCol.get(n.col) ?? 0, n.row + 1));
   const maxRows = Math.max(1, ...rowsPerCol.values());
-  const width = PAD * 2 + graph.cols * COL_W + (graph.cols - 1) * COL_GAP;
-  const height = PAD * 2 + HEADER_H + maxRows * NODE_H + (maxRows - 1) * ROW_GAP;
+  const gutter = vertical ? V_GUTTER : 0;
+  const xCount = vertical ? maxRows : graph.cols; // node columns laid along x
+  const yCount = vertical ? graph.cols : maxRows; // node rows laid along y
+  const xGap = vertical ? X_GAP_V : COL_GAP;
+  const yGap = vertical ? Y_GAP_V : ROW_GAP;
+  const width = PAD * 2 + gutter + xCount * COL_W + (xCount - 1) * xGap;
+  const height = PAD * 2 + HEADER_H + yCount * NODE_H + (yCount - 1) * yGap;
   const doneCount = graph.nodes.filter((n) => !n.open).length;
 
   // candidates for the blockers picker: every other numbered concern
@@ -152,15 +173,20 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
               const a = pos.get(e.from);
               const b = pos.get(e.to);
               if (!a || !b) return null;
-              const x1 = a.x + COL_W;
-              const y1 = a.y + NODE_H / 2;
-              const x2 = b.x;
-              const y2 = b.y + NODE_H / 2;
-              const mx = (x1 + x2) / 2;
+              // vertical: bottom of blocker → top of dependent; horizontal: right → left edge
+              const d = vertical
+                ? (() => {
+                    const x1 = a.x + COL_W / 2, y1 = a.y + NODE_H, x2 = b.x + COL_W / 2, y2 = b.y, my = (y1 + y2) / 2;
+                    return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2 - 2}`;
+                  })()
+                : (() => {
+                    const x1 = a.x + COL_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mx = (x1 + x2) / 2;
+                    return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2 - 2} ${y2}`;
+                  })();
               return (
                 <path
                   key={`${e.from}->${e.to}`}
-                  d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2 - 2} ${y2}`}
+                  d={d}
                   className="fill-none stroke-gray-300 dark:stroke-gray-700"
                   strokeWidth={1.5}
                   markerEnd="url(#planflow-arrow)"
@@ -169,12 +195,14 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
             })}
           </svg>
 
-          {/* column (batch) headers */}
+          {/* batch labels — column headers (horizontal) or left-gutter row labels (vertical) */}
           {Array.from({ length: graph.cols }, (_, c) => (
             <div
               key={`hdr-${c}`}
               className="absolute text-[10px] font-semibold uppercase tracking-wider text-gray-400"
-              style={{ left: PAD + c * (COL_W + COL_GAP), top: PAD - 2, width: COL_W }}
+              style={vertical
+                ? { left: PAD, top: PAD + HEADER_H + c * (NODE_H + Y_GAP_V) + NODE_H / 2 - 6, width: V_GUTTER - 10 }
+                : { left: PAD + c * (COL_W + COL_GAP), top: PAD - 2, width: COL_W }}
             >
               Batch {c + 1}
             </div>
