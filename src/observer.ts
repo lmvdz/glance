@@ -2,9 +2,10 @@
  * Observer — periodic fleet self-audit loop (OMPSQ-52), sibling to the Orchestrator.
  *
  * Where the Orchestrator DRIVES work (spawn → verify → land), the Observer CONFIRMS the
- * fleet/project is in the intended state and, on a detected gap, FILES a fix-issue the
- * existing Dispatcher picks up — closing observe → fix → confirm. It never modifies the
- * orchestrator/dispatcher; it only files issues (and, opt-in, reaps a landed survivor).
+ * fleet/project is in the intended state and, on a detected gap, FILES a fix-issue or
+ * reopens a false-Done source issue for the existing Dispatcher to pick up — closing
+ * observe → fix → confirm. It never modifies the orchestrator/dispatcher; it only files
+ * issues, reopens false-Dones, and (opt-in) reaps a landed survivor.
  *
  * Strictly opt-in like the orchestrator: `start()` arms no timer and `tick()` is inert
  * unless OMP_SQUAD_OBSERVE !== "0" (on by default; =0 disables). Every effect goes through
@@ -44,6 +45,8 @@ export interface Finding {
 	autoFixable?: boolean;
 	/** The direct repair for an autoFixable finding. MUST never touch main/code (reap-survivor only). */
 	fix?: () => Promise<void>;
+	/** Reopen this Done issue instead of filing a new observer issue (false-done self-heal). */
+	reopenIssue?: IssueRef;
 }
 
 /** External edges the loop audits/acts through — all injected so the loop runs without a live daemon. */
@@ -56,6 +59,8 @@ export interface ObserverDeps {
 	fileIssue: (title: string) => Promise<IssueRef | null>;
 	/** Close a now-resolved observer issue (self-healing). Optional — absent ⇒ resolved issues are only cleared from the seen-map, not closed. */
 	closeIssue?: (ref: IssueRef) => Promise<boolean>;
+	/** Reopen a false-Done issue to Todo so the dispatcher re-runs the original work. */
+	reopenIssue?: (ref: IssueRef) => Promise<boolean>;
 	/** Reap a landed-survivor agent (the only autofix; never touches main/code). */
 	removeAgent: (id: string) => Promise<void>;
 	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
@@ -184,17 +189,21 @@ const STALE_DONE_SYSTEMIC = 3;
 /**
  * Check 4 — Done Plane issues whose branch is ahead>0 (work the fleet marked done but never landed).
  *
- * ONE is a special case ⇒ file a per-issue reconcile so it gets landed. But N≥STALE_DONE_SYSTEMIC at
- * once is the auto-land MECHANISM failing, not N coincidences — filing a reconcile per issue is noise
- * that nudges a manual force-land each time (treating the symptom, one branch at a time). Above the
- * threshold, collapse to ONE structural finding that names the pattern and points at the land path, so
- * the fleet fixes auto-land instead of hand-reconciling every stranded branch. The aggregate keeps a
- * single count-independent fingerprint so it dedups across ticks even as the stranded set shifts.
+ * These are false-Dones: reopen the original issue instead of filing a reconcile issue, so the
+ * dispatcher re-runs the source ticket and Plane history stays on the real work item. N≥threshold
+ * still emits one structural observer finding because that names an auto-land mechanism failure.
  */
 export function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => number): Finding[] {
 	const stale = agents.filter((a) => a.issue && !openIds.has(a.issue.id) && aheadOf(a) > 0);
 	if (stale.length === 0) return [];
 	const ident = (a: AgentDTO): string => a.issue!.identifier ?? a.issue!.id;
+	const reopenFindings = stale.map((a) => ({
+		fingerprint: `false-done:${ident(a)}`,
+		title: `reopen false-Done ${ident(a)}`,
+		detail: `issue ${ident(a)} is marked Done but branch ${a.branch ?? "?"} is ahead>0 — the work was never landed`,
+		severity: "structural" as const,
+		reopenIssue: a.issue,
+	}));
 	if (stale.length >= STALE_DONE_SYSTEMIC) {
 		const idents = stale.map(ident).sort();
 		return [
@@ -202,16 +211,12 @@ export function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, aheadOf
 				fingerprint: "autoland-systemic-failure", // count-independent ⇒ one finding, not one-per-issue churn
 				title: `auto-land is systemically failing — ${stale.length} issues Done-but-unlanded`,
 				detail: `${stale.length} Done issues have unlanded branches (ahead>0): ${idents.join(", ")}.\nThis is one auto-land failure, not ${stale.length} cases — fix the land path, don't hand-reconcile each branch. Likely causes: event-driven land never re-fires for a re-adopted agent that didn't re-run (OMPSQ-164); a conflict-auto-resolved land left "staged" awaits a one-tap Land and is never completed/parked (OMPSQ-138/175); or the orchestrator land tick is off (OMP_SQUAD_AUTODRIVE).`,
-				severity: "structural",
+				severity: "structural" as const,
 			},
+			...reopenFindings,
 		];
 	}
-	return stale.map((a) => ({
-		fingerprint: `stale-done:${ident(a)}`,
-		title: `reconcile Done-but-unlanded ${ident(a)}`,
-		detail: `issue ${ident(a)} is marked Done but branch ${a.branch ?? "?"} is ahead>0 — the work was never landed`,
-		severity: "structural",
-	}));
+	return reopenFindings;
 }
 
 /** Check 3 — untracked files in the main checkout that also exist on an open agent branch ⇒ land hazard (structural). */
@@ -251,6 +256,7 @@ export function landFailureFindings(ledger: LandLedger, liveBranches: Set<string
 interface SeenEntry {
 	title: string;
 	issueId?: string;
+	reopened?: boolean;
 	filedAt: number;
 }
 type SeenMap = Record<string, SeenEntry>;
@@ -332,6 +338,26 @@ export class Observer {
 					continue;
 				}
 
+				if (f.reopenIssue) {
+					if (!this.deps.reopenIssue) {
+						reproduced.delete(f.fingerprint);
+						log(`reopen unavailable for ${f.fingerprint}: ${f.title}`);
+						continue;
+					}
+					if (this.seen[f.fingerprint]) continue; // dedup — already reopened; don't spam PATCH
+					const reopened = await this.deps.reopenIssue(f.reopenIssue).catch((e) => {
+						log(`reopen failed for ${f.fingerprint}: ${msg(e)}`);
+						return false;
+					});
+					if (!reopened) {
+						reproduced.delete(f.fingerprint); // reopen failed — retry next tick
+						continue;
+					}
+					this.seen[f.fingerprint] = { title: f.title, issueId: f.reopenIssue.id, filedAt: clock(), reopened: true };
+					log(`reopened false-Done ${f.reopenIssue.identifier ?? f.reopenIssue.id}: ${f.title}`);
+					continue;
+				}
+
 				if (this.seen[f.fingerprint]) continue; // dedup — already filed; never re-file
 
 				if (openObserverCount >= max) {
@@ -363,9 +389,9 @@ export class Observer {
 			for (const fp of Object.keys(this.seen)) {
 				if (reproduced.has(fp)) continue;
 				const entry = this.seen[fp];
-				// Self-healing: close the now-resolved Plane issue before clearing its fingerprint, so a finding
-				// that stops reproducing never leaves a stale OPEN issue behind.
-				if (this.deps.closeIssue && entry.issueId) await this.deps.closeIssue({ id: entry.issueId, name: entry.title }).catch((e) => log(`close failed for ${entry.issueId}: ${msg(e)}`));
+				// Self-healing: close now-resolved OBSERVER issues before clearing their fingerprints.
+				// False-Done entries point at the source work item; never close it during resolve.
+				if (!entry.reopened && this.deps.closeIssue && entry.issueId) await this.deps.closeIssue({ id: entry.issueId, name: entry.title }).catch((e) => log(`close failed for ${entry.issueId}: ${msg(e)}`));
 				log(`resolved ${fp} (${entry.title}) — clearing fingerprint`);
 				delete this.seen[fp];
 				resolved++;

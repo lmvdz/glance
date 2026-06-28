@@ -40,7 +40,7 @@ import { Opportunity } from "./opportunity.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
@@ -635,6 +635,7 @@ export class SquadManager extends EventEmitter {
 					listIssues: () => listPlaneIssues(repo),
 					fileIssue: (title) => createPlaneIssue(repo, title),
 					closeIssue: (ref) => closePlaneIssue(ref),
+					reopenIssue: (ref) => reopenPlaneIssue(ref),
 					removeAgent: (id) => this.remove(id, false),
 					runGate: () => this.runMainGate(repo),
 					gitAheadOfMain: (a) => this.aheadOfMain(a),
@@ -1586,7 +1587,7 @@ export class SquadManager extends EventEmitter {
 			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
-			void this.closeLandedIssue(rec?.dto.issue); // landed branch ⇒ close its tracking issue (idempotent)
+			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
 		}
 		this.emitFeaturesChanged();
 		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
@@ -1644,9 +1645,10 @@ export class SquadManager extends EventEmitter {
 		// never bump the streak for it, else transient dirty windows park a healthy branch.
 		if (!result.retryable && (auto || result.ok)) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 		if (result.ok) {
-			rec.dto.landReady = false; // merged ⇒ clear the confirm-mode staged flag
+			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
-			await this.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
+			if (result.merged) await this.closeLandedIssue(dto.issue); // real merge ⇒ close its tracking issue (idempotent, best-effort)
+			else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
@@ -2721,10 +2723,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Close an agent/member's Plane issue once its branch successfully LANDS — the only close path now
-	 * (no premature close-on-gate-pass). Gated by OMP_SQUAD_AUTOCLOSE (closeOnDone). Idempotent via
-	 * `closedIssues` (a closed id is never re-closed) and best-effort (`closePlaneIssue` swallows
-	 * transport errors). A failed close leaves the id unmarked so a later land retries it.
+	 * Close an agent/member's Plane issue once its branch successfully MERGES — the only close path now
+	 * (no premature close-on-gate-pass, no close on no-op land). Gated by OMP_SQUAD_AUTOCLOSE
+	 * (closeOnDone). Idempotent via `closedIssues` (a closed id is never re-closed) and best-effort
+	 * (`closePlaneIssue` swallows transport errors). A failed close leaves the id unmarked so a later land retries it.
 	 */
 	async closeLandedIssue(issue: IssueRef | undefined): Promise<void> {
 		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;

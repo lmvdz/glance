@@ -47,10 +47,12 @@ interface Harness {
 	deps: ObserverDeps;
 	filed: string[];
 	closed: string[];
+	reopened: string[];
 }
 function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
 	const filed: string[] = [];
 	const closed: string[] = [];
+	const reopened: string[] = [];
 	let seq = 0;
 	const deps: ObserverDeps = {
 		listAgents: () => [],
@@ -63,6 +65,10 @@ function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
 			closed.push(ref.id);
 			return true;
 		},
+		reopenIssue: async (ref) => {
+			reopened.push(ref.id);
+			return true;
+		},
 		removeAgent: async () => {},
 		runGate: async () => ({ ok: true }),
 		gitAheadOfMain: () => 0,
@@ -73,7 +79,7 @@ function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
 		log: () => {},
 		...over,
 	};
-	return { deps, filed, closed };
+	return { deps, filed, closed, reopened };
 }
 
 test("(a) start() arms no timer when OMP_SQUAD_OBSERVE=0; arms one when enabled", () => {
@@ -249,8 +255,8 @@ test("(e) findings default to needs-triage (do-not-auto-land marker); autodispat
 	const done = { id: "d", name: "n", identifier: "OMPSQ-9" } satisfies IssueRef;
 	const h3 = makeDeps(tmpDir(), { listAgents: () => [agent("a", "working", done)], listIssues: async () => [], gitAheadOfMain: () => 3 });
 	await new Observer(h3.deps).tick();
-	expect(h3.filed[0]).toContain("reconcile Done-but-unlanded OMPSQ-9");
-	expect(h3.filed[0]).toContain("do-not-auto-land");
+	expect(h3.filed).toEqual([]);
+	expect(h3.reopened).toEqual(["d"]);
 });
 
 test("autofix actions a survivor even if it was already FILED while autofix was off (reorder before dedup)", async () => {
@@ -365,23 +371,25 @@ test("survivor fingerprint is keyed on the stable Plane identifier, not the ephe
 	expect(f2[0].fingerprint).toBe(f1[0].fingerprint);
 });
 
-test("auditStaleDone: below the systemic threshold ⇒ one reconcile finding per stranded issue", () => {
+test("auditStaleDone: below the systemic threshold ⇒ reopens the source false-Done issues", () => {
 	const mk = (n: number) => ({ id: `i${n}`, name: "x", identifier: `OMPSQ-${n}` }) satisfies IssueRef;
 	const agents = [agent("a1", "stopped", mk(1)), agent("a2", "stopped", mk(2))];
 	const f = auditStaleDone(agents, new Set<string>(), () => 3);
 	expect(f.length).toBe(2);
-	expect(f.map((x) => x.fingerprint).sort()).toEqual(["stale-done:OMPSQ-1", "stale-done:OMPSQ-2"]);
+	expect(f.map((x) => x.fingerprint).sort()).toEqual(["false-done:OMPSQ-1", "false-done:OMPSQ-2"]);
+	expect(f.map((x) => x.reopenIssue?.id).sort()).toEqual(["i1", "i2"]);
 });
 
-test("auditStaleDone: ≥3 stranded at once ⇒ ONE systemic auto-land finding, not per-issue churn", () => {
+test("auditStaleDone: ≥3 stranded at once ⇒ one systemic finding plus source issue reopens", () => {
 	const mk = (n: number) => ({ id: `i${n}`, name: "x", identifier: `OMPSQ-${n}` }) satisfies IssueRef;
 	const agents = [1, 2, 3, 4].map((n) => agent(`a${n}`, "stopped", mk(n)));
 	const f = auditStaleDone(agents, new Set<string>(), () => 1);
-	expect(f.length).toBe(1);
+	expect(f.length).toBe(5);
 	expect(f[0].fingerprint).toBe("autoland-systemic-failure"); // count-independent ⇒ dedups across ticks
 	expect(f[0].severity).toBe("structural");
 	expect(f[0].detail).toContain("OMPSQ-1, OMPSQ-2, OMPSQ-3, OMPSQ-4"); // names the stranded set
-	// The set shifting (one lands, a new one strands) keeps the SAME fingerprint ⇒ no re-file.
+	expect(f.slice(1).map((x) => x.reopenIssue?.id).sort()).toEqual(["i1", "i2", "i3", "i4"]);
+	// The aggregate set shifting (one lands, a new one strands) keeps the SAME fingerprint ⇒ no re-file.
 	const f2 = auditStaleDone([2, 3, 4, 5].map((n) => agent(`a${n}`, "stopped", mk(n))), new Set<string>(), () => 1);
 	expect(f2[0].fingerprint).toBe(f[0].fingerprint);
 });
@@ -407,6 +415,24 @@ test("a resolved finding CLOSES its Plane issue (self-healing), not just clears 
 	red = false;
 	await obs.tick(); // green ⇒ resolved ⇒ the filed issue is closed, not left open
 	expect(h.closed).toEqual(["i-1"]);
+});
+
+test("a resolved false-Done fingerprint never closes the reopened source issue", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const done = { id: "done-1", name: "stranded", identifier: "OMPSQ-330" } satisfies IssueRef;
+	let openIssues: IssueRef[] = [];
+	const h = makeDeps(tmpDir(), {
+		listAgents: () => [agent("ag", "stopped", done)],
+		listIssues: async () => openIssues,
+		gitAheadOfMain: () => 2,
+	});
+	const obs = new Observer(h.deps);
+	await obs.tick();
+	expect(h.filed).toEqual([]);
+	expect(h.reopened).toEqual(["done-1"]);
+	openIssues = [done]; // reopened source issue is now open, so the false-Done no longer reproduces
+	await obs.tick();
+	expect(h.closed).toEqual([]);
 });
 
 // #17: a transient (thrown) Plane list is retried once and recovers silently; a persistent failure is

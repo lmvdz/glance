@@ -263,6 +263,7 @@ export function planeRepos(): string[] {
 
 interface PlaneState {
 	id: string;
+	name?: string;
 	group?: string;
 }
 
@@ -282,6 +283,20 @@ async function transitionTo(issue: IssueRef, group: string): Promise<boolean> {
 /** Transition an issue to a completed-group state. Best-effort; true on success. */
 export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
 	return transitionTo(issue, "completed");
+}
+
+/** Reopen a false-done issue to Todo when present, else the first open group state. Best-effort; true on success. */
+export async function reopenPlaneIssue(issue: IssueRef): Promise<boolean> {
+	const ctx = planeContext();
+	if (!ctx || !issue.projectId) return false;
+	const { cfg, headers } = ctx;
+	const base = projectBase(cfg, issue.projectId);
+	const states = await fetchStates(base, headers);
+	const target = states.find((s) => s.name === "Todo") ?? states.find((s) => s.group === "unstarted") ?? states.find((s) => s.group === "backlog");
+	if (!target) return false;
+	const res = await throttledFetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: target.id }) });
+	if (res && res.ok) issueListCache.clear();
+	return !!res && res.ok;
 }
 
 /** Transition an issue to a started-group state (backlog → started when a spawn picks it up). Best-effort; true on success. */

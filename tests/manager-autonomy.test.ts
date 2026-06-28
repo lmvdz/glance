@@ -149,6 +149,20 @@ test("single-agent land closes its tracking issue exactly once (idempotent acros
 	}
 });
 
+test("single-agent no-op land does NOT close its tracking issue", async () => {
+	const { server, patches } = planeStub(true);
+	try {
+		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
+		mgr.landResult = { ok: true, committed: false, merged: false, message: "nothing to land" };
+		seed(mgr, "a1", trackedIssue);
+		const r = await mgr.land("a1");
+		expect(r.ok).toBe(true);
+		expect(patches()).toBe(0);
+	} finally {
+		server.stop(true);
+	}
+});
+
 test("single-agent land does NOT close the issue when the land fails", async () => {
 	const { server, patches } = planeStub(true);
 	try {
