@@ -384,6 +384,148 @@ export async function parsePlanDocuments(repo: string, planDir: string): Promise
 	}));
 }
 
+// ── concern editing (plan flow-diagram writes) ───────────────────────────────
+//
+// The webapp plan flow diagram (lib/planGraph + PlanFlowDiagram) lets an operator
+// change a concern's STATUS and the concerns that block it, straight from a node.
+// Those edits land HERE: we rewrite the concern doc's STATUS:/BLOCKED_BY: lines AND
+// the 00-overview "Dependency graph" table row, keeping the two sources the diagram
+// reads in sync. Pure string surgery (no fs) lives in the set*() helpers so they're
+// unit-testable; updatePlanConcern() is the fs-touching orchestrator.
+
+const C_STATUS_LINE = /^(STATUS:[ \t]*)([\w-]+)(.*)$/im;
+const C_STATUS_BOLD_LINE = /^(\*\*Status:\*\*[ \t]*)([\w-]+)(.*)$/im;
+const C_STATUS_H2_LINE = /^(##[ \t]*Status:[ \t]*(?:[^\w\s]+[ \t]*)?)([\w-]+)(.*)$/im;
+
+/** Leading concern number from a file like "03-runtime.md" → 3 (null if none). Mirrors webapp concernNum. */
+export function concernNumFromFile(file: string): number | null {
+	const m = /(?:^|\/)(\d{1,3})[-_.]/.exec(file) ?? /^(\d{1,3})\b/.exec(file);
+	return m ? Number(m[1]) : null;
+}
+
+/** Format blocker concern numbers for a BLOCKED_BY: line or table cell (dedup + sort; empty → "none"). */
+function formatBlockerList(nums: number[], joiner: (n: number) => string): string {
+	const uniq = [...new Set(nums.filter((n) => Number.isFinite(n)))].sort((a, b) => a - b);
+	return uniq.length ? uniq.map(joiner).join(", ") : "none";
+}
+
+/** Set a concern doc's STATUS, preserving whichever of the three notations it uses; insert one if absent. */
+export function setConcernStatus(text: string, status: string): string {
+	const s = status.trim();
+	if (!s) return text;
+	for (const re of [C_STATUS_LINE, C_STATUS_BOLD_LINE, C_STATUS_H2_LINE]) {
+		if (re.test(text)) return text.replace(re, (_m, p1: string, _old: string, p3: string) => `${p1}${s}${p3}`);
+	}
+	const titleM = /^#[ \t]+.+$/m.exec(text);
+	if (titleM) {
+		const at = titleM.index + titleM[0].length;
+		return `${text.slice(0, at)}\n\nSTATUS: ${s}${text.slice(at)}`;
+	}
+	return `STATUS: ${s}\n${text}`;
+}
+
+/** Set a concern doc's BLOCKED_BY: line (after STATUS/title when absent). Numbers render as "concern #N". */
+export function setConcernBlockedBy(text: string, nums: number[]): string {
+	const value = formatBlockerList(nums, (n) => `concern #${n}`);
+	if (C_BLOCKED_BY.test(text)) return text.replace(C_BLOCKED_BY, `BLOCKED_BY: ${value}`);
+	const statusM = C_STATUS.exec(text) ?? C_STATUS_BOLD.exec(text) ?? C_STATUS_H2.exec(text) ?? /^#[ \t]+.+$/m.exec(text);
+	if (statusM) {
+		const lineEnd = text.indexOf("\n", statusM.index);
+		const at = lineEnd < 0 ? text.length : lineEnd;
+		return `${text.slice(0, at)}\nBLOCKED_BY: ${value}${text.slice(at)}`;
+	}
+	return `BLOCKED_BY: ${value}\n${text}`;
+}
+
+/**
+ * Rewrite the BLOCKED_BY cell for `num`'s row in the overview "Dependency graph" table,
+ * preserving every other column. Appends a row if `num` has none yet; returns the text
+ * unchanged when the overview has no such table (the concern's own BLOCKED_BY then carries it).
+ */
+export function setOverviewDepRow(overviewText: string, num: number, nums: number[]): string {
+	if (!overviewText) return overviewText;
+	const eol = overviewText.includes("\r\n") ? "\r\n" : "\n";
+	const lines = overviewText.split(/\r?\n/);
+	const headingIdx = lines.findIndex((l) => /^#{1,6}\s*Dependency graph/i.test(l.trim()));
+	if (headingIdx < 0) return overviewText;
+	let start = -1;
+	let end = -1;
+	for (let i = headingIdx + 1; i < lines.length; i++) {
+		const t = lines[i].trim();
+		if (/^#{1,6}\s/.test(t)) break; // next section
+		if (t.startsWith("|")) { if (start < 0) start = i; end = i; }
+		else if (start >= 0) break; // blank/non-table line after the table → table ended
+	}
+	if (start < 0) return overviewText; // heading but no table
+	const cell = formatBlockerList(nums, (n) => String(n));
+	const headerCols = lines[start].split("|").slice(1, -1).length;
+	const isMeta = (c0: string): boolean => /concern/i.test(c0) || /^[-:\s]+$/.test(c0);
+
+	let rowIdx = -1;
+	for (let i = start; i <= end; i++) {
+		const cols = lines[i].split("|").slice(1, -1).map((c) => c.trim());
+		if (cols.length < 2 || isMeta(cols[0])) continue;
+		if (Number((/\d{1,3}/.exec(cols[0]) ?? [])[0]) === num) { rowIdx = i; break; }
+	}
+	if (rowIdx >= 0) {
+		const lead = lines[rowIdx].match(/^\s*/)?.[0] ?? "";
+		const cols = lines[rowIdx].split("|").slice(1, -1).map((c) => c.trim());
+		cols[1] = cell;
+		lines[rowIdx] = `${lead}| ${cols.join(" | ")} |`;
+	} else {
+		const cols = new Array(Math.max(headerCols, 2)).fill("—");
+		cols[0] = String(num);
+		cols[1] = cell;
+		const lead = lines[end].match(/^\s*/)?.[0] ?? "";
+		lines.splice(end + 1, 0, `${lead}| ${cols.join(" | ")} |`);
+	}
+	return lines.join(eol);
+}
+
+/** Find a plan dir's overview file (00-overview.md preferred), or null. */
+async function findOverviewFile(dirAbs: string): Promise<string | null> {
+	const files = await fs.readdir(dirAbs).catch(() => [] as string[]);
+	return files.find((f) => /^0*0[-_.]?overview\.md$/i.test(f)) ?? files.find((f) => /overview\.md$/i.test(f)) ?? null;
+}
+
+export interface ConcernPatch {
+	status?: string;
+	blockedBy?: number[];
+}
+
+/**
+ * Apply a flow-diagram edit to one concern: rewrite its STATUS/BLOCKED_BY in the concern doc
+ * and, when blockers change, the matching row of the overview "Dependency graph" table. Returns
+ * the re-parsed concern, or undefined when `file` isn't a writable concern in this plan dir.
+ */
+export async function updatePlanConcern(repo: string, planDir: string, file: string, patch: ConcernPatch): Promise<PlanConcern | undefined> {
+	const base = path.basename(file); // strip any dir component → no traversal out of the plan dir
+	if (!base.toLowerCase().endsWith(".md") || CONCERN_SKIP.has(base.toLowerCase())) return undefined;
+	const dirAbs = path.join(repo, planDir);
+	const concernAbs = path.join(dirAbs, base);
+	let text: string;
+	try { text = await fs.readFile(concernAbs, "utf8"); } catch { return undefined; }
+	if (!(C_STATUS.exec(text) ?? C_STATUS_BOLD.exec(text) ?? C_STATUS_H2.exec(text))) return undefined; // not a concern
+
+	let next = text;
+	if (patch.status != null) next = setConcernStatus(next, patch.status);
+	if (patch.blockedBy != null) next = setConcernBlockedBy(next, patch.blockedBy);
+	if (next !== text) await fs.writeFile(concernAbs, next, "utf8");
+
+	if (patch.blockedBy != null) {
+		const num = concernNumFromFile(base);
+		const ov = num != null ? await findOverviewFile(dirAbs) : null;
+		if (ov && num != null) {
+			const ovAbs = path.join(dirAbs, ov);
+			const ovText = await fs.readFile(ovAbs, "utf8").catch(() => "");
+			const ovNext = setOverviewDepRow(ovText, num, patch.blockedBy);
+			if (ovNext !== ovText) await fs.writeFile(ovAbs, ovNext, "utf8");
+		}
+	}
+
+	return (await parsePlanConcerns(repo, planDir)).find((c) => c.file === base);
+}
+
 function countStatuses(agents: AgentDTO[]): Partial<Record<AgentStatus, number>> {
 	const counts: Partial<Record<AgentStatus, number>> = {};
 	for (const a of agents) counts[a.status] = (counts[a.status] ?? 0) + 1;

@@ -40,7 +40,7 @@ import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
-import { archivePlanDir, buildFeatures, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, restorePlanDir, type LandMember, landOrder, type PlanConcern } from "./features.ts";
+import { archivePlanDir, buildFeatures, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -1285,6 +1285,19 @@ export class SquadManager extends EventEmitter {
 		}
 		this.emitFeaturesChanged();
 		return pf;
+	}
+
+	/**
+	 * Edit one concern of a feature's plan from the flow diagram: rewrite its STATUS and/or the
+	 * concerns that block it, persisting to the concern doc + overview dependency table. Works for
+	 * stored AND derived (plan-dir-scanned) features — it resolves the feature via features().
+	 */
+	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }): Promise<PlanConcern | undefined> {
+		const f = (await this.features(opts.repo)).find((x) => x.id === id);
+		if (!f || !f.planDir) return undefined;
+		const concern = await updatePlanConcern(f.repo, f.planDir, opts.file, { status: opts.status, blockedBy: opts.blockedBy });
+		if (concern) this.emitFeaturesChanged();
+		return concern;
 	}
 
 	/** Persisted, archived features (the "garbage bin") — the soft-deleted set the board hides. */

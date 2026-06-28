@@ -6,7 +6,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { archivePlanDir, buildFeatures, deletePlanDir, landOrder, listPlanDirs, restorePlanDir } from "../src/features.ts";
+import { archivePlanDir, buildFeatures, deletePlanDir, landOrder, listPlanDirs, restorePlanDir, setConcernBlockedBy, setConcernStatus, setOverviewDepRow, updatePlanConcern } from "../src/features.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { FeatureWorktreeStatus, LandReadiness, PersistedFeature } from "../src/types.ts";
 
@@ -229,6 +229,99 @@ test("deleteFeature removes the feature + its plan dir (live or archived)", asyn
 
 	// deleting a non-existent feature is a clean no-op
 	expect((await mgr.deleteFeature("feat-nope", { repo })).deleted).toBe(false);
+});
+
+// ── concern editing (flow-diagram writes) ──
+
+test("setConcernStatus preserves notation (plain / **Status:** / ## Status:) and inserts when absent", () => {
+	expect(setConcernStatus("# C\n\nSTATUS: open\n\nbody", "done")).toContain("STATUS: done");
+	expect(setConcernStatus("# C\n\nSTATUS: open\n", "done")).not.toContain("STATUS: open");
+	expect(setConcernStatus("# C\n\n**Status:** open\n", "in-progress")).toContain("**Status:** in-progress");
+	expect(setConcernStatus("# C\n\n## Status: ✅ open\n", "blocked")).toContain("## Status: ✅ blocked");
+	// no STATUS line ⇒ inserted right after the H1 title
+	const inserted = setConcernStatus("# Title\n\nsome prose\n", "open");
+	expect(inserted).toMatch(/# Title\n\nSTATUS: open/);
+	// blank status is a no-op
+	expect(setConcernStatus("# C\nSTATUS: open\n", "  ")).toContain("STATUS: open");
+});
+
+test("setConcernBlockedBy rewrites/inserts BLOCKED_BY with dedup+sort; empty ⇒ none", () => {
+	expect(setConcernBlockedBy("# C\nSTATUS: open\nBLOCKED_BY: concern #9\n", [3, 1, 3])).toContain("BLOCKED_BY: concern #1, concern #3");
+	expect(setConcernBlockedBy("# C\nSTATUS: open\nBLOCKED_BY: concern #9\n", [])).toContain("BLOCKED_BY: none");
+	// absent ⇒ inserted on the line after STATUS
+	const added = setConcernBlockedBy("# C\nSTATUS: open\n\nbody\n", [2]);
+	expect(added).toMatch(/STATUS: open\nBLOCKED_BY: concern #2/);
+});
+
+test("setOverviewDepRow updates the matching row, preserves other columns, appends when missing", () => {
+	const ov = [
+		"# Overview",
+		"",
+		"## Dependency graph",
+		"",
+		"| Concern | BLOCKED_BY | VERIFY_BLOCKER |",
+		"| --- | --- | --- |",
+		"| 1 — runtime | none | none |",
+		"| 2 — api | 1 | none |",
+		"",
+		"## Batch order",
+	].join("\n");
+	const updated = setOverviewDepRow(ov, 2, [1, 3]);
+	expect(updated).toContain("| 2 — api | 1, 3 | none |"); // col0 label + col2 preserved
+	// appends a row for a concern with no existing row
+	const appended = setOverviewDepRow(ov, 4, [2]);
+	expect(appended).toMatch(/\| 4 \| 2 \| — \|/);
+	// emptying blockers writes "none"
+	expect(setOverviewDepRow(ov, 2, [])).toContain("| 2 — api | none | none |");
+	// no Dependency-graph table ⇒ unchanged
+	expect(setOverviewDepRow("# Plan\n\njust prose\n", 1, [2])).toBe("# Plan\n\njust prose\n");
+});
+
+test("updatePlanConcern writes the concern STATUS + BLOCKED_BY and mirrors the overview table", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-concern-edit-"));
+	tmps.push(repo);
+	const dir = path.join(repo, "plans", "feat");
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(path.join(dir, "00-overview.md"), [
+		"# Feat", "", "## Dependency graph", "",
+		"| Concern | BLOCKED_BY |", "| --- | --- |", "| 1 | none |", "| 2 | 1 |", "",
+	].join("\n"));
+	await fs.writeFile(path.join(dir, "01-runtime.md"), "# Runtime\n\nSTATUS: open\n\nbody\n");
+	await fs.writeFile(path.join(dir, "02-api.md"), "# Api\n\nSTATUS: open\nBLOCKED_BY: concern #1\n\nbody\n");
+
+	const result = await updatePlanConcern(repo, "plans/feat", "02-api.md", { status: "done", blockedBy: [1, 3] });
+	expect(result?.status).toBe("done");
+	expect(result?.open).toBe(false);
+
+	const concernText = await fs.readFile(path.join(dir, "02-api.md"), "utf8");
+	expect(concernText).toContain("STATUS: done");
+	expect(concernText).toContain("BLOCKED_BY: concern #1, concern #3");
+	const overviewText = await fs.readFile(path.join(dir, "00-overview.md"), "utf8");
+	expect(overviewText).toContain("| 2 | 1, 3 |");
+
+	// the overview itself is not editable as a concern, and traversal is refused
+	expect(await updatePlanConcern(repo, "plans/feat", "00-overview.md", { status: "done" })).toBeUndefined();
+	expect(await updatePlanConcern(repo, "plans/feat", "../../../etc/passwd", { status: "x" })).toBeUndefined();
+});
+
+test("manager.updateConcern edits a derived plan feature's concern end-to-end", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-mgr-concern-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	const dir = path.join(repo, "plans", "ctx");
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(path.join(dir, "01-a.md"), "# A\n\nSTATUS: open\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-mgr-concern-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	const id = `plan:${repo}:plans/ctx`;
+	const concern = await mgr.updateConcern(id, { repo, file: "plans/ctx/01-a.md", status: "in-progress" });
+	expect(concern?.status).toBe("in-progress");
+	expect(await fs.readFile(path.join(dir, "01-a.md"), "utf8")).toContain("STATUS: in-progress");
+	// unknown feature ⇒ undefined, no throw
+	expect(await mgr.updateConcern("plan:nope", { repo, file: "plans/ctx/01-a.md", status: "done" })).toBeUndefined();
 });
 
 test("createFeatureModule can adopt a plan and fan out open concerns into Plane tickets", async () => {

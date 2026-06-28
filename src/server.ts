@@ -836,6 +836,20 @@ export class SquadServer {
 			const unlink = "unlink" in body && body.unlink === true;
 			return Response.json({ ok: manager.linkAgent(id, body.agentId, unlink) });
 		}
+		const mfconcern = url.pathname.match(/^\/api\/features\/([^/]+)\/concerns$/);
+		if (mfconcern && req.method === "PATCH") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object" || !("file" in body) || typeof body.file !== "string" || !body.file.trim()) {
+				return new Response("file required", { status: 400 });
+			}
+			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const opts: { repo?: string; file: string; status?: string; blockedBy?: number[] } = { repo, file: body.file };
+			if ("status" in body && typeof body.status === "string" && body.status.trim()) opts.status = body.status.trim();
+			if ("blockedBy" in body && Array.isArray(body.blockedBy)) opts.blockedBy = body.blockedBy.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+			if (opts.status === undefined && opts.blockedBy === undefined) return new Response("nothing to update", { status: 400 });
+			const concern = await manager.updateConcern(decodeURIComponent(mfconcern[1]), opts);
+			return concern ? Response.json({ concern }) : new Response("no such concern", { status: 404 });
+		}
 		if (url.pathname === "/api/federation/capabilities") return Response.json({ capabilities: manager.capabilityFederation() });
 		if (url.pathname === "/api/capability-discovery") return Response.json({ name: "omp-squad capabilities", routes: ["/api/capability-catalog", "/api/capability-sources", "/api/capability-packs", "/api/capability-installs", "/api/federation/capabilities"], privateTenantData: false });
 		const mfland = url.pathname.match(/^\/api\/features\/([^/]+)\/land$/);
