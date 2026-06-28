@@ -4,6 +4,7 @@ PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: `webapp/src/lib/dto.ts`, `webapp/src/lib/api.ts`, `webapp/src/hooks/useSquad.ts`, `webapp/src/context/TaskContext.tsx`, `webapp/src/components/*`, `webapp/src/lib/*.test.ts`
+PLANE: OMPSQ-325 — https://app.plane.so/inkwell-finance/browse/OMPSQ-325/
 
 ## Goal
 

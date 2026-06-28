@@ -4,6 +4,7 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: `src/capabilities/*`, `src/dal/store.ts`, `src/db/*`, `src/server.ts`, `src/authz.ts`, `tests/capabilities-api.test.ts`
+PLANE: OMPSQ-322 — https://app.plane.so/inkwell-finance/browse/OMPSQ-322/
 
 ## Goal
 
