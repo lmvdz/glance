@@ -335,6 +335,8 @@ export interface FeatureDTO {
 	workflowStage?: string;
 	/** Workflow node rollup (completed/total) for a progress bar. */
 	workflowProgress?: { done: number; total: number };
+	/** Freshness of the workflow milestone proof backing any automatic land. */
+	workflowProof?: WorktreeProofSummary;
 	/** Human-readable description exposed in the React task detail pane. */
 	description?: string;
 	/** Acceptance criteria from plan docs / tickets / workflow / manual edits. */

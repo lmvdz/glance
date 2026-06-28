@@ -680,6 +680,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 		const wfStage = wfActive ? WF_STAGE[wfActive] : undefined;
 		const concerns = pf.origin?.planDir ? await parsePlanConcerns(repo, pf.origin.planDir) : [];
 		const workflowProgress = wfAgent?.todo ? { done: wfAgent.todo.done, total: wfAgent.todo.total } : undefined;
+		const workflowProof = wfAgent ? worktrees.find((w) => w.agentId === wfAgent.id)?.proof : undefined;
 		const decisions = pf.decisions ?? planDecisions(concerns);
 		const relationships = mergeIssueRelationships(pf.relationships, issueIds);
 		const stage = pf.stageOverride ?? wfStage ?? deriveStage({ agents: members, worktrees, unlanded: unlandedFiles, planDir: pf.origin?.planDir, hasIssues });
@@ -709,6 +710,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			workflowAgentId: pf.workflowAgentId,
 			workflowStage: wfActive,
 			workflowProgress,
+			workflowProof,
 			description,
 			acceptanceCriteria: pf.acceptanceCriteria ?? planCriteria(concerns, workflowProgress),
 			decisions,
