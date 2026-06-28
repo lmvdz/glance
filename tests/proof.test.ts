@@ -58,13 +58,16 @@ test("runProof records a failing proof (non-zero exit)", async () => {
 	expect((await runProof({ repo, worktree: repo, command: "exit 3" })).ok).toBe(false);
 });
 
-test("isFresh: passing + matching commit is fresh; mismatch or failure is not", () => {
-	const b: Omit<Proof, "ok" | "commit"> = { command: "x", ranAt: 0, detail: "", artifacts: [] };
-	expect(isFresh({ ...b, ok: true, commit: "abc" }, "abc")).toBe(true);
-	expect(isFresh({ ...b, ok: true, commit: "abc" }, "def")).toBe(false);
-	expect(isFresh({ ...b, ok: false, commit: "abc" }, "abc")).toBe(false);
-	expect(isFresh(undefined, "abc")).toBe(false);
-	expect(isFresh({ ...b, ok: true, commit: "" }, "")).toBe(false);
+test("isFresh: passing + matching fingerprint is fresh; mismatch, dirty, or failure is not", () => {
+	const fp = { commit: "abc", tree: "tree", branch: "feat", dirty: false, baseCommit: "base", repo: "/repo", worktree: "/repo-wt", commandHash: "cmd", now: 10 };
+	const b: Omit<Proof, "ok" | "commit"> = { tree: "tree", branch: "feat", dirty: false, baseCommit: "base", repo: "/repo", worktree: "/repo-wt", command: "x", commandHash: "cmd", ranAt: 0, ttlMs: 100, detail: "", artifacts: [] };
+	expect(isFresh({ ...b, ok: true, commit: "abc" }, fp)).toBe(true);
+	expect(isFresh({ ...b, ok: true, commit: "abc" }, { ...fp, tree: "other" })).toBe(false);
+	expect(isFresh({ ...b, ok: true, commit: "abc", dirty: true }, fp)).toBe(false);
+	expect(isFresh({ ...b, ok: true, commit: "abc" }, { ...fp, dirty: true })).toBe(false);
+	expect(isFresh({ ...b, ok: false, commit: "abc" }, fp)).toBe(false);
+	expect(isFresh(undefined, fp)).toBe(false);
+	expect(isFresh({ ...b, ok: true, commit: "abc" }, { ...fp, now: 101 })).toBe(false);
 });
 
 test("proofGate: blocks without proof, clears when fresh, goes stale on a new commit, blocks on failure", async () => {
@@ -83,6 +86,27 @@ test("proofGate: blocks without proof, clears when fresh, goes stale on a new co
 
 	await runProof({ repo, worktree: wt, command: "exit 1" });
 	expect(await proofGate(repo, wt, "feat")).toMatch(/FAILED/);
+});
+
+test("proofGate: dirty same-commit tree invalidates a previously passing proof", async () => {
+	const repo = await baseRepo();
+	const wt = await branchWorktree(repo, "dirty-feat", "f.txt");
+	await runProof({ repo, worktree: wt, command: "true" });
+	expect(await proofGate(repo, wt, "dirty-feat")).toBeUndefined();
+
+	await fs.writeFile(path.join(wt, "f.txt"), "changed but uncommitted\n");
+	expect(await headCommit(wt)).toBe((await proofFor(repo, wt))?.commit);
+	expect(await proofGate(repo, wt, "dirty-feat")).toMatch(/uncommitted tracked changes/);
+});
+
+test("runProof refuses to record a passing proof for a dirty worktree", async () => {
+	const repo = await baseRepo();
+	const wt = await branchWorktree(repo, "dirty-proof", "f.txt");
+	await fs.writeFile(path.join(wt, "f.txt"), "dirty before verify\n");
+	const proof = await runProof({ repo, worktree: wt, command: "true" });
+	expect(proof.ok).toBe(false);
+	expect(proof.dirty).toBe(true);
+	expect(proof.detail).toContain("uncommitted tracked changes");
 });
 
 test("proofGate: in-place agents (worktree === repo, or no branch) need no proof", async () => {

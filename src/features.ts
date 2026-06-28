@@ -15,7 +15,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { hardenedGitSync } from "./git-harden.ts";
 import { worktreeDiff } from "./explore.ts";
-import { headCommit, isFresh, proofFor } from "./proof.ts";
+import { isFresh, proofFingerprint, proofFor } from "./proof.ts";
 import type { AgentDTO, AgentStatus, FeatureContextSummary, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureReadiness, FeatureRelationship, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
@@ -94,7 +94,7 @@ export async function featureLandStatus(members: LandMember[]): Promise<FeatureW
 		// already spawns git several times per member, so this marginal cost is acceptable.
 		const proof = await proofFor(m.repo, m.worktree);
 		let proofState: WorktreeProofSummary["state"] = "none";
-		if (proof) proofState = !proof.ok ? "failed" : isFresh(proof, await headCommit(m.worktree)) ? "fresh" : "stale";
+		if (proof) proofState = !proof.ok ? "failed" : isFresh(proof, await proofFingerprint(m.repo, m.worktree, proof.command)) ? "fresh" : "stale";
 		const proofSummary: WorktreeProofSummary = { state: proofState, ranAt: proof?.ranAt, artifacts: proof?.artifacts.length ?? 0 };
 		out.push({ agentId: m.agentId, agentName: m.agentName, branch: m.branch, worktree: m.worktree, changedFiles, ahead, behind, readiness, proof: proofSummary });
 	}

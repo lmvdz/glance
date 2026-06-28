@@ -854,7 +854,8 @@ export class SquadServer {
 		if (mfland && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
 			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
-			return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force));
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason.trim() : undefined;
+			return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force, actor, reason));
 		}
 		const mftickets = url.pathname.match(/^\/api\/features\/([^/]+)\/tickets$/);
 		if (mftickets && req.method === "GET") return Response.json(await withTimeout(manager.featurePlaneTickets(decodeURIComponent(mftickets[1])), 1500, { tickets: null }));
@@ -1061,10 +1062,12 @@ export class SquadServer {
 			if (!dto) return new Response("no such agent", { status: 404 });
 			let message = `squad(${dto.name}): ${dto.issue?.name ?? "agent changes"}`;
 			const body: unknown = await req.json().catch(() => null);
+			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason.trim() : undefined;
 			if (body && typeof body === "object" && "message" in body && typeof body.message === "string" && body.message.trim()) {
 				message = body.message.trim();
 			}
-			const result = await manager.land(id, message, { auto: false });
+			const result = await manager.land(id, message, { auto: false, force, reason, actor });
 			return Response.json(result, { status: result.ok ? 200 : 409 });
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);

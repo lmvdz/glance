@@ -45,7 +45,7 @@ import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featu
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
-import { headCommit, isFresh, proofFor, proofGate, runProof, sweepProofs } from "./proof.ts";
+import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
@@ -515,6 +515,7 @@ export class SquadManager extends EventEmitter {
 		this.operator = opts.operator ?? LOCAL_ACTOR;
 		this.bus = opts.bus ?? new NullFederationBus();
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
+		setProofRoot(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -551,11 +552,11 @@ export class SquadManager extends EventEmitter {
 
 	private async refreshProofState(rec: AgentRecord): Promise<void> {
 		const proof = await proofFor(rec.dto.repo, rec.dto.worktree);
-		const head = await headCommit(rec.dto.worktree);
+		const fp = await proofFingerprint(rec.dto.repo, rec.dto.worktree, proof?.command);
 		let verificationState: VerificationState = "none";
-		if (proof) verificationState = proof.ok ? (isFresh(proof, head) ? "fresh" : "stale") : "failed";
+		if (proof) verificationState = proof.ok ? (isFresh(proof, fp) ? "fresh" : "stale") : "failed";
 		rec.dto.verificationState = verificationState;
-		rec.dto.proof = proof ? { commit: proof.commit, command: proof.command, ranAt: proof.ranAt, fingerprint: `${proof.commit}:${proof.command}` } : undefined;
+		rec.dto.proof = proof ? { commit: proof.commit, command: proof.command, ranAt: proof.ranAt, fingerprint: `${proof.commit}:${proof.tree}:${proof.commandHash}` } : undefined;
 		this.syncAuthority(rec.dto);
 	}
 
@@ -1566,9 +1567,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Land all member branches: fast-forward-safe first, stop on a diverged/failed branch (unless force). */
-	async landFeature(id: string, force = false): Promise<{ ok: boolean; stopped?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] }> {
+	async landFeature(id: string, force = false, actor: Actor = LOCAL_ACTOR, reason?: string): Promise<{ ok: boolean; stopped?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] }> {
 		const pf = this.featureStore.get(id);
 		if (!pf) return { ok: false, stopped: "no such feature", results: [] };
+		if (force && !reason?.trim()) return { ok: false, stopped: "force land requires a reason", results: [] };
 		this.snapshotBranches(id);
 		const members: LandMember[] = [...this.agents.values()].filter((r) => r.dto.featureId === id).map((r) => ({ agentId: r.dto.id, agentName: r.dto.name, branch: r.dto.branch, worktree: r.dto.worktree, repo: pf.repo }));
 		for (const b of pf.branches ?? []) if (!members.some((m) => m.agentId === b.agentId)) members.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo: pf.repo });
@@ -1576,15 +1578,19 @@ export class SquadManager extends EventEmitter {
 		if (!force && wts.some((w) => w.readiness === "diverged")) return { ok: false, stopped: "a branch is diverged — resolve it (or force)", results: [] };
 		if (!force) {
 			for (const m of members) {
-				const reason = await proofGate(pf.repo, m.worktree, m.branch);
+				const reason = await proofGate(pf.repo, m.worktree, m.branch, pf.acceptance ?? undefined);
 				if (reason) return { ok: false, stopped: `${m.agentName ?? m.branch ?? "member"}: ${reason}`, results: [] };
 			}
+		}
+		if (force) {
+			void this.recordAudit(actor, "land", id, "ok", `force land: ${reason}`);
+			void this.store.appendAudit({ actor: actor.id, action: "land.force", target: id, detail: { reason } }).catch(() => {});
 		}
 		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] = [];
 		for (const w of landOrder(wts)) {
 			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
-			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy });
+			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, verify: pf.acceptance ?? undefined });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
 			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
@@ -1602,25 +1608,29 @@ export class SquadManager extends EventEmitter {
 	 * is guaranteed for the single-agent path too — not only the multi-branch `landFeature`. Close is
 	 * idempotent (`closedIssues`) and best-effort. Busy-aware `commitWip` mirrors the feature path.
 	 */
-	async land(id: string, message?: string, opts: { auto?: boolean } = {}): Promise<LandResult> {
+	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
 		const auto = opts.auto ?? true;
 		await this.refreshProofState(rec);
-		if (dto.effectiveMode === "observe") return { ok: false, committed: false, merged: false, message: "land blocked", detail: "land blocked in observe mode" };
-		// Restart-safe auto-land cap: a branch whose merge keeps failing the gate is parked rather than
-		// re-merged + rolled-back forever. The streak is keyed by BRANCH (stable across re-adoption,
-		// unlike the agent id which create() re-mints) and persisted, so it holds across daemon restarts.
-		// Operator lands (server /api/agents/:id/land → landAgent directly) bypass this method, so a human
-		// is never blocked; the Observer files a dedup'd bug issue for a parked branch so the fleet re-does
-		// the work on a fresh branch.
+		if (opts.force && !opts.reason?.trim()) return { ok: false, committed: false, merged: false, message: "force land blocked", detail: "force land requires a reason" };
+		// Restart-safe auto-land cap: check before proofGate so a branch already over the cap parks
+		// without re-running any landing preconditions. Operator lands (auto:false) bypass this.
 		if (auto && dto.branch) {
 			const fails = landFailureCount(this.stateDir, dto.branch);
 			if (fails >= autoLandFailCap()) {
 				this.log("warn", `auto-land parked for ${dto.branch} — ${fails} consecutive failed lands; awaiting a fix (the observer files a bug issue)`);
 				return { ok: false, committed: false, merged: false, message: "auto-land parked", detail: `auto-land parked: ${fails} consecutive failed lands on ${dto.branch} — not re-merging until the branch is fixed` };
 			}
+		}
+		if (!opts.force) {
+			const reason = await proofGate(dto.repo, dto.worktree, dto.branch);
+			if (reason) return { ok: false, committed: false, merged: false, message: "land blocked", detail: reason };
+		} else {
+			const actor = opts.actor ?? LOCAL_ACTOR;
+			void this.recordAudit(actor, "land", id, "ok", `force land: ${opts.reason}`);
+			void this.store.appendAudit({ actor: actor.id, action: "land.force", target: id, detail: { reason: opts.reason } }).catch(() => {});
 		}
 		const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
 		const result = await this.landBranch({
@@ -1630,6 +1640,7 @@ export class SquadManager extends EventEmitter {
 			message: message ?? `squad(${dto.name}): land ${dto.branch ?? "changes"}`,
 			commitWip: !busy,
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
+			requireProof: !opts.force,
 		});
 		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
 		// (never bump the fail streak) and not landed — surface the ready-to-land flag and return.

@@ -10,6 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { dirtyLandTargetWarnings, landAgent } from "../src/land.ts";
+import { runProof } from "../src/proof.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -78,6 +79,21 @@ test("landAgent: nothing to land is reported, not failed", async () => {
 	const res = await landAgent({ repo, worktree: repo, branch: "main", message: "noop", commitWip: false });
 	expect(res.ok).toBe(true);
 	expect(res.merged).toBe(false);
+});
+
+test("landAgent: requireProof refuses missing proof and allows fresh proof", async () => {
+	const repo = await baseRepo("land-proof-");
+	const wt = await branchWorktree(repo, "feat-proof", "proof.txt");
+
+	const blocked = await landAgent({ repo, worktree: wt, branch: "feat-proof", message: "land proof", commitWip: false, requireProof: true });
+	expect(blocked.ok).toBe(false);
+	expect(blocked.merged).toBe(false);
+	expect(blocked.detail).toContain("no proof");
+
+	await runProof({ repo, worktree: wt, command: "true" });
+	const landed = await landAgent({ repo, worktree: wt, branch: "feat-proof", message: "land proof", commitWip: false, requireProof: true });
+	expect(landed.ok).toBe(true);
+	expect(landed.merged).toBe(true);
 });
 
 test("dirtyLandTargetWarnings: flags only targets with uncommitted tracked changes", () => {

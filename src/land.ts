@@ -11,6 +11,7 @@
  */
 
 import { detectVerify } from "./intake.ts";
+import { proofGate } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
 export interface LandResult {
@@ -78,6 +79,8 @@ export interface LandOpts {
 	 * ⇒ skip verification.
 	 */
 	verify?: string;
+	/** Require a fresh pre-merge land proof before any non-forced branch merge. */
+	requireProof?: boolean;
 	/** Conflict-resolver override (#12). undefined ⇒ default one-shot `omp -p` agent. */
 	resolver?: ConflictResolver;
 	/** Resolution reviewer override (#12). undefined ⇒ default one-shot `omp -p` reviewer. */
@@ -184,6 +187,11 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			message,
 			detail: committed ? "committed in place (no branch to merge)" : "no changes to commit",
 		};
+	}
+
+	if (opts.requireProof) {
+		const reason = await proofGate(repo, worktree, branch, opts.verify);
+		if (reason) return { ok: false, committed, merged: false, message, detail: reason };
 	}
 
 	// Nothing committed and the branch has no commits ahead → nothing to land.
