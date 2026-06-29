@@ -50,12 +50,17 @@ export function ownershipOverlap(a: readonly string[], b: readonly string[]): st
 	return [...hits];
 }
 
-/** A live agent's ownership claim, as seen by the partition check. */
+/** A live agent's scope contract, as seen by spawn partition checks. */
 export interface Owner {
 	repo: string;
 	name: string;
 	status: AgentStatus;
+	/** Legacy/short-hand write claim. `produces` defaults to this. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent reads from. */
+	requires?: string[];
+	/** Repo-relative path prefixes this agent writes/creates. Defaults to `owns`. */
+	produces?: string[];
 }
 
 /** The first live agent in `repo` whose ownership overlaps `owns`, with the offending paths. */
@@ -64,6 +69,19 @@ export function ownershipConflict(live: readonly Owner[], repo: string, owns: re
 	for (const o of live) {
 		if (o.repo !== repo || o.status === "stopped" || o.status === "error" || !o.owns?.length) continue;
 		const hits = ownershipOverlap(owns, o.owns);
+		if (hits.length) return { agent: o.name, paths: hits };
+	}
+	return undefined;
+}
+
+/** The first live agent whose write outputs overlap the requested read dependencies. */
+export function requiresConflict(live: readonly Owner[], repo: string, requires: readonly string[]): { agent: string; paths: string[] } | undefined {
+	if (requires.length === 0) return undefined;
+	for (const o of live) {
+		if (o.repo !== repo || o.status === "stopped" || o.status === "error") continue;
+		const writes = o.produces?.length ? o.produces : o.owns;
+		if (!writes?.length) continue;
+		const hits = ownershipOverlap(requires, writes);
 		if (hits.length) return { agent: o.name, paths: hits };
 	}
 	return undefined;

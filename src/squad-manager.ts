@@ -44,7 +44,7 @@ import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedBy
 import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
-import { ownershipConflict } from "./ownership.ts";
+import { ownershipConflict, requiresConflict } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
@@ -854,6 +854,9 @@ export class SquadManager extends EventEmitter {
 				parentId: p.parentId,
 				featureId: p.featureId,
 				owns: p.owns,
+				requires: p.requires,
+				produces: p.produces,
+				scopeSource: p.scopeSource,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				// Resume the graph from its checkpoint; without this the adopted workflow restarts from
@@ -907,6 +910,9 @@ export class SquadManager extends EventEmitter {
 			parentId: p.parentId,
 			featureId: p.featureId,
 			owns: p.owns,
+			requires: p.requires,
+			produces: p.produces,
+			scopeSource: p.scopeSource,
 			workflow: p.workflow,
 			workflowState: p.workflowState,
 		};
@@ -1787,6 +1793,9 @@ export class SquadManager extends EventEmitter {
 			issue: opts.issue,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			requires: opts.requires,
+			produces: opts.produces ?? opts.owns,
+			scopeSource: opts.scopeSource,
 		};
 	}
 
@@ -1956,8 +1965,13 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `context primer failed: ${String(err)}`);
 			}
 		}
-		if (opts.owns?.length) {
-			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
+		const produces = opts.produces ?? opts.owns;
+		if (opts.requires?.length) {
+			const conflict = requiresConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.requires);
+			if (conflict) throw new Error(`scope requires conflict: ${conflict.paths.join(", ")} produced by agent "${conflict.agent}" — wait for that output or narrow the dependency`);
+		}
+		if (produces?.length) {
+			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, produces);
 			if (conflict) throw new Error(`path ownership conflict: ${conflict.paths.join(", ")} held by agent "${conflict.agent}" — narrow the scope or stop that agent`);
 		}
 		// Global concurrency ceiling (see Scheduler). Restore / fan-out recreate already-counted agents → bypassCap.
@@ -2056,6 +2070,9 @@ export class SquadManager extends EventEmitter {
 			parentId: opts.parentId,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			requires: opts.requires,
+			produces,
+			scopeSource: opts.scopeSource,
 		};
 
 		const dto: AgentDTO = {
@@ -2077,6 +2094,9 @@ export class SquadManager extends EventEmitter {
 			parentId: opts.parentId,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			requires: opts.requires,
+			produces,
+			scopeSource: opts.scopeSource,
 			workflow: persisted.workflow,
 			workflowState: persisted.workflowState,
 			adopted: opts.adopted,
@@ -3390,6 +3410,9 @@ export class SquadManager extends EventEmitter {
 				parentId: p.parentId,
 				featureId: p.featureId,
 				owns: p.owns,
+				requires: p.requires,
+				produces: p.produces,
+				scopeSource: p.scopeSource,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				workflowState: p.workflowState, // resume the graph from its checkpoint, never restart from scratch (OMPSQ-165)

@@ -5,7 +5,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { type Owner, ownershipConflict, ownershipOverlap } from "../src/ownership.ts";
+import { type Owner, ownershipConflict, ownershipOverlap, requiresConflict } from "../src/ownership.ts";
 
 test("ownershipOverlap: exact, nested (both ways), and normalized slashes hit", () => {
 	expect(ownershipOverlap(["src/web"], ["src/web"])).toEqual(["src/web"]);
@@ -66,4 +66,17 @@ test("ownershipConflict: a terminal (stopped/error) or claimless holder doesn't 
 test("ownershipConflict: returns the FIRST overlapping holder among many", () => {
 	const live: Owner[] = [owner({ name: "idle-other", owns: ["docs"] }), owner({ name: "beta", owns: ["src/web/app"] })];
 	expect(ownershipConflict(live, "/r", ["src/web"])?.agent).toBe("beta");
+});
+
+test("requiresConflict: read deps are blocked by live owns or produces writes", () => {
+	expect(requiresConflict([owner()], "/r", ["src/web/config.ts"])).toEqual({ agent: "alpha", paths: ["src/web/config.ts"] });
+	expect(requiresConflict([owner({ owns: undefined, produces: ["generated/api"] })], "/r", ["generated/api/types.ts"])).toEqual({ agent: "alpha", paths: ["generated/api/types.ts"] });
+});
+
+test("requiresConflict: read deps ignore read-only, terminal, and disjoint agents", () => {
+	expect(requiresConflict([owner({ owns: undefined, requires: ["src/web"] })], "/r", ["src/web"])).toBeUndefined();
+	expect(requiresConflict([owner({ status: "stopped" })], "/r", ["src/web"])).toBeUndefined();
+	expect(requiresConflict([owner()], "/r", ["src/server.ts"])).toBeUndefined();
+	expect(requiresConflict([owner()], "/other", ["src/web"])).toBeUndefined();
+	expect(requiresConflict([owner()], "/r", [])).toBeUndefined();
 });

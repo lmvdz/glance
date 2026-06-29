@@ -487,8 +487,14 @@ export interface AgentDTO {
 	issue?: IssueRef;
 	/** Feature this agent belongs to (single source of truth for membership). */
 	featureId?: string;
-	/** Repo-relative path prefixes this agent owns — overlapping spawns are refused (partition). */
+	/** Repo-relative path prefixes this agent will read. */
+	requires?: string[];
+	/** Repo-relative path prefixes this agent owns — legacy shorthand for produced writes. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent will write/create. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
 	/** Workflow definition backing this agent, when kind === "workflow". */
 	workflow?: WorkflowMemberConfig;
 	/** Live workflow checkpoint/rollup, emitted on every stage boundary. */
@@ -559,6 +565,9 @@ export type ApprovalMode = "always-ask" | "write" | "yolo";
 
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
 
+/** Provenance for scope contracts. Operator-declared scopes are enforceable; inferred scopes are advisory until promoted. */
+export type ScopeSource = "inferred" | "operator";
+
 /** Persisted across restarts in ~/.omp/squad/state.json. */
 export interface PersistedAgent {
 	id: string;
@@ -591,8 +600,14 @@ export interface PersistedAgent {
 	parentId?: string;
 	/** When set, run this agent inside a container instead of locally. */
 	sandbox?: SandboxConfig;
+	/** Repo-relative path prefixes this agent reads — restored so read/write hazards survive a restart. */
+	requires?: string[];
 	/** Repo-relative path prefixes this agent owns — restored so partition survives a restart. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent writes/creates. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
 }
 
 /** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */
@@ -659,8 +674,14 @@ export interface CreateAgentOptions {
 	sandbox?: SandboxConfig;
 	/** Auto-pick a process (verify / plan-approve / fan-out) from the task. Default on; false = plain agent. */
 	autoRoute?: boolean;
-	/** Repo-relative path prefixes this agent will edit. A spawn whose paths overlap a live agent's is refused. */
+	/** Repo-relative path prefixes this agent will read; conflicts with live agents' owns/produces. */
+	requires?: string[];
+	/** Repo-relative path prefixes this agent will edit. A spawn whose paths overlap a live agent's writes is refused. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent will write/create. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
 	/** Auto-create + attach a tracking Plane issue for this spawn (work→Plane). Set at human/dispatch spawn entry points; off for restore/fan-out. */
 	track?: boolean;
 	/** Skip the global live-agent WIP cap (restore / fan-out paths that recreate already-accounted-for agents). */
