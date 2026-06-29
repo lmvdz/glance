@@ -11,6 +11,42 @@
   --color-gray-900: #1e1e20;
   --color-gray-800: #282a2c;
   --color-gray-700: #3f4145;
+  
+  --wf-paper: #f8fafc;
+  --wf-paper-muted: #f1f5f9;
+  --wf-surface: #ffffff;
+  --wf-surface-raised: #f8fafc;
+  --wf-surface-hover: #f1f5f9;
+  --wf-border: #e2e8f0;
+  --wf-border-strong: #cbd5e1;
+  --wf-text: #0f172a;
+  --wf-text-muted: #475569;
+  --wf-text-subtle: #64748b;
+  --wf-accent: #4f46e5;
+  --wf-accent-soft: #e0e7ff;
+  --wf-danger: #dc2626;
+  --wf-warning: #d97706;
+  --wf-success: #16a34a;
+  --wf-shadow-soft: 0 1px 2px rgb(15 23 42 / 0.06), 0 8px 24px rgb(15 23 42 / 0.08);
+}
+
+.dark {
+  --wf-paper: var(--color-gray-950);
+  --wf-paper-muted: var(--color-gray-900);
+  --wf-surface: var(--color-gray-900);
+  --wf-surface-raised: var(--color-gray-800);
+  --wf-surface-hover: var(--color-gray-700);
+  --wf-border: #34363a;
+  --wf-border-strong: #4b4d52;
+  --wf-text: #f8fafc;
+  --wf-text-muted: #cbd5e1;
+  --wf-text-subtle: #94a3b8;
+  --wf-accent: #818cf8;
+  --wf-accent-soft: rgb(129 140 248 / 0.16);
+  --wf-danger: #f87171;
+  --wf-warning: #fbbf24;
+  --wf-success: #4ade80;
+  --wf-shadow-soft: 0 1px 2px rgb(0 0 0 / 0.28), 0 12px 32px rgb(0 0 0 / 0.32);
 }
 
 @layer base {
@@ -84,6 +120,49 @@
   .shimmer-container {
     position: relative;
     overflow: hidden;
+  }
+
+  .wf-surface-scoped {
+    background: var(--wf-paper);
+    color: var(--wf-text);
+    border-color: var(--wf-border);
+  }
+
+  .wf-surface-scoped .wf-surface,
+  .wf-surface-scoped.wf-surface {
+    background: var(--wf-surface);
+    color: var(--wf-text);
+    border-color: var(--wf-border);
+    box-shadow: var(--wf-shadow-soft);
+  }
+
+  .wf-surface-scoped .wf-surface-raised,
+  .wf-surface-scoped.wf-surface-raised {
+    background: var(--wf-surface-raised);
+    color: var(--wf-text);
+    border-color: var(--wf-border-strong);
+    box-shadow: var(--wf-shadow-soft);
+  }
+
+  .wf-surface-scoped .wf-surface-hover:hover {
+    background: var(--wf-surface-hover);
+  }
+
+  .wf-surface-scoped .wf-muted {
+    color: var(--wf-text-muted);
+  }
+
+  .wf-surface-scoped .wf-subtle {
+    color: var(--wf-text-subtle);
+  }
+
+  .wf-surface-scoped .wf-accent {
+    color: var(--wf-accent);
+  }
+
+  .wf-surface-scoped .wf-accent-soft {
+    background: var(--wf-accent-soft);
+    color: var(--wf-accent);
   }
 }
 
