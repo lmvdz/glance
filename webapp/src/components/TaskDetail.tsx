@@ -297,6 +297,32 @@ function highlightQuote(root: HTMLElement, annotation: TaskComment) {
   }
 }
 
+// Recover question id → prompt from a plan doc's ```questions fences. Mirrors QuestionsBlock's
+// hand-rolled parser (a `- id: x` item, indented `prompt:` line) just enough to map the two fields,
+// so the answers POST can carry the prompt the 3-arg onAnswer contract doesn't include.
+function promptsFromContent(content: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const fence = /```+\s*questions[^\n]*\n([\s\S]*?)```/g;
+  const stripQuotes = (value: string) => {
+    const t = value.trim();
+    return t.length >= 2 && /^["'].*["']$/.test(t) && t[0] === t[t.length - 1] ? t.slice(1, -1) : t;
+  };
+  for (const block of content.matchAll(fence)) {
+    let id: string | null = null;
+    for (const rawLine of block[1].split(/\r?\n/)) {
+      const itemStart = rawLine.match(/^\s*-\s+(.*)$/);
+      const source = itemStart ? itemStart[1] : rawLine;
+      if (itemStart) id = null;
+      const kv = source.match(/^\s*([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+      if (!kv) continue;
+      const key = kv[1].toLowerCase();
+      if (key === 'id') id = stripQuotes(kv[2]);
+      else if ((key === 'prompt' || key === 'question' || key === 'q') && id) map.set(id, stripQuotes(kv[2]));
+    }
+  }
+  return map;
+}
+
 export const TaskDetail = () => {
   const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
@@ -441,15 +467,6 @@ export const TaskDetail = () => {
     if (!selectedPlanDoc) return [];
     return planAnnotations.filter((comment) => comment.annotation?.planPath === selectedPlanDoc.path);
   }, [planAnnotations, selectedPlanDoc]);
-  const planBlockContext = React.useMemo(() => ({
-    featureId,
-    repo,
-    planPath: selectedPlanDoc?.path,
-    touches: selectedConcern?.touches ?? [],
-    decisions: selectedConcern?.decisions ?? [],
-    comments: pipeline?.comments ?? [],
-  }), [featureId, pipeline?.comments, repo, selectedConcern?.decisions, selectedConcern?.touches, selectedPlanDoc?.path]);
-
 
   const loadPipeline = React.useCallback(async () => {
     if (!featureId || !repo) return;
@@ -460,6 +477,35 @@ export const TaskDetail = () => {
     setSelectedDoc((current) => current && payload.documents.some((doc) => doc.path === current) ? current : preferredPlanDoc(payload.documents)?.path ?? null);
     if (payload.comments.length) setComments(payload.comments.map(commentFromApi));
   }, [featureId, preferredPlanDoc, repo]);
+
+  // Map a question's id → its prompt by scanning the doc's ```questions fences (the QuestionsBlock
+  // sends only id+value through the 3-arg onAnswer contract; the server needs the prompt to write a
+  // `Q: <prompt> — A: <value>` decision bullet, so we recover it here from the same source markdown).
+  const questionPrompts = React.useMemo(() => promptsFromContent(selectedPlanDoc?.content ?? ''), [selectedPlanDoc?.content]);
+
+  // Persist an answered Open Question to the concern's Decisions log, then refresh the pipeline.
+  const answerQuestion = React.useCallback(async (blockId: string, questionId: string, value: string) => {
+    const file = selectedConcern?.file ?? selectedPlanDoc?.file;
+    if (!featureId || !repo || !file) return;
+    const prompt = questionPrompts.get(questionId) ?? questionId;
+    try {
+      await apiJson(`/api/features/${encodeURIComponent(featureId)}/answers`, jsonInit('POST', { repo, file, blockId, questionId, prompt, value }));
+      showToast('Answer recorded', 'success');
+      await loadPipeline();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not record answer', 'error');
+    }
+  }, [featureId, repo, selectedConcern?.file, selectedPlanDoc?.file, questionPrompts, loadPipeline, showToast]);
+
+  const planBlockContext = React.useMemo(() => ({
+    featureId,
+    repo,
+    planPath: selectedPlanDoc?.path,
+    touches: selectedConcern?.touches ?? [],
+    decisions: selectedConcern?.decisions ?? [],
+    comments: pipeline?.comments ?? [],
+    onAnswer: answerQuestion,
+  }), [answerQuestion, featureId, pipeline?.comments, repo, selectedConcern?.decisions, selectedConcern?.touches, selectedPlanDoc?.path]);
 
   const loadPlaneLinks = React.useCallback(async () => {
     if (!featureId) return;

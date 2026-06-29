@@ -16,7 +16,7 @@ import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
-import { listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
+import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
@@ -847,6 +847,26 @@ export class SquadServer {
 			if (opts.status === undefined && opts.blockedBy === undefined) return new Response("nothing to update", { status: 400 });
 			const concern = await manager.updateConcern(decodeURIComponent(mfconcern[1]), opts);
 			return concern ? Response.json({ concern }) : new Response("no such concern", { status: 404 });
+		}
+		const mfanswer = url.pathname.match(/^\/api\/features\/([^/]+)\/answers$/);
+		if (mfanswer && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object" || !("file" in body) || typeof body.file !== "string" || !body.file.trim()) {
+				return new Response("file required", { status: 400 });
+			}
+			const prompt = "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";
+			const value = "value" in body && typeof body.value === "string" ? body.value.trim() : "";
+			if (!prompt || !value) return new Response("prompt and value required", { status: 400 });
+			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const featureId = decodeURIComponent(mfanswer[1]);
+			const feature = (await manager.features(repo)).find((x) => x.id === featureId);
+			if (!feature || !feature.planDir) return new Response("no such feature", { status: 404 });
+			const concernPath = path.join(feature.planDir, path.basename(body.file));
+			const concern = await appendConcernDecision(feature.repo, concernPath, `Q: ${prompt} — A: ${value}`);
+			if (!concern) return new Response("no such concern", { status: 404 });
+			const detail = `${prompt} — ${value}`;
+			void manager.recordAudit(actor, "plan-answer", featureId, "ok", detail.length > 80 ? `${detail.slice(0, 79)}…` : detail);
+			return Response.json({ concern });
 		}
 		if (url.pathname === "/api/federation/capabilities") return Response.json({ capabilities: manager.capabilityFederation() });
 		if (url.pathname === "/api/capability-discovery") return Response.json({ name: "omp-squad capabilities", routes: ["/api/capability-catalog", "/api/capability-sources", "/api/capability-packs", "/api/capability-installs", "/api/federation/capabilities"], privateTenantData: false });

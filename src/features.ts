@@ -586,6 +586,70 @@ export async function updatePlanConcern(repo: string, planDir: string, file: str
 	return (await parsePlanConcerns(repo, planDir)).find((c) => c.file === base);
 }
 
+// ── concern decision-log appends (QuestionsBlock answers) ─────────────────────
+//
+// An answered Open Question is persisted as a resolved decision: we append a
+// `- Q: <prompt> — A: <value>` bullet to the concern doc's `## Decisions` section
+// (the same heading set markdownSectionItems reads into PlanConcern.decisions), so
+// the answer is git-committed, reparsed, and visible to the worktree agent + Plane.
+
+const DECISION_HEADINGS = new Set(["decisions", "decision log", "rationale"]);
+
+/** Append `line` as a `- <line>` bullet under the concern's Decisions section (idempotent: an
+ *  identical bullet is never duplicated). Creates the section if absent. Pure string surgery. */
+export function appendDecisionLine(text: string, line: string): string {
+	const eol = text.includes("\r\n") ? "\r\n" : "\n";
+	const bullet = `- ${line}`;
+	const lines = text.split(/\r?\n/);
+
+	// Locate the Decisions section and its end (the last non-blank line before the next heading/EOF).
+	let headingIdx = -1;
+	let lastContentIdx = -1;
+	for (let i = 0; i < lines.length; i++) {
+		const heading = /^(#{2,6})\s+(.+?)\s*$/.exec(lines[i]);
+		if (heading) {
+			if (headingIdx >= 0) break; // reached the section after Decisions
+			if (DECISION_HEADINGS.has(heading[2].replace(/[:#]+$/g, "").trim().toLowerCase())) { headingIdx = i; lastContentIdx = i; }
+			continue;
+		}
+		if (headingIdx >= 0 && lines[i].trim()) lastContentIdx = i;
+	}
+
+	if (headingIdx >= 0) {
+		// Idempotency: same bullet already present in this section.
+		for (let i = headingIdx + 1; i <= lastContentIdx; i++) {
+			if (lines[i].trim() === bullet) return text;
+		}
+		lines.splice(lastContentIdx + 1, 0, bullet);
+		return lines.join(eol);
+	}
+
+	// No Decisions section: append one at the end of the file.
+	const trimmed = text.replace(/\s+$/, "");
+	return `${trimmed}${eol}${eol}## Decisions${eol}${eol}${bullet}${eol}`;
+}
+
+/**
+ * Append an answered Open Question to a concern's Decisions log. `file` is the concern path relative
+ * to `repo` (PlanConcern.path), e.g. "plans/foo/03-bar.md". Reads the file, appends `- <line>` under
+ * its `## Decisions`/`## Decision Log`/`## Rationale` section (creating it if absent), writes it back,
+ * and returns the reparsed concern — or null when the file is missing or isn't a concern. Idempotent.
+ */
+export async function appendConcernDecision(repo: string, file: string, line: string): Promise<PlanConcern | null> {
+	const rel = file.replace(/^[/\\]+/, "");
+	const planDir = path.dirname(rel);
+	const base = path.basename(rel);
+	if (!base.toLowerCase().endsWith(".md") || CONCERN_SKIP.has(base.toLowerCase())) return null;
+	const concernAbs = path.join(repo, planDir, base);
+	let text: string;
+	try { text = await fs.readFile(concernAbs, "utf8"); } catch { return null; }
+
+	const next = appendDecisionLine(text, line);
+	if (next !== text) await fs.writeFile(concernAbs, next, "utf8");
+
+	return (await parsePlanConcerns(repo, planDir)).find((c) => c.file === base) ?? null;
+}
+
 function countStatuses(agents: AgentDTO[]): Partial<Record<AgentStatus, number>> {
 	const counts: Partial<Record<AgentStatus, number>> = {};
 	for (const a of agents) counts[a.status] = (counts[a.status] ?? 0) + 1;
