@@ -7,6 +7,7 @@ import {
   CalloutBlock,
   ColumnsBlock,
   FileTreeBlock,
+  MermaidBlock,
   QuestionsBlock,
   WireframeBlock,
 } from './blocks';
@@ -56,6 +57,7 @@ export const BLOCK_REGISTRY: Record<string, React.FC<BlockProps>> = {
   wireframe: WireframeBlock,
   diagram: DiagramBlock,
   filetree: FileTreeBlock,
+  mermaid: MermaidBlock,
   questions: QuestionsBlock,
   'annotated-code': AnnotatedCodeBlock,
   annotated: AnnotatedCodeBlock,
