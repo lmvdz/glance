@@ -86,6 +86,7 @@ export class AutomationLog {
 	private readonly log: (msg: string) => void;
 	/** Spool failures are logged once per error episode (not per event) so a wedged disk doesn't flood. */
 	private spoolFailing = false;
+	private spoolTail: Promise<void> = Promise.resolve();
 
 	constructor(baseDir: string, opts: { max?: number; onEvent?: (e: AutomationEvent) => void; log?: (msg: string) => void } = {}) {
 		this.baseDir = baseDir;
@@ -115,7 +116,7 @@ export class AutomationLog {
 		this.ring.push(e);
 		if (this.ring.length > this.max) this.ring.shift();
 		this.onEvent?.(e);
-		if (isMeaningful(e)) void this.spool(e);
+		if (isMeaningful(e)) this.spoolTail = this.spoolTail.then(() => this.spool(e), () => this.spool(e));
 		return e;
 	}
 
