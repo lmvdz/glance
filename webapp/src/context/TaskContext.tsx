@@ -3,7 +3,7 @@ import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
 import { useSquad } from '../hooks/useSquad';
-import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ClientCommand, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
+import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
 export interface ToastInfo {
   id: string;
@@ -11,7 +11,7 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'attention' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'federation' | 'knowledge';
+export type AppView = 'attention' | 'active' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'federation' | 'knowledge';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
@@ -45,6 +45,8 @@ interface TaskContextType {
   resolvedCommentEvents: Map<string, number>;
   connected: boolean;
   agents: AgentDTO[];
+  /** Raw live feature/plan list — the other half of the active-work join (agents being the first). */
+  features: FeatureDTO[];
   transcripts: Map<string, TranscriptEntry[]>;
   capabilities: CapabilitySnapshotDTO;
   publicCatalog: PublicCapabilityCatalogDTO[];
@@ -249,7 +251,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

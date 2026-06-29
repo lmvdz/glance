@@ -71,6 +71,7 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
   return {
     id: feature.issueIdentifiers?.[0] ?? feature.id,
     sourceId: feature.id,
+    planDir: feature.planDir,
     title: feature.title,
     category: taskCategory(feature),
     duration: duration(feature),
@@ -98,6 +99,22 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
     },
     tags: [feature.stage, repoName(feature.repo), ...(feature.blocked ? ["blocked"] : []), ...(feature.divergent ? ["diverged"] : []), ...activeAgents.map((agent) => agent.status)],
   };
+}
+
+/** A real tracker identifier, e.g. "OMPSQ-306" — worth showing as a handle. */
+const PLANE_ID_RE = /^[A-Z][A-Z0-9]+-\d+$/;
+
+/**
+ * The readable secondary handle for a task row. Prefer a real Plane ticket id;
+ * otherwise the plan's directory slug (the thing the operator actually
+ * recognizes); otherwise null — a synthetic feature UUID like
+ * "plan:repo:plans/x" or a bare hash is noise, not a handle, so the row simply
+ * leads with its human title instead.
+ */
+export function taskRef(task: Pick<Task, "id" | "planDir">): string | null {
+  if (PLANE_ID_RE.test(task.id)) return task.id;
+  if (task.planDir) return task.planDir.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
+  return null;
 }
 
 export function tasksFromSquad(features: FeatureDTO[], agents: AgentDTO[], projects: ProjectDTO[]): Task[] {

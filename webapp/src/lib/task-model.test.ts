@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { taskFromFeature } from "./task-model";
+import { taskFromFeature, taskRef } from "./task-model";
 import type { FeatureDTO } from "./dto";
 
 const feature: FeatureDTO = {
@@ -28,7 +28,23 @@ test("taskFromFeature preserves the starter task shape with live feature ids", (
 
   expect(task.id).toBe("OMP-1");
   expect(task.sourceId).toBe("feat-1");
+  expect(task.planDir).toBe("plans/web-dashboard");
   expect(task.category).toBe("frontend");
   expect(task.status).toBe("active");
   expect(task.contextBundle.criteria).toBe("2 / 5 workflow steps");
+});
+
+test("taskRef prefers a real Plane ticket identifier", () => {
+  expect(taskRef({ id: "OMPSQ-306", planDir: "plans/x" })).toBe("OMPSQ-306");
+  expect(taskRef({ id: "OMP-1", planDir: undefined })).toBe("OMP-1");
+});
+
+test("taskRef falls back to the plan slug when the id is a synthetic feature id", () => {
+  expect(taskRef({ id: "plan:repo:plans/visual-plan-demo", planDir: "plans/visual-plan-demo" })).toBe("visual-plan-demo");
+  expect(taskRef({ id: "a1b2c3d4-uuid", planDir: "plans/change-driven-loops" })).toBe("change-driven-loops");
+});
+
+test("taskRef returns null for a bare synthetic id with no plan dir — no UUID noise in the list", () => {
+  expect(taskRef({ id: "a1b2c3d4-9999", planDir: undefined })).toBeNull();
+  expect(taskRef({ id: "plan:repo:something", planDir: undefined })).toBeNull();
 });

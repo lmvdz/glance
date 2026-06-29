@@ -19,6 +19,7 @@ import { HeatPanel } from './components/HeatPanel';
 import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
+import { ActiveWorkPane } from './components/ActiveWorkPane';
 
 const readStoredBoolean = (key: string, fallback: boolean) => {
   if (typeof window === 'undefined') return fallback;
@@ -30,6 +31,7 @@ const MainContent = () => {
   const { view } = useTaskContext();
 
   if (view === 'attention') return <AttentionPanel />;
+  if (view === 'active') return <ActiveWorkPane />;
   if (view === 'capabilities') return <CapabilityPanel />;
   if (view === 'automation') return <AutomationPanel />;
   if (view === 'fleet-health') return <FleetHealthPanel />;

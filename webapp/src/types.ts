@@ -44,6 +44,8 @@ export interface TaskComment {
 export interface Task {
   id: string;
   sourceId?: string;
+  /** plans/<name>/ directory when this task is a plan — the readable handle the list shows. */
+  planDir?: string;
   title: string;
   category: 'frontend' | 'devops' | 'backend' | 'mcp' | 'database';
   duration: string;

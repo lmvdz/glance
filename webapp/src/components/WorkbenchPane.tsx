@@ -21,6 +21,7 @@ import {
   Mic,
   Network,
   Plus,
+  Radar,
   Search,
   Settings,
   Tag,
@@ -31,6 +32,8 @@ import {
 import { getCategoryBadge } from '../utils';
 import { useTaskContext, type TaskFilter, type ArchivedFeature } from '../context/TaskContext';
 import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus';
+import { activeWork } from '../lib/insights';
+import { taskRef } from '../lib/task-model';
 import type { Task } from '../types';
 
 const taskFilters: Array<{ key: TaskFilter; label: string }> = [
@@ -74,6 +77,8 @@ export const TaskRailRow: React.FC<{
   const critical = attention && status?.verdict === 'critical';
   const isWorking = !isDone && status?.posture === 'working';
   const attnLabel = status?.posture === 'idle' ? 'stopped' : critical ? 'needs you' : 'land ready';
+  // Readable secondary handle: Plane ticket or plan slug — never a raw UUID.
+  const ref = taskRef(task);
   return (
     <div
       draggable={isDraggable}
@@ -103,9 +108,11 @@ export const TaskRailRow: React.FC<{
             {task.title}
           </span>
           <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
-            <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-gray-400 dark:text-gray-600' : isActive ? 'text-blue-700 dark:text-blue-400' : 'text-blue-600 dark:text-blue-500'}`} title={task.id}>
-              {task.id}
-            </span>
+            {ref && (
+              <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-gray-400 dark:text-gray-600' : isActive ? 'text-blue-700 dark:text-blue-400' : 'text-blue-600 dark:text-blue-500'}`} title={task.planDir ?? task.id}>
+                {ref}
+              </span>
+            )}
             {dueSoon && (
               <span title="Due within 24 hours" className="flex">
                 <AlertCircle className="h-3.5 w-3.5 text-red-500" aria-hidden="true" />
@@ -161,6 +168,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     capabilities,
     publicCatalog,
     agents,
+    features,
   } = useTaskContext();
   // The "garbage bin": archived features, restorable or permanently deletable.
   const [showArchived, setShowArchived] = useState(false);
@@ -180,6 +188,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const needsYouCount = agents.filter(
     (a) => a.status === 'input' || a.status === 'error' || a.pending.length > 0 || a.landReady,
   ).length;
+  // Live count of things currently being worked on — drives the Active nav badge.
+  const activeWorkCount = React.useMemo(() => activeWork(agents, features).length, [agents, features]);
   const [workspaceOpen, setWorkspaceOpen] = useState(true);
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
@@ -316,8 +326,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
 
   const collapsedLabel = view === 'attention'
     ? `Needs you${needsYouCount ? ` · ${needsYouCount}` : ''}`
+    : view === 'active'
+    ? `Active work${activeWorkCount ? ` · ${activeWorkCount}` : ''}`
     : view === 'tasks'
-    ? `${filteredTasks.length} tasks${selectedTask ? ` · ${selectedTask.id}` : ''}`
+    ? `${filteredTasks.length} tasks${selectedTask ? ` · ${taskRef(selectedTask) ?? selectedTask.title}` : ''}`
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
     : view === 'automation' ? 'Automation'
     : view === 'fleet-health' ? 'Fleet Health'
@@ -335,6 +347,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         <button onClick={() => setView('attention')} className={`relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'attention' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Needs you${needsYouCount ? ` (${needsYouCount})` : ''}`} title="Needs you">
           <Bell className="h-4 w-4" aria-hidden="true" />
           {needsYouCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-red-500" aria-hidden="true" />}
+        </button>
+        <button onClick={() => setView('active')} className={`mt-1 relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'active' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Active work${activeWorkCount ? ` (${activeWorkCount})` : ''}`} title="Active work">
+          <Radar className="h-4 w-4" aria-hidden="true" />
+          {activeWorkCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />}
         </button>
         <button onClick={() => setView('tasks')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Tasks" title="Tasks">
           <Inbox className="h-4 w-4" aria-hidden="true" />
@@ -393,6 +409,13 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               Needs you
               {needsYouCount > 0 && (
                 <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${view === 'attention' ? 'bg-blue-600 text-white' : 'bg-red-500 text-white'}`}>{needsYouCount}</span>
+              )}
+            </button>
+            <button onClick={() => setView('active')} className={`relative flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'active' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Radar className="h-3.5 w-3.5" aria-hidden="true" />
+              Active
+              {activeWorkCount > 0 && (
+                <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${view === 'active' ? 'bg-blue-600 text-white' : 'bg-emerald-500 text-white'}`}>{activeWorkCount}</span>
               )}
             </button>
             <button onClick={() => setView('tasks')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>

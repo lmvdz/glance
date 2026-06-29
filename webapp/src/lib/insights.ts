@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import type { AgentDTO } from './dto';
+import type { AgentDTO, FeatureDTO, IssueRef } from './dto';
 
 // ───────────────────────────── shared types ─────────────────────────────
 
@@ -570,4 +570,275 @@ export function useRollingHistory(value: number, max = 30): number[] {
     setHistory((prev) => pushRolling(prev, value, max));
   }, [value, max]);
   return history;
+}
+
+// ───────────────────────────── active work ─────────────────────────────
+//
+// THE JOIN nothing else in the UI does: agent ⇄ feature/plan ⇄ live activity.
+// The raw data is all present (AgentDTO carries featureId/activity/todo/issue;
+// FeatureDTO carries agentIds/title/planDir/workflowStage/workflowProgress) but
+// no view stitches them, so "what is being worked on right now, and by whom?"
+// has no single answer. This join is the answer — consumed BOTH by the
+// ActiveWork pane and (via activeWorkDigest) by the assistant's context, so the
+// dashboard and the chat can never disagree about what's live.
+
+/** Rolled-up posture for one unit of active work — drives row color and sort. */
+export type ActiveWorkStatus = 'errored' | 'blocked' | 'land-ready' | 'working' | 'idle';
+
+/** One agent attached to a unit of active work, flattened for display. */
+export interface ActiveWorkAgentLine {
+  id: string;
+  name: string;
+  status: AgentDTO['status'];
+  /** the single most relevant one-liner: the error, the blocking question, or the live activity. */
+  note?: string;
+  /** latest todo progress for this agent. */
+  todo?: { done: number; total: number; active?: string };
+  landReady?: boolean;
+  /** waiting on operator input (status input OR a pending request). */
+  blocked?: boolean;
+  /** first pending request id — the answer target when blocked. */
+  requestId?: string;
+  /** preset choices for the pending request, rendered as one-click answers. */
+  options?: string[];
+  /** placeholder for the free-text answer composer. */
+  placeholder?: string;
+  startedAt?: number;
+  lastActivity: number;
+}
+
+/** One unit of active work — a plan/feature (with its agents) or an unassigned live agent. */
+export interface ActiveWorkItem {
+  /** the feature/plan this belongs to; undefined for an unassigned live agent. */
+  featureId?: string;
+  /** human title — the plan/feature title, or the agent name for unassigned work. */
+  title: string;
+  /** plans/<name>/ directory, when this is a plan. */
+  planDir?: string;
+  repo: string;
+  /** linked Plane issue (first attached agent's), if any. */
+  issue?: IssueRef;
+  /** workflow stage label (workflowStage ?? humanized feature.stage). */
+  stage?: string;
+  /** feature-level workflow progress. */
+  progress?: { done: number; total: number };
+  /** attached agents, most-urgent first. */
+  agents: ActiveWorkAgentLine[];
+  /** rolled-up status across the attached agents / feature stage. */
+  status: ActiveWorkStatus;
+  /** the one sentence describing what's happening, lead-agent first. */
+  headline: string;
+  /** most recent activity across this item, for sort + age label. */
+  lastActivity: number;
+}
+
+/** Feature stages that count as "work underway" even with no agent currently attached. */
+const ACTIVE_FEATURE_STAGES: ReadonlySet<FeatureDTO['stage']> = new Set(['in-progress', 'review', 'diverged']);
+
+/** Order agents within an item so the one that needs attention leads the headline. */
+const AGENT_RANK: Record<AgentDTO['status'], number> = { error: 0, input: 1, working: 2, starting: 3, idle: 4, stopped: 5 };
+
+/** Order items so blocking/erroring work sorts to the top of the pane. */
+const STATUS_RANK: Record<ActiveWorkStatus, number> = { errored: 0, blocked: 1, 'land-ready': 2, working: 3, idle: 4 };
+
+/** Compact human label for a status, reused by the digest and the pane. */
+export const ACTIVE_WORK_STATUS_LABEL: Record<ActiveWorkStatus, string> = {
+  errored: 'ERRORED',
+  blocked: 'BLOCKED',
+  'land-ready': 'ready to land',
+  working: 'working',
+  idle: 'idle',
+};
+
+function humanizeStage(stage: string): string {
+  return stage.replace(/-/g, ' ');
+}
+
+function agentLine(a: AgentDTO): ActiveWorkAgentLine {
+  const pending = a.pending[0];
+  const blocked = a.status === 'input' || a.pending.length > 0;
+  let note: string | undefined;
+  if (a.status === 'error') note = a.error ?? 'errored';
+  else if (blocked) note = pending?.title ?? pending?.message ?? 'waiting on operator input';
+  else note = a.activity ?? a.todo?.active;
+  return { id: a.id, name: a.name, status: a.status, note, todo: a.todo, landReady: a.landReady, blocked, requestId: pending?.id, options: pending?.options, placeholder: pending?.placeholder, startedAt: a.startedAt, lastActivity: a.lastActivity };
+}
+
+function rollUpStatus(lines: ActiveWorkAgentLine[]): ActiveWorkStatus {
+  if (lines.some((l) => l.status === 'error')) return 'errored';
+  if (lines.some((l) => l.blocked)) return 'blocked';
+  if (lines.some((l) => l.landReady)) return 'land-ready';
+  if (lines.some((l) => l.status === 'working' || l.status === 'starting')) return 'working';
+  return 'idle';
+}
+
+function activeHeadline(status: ActiveWorkStatus, lead: ActiveWorkAgentLine | undefined, count: number, issue: IssueRef | undefined, stage: string | undefined): string {
+  if (!lead) return stage ? `${stage} — no agent attached, staffable` : 'no agent attached — staffable';
+  const who = count > 1 ? `${lead.name} +${count - 1}` : lead.name;
+  const prog = lead.todo && lead.todo.total > 0 ? ` · ${lead.todo.done}/${lead.todo.total}` : '';
+  switch (status) {
+    case 'errored':
+      return `${who} errored — ${lead.note ?? 'see transcript'}`;
+    case 'blocked':
+      return `${who} is waiting on you — ${lead.note ?? 'operator input'}`;
+    case 'land-ready':
+      return `${who} ready to land${issue?.name ? ` — ${issue.name}` : ''}`;
+    case 'working':
+      return `${who} · ${lead.note ?? 'working'}${prog}`;
+    default:
+      return `${who} idle between turns${prog}`;
+  }
+}
+
+function featureItem(f: FeatureDTO, attached: AgentDTO[]): ActiveWorkItem {
+  const lines = attached.map(agentLine).sort((a, b) => AGENT_RANK[a.status] - AGENT_RANK[b.status] || b.lastActivity - a.lastActivity);
+  const status = rollUpStatus(lines);
+  const issue = attached.find((a) => a.issue)?.issue;
+  const stage = (f.workflowStage && f.workflowStage.trim()) || humanizeStage(f.stage);
+  const lastActivity = Math.max(f.updatedAt ?? 0, ...lines.map((l) => l.lastActivity), 0);
+  return {
+    featureId: f.id,
+    title: f.title,
+    planDir: f.planDir,
+    repo: f.repo,
+    issue,
+    stage,
+    progress: f.workflowProgress,
+    agents: lines,
+    status,
+    headline: activeHeadline(status, lines[0], lines.length, issue, stage),
+    lastActivity,
+  };
+}
+
+function orphanItem(a: AgentDTO): ActiveWorkItem {
+  const line = agentLine(a);
+  const status = rollUpStatus([line]);
+  return {
+    featureId: undefined,
+    title: a.name,
+    repo: a.repo,
+    issue: a.issue,
+    stage: undefined,
+    agents: [line],
+    status,
+    headline: activeHeadline(status, line, 1, a.issue, undefined),
+    lastActivity: a.lastActivity,
+  };
+}
+
+/**
+ * Join the live roster against the feature list into a single "what's being
+ * worked on right now" view. An item is active when it has ≥1 non-terminal (or
+ * errored) agent OR its feature stage is in-progress/review/diverged — the
+ * latter surfaces plans that are underway but currently un-staffed (dropped
+ * work), which is exactly the thing that otherwise goes invisible. Live agents
+ * not tied to any feature appear as their own rows so nothing running is hidden.
+ *
+ * Sort: errored → blocked → land-ready → working → idle, then most-recent first.
+ */
+export function activeWork(agents: AgentDTO[] | null | undefined, features: FeatureDTO[] | null | undefined): ActiveWorkItem[] {
+  const featureList = features ?? [];
+  // Errored agents are terminal but the operator MUST see the crash, so include them.
+  const agentList = (agents ?? []).filter((a) => LIVE_STATUSES.has(a.status) || a.status === 'error');
+  const featById = new Map(featureList.map((f) => [f.id, f]));
+
+  const byFeature = new Map<string, AgentDTO[]>();
+  const assigned = new Set<string>();
+  for (const a of agentList) {
+    let fid = a.featureId && featById.has(a.featureId) ? a.featureId : undefined;
+    if (!fid) {
+      const owner = featureList.find((f) => f.agentIds.includes(a.id));
+      if (owner) fid = owner.id;
+    }
+    if (fid) {
+      const arr = byFeature.get(fid) ?? [];
+      arr.push(a);
+      byFeature.set(fid, arr);
+      assigned.add(a.id);
+    }
+  }
+
+  const items: ActiveWorkItem[] = [];
+  for (const f of featureList) {
+    if (f.stage === 'done' || f.stage === 'landed') continue;
+    const attached = byFeature.get(f.id) ?? [];
+    if (attached.length === 0 && !ACTIVE_FEATURE_STAGES.has(f.stage)) continue;
+    items.push(featureItem(f, attached));
+  }
+  for (const a of agentList) {
+    if (!assigned.has(a.id)) items.push(orphanItem(a));
+  }
+
+  items.sort((x, y) => STATUS_RANK[x.status] - STATUS_RANK[y.status] || y.lastActivity - x.lastActivity || x.title.localeCompare(y.title));
+  return items;
+}
+
+/** The kinds of move a single active-work row offers — exactly one per row. */
+export type ActiveWorkActionKind = 'answer' | 'land' | 'restart' | 'staff' | 'view';
+
+/** The one action that moves an active-work item forward. */
+export interface ActiveWorkAction {
+  kind: ActiveWorkActionKind;
+  /** button label. */
+  label: string;
+  /** the agent this action targets; absent for feature-level land and staff. */
+  agentId?: string;
+  /** the pending request to answer (answer only). */
+  requestId?: string;
+}
+
+/**
+ * Map an active-work item to the ONE action that moves it forward, so the pane
+ * and the digest never re-derive "what do I do about this row?":
+ *   errored → restart · blocked → answer · land-ready → land ·
+ *   un-staffed plan → staff · anything else → open the console.
+ *
+ * Land targets the FEATURE when the item is a plan (lands every attached agent
+ * through the proof gate at once) and the lone agent when it's an orphan. A
+ * blocked item with no answerable pending request falls back to opening the
+ * console rather than offering an answer box that targets nothing.
+ */
+export function activeWorkAction(item: ActiveWorkItem): ActiveWorkAction {
+  const agents = item.agents;
+  switch (item.status) {
+    case 'errored': {
+      const a = agents.find((l) => l.status === 'error') ?? agents[0];
+      return { kind: 'restart', label: 'Restart', agentId: a?.id };
+    }
+    case 'blocked': {
+      const a = agents.find((l) => l.requestId) ?? agents.find((l) => l.blocked) ?? agents[0];
+      return a?.requestId
+        ? { kind: 'answer', label: 'Answer', agentId: a.id, requestId: a.requestId }
+        : { kind: 'view', label: 'Open console', agentId: a?.id };
+    }
+    case 'land-ready': {
+      const a = agents.find((l) => l.landReady) ?? agents[0];
+      return item.featureId ? { kind: 'land', label: 'Land' } : { kind: 'land', label: 'Land', agentId: a?.id };
+    }
+    case 'idle':
+      if (item.featureId && agents.length === 0) return { kind: 'staff', label: 'Staff a unit' };
+      return { kind: 'view', label: 'Open console', agentId: agents[0]?.id };
+    default: // working
+      return { kind: 'view', label: 'Open console', agentId: agents[0]?.id };
+  }
+}
+
+/**
+ * Compress the active-work join into a compact plain-text snapshot suitable for
+ * injecting into the assistant's prompt, so the chat can answer "what's being
+ * worked on?" from the same source of truth the pane renders. Capped so the
+ * preamble never balloons the prompt.
+ */
+export function activeWorkDigest(items: ActiveWorkItem[], limit = 8): string {
+  if (!items.length) return "Fleet snapshot: nothing is being worked on right now — no live agents and no in-progress plans.";
+  const lines = items.slice(0, limit).map((it) => {
+    const id = it.issue?.identifier ? ` [${it.issue.identifier}]` : '';
+    const action = activeWorkAction(it);
+    // The next move, when there is one beyond just looking at it.
+    const hint = action.kind === 'view' ? '' : ` → ${action.label.toLowerCase()}`;
+    return `- "${it.title}" — ${ACTIVE_WORK_STATUS_LABEL[it.status]}: ${it.headline}${id}${hint}`;
+  });
+  const more = items.length > limit ? `\n  …and ${items.length - limit} more (see the Active Work tab)` : '';
+  return `Fleet snapshot — what's being worked on right now (${items.length} active):\n${lines.join('\n')}${more}`;
 }
