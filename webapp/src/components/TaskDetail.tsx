@@ -2,8 +2,7 @@ import React from 'react';
 import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Sun, Moon, Bot, PanelRight, FileText, GripVertical, MessageSquare, GitBranch, Maximize2 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { MarkdownComponents, PlanBlockContext } from './PlanBlocks';
 import { TaskProperties } from './TaskProperties';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
@@ -104,22 +103,6 @@ function commentFromApi(comment: ArtifactCommentDTO): TaskComment {
   return { id: comment.id, text: comment.body, timestamp: new Date(comment.createdAt).toISOString(), author: comment.author, urgent: comment.urgent, resolvedAt: comment.resolvedAt, kind: comment.kind, subject: comment.subject, annotation: comment.annotation };
 }
 
-const MarkdownCode = ({ inline, className, children, ...props }: any) => {
-  const match = /language-(\w+)/.exec(className || '');
-  if (!inline && match) {
-    return (
-      <SyntaxHighlighter
-        language={match[1]}
-        style={vscDarkPlus}
-        customStyle={{ margin: 0, borderRadius: '0.5rem', background: 'transparent' }}
-        PreTag="div"
-      >
-        {String(children).replace(/\n$/, '')}
-      </SyntaxHighlighter>
-    );
-  }
-  return <code className={className} {...props}>{children}</code>;
-};
 
 const PLAN_MARKDOWN_CLASS = "prose prose-sm max-w-none dark:prose-invert prose-headings:scroll-mt-4 prose-headings:text-gray-900 dark:prose-headings:text-gray-100 prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-900 dark:prose-strong:text-gray-100 prose-code:rounded prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:text-gray-900 dark:prose-code:bg-gray-900 dark:prose-code:text-gray-100 prose-pre:border prose-pre:border-gray-200 prose-pre:bg-gray-50 prose-pre:text-gray-900 dark:prose-pre:border-gray-800 dark:prose-pre:bg-gray-950 dark:prose-pre:text-gray-100 prose-table:text-sm prose-th:border prose-th:border-gray-200 prose-th:bg-gray-50 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-gray-200 prose-td:px-3 prose-td:py-2 dark:prose-th:border-gray-800 dark:prose-th:bg-gray-900 dark:prose-td:border-gray-800";
 const PLAN_NAV_BUTTON_CLASS = "inline-flex min-h-8 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900 dark:focus-visible:ring-offset-gray-950";
@@ -130,7 +113,7 @@ const PLAN_DOC_TAB_IDLE_CLASS = "border-gray-200 bg-white text-gray-700 hover:bo
 
 export const PlanMarkdown = React.forwardRef<HTMLElement, React.HTMLAttributes<HTMLElement> & { content: string }>(({ content, className = '', ...props }, ref) => (
   <article ref={ref} className={`${PLAN_MARKDOWN_CLASS} ${className}`.trim()} {...props}>
-    <Markdown remarkPlugins={[remarkGfm]} components={{ code: MarkdownCode }}>{content}</Markdown>
+    <Markdown remarkPlugins={[remarkGfm]} components={MarkdownComponents}>{content}</Markdown>
   </article>
 ));
 PlanMarkdown.displayName = 'PlanMarkdown';
@@ -353,6 +336,11 @@ export const TaskDetail = () => {
     return docs.find((item) => item.path === selectedDoc) ?? docs[0] ?? null;
   }, [pipeline, selectedDoc]);
 
+  const selectedConcern = React.useMemo(() => {
+    if (!selectedPlanDoc) return undefined;
+    return (pipeline?.concerns ?? []).find((concern) => concern.path === selectedPlanDoc.path || concern.file === selectedPlanDoc.file);
+  }, [pipeline?.concerns, selectedPlanDoc]);
+
   const planDocuments = pipeline?.documents ?? [];
   const selectedPlanIndex = safePlanIndex(planDocuments, selectedPlanDoc?.path ?? selectedDoc);
   const previousPlanPath = adjacentPlanPath(planDocuments, selectedPlanDoc?.path ?? selectedDoc, -1);
@@ -453,6 +441,14 @@ export const TaskDetail = () => {
     if (!selectedPlanDoc) return [];
     return planAnnotations.filter((comment) => comment.annotation?.planPath === selectedPlanDoc.path);
   }, [planAnnotations, selectedPlanDoc]);
+  const planBlockContext = React.useMemo(() => ({
+    featureId,
+    repo,
+    planPath: selectedPlanDoc?.path,
+    touches: selectedConcern?.touches ?? [],
+    decisions: selectedConcern?.decisions ?? [],
+    comments: pipeline?.comments ?? [],
+  }), [featureId, pipeline?.comments, repo, selectedConcern?.decisions, selectedConcern?.touches, selectedPlanDoc?.path]);
 
 
   const loadPipeline = React.useCallback(async () => {
@@ -980,12 +976,14 @@ export const TaskDetail = () => {
               </div>
             </form>
           )}
-          <PlanMarkdown
-            ref={planArticleRef}
-            content={selectedPlanDoc.content}
-            onMouseUp={() => window.setTimeout(captureSelection, 0)}
-            onKeyUp={captureSelection}
-          />
+          <PlanBlockContext.Provider value={planBlockContext}>
+            <PlanMarkdown
+              ref={planArticleRef}
+              content={selectedPlanDoc.content}
+              onMouseUp={() => window.setTimeout(captureSelection, 0)}
+              onKeyUp={captureSelection}
+            />
+          </PlanBlockContext.Provider>
           <div className="mt-6 space-y-3 border-t border-gray-200 pt-4 dark:border-gray-800">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Live annotations</h3>
