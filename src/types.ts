@@ -356,6 +356,8 @@ export interface PlanAnnotationTarget {
 	lineStart?: number;
 	lineEnd?: number;
 	quote?: string;
+	/** Anchors the annotation to a specific rendered plan block (data-block-id). */
+	blockId?: string;
 }
 
 export interface ArtifactCommentDTO {

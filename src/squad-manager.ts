@@ -2876,7 +2876,9 @@ export class SquadManager extends EventEmitter {
 		await appendCommentEvent(this.stateDir, { type: "add", id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, at, kind: input.kind, annotation: input.annotation });
 		const comment: ArtifactComment = { id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, createdAt: at, kind: input.kind, annotation: input.annotation };
 		this.emit("event", { type: "comment", comment } satisfies SquadEvent);
-		for (const issue of await this.commentPlaneTargets(input.repo, input.subject)) void addPlaneIssueComment(input.repo, issue, input.body).catch((err) => this.log("warn", `plane comment sync failed: ${err instanceof Error ? err.message : String(err)}`));
+		// Only regular comments fan out to Plane; plan-annotations are plan-doc-local review chatter
+		// anchored to a rendered block/line and arrive in Plane stripped of that context (noise), so suppress them.
+		if (input.kind !== "plan-annotation") for (const issue of await this.commentPlaneTargets(input.repo, input.subject)) void addPlaneIssueComment(input.repo, issue, input.body).catch((err) => this.log("warn", `plane comment sync failed: ${err instanceof Error ? err.message : String(err)}`));
 		void this.recordAudit(actor, input.kind === "plan-annotation" ? "plan-annotate" : "comment", input.subject, "ok", truncate(input.body, 80));
 		return comment;
 	}

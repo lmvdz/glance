@@ -17,6 +17,9 @@ export interface PlanAnnotationTarget {
   lineStart?: number;
   lineEnd?: number;
   quote?: string;
+  /** Anchors the annotation to a specific rendered plan block (data-block-id). Optional; the
+   * append-only JSONL store + fold-on-read tolerate the new field, so no migration is needed. */
+  blockId?: string;
 }
 
 export interface ArtifactComment {

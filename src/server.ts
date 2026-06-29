@@ -164,7 +164,8 @@ function planAnnotationTarget(value: unknown): PlanAnnotationTarget | undefined 
 	const lineStart = typeof rec.lineStart === "number" && Number.isInteger(rec.lineStart) && rec.lineStart > 0 ? rec.lineStart : undefined;
 	const lineEnd = typeof rec.lineEnd === "number" && Number.isInteger(rec.lineEnd) && rec.lineEnd > 0 ? rec.lineEnd : lineStart;
 	const quote = typeof rec.quote === "string" && rec.quote.trim() ? rec.quote.trim().slice(0, 4000) : undefined;
-	return { planPath, lineStart, lineEnd, quote };
+	const blockId = typeof rec.blockId === "string" && rec.blockId.trim() ? rec.blockId.trim() : undefined;
+	return { planPath, lineStart, lineEnd, quote, blockId };
 }
 
 function planAnnotationPrompt(feature: FeatureDTO, comment: ArtifactCommentDTO): string {

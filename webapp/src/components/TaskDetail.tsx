@@ -14,7 +14,7 @@ import { AgentStatusStrip } from './AgentStatusStrip';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
-import type { ArtifactCommentDTO } from '../lib/dto';
+import type { ArtifactCommentDTO, PlanAnnotationTargetDTO } from '../lib/dto';
 
 interface PipelineConcern {
   file: string;
@@ -167,6 +167,7 @@ interface AnnotationDraft {
   left: number;
   lineStart?: number;
   lineEnd?: number;
+  blockId?: string;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
@@ -497,6 +498,43 @@ export const TaskDetail = () => {
     }
   }, [featureId, repo, selectedConcern?.file, selectedPlanDoc?.file, questionPrompts, loadPipeline, showToast]);
 
+  // Anchor a fresh annotation to a rendered plan block. Reuses the existing annotation composer
+  // (annotationDraft → saveAnnotation → POST /annotations) but seeds it with a blockId and leaves
+  // line/quote unset — a block anchor, not a text-range anchor. The composer pops near the block.
+  const anchorBlockComment = React.useCallback((blockId: string) => {
+    const scroll = planScrollRef.current;
+    const article = planArticleRef.current;
+    const el = article?.querySelector(`[data-block-id="${CSS.escape(blockId)}"]`) as HTMLElement | null;
+    let top = 16;
+    let left = 12;
+    if (scroll && el) {
+      const rect = el.getBoundingClientRect();
+      const scrollRect = scroll.getBoundingClientRect();
+      const popoverWidth = 336;
+      left = clamp(rect.left - scrollRect.left + scroll.scrollLeft, 12, Math.max(12, scroll.clientWidth - popoverWidth - 12));
+      top = rect.bottom - scrollRect.top + scroll.scrollTop + 10;
+    }
+    window.getSelection()?.removeAllRanges();
+    setActiveAnnotationId(null);
+    setAnnotationText('');
+    setAnnotationDraft({ quote: '', top, left, blockId });
+  }, []);
+
+  // Affordance for anchoring a comment to a rendered block: Alt/Option-click a block (blocks already
+  // carry data-block-id, concerns 05-08) opens the composer for that blockId. Event delegation keeps
+  // this in TaskDetail (the block components are out of scope) and leaves plain clicks/selection alone;
+  // interactive controls inside a block (inputs, buttons, links) are skipped.
+  const handleBlockAnchorClick = React.useCallback((event: React.MouseEvent<HTMLElement>) => {
+    if (!event.altKey) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('input, textarea, button, a, select, [contenteditable="true"]')) return;
+    const block = target.closest('[data-block-id]') as HTMLElement | null;
+    const blockId = block?.getAttribute('data-block-id');
+    if (!blockId) return;
+    event.preventDefault();
+    anchorBlockComment(blockId);
+  }, [anchorBlockComment]);
+
   const planBlockContext = React.useMemo(() => ({
     featureId,
     repo,
@@ -505,7 +543,8 @@ export const TaskDetail = () => {
     decisions: selectedConcern?.decisions ?? [],
     comments: pipeline?.comments ?? [],
     onAnswer: answerQuestion,
-  }), [answerQuestion, featureId, pipeline?.comments, repo, selectedConcern?.decisions, selectedConcern?.touches, selectedPlanDoc?.path]);
+    onAnchorComment: anchorBlockComment,
+  }), [anchorBlockComment, answerQuestion, featureId, pipeline?.comments, repo, selectedConcern?.decisions, selectedConcern?.touches, selectedPlanDoc?.path]);
 
   const loadPlaneLinks = React.useCallback(async () => {
     if (!featureId) return;
@@ -680,7 +719,8 @@ export const TaskDetail = () => {
     const saved = commentFromApi(await apiJson<ArtifactCommentDTO>(`/api/features/${encodeURIComponent(featureId)}/annotations?repo=${encodeURIComponent(repo)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ planPath: selectedPlanDoc.path, body: annotationText.trim(), quote, lineStart: annotationDraft.lineStart, lineEnd: annotationDraft.lineEnd }),
+      // blockId carries a rendered-block anchor (concern 10); omitted for plain text-range annotations.
+      body: JSON.stringify({ planPath: selectedPlanDoc.path, body: annotationText.trim(), quote, lineStart: annotationDraft.lineStart, lineEnd: annotationDraft.lineEnd, blockId: annotationDraft.blockId }),
     }));
     setComments((prev) => mergeComments(prev, saved));
     setAnnotationText('');
@@ -997,16 +1037,18 @@ export const TaskDetail = () => {
             >
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div>
-                  <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">Annotate selection</div>
+                  <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{annotationDraft.blockId ? 'Comment on block' : 'Annotate selection'}</div>
                   <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
-                    {annotationDraft.lineStart ? `Line ${annotationDraft.lineStart}${annotationDraft.lineEnd && annotationDraft.lineEnd !== annotationDraft.lineStart ? `-${annotationDraft.lineEnd}` : ''}` : 'Selected markdown text'}
+                    {annotationDraft.blockId ? 'Anchored to this rendered block' : annotationDraft.lineStart ? `Line ${annotationDraft.lineStart}${annotationDraft.lineEnd && annotationDraft.lineEnd !== annotationDraft.lineStart ? `-${annotationDraft.lineEnd}` : ''}` : 'Selected markdown text'}
                   </div>
                 </div>
                 <button type="button" onClick={() => setAnnotationDraft(null)} className="flex min-h-10 w-10 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900 dark:hover:text-gray-200" aria-label="Close annotation popover">
                   <X className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
-              <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-blue-400 bg-blue-50 p-2 text-xs text-gray-700 dark:bg-blue-950/30 dark:text-gray-300">{annotationDraft.quote}</blockquote>
+              {annotationDraft.quote && (
+                <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-blue-400 bg-blue-50 p-2 text-xs text-gray-700 dark:bg-blue-950/30 dark:text-gray-300">{annotationDraft.quote}</blockquote>
+              )}
               <label htmlFor="plan-annotation-body" className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">What should change?</label>
               <textarea
                 ref={annotationTextareaRef}
@@ -1028,6 +1070,7 @@ export const TaskDetail = () => {
               content={selectedPlanDoc.content}
               onMouseUp={() => window.setTimeout(captureSelection, 0)}
               onKeyUp={captureSelection}
+              onClick={handleBlockAnchorClick}
             />
           </PlanBlockContext.Provider>
           <div className="mt-6 space-y-3 border-t border-gray-200 pt-4 dark:border-gray-800">
@@ -1045,6 +1088,7 @@ export const TaskDetail = () => {
                     <div className="flex min-w-0 items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                       <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: colors.border }} />
                       <span className="truncate">{annotation.author ?? 'User'} · {new Date(annotation.timestamp).toLocaleString()}{annotation.annotation?.lineStart ? ` · line ${annotation.annotation.lineStart}${annotation.annotation.lineEnd && annotation.annotation.lineEnd !== annotation.annotation.lineStart ? `-${annotation.annotation.lineEnd}` : ''}` : ''}</span>
+                      {(annotation.annotation as PlanAnnotationTargetDTO | undefined)?.blockId && <span className="flex-shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">block</span>}
                     </div>
                     {annotation.resolvedAt ? <span className="text-xs text-gray-400">Resolved</span> : <button onClick={() => void resolveAnnotation(annotation)} className="min-h-10 rounded px-2 text-xs text-gray-500 hover:bg-white focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900">Resolve</button>}
                   </div>
