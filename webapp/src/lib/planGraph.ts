@@ -37,9 +37,17 @@ export interface PlanGraphEdge {
   to: string; // dependent concern id
 }
 
+export interface PlanGraphIssue {
+  kind: 'cycle' | 'unresolved';
+  message: string;
+  refs: number[];
+  files: string[];
+}
+
 export interface PlanGraph {
   nodes: PlanGraphNode[];
   edges: PlanGraphEdge[];
+  issues: PlanGraphIssue[];
   cols: number;
   rows: number;
 }
@@ -102,7 +110,8 @@ function assignColumns(ids: string[], incoming: Map<string, Set<string>>): Map<s
 /**
  * Build the dependency DAG. Edges come from the overview dependency table first;
  * if a concern's row is missing there, its own `prerequisites` lines are scanned
- * for concern-number references as a fallback. Self/dangling refs are dropped.
+ * for concern-number references as a fallback. Invalid refs are reported instead
+ * of being silently dropped.
  */
 export function buildPlanGraph(concerns: GraphConcernInput[], overviewText = ""): PlanGraph {
   // nodes = concerns excluding the overview doc itself (00-overview)
@@ -115,6 +124,7 @@ export function buildPlanGraph(concerns: GraphConcernInput[], overviewText = "")
 
   const table = parseDependencyTable(overviewText);
   const incoming = new Map<string, Set<string>>();
+  const issues: PlanGraphIssue[] = [];
   const ensure = (id: string): Set<string> => {
     let s = incoming.get(id);
     if (!s) incoming.set(id, (s = new Set()));
@@ -125,13 +135,19 @@ export function buildPlanGraph(concerns: GraphConcernInput[], overviewText = "")
   for (const c of nodes) {
     const n = concernNum(c.file);
     const fromTable = n != null ? table.get(n) : undefined;
-    const blockerNums = fromTable && fromTable.length
+    const blockerNums = fromTable !== undefined
       ? fromTable
       : // fallback: scan this concern's prerequisites lines for concern numbers
         [...new Set(c.prerequisites.flatMap((p) => [...p.matchAll(/(?:concern\s*)?#?\b(\d{1,3})\b/gi)].map((m) => Number(m[1]))))];
     for (const bn of blockerNums) {
       const from = byNum.get(bn);
-      if (from && from !== c.file) ensure(c.file).add(from);
+      if (!from) {
+        issues.push({ kind: 'unresolved', message: `Concern ${n ?? c.file} depends on missing concern ${bn}.`, refs: [bn], files: [c.file] });
+      } else if (from === c.file) {
+        issues.push({ kind: 'cycle', message: `Concern ${n ?? c.file} depends on itself.`, refs: n == null ? [] : [n], files: [c.file] });
+      } else {
+        ensure(c.file).add(from);
+      }
     }
   }
 
@@ -158,7 +174,27 @@ export function buildPlanGraph(concerns: GraphConcernInput[], overviewText = "")
   const edges: PlanGraphEdge[] = [];
   for (const [to, froms] of incoming) for (const from of froms) edges.push({ from, to });
 
+  const byId = new Map(nodes.map((c) => [c.file, concernNum(c.file)] as const));
+  const temp = new Set<string>(), perm = new Set<string>(), stack: string[] = [];
+  const visit = (id: string) => {
+    if (perm.has(id)) return;
+    const at = stack.indexOf(id);
+    if (at >= 0) {
+      const cycle = stack.slice(at);
+      issues.push({ kind: 'cycle', message: `Dependency cycle: ${cycle.map((f) => byId.get(f) ?? f).join(' → ')} → ${byId.get(id) ?? id}.`, refs: cycle.map((f) => byId.get(f)).filter((n): n is number => n != null), files: cycle });
+      return;
+    }
+    if (temp.has(id)) return;
+    temp.add(id);
+    stack.push(id);
+    for (const pre of incoming.get(id) ?? []) visit(pre);
+    stack.pop();
+    temp.delete(id);
+    perm.add(id);
+  };
+  for (const id of ids) visit(id);
+
   const cols = layoutNodes.reduce((m, n) => Math.max(m, n.col + 1), 0);
   const rows = [...rowCounters.values()].reduce((m, r) => Math.max(m, r), 0);
-  return { nodes: layoutNodes, edges, cols, rows };
+  return { nodes: layoutNodes, edges, issues, cols, rows };
 }
