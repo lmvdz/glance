@@ -48,6 +48,7 @@ interface AutomationEvent {
   filed?: number;
   spawned?: number;
   durationMs?: number;
+  skipReason?: 'budget';
   detail?: string;
 }
 
@@ -449,13 +450,18 @@ export const AutomationPanel: React.FC = () => {
                               {e.spawned} spawned
                             </span>
                           )}
+                          {e.skipReason && (
+                            <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+                              skipped: {e.skipReason}
+                            </span>
+                          )}
                           {e.level === 'error' && (
                             <span className="rounded bg-red-100 dark:bg-red-900/40 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:text-red-300">error</span>
                           )}
                           {e.level === 'warn' && (
                             <span className="rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">warn</span>
                           )}
-                          {!e.llmCalls && !e.found && !e.filed && !e.spawned && e.level !== 'error' && e.level !== 'warn' && (
+                          {!e.llmCalls && !e.found && !e.filed && !e.spawned && !e.skipReason && e.level !== 'error' && e.level !== 'warn' && (
                             <span className="text-gray-400">—</span>
                           )}
                         </div>

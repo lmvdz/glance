@@ -47,9 +47,9 @@ function nextId(now: number): number {
 	return lastId;
 }
 
-/** A unit "did something" (or errored) — worth persisting. A pure heartbeat (all-zero, info) is not. */
-export function isMeaningful(e: Pick<AutomationEvent, "llmCalls" | "filed" | "found" | "spawned" | "level">): boolean {
-	return (e.llmCalls ?? 0) > 0 || (e.filed ?? 0) > 0 || (e.found ?? 0) > 0 || (e.spawned ?? 0) > 0 || e.level === "warn" || e.level === "error";
+/** A unit "did something", intentionally skipped work, or errored — worth persisting. A pure heartbeat is not. */
+export function isMeaningful(e: Pick<AutomationEvent, "llmCalls" | "filed" | "found" | "spawned" | "skipReason" | "level">): boolean {
+	return (e.llmCalls ?? 0) > 0 || (e.filed ?? 0) > 0 || (e.found ?? 0) > 0 || (e.spawned ?? 0) > 0 || e.skipReason !== undefined || e.level === "warn" || e.level === "error";
 }
 
 /** Per-loop aggregate over a window — the at-a-glance "what's running and what it cost" view. */

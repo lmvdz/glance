@@ -324,7 +324,7 @@ test("(#16) ScoutCallBudget: max<=0 ⇒ unlimited", () => {
 	for (let i = 0; i < 100; i++) expect(b.tryConsume()).toBe(true);
 });
 
-test("(#16) once the per-hour budget is hit, further scans skip the LLM call (record a warn skip)", async () => {
+test("(#16) once the per-hour budget is hit, further scans skip the LLM call (record a structured skip)", async () => {
 	process.env.OMP_SQUAD_SCOUT = "1";
 	process.env.OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR = "2";
 	const events: AutomationReport[] = [];
@@ -344,9 +344,10 @@ test("(#16) once the per-hour budget is hit, further scans skip the LLM call (re
 	await s.scan(BIG, { agent: "ag1" }); // call 2 — admitted
 	await s.scan(BIG, { agent: "ag1" }); // call 3 — OVER BUDGET ⇒ no LLM call
 	expect(extractCalls).toBe(2); // only two extractions ever ran
-	// Two cost events (llmCalls:1) + one skip event (llmCalls:0, warn).
-	const skips = events.filter((e) => e.llmCalls === 0 && e.level === "warn");
+	// Two cost events (llmCalls:1) + one structured skip event (llmCalls:0, info).
+	const skips = events.filter((e) => e.llmCalls === 0 && e.skipReason === "budget");
 	expect(skips.length).toBe(1);
+	expect(skips[0].level).toBe("info");
 	expect(skips[0].detail).toContain("budget reached");
 	expect(events.filter((e) => e.llmCalls === 1).length).toBe(2);
 

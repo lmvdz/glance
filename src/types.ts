@@ -755,6 +755,9 @@ export type SquadEvent =
  *  Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
 export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch";
 
+/** Structured reason an automation loop intentionally skipped a unit without doing work. */
+export type AutomationSkipReason = "budget";
+
 /**
  * One unit of background-loop work, the observability record the audit log never carried (it logs only
  * operator-initiated mutations). Scout emits one per reasoning scan (each = one LLM call); the other
@@ -782,9 +785,11 @@ export interface AutomationEvent {
 	deduped?: number;
 	/** Dispatch only: agents spawned this tick. */
 	spawned?: number;
+	/** Structured reason this unit intentionally skipped work; skip events persist even with zero work/cost. */
+	skipReason?: AutomationSkipReason;
 	/** Severity of the unit; "warn"/"error" force the event onto disk even with no work done. */
 	level?: "info" | "warn" | "error";
-	/** Optional human-readable detail (a filed title, an error message). */
+	/** Optional human-readable detail (a filed title, an error message, or skip explanation). */
 	detail?: string;
 }
 
