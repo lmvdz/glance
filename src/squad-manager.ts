@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
@@ -37,7 +37,7 @@ import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
 import { Opportunity } from "./opportunity.ts";
-import { hardenedGitSync } from "./git-harden.ts";
+import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
@@ -529,6 +529,7 @@ export class SquadManager extends EventEmitter {
 	private transcriptSeq = 0;
 	/** Last observed `plans/` signature for repos the feature board scans. */
 	private planFeatureSignature = "";
+	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string }; tick: number }>();
 
 	constructor(opts: SquadManagerOptions = {}) {
 		super();
@@ -1898,26 +1899,56 @@ export class SquadManager extends EventEmitter {
 	 * Serialized against lands via withRepoLandLock: the gate reads the same main tree a land mutates
 	 * (merge / reset --hard), so running it concurrently makes it `(fail)` against a half-merged main and
 	 * file a false `regression:` bug (OMPSQ-168). The lock makes the gate and lands mutually exclusive.
-	 * ponytail: runs the full gate per observer tick; the Observer's own overlap guard prevents pile-up,
-	 * but a long suite makes ticks costly — throttle (run every Nth tick) if it ever bites.
+	 * Change-driven: cache by live working-tree fingerprint (git status + bun.lock), force-run every
+	 * 10th tick, and fail open to running the real gate if the fingerprint cannot be sampled.
 	 */
-	protected runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+	protected runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }> {
 		return withRepoLandLock(repo, async () => {
 			try {
-				const command = await detectVerify(repo);
-				if (!command) return { ok: true };
-				const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-				const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-				if (code === 0) return { ok: true };
-				// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
-				const text = `${out}\n${err}`;
-				const failLine = text.split("\n").find((l) => l.includes("(fail)"));
-				const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
-				return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
+				const fp = await this.mainGateFingerprint(repo);
+				const cached = fp ? this.mainGateCache.get(repo) : undefined;
+				const tick = (cached?.tick ?? 0) + 1;
+				if (fp && cached?.fp === fp && tick % 10 !== 0) {
+					this.mainGateCache.set(repo, { ...cached, tick });
+					return { ...cached.result, skipped: true };
+				}
+
+				const result = await this.runMainGateUncached(repo);
+				if (fp) this.mainGateCache.set(repo, { fp, result, tick });
+				return result;
 			} catch (e) {
 				return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
 			}
 		});
+	}
+
+	private async mainGateFingerprint(repo: string): Promise<string | undefined> {
+		const status = await hardenedGit(["status", "--porcelain", "--untracked-files=all"], { cwd: repo });
+		if (status.code !== 0) return undefined;
+		let lock = "";
+		try {
+			lock = await fs.readFile(path.join(repo, "bun.lock"), "utf8");
+		} catch (e) {
+			if ((e as { code?: string }).code !== "ENOENT") return undefined;
+		}
+		return createHash("sha256").update(status.stdout).update("\0").update(lock).digest("hex");
+	}
+
+	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+		try {
+			const command = await detectVerify(repo);
+			if (!command) return { ok: true };
+			const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			if (code === 0) return { ok: true };
+			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
+			const text = `${out}\n${err}`;
+			const failLine = text.split("\n").find((l) => l.includes("(fail)"));
+			const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
+			return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
+		} catch (e) {
+			return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
+		}
 	}
 
 

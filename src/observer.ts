@@ -64,7 +64,7 @@ export interface ObserverDeps {
 	/** Reap a landed-survivor agent (the only autofix; never touches main/code). */
 	removeAgent: (id: string) => Promise<void>;
 	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
-	runGate: () => Promise<{ ok: boolean; firstFailure?: string }>;
+	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }>;
 	/** Commits on the agent's branch not in main: 0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown. */
 	gitAheadOfMain: (agent: AgentDTO) => number;
 	/** Untracked file paths in the main checkout. */
@@ -415,8 +415,9 @@ export class Observer {
 	 * ponytail: one extra gate run, and only on the rare red path; the green (common) path is unchanged.
 	 */
 	private async confirmedGate(): Promise<{ ok: boolean; firstFailure?: string }> {
-		const safe = () => this.deps.runGate().catch(() => ({ ok: true }) as { ok: boolean; firstFailure?: string });
+		const safe = () => this.deps.runGate().catch(() => ({ ok: true }) as { ok: boolean; firstFailure?: string; skipped?: boolean });
 		const first = await safe();
+		if (first.skipped) this.deps.record?.({ detail: "gate inputs unchanged" });
 		if (first.ok) return first;
 		const confirm = await safe();
 		if (!confirm.ok) return confirm; // reproduced — a real regression, named by the confirming run
