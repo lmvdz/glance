@@ -309,6 +309,22 @@ export interface CapabilitySnapshotDTO {
   installs: CapabilityInstallDTO[];
 }
 
+/** One operator-/loop-initiated fleet mutation from the append-only audit log (GET /api/audit). */
+export interface AuditEntry {
+  /** strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */
+  id: number;
+  /** epoch millis the action resolved. */
+  at: number;
+  /** who did it — "local" (the auto-loops), "web:admin", etc. */
+  actor: string;
+  /** land | create | answer | remove | kill | interrupt | set-model | catastrophe | prompt | plan-answer | … */
+  action: string;
+  /** the work unit acted on (an agent id, usually slug+hash); null for fleet-wide actions. */
+  target?: string | null;
+  outcome?: "ok" | "error";
+  detail?: string;
+}
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }

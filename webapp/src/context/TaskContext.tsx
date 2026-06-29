@@ -3,7 +3,7 @@ import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
 import { useSquad } from '../hooks/useSquad';
-import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
+import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
 export interface ToastInfo {
   id: string;
@@ -47,6 +47,8 @@ interface TaskContextType {
   agents: AgentDTO[];
   /** Raw live feature/plan list — the other half of the active-work join (agents being the first). */
   features: FeatureDTO[];
+  /** Recent fleet audit trail (newest-first) — the narrative source for "what the fleet just did". */
+  audit: AuditEntry[];
   transcripts: Map<string, TranscriptEntry[]>;
   capabilities: CapabilitySnapshotDTO;
   publicCatalog: PublicCapabilityCatalogDTO[];
@@ -107,11 +109,25 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [view, setView] = useState<AppView>('attention');
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
     const nextSelectedTaskId = reconcileSelectedTaskId(selectedTaskId, tasks);
     if (nextSelectedTaskId !== selectedTaskId) setSelectedTaskId(nextSelectedTaskId);
   }, [tasks, selectedTaskId]);
+
+  // The fleet narrative isn't on the WS snapshot — poll the append-only audit log. Shared here so
+  // the Active Work pane and the assistant both narrate "what just happened" from one source.
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      apiJson<AuditEntry[] | { entries?: AuditEntry[] }>('/api/audit?limit=80')
+        .then((r) => { if (alive) setAudit(Array.isArray(r) ? r : r?.entries ?? []); })
+        .catch(() => { /* daemon offline / not yet up — keep the last good list */ });
+    void load();
+    const interval = setInterval(load, 15_000);
+    return () => { alive = false; clearInterval(interval); };
+  }, []);
 
   const selectedTask = tasks.find((task) => task.id === selectedTaskId);
   const currentProject = selectedTask?.properties.project ?? Object.values(projects)[0]?.[0] ?? null;
@@ -251,7 +267,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

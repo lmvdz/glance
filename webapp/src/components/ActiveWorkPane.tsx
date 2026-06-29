@@ -19,11 +19,12 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Radar, RefreshCw, FolderGit2, GitBranch, MessageSquare, Send, GitMerge, RotateCw, UserPlus, ExternalLink, Loader2, X, type LucideIcon } from 'lucide-react';
+import { Radar, RefreshCw, FolderGit2, GitBranch, MessageSquare, Send, GitMerge, RotateCw, UserPlus, ExternalLink, Loader2, X, History, AlertTriangle, type LucideIcon } from 'lucide-react';
 import { apiJson, jsonInit } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
 import { answerCommand, restartCommand } from '../lib/agent-control';
 import { activeWork, activeWorkAction, ACTIVE_WORK_STATUS_LABEL, type ActiveWorkItem, type ActiveWorkStatus, type ActiveWorkAction, type ActiveWorkActionKind, type ActiveWorkAgentLine } from '../lib/insights';
+import { fleetActivityLines, fleetActivityRollup, type FleetActivityLine, type FleetActivityKind } from '../lib/fleetActivity';
 import { PanelShell, VerdictBadge, SectionCard, StatTile, relativeAge, toneClasses, type Tone } from './ui';
 
 const STATUS_TONE: Record<ActiveWorkStatus, Tone> = {
@@ -99,6 +100,32 @@ function RowAction({ action, busy, onClick }: { action: ActiveWorkAction; busy: 
       {busy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <Icon className="h-3 w-3" aria-hidden="true" />}
       {action.label}
     </button>
+  );
+}
+
+const ACTIVITY_TONE: Record<FleetActivityKind, Tone> = { good: 'success', bad: 'critical', neutral: 'neutral' };
+
+/** One line of the fleet narrative — "who did what to which unit, and how it went". */
+function ActivityLineRow({ line }: { line: FleetActivityLine }) {
+  const t = toneClasses(ACTIVITY_TONE[line.kind]);
+  const cat = line.action === 'catastrophe';
+  const bad = cat || line.outcome === 'error';
+  return (
+    <div className="flex items-start gap-2.5 px-4 py-2">
+      <span className={`mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full ${t.dot}`} aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-xs">
+          {cat && <AlertTriangle className="h-3 w-3 flex-shrink-0 text-red-500" aria-hidden="true" />}
+          <span className="flex-shrink-0 font-medium text-gray-700 dark:text-gray-200">{line.actor}</span>
+          <span className="flex-shrink-0 text-gray-500 dark:text-gray-400">{line.verb}</span>
+          <span className="truncate font-mono text-[11px] text-gray-600 dark:text-gray-300">{line.subject}</span>
+          <span className="ml-auto flex-shrink-0 text-[11px] text-gray-400">{relativeAge(line.at)}</span>
+        </div>
+        {line.detail && (
+          <div className={`mt-0.5 truncate text-[11px] ${bad ? 'text-red-500 dark:text-red-400' : 'text-gray-400'}`}>{line.detail}</div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -276,9 +303,11 @@ function AnswerComposer({
 }
 
 export const ActiveWorkPane: React.FC = () => {
-  const { agents, features, tasks, connected, reload, selectTask, setView, subscribeConsole, setIsChatOpen, sendConsoleCommand, showToast } = useTaskContext();
+  const { agents, features, audit, tasks, connected, reload, selectTask, setView, subscribeConsole, setIsChatOpen, sendConsoleCommand, showToast } = useTaskContext();
 
   const items = useMemo(() => activeWork(agents, features), [agents, features]);
+  const activityRollup = useMemo(() => fleetActivityRollup(audit), [audit]);
+  const activityLines = useMemo(() => fleetActivityLines(audit, agents, 14), [audit, agents]);
 
   const [answeringKey, setAnsweringKey] = useState<string | null>(null);
   const [answerText, setAnswerText] = useState('');
@@ -480,6 +509,32 @@ export const ActiveWorkPane: React.FC = () => {
             );
           })}
         </>
+      )}
+
+      {/* The recent-past complement: what the fleet actually did while you were away. */}
+      {activityLines.length > 0 && (
+        <SectionCard
+          title={
+            <span className="flex items-center gap-1.5">
+              <History className="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+              Recent activity
+              {activityRollup.catastrophes > 0 && (
+                <span className="ml-1 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:bg-red-950/50 dark:text-red-400">
+                  {activityRollup.catastrophes} catastrophe{activityRollup.catastrophes === 1 ? '' : 's'}
+                </span>
+              )}
+            </span>
+          }
+          right={
+            <span className={activityRollup.verdict === 'critical' ? 'text-red-500 dark:text-red-400' : activityRollup.verdict === 'warn' ? 'text-amber-500 dark:text-amber-400' : ''}>
+              {activityRollup.headline}
+            </span>
+          }
+        >
+          <div className="divide-y divide-gray-100 dark:divide-gray-800">
+            {activityLines.map((l) => <ActivityLineRow key={l.id} line={l} />)}
+          </div>
+        </SectionCard>
       )}
     </PanelShell>
   );

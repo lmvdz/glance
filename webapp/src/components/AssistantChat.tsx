@@ -7,6 +7,7 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useTaskContext } from '../context/TaskContext';
 import { apiJson, jsonInit } from '../lib/api';
 import { activeWork, activeWorkDigest } from '../lib/insights';
+import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../lib/fleetActivity';
 import type { AgentDTO, TodoPhaseDTO, TodoStatus, TranscriptEntry } from '../lib/dto';
 import type { Task } from '../types';
 
@@ -592,7 +593,7 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
 
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
-  const { agents, features, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole } = useTaskContext();
+  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole } = useTaskContext();
   const [initialChatState] = useState(readInitialChatState);
   const [sessions, setSessions] = useState<Session[]>(initialChatState.sessions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialChatState.activeSessionId);
@@ -780,12 +781,14 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
           metadata: { ...session.metadata, agentId: nextAgentId, status: 'active', stage: 'Chat' },
         } : session));
       }
-      // Always hand the assistant the same live join the Active Work pane renders, so it
-      // can answer "what's being worked on?" from one source of truth — plus the selected
-      // feature's detail when one is open. Reference context, not an instruction to act.
+      // Always hand the assistant the same live join the Active Work pane renders, so it can
+      // answer "what's being worked on?" (present) AND "what happened while I was away?" (recent
+      // past, from the audit log) from one source of truth — plus the selected feature's detail
+      // when one is open. Reference context, not an instruction to act.
       const fleetSnapshot = activeWorkDigest(activeWork(agents, features));
+      const activitySnapshot = fleetActivityDigest(fleetActivityRollup(audit), fleetActivityLines(audit, agents));
       const taskContext = selectedTask ? `\n\nCurrent feature context:\n${selectedTask.id} — ${selectedTask.title}\n${selectedTask.description}` : '';
-      const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}${taskContext}`;
+      const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}\n\n${activitySnapshot}${taskContext}`;
       sendConsoleCommand({ type: 'prompt', id: nextAgentId, message, clientTurnId });
     } catch (error: any) {
       updateSessionMessages(activeSessionId, [...newMessages, { role: 'model', text: `Error: ${error.message || 'Could not reach omp-squad chat'}`, timestamp: Date.now() }]);
