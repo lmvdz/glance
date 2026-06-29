@@ -1,5 +1,5 @@
 # --wf-* CSS token layer and scoped helper classes
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -82,3 +82,7 @@ None. Other concerns (04, 08) consume these tokens/classes via `var(--wf-*)` and
   `theme()`/tree-shaking breakage).
 - Manual: a `<div class="wf-surface not-prose"><div class="wf-card">x</div></div>`
   shows a bordered card whose colors invert when `.dark` is toggled on `<html>`.
+
+## Resolution
+
+Landed in 5d38ece (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

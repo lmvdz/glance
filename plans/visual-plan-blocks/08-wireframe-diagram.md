@@ -1,5 +1,5 @@
 # WireframeBlock + diagram skin + rough.js overlay
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -75,3 +75,7 @@ Imports `sanitize` (concern 03) and `BlockProps` (concern 04). First importer of
   stripped (sanitizer working).
 - `params.kind=diagram` (```diagram```) renders with the diagram skin.
 - No crash if the overlay can't draw (graceful CSS-border fallback).
+
+## Resolution
+
+Landed in e3a6755 (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

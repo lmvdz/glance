@@ -1,5 +1,5 @@
 # AnnotatedCodeBlock
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -45,3 +45,7 @@ None. Imports `BlockProps` from `../PlanBlocks`.
   stripped from the code, and each note shown against its line range.
 - Referenced lines are visually highlighted; notes are legible in light and dark.
 - `data-block-id` present.
+
+## Resolution
+
+Landed in 1d05feb (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

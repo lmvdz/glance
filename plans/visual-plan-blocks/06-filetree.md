@@ -1,5 +1,5 @@
 # FileTreeBlock
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -44,3 +44,7 @@ Consumes `PlanBlockContext.touches` populated by concern 04. Imports `BlockProps
   derived from those paths (test against the concern 01 fixture or a concern that
   has TOUCHES).
 - Badges use `--wf-*` colors and invert under `.dark`.
+
+## Resolution
+
+Landed in c4f80e4 (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

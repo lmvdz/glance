@@ -66,3 +66,9 @@ no external service. See `DESIGN.md` for rationale and red-team resolutions.
 - Build/verify: `cd webapp && bun run build` (or the project's build script) and
   `bun test` from repo root (ensure `node_modules/.bin` is on PATH per the known
   test-PATH gotcha).
+
+## Completion
+
+**11/11 concerns closed (2026-06-29).** Full visual-plan block vocabulary landed in the webapp: wireframe/diagram, file-tree, Open-Questions form (answers→Decisions), annotated-code, callouts, before/after columns, and block-anchored comments. Verified: webapp build + backend `tsc` green; full suite 753 pass (1 pre-existing unrelated failure, OMPSQ-308). Commits ae01192, 5d38ece, c3a4f31, 3ce7b0b, 154cb7d, c4f80e4, 1d05feb, e3a6755, 85e31a3, 72cd33a, 9ef3142.
+
+Follow-ups (not blocking): frontend block-parser/sanitizer unit tests (deferred — DOM/cross-package fragility under bun:test); apply plans/visual-plan-blocks/SKILL-GUIDANCE.md to the /plan + squad skills so agents emit blocks.

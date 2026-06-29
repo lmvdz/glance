@@ -1,5 +1,5 @@
 # Authoring spec, example fixture, and skill-guidance deliverable
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: research
@@ -70,3 +70,7 @@ None in-repo. The SKILL-GUIDANCE.md is consumed by a human to update
   code-block-rule relaxation.
 - The fixture is internally consistent with the spec (a human read confirms an
   agent could author it from the spec alone).
+
+## Resolution
+
+Landed in ae01192 (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

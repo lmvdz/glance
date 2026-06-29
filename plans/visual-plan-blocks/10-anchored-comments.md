@@ -1,5 +1,5 @@
 # Block-anchored comments + Plane over-sync fix
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -72,3 +72,7 @@ this in the commit message; it is the intended fix.
   (verify the gate; e.g. unit-test `addComment` skips Plane for that kind, or
   confirm no `addPlaneIssueComment` call path for annotations).
 - Existing send-to-agent on an annotation still functions.
+
+## Resolution
+
+Landed in 72cd33a (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

@@ -1,5 +1,5 @@
 # Tests
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -53,3 +53,7 @@ framework-free `webapp/src/lib/*.ts` modules so they're importable by `bun:test`
   new `plan-blocks.test.ts` and the extended `features.test.ts`.
 - `cd webapp && bun run build` still succeeds.
 - No reduction in existing passing tests.
+
+## Resolution
+
+Landed in 9ef3142 (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

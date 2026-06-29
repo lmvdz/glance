@@ -1,5 +1,5 @@
 # HTML sanitizer utility + add dependencies
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -79,3 +79,7 @@ touch `package.json` and conflict). `sanitize()` is imported by concern 08
 - Quick unit sanity (also covered in 11): `sanitize('<div style="color:var(--wf-ink);background:url(http://x)">a</div>')`
   keeps `color:var(--wf-ink)`, drops the `url(...)`; `sanitize('<img src=x onerror=alert(1)>')`
   drops `onerror`; `sanitize('<style>*{}</style>x')` drops the `<style>`.
+
+## Resolution
+
+Landed in c3a4f31 (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

@@ -1,5 +1,5 @@
 # Block registry + PlanMarkdown pre-override refactor + block stubs
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -117,3 +117,7 @@ alongside) by their owning concern, so there is no shared-file contention.
 - `grep -q 'BLOCK_REGISTRY' webapp/src/components/PlanBlocks.tsx` and all six stub
   files + `blocks/index.ts` exist.
 - No remaining reference to the removed `inline` prop.
+
+## Resolution
+
+Landed in 3ce7b0b (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

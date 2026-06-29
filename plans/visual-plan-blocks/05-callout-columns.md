@@ -1,5 +1,5 @@
 # CalloutBlock + ColumnsBlock
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -49,3 +49,7 @@ None. Imports `BlockProps` from `../PlanBlocks`.
   `---`, stacking on narrow width.
 - Both outer elements have `data-block-id`.
 - Colors invert correctly under `.dark`.
+
+## Resolution
+
+Landed in 154cb7d (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).

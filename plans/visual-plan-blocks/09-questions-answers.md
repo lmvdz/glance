@@ -1,5 +1,5 @@
 # QuestionsBlock + answers→Decisions API
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -73,3 +73,7 @@ Adds `appendConcernDecision` to `features.ts` (pure, unit-testable). New
   submitted answer appears as a resolved decision after refresh.
 - A worktree clone of the repo shows the answer in the concern markdown (proves
   git-visibility — the whole point).
+
+## Resolution
+
+Landed in 85e31a3 (2026-06-29). Verified: webapp `bun run build` + backend `tsc --noEmit` green; full suite 753 pass (1 pre-existing unrelated orchestrator failure, OMPSQ-308).
