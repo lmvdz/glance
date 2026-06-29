@@ -7,7 +7,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildFeatures, featureLandStatus, featureReadiness, listPlanDirs } from "../src/features.ts";
+import { appendConcernDecision, appendDecisionLine, buildFeatures, featureLandStatus, featureReadiness, listPlanDirs, parsePlanConcerns } from "../src/features.ts";
 import type { AgentDTO, FeatureDTO, FeatureWorktreeStatus } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -239,4 +239,48 @@ test("buildFeatures does not turn verify commands into acceptance criteria", asy
 	expect(criteria).toContain("Operators see a human-readable success condition");
 	expect(criteria).not.toContain("`bun test tests/features.test.ts`");
 	expect(feature.contextBundle?.criteria).toBe("API work: Operators see a human-readable success condition");
+});
+
+// ── visual-plan concern 09/11: Open-Questions answers append to the concern Decisions log ──
+
+test("appendDecisionLine creates a Decisions section when absent", () => {
+	const out = appendDecisionLine("# Concern\nSTATUS: open\n", "Q: Strategy? — A: JWT");
+	expect(out).toContain("## Decisions");
+	expect(out).toContain("- Q: Strategy? — A: JWT");
+});
+
+test("appendDecisionLine appends into an existing Decisions section and is idempotent", () => {
+	const base = "# Concern\nSTATUS: open\n\n## Decisions\n\n- First decision\n";
+	const once = appendDecisionLine(base, "Q: Strategy? — A: JWT");
+	expect(once).toContain("- First decision");
+	expect(once).toContain("- Q: Strategy? — A: JWT");
+	const twice = appendDecisionLine(once, "Q: Strategy? — A: JWT");
+	expect(twice).toBe(once); // same bullet not duplicated
+	expect(twice.match(/- Q: Strategy\? — A: JWT/g)?.length).toBe(1);
+});
+
+test("appendDecisionLine recognizes 'Decision Log' heading variant", () => {
+	const dl = appendDecisionLine("# C\nSTATUS: open\n\n## Decision Log\n\n- a\n", "b");
+	expect(dl).toContain("## Decision Log");
+	expect(dl).not.toContain("## Decisions"); // appended into the existing section, no new one
+	expect(dl).toContain("- b");
+});
+
+test("appendConcernDecision round-trips through parsePlanConcerns as a decision", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "dec-"));
+	tmps.push(repo);
+	await fs.mkdir(path.join(repo, "plans", "x"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "x", "01-c.md"), "# C\nSTATUS: open\n\n## Approach\n\ndo it\n");
+	const updated = await appendConcernDecision(repo, "plans/x/01-c.md", "Q: Gate? — A: warn-only");
+	expect(updated?.decisions).toContain("Q: Gate? — A: warn-only");
+	const reparsed = (await parsePlanConcerns(repo, "plans/x")).find((c) => c.file === "01-c.md");
+	expect(reparsed?.decisions).toContain("Q: Gate? — A: warn-only"); // persisted to disk
+});
+
+test("appendConcernDecision returns null for a non-concern file", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "dec-"));
+	tmps.push(repo);
+	await fs.mkdir(path.join(repo, "plans", "x"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "x", "00-overview.md"), "# Overview\n");
+	expect(await appendConcernDecision(repo, "plans/x/00-overview.md", "noop")).toBeNull();
 });
