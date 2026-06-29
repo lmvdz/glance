@@ -23,7 +23,7 @@ tournament.
 \* 02 is a deliberate YAGNI deferral — not authored until 01 is landing. It needs 01's selection to exist
 first, and the operator may never want it. Don't pre-write a blocked, low-priority concern.
 
-## Dependencies
+## Dependency graph
 
 ```mermaid
 graph TD

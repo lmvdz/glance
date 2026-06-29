@@ -41,7 +41,7 @@ import { hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
-import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
+import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict } from "./ownership.ts";
@@ -1459,14 +1459,20 @@ export class SquadManager extends EventEmitter {
 		const pf = this.featureStore.get(id);
 		let idents = pf?.plane?.issueIdentifiers ?? [];
 		let repo = pf?.repo;
+		let planDir = pf?.origin?.planDir;
 		if (!idents.length) {
 			// derived feature (identifiers live in plan docs) — fall back to the full build
 			const f = (await this.features()).find((x) => x.id === id);
 			idents = f?.issueIdentifiers ?? [];
 			repo = f?.repo ?? repo;
+			planDir = f?.planDir ?? planDir;
 		}
 		const tickets = idents.length && repo ? await featureTickets(repo, idents) : [];
-		return { tickets, moduleUrl: pf?.plane?.moduleUrl };
+		// Prefer the daemon's own module link; else the module URL /plan-to-plane backfilled into the plan dir
+		// (skill-filed modules are created via MCP, so the daemon never set pf.plane.moduleUrl itself).
+		let moduleUrl = pf?.plane?.moduleUrl;
+		if (!moduleUrl && repo && planDir) moduleUrl = await planeModuleUrlIn(path.join(repo, planDir));
+		return { tickets, moduleUrl };
 	}
 
 	/** Create a Plane module for a feature and group its issues under it; persists the link. */

@@ -239,6 +239,32 @@ async function planeIdsIn(dirAbs: string): Promise<string[]> {
 	return [...ids];
 }
 
+const PLANE_MODULE_RE = /https?:\/\/[^\s)\]]+\/modules\/[0-9a-fA-F-]{8,}\/?/;
+
+/**
+ * Plane module URL backfilled into a plan dir by /plan-to-plane (under "## Plane tracking").
+ * Lets the webui show "Module linked" for plans filed via the MCP skill, whose module the daemon
+ * never created itself (so `pf.plane.moduleUrl` is unset). Overview preferred; else any markdown.
+ */
+export async function planeModuleUrlIn(dirAbs: string): Promise<string | undefined> {
+	const ov = await findOverviewFile(dirAbs);
+	let files: string[];
+	if (ov) files = [ov];
+	else {
+		try {
+			files = (await fs.readdir(dirAbs)).filter((f) => f.endsWith(".md"));
+		} catch {
+			return undefined;
+		}
+	}
+	for (const f of files) {
+		const text = await fs.readFile(path.join(dirAbs, f), "utf8").catch(() => "");
+		const m = PLANE_MODULE_RE.exec(text);
+		if (m) return m[0].replace(/\/$/, "");
+	}
+	return undefined;
+}
+
 /** One markdown doc inside a plan dir. */
 export interface PlanDocument {
 	file: string;

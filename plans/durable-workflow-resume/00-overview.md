@@ -24,7 +24,7 @@ The resumable `EngineCheckpoint` is persisted on every node boundary (`engine.ts
 | 01 | Sound cold resume + two-phase checkpoint | architectural | **yes** (no dep) | `src/workflow/engine.ts`, `src/workflow/executor.ts`, `src/workflow-driver.ts`, `src/workflow/types.ts`, `src/squad-manager.ts` |
 | 02 | Checkpoint-authoritative, loss-free adoption | architectural | no — BLOCKED_BY 01 | `src/squad-manager.ts` |
 
-## Dependencies
+## Dependency graph
 
 ```mermaid
 graph TD

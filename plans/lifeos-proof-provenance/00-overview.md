@@ -32,7 +32,7 @@ REPOS: omp-squad
 | 4 | 04 | Candidate plan workflow builds on proven source/provenance surfaces. |
 | 5 | 05 | Docs and verification after behavior stabilizes. |
 
-## Dependencies
+## Dependency graph
 
 | Concern | Blocked by | 30s check |
 |---|---|---|
