@@ -1,21 +1,6 @@
 export type AgentStatus = "starting" | "working" | "idle" | "input" | "error" | "stopped";
 export type FeatureStage = "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
-export type FeatureReadinessState = "no-candidate" | "needs-proof" | "proof-failed" | "proof-stale" | "blocked-input" | "diverged" | "ready" | "landed/done";
 export type WorktreeProofState = "none" | "failed" | "stale" | "fresh";
-
-export interface WorktreeProofSummaryDTO {
-  state: WorktreeProofState;
-  ranAt?: number;
-  artifacts: number;
-}
-
-
-export interface FeatureReadinessDTO {
-  ready: boolean;
-  state: FeatureReadinessState;
-  blockers: string[];
-  nextAction: string;
-}
 
 
 export interface PendingRequest {
@@ -139,7 +124,6 @@ export interface FeatureDTO {
   readiness: FeatureReadinessDTO;
   contextBundle?: FeatureContextBundleDTO;
   proof?: FeatureProofAggregateDTO;
-  readiness?: FeatureReadinessDTO;
   planRevisionCandidates?: PlanRevisionCandidateDTO[];
 }
 

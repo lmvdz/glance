@@ -51,7 +51,7 @@ test("featureReadiness distinguishes missing, failed, stale, fresh, and blocking
 	expect(readinessOf([worktree("ahead", { state: "failed", artifacts: 0 })])).toMatchObject({ ready: false, state: "proof-failed", blockers: ["proof-failed"] });
 	expect(readinessOf([worktree("ahead", { state: "stale", artifacts: 0 })])).toMatchObject({ ready: false, state: "proof-stale", blockers: ["proof-stale"] });
 	expect(readinessOf([worktree("ahead", { state: "fresh", artifacts: 0 })])).toMatchObject({ ready: true, state: "ready", blockers: [] });
-	expect(readinessOf([worktree("uncommitted", { state: "fresh", artifacts: 0 })])).toMatchObject({ ready: false, state: "needs-proof", blockers: ["uncommitted"] });
+	expect(readinessOf([worktree("uncommitted", { state: "fresh", artifacts: 0 })])).toMatchObject({ ready: false, state: "uncommitted", blockers: ["uncommitted"] });
 	expect(readinessOf([worktree("diverged", { state: "fresh", artifacts: 0 })])).toMatchObject({ ready: false, state: "diverged", blockers: ["diverged"] });
 	expect(readinessOf([worktree("ahead", { state: "fresh", artifacts: 0 })], { blocked: true })).toMatchObject({ ready: false, state: "blocked-input", blockers: ["blocked-input"] });
 });

@@ -72,7 +72,7 @@ test("feature pipeline returns inline readiness read model", async () => {
 	expect(created.ok).toBe(true);
 	const features = await fetch(`${url}/api/features?repo=${encodeURIComponent(repo)}`).then((r) => r.json());
 	const feature = features.find((f: { title?: string }) => f.title === "Readiness");
-	expect(feature.readiness).toMatchObject({ ready: false, state: "no-candidate", blockers: [] });
+	expect(feature.readiness).toMatchObject({ ready: false, state: "no-candidate", blockers: ["no-candidate"] });
 	const pipeline = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/pipeline?repo=${encodeURIComponent(repo)}`).then((r) => r.json());
 	expect(pipeline.readiness).toEqual(feature.readiness);
 	expect(pipeline.feature.readiness).toEqual(feature.readiness);
