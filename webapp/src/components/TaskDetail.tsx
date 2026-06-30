@@ -12,6 +12,7 @@ import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, re
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
 import { AgentStatusStrip } from './AgentStatusStrip';
+import { TranscriptTimeline } from './AssistantChat';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
@@ -326,7 +327,7 @@ function promptsFromContent(content: string): Map<string, string> {
 }
 
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand } = useTaskContext();
+  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
@@ -351,6 +352,9 @@ export const TaskDetail = () => {
   // Plan flow "focus" mode: blow the dependency diagram out to a full-pane view (it's far wider
   // than the reading column it previews in).
   const [flowFocus, setFlowFocus] = React.useState(false);
+  const [transcriptOpenIds, setTranscriptOpenIds] = React.useState<Set<string>>(() => new Set());
+  const [transcriptDetailOpenIds, setTranscriptDetailOpenIds] = React.useState<Set<string>>(() => new Set());
+  const [now, setNow] = React.useState(Date.now);
   const splitContainerRef = React.useRef<HTMLDivElement | null>(null);
   const planArticleRef = React.useRef<HTMLElement | null>(null);
   const planScrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -415,7 +419,7 @@ export const TaskDetail = () => {
   // Answer (pending input) state
   const [answerValues, setAnswerValues] = React.useState<Record<string, string>>({});
 
-  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setFlowFocus(false); }, [selectedTaskId]);
+  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setFlowFocus(false); setTranscriptOpenIds(new Set()); setTranscriptDetailOpenIds(new Set()); }, [selectedTaskId]);
   // Esc leaves plan-flow focus mode.
   React.useEffect(() => {
     if (!flowFocus) return;
@@ -423,6 +427,33 @@ export const TaskDetail = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [flowFocus]);
+  // Tick the elapsed-time display every second while any agent is working.
+  React.useEffect(() => {
+    if (!activeAgents.some((a) => a.status === 'working' || a.status === 'starting')) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [activeAgents]);
+  // Auto-subscribe the first working agent so transcript entries arrive via WS.
+  React.useEffect(() => {
+    const working = activeAgents.find((a) => a.status === 'working' || a.status === 'starting');
+    if (working) subscribeConsole(working.id);
+  }, [activeAgents, subscribeConsole]);
+  const toggleTranscript = React.useCallback((agentId: string) => {
+    setTranscriptOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) { next.delete(agentId); return next; }
+      subscribeConsole(agentId);
+      next.add(agentId);
+      return next;
+    });
+  }, [subscribeConsole]);
+  const toggleTranscriptDetail = React.useCallback((agentId: string) => {
+    setTranscriptDetailOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) next.delete(agentId); else next.add(agentId);
+      return next;
+    });
+  }, []);
   const handleStopAgents = () => {
     if (!stopTargets.length) return;
     if (!stopConfirm) {
@@ -1390,6 +1421,39 @@ export const TaskDetail = () => {
                               )}
                             </div>
                           ))}
+                          {/* Live transcript panel */}
+                          {(() => {
+                            const agentTranscript = transcripts.get(agent.id) ?? [];
+                            const isOpen = transcriptOpenIds.has(agent.id);
+                            const isDetailOpen = transcriptDetailOpenIds.has(agent.id);
+                            if (!isWorking && agentTranscript.length === 0) return null;
+                            return (
+                              <div className="border-t border-gray-100 dark:border-gray-800">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleTranscript(agent.id)}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/50 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500"
+                                >
+                                  <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                                  {isWorking && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500 animate-pulse" aria-hidden />}
+                                  <span>Live transcript</span>
+                                  {agentTranscript.length > 0 && <span className="ml-auto rounded-full bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">{agentTranscript.length}</span>}
+                                </button>
+                                {isOpen && (
+                                  <div className="max-h-[28rem] overflow-y-auto border-t border-gray-100 px-3 pb-3 pt-2 dark:border-gray-800 scrollbar-custom">
+                                    <TranscriptTimeline
+                                      entries={agentTranscript}
+                                      messages={[]}
+                                      agent={agent}
+                                      now={now}
+                                      expanded={isDetailOpen}
+                                      onToggle={() => toggleTranscriptDetail(agent.id)}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })}
