@@ -144,6 +144,32 @@ function truncate(s: string, n: number): string {
 	return s.length <= n ? s : `${s.slice(0, n)}…`;
 }
 
+const FAILURE_DURATION_SUFFIX = /\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/;
+
+function normalizeFailureIdentity(failure: string): string {
+	return failure.replace(FAILURE_DURATION_SUFFIX, "").trim();
+}
+
+function uniqueSortedFailures(failures: Iterable<string>): string[] {
+	return [...new Set([...failures].map(normalizeFailureIdentity).filter((f) => f.length > 0))].sort();
+}
+
+export function extractGateFailures(output: string, fallback = "gate"): string[] {
+	const parsed = uniqueSortedFailures(output.split("\n").flatMap((line) => {
+		const match = line.match(/\(fail\)\s*(.+)$/);
+		return match ? [match[1] ?? ""] : [];
+	}));
+	if (parsed.length > 0) return parsed;
+	const firstLine = output.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
+	return uniqueSortedFailures([firstLine ?? fallback]);
+}
+
+export function decideRegressionGate(baseFailures: Iterable<string>, mergedFailures: Iterable<string>): { allow: boolean; newRegressions: string[] } {
+	const base = new Set(uniqueSortedFailures(baseFailures));
+	const newRegressions = uniqueSortedFailures(mergedFailures).filter((failure) => !base.has(failure));
+	return { allow: newRegressions.length === 0, newRegressions };
+}
+
 /**
  * Run `fn` serialized against this repo's lands (and any other work already queued on the same
  * checkout). Use it for anything that reads or writes the shared main tree concurrently with lands —
