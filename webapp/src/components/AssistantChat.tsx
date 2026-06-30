@@ -353,42 +353,73 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
   }
 
   if (entry.kind === 'tool') {
+    // Workflow stage markers are progress dividers, not real tool calls.
+    if (entry.format === 'stage') {
+      const label = entry.text.replace(/^[▸►]\s*stage:\s*/i, '');
+      return (
+        <div className="flex items-center gap-2 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+          <span className="font-medium uppercase tracking-wider">{label}</span>
+          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+        </div>
+      );
+    }
     const view = toolView(entry);
     const running = entry.status === 'running';
+    const toolLabel = (entry.tool?.name ?? 'Tool').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    const hasBody = view.command || view.output || view.stderr || view.raw.length > 0;
     return (
       <details open={running} className="group rounded-md">
-        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-gray-500 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-900">
-          <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 transition-transform group-open:rotate-90" aria-hidden />
-          <TerminalSquare className="h-3.5 w-3.5 flex-shrink-0" aria-hidden />
-          <span className="uppercase tracking-wide">Tool</span>
-          <span className={`min-w-0 flex-1 truncate font-medium text-gray-800 dark:text-gray-200 ${running ? 'shimmer' : ''}`}>{view.title}</span>
-          <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(entry.status)}`} aria-label={entry.status ?? 'ok'} />
+        <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900/60">
+          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotClass(entry.status)} ${running ? 'animate-pulse' : ''}`} aria-label={entry.status ?? 'ok'} />
+          <span className="font-semibold text-gray-900 dark:text-gray-100">{toolLabel}</span>
+          <span className={`min-w-0 flex-1 truncate text-gray-500 dark:text-gray-400 ${running ? 'shimmer' : ''}`}>{view.title !== toolLabel ? view.title : ''}</span>
+          {hasBody && <ChevronRight className="ml-auto h-3 w-3 flex-shrink-0 text-gray-300 transition-transform group-open:rotate-90 dark:text-gray-600" aria-hidden />}
         </summary>
-        <div className="ml-6 mt-1 space-y-2 border-l border-gray-200 pl-3 dark:border-gray-800">
-          {view.command && <code className="block rounded-md bg-gray-100 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap">{view.command}</code>}
-          {view.output ? <pre className="max-h-56 overflow-auto rounded-md bg-gray-100 p-2.5 text-[11px] leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap scrollbar-custom">{view.output}</pre> : null}
-          {view.stderr && <pre className="max-h-40 overflow-auto rounded-md bg-red-50 p-2.5 text-[11px] leading-relaxed text-red-800 dark:bg-red-950/30 dark:text-red-200 whitespace-pre-wrap scrollbar-custom">{view.stderr}</pre>}
-          <div className="flex items-center gap-2 text-[11px] text-gray-500 dark:text-gray-400">
-            {view.exitCode !== undefined && <span>Exit {view.exitCode}</span>}
-            {entry.tool?.durationMs !== undefined && <span>{fmtDuration(entry.tool.durationMs)}</span>}
-          </div>
-          {view.raw.length > 0 && (
-            <details className="group/raw">
-              <summary className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md px-2 text-[11px] text-gray-500 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-900">
-                <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
-                Raw payload
-              </summary>
-              <div className="mt-1 space-y-2">
-              {view.raw.map(([name, value]) => (
-                <div key={name as string}>
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">{name as string}</div>
-                  <pre className="max-h-44 overflow-auto rounded-md bg-gray-950 p-2.5 text-[11px] leading-relaxed text-gray-100 whitespace-pre-wrap scrollbar-custom">{prettyJson(value)}</pre>
-                </div>
-              ))}
+        {hasBody && (
+          <div className="mt-1 ml-4 space-y-1.5 text-[11px]">
+            {view.command && (
+              <div className="flex gap-2">
+                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">IN</span>
+                <code className="flex-1 rounded bg-gray-100 px-2 py-1.5 font-mono leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap">{view.command}</code>
               </div>
-            </details>
-          )}
-        </div>
+            )}
+            {view.output && (
+              <div className="flex gap-2">
+                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">OUT</span>
+                <pre className="max-h-48 flex-1 overflow-auto rounded bg-gray-100 px-2 py-1.5 leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap scrollbar-custom">{view.output}</pre>
+              </div>
+            )}
+            {view.stderr && (
+              <div className="flex gap-2">
+                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-red-400">ERR</span>
+                <pre className="max-h-32 flex-1 overflow-auto rounded bg-red-50 px-2 py-1.5 leading-relaxed text-red-800 dark:bg-red-950/30 dark:text-red-200 whitespace-pre-wrap scrollbar-custom">{view.stderr}</pre>
+              </div>
+            )}
+            {(view.exitCode !== undefined || entry.tool?.durationMs !== undefined) && (
+              <div className="flex items-center gap-2 pl-8 text-[10px] text-gray-400 dark:text-gray-500">
+                {view.exitCode !== undefined && <span>exit {view.exitCode}</span>}
+                {entry.tool?.durationMs !== undefined && <span>{fmtDuration(entry.tool.durationMs)}</span>}
+              </div>
+            )}
+            {view.raw.length > 0 && (
+              <details className="group/raw ml-8">
+                <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[10px] text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-500 dark:hover:bg-gray-900">
+                  <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
+                  Raw payload
+                </summary>
+                <div className="mt-1 space-y-2">
+                  {view.raw.map(([name, value]) => (
+                    <div key={name as string}>
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">{name as string}</div>
+                      <pre className="max-h-44 overflow-auto rounded-md bg-gray-950 p-2.5 leading-relaxed text-gray-100 whitespace-pre-wrap scrollbar-custom">{prettyJson(value)}</pre>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
       </details>
     );
   }
