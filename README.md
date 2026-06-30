@@ -911,6 +911,19 @@ with the detail noting it *landed onto a red baseline*. Green-base behavior is u
 that regresses a green base is still rolled back to keep `main` green. The base gate runs **only when
 the merged gate fails**, so the common green land still runs the gate exactly once.
 
+**Pre-land regression gate (opt-in).** Set `OMP_SQUAD_REGRESSION_GATE=1` to make every land
+prove the full test suite on the *exact merged result* before `main` advances. This is stricter
+than the per-feature acceptance gate (`verify:` / `opts.verify`), which can be narrower than the
+full suite. The gate runs `detectVerify(repo)` — the same Bun/Cargo/Go suite command the daemon
+uses for baseline checks — *after* the acceptance gate passes, so it is an additional layer, not
+a replacement. Failure semantics match the base-aware gate: if the full suite fails on merged
+`main`, `landAgent` resets to `head0`, runs the full suite on the base, and compares extracted
+failure sets (`decideRegressionGate`). Only **new** failures block the land (and leave `main` at
+`head0`); pre-existing failures that the branch didn't introduce allow a re-merge with a logged
+note. Auto-resolved conflict lands inherit the same gate before the reviewer call. Off by default
+to preserve existing behavior; enable on repos where a suite-wide regression cannot slip through a
+narrower per-feature acceptance gate.
+
 **Landing it automatically, too.** `OMP_SQUAD_AUTORESOLVE` decides what happens *when* a land
 conflicts; **`OMP_SQUAD_AUTOLAND=1`** decides *that a land happens at all* with no operator: a
 workflow run that finishes successfully (`--verify`, plan-implement, an auto-dispatched issue)
@@ -928,6 +941,7 @@ this *staged* outcome as a hold — never a blocked land — so it neither re-me
 
 | Env var | Effect |
 |---|---|
+| `OMP_SQUAD_REGRESSION_GATE` | `=1` makes every land run the full suite (`detectVerify`) on the merged result; blocks if new failures introduced vs base (off by default) |
 | `OMP_SQUAD_AUTORESOLVE` | `landAgent`'s in-process rebase conflict resolver, distinct from the manual `resolve-conflict` workflow (on by default; `=0` to disable) |
 | `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (on by default; `=0` to disable) |
 | `OMP_SQUAD_LAND_CONFIRM` | Safety valve: the auto-land loop still verifies idle agents, but a GREEN verify only marks them **✓ ready to land** (no merge) — the operator merges via the existing one-tap Land (off by default) |
