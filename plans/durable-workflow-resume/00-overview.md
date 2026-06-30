@@ -1,7 +1,10 @@
 # Overview — durable, process-independent workflow resume
 
-> **STATUS: PLANNED.** From `/research https://github.com/mastra-ai/mastra` (concept #1: process-independent
-> durable execution). Design in `DESIGN.md`, hardened by a 2× opus red-team pass. Not yet dispatched.
+> **STATUS: DONE.** From `/research https://github.com/mastra-ai/mastra` (concept #1: process-independent
+> durable execution). Design in `DESIGN.md`, hardened by a 2× opus red-team pass. Both concerns (C01 sound
+> cold resume + two-phase checkpoint; C02 checkpoint-authoritative, loss-free adoption) implemented and
+> landed green: `bun run check` clean + full `bun test` (761 pass). Tests in `tests/workflow-resume.test.ts`
+> (cold re-run, two-phase, poison cap) and `tests/adopt-cap.test.ts` (parentId exclusion, deferred preserve).
 >
 > WIP note: this repo has other open plan dirs (e.g. `best-of-n-selection`, `mt-isolation`, `omp-planner`).
 > This plan was filed at the operator's explicit direction to chain research concept #1 into `/plan`; it does

@@ -169,6 +169,13 @@ export interface EngineCheckpoint {
 	preferredLabel?: string;
 	/** Monotonic stage index. */
 	index: number;
+	/**
+	 * How many times a cold (dead-thread) resume has re-entered this exact node without making
+	 * forward progress. Reset to 0 by the exit checkpoint (a node that advanced), incremented only on
+	 * a cold re-entry. Bounds a run that keeps crashing the daemon before it ever reaches idle — the
+	 * engine visit-cap deliberately does not re-count the resumed node, so this is its only ceiling.
+	 */
+	resumeAttempts?: number;
 }
 
 /** Persisted run state — an engine checkpoint plus the executor's stage rollup (for the progress view). */
@@ -178,6 +185,13 @@ export interface WorkflowRunState extends EngineCheckpoint {
 	autonomy?: WorkflowAutonomyMode;
 	sessionId?: string;
 	proof?: WorkflowProofState;
+	/**
+	 * Resume-time only (NOT persisted state): true when this run is resuming on a FRESH inner thread
+	 * after the prior host died (the adopt path), false/absent when reattaching a surviving host (the
+	 * reconnect path). A cold resume must re-execute its genuinely-in-flight node (re-prime the goal)
+	 * instead of waiting on a turn that no live thread is running. Set by the manager at resume time.
+	 */
+	cold?: boolean;
 }
 
 /**

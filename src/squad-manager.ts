@@ -261,12 +261,15 @@ export function toolGrantsPrompt(grants: string[] | undefined): string | undefin
 
 /** Persisted agents to take over on restart: not already reattached (live), not flue, and whose worktree
  *  still holds context on disk. Live hosts are reattached by reconnectLive; a gone worktree re-dispatches. */
-export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: string }>(
+export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: string; parentId?: string }>(
 	persisted: T[],
 	rosterIds: ReadonlySet<string>,
 	worktreeExists: (worktree: string) => boolean,
 ): T[] {
-	return persisted.filter((p) => p.kind !== "flue-service" && !rosterIds.has(p.id) && !!p.worktree && worktreeExists(p.worktree));
+	// Exclude parallel-branch children (parentId set): a branch belongs to its parent run, whose own
+	// resume re-drives the fan-out. Adopting a branch as a plain agent would direct-land it independently
+	// of the join → a double-land (and revives completed wait_all branches on the next restart).
+	return persisted.filter((p) => p.kind !== "flue-service" && !p.parentId && !rosterIds.has(p.id) && !!p.worktree && worktreeExists(p.worktree));
 }
 
 /**
@@ -278,6 +281,18 @@ export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: 
 export function selectAdoptable<T extends { id: string }>(eligible: T[], hasWork: (a: T) => boolean, cap: number): T[] {
 	if (cap <= 0) return [];
 	return eligible.filter(hasWork).slice(0, cap);
+}
+
+/**
+ * The resumable records NOT taken this boot (dropped by the ceiling). They must be PRESERVED, not
+ * erased: the full-snapshot-replace persist would otherwise overwrite an un-adopted checkpointed
+ * workflow into permanent loss (D1). persistNow folds these back into the snapshot so a later routine
+ * restart re-attempts them. Resumability is the operative signal — a plain over-ceiling agent re-dispatches
+ * from its still-open issue, but a workflow checkpoint has nothing to re-dispatch it.
+ */
+export function deferredResumable<T extends { id: string }>(eligible: T[], resumable: (p: T) => boolean, adopted: T[]): T[] {
+	const adoptedIds = new Set(adopted.map((a) => a.id));
+	return eligible.filter((p) => resumable(p) && !adoptedIds.has(p.id));
 }
 
 let agentIdSeq = 0;
@@ -457,6 +472,9 @@ export class SquadManager extends EventEmitter {
 	private readonly operator: Actor;
 	private availability: OperatorPresence["availability"] = "active";
 	private readonly stateDir: string;
+	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
+	 *  persistNow folds them back into the snapshot for a later restart to re-attempt (D1 loss fix). */
+	private deferred: PersistedAgent[] = [];
 	private readonly featureStore = new Map<string, PersistedFeature>();
 	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
 	private readonly bin?: string;
@@ -799,14 +817,24 @@ export class SquadManager extends EventEmitter {
 	 *  still holds built-up context — re-create them in place (idle; the orchestrator then verifies/lands).
 	 *  So a restart RESUMES the issue with its context instead of re-dispatching a fresh worktree. */
 	private async adoptOrphanedAgents(snapshot: StateSnapshot): Promise<number> {
-		const eligible = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt));
+		const halted = openOrchestratorState(this.stateDir);
+		const resumable = (p: PersistedAgent): boolean => p.kind === "workflow" && p.workflowState !== undefined;
+		// Eligible = adoptable (dead host, on-disk worktree, not a branch child) AND not a branch the
+		// orchestrator already halted (re-adopting a halted run burns a ceiling slot + a resume attempt
+		// before the orchestrator re-skips it).
+		const eligible = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt)).filter((p) => !(p.branch && halted.isHalted(p.branch)));
 		// Probe each for unlanded work, then cap re-adoption at the agent ceiling. Re-spawning EVERY
-		// orphaned worktree at once (bypassCap) is what OOM'd the host on restart. Resume only agents with
-		// work to continue; done/clean ones are dropped (a still-open issue re-dispatches gradually under
-		// the WIP cap), and at most (ceiling - already-live) are taken over this boot.
+		// orphaned worktree at once (bypassCap) is what OOM'd the host on restart. A resumable workflow
+		// CHECKPOINT counts as work even with a clean worktree (the run is mid-graph between commits) —
+		// otherwise a crashed graph run with no dirty files is dropped as "done". Done/clean plain agents
+		// re-dispatch gradually under the WIP cap; at most (ceiling - already-live) are taken over this boot.
 		const work = new Map<string, boolean>();
-		for (const p of eligible) work.set(p.id, await this.persistedHasWork(p));
+		for (const p of eligible) work.set(p.id, resumable(p) || (await this.persistedHasWork(p)));
 		const adopt = selectAdoptable(eligible, (p) => work.get(p.id) ?? false, hardAgentCeiling() - this.agents.size);
+		// D1 FIX: resumable runs the ceiling dropped are PRESERVED (not erased). persistNow folds them back
+		// into the snapshot so a later restart re-attempts them, instead of the full-snapshot persist silently
+		// overwriting a still-resumable checkpoint into oblivion.
+		this.deferred = deferredResumable(eligible, resumable, adopt);
 		const skipped = eligible.length - adopt.length;
 		let n = 0;
 		for (const p of adopt) {
@@ -832,7 +860,13 @@ export class SquadManager extends EventEmitter {
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
-				adopted: true, // OMPSQ-164: re-adopted with complete work ⇒ orchestrator auto-lands it directly
+				// OMPSQ-164: a re-adopted plain agent with complete work is auto-landed directly by the
+				// orchestrator. A workflow must NOT be direct-landed — a resuming/partial graph lands only via
+				// its own workflow_done → autoLandOnSuccess once the graph completes (RTC-F5).
+				adopted: p.kind !== "workflow",
+				// The prior inner host is gone (this is the orphan-adoption path, not warm reconnect), so a
+				// resumed workflow runs on a FRESH thread: cold resume re-executes the in-flight node soundly.
+				cold: true,
 			}).then(() => { n++; }).catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
 		if (n || skipped) this.log("info", `took over ${n} orphaned worktree(s) with work; skipped ${skipped} (done/clean or over the ${hardAgentCeiling()}-agent cap)`);
@@ -2045,7 +2079,7 @@ export class SquadManager extends EventEmitter {
 		};
 		this.seedAuthority(dto, requestedMode);
 
-		const agent = this.makeDriver(persisted);
+		const agent = this.makeDriver(persisted, opts.cold);
 		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
 		this.agents.set(id, rec);
 		this.wire(rec);
@@ -2084,7 +2118,7 @@ export class SquadManager extends EventEmitter {
 		return rec.dto;
 	}
 
-	private makeDriver(p: PersistedAgent): AgentDriver {
+	private makeDriver(p: PersistedAgent, cold = false): AgentDriver {
 		if (p.kind === "flue-service" && p.flue) {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
 		}
@@ -2100,7 +2134,7 @@ export class SquadManager extends EventEmitter {
 						return cs.length ? `--- Reviewer comments to address (from the plan review) ---\n${cs.map((c) => `- ${c.body}`).join("\n")}` : undefined;
 					}
 				: undefined;
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState, decoratePrompt });
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState, decoratePrompt, cold });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
@@ -3297,7 +3331,12 @@ export class SquadManager extends EventEmitter {
 
 	/** Atomic write through the store: file mode → state.json temp+rename; DB mode → roster/feature tables + on-disk transcripts. */
 	private async persistNow(): Promise<void> {
-		const agents = [...this.agents.values()].map((r) => r.options);
+		const live = [...this.agents.values()].map((r) => r.options);
+		// D1 FIX: fold in resumable checkpoints the adoption ceiling dropped this boot so the full-snapshot
+		// replace doesn't erase them — a later restart re-attempts them. Live records win on id collision
+		// (a deferred run that has since been adopted is now in the live roster).
+		const liveIds = new Set(live.map((a) => a.id));
+		const agents = this.deferred.length ? [...live, ...this.deferred.filter((d) => !liveIds.has(d.id))] : live;
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];

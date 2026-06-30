@@ -55,7 +55,21 @@ export interface SingleAgentExecutorOptions {
 	/** Fold extra context (e.g. unresolved plan-review comments) into the FIRST agent node after a
 	 *  human gate resolves — the feed-forward seam. Returns undefined to add nothing. May be async. */
 	decoratePrompt?: (node: WorkflowNode, ctx: RunContext) => Promise<string | undefined> | string | undefined;
+	/**
+	 * True when resuming on a FRESH inner thread (the prior host died — the adopt path). A cold thread
+	 * never received the goal, so the in-flight node must RE-EXECUTE via runAgent (re-priming the goal)
+	 * rather than waiting on a turn no live thread is running. Absent/false = warm reattach (reconnect),
+	 * where the original turn is still in flight and must NOT be re-prompted.
+	 */
+	cold?: boolean;
 }
+
+/**
+ * Run var that survives a cold restart to re-trigger the post-gate feed-forward fold. `gateJustPassed`
+ * is in-memory and lost when a fresh executor is built on resume; this var rides in the checkpoint vars
+ * so a cold resume of the agent node right after a human gate still folds in the reviewer's comments.
+ */
+const GATE_FOLD_VAR = "__gateFold";
 
 const MAX_CONTEXT_OUTPUT = 4000;
 const IDLE_POLL_MS = 5_000;
@@ -75,16 +89,22 @@ export class SingleAgentExecutor implements NodeExecutor {
 
 	constructor(opts: SingleAgentExecutorOptions) {
 		this.opts = opts;
-		if (opts.initialRollup?.length) {
-			this.rollup.push(...opts.initialRollup);
-			this.primed = true; // resuming: the inner thread already carries the goal
-		}
+		if (opts.initialRollup?.length) this.rollup.push(...opts.initialRollup);
+		// primed is decoupled from the seeded rollup: a WARM resume's inner thread already carries the
+		// goal (don't re-send it), but a COLD resume's fresh thread never received it — so the first
+		// runAgent must re-prime "Goal:" while still showing the restored progress rollup (RTC-F11).
+		this.primed = !!opts.initialRollup?.length && !opts.cold;
 	}
 
 	onStage(ev: StageEvent): void {
 		if (ev.kind === "start" || ev.kind === "exit") return;
 		if (ev.phase === "start") {
-			this.rollup.push({ label: ev.label, status: "in_progress" });
+			// On resume the seeded rollup already ends with the in-flight node as in_progress; reuse that
+			// trailing entry instead of pushing a duplicate (RTC-F10) so the resumed node isn't listed twice.
+			const tail = this.rollup[this.rollup.length - 1];
+			if (!(tail && tail.status === "in_progress" && tail.label === ev.label)) {
+				this.rollup.push({ label: ev.label, status: "in_progress" });
+			}
 			this.opts.emit({ type: "tool_execution_start", toolName: "stage", intent: ev.label });
 		} else {
 			const last = this.rollup[this.rollup.length - 1];
@@ -111,9 +131,12 @@ export class SingleAgentExecutor implements NodeExecutor {
 			parts.push(`--- Recent command output ---\n${ctx.vars.lastOutput}`);
 		}
 		// Feed-forward: on the FIRST agent node after a gate resolves, fold in the reviewer's comments once
-		// (agent nodes share one thread, so re-injecting every turn would spam the same notes).
-		if (this.gateJustPassed) {
+		// (agent nodes share one thread, so re-injecting every turn would spam the same notes). The trigger
+		// is OR'd with a persisted checkpoint var so a COLD restart landing on this node still folds the
+		// comments in — a fresh executor has gateJustPassed=false and would otherwise run blind (RTC-F7).
+		if (this.gateJustPassed || ctx.vars[GATE_FOLD_VAR]) {
 			this.gateJustPassed = false;
+			delete ctx.vars[GATE_FOLD_VAR];
 			const extra = await this.opts.decoratePrompt?.(node, ctx);
 			if (extra) parts.push(extra);
 		}
@@ -143,7 +166,11 @@ export class SingleAgentExecutor implements NodeExecutor {
 	 * current turn to end WITHOUT re-prompting (re-prompting would duplicate work — e.g. re-file the
 	 * Plane issues). If the turn already finished while the daemon was down, advance immediately.
 	 */
-	async resumeAgent(node: WorkflowNode, _ctx: RunContext): Promise<NodeResult> {
+	async resumeAgent(node: WorkflowNode, ctx: RunContext): Promise<NodeResult> {
+		// Cold resume (fresh thread): the prior host died, so there is no in-flight turn to wait on and the
+		// new thread never received the goal. Re-execute the node via runAgent (which re-primes "Goal:" because
+		// `primed` is false on a cold resume), instead of skipping it — the D2 soundness fix.
+		if (this.opts.cold) return this.runAgent(node, ctx);
 		try {
 			const agent = await this.opts.acquireAgent();
 			const st = await agent.getState();
@@ -168,9 +195,12 @@ export class SingleAgentExecutor implements NodeExecutor {
 		return { outcome: code === 0 ? "succeeded" : "failed", text: shown };
 	}
 
-	async humanGate(node: WorkflowNode, options: string[], _ctx: RunContext): Promise<string> {
+	async humanGate(node: WorkflowNode, options: string[], ctx: RunContext): Promise<string> {
 		const label = await this.opts.gate(node, options);
 		this.gateJustPassed = true; // the next agent node folds in the review comments once
+		// Persist the same intent in the run vars so the fold survives a cold restart between this gate
+		// and the next agent node (the entry checkpoint captures vars; runAgent clears it on consume).
+		ctx.vars[GATE_FOLD_VAR] = "1";
 		return label;
 	}
 

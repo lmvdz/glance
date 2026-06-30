@@ -74,6 +74,9 @@ export interface WorkflowDriverOptions {
 	/** Feed-forward: fold context (e.g. unresolved plan-review comments) into the first agent node after
 	 *  a gate. Passed straight to the executor. */
 	decoratePrompt?: (node: WorkflowNode, ctx: RunContext) => Promise<string | undefined> | string | undefined;
+	/** True when resuming on a FRESH inner thread (the adopt path, prior host dead) → the in-flight node
+	 *  re-executes and re-primes the goal. Absent/false = warm reattach (reconnect), which never re-prompts. */
+	cold?: boolean;
 }
 
 interface PendingGate {
@@ -124,6 +127,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), signal }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
+			cold: this.opts.cold,
 		});
 		const baseOnStage = this.executor.onStage.bind(this.executor);
 		this.executor.onStage = (ev) => {
@@ -213,7 +217,18 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		this.emit("event", { type: "agent_start" });
 		let outcome: "succeeded" | "failed" = "failed";
 		try {
-			const result = await this.engine!.run(goal, { resume, checkpoint: (c) => this.onCheckpoint(c) });
+			// cold is a resume-time property (adopt = fresh thread), threaded onto the resume so the engine's
+			// poison cap applies and the executor re-primes the goal. escalate surfaces a poison-cap stop to
+			// the operator via the ordinary message channel (the manager renders it; the run then fails out).
+			const resumeRun = resume ? { ...resume, cold: this.opts.cold ?? resume.cold } : undefined;
+			const result = await this.engine!.run(goal, {
+				resume: resumeRun,
+				checkpoint: (c) => this.onCheckpoint(c),
+				escalate: (reason) => {
+					this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `⚠ ${reason}` } });
+					this.emit("event", { type: "message_end" });
+				},
+			});
 			outcome = result.outcome;
 			const mark = result.outcome === "succeeded" ? "✓" : "✗";
 			this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `${mark} workflow ${this.wf?.name}${resume ? " (resumed)" : ""}: ${result.reason}` } });

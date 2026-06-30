@@ -640,6 +640,10 @@ export interface CreateAgentOptions {
 	 *  orchestrator auto-lands its already-complete work directly, since the event-driven auto-land that
 	 *  fires on a run-to-completion never re-fires for an adopted agent that doesn't re-run. */
 	adopted?: boolean;
+	/** Resuming a workflow run on a FRESH inner thread (the adopt path — the prior host is gone), so the
+	 *  in-flight graph node must re-execute and re-prime the goal rather than wait on a turn no thread is
+	 *  running. The warm reconnect path leaves this false. */
+	cold?: boolean;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

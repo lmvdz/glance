@@ -1063,6 +1063,20 @@ See [`docs/federation.md`](docs/federation.md) for the full architecture and run
 | `src/workflow/verify-workflow.ts` | `buildVerifyWorkflow` — synthesizes the `--verify` implement → verify → fixup loop |
 | `src/workflow/stylesheet.ts` | CSS-like `model_stylesheet` parser + per-node model/effort resolver |
 
+**Durable resume (survives a full daemon crash).** A workflow run resumes from its persisted checkpoint even
+after the inner thread *and* the daemon are gone — not only when the inner host survived. The engine writes a
+**two-phase checkpoint** per node: one at entry (warm reattach) and one after the node finishes with
+`currentNode` advanced to its successor. So a *completed* node is never re-run; the only re-runnable node is one
+interrupted between its own entry and exit checkpoints = genuinely in-flight. On a **cold** resume (fresh inner
+thread, the orphan-adoption path) that in-flight node re-executes and re-primes the goal, rather than waiting on
+a turn no live thread is running. Because a mid-execution node re-runs, **`.fabro` command and agent nodes must
+be idempotent / HEAD-keyed** — the two-phase checkpoint already prevents re-running a *finished* one. A node
+that keeps crashing the daemon before reaching idle is bounded by a **resume poison cap** (3 cold re-entries),
+after which the run escalates to a human instead of looping forever. The persisted checkpoint is **authoritative
+for restart adoption** (a resumable run counts as work even with a clean worktree) and is **preserved across a
+ceiling-constrained restart** (kept and re-attempted on a later boot instead of being erased by the
+full-snapshot persist); a resuming workflow is never direct-landed without completing its graph.
+
 ### Autonomy & orchestration
 
 | File | Role |
