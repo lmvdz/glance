@@ -2019,6 +2019,7 @@ export class SquadManager extends EventEmitter {
 			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir);
 			cwd = wt.cwd;
 			repo = wt.repo;
+			resolvedBranch = wt.inPlace ? undefined : wt.branch;
 			createdWorktree = !wt.inPlace;
 			if (wt.inPlace) {
 				// Non-git target dir: no isolation, but "spawn anywhere" still works. A real git checkout
@@ -2167,7 +2168,7 @@ export class SquadManager extends EventEmitter {
 			const reason = this.scheduler.pressured() ? "host under resource pressure" : `WIP cap reached (${occupying}/${this.scheduler.cap()})`;
 			return { outcome: "failed", text: `${reason} — branch "${spec.name}" not spawned` };
 		}
-		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false, bypassCap: true });
+		const dto = await this.create({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true });
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", text: "branch agent not created" };
 		return this.runAgentTask(rec, spec.task, spec.signal);

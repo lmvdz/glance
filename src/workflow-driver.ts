@@ -35,6 +35,7 @@ export interface BranchSpec {
 	name: string;
 	task: string;
 	model?: string;
+	approvalMode?: ApprovalMode;
 	autonomy?: WorkflowAutonomyMode;
 	proof?: WorkflowProofState;
 	sessionId?: string;
@@ -124,7 +125,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			execCommand: this.opts.execCommand,
 			readPromptRef: (ref) => fs.readFile(path.join(wfDir, ref.slice(1)), "utf8"),
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
-			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), signal }) : undefined,
+			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, approvalMode: this.opts.approvalMode, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), signal }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
 			cold: this.opts.cold,
