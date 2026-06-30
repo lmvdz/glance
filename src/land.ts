@@ -170,6 +170,68 @@ export function decideRegressionGate(baseFailures: Iterable<string>, mergedFailu
 	return { allow: newRegressions.length === 0, newRegressions };
 }
 
+/** On by default when OMP_SQUAD_REGRESSION_GATE=1. */
+function regressionGateEnabled(): boolean {
+	return process.env.OMP_SQUAD_REGRESSION_GATE === "1";
+}
+
+/**
+ * Post-merge full-suite regression gate (OMP_SQUAD_REGRESSION_GATE=1).
+ *
+ * Called after the acceptance gate passes, with main already at the merged state. Runs the full
+ * suite via detectVerify() — deliberately separate from opts.verify, which can be narrower.
+ * Returns null to allow the land, or a blocking LandResult to reject it. Leaves main at the
+ * correct state: merged HEAD (allow) or head0 (block). Red-baseline handling: if the full suite
+ * also fails on base, decideRegressionGate() compares the extracted failure sets — only strictly
+ * new failures block; pre-existing red baseline failures allow a re-merge.
+ */
+async function applyRegressionGate(p: {
+	repo: string;
+	head0: string;
+	committed: boolean;
+	message: string;
+	branch: string;
+	reMerge: () => Promise<GitRun>;
+}): Promise<LandResult | null> {
+	if (!regressionGateEnabled()) return null;
+	const fullSuite = await detectVerify(p.repo);
+	if (!fullSuite) return null;
+
+	const mergedRun = await runGate(fullSuite, p.repo);
+	if (mergedRun.code === 0) return null; // full suite clean on merged main
+
+	// Full suite failed on merged main — determine whether branch introduced new failures.
+	await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
+	const baseRun = await runGate(fullSuite, p.repo);
+	const baseFailures = baseRun.code !== 0 ? extractGateFailures(baseRun.output) : [];
+	const mergedFailures = extractGateFailures(mergedRun.output);
+	const { allow, newRegressions } = decideRegressionGate(baseFailures, mergedFailures);
+
+	if (!allow) {
+		// New failures introduced — keep main reset to head0, block the land.
+		return {
+			ok: false,
+			committed: p.committed,
+			merged: false,
+			message: p.message,
+			detail: `regression gate (${fullSuite}) blocked ${p.branch}: ${newRegressions.length} new failure(s):\n  ${newRegressions.join("\n  ")}\n${truncate(mergedRun.output, 600)}`,
+		};
+	}
+
+	// No new regressions — base already had these failures. Re-merge so main advances.
+	const rm = await p.reMerge();
+	if (rm.code !== 0) {
+		return {
+			ok: false,
+			committed: p.committed,
+			merged: false,
+			message: p.message,
+			detail: `regression gate: no new regressions in ${p.branch} but re-merge failed: ${rm.stderr || rm.stdout}`,
+		};
+	}
+	return null; // allowed — pre-existing red baseline, no new failures introduced
+}
+
 /**
  * Run `fn` serialized against this repo's lands (and any other work already queued on the same
  * checkout). Use it for anything that reads or writes the shared main tree concurrently with lands —
@@ -244,9 +306,19 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	// Verify the merged main; if the gate fails, reset main to head0 so it stays green. The
 	// worktree branch keeps its commit (only main is reset), so it can be re-landed after a fix.
 	const verifyMerged = async (detail: string, reMerge: () => Promise<GitRun>): Promise<LandResult> => {
-		if (!gate) return { ok: true, committed, merged: true, message, detail };
+		if (!gate) {
+			// No acceptance gate — still run the full-suite regression gate if armed.
+			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
+			if (rg) return rg;
+			return { ok: true, committed, merged: true, message, detail };
+		}
 		const v = await runGate(gate, repo);
-		if (v.code === 0) return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
+		if (v.code === 0) {
+			// Acceptance gate green — additionally run the full-suite regression gate if armed.
+			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
+			if (rg) return rg;
+			return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
+		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
 		await git(["reset", "--hard", head0], repo).catch(() => {});
 		const base = await runGate(gate, repo); // main == head0 now
@@ -370,6 +442,10 @@ async function attemptAutoResolve(a: {
 		const v = await runGate(gate, repo);
 		if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${truncate(v.output, 800)}`);
 	}
+
+	// (c2) Full-suite regression gate — auto-resolved lands must not bypass it.
+	const rgr = await applyRegressionGate({ repo, head0, committed, message, branch, reMerge: () => git(["merge", "--ff-only", branch], repo) });
+	if (rgr) return rgr;
 
 	// (d) Independent second opinion before keeping an LLM-merged result.
 	const approved = await reviewer({ repo, worktree, branch }).catch(() => false);

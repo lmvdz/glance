@@ -1,5 +1,5 @@
 # Orchestrator path coverage
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -36,3 +36,7 @@ None.
   - Auto-land receives a blocking `LandResult` from the land primitive and records/parks it like other non-retryable land failures.
 - Run the narrow affected tests only before final suite:
   - `bun test tests/land-regression-gate.test.ts tests/orchestrator.test.ts tests/manager-autonomy.test.ts`
+
+## Resolution
+
+Closed 2026-06-30 via OMPSQ-401. All land paths (single-agent `landBranch`, feature `landFeature`, orchestrator `autoLandWorkflow → deps.land`) funnel through `landAgent()` → `verifyMerged()` → `applyRegressionGate()`. No production changes needed; coverage is documented and verified in `tests/land-regression-gate.test.ts` (6 tests including autoresolve path).

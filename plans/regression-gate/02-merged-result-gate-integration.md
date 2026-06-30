@@ -1,5 +1,5 @@
 # Merged-result gate integration
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -43,3 +43,7 @@ None.
   - Flag on + base has `BASE_RED` + branch adds `NEW_RED` => blocked; detail names `new.test.ts > introduced`; repo `HEAD` equals `head0`.
   - Flag on + base has `BASE_RED` + branch fixes it => allowed.
 - Add or extend auto-resolve coverage so a conflict-resolved branch that introduces a new full-suite failure is rolled back before reviewer approval.
+
+## Resolution
+
+Closed 2026-06-30 via OMPSQ-400. Added `regressionGateEnabled()` + `applyRegressionGate()` to `src/land.ts`; hooked into `verifyMerged()` (after acceptance gate passes) and `attemptAutoResolve()` (step c2, before reviewer). All 6 required test cases pass in `tests/land-regression-gate.test.ts`; existing land tests green.
