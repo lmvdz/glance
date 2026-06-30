@@ -303,7 +303,7 @@ function AnswerComposer({
 }
 
 export const ActiveWorkPane: React.FC = () => {
-  const { agents, features, audit, tasks, connected, reload, selectTask, setView, subscribeConsole, setIsChatOpen, sendConsoleCommand, showToast } = useTaskContext();
+  const { agents, features, audit, tasks, connected, reload, selectTask, setView, openConsole, sendConsoleCommand, showToast } = useTaskContext();
 
   const items = useMemo(() => activeWork(agents, features), [agents, features]);
   const activityRollup = useMemo(() => fleetActivityRollup(audit), [audit]);
@@ -329,19 +329,18 @@ export const ActiveWorkPane: React.FC = () => {
   // ── actions ────────────────────────────────────────────────────────────────
 
   const openAgent = useCallback((id?: string) => {
-    if (id) subscribeConsole(id);
-    setIsChatOpen(true);
-  }, [subscribeConsole, setIsChatOpen]);
+    if (id) openConsole(id);
+  }, [openConsole]);
 
   const openFeature = useCallback((item: ActiveWorkItem) => {
     if (!item.featureId) {
       const first = item.agents[0];
-      if (first) { subscribeConsole(first.id); setIsChatOpen(true); }
+      if (first) openConsole(first.id);
       return;
     }
     const task = tasks.find((t) => t.sourceId === item.featureId) ?? tasks.find((t) => t.id === item.featureId);
     if (task) { selectTask(task.id); setView('tasks'); }
-  }, [tasks, selectTask, setView, subscribeConsole, setIsChatOpen]);
+  }, [tasks, selectTask, setView, openConsole]);
 
   const submitAnswer = useCallback((_item: ActiveWorkItem, action: ActiveWorkAction, value: string) => {
     if (!action.agentId || !action.requestId || !value.trim()) return;

@@ -43,7 +43,7 @@ const SEVERITY_GROUPS: { key: 'critical' | 'warn'; title: string }[] = [
 ];
 
 export const AttentionPanel: React.FC = () => {
-  const { agents, connected, setIsChatOpen, subscribeConsole, sendConsoleCommand, showToast } = useTaskContext();
+  const { agents, connected, openConsole, sendConsoleCommand, showToast } = useTaskContext();
 
   const [gov, setGov] = useState<GovernancePayload | null>(null);
   const [usage, setUsage] = useState<UsagePayload | null>(null);
@@ -98,14 +98,6 @@ export const AttentionPanel: React.FC = () => {
   const idle = agents.filter((a) => a.status === 'idle').length;
 
   // ── actions ──────────────────────────────────────────────────────────────
-
-  const openConsole = useCallback(
-    (agentId?: string) => {
-      if (agentId) subscribeConsole(agentId);
-      setIsChatOpen(true);
-    },
-    [subscribeConsole, setIsChatOpen],
-  );
 
   const submitAnswer = useCallback(() => {
     if (!answering?.agentId || !answering.requestId || !answerText.trim()) return;

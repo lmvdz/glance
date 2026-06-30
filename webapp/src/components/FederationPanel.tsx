@@ -128,7 +128,7 @@ function filesInFlight(
 // ── component ─────────────────────────────────────────────────────────────────
 
 export const FederationPanel: React.FC = () => {
-  const { agents, currentProject, subscribeConsole, setIsChatOpen } = useTaskContext();
+  const { agents, currentProject, openConsole } = useTaskContext();
 
   const [fed, setFed] = useState<FederationResponse | null>(null);
   const [leases, setLeases] = useState<Lease[]>([]);
@@ -161,14 +161,6 @@ export const FederationPanel: React.FC = () => {
     const interval = setInterval(() => void load(), 10_000);
     return () => clearInterval(interval);
   }, [load]);
-
-  const openConsole = useCallback(
-    (agentId?: string) => {
-      if (agentId) subscribeConsole(agentId);
-      setIsChatOpen(true);
-    },
-    [subscribeConsole, setIsChatOpen],
-  );
 
   // ── derived state ──────────────────────────────────────────────────────────
 
@@ -365,7 +357,7 @@ export const FederationPanel: React.FC = () => {
                     — {c.agents.map((a) => a.name).join(', ')}
                   </span>
                   <button
-                    onClick={() => openConsole(c.agents[0]?.id)}
+                    onClick={() => { const id = c.agents[0]?.id; if (id) openConsole(id); }}
                     className="ml-auto text-[11px] text-blue-600 dark:text-blue-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     aria-label={`View agent for ${c.file}`}
                   >

@@ -593,7 +593,7 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
 
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
-  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole } = useTaskContext();
+  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId } = useTaskContext();
   const [initialChatState] = useState(readInitialChatState);
   const [sessions, setSessions] = useState<Session[]>(initialChatState.sessions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialChatState.activeSessionId);
@@ -639,6 +639,24 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   useEffect(() => {
     if (agentId) subscribeConsole(agentId);
   }, [agentId, subscribeConsole]);
+
+  // When an external "Open console" targets a specific agent, find or create a session for it.
+  useEffect(() => {
+    if (!openedConsoleAgentId) return;
+    const agent = agents.find((a) => a.id === openedConsoleAgentId);
+    setSessions((prev) => {
+      if (prev.some((s) => s.id === openedConsoleAgentId)) return prev;
+      const newSession: Session = {
+        id: openedConsoleAgentId,
+        title: agent?.name ?? 'Agent console',
+        messages: [],
+        updatedAt: Date.now(),
+        metadata: { agentId: openedConsoleAgentId, status: 'active', stage: 'Console' },
+      };
+      return [newSession, ...prev];
+    });
+    setActiveSessionId(openedConsoleAgentId);
+  }, [openedConsoleAgentId, agents]);
 
   useEffect(() => {
     void apiJson<{ models?: ModelOption[] }>('/api/models')

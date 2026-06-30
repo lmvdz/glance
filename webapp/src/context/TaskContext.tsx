@@ -57,10 +57,14 @@ interface TaskContextType {
   view: AppView;
   taskFilter: TaskFilter;
   isChatOpen: boolean;
+  /** The agent that was most recently opened via openConsole(). AssistantChat reacts to switch its active session. */
+  openedConsoleAgentId: string | null;
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
   setIsChatOpen: (isOpen: boolean) => void;
+  /** Subscribe to an agent's transcript AND open the chat panel focused on that agent. No-op if agentId is undefined. */
+  openConsole: (agentId: string | undefined) => void;
   selectTask: (id: string | null) => void;
   addTask: (task: Partial<Task>) => void;
   deleteTask: (id: string) => void;
@@ -109,6 +113,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [view, setView] = useState<AppView>('attention');
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
@@ -140,6 +145,13 @@ export function TaskProvider({ children }: { children: ReactNode }) {
 
   const reorderTasks = (_startIndex: number, _endIndex: number) => {
     showToast('Live omp-squad ordering is driven by the daemon', 'info');
+  };
+
+  const openConsole = (agentId: string | undefined) => {
+    if (!agentId) return;
+    squad.subscribe(agentId);
+    setOpenedConsoleAgentId(agentId);
+    setIsChatOpen(true);
   };
 
   const selectTask = (id: string | null) => setSelectedTaskId(id);
@@ -267,7 +279,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );
