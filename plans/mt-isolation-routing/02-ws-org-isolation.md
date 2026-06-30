@@ -1,5 +1,5 @@
 # WebSocket org isolation
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -58,3 +58,8 @@ None. This is backend test coverage only in `omp-squad`.
 
 - `bun test tests/ws-org-isolation.test.ts` passes without hanging.
 - Full gate after both concerns: `bun run check && bun test`.
+
+## Resolution
+
+Closed 2026-06-30 via OMPSQ-397 (https://app.plane.so/inkwell-finance/browse/OMPSQ-397/). Commits: c3fce10.
+Added `tests/ws-org-isolation.test.ts`, a live `SquadServer` + real `ManagerRegistry` WebSocket test proving org B roster/agent/transcript events stay out of org A and org B cannot replay org A transcripts.

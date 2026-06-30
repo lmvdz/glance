@@ -42,4 +42,4 @@
 - Module: [MT Isolation Routing](https://app.plane.so/inkwell-finance/projects/1eb181ba-f324-4767-a6d5-98953d5df011/modules/a2a7e7ff-d6be-4046-acbf-b6042315f72b/)
 - Issues:
   - [01-rest-request-routing](https://app.plane.so/inkwell-finance/browse/OMPSQ-396/) — OMPSQ-396 ✅ done (commit 2edcfe2)
-  - [02-ws-org-isolation](https://app.plane.so/inkwell-finance/browse/OMPSQ-397/) — OMPSQ-397
+  - [02-ws-org-isolation](https://app.plane.so/inkwell-finance/browse/OMPSQ-397/) — OMPSQ-397 ✅ done (commit c3fce10)
