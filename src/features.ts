@@ -16,6 +16,10 @@ import * as path from "node:path";
 import { hardenedGitSync } from "./git-harden.ts";
 import { worktreeDiff } from "./explore.ts";
 import { isFresh, proofFingerprint, proofFor } from "./proof.ts";
+// Reuse the webapp diagram's PURE graph core (zero imports) so the daemon-side validator
+// and the UI share ONE cycle/unresolved-dep algorithm — imported, never hand-copied.
+import { buildPlanGraph } from "../webapp/src/lib/planGraph.ts";
+import type { GraphConcernInput, PlanGraphIssue } from "../webapp/src/lib/planGraph.ts";
 import type { AgentDTO, AgentStatus, FeatureContextSummary, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureProofAggregate, FeatureReadiness, FeatureRelationship, FeatureStage, FeatureWorktreeStatus, LandReadiness, PersistedFeature, WorktreeProofSummary } from "./types.ts";
 
 function git(cwd: string, args: string[]): string | undefined {
@@ -385,6 +389,37 @@ export async function parsePlanConcerns(repo: string, planDir: string): Promise<
 		});
 	}
 	return out;
+}
+
+/** Read the raw text of a plan's overview doc (holds the "Dependency graph" table), or "". */
+async function readPlanOverview(repo: string, planDir: string): Promise<string> {
+	const dirAbs = path.join(repo, planDir);
+	for (const name of PLAN_TITLE_FILES) {
+		const text = await fs.readFile(path.join(dirAbs, name), "utf8").catch(() => null);
+		if (text != null) return text;
+	}
+	return "";
+}
+
+/**
+ * Validate a plan dir's dependency graph — dependency cycles + unresolved (dangling) deps —
+ * using the SAME pure core the webapp diagram uses (buildPlanGraph). One algorithm, imported
+ * not copied (concern 06 / red-team B-S4). Non-UI consumers (the pipeline skills) reach this
+ * through `omp-squad plan-validate <dir>`.
+ */
+export async function validatePlanConcerns(repo: string, planDir: string): Promise<PlanGraphIssue[]> {
+	const concerns = await parsePlanConcerns(repo, planDir);
+	const overviewText = await readPlanOverview(repo, planDir);
+	const inputs: GraphConcernInput[] = concerns.map((c) => ({
+		file: c.file,
+		title: c.title,
+		status: c.status,
+		open: c.open,
+		complexity: c.complexity,
+		prerequisites: c.prerequisites,
+		touches: c.touches,
+	}));
+	return buildPlanGraph(inputs, overviewText).issues;
 }
 
 export async function parsePlanDocuments(repo: string, planDir: string): Promise<PlanDocument[]> {

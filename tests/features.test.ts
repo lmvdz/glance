@@ -7,7 +7,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { appendConcernDecision, appendDecisionLine, buildFeatures, featureLandStatus, featureReadiness, listPlanDirs, parsePlanConcerns } from "../src/features.ts";
+import { appendConcernDecision, appendDecisionLine, buildFeatures, featureLandStatus, featureReadiness, listPlanDirs, parsePlanConcerns, validatePlanConcerns } from "../src/features.ts";
 import type { AgentDTO, FeatureDTO, FeatureWorktreeStatus } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -275,6 +275,32 @@ test("appendConcernDecision round-trips through parsePlanConcerns as a decision"
 	expect(updated?.decisions).toContain("Q: Gate? — A: warn-only");
 	const reparsed = (await parsePlanConcerns(repo, "plans/x")).find((c) => c.file === "01-c.md");
 	expect(reparsed?.decisions).toContain("Q: Gate? — A: warn-only"); // persisted to disk
+});
+
+test("validatePlanConcerns flags a dependency cycle and a dangling dep (shared with the UI core)", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "val-"));
+	tmps.push(repo);
+	const dir = path.join(repo, "plans", "bad");
+	await fs.mkdir(dir, { recursive: true });
+	// 01 ⇄ 02 is a cycle; 03 depends on a concern (99) that does not exist.
+	await fs.writeFile(path.join(dir, "00-overview.md"), "# Overview\n\n## Dependency graph\n\n| Concern | BLOCKED_BY |\n| --- | --- |\n| 01 | 02 |\n| 02 | 01 |\n| 03 | 99 |\n");
+	await fs.writeFile(path.join(dir, "01-a.md"), "# A\nSTATUS: open\n");
+	await fs.writeFile(path.join(dir, "02-b.md"), "# B\nSTATUS: open\n");
+	await fs.writeFile(path.join(dir, "03-c.md"), "# C\nSTATUS: open\n");
+	const issues = await validatePlanConcerns(repo, "plans/bad");
+	expect(issues.some((i) => i.kind === "cycle")).toBe(true);
+	expect(issues.some((i) => i.kind === "unresolved" && i.refs.includes(99))).toBe(true);
+});
+
+test("validatePlanConcerns is clean for a well-formed plan", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "val-"));
+	tmps.push(repo);
+	const dir = path.join(repo, "plans", "ok");
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(path.join(dir, "00-overview.md"), "# Overview\n\n## Dependency graph\n\n| Concern | BLOCKED_BY |\n| --- | --- |\n| 01 | none |\n| 02 | 01 |\n");
+	await fs.writeFile(path.join(dir, "01-a.md"), "# A\nSTATUS: open\n");
+	await fs.writeFile(path.join(dir, "02-b.md"), "# B\nSTATUS: open\n");
+	expect(await validatePlanConcerns(repo, "plans/ok")).toEqual([]);
 });
 
 test("appendConcernDecision returns null for a non-concern file", async () => {

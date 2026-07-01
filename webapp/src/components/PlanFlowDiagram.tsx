@@ -73,6 +73,14 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
   const [statusValue, setStatusValue] = React.useState<string>('open');
   const [blockedSet, setBlockedSet] = React.useState<Set<number>>(new Set());
   const [saving, setSaving] = React.useState(false);
+  const [issuesDismissed, setIssuesDismissed] = React.useState(false);
+
+  // Files that participate in a dependency cycle — highlighted with a distinct border so the
+  // operator can see WHICH nodes form the loop, not just read the message.
+  const cycleFiles = useMemo(
+    () => new Set(graph.issues.filter((i) => i.kind === 'cycle').flatMap((i) => i.files)),
+    [graph.issues],
+  );
 
   // depth axis = batch order (n.col); cross axis = position within a batch (n.row). Horizontal maps
   // depth→x, cross→y; vertical swaps them so batches march downward and use a tall container.
@@ -160,9 +168,22 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
 
   return (
     <div>
-      {graph.issues.length > 0 && (
+      {graph.issues.length > 0 && !issuesDismissed && (
         <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
-          <div className="mb-1 font-semibold uppercase tracking-wider">Plan dependency issues</div>
+          <div className="mb-1 flex items-center gap-2">
+            <span className="font-semibold uppercase tracking-wider">
+              ⚠ {graph.issues.length} plan dependency issue{graph.issues.length === 1 ? '' : 's'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setIssuesDismissed(true)}
+              className="ml-auto rounded px-1 text-red-400 hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 dark:hover:text-red-200"
+              aria-label="Dismiss plan dependency warnings"
+              title="Dismiss (warning only — the diagram still renders)"
+            >
+              ✕
+            </button>
+          </div>
           <ul className="list-disc space-y-0.5 pl-4">
             {graph.issues.map((issue, i) => <li key={`${issue.kind}-${i}`}>{issue.message}</li>)}
           </ul>
@@ -222,13 +243,14 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
             const t = tone(n.open, n.status);
             const active = n.id === selectedId;
             const editing = n.id === editId;
+            const inCycle = cycleFiles.has(n.id);
             return (
               <button
                 key={n.id}
                 type="button"
                 onClick={() => onSelect?.(n.id)}
-                title={`${n.title} — ${n.status}${n.touches.length ? ` · touches ${n.touches.length}` : ''}`}
-                className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-white dark:bg-gray-900 ${onEdit ? 'pl-2.5 pr-7' : 'px-2.5'} py-1.5 text-left shadow-sm transition-colors hover:border-gray-300 dark:hover:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${active || editing ? 'ring-2 ring-blue-500' : ''}`}
+                title={`${n.title} — ${n.status}${n.touches.length ? ` · touches ${n.touches.length}` : ''}${inCycle ? ' · in a dependency cycle' : ''}`}
+                className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-white dark:bg-gray-900 ${onEdit ? 'pl-2.5 pr-7' : 'px-2.5'} py-1.5 text-left shadow-sm transition-colors hover:border-gray-300 dark:hover:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${active || editing ? 'ring-2 ring-blue-500' : inCycle ? 'ring-2 ring-red-400 dark:ring-red-500' : ''}`}
                 style={{ left: p.x, top: p.y, width: COL_W, height: NODE_H }}
               >
                 <div className="flex items-center gap-1.5">

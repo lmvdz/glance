@@ -1,6 +1,6 @@
 # Surface plan-DAG warnings (UI banner + skill pre-flight)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

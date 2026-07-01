@@ -36,6 +36,7 @@ import { DbStore } from "./dal/store.ts";
 import type { OrgContext } from "./dal/context.ts";
 import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
 import { curatePlaneIssues, renderClusterReport } from "./plane-curator.ts";
+import { validatePlanConcerns } from "./features.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
@@ -56,6 +57,7 @@ USAGE
   omp-squad automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   omp-squad open                                   Print the dashboard URL
   omp-squad curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
+  omp-squad plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
 
 ADD FLAGS
   --name <s>        Agent name (default: agent-N)
@@ -554,6 +556,37 @@ async function cmdCommission(args: string[]): Promise<void> {
 	}
 }
 
+/**
+ * Offline plan-DAG validator — reads a plan dir straight off disk (no daemon) and reports
+ * dependency cycles + dangling deps, using the same core the UI diagram uses. Exit 0 = clean,
+ * 1 = issues found (a signal the pipeline skills branch on, warning-first not a hard gate).
+ */
+async function cmdPlanValidate(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const dir = positional[0];
+	if (!dir) {
+		process.stderr.write("usage: omp-squad plan-validate <plan-dir> [--json]\n");
+		process.exit(1);
+		return;
+	}
+	// Accept an absolute or cwd-relative plan dir; validatePlanConcerns joins repo+planDir,
+	// so passing repo="" + the resolved absolute path works for both.
+	const abs = path.resolve(dir);
+	const issues = await validatePlanConcerns("", abs);
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify({ dir: abs, issues }, null, 2)}\n`);
+		if (issues.length) process.exit(1);
+		return;
+	}
+	if (!issues.length) {
+		process.stdout.write(`✓ ${path.basename(abs)} — plan dependency graph is clean (no cycles or dangling deps)\n`);
+		return;
+	}
+	process.stdout.write(`⚠ ${path.basename(abs)} — ${issues.length} plan dependency issue${issues.length === 1 ? "" : "s"}:\n`);
+	for (const issue of issues) process.stdout.write(`  • [${issue.kind}] ${issue.message}\n`);
+	process.exit(1);
+}
+
 async function cmdCuratePlane(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	loadEnvFile(path.join(os.homedir(), ".claude", "secrets", "plane.env"));
@@ -675,6 +708,10 @@ async function main(): Promise<void> {
 		case "curate-plane":
 		case "plane-curator":
 			await cmdCuratePlane(rest);
+			break;
+		case "plan-validate":
+		case "validate-plan":
+			await cmdPlanValidate(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);
