@@ -98,6 +98,7 @@ export const OmpGraphPanel: React.FC = () => {
     if (opts?.force) setRefreshing(true);
     try {
       const d = await apiJson<GraphDoc>(`/api/graph?days=${days}${future ? '&future=3' : ''}${opts?.force ? '&fresh=1' : ''}`);
+      d.tracks = d.tracks.filter((t) => t.id !== 'git.heat'); // removed server-side; drop it client-side until the daemon reloads
       writeGraphCache(key, d); // valid for its key regardless of arrival order
       if (id !== reqId.current) return; // a newer load superseded this one
       setDoc(d);

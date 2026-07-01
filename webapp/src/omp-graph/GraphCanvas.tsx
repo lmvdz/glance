@@ -65,15 +65,16 @@ const overlayIds = new Set(Object.values(RIDGE_OVERLAY));
 const MERGE_EVENTS = [{ id: 'shipped', label: 'SHIPPED', sublabel: 'commits · tickets', group: 'fleet', sources: ['git.milestones', 'plane.closed'] }];
 
 /** A composite "instrument" lane that layers several tracks into one blend. */
-type PulseRole = 'band' | 'line' | 'lineDim' | 'ticks';
+type PulseRole = 'band' | 'line' | 'lineDim' | 'ticks' | 'bars';
 const PULSE = {
   id: 'pulse',
   label: 'FLEET PULSE',
-  sublabel: 'cost · runs · llm · state',
+  sublabel: 'commits · cost · runs · state',
   group: 'fleet',
-  height: 118,
+  height: 132,
   layers: [
     { id: 'receipts.state', role: 'band' as PulseRole }, // power: was the fleet on
+    { id: 'git.commits', role: 'bars' as PulseRole }, // commits histogram along the top strip
     { id: 'receipts.cost', role: 'line' as PulseRole }, // amplitude: $ heartbeat
     { id: 'automation.llm', role: 'lineDim' as PulseRole }, // automation shadow
     { id: 'receipts.sessions', role: 'ticks' as PulseRole }, // individual beats
@@ -269,12 +270,15 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
   function renderPulse(layers: { role: PulseRole; track: GraphTrack }[], y: number, h: number): React.ReactNode {
     const els: React.ReactNode[] = [];
     const bandT = layers.find((l) => l.role === 'band')?.track;
+    const barsT = layers.find((l) => l.role === 'bars')?.track;
     const lineT = layers.find((l) => l.role === 'line')?.track;
     const dimT = layers.find((l) => l.role === 'lineDim')?.track;
     const ticksT = layers.find((l) => l.role === 'ticks')?.track;
     const tickStrip = 13;
+    const commitTop = y + 13;
+    const commitStripH = 20;
     const waveBottom = y + h - tickStrip - 2;
-    const waveTop = y + 12;
+    const waveTop = commitTop + commitStripH + 4; // leave the top strip for the commit histogram
 
     // power: active/idle band as a faint wash behind everything
     if (bandT?.type === 'bands') {
@@ -283,6 +287,20 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
         const sx = Math.max(view.plotX0, x(new Date(sg.t0)));
         els.push(<rect key={`pb${i}`} x={sx} y={y + 2} width={Math.max(1, x(new Date(sg.t1)) - sx)} height={h - 4} fill="#3d7dff" fillOpacity={0.05} />);
       });
+    }
+    // commits: a gold histogram hanging along the top strip
+    if (barsT?.type === 'bars') {
+      const cmx = Math.max(1, ...barsT.bins.map((b) => b.v));
+      for (const b of barsT.bins) {
+        if (b.v <= 0 || !inView(b.t)) continue;
+        const bx = x(new Date(b.t));
+        const bw = Math.max(1.5, Math.min(x(new Date(b.t + barsT.binMs)) - bx - 0.6, 7));
+        const frac = b.v / cmx;
+        const bh = Math.max(2, frac * commitStripH);
+        els.push(<rect key={`pcm${b.t}`} x={bx} y={commitTop + (commitStripH - bh)} width={bw} height={bh} rx={0.5} fill="#f5c518" fillOpacity={0.45 + 0.55 * frac} />);
+      }
+      const cpk = barsT.bins.reduce((m, b) => (b.v > m.v ? b : m), { t: 0, v: 0 });
+      if (cpk.v > 0) els.push(<text key="pcmpk" x={view.plotX0 + 2} y={y + 9} fontSize={8} fontWeight={600} fill="#8a92a0" className="tabular-nums">{`peak ${cpk.v} commits/hr`}</text>);
     }
     // automation shadow: llm bars → a dim magenta line
     if (dimT?.type === 'bars') {
@@ -319,7 +337,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
     }
     // legend
     let lx = view.plotX1;
-    for (const it of [{ c: '#3d7dff', t: 'runs' }, { c: '#b5307a', t: 'llm' }, { c: '#f2913d', t: 'cost' }]) {
+    for (const it of [{ c: '#3d7dff', t: 'runs' }, { c: '#b5307a', t: 'llm' }, { c: '#f2913d', t: 'cost' }, { c: '#f5c518', t: 'commits' }]) {
       lx -= it.t.length * 4.6 + 14;
       els.push(<g key={`plg${it.t}`} pointerEvents="none"><rect x={lx} y={y + 1} width={7} height={7} rx={1} fill={it.c} /><text x={lx + 10} y={y + 8} fontSize={7.5} fill="#7a8390">{it.t}</text></g>);
     }
@@ -558,10 +576,15 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
         const layers = pulseRow.pulseLayers!;
         const t = pulseHover.t;
         const bandT = layers.find((l) => l.role === 'band')?.track;
+        const barsT = layers.find((l) => l.role === 'bars')?.track;
         const lineT = layers.find((l) => l.role === 'line')?.track;
         const dimT = layers.find((l) => l.role === 'lineDim')?.track;
         const ticksT = layers.find((l) => l.role === 'ticks')?.track;
         const out: { label: string; value: string; color: string }[] = [];
+        if (barsT?.type === 'bars') {
+          const b = barsT.bins.find((bb) => t >= bb.t && t < bb.t + barsT.binMs);
+          out.push({ label: 'commits', value: `${b ? b.v : 0}`, color: '#f5c518' });
+        }
         if (lineT?.type === 'series') {
           let best: { t: number; v: number } | null = null;
           for (const p of lineT.points) if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
