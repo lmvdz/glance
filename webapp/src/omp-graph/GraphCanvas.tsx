@@ -31,13 +31,12 @@ const cat = (c: string): string => (c === 'active' ? '#3d7dff' : c === 'busy' ? 
 /** Sparse event tracks don't deserve the full milestones height. */
 const eventsHeight = (n: number): number => (n <= 2 ? 60 : n <= 6 ? 100 : n <= 14 ? 148 : 200);
 const trackHeight = (t: GraphTrack): number =>
-  t.type === 'events' ? eventsHeight(t.marks.length) : t.type === 'series' ? 88 : t.type === 'bars' ? (t.style === 'grid' ? 104 : 88) : t.type === 'spans' ? 132 : 28;
+  t.type === 'events' ? eventsHeight(t.marks.length) : t.type === 'series' ? 88 : t.type === 'bars' ? 88 : t.type === 'spans' ? 132 : 28;
 
 /** Second-line descriptor under each track name (the poster's structured labels). */
 const SUBLABEL: Record<string, string> = {
   'git.milestones': 'commits · Δchurn',
   'git.commits': '+ churn ridge',
-  'git.heat': 'churn density',
   'receipts.cost': 'usd · receipts',
   'receipts.sessions': 'agent runs',
   'receipts.state': 'active / idle',
@@ -328,33 +327,6 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
 
   // ── per-track renderers (drawn inside the translated tracks group) ──────────
   function renderTrack(t: GraphTrack, y: number, h: number): React.ReactNode {
-    // COMMIT HEAT — Feltron magma grid: each fine time bin is a column of `rows`
-    // cells filled bottom-up by intensity. The full grid is always drawn (quiet
-    // cells faint) so it reads as a heatmap texture, not sparse ticks. A robust
-    // (85th-pct) max keeps one churn outlier from crushing every other column.
-    if (t.type === 'bars' && t.style === 'grid') {
-      const rows = t.rows ?? 7;
-      const positives = t.bins.map((b) => b.v).filter((v) => v > 0).sort((a, b) => a - b);
-      const mx = Math.max(1, positives.length ? positives[Math.floor(positives.length * 0.85)] : 1);
-      const norm = (v: number): number => (v <= 0 ? 0 : Math.min(1, Math.sqrt(Math.min(v, mx)) / Math.sqrt(mx)));
-      const gap = 1;
-      const cellH = (h - 4) / rows;
-      const els: React.ReactNode[] = [];
-      for (const b of t.bins) {
-        if (!inView(b.t)) continue;
-        const xl = x(new Date(b.t));
-        const cw = Math.max(1.5, Math.min(x(new Date(b.t + t.binMs)) - xl - gap, 22));
-        const i = norm(b.v);
-        for (let r = 0; r < rows; r++) {
-          const on = i > 0 && i >= r / rows; // fill bottom-up; higher rows need more intensity
-          const cellVal = on ? Math.min(1, 0.42 + i * 0.58) : 0.14;
-          els.push(<rect key={`hg${b.t}-${r}`} x={xl} y={y + h - 2 - (r + 1) * cellH} width={cw} height={Math.max(1, cellH - gap)} rx={0.5} fill={magma(cellVal)} fillOpacity={on ? 1 : 0.5} />);
-        }
-      }
-      const peak = t.bins.reduce((m, b) => (b.v > m.v ? b : m), { t: 0, v: 0 });
-      if (peak.v > 0) els.push(<text key="hgpk" x={view.plotX0 + 2} y={y + 8} fontSize={8} fontWeight={600} fill="#8a92a0" className="tabular-nums">{`peak Δ${fmtV(peak.v)} lines/cell`}</text>);
-      return <>{els}</>;
-    }
     if (t.type === 'bars') {
       const { s, mx } = valueScale(t.bins.map((b) => b.v), h, t.scale);
       const peak = t.bins.reduce((m, b) => (b.v > m.v ? b : m), { t: 0, v: 0 });

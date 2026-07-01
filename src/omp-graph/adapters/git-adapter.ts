@@ -121,26 +121,7 @@ export function commitTracks(commits: GitCommit[], range: TimeRange, group: stri
 		bins: bucketSums(range, HOUR_MS, inWindow.map((c) => ({ t: c.t, v: c.insertions + c.deletions }))),
 	};
 
-	// COMMIT HEAT — the Feltron day/hour magma grid: churn bucketed into fine cells,
-	// rendered as a stack of magma-lit cells per column (grid style). The cell width
-	// adapts to the window (~320 columns) so it stays readable + bounded at any range.
-	const FIFTEEN = 15 * 60_000;
-	const HEAT_BIN = Math.max(FIFTEEN, Math.round((range.end - range.start) / 320 / FIFTEEN) * FIFTEEN);
-	const heat: GraphTrack = {
-		id: "git.heat",
-		label: "COMMIT HEAT",
-		group,
-		source,
-		unit: "lines",
-		type: "bars",
-		binMs: HEAT_BIN,
-		scale: "sqrt",
-		style: "grid",
-		rows: 7,
-		bins: bucketSums(range, HEAT_BIN, inWindow.map((c) => ({ t: c.t, v: c.insertions + c.deletions }))),
-	};
-
-	return [events, commitsBars, churnBars, heat];
+	return [events, commitsBars, churnBars];
 }
 
 const GROUP: GraphGroup = { id: "fleet", label: "FLEET ACTIVITY", order: 0 };

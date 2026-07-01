@@ -62,7 +62,7 @@ interface TrackBase {
 export type GraphTrack =
   | (TrackBase & { type: 'events'; marks: EventMark[] })
   | (TrackBase & { type: 'series'; points: SeriesPoint[]; scale?: Scale })
-  | (TrackBase & { type: 'bars'; bins: Bin[]; binMs: number; scale?: Scale; style?: 'bar' | 'grid'; rows?: number })
+  | (TrackBase & { type: 'bars'; bins: Bin[]; binMs: number; scale?: Scale })
   | (TrackBase & { type: 'spans'; spans: Span[] })
   | (TrackBase & { type: 'bands'; segments: BandSegment[] });
 
