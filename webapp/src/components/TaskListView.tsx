@@ -3,14 +3,18 @@
  *
  * A dense, full-width ROW list (Plane/Linear style). Each row is assembled from a
  * COLUMNS config of pluggable "slots" — Pin · ID · Title · Status · % · Agents —
- * so adding a column is one entry in the array, nothing else changes. Grouped
- * PINNED → IN PROGRESS (active agents) → PLANNED → DONE.
+ * so adding a column is one entry in the array. Grouped PINNED → IN PROGRESS →
+ * PLANNED → DONE.
+ *
+ * The Status slot is a dropdown of Plane's canonical state groups (Backlog · Todo
+ * · In Progress · Done · Cancelled). Selecting one updates the task optimistically;
+ * persisting the change back to Plane for issue-backed tasks is a backend follow-up.
  *
  * Reuses the exact task→agent→status mapping the WorkbenchPane rail uses.
  */
 
-import React, { useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle2, CircleDashed, CircleDot, Inbox, Loader, Pin, Users } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, ChevronDown, Inbox, Pin, Users } from 'lucide-react';
 import { useTaskContext } from '../context/TaskContext';
 import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus';
 import { taskRef } from '../lib/task-model';
@@ -18,21 +22,24 @@ import { getCategoryBadge } from '../utils';
 import type { Task } from '../types';
 import type { AgentDTO } from '../lib/dto';
 
-// ── slot context: everything a column render function may need ────────────────
-interface SlotCtx {
-  task: Task;
-  status: TaskStatus;
-  pinned: boolean;
-  togglePin: () => void;
-}
-interface TaskColumn {
-  key: string;
-  header: string;
-  /** width / alignment classes for both the header cell and the row cell. */
-  cell: string;
-  render: (ctx: SlotCtx) => React.ReactNode;
-}
+// ── Plane's canonical state groups — the status dropdown options ───────────────
+interface StatusOption { group: string; label: string; dot: string; text: string }
+const TASK_STATUSES: StatusOption[] = [
+  { group: 'backlog', label: 'Backlog', dot: 'bg-gray-400', text: 'text-gray-500 dark:text-gray-400' },
+  { group: 'unstarted', label: 'Todo', dot: 'bg-blue-400', text: 'text-blue-500 dark:text-blue-400' },
+  { group: 'started', label: 'In Progress', dot: 'bg-amber-500', text: 'text-amber-500' },
+  { group: 'completed', label: 'Done', dot: 'bg-emerald-500', text: 'text-emerald-500' },
+  { group: 'cancelled', label: 'Cancelled', dot: 'bg-red-400', text: 'text-red-400 dark:text-red-400' },
+];
+const byGroup = (g: string): StatusOption => TASK_STATUSES.find((s) => s.group === g) ?? TASK_STATUSES[0];
+const currentStatus = (task: Task): StatusOption => {
+  const byLabel = TASK_STATUSES.find((s) => s.label.toLowerCase() === (task.properties.status ?? '').toLowerCase());
+  if (byLabel) return byLabel;
+  return task.status === 'done' ? byGroup('completed') : task.status === 'active' ? byGroup('started') : byGroup('backlog');
+};
+const taskStatusForGroup = (g: string): Task['status'] => (g === 'completed' ? 'done' : g === 'started' ? 'active' : 'todo');
 
+// ── avatars ──────────────────────────────────────────────────────────────────
 const AVATAR_COLORS = ['bg-rose-500', 'bg-sky-500', 'bg-amber-500', 'bg-emerald-500', 'bg-violet-500', 'bg-pink-500', 'bg-cyan-500'];
 const avatarColor = (name: string): string => {
   let h = 0;
@@ -41,29 +48,78 @@ const avatarColor = (name: string): string => {
 };
 const initials = (name: string): string => name.split(/[\s\-_./]+/).filter(Boolean).slice(0, 2).map((s) => s[0]?.toUpperCase()).join('') || '?';
 const agentRing: Record<string, string> = { working: 'ring-emerald-500', starting: 'ring-emerald-500', error: 'ring-red-500', idle: 'ring-amber-400' };
-
 const Avatar: React.FC<{ agent: AgentDTO }> = ({ agent }) => (
-  <span
-    className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-semibold text-white ring-2 ring-offset-1 ring-offset-white dark:ring-offset-gray-950 ${avatarColor(agent.name)} ${agentRing[agent.status] ?? 'ring-gray-400'}`}
-    title={`${agent.name} · ${agent.status}`}
-  >
+  <span className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-semibold text-white ring-2 ring-offset-1 ring-offset-white dark:ring-offset-gray-950 ${avatarColor(agent.name)} ${agentRing[agent.status] ?? 'ring-gray-400'}`} title={`${agent.name} · ${agent.status}`}>
     {initials(agent.name)}
   </span>
 );
 
-// ── the pluggable columns — extend by adding an entry ─────────────────────────
+// ── the status dropdown cell ─────────────────────────────────────────────────
+const StatusCell: React.FC<{ current: StatusOption; onChange: (s: StatusOption) => void }> = ({ current, onChange }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent): void => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  return (
+    <div ref={ref} className="relative" onClick={(e) => e.stopPropagation()}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title="Change status"
+      >
+        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${current.dot}`} />
+        <span className={current.text}>{current.label}</span>
+        <ChevronDown className="h-3 w-3 text-gray-400" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-20 mt-1 w-44 rounded-md border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900" role="listbox">
+          {TASK_STATUSES.map((s) => (
+            <button
+              key={s.group}
+              onClick={() => { onChange(s); setOpen(false); }}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
+              role="option"
+              aria-selected={s.group === current.group}
+            >
+              <span className={`h-2 w-2 flex-shrink-0 rounded-full ${s.dot}`} />
+              <span className={`${s.text} ${s.group === current.group ? 'font-semibold' : ''}`}>{s.label}</span>
+              {s.group === current.group && <Check className="ml-auto h-3 w-3 text-gray-400" aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── slot context + pluggable columns ─────────────────────────────────────────
+interface SlotCtx {
+  task: Task;
+  status: TaskStatus;
+  pinned: boolean;
+  togglePin: () => void;
+  onStatusChange: (s: StatusOption) => void;
+}
+interface TaskColumn {
+  key: string;
+  header: string;
+  cell: string;
+  render: (ctx: SlotCtx) => React.ReactNode;
+}
+
 const COLUMNS: TaskColumn[] = [
   {
     key: 'pin',
     header: '',
     cell: 'w-7 flex-shrink-0',
     render: ({ pinned, togglePin }) => (
-      <button
-        onClick={(e) => { e.stopPropagation(); togglePin(); }}
-        className={`flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${pinned ? 'text-amber-500' : 'text-gray-300 hover:text-gray-500 dark:text-gray-600'}`}
-        title={pinned ? 'Unpin' : 'Pin to top'}
-        aria-pressed={pinned}
-      >
+      <button onClick={(e) => { e.stopPropagation(); togglePin(); }} className={`flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${pinned ? 'text-amber-500' : 'text-gray-300 hover:text-gray-500 dark:text-gray-600'}`} title={pinned ? 'Unpin' : 'Pin to top'} aria-pressed={pinned}>
         <Pin className={`h-3.5 w-3.5 ${pinned ? 'fill-amber-400' : ''}`} aria-hidden="true" />
       </button>
     ),
@@ -88,25 +144,8 @@ const COLUMNS: TaskColumn[] = [
   {
     key: 'status',
     header: 'Status',
-    cell: 'w-32 flex-shrink-0',
-    render: ({ task, status }) => {
-      const isDone = task.status === 'done';
-      const [Icon, label, cls] = isDone
-        ? [CheckCircle2, 'Done', 'text-blue-500']
-        : status.posture === 'working'
-          ? [Loader, 'In progress', 'text-emerald-500']
-          : status.posture === 'needs-you'
-            ? [AlertCircle, status.verdict === 'critical' ? 'Blocked' : 'Ready', status.verdict === 'critical' ? 'text-red-500' : 'text-amber-500']
-            : status.posture === 'idle'
-              ? [CircleDot, 'Stopped', 'text-amber-400']
-              : [CircleDashed, 'Backlog', 'text-gray-400'];
-      return (
-        <span className={`inline-flex items-center gap-1.5 text-xs ${cls}`}>
-          <Icon className={`h-3.5 w-3.5 ${status.posture === 'working' ? 'animate-spin [animation-duration:3s]' : ''}`} aria-hidden="true" />
-          {label}
-        </span>
-      );
-    },
+    cell: 'w-36 flex-shrink-0',
+    render: ({ task, onStatusChange }) => <StatusCell current={currentStatus(task)} onChange={onStatusChange} />,
   },
   {
     key: 'completion',
@@ -136,9 +175,7 @@ const COLUMNS: TaskColumn[] = [
       if (!on.length) return <Users className="h-3.5 w-3.5 text-gray-300 dark:text-gray-700" aria-hidden="true" />;
       return (
         <div className="flex items-center">
-          <div className="flex -space-x-1.5">
-            {on.slice(0, 3).map((a) => <Avatar key={a.id} agent={a} />)}
-          </div>
+          <div className="flex -space-x-1.5">{on.slice(0, 3).map((a) => <Avatar key={a.id} agent={a} />)}</div>
           {on.length > 3 && <span className="ml-1 text-[10px] text-gray-400">+{on.length - 3}</span>}
         </div>
       );
@@ -169,9 +206,10 @@ const SectionHeader: React.FC<{ title: string; count: number; hint?: string; ton
 );
 
 export const TaskListView: React.FC = () => {
-  const { tasks, agents, selectTask } = useTaskContext();
+  const { tasks, agents, selectTask, updateTask } = useTaskContext();
   const [pinned, setPinned] = useState<Set<string>>(new Set());
   const togglePin = (id: string): void => setPinned((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const changeStatus = (task: Task, s: StatusOption): void => updateTask(task.id, { status: taskStatusForGroup(s.group), properties: { ...task.properties, status: s.label } });
 
   const statuses = useMemo(() => {
     const map = new Map<string, TaskStatus>();
@@ -199,7 +237,7 @@ export const TaskListView: React.FC = () => {
     return { pin, inProgress, planned, done };
   }, [tasks, statuses, pinned]);
 
-  const ctxFor = (t: Task): SlotCtx => ({ task: t, status: statusFor(t), pinned: pinned.has(t.id), togglePin: () => togglePin(t.id) });
+  const ctxFor = (t: Task): SlotCtx => ({ task: t, status: statusFor(t), pinned: pinned.has(t.id), togglePin: () => togglePin(t.id), onStatusChange: (s) => changeStatus(t, s) });
   const total = tasks.length;
 
   const renderSection = (title: string, list: Task[], tone?: string, hint?: string): React.ReactNode =>
@@ -216,10 +254,9 @@ export const TaskListView: React.FC = () => {
         <Inbox className="h-4 w-4 text-blue-500" aria-hidden="true" />
         <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">All work items</h1>
         <span className="font-mono text-xs text-gray-400">{total}</span>
-        <span className="ml-auto text-[11px] text-gray-400">click a row for full detail</span>
+        <span className="ml-auto text-[11px] text-gray-400">click a row for full detail · click status to change</span>
       </div>
 
-      {/* column header — same COLUMNS drive it, so cells stay aligned with the rows */}
       <div className="flex flex-shrink-0 items-center gap-3 border-b border-gray-200 px-4 py-1.5 dark:border-gray-800">
         {COLUMNS.map((col) => (
           <div key={col.key} className={`text-[10px] font-semibold uppercase tracking-wider text-gray-400 ${col.cell}`}>{col.header}</div>
