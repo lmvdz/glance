@@ -112,6 +112,7 @@ interface Row {
 export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: (d: GraphDatum) => void; selected?: GraphDatum | null }> = ({ doc, blend = true, onSelect, selected }) => {
   const [userCollapsed, setUserCollapsed] = useState<Record<string, boolean>>({});
   const [hoverDatum, setHoverDatum] = useState<{ d: GraphDatum; px: number; py: number } | null>(null);
+  const [pulseHover, setPulseHover] = useState<{ x: number; t: number } | null>(null);
 
   // Groups whose data is thin OR time-clustered collapse by default, so the graph
   // leads with the dense, meaningful lanes and tucks sparse ones into a header you
@@ -322,6 +323,34 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
       lx -= it.t.length * 4.6 + 14;
       els.push(<g key={`plg${it.t}`} pointerEvents="none"><rect x={lx} y={y + 1} width={7} height={7} rx={1} fill={it.c} /><text x={lx + 10} y={y + 8} fontSize={7.5} fill="#7a8390">{it.t}</text></g>);
     }
+    // hover readout: crosshair + a live dot on the cost waveform at the mouse x
+    if (pulseHover && pulseHover.x >= view.plotX0 && pulseHover.x <= view.plotX1) {
+      els.push(<line key="pcx" x1={pulseHover.x} y1={y} x2={pulseHover.x} y2={y + h} stroke="#f2c46b" strokeOpacity={0.5} strokeWidth={1} pointerEvents="none" />);
+      if (lineT?.type === 'series' && lineT.points.length) {
+        const mx = Math.max(1, ...lineT.points.map((p) => p.v));
+        const s = scaleSqrt().domain([0, mx]).range([waveBottom, waveTop]);
+        let best = lineT.points[0];
+        for (const p of lineT.points) if (Math.abs(p.t - pulseHover.t) < Math.abs(best.t - pulseHover.t)) best = p;
+        els.push(<circle key="pcxd" cx={x(new Date(best.t))} cy={s(best.v)} r={2.6} fill="#fbe9a0" stroke="#0b0e14" strokeWidth={0.6} pointerEvents="none" />);
+      }
+    }
+    // transparent hit area — read the 4 layered stats at any x; pointerdown still pans
+    els.push(
+      <rect
+        key="phit"
+        x={view.plotX0}
+        y={y}
+        width={Math.max(0, view.plotX1 - view.plotX0)}
+        height={h}
+        fill="transparent"
+        onMouseMove={(e) => {
+          // rect's screen-left = container-left + plotX0, so this recovers the SVG x
+          const px = e.clientX - e.currentTarget.getBoundingClientRect().left + view.plotX0;
+          setPulseHover({ x: px, t: view.timeAt(px) });
+        }}
+        onMouseLeave={() => setPulseHover(null)}
+      />,
+    );
     return els;
   }
 
@@ -521,6 +550,36 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
 
   const nowX = doc.generatedAt > view.domain[0] && doc.generatedAt < view.domain[1] ? x(new Date(doc.generatedAt)) : null;
 
+  // FLEET PULSE hover: read all four layered metrics (cost · runs · llm · state) at
+  // the hovered time. Cheap IIFE — only runs while the cursor is over the pulse lane.
+  const pulseRow = rows.find((r) => r.kind === 'pulse');
+  const pulseStats = pulseHover && pulseRow?.pulseLayers
+    ? ((): { label: string; value: string; color: string }[] => {
+        const layers = pulseRow.pulseLayers!;
+        const t = pulseHover.t;
+        const bandT = layers.find((l) => l.role === 'band')?.track;
+        const lineT = layers.find((l) => l.role === 'line')?.track;
+        const dimT = layers.find((l) => l.role === 'lineDim')?.track;
+        const ticksT = layers.find((l) => l.role === 'ticks')?.track;
+        const out: { label: string; value: string; color: string }[] = [];
+        if (lineT?.type === 'series') {
+          let best: { t: number; v: number } | null = null;
+          for (const p of lineT.points) if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
+          out.push({ label: 'cost', value: best ? `$${best.v.toFixed(1)}/hr` : '$0', color: '#f2913d' });
+        }
+        if (ticksT?.type === 'spans') out.push({ label: 'runs', value: `${ticksT.spans.filter((sp) => t >= sp.t0 && t <= sp.t1).length} active`, color: '#3d7dff' });
+        if (dimT?.type === 'bars') {
+          const b = dimT.bins.find((bb) => t >= bb.t && t < bb.t + dimT.binMs);
+          out.push({ label: 'llm', value: `${b ? Math.round(b.v) : 0}/hr`, color: '#b5307a' });
+        }
+        if (bandT?.type === 'bands') {
+          const sg = bandT.segments.find((s) => t >= s.t0 && t < s.t1);
+          out.push({ label: 'state', value: sg ? sg.category : 'idle', color: sg ? (sg.color ?? cat(sg.category)) : '#6d7480' });
+        }
+        return out;
+      })()
+    : null;
+
   return (
     <div
       ref={view.containerRef}
@@ -528,7 +587,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
       style={{ cursor: 'grab', touchAction: 'none' }}
       onWheel={view.onWheel}
       onPointerDown={view.onPanStart}
-      onMouseLeave={() => setHoverDatum(null)}
+      onMouseLeave={() => { setHoverDatum(null); setPulseHover(null); }}
     >
       <svg width={view.width} height={viewportH} className="block">
         <defs>
@@ -648,6 +707,25 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
       {/* vertical scroll hint */}
       {view.maxOffsetY > 0 && (
         <div className="pointer-events-none absolute right-1.5 rounded-full bg-[#2a3240]" style={{ top: HEADER_H + 4 + (view.offsetY / view.maxOffsetY) * (axisY - HEADER_H - 40), width: 3, height: 36 }} />
+      )}
+
+      {/* FLEET PULSE readout — all four layered metrics at the hovered x */}
+      {pulseHover && pulseStats && pulseStats.length > 0 && (
+        <div
+          className="pointer-events-none absolute z-10 min-w-[150px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-2 text-[10px] shadow-xl"
+          style={{ left: Math.min(pulseHover.x + 14, view.width - 168), top: Math.max(HEADER_H + 4, Math.min((pulseRow ? pulseRow.y - view.offsetY : HEADER_H) - 6, viewportH - 92)) }}
+        >
+          <div className="mb-1 flex items-center gap-2">
+            <span className="font-semibold uppercase tracking-wider text-[#7a8390]">Fleet pulse</span>
+            <span className="ml-auto tabular-nums text-[#6d7480]">{new Date(pulseHover.t).toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' })} {new Date(pulseHover.t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</span>
+          </div>
+          {pulseStats.map((st) => (
+            <div key={st.label} className="flex items-center justify-between gap-4 leading-relaxed">
+              <span className="flex items-center gap-1.5 text-[#7a8390]"><span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: st.color }} />{st.label}</span>
+              <span className="tabular-nums text-[#c4c9d2]">{st.value}</span>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* per-datum tooltip — describes exactly the mark under the cursor */}
