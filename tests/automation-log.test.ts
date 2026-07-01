@@ -187,6 +187,24 @@ describe("AutomationLog.rollup", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	test("carries the newest skip reason, and real work after a skip clears it", () => {
+		const dir = tmp();
+		try {
+			const log = mkLog(dir);
+			const now = 100_000;
+			// dispatch: skip is the newest tick → reason carried (detail wins over the enum).
+			log.record({ loop: "dispatch", skipReason: "budget", detail: "WIP cap reached" }, now - 1000);
+			// scout: skip then real work → newest is work, so no lingering skip reason.
+			log.record({ loop: "scout", skipReason: "budget" }, now - 800);
+			log.record({ loop: "scout", llmCalls: 1, found: 1 }, now - 200);
+			const rows = log.rollup(3_600_000, now);
+			expect(rows.find((r) => r.loop === "dispatch")!.lastSkipReason).toBe("WIP cap reached");
+			expect(rows.find((r) => r.loop === "scout")!.lastSkipReason).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("AutomationLog.hydrate", () => {

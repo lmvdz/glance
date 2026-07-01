@@ -275,6 +275,21 @@ describe('automationDigest', () => {
     expect(d.anomalies).toEqual([]);
   });
 
+  test('silent loop past 3× its interval with no skip reason is a stuck anomaly', () => {
+    const now = 1_000_000;
+    // dispatch interval is 30s; 91s of silence with no skip reason → stuck.
+    const d = automationDigest([roll('dispatch', { lastAt: now - 91_000 })], { runs: [] }, 30, now);
+    expect(d.anomalies.some((a) => a.loop === 'dispatch' && a.message.includes('stuck'))).toBe(true);
+    expect(d.idle).toEqual([]);
+  });
+
+  test('recent skip reason is healthy idle, not an anomaly', () => {
+    const now = 1_000_000;
+    const d = automationDigest([roll('dispatch', { lastAt: now - 20_000, lastSkipReason: 'WIP cap reached' })], { runs: [] }, 30, now);
+    expect(d.anomalies.filter((a) => a.loop === 'dispatch')).toEqual([]);
+    expect(d.idle).toEqual([{ loop: 'dispatch', reason: 'WIP cap reached', idleMs: 20_000 }]);
+  });
+
   test('null inputs → zeros', () => {
     const d = automationDigest(null, null);
     expect(d.llmCalls).toBe(0);

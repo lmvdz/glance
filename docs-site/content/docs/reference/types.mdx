@@ -268,6 +268,7 @@ One unit of background-loop work. Scout emits one per reasoning scan (each = one
 		spawned: { type: 'number', required: true },
 		errors: { type: 'number', required: true },
 		lastAt: { type: 'number', required: true, description: 'Most-recent activity timestamp in the window. 0 if the loop was silent (lets the UI flag a stalled loop).' },
+		lastSkipReason: { type: 'string', description: 'Reason for the loop\'s most-recent intentional no-work tick, when present. Lets the digest tell healthy-idle (has a reason) from stuck (silent).' },
 	}}
 />
 

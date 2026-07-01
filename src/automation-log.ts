@@ -64,6 +64,11 @@ export interface AutomationRollupRow {
 	errors: number;
 	/** Most-recent activity ts in the window — 0 if the loop was silent (lets the UI flag a stalled loop). */
 	lastAt: number;
+	/**
+	 * Human-readable reason for the most-recent intentional no-work tick in the window, if any.
+	 * Lets the UI tell "alive but idle on purpose" (has a reason) from "stuck" (silent, no reason).
+	 */
+	lastSkipReason?: string;
 }
 
 export interface AutomationQuery {
@@ -195,7 +200,12 @@ export class AutomationLog {
 			r.filed += e.filed ?? 0;
 			r.spawned += e.spawned ?? 0;
 			if (e.level === "warn" || e.level === "error") r.errors++;
-			if (e.at > r.lastAt) r.lastAt = e.at;
+			if (e.at >= r.lastAt) {
+				r.lastAt = e.at;
+				// Reflect the NEWEST event's skip state: a skip carries its reason, real work clears it.
+				// Lets the digest tell healthy-idle (reason present) from stuck (silent, no reason).
+				r.lastSkipReason = e.skipReason ? (e.detail ?? e.skipReason) : undefined;
+			}
 		}
 		return [...rows.values()].sort((a, b) => a.loop.localeCompare(b.loop));
 	}

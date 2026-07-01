@@ -97,6 +97,8 @@ export interface AutomationRollup {
   spawned?: number;
   errors?: number;
   lastAt: number;
+  /** Human-readable reason for the loop's most-recent no-work tick, when it was intentionally idle. */
+  lastSkipReason?: string;
 }
 
 /** Server-built action item from GET /api/action-items.items[]. */
@@ -314,6 +316,8 @@ export interface AutomationDigest {
   /** candidates the dispatch/opportunity loops scanned (found). */
   candidates: number;
   anomalies: { loop: string; message: string }[];
+  /** Loops that are alive but intentionally idle — a recent skip reason, not silence. */
+  idle: { loop: string; reason: string; idleMs: number }[];
   scoutBudget: { used: number; cap: number };
 }
 
@@ -327,6 +331,7 @@ export function automationDigest(
   rollup: AutomationRollup[] | null | undefined,
   usage: UsagePayload | null | undefined,
   scoutCap = 30,
+  now = Date.now(),
 ): AutomationDigest {
   const rows = rollup ?? [];
   const sum = (pick: (r: AutomationRollup) => number) => rows.reduce((acc, r) => acc + (pick(r) || 0), 0);
@@ -338,6 +343,7 @@ export function automationDigest(
   const spentUsd = usage?.costUsd ?? 0;
 
   const anomalies: { loop: string; message: string }[] = [];
+  const idle: { loop: string; reason: string; idleMs: number }[] = [];
   for (const r of rows) {
     // Found a lot, acted on none → cap or filter is eating work.
     if ((r.found ?? 0) >= 3 && (r.spawned ?? 0) === 0 && (r.filed ?? 0) === 0) {
@@ -354,6 +360,15 @@ export function automationDigest(
     if ((r.errors ?? 0) > 0) {
       anomalies.push({ loop: r.loop, message: `${cap1(r.loop)} logged ${plural(r.errors!, 'error')} in this window.` });
     }
+
+    // Idle-vs-stuck: a loop past ~3× its interval is silent. If its newest tick
+    // named a skip reason, it's alive-but-idle (healthy); otherwise it's stuck.
+    const idleMs = r.lastAt > 0 ? now - r.lastAt : 0;
+    if (r.lastSkipReason && idleMs <= loopIntervalMs(r.loop) * 3) {
+      idle.push({ loop: r.loop, reason: r.lastSkipReason, idleMs });
+    } else if (r.lastAt > 0 && idleMs > loopIntervalMs(r.loop) * 3) {
+      anomalies.push({ loop: r.loop, message: `${cap1(r.loop)} has not reported for ${fmtIdle(idleMs)} — loop may be stuck.` });
+    }
   }
 
   const scoutRow = rows.find((r) => r.loop === 'scout');
@@ -369,12 +384,28 @@ export function automationDigest(
     agentsSpawned,
     candidates,
     anomalies,
+    idle,
     scoutBudget: { used: scoutUsed, cap: scoutCap },
   };
 }
 
 function cap1(s: string): string {
   return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/** Nominal cadence per loop — the digest flags a loop as "stuck" past ~3× this. */
+function loopIntervalMs(loop: string): number {
+  if (loop === 'scout') return 60_000;
+  if (loop === 'dispatch') return 30_000;
+  return 300_000;
+}
+
+function fmtIdle(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.round(m / 60)}h`;
 }
 
 // ───────────────────────────── attention items ─────────────────────────────
