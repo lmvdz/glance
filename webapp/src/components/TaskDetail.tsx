@@ -1448,6 +1448,7 @@ export const TaskDetail = () => {
                                       now={now}
                                       expanded={isDetailOpen}
                                       onToggle={() => toggleTranscriptDetail(agent.id)}
+                                      onAnswer={(requestId, value) => { sendConsoleCommand(answerCommand(agent.id, requestId, value)); showToast('Answer sent', 'info'); }}
                                     />
                                   </div>
                                 )}

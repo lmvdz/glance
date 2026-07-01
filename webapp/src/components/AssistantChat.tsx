@@ -1,14 +1,16 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Plus, Mic, Paperclip, ArrowUp, X, ChevronRight, Copy, Check, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare, Clock3, TerminalSquare, FileText } from 'lucide-react';
+import { Sparkles, Plus, Mic, Paperclip, ArrowUp, X, ChevronRight, Copy, Check, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare, Clock3, TerminalSquare, FileText, Send } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useTaskContext } from '../context/TaskContext';
 import { apiJson, jsonInit } from '../lib/api';
+import { answerCommand } from '../lib/agent-control';
 import { activeWork, activeWorkDigest } from '../lib/insights';
 import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../lib/fleetActivity';
-import type { AgentDTO, TodoPhaseDTO, TodoStatus, TranscriptEntry } from '../lib/dto';
+import type { AgentDTO, PendingRequest, TodoPhaseDTO, TodoStatus, TranscriptEntry } from '../lib/dto';
 import type { Task } from '../types';
 
 export interface Message {
@@ -272,6 +274,63 @@ export const RunStatusHeader = ({
   </button>
 );
 
+const GateWidget = ({
+  request,
+  onAnswer,
+}: {
+  request: PendingRequest;
+  onAnswer: (value: string) => void;
+}) => {
+  const [text, setText] = useState('');
+  if (request.options && request.options.length > 0) {
+    return (
+      <div className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
+        <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
+        <div className="flex flex-wrap gap-2">
+          {request.options.map((opt) => (
+            <button
+              key={opt}
+              onClick={() => onAnswer(opt)}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
+      <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
+      {request.message && <div className="mb-2 text-[11px] text-gray-600 dark:text-gray-400">{request.message}</div>}
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            if (text.trim()) { onAnswer(text.trim()); setText(''); }
+          }
+        }}
+        rows={2}
+        placeholder={request.placeholder ?? 'Type your reply…'}
+        className="w-full resize-y rounded-md border border-amber-200 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-700 dark:bg-gray-950 dark:text-gray-100"
+      />
+      <div className="mt-2 flex justify-end">
+        <button
+          onClick={() => { if (text.trim()) { onAnswer(text.trim()); setText(''); } }}
+          disabled={!text.trim()}
+          className="flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Send className="h-3 w-3" aria-hidden />
+          Send
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const DiffReviewPanel = ({ diffs }: { diffs: AgentFileDiff[] }) => {
   if (!diffs.length) return null;
   return (
@@ -305,6 +364,7 @@ export const TranscriptTimeline = ({
   diffs = EMPTY_DIFFS,
   expanded,
   onToggle,
+  onAnswer,
 }: {
   entries: TranscriptEntry[];
   messages: Message[];
@@ -313,6 +373,7 @@ export const TranscriptTimeline = ({
   diffs?: AgentFileDiff[];
   expanded: boolean;
   onToggle: () => void;
+  onAnswer?: (requestId: string, value: string) => void;
 }) => {
   const { promptEntries, workEntries, finalEntry } = splitTranscriptEntries(entries);
   const running = agentIsRunning(agent) || transcriptIsRunning(entries);
@@ -320,14 +381,37 @@ export const TranscriptTimeline = ({
   const latestWork = [...workEntries].reverse().find((entry) => entry.kind !== 'assistant' || entry.status === 'running') ?? workEntries.at(-1);
   const hiddenWorkEntries = !running && finalEntry ? workEntries.filter((entry) => entry !== finalEntry) : workEntries;
 
+  const renderEntry = (entry: TranscriptEntry) => {
+    const gateRequest =
+      entry.kind === 'system' && entry.pending?.action === 'created' && agent && onAnswer
+        ? agent.pending.find((p) => p.id === entry.pending!.requestId)
+        : undefined;
+    return (
+      <>
+        <TranscriptEntryView entry={entry} />
+        {gateRequest && onAnswer && (
+          <GateWidget request={gateRequest} onAnswer={(value) => onAnswer(gateRequest.id, value)} />
+        )}
+      </>
+    );
+  };
+
   return (
     <>
-      {promptEntries.map((entry) => <TranscriptEntryView key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`} entry={entry} />)}
+      {promptEntries.map((entry) => (
+        <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
+          {renderEntry(entry)}
+        </React.Fragment>
+      ))}
       <RunStatusHeader running={running} elapsedMs={elapsedMs} action={entryAction(latestWork)} expanded={expanded} onToggle={onToggle} />
-      {expanded && hiddenWorkEntries.map((entry) => <TranscriptEntryView key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`} entry={entry} />)}
+      {expanded && hiddenWorkEntries.map((entry) => (
+        <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
+          {renderEntry(entry)}
+        </React.Fragment>
+      ))}
       {!running && finalEntry && (
         <div className="space-y-3">
-          <TranscriptEntryView entry={finalEntry} />
+          {renderEntry(finalEntry)}
           <DiffReviewPanel diffs={diffs} />
         </div>
       )}
@@ -443,7 +527,7 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
 
   if (entry.kind === 'system') {
     return (
-      <div className="rounded-md px-1.5 py-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400 whitespace-pre-wrap">
+      <div className="rounded-md bg-gray-100 px-2 py-1.5 text-[11px] font-mono leading-relaxed text-gray-600 dark:bg-gray-900 dark:text-gray-400 whitespace-pre-wrap">
         {entry.text}
       </div>
     );
@@ -455,8 +539,8 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
         {entry.kind === 'assistant' ? 'omp-squad' : entry.kind} <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         {entry.status === 'running' && <span className="shimmer text-[10px]">streaming</span>}
       </div>
-      <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
-        <Markdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>{entry.text}</Markdown>
+      <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300 prose-headings:text-sm prose-headings:font-semibold prose-headings:mb-1 prose-headings:mt-2">
+        <Markdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ code: CodeBlock }}>{entry.text}</Markdown>
       </div>
     </div>
   );
@@ -624,7 +708,7 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
 
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
-  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId } = useTaskContext();
+  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, showToast } = useTaskContext();
   const [initialChatState] = useState(readInitialChatState);
   const [sessions, setSessions] = useState<Session[]>(initialChatState.sessions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialChatState.activeSessionId);
@@ -1081,6 +1165,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             diffs={agentDiffs ?? EMPTY_DIFFS}
             expanded={workExpanded}
             onToggle={() => setWorkExpanded((value) => !value)}
+            onAnswer={selectedAgent ? (requestId, value) => {
+              sendConsoleCommand(answerCommand(selectedAgent.id, requestId, value));
+              showToast(`Answer sent to ${selectedAgent.name}`, 'success');
+            } : undefined}
           />
         ) : visibleMessages.map((msg, idx) => (
           <div key={idx} className={`flex flex-col w-full ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
@@ -1099,7 +1187,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
                   omp-squad <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </div>
                 <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
-                  <Markdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>{msg.text}</Markdown>
+                  <Markdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ code: CodeBlock }}>{msg.text}</Markdown>
                 </div>
                 <div className="flex items-center gap-2 mt-3 text-gray-400 dark:text-gray-500">
                   <button
