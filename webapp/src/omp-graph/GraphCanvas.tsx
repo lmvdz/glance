@@ -528,28 +528,21 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
           </g>
         ))}
 
-        {/* fixed: hours ruler axis (bottom band) with sun arc */}
+        {/* fixed: hours ruler axis (bottom band) */}
         <rect x={0} y={axisY} width={view.width} height={AXIS_H} fill="#05060a" />
         <line x1={view.plotX0} y1={axisY} x2={view.plotX1} y2={axisY} stroke="#1e2430" />
         {spanDays <= 12 &&
-          dayTicks.flatMap((d, i) => {
-            const els: React.ReactNode[] = [];
-            // sun arc: dotted parabola peaking at noon
-            if (spanDays <= 8) {
-              const noon = d.t + 12 * 3_600_000;
-              const dawn = d.t + 5 * 3_600_000;
-              const dusk = d.t + 19 * 3_600_000;
-              const xn = x(new Date(noon));
-              const path = `M ${x(new Date(dawn))} ${axisY + 20} Q ${xn} ${axisY + 6} ${x(new Date(dusk))} ${axisY + 20}`;
-              els.push(<path key={`sa${i}`} d={path} fill="none" stroke="#2a2f3a" strokeWidth={0.7} strokeDasharray="1 2" />);
-              if (noon >= view.domain[0] && noon <= view.domain[1]) els.push(<circle key={`sun${i}`} cx={xn} cy={axisY + 7} r={1.6} fill="#c8a24a" />);
-            }
-            for (const hr of [0, 6, 12, 18]) {
+          dayTicks.flatMap((d, i) =>
+            [0, 6, 12, 18].map((hr) => {
               const tt = d.t + hr * 3_600_000;
-              if (tt >= view.domain[0] && tt <= view.domain[1]) els.push(<text key={`hr${i}-${hr}`} x={x(new Date(tt))} y={axisY + 12} fontSize={7} textAnchor="middle" fill="#4a515e" className="tabular-nums">{String(hr).padStart(2, '0')}</text>);
-            }
-            return els;
-          })}
+              if (tt < view.domain[0] || tt > view.domain[1]) return null;
+              return (
+                <text key={`hr${i}-${hr}`} x={x(new Date(tt))} y={axisY + 12} fontSize={7} textAnchor="middle" fill="#4a515e" className="tabular-nums">
+                  {String(hr).padStart(2, '0')}
+                </text>
+              );
+            }),
+          )}
 
         {/* fixed: now marker + hover cursor */}
         {nowX !== null && (
