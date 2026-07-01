@@ -327,7 +327,7 @@ function promptsFromContent(content: string): Map<string, string> {
 }
 
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole } = useTaskContext();
+  const { tasks, selectedTaskId, selectTask, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
@@ -1221,7 +1221,7 @@ export const TaskDetail = () => {
           <section className="min-w-0 flex-1 overflow-y-auto scrollbar-custom lg:flex-none lg:[flex-basis:var(--detail-pane-width)]">
             <div className="mx-auto max-w-5xl px-4 py-5 lg:px-5">
               <div className="flex items-start justify-between mb-4">
-                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-xs mb-2"><span className="font-medium text-gray-700 dark:text-gray-300">{task.id}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
+                <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400 text-xs mb-2"><button onClick={() => selectTask(null)} className="flex items-center gap-1 rounded px-1.5 py-0.5 font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" title="Back to all work items"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />Tasks</button><ChevronRight className="w-3 h-3" /><span className="font-medium text-gray-700 dark:text-gray-300">{task.id}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
                 <div className="flex items-center gap-2">
                   <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties" aria-label="Toggle properties panel" aria-expanded={showProperties}><PanelRight className="w-3.5 h-3.5" /></button>
                   <button onClick={() => { navigator.clipboard.writeText(`${task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
