@@ -203,7 +203,9 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       }
 
       const els: React.ReactNode[] = [];
-      for (const m of marks) els.push(<circle key={`d${m.t}`} cx={x(new Date(m.t))} cy={railY} r={2.2} fill={kindColor(m.kind)} />);
+      // index keys, NOT timestamps — commits share per-second dates, and duplicate
+      // keys leave "ghost" dots that React can't reconcile away when the view changes.
+      marks.forEach((m, i) => els.push(<circle key={`d${i}`} cx={x(new Date(m.t))} cy={railY} r={2.2} fill={kindColor(m.kind)} />));
 
       type L = { kind?: string; text: string; delta?: string; color: string };
       const blocks = clusters.map((cl) => {
@@ -218,7 +220,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
 
       const placed: { x0: number; x1: number; y0: number; y1: number }[] = [];
       const hits = (a: { x0: number; x1: number; y0: number; y1: number }, b: { x0: number; x1: number; y0: number; y1: number }) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
-      for (const blk of [...blocks].sort((a, b) => b.priority - a.priority)) {
+      [...blocks].sort((a, b) => b.priority - a.priority).forEach((blk, bi) => {
         const xc = blk.cl.x;
         const rightAlign = xc + blk.w > view.plotX1 - 4;
         const rx0 = rightAlign ? xc - blk.w : xc - 1;
@@ -228,19 +230,19 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
           const rect = { x0: rx0, x1: rx1, y0: cand, y1: cand + blk.bh };
           if (!placed.some((p) => hits(rect, p))) { top = cand; placed.push(rect); break; }
         }
-        if (top === null) continue;
-        els.push(<line key={`c${xc}`} x1={xc} y1={railY + 2} x2={xc} y2={top - 1} stroke={kindColor(blk.cl.marks[0].kind)} strokeOpacity={0.22} strokeWidth={0.6} />);
+        if (top === null) return;
+        els.push(<line key={`c${bi}`} x1={xc} y1={railY + 2} x2={xc} y2={top - 1} stroke={kindColor(blk.cl.marks[0].kind)} strokeOpacity={0.22} strokeWidth={0.6} />);
         blk.lines.forEach((l, li) => {
           const ly = top! + li * lineH + 8;
           els.push(
-            <text key={`l${xc}-${li}`} x={rightAlign ? xc - 4 : xc + 4} y={ly} textAnchor={rightAlign ? 'end' : 'start'} fontSize={8} className="tabular-nums">
+            <text key={`l${bi}-${li}`} x={rightAlign ? xc - 4 : xc + 4} y={ly} textAnchor={rightAlign ? 'end' : 'start'} fontSize={8} className="tabular-nums">
               {l.kind && <tspan fontWeight={700} fill={l.color}>{l.kind} </tspan>}
               <tspan fill={l.kind ? '#9aa1ad' : l.color} fontWeight={l.kind ? 400 : 600}>{l.text}</tspan>
               {l.delta && <tspan fill="#5a6270"> {l.delta}</tspan>}
             </text>,
           );
         });
-      }
+      });
 
       const kinds = [...new Set(marks.map((m) => m.kind ?? 'other'))].slice(0, 6);
       let lx = view.plotX1;
@@ -362,12 +364,15 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
         {/* scrollable tracks (clipped between the pinned header + axis) */}
         <g clipPath="url(#omp-graph-tracks)">
           <g transform={`translate(0, ${-view.offsetY})`}>
-            {/* rotated group labels on the far left */}
-            {groupExtents.map((g) => (
-              <text key={`rl${g.id}`} transform={`translate(13, ${(g.y0 + g.y1) / 2}) rotate(-90)`} textAnchor="middle" fontSize={8.5} fontWeight={700} letterSpacing="0.18em" fill="#3f4653">
-                {g.label}
-              </text>
-            ))}
+            {/* rotated group labels on the far left — only when the group is tall enough
+                to hold the vertical text, so collapsed groups don't overlap each other */}
+            {groupExtents.map((g) =>
+              g.y1 - g.y0 < g.label.length * 8 + 16 ? null : (
+                <text key={`rl${g.id}`} transform={`translate(13, ${(g.y0 + g.y1) / 2}) rotate(-90)`} textAnchor="middle" fontSize={8.5} fontWeight={700} letterSpacing="0.18em" fill="#3f4653">
+                  {g.label}
+                </text>
+              ),
+            )}
             {rows.map((r, i) => {
               if (r.kind === 'group') {
                 const isCol = collapsed.has(r.groupId);
