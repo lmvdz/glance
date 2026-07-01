@@ -1,11 +1,11 @@
 /**
- * GraphCanvas — the interactive omp-graph renderer.
+ * GraphCanvas — the interactive omp-graph renderer, in the Felton "One Week" idiom.
  *
- * Draws a GraphDoc as stacked, time-aligned tracks (the Felton "One Week"
- * language) in the moodboard's dark idiom. One shared time x-axis; each track
- * renders by its primitive type. Pan/zoom via useGraphView; a shared hover
- * cursor reads every track at the pointer. SVG throughout (crisp text +
- * connectors); d3-scale/shape for scales + line/area paths.
+ * The graph lives in a FIXED-HEIGHT viewport: taller content scrolls inside it via
+ * drag (drag pans time on x AND scrolls tracks on y), wheel zooms time. Day-column
+ * headers stay pinned at the top and the hours ruler at the bottom while the tracks
+ * scroll between them (clipped). One shared time axis; each track renders by its
+ * primitive type. d3-scale/shape for scales + line/area paths.
  */
 
 import React, { useMemo, useState } from 'react';
@@ -17,15 +17,28 @@ import { kindColor, statusColor, type EventMark, type GraphDoc, type GraphTrack,
 
 const LABEL_W = 118;
 const PAD_R = 18;
-const AXIS_H = 26;
-const HEADER_H = 44; // top band for big weekday/date column headers
+const AXIS_H = 28;
+const HEADER_H = 44;
 const GROUP_H = 24;
-const TRACK_H: Record<GraphTrack['type'], number> = { events: 176, series: 72, bars: 72, spans: 116, bands: 24 };
 const TRACK_GAP = 10;
+const MAX_VIEWPORT = 660; // graph viewport height; taller content scrolls inside
+const MAX_BAR = 18; // cap bar width so a day-wide bin isn't a giant block
 
-/** Compact churn/Δ formatter (865 → "865", 16400 → "16.4k"). */
 const fmtV = (v: number): string => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10_000 ? 0 : 1)}k` : `${Math.round(v)}`);
 const hhmm = (d: Date): string => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+const short = (s: string, n = 24): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const cat = (c: string): string => (c === 'active' ? '#3d7dff' : c === 'busy' ? '#2fb6d6' : '#7b4bd0');
+
+/** Sparse event tracks don't deserve the full milestones height. */
+const eventsHeight = (n: number): number => (n <= 2 ? 52 : n <= 6 ? 88 : n <= 14 ? 128 : 176);
+const trackHeight = (t: GraphTrack): number =>
+  t.type === 'events' ? eventsHeight(t.marks.length) : t.type === 'series' ? 72 : t.type === 'bars' ? 72 : t.type === 'spans' ? 116 : 24;
+
+function valueScale(vals: number[], h: number, scale: Scale | undefined) {
+  const mx = Math.max(1, ...vals);
+  const s = scale === 'sqrt' ? scaleSqrt() : scale === 'log' ? scaleSymlog().constant(8) : scaleLinear();
+  return { s: s.domain([0, mx]).range([h - 2, 2]), mx };
+}
 
 interface Row {
   kind: 'group' | 'track';
@@ -36,127 +49,116 @@ interface Row {
   track?: GraphTrack;
 }
 
-/** A value-axis scale for a track, honoring its scale hint. */
-function valueScale(vals: number[], h: number, scale: Scale | undefined) {
-  const mx = Math.max(1, ...vals);
-  const s = scale === 'sqrt' ? scaleSqrt() : scale === 'log' ? scaleSymlog().constant(8) : scaleLinear();
-  return { s: s.domain([0, mx]).range([h - 2, 2]), mx };
-}
-
-const cat = (c: string): string => (c === 'active' ? '#3d7dff' : c === 'busy' ? '#2fb6d6' : '#7b4bd0');
-const short = (s: string, n = 44): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-
 export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
-  const view = useGraphView(doc.range, LABEL_W, PAD_R);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
 
   // Vertical layout — independent of the time domain, so it memoizes cleanly.
-  const { rows, totalH } = useMemo(() => {
+  const { rows, totalH, groupExtents } = useMemo(() => {
     const out: Row[] = [];
+    const extents: { id: string; label: string; y0: number; y1: number }[] = [];
     let y = HEADER_H;
     for (const g of doc.groups) {
       const tracks = doc.tracks.filter((t) => t.group === g.id);
       if (!tracks.length) continue;
+      const y0 = y;
       out.push({ kind: 'group', label: g.label, groupId: g.id, y, h: GROUP_H });
       y += GROUP_H;
       if (!collapsed.has(g.id)) {
         for (const t of tracks) {
-          const h = TRACK_H[t.type];
+          const h = trackHeight(t);
           out.push({ kind: 'track', label: t.label, groupId: g.id, y, h, track: t });
           y += h + TRACK_GAP;
         }
       }
+      extents.push({ id: g.id, label: g.label, y0, y1: y - TRACK_GAP });
     }
-    return { rows: out, totalH: y + AXIS_H };
+    return { rows: out, totalH: y + AXIS_H, groupExtents: extents };
   }, [doc, collapsed]);
 
-  const x = scaleTime()
-    .domain([new Date(view.domain[0]), new Date(view.domain[1])])
-    .range([view.plotX0, view.plotX1]);
+  const viewportH = Math.min(totalH, MAX_VIEWPORT);
+  const view = useGraphView(doc.range, LABEL_W, PAD_R, totalH, viewportH);
+
+  const x = scaleTime().domain([new Date(view.domain[0]), new Date(view.domain[1])]).range([view.plotX0, view.plotX1]);
   const inView = (t: number): boolean => t >= view.domain[0] - 1 && t <= view.domain[1] + 1;
+  const axisY = viewportH - AXIS_H; // fixed bottom axis line
+  const tracksBottom = axisY;
+  const tracksTop = HEADER_H;
 
-  const axisY = totalH - AXIS_H;
-
-  // ── day separators + ticks ────────────────────────────────────────────────
   const dayTicks = useMemo(() => {
-    const ticks: { t: number; weekday: string; weekdayLong: string; date: string }[] = [];
+    const ticks: { t: number; weekdayLong: string; date: string }[] = [];
     const start = new Date(view.domain[0]);
     start.setHours(0, 0, 0, 0);
     for (let cur = start.getTime(); cur <= view.domain[1]; cur += 86_400_000) {
       const dd = new Date(cur);
-      ticks.push({
-        t: cur,
-        weekday: dd.toLocaleDateString(undefined, { weekday: 'short' }),
-        weekdayLong: dd.toLocaleDateString(undefined, { weekday: 'long' }),
-        date: dd.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }),
-      });
+      ticks.push({ t: cur, weekdayLong: dd.toLocaleDateString(undefined, { weekday: 'long' }), date: dd.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }) });
     }
     return ticks;
   }, [view.domain]);
 
   const spanDays = (view.domain[1] - view.domain[0]) / 86_400_000;
-  const hourTicks = useMemo(() => {
-    if (spanDays > 3) return [] as number[];
-    const out: number[] = [];
-    const d = new Date(view.domain[0]);
-    d.setMinutes(0, 0, 0);
-    for (let cur = d.getTime(); cur <= view.domain[1]; cur += 3_600_000) if (cur >= view.domain[0]) out.push(cur);
-    return out;
-  }, [view.domain, spanDays]);
 
-  // ── per-track renderers ───────────────────────────────────────────────────
+  // ── per-track renderers (drawn inside the translated tracks group) ──────────
   function renderTrack(t: GraphTrack, y: number, h: number): React.ReactNode {
     if (t.type === 'bars') {
       const { s, mx } = valueScale(t.bins.map((b) => b.v), h, t.scale);
       const peak = t.bins.reduce((m, b) => (b.v > m.v ? b : m), { t: 0, v: 0 });
+
+      // churn (and other big-sqrt bars) read better as a filled ridge than columns.
+      if (t.id.endsWith('churn')) {
+        const pts = t.bins.filter((b) => inView(b.t));
+        const ln = line<{ t: number; v: number }>().x((b) => x(new Date(b.t + t.binMs / 2))).y((b) => y + s(b.v)).curve(curveMonotoneX);
+        const ar = area<{ t: number; v: number }>().x((b) => x(new Date(b.t + t.binMs / 2))).y0(y + h).y1((b) => y + s(b.v)).curve(curveMonotoneX);
+        return (
+          <>
+            <path d={ar(pts) ?? undefined} fill="#7b1f6f" fillOpacity={0.28} />
+            <path d={ln(pts) ?? undefined} fill="none" stroke="#b5307a" strokeOpacity={0.7} strokeWidth={1} />
+            {peak.v > 0 && inView(peak.t) && (
+              <text x={x(new Date(peak.t))} y={y - 3} fontSize={8} fontWeight={600} textAnchor="middle" fill="#8a92a0" className="tabular-nums">{`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>
+            )}
+          </>
+        );
+      }
+
       return (
         <>
           {t.bins
             .filter((b) => b.v > 0 && inView(b.t))
             .map((b, i) => {
-              const bx = x(new Date(b.t));
-              const bw = Math.max(1, x(new Date(b.t + t.binMs)) - bx - 0.6);
+              const bl = x(new Date(b.t));
+              const binW = x(new Date(b.t + t.binMs)) - bl;
+              const bw = Math.max(1, Math.min(binW - 0.6, MAX_BAR));
+              const bx = bl + (binW - bw) / 2; // center the (capped) bar in its bin
               const by = y + s(b.v);
               const isPeak = b.t === peak.t;
-              // crisp: glow ONLY on the single peak bar, not every hot one
               return <rect key={i} x={bx} y={by} width={bw} height={y + h - by} fill={magma(mx > 0 ? b.v / mx : 0)} style={isPeak ? { filter: 'drop-shadow(0 0 4px #fbe9a0aa)' } : undefined} />;
             })}
           {peak.v > 0 && inView(peak.t) && (
-            <text x={x(new Date(peak.t))} y={y - 3} fontSize={8} fontWeight={600} textAnchor="middle" fill="#8a92a0" className="tabular-nums">
-              {`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}
-            </text>
+            <text x={x(new Date(peak.t))} y={y - 3} fontSize={8} fontWeight={600} textAnchor="middle" fill="#8a92a0" className="tabular-nums">{`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>
           )}
         </>
       );
     }
     if (t.type === 'series') {
       const { s } = valueScale(t.points.map((p) => p.v), h, t.scale);
-      const pts = t.points;
-      const peak = pts.reduce((m, p) => (p.v > m.v ? p : m), { t: 0, v: 0 });
+      const peak = t.points.reduce((m, p) => (p.v > m.v ? p : m), { t: 0, v: 0 });
       const ln = line<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y((p) => y + s(p.v)).curve(curveMonotoneX);
       const ar = area<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y0(y + h).y1((p) => y + s(p.v)).curve(curveMonotoneX);
       const money = t.unit === '$';
       return (
         <>
-          <path d={ar(pts) ?? undefined} fill="#f2913d" fillOpacity={0.14} />
-          <path d={ln(pts) ?? undefined} fill="none" stroke="#f2913d" strokeWidth={1.3} style={{ filter: 'drop-shadow(0 0 2px #f2913d55)' }} />
+          <path d={ar(t.points) ?? undefined} fill="#f2913d" fillOpacity={0.14} />
+          <path d={ln(t.points) ?? undefined} fill="none" stroke="#f2913d" strokeWidth={1.3} style={{ filter: 'drop-shadow(0 0 2px #f2913d55)' }} />
           {peak.v > 0 && inView(peak.t) && (
             <g pointerEvents="none">
               <circle cx={x(new Date(peak.t))} cy={y + s(peak.v)} r={2.5} fill="#fbe9a0" />
-              <text x={x(new Date(peak.t))} y={y + s(peak.v) - 5} fontSize={8.5} fontWeight={700} textAnchor="middle" fill="#f2c46b" className="tabular-nums">
-                {money ? `$${peak.v.toFixed(1)}/hr` : `${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}
-              </text>
+              <text x={x(new Date(peak.t))} y={y + s(peak.v) - 5} fontSize={8.5} fontWeight={700} textAnchor="middle" fill="#f2c46b" className="tabular-nums">{money ? `$${peak.v.toFixed(1)}/hr` : `${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>
             </g>
           )}
         </>
       );
     }
     if (t.type === 'events') {
-      // Cluster nearby marks, then hang a labeled block from the top rail for each.
-      // Blocks are placed by priority (bigger / land-feat clusters first) with true
-      // rectangle collision-avoidance — anything that can't fit stays just a dot. The
-      // Felton "One Week" annotation style, made robust to dense real data.
       const marks = t.marks.filter((m) => inView(m.t)).sort((a, b) => a.t - b.t);
       const railY = y + 7;
       const lineH = 11;
@@ -181,7 +183,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
         for (const m of cl.marks.slice(0, 5)) lines.push({ kind: (m.kind ?? '').toUpperCase(), text: short(m.label.replace(/^[✓→←·]\s*/, ''), 24), delta: m.value ? `Δ${fmtV(m.value)}` : undefined, color: kindColor(m.kind) });
         if (cl.marks.length > 5) lines.push({ text: `+${cl.marks.length - 5}`, color: '#5a6270' });
         const w = 10 + Math.max(...lines.map((l) => ((l.kind ? l.kind.length + 1 : 0) + l.text.length + (l.delta ? l.delta.length + 1 : 0)) * CHAR));
-        const important = cl.marks.some((m) => m.kind === 'land' || m.kind === 'feat');
+        const important = cl.marks.some((m) => m.kind === 'land' || m.kind === 'feat' || m.kind === 'done');
         return { cl, lines, w, bh: lines.length * lineH, priority: cl.marks.length + (important ? 6 : 0) };
       });
 
@@ -189,7 +191,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       const hits = (a: { x0: number; x1: number; y0: number; y1: number }, b: { x0: number; x1: number; y0: number; y1: number }) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
       for (const blk of [...blocks].sort((a, b) => b.priority - a.priority)) {
         const xc = blk.cl.x;
-        const rightAlign = xc + blk.w > view.plotX1 - 4; // near the right edge → grow leftward
+        const rightAlign = xc + blk.w > view.plotX1 - 4;
         const rx0 = rightAlign ? xc - blk.w : xc - 1;
         const rx1 = rightAlign ? xc + 1 : xc + blk.w;
         let top: number | null = null;
@@ -197,7 +199,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
           const rect = { x0: rx0, x1: rx1, y0: cand, y1: cand + blk.bh };
           if (!placed.some((p) => hits(rect, p))) { top = cand; placed.push(rect); break; }
         }
-        if (top === null) continue; // no room → the dot already stands in for it
+        if (top === null) continue;
         els.push(<line key={`c${xc}`} x1={xc} y1={railY + 2} x2={xc} y2={top - 1} stroke={kindColor(blk.cl.marks[0].kind)} strokeOpacity={0.22} strokeWidth={0.6} />);
         blk.lines.forEach((l, li) => {
           const ly = top! + li * lineH + 8;
@@ -211,12 +213,10 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
         });
       }
 
-      // kind legend, top-right of the track
       const kinds = [...new Set(marks.map((m) => m.kind ?? 'other'))].slice(0, 6);
       let lx = view.plotX1;
       for (const k of [...kinds].reverse()) {
-        const w = k.length * 4.6 + 14;
-        lx -= w;
+        lx -= k.length * 4.6 + 14;
         els.push(
           <g key={`lg${k}`} pointerEvents="none">
             <rect x={lx} y={y + 1} width={7} height={7} rx={1} fill={kindColor(k)} />
@@ -231,20 +231,18 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       const gap = 2;
       const maxLanes = Math.max(1, Math.floor(h / (laneH + gap)));
       const laneEnds: number[] = [];
-      const sorted = [...t.spans].sort((a, b) => a.t0 - b.t0);
       const out: React.ReactNode[] = [];
-      sorted.forEach((sp, i) => {
-        if (sp.t1 < view.domain[0] || sp.t0 > view.domain[1]) return;
-        let lane = laneEnds.findIndex((e) => e <= sp.t0);
-        if (lane === -1) {
-          lane = laneEnds.length;
-          laneEnds.push(sp.t1);
-        } else laneEnds[lane] = sp.t1;
-        if (lane >= maxLanes) lane = maxLanes - 1;
-        const sx = Math.max(view.plotX0, x(new Date(sp.t0)));
-        const sw = Math.max(1, x(new Date(sp.t1)) - sx);
-        out.push(<rect key={i} x={sx} y={y + lane * (laneH + gap)} width={sw} height={laneH} rx={1.5} fill={statusColor(sp.status)} fillOpacity={0.85} />);
-      });
+      [...t.spans]
+        .sort((a, b) => a.t0 - b.t0)
+        .forEach((sp, i) => {
+          if (sp.t1 < view.domain[0] || sp.t0 > view.domain[1]) return;
+          let lane = laneEnds.findIndex((e) => e <= sp.t0);
+          if (lane === -1) { lane = laneEnds.length; laneEnds.push(sp.t1); } else laneEnds[lane] = sp.t1;
+          if (lane >= maxLanes) lane = maxLanes - 1;
+          const sx = Math.max(view.plotX0, x(new Date(sp.t0)));
+          const sw = Math.max(1, x(new Date(sp.t1)) - sx);
+          out.push(<rect key={i} x={sx} y={y + lane * (laneH + gap)} width={sw} height={laneH} rx={1.5} fill={statusColor(sp.status)} fillOpacity={0.85} />);
+        });
       return out;
     }
     // bands
@@ -257,7 +255,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       });
   }
 
-  // ── hover readout ─────────────────────────────────────────────────────────
+  // ── hover readout ──────────────────────────────────────────────────────────
   const tip = useMemo(() => {
     if (!hover) return null;
     const t = hover.t;
@@ -278,7 +276,6 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
         const sg = tr.segments.find((s) => t >= s.t0 && t < s.t1);
         if (sg) lines.push({ label: tr.label, value: sg.category, color: sg.color ?? cat(sg.category) });
       } else {
-        // events: nearest within ~5px
         let best: { d: number; label: string; color: string } | null = null;
         for (const m of tr.marks) {
           const d = Math.abs(x(new Date(m.t)) - hover.x);
@@ -292,103 +289,116 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
 
   const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
-    if (px < view.plotX0 || px > view.plotX1) {
-      setHover(null);
-      return;
-    }
+    if (px < view.plotX0 || px > view.plotX1) { setHover(null); return; }
     setHover({ x: px, t: view.timeAt(px) });
   };
+
+  const nowX = doc.generatedAt > view.domain[0] && doc.generatedAt < view.domain[1] ? x(new Date(doc.generatedAt)) : null;
 
   return (
     <div
       ref={view.containerRef}
       className="relative w-full select-none overflow-hidden rounded-xl border border-[#1e2430] bg-[#05060a]"
+      style={{ height: viewportH, cursor: 'grab', touchAction: 'none' }}
       onWheel={view.onWheel}
       onPointerDown={view.onPanStart}
       onMouseMove={onMove}
       onMouseLeave={() => setHover(null)}
-      style={{ cursor: 'crosshair' }}
     >
-      <svg width={view.width} height={totalH} className="block">
-        {/* day separators (full height) */}
+      <svg width={view.width} height={viewportH} className="block">
+        <defs>
+          <clipPath id="omp-graph-tracks">
+            <rect x={0} y={tracksTop} width={view.width} height={Math.max(0, tracksBottom - tracksTop)} />
+          </clipPath>
+        </defs>
+
+        {/* fixed: day separators (full height) */}
         {dayTicks.map((d, i) => (
           <line key={`d${i}`} x1={x(new Date(d.t))} y1={HEADER_H - 26} x2={x(new Date(d.t))} y2={axisY} stroke="#131820" strokeWidth={1} />
         ))}
-        {hourTicks.map((t, i) => (
-          <line key={`h${i}`} x1={x(new Date(t))} y1={HEADER_H} x2={x(new Date(t))} y2={axisY} stroke="#0d1119" strokeWidth={1} />
-        ))}
 
-        {/* big day-column headers (top band) */}
+        {/* scrollable tracks (clipped between the pinned header + axis) */}
+        <g clipPath="url(#omp-graph-tracks)">
+          <g transform={`translate(0, ${-view.offsetY})`}>
+            {/* rotated group labels on the far left */}
+            {groupExtents.map((g) => (
+              <text key={`rl${g.id}`} transform={`translate(13, ${(g.y0 + g.y1) / 2}) rotate(-90)`} textAnchor="middle" fontSize={8.5} fontWeight={700} letterSpacing="0.18em" fill="#3f4653">
+                {g.label}
+              </text>
+            ))}
+            {rows.map((r, i) => {
+              if (r.kind === 'group') {
+                const isCol = collapsed.has(r.groupId);
+                return (
+                  <g key={`g${i}`} style={{ cursor: 'pointer' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => setCollapsed((s) => { const n = new Set(s); n.has(r.groupId) ? n.delete(r.groupId) : n.add(r.groupId); return n; })}>
+                    <text x={26} y={r.y + 16} fontSize={10} fontWeight={700} letterSpacing="0.1em" fill="#c4c9d2">
+                      {isCol ? '▸ ' : '▾ '}
+                      {r.label}
+                    </text>
+                  </g>
+                );
+              }
+              return (
+                <g key={`t${i}`}>
+                  <text x={LABEL_W - 8} y={r.y + 12} textAnchor="end" fontSize={9} fontWeight={600} letterSpacing="0.06em" fill="#7a8390">{r.label}</text>
+                  {r.track && renderTrack(r.track, r.y, r.h)}
+                </g>
+              );
+            })}
+          </g>
+        </g>
+
+        {/* fixed: big day-column headers (top band) */}
+        <rect x={0} y={0} width={view.width} height={HEADER_H} fill="#05060a" />
         {dayTicks.map((d, i) => (
           <g key={`hd${i}`} pointerEvents="none">
-            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 18} fontSize={12.5} fontWeight={700} letterSpacing="0.08em" fill="#c4c9d2">
-              {d.weekdayLong.toUpperCase()}
-            </text>
-            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 6} fontSize={9} letterSpacing="0.04em" fill="#6d7480" className="tabular-nums">
-              {d.date}
-            </text>
+            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 18} fontSize={12.5} fontWeight={700} letterSpacing="0.08em" fill="#c4c9d2">{d.weekdayLong.toUpperCase()}</text>
+            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 6} fontSize={9} letterSpacing="0.04em" fill="#6d7480" className="tabular-nums">{d.date}</text>
           </g>
         ))}
 
-        {/* rows */}
-        {rows.map((r, i) => {
-          if (r.kind === 'group') {
-            const isCol = collapsed.has(r.groupId);
-            return (
-              <g key={`g${i}`} style={{ cursor: 'pointer' }} onClick={() => setCollapsed((s) => { const n = new Set(s); n.has(r.groupId) ? n.delete(r.groupId) : n.add(r.groupId); return n; })}>
-                <text x={10} y={r.y + 16} fontSize={10} fontWeight={700} letterSpacing="0.12em" fill="#c4c9d2">
-                  {isCol ? '▸ ' : '▾ '}
-                  {r.label}
-                </text>
-              </g>
-            );
-          }
-          return (
-            <g key={`t${i}`}>
-              <text x={LABEL_W - 8} y={r.y + 12} textAnchor="end" fontSize={9} fontWeight={600} letterSpacing="0.06em" fill="#7a8390">
-                {r.label}
-              </text>
-              {r.track && renderTrack(r.track, r.y, r.h)}
-            </g>
-          );
-        })}
-
-        {/* time axis — per-day hours ruler (00·06·12·18) */}
+        {/* fixed: hours ruler axis (bottom band) with sun arc */}
+        <rect x={0} y={axisY} width={view.width} height={AXIS_H} fill="#05060a" />
         <line x1={view.plotX0} y1={axisY} x2={view.plotX1} y2={axisY} stroke="#1e2430" />
-        {spanDays <= 10 &&
-          dayTicks.flatMap((d, i) =>
-            [0, 6, 12, 18].map((hr) => {
+        {spanDays <= 12 &&
+          dayTicks.flatMap((d, i) => {
+            const els: React.ReactNode[] = [];
+            // sun arc: dotted parabola peaking at noon
+            if (spanDays <= 8) {
+              const noon = d.t + 12 * 3_600_000;
+              const dawn = d.t + 5 * 3_600_000;
+              const dusk = d.t + 19 * 3_600_000;
+              const xn = x(new Date(noon));
+              const path = `M ${x(new Date(dawn))} ${axisY + 20} Q ${xn} ${axisY + 6} ${x(new Date(dusk))} ${axisY + 20}`;
+              els.push(<path key={`sa${i}`} d={path} fill="none" stroke="#2a2f3a" strokeWidth={0.7} strokeDasharray="1 2" />);
+              if (noon >= view.domain[0] && noon <= view.domain[1]) els.push(<circle key={`sun${i}`} cx={xn} cy={axisY + 7} r={1.6} fill="#c8a24a" />);
+            }
+            for (const hr of [0, 6, 12, 18]) {
               const tt = d.t + hr * 3_600_000;
-              if (tt < view.domain[0] || tt > view.domain[1]) return null;
-              return (
-                <text key={`hr${i}-${hr}`} x={x(new Date(tt))} y={axisY + 11} fontSize={7} textAnchor="middle" fill="#4a515e" className="tabular-nums">
-                  {String(hr).padStart(2, '0')}
-                </text>
-              );
-            }),
-          )}
+              if (tt >= view.domain[0] && tt <= view.domain[1]) els.push(<text key={`hr${i}-${hr}`} x={x(new Date(tt))} y={axisY + 12} fontSize={7} textAnchor="middle" fill="#4a515e" className="tabular-nums">{String(hr).padStart(2, '0')}</text>);
+            }
+            return els;
+          })}
 
-        {/* now marker + faint future shading (visible only when the window reaches past now) */}
-        {doc.generatedAt > view.domain[0] && doc.generatedAt < view.domain[1] && (
+        {/* fixed: now marker + hover cursor */}
+        {nowX !== null && (
           <g pointerEvents="none">
-            <rect x={x(new Date(doc.generatedAt))} y={0} width={Math.max(0, view.plotX1 - x(new Date(doc.generatedAt)))} height={axisY} fill="#0a1420" fillOpacity={0.35} />
-            <line x1={x(new Date(doc.generatedAt))} y1={0} x2={x(new Date(doc.generatedAt))} y2={axisY} stroke="#2fb6d6" strokeWidth={1} strokeDasharray="3 3" />
-            <text x={x(new Date(doc.generatedAt)) + 3} y={10} fontSize={8} fontWeight={600} fill="#2fb6d6">
-              now
-            </text>
+            <rect x={nowX} y={HEADER_H} width={Math.max(0, view.plotX1 - nowX)} height={Math.max(0, axisY - HEADER_H)} fill="#0a1420" fillOpacity={0.35} />
+            <line x1={nowX} y1={0} x2={nowX} y2={axisY} stroke="#2fb6d6" strokeWidth={1} strokeDasharray="3 3" />
+            <text x={nowX + 3} y={HEADER_H - 30} fontSize={8} fontWeight={600} fill="#2fb6d6">now</text>
           </g>
         )}
-
-        {/* hover cursor */}
-        {hover && <line x1={hover.x} y1={0} x2={hover.x} y2={axisY} stroke="#f2913d" strokeOpacity={0.5} strokeWidth={1} pointerEvents="none" />}
+        {hover && <line x1={hover.x} y1={HEADER_H} x2={hover.x} y2={axisY} stroke="#f2913d" strokeOpacity={0.5} strokeWidth={1} pointerEvents="none" />}
       </svg>
+
+      {/* vertical scroll hint */}
+      {view.maxOffsetY > 0 && (
+        <div className="pointer-events-none absolute right-1.5 rounded-full bg-[#2a3240]" style={{ top: HEADER_H + 4 + (view.offsetY / view.maxOffsetY) * (axisY - HEADER_H - 40), width: 3, height: 36 }} />
+      )}
 
       {/* tooltip */}
       {hover && tip && tip.lines.length > 0 && (
-        <div
-          className="pointer-events-none absolute z-10 max-w-[240px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-1.5 text-[10px] shadow-xl"
-          style={{ left: Math.min(hover.x + 12, view.width - 220), top: 8 }}
-        >
+        <div className="pointer-events-none absolute z-10 max-w-[240px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-1.5 text-[10px] shadow-xl" style={{ left: Math.min(hover.x + 12, view.width - 220), top: HEADER_H + 4 }}>
           <div className="mb-1 font-semibold tabular-nums text-[#c4c9d2]">
             {tip.when.toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' })} · {tip.when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
           </div>

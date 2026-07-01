@@ -52,7 +52,9 @@ export function planeTracks(issues: PlaneIssueTemporal[], range: TimeRange, grou
 	};
 
 	const spans: Span[] = issues
-		.filter((i) => i.createdAt != null && (i.completedAt ?? range.end) > range.start && i.createdAt < range.end)
+		// only work that actually moved — started or completed. Backlog/unstarted
+		// issues would otherwise render as a wall of full-width gray spans.
+		.filter((i) => (i.state === 'started' || i.state === 'completed') && i.createdAt != null && (i.completedAt ?? range.end) > range.start && i.createdAt < range.end)
 		.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
 		.slice(0, limit)
 		.map((i) => ({
