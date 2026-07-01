@@ -11,7 +11,7 @@
 
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { DispatchLedger } from "./dispatch-ledger.ts";
-import type { IssueRef } from "./types.ts";
+import type { AutomationSkipReason, IssueRef } from "./types.ts";
 
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
 
@@ -89,8 +89,11 @@ export class Dispatcher {
 
 	/** One poll: spawn routed agents for new open issues, bounded by `maxActive`. Returns the number spawned. */
 	async tick(): Promise<number> {
-		if (this.running) return 0; // never overlap polls
 		const t0 = Date.now();
+		if (this.running) {
+			this.deps.record?.({ durationMs: 0, skipReason: "overlap", detail: "previous dispatch tick still running" });
+			return 0; // never overlap polls
+		}
 		// Model subscription rate-limited (5h/weekly cap): spawning now only launches agents that immediately
 		// stall on the same cap. Skip the whole poll until the cooldown lifts; issues stay open for a later tick.
 		if (this.deps.paused?.()) {
@@ -108,12 +111,29 @@ export class Dispatcher {
 		this.running = true;
 		let spawned = 0;
 		let considered = 0;
+		// Track WHY a no-op tick did nothing, so the digest shows "at cap" vs "nothing to do".
+		// Cap hits are the strongest signal (force=true overwrites); per-issue reasons are first-wins.
+		let skipReason: AutomationSkipReason | undefined;
+		let skipDetail = "";
+		const noteSkip = (reason: AutomationSkipReason, detail: string, force = false) => {
+			if (force || !skipReason) {
+				skipReason = reason;
+				skipDetail = detail;
+			}
+		};
 		try {
 			const claimed = this.deps.claimed();
 			let budget = this.maxActive - this.deps.activeCount();
+			if (budget <= 0) noteSkip("wip-cap", "dispatch concurrency cap reached");
 			for (const repo of this.deps.repos()) {
-				if (this.atGlobalCap()) break; // global WIP ceiling reached — leave remaining issues for a later tick
-				if (budget <= 0) break;
+				if (this.atGlobalCap()) {
+					noteSkip("wip-cap", "global WIP cap reached", true);
+					break; // global WIP ceiling reached — leave remaining issues for a later tick
+				}
+				if (budget <= 0) {
+					noteSkip("wip-cap", "dispatch concurrency cap reached", true);
+					break;
+				}
 				// Poll is a transient external (Plane) call: retry once, then warn instead of letting a throw
 				// reject the whole tick or dropping a repo silently. `null` (Plane unreachable / unconfigured)
 				// is a clean skip; only a THROW retries/warns.
@@ -129,9 +149,18 @@ export class Dispatcher {
 				const ordered = [...issues].sort(dispatchOrder);
 				for (const issue of ordered) {
 					considered++;
-					if (budget <= 0) break;
-					if (this.atGlobalCap()) break; // recheck per spawn: each spawned agent counts toward the global cap
-					if (claimed.has(issue.id) || this.dispatched.has(issue.id) || this.deps.ledger?.has(issue.id)) continue;
+					if (budget <= 0) {
+						noteSkip("wip-cap", "dispatch concurrency cap reached", true);
+						break;
+					}
+					if (this.atGlobalCap()) {
+						noteSkip("wip-cap", "global WIP cap reached", true); // recheck per spawn: each spawned agent counts toward the global cap
+						break;
+					}
+					if (claimed.has(issue.id) || this.dispatched.has(issue.id) || this.deps.ledger?.has(issue.id)) {
+						noteSkip("already-handled", "all open issues already claimed or dispatched");
+						continue;
+					}
 					// Human-review / do-NOT-auto-land: stays visible in the UI's issue list but never auto-dispatched.
 					// Not added to `dispatched`, logged once like the blocked_by deferral.
 					if (issue.noAutoDispatch) {
@@ -139,6 +168,7 @@ export class Dispatcher {
 							this.skipLogged.add(issue.id);
 							this.deps.log(`skip ${issue.identifier ?? issue.id} — human-review / do-not-auto-land`);
 						}
+						noteSkip("human-review", "open issues require human review / do-not-auto-land");
 						continue;
 					}
 					// Dependency gate: defer while any blocked_by issue is still open. Not added to `dispatched`,
@@ -149,6 +179,7 @@ export class Dispatcher {
 							this.blockedLogged.add(issue.id);
 							this.deps.log(`defer ${issue.identifier ?? issue.id} — blocked by ${blockers.length} open issue(s)`);
 						}
+						noteSkip("blocked", `open issue blocked by ${blockers.length} dependency issue(s)`);
 						continue;
 					}
 					this.dispatched.add(issue.id);
@@ -167,7 +198,12 @@ export class Dispatcher {
 		} finally {
 			this.running = false;
 		}
-		this.deps.record?.({ durationMs: Date.now() - t0, found: considered, spawned });
+		// A no-op tick names why it did nothing; a productive tick is a plain heartbeat.
+		if (spawned === 0) {
+			this.deps.record?.({ durationMs: Date.now() - t0, found: considered, spawned, skipReason: skipReason ?? "idle", detail: skipDetail || "no open issues to dispatch" });
+		} else {
+			this.deps.record?.({ durationMs: Date.now() - t0, found: considered, spawned });
+		}
 		return spawned;
 	}
 

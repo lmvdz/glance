@@ -296,9 +296,16 @@ export class Scout {
 
 	/** One mid-run sweep: scan each live agent's new reasoning. Inert when disabled; never overlaps itself. */
 	async tick(): Promise<void> {
-		if (process.env.OMP_SQUAD_SCOUT === "0" || this.running) return;
+		if (process.env.OMP_SQUAD_SCOUT === "0") return;
+		if (this.running) {
+			this.deps.record?.({ durationMs: 0, skipReason: "overlap", detail: "previous scout sweep still running" });
+			return;
+		}
 		const live = this.deps.liveReasoning?.() ?? [];
-		if (!live.length) return;
+		if (!live.length) {
+			this.deps.record?.({ durationMs: 0, skipReason: "idle", detail: "no live agent reasoning to scan" });
+			return;
+		}
 		this.running = true;
 		try {
 			for (const { text, ...ctx } of live) await this.scan(text, ctx);

@@ -31,7 +31,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { LandLedger } from "./land-ledger.ts";
-import type { AgentDTO, IssueRef } from "./types.ts";
+import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
 export type Severity = "low" | "high" | "structural";
 
@@ -399,8 +399,22 @@ export class Observer {
 			this.saveSeen();
 		} finally {
 			this.running = false;
-			// One report per tick — found/filed surface real audit work; a clean tick is a heartbeat (ring-only).
-			this.deps.record?.({ durationMs: (this.deps.now ?? Date.now)() - t0, found, filed, deduped: Math.max(0, found - filed), detail: resolved ? `${resolved} resolved` : undefined });
+			// One report per tick — found/filed surface real audit work; a no-op tick names why it did nothing.
+			const skipReason: AutomationSkipReason | undefined = found === 0 ? "idle" : filed === 0 ? "already-handled" : undefined;
+			this.deps.record?.({
+				durationMs: (this.deps.now ?? Date.now)() - t0,
+				found,
+				filed,
+				deduped: Math.max(0, found - filed),
+				skipReason: resolved ? undefined : skipReason,
+				detail: resolved
+					? `${resolved} resolved`
+					: found === 0
+						? "no observer findings this tick"
+						: filed === 0
+							? "findings already filed, capped, autofixable, or an unresolved reopen/file edge"
+							: undefined,
+			});
 		}
 	}
 

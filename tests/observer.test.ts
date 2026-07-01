@@ -121,6 +121,17 @@ test("(a) tick is inert when OMP_SQUAD_OBSERVE=0 (gate precedes every dep)", asy
 	expect(filed).toEqual([]);
 });
 
+test("(record) a clean no-op tick emits an idle skip heartbeat with a reason", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const events: AutomationReport[] = [];
+	const { deps } = makeDeps(tmpDir(), { record: (r) => events.push(r) });
+	await new Observer(deps).tick();
+	expect(events).toHaveLength(1);
+	expect(events[0].found).toBe(0);
+	expect(events[0].skipReason).toBe("idle");
+	expect(events[0].detail).toBe("no observer findings this tick");
+});
+
 test("(b) a red gate files exactly one regression finding", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	const { deps, filed } = makeDeps(tmpDir(), { runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }) });

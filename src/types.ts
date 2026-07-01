@@ -811,8 +811,19 @@ export type SquadEvent =
  *  Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
 export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch";
 
-/** Structured reason an automation loop intentionally skipped a unit without doing work. */
-export type AutomationSkipReason = "budget";
+/**
+ * Structured reason an automation loop intentionally skipped a unit without doing work.
+ * Proves a loop is alive-but-idle (not dead) and categorizes WHY so the UI can rank
+ * "at capacity" above "nothing to do". Pair with `detail` for the human-readable specifics.
+ */
+export type AutomationSkipReason =
+	| "budget" //          LLM/token budget for the window is spent
+	| "overlap" //         a previous tick of this loop is still running
+	| "wip-cap" //         concurrency / global WIP ceiling reached
+	| "idle" //            nothing to act on this tick (no candidates/findings)
+	| "already-handled" // all candidates already claimed / filed / deduped
+	| "human-review" //    work exists but is gated on human review / do-not-auto-land
+	| "blocked"; //        work exists but is blocked by open dependency issues
 
 /**
  * One unit of background-loop work, the observability record the audit log never carried (it logs only
@@ -845,7 +856,7 @@ export interface AutomationEvent {
 	skipReason?: AutomationSkipReason;
 	/** Severity of the unit; "warn"/"error" force the event onto disk even with no work done. */
 	level?: "info" | "warn" | "error";
-	/** Optional human-readable detail (a filed title, an error message, or skip explanation). */
+	/** Optional human-readable detail (a filed title, an error message, or the specifics behind a skipReason). */
 	detail?: string;
 }
 

@@ -380,3 +380,20 @@ test("start() arms no timer when OMP_SQUAD_SCOUT=0 or without a liveReasoning de
 		globalThis.setInterval = real;
 	}
 });
+
+test("(record) a no-live-reasoning tick emits an idle skip heartbeat with a reason", async () => {
+	const prev = process.env.OMP_SQUAD_SCOUT;
+	process.env.OMP_SQUAD_SCOUT = "1";
+	try {
+		const events: AutomationReport[] = [];
+		const h = makeDeps(tmpDir(), { liveReasoning: () => [], record: (r) => events.push(r) });
+		await new Scout(h.deps).tick();
+		expect(events).toHaveLength(1);
+		expect(events[0].skipReason).toBe("idle");
+		expect(events[0].detail).toBe("no live agent reasoning to scan");
+		expect(events[0].llmCalls).toBeUndefined();
+	} finally {
+		if (prev === undefined) delete process.env.OMP_SQUAD_SCOUT;
+		else process.env.OMP_SQUAD_SCOUT = prev;
+	}
+});

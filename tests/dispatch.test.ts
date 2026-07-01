@@ -55,6 +55,35 @@ test("dispatcher: a tick emits one automation event with the spawned count + iss
 	expect(typeof events[0].durationMs).toBe("number");
 });
 
+test("dispatcher: a no-op tick (no open issues) emits an idle skip heartbeat with a reason", async () => {
+	const events: AutomationReport[] = [];
+	const { deps } = harness({ listIssues: async () => [], record: (r) => events.push(r) });
+	await new Dispatcher(deps).tick();
+	expect(events).toHaveLength(1);
+	expect(events[0].spawned).toBe(0);
+	expect(events[0].skipReason).toBe("idle");
+	expect(events[0].detail).toBe("no open issues to dispatch");
+});
+
+test("dispatcher: at the global WIP cap, a no-op tick names the cap as the skip reason", async () => {
+	const events: AutomationReport[] = [];
+	// maxWip 0 with a live agent → atGlobalCap true on the first repo check.
+	const { deps, spawned } = harness({ record: (r) => events.push(r), maxWip: 0, liveCount: () => 1 });
+	expect(await new Dispatcher(deps).tick()).toBe(0);
+	expect(spawned).toEqual([]);
+	expect(events).toHaveLength(1);
+	expect(events[0].skipReason).toBe("wip-cap");
+	expect(events[0].detail).toContain("WIP cap");
+});
+
+test("dispatcher: a productive tick is a plain heartbeat with no skip reason", async () => {
+	const events: AutomationReport[] = [];
+	const { deps } = harness({ record: (r) => events.push(r) });
+	await new Dispatcher(deps).tick();
+	expect(events[0].spawned).toBe(3);
+	expect(events[0].skipReason).toBeUndefined();
+});
+
 test("dispatcher: a paused tick still emits a heartbeat (warn) so the loop stays visible", async () => {
 	const events: AutomationReport[] = [];
 	const { deps, spawned } = harness({ record: (r) => events.push(r), paused: () => true });
