@@ -321,11 +321,11 @@ export class Scout {
 		const clock = this.deps.now ?? Date.now;
 		// Global per-hour LLM-call budget (OMPSQ #16): a verbose fleet can otherwise burn dozens of scout
 		// one-shots/hour. When the window is full, skip the (costly) extraction for this scan — recording a
-		// non-error skip heartbeat so the throttling is observable, NOT an error (it's expected, by design).
+		// structured non-error skip so throttling is observable and persisted without inflating warn/error counts.
 		// No fingerprint/cursor is consumed, so the same reasoning is re-harvested once the window reopens.
 		if (!this.budget.tryConsume()) {
 			log(`scout LLM budget reached (${scoutMaxCallsPerHour()}/h) — skipping extraction for ${ctx.agent}`);
-			this.deps.record?.({ agent: ctx.agent, durationMs: 0, llmCalls: 0, level: "warn", detail: `scout LLM budget reached (${scoutMaxCallsPerHour()}/h) — extraction skipped` });
+			this.deps.record?.({ agent: ctx.agent, durationMs: 0, llmCalls: 0, skipReason: "budget", level: "info", detail: `scout LLM budget reached (${scoutMaxCallsPerHour()}/h) — extraction skipped` });
 			return;
 		}
 		// t0 spans the LLM call: an event is emitted on EVERY path past here (even no-tickets / error) because

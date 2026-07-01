@@ -47,9 +47,9 @@ function nextId(now: number): number {
 	return lastId;
 }
 
-/** A unit "did something" (or errored) — worth persisting. A pure heartbeat (all-zero, info) is not. */
-export function isMeaningful(e: Pick<AutomationEvent, "llmCalls" | "filed" | "found" | "spawned" | "level">): boolean {
-	return (e.llmCalls ?? 0) > 0 || (e.filed ?? 0) > 0 || (e.found ?? 0) > 0 || (e.spawned ?? 0) > 0 || e.level === "warn" || e.level === "error";
+/** A unit "did something", intentionally skipped work, or errored — worth persisting. A pure heartbeat is not. */
+export function isMeaningful(e: Pick<AutomationEvent, "llmCalls" | "filed" | "found" | "spawned" | "skipReason" | "level">): boolean {
+	return (e.llmCalls ?? 0) > 0 || (e.filed ?? 0) > 0 || (e.found ?? 0) > 0 || (e.spawned ?? 0) > 0 || e.skipReason !== undefined || e.level === "warn" || e.level === "error";
 }
 
 /** Per-loop aggregate over a window — the at-a-glance "what's running and what it cost" view. */
@@ -86,6 +86,7 @@ export class AutomationLog {
 	private readonly log: (msg: string) => void;
 	/** Spool failures are logged once per error episode (not per event) so a wedged disk doesn't flood. */
 	private spoolFailing = false;
+	private spoolTail: Promise<void> = Promise.resolve();
 
 	constructor(baseDir: string, opts: { max?: number; onEvent?: (e: AutomationEvent) => void; log?: (msg: string) => void } = {}) {
 		this.baseDir = baseDir;
@@ -115,7 +116,7 @@ export class AutomationLog {
 		this.ring.push(e);
 		if (this.ring.length > this.max) this.ring.shift();
 		this.onEvent?.(e);
-		if (isMeaningful(e)) void this.spool(e);
+		if (isMeaningful(e)) this.spoolTail = this.spoolTail.then(() => this.spool(e), () => this.spool(e));
 		return e;
 	}
 

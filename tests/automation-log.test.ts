@@ -17,11 +17,12 @@ function mkLog(dir: string, opts: ConstructorParameters<typeof AutomationLog>[1]
 }
 
 describe("isMeaningful", () => {
-	test("work or an error is meaningful; a pure heartbeat is not", () => {
+	test("work, skips, or an error are meaningful; a pure heartbeat is not", () => {
 		expect(isMeaningful({ llmCalls: 1 })).toBe(true);
 		expect(isMeaningful({ filed: 1 })).toBe(true);
 		expect(isMeaningful({ found: 2 })).toBe(true);
 		expect(isMeaningful({ spawned: 1 })).toBe(true);
+		expect(isMeaningful({ skipReason: "budget" })).toBe(true);
 		expect(isMeaningful({ level: "warn" })).toBe(true);
 		expect(isMeaningful({ level: "error" })).toBe(true);
 		expect(isMeaningful({ llmCalls: 0, filed: 0, found: 0, spawned: 0, level: "info" })).toBe(false);
@@ -44,19 +45,20 @@ describe("AutomationLog.record", () => {
 		}
 	});
 
-	test("spools meaningful events to disk but keeps heartbeats ring-only", async () => {
+	test("spools meaningful and skip events to disk but keeps heartbeats ring-only", async () => {
 		const dir = tmp();
 		try {
 			const log = mkLog(dir);
 			log.record({ loop: "observer", found: 0, filed: 0 }); // heartbeat
-			log.record({ loop: "scout", llmCalls: 1, found: 2, filed: 1 }); // meaningful
+			log.record({ loop: "scout", llmCalls: 1, found: 2, filed: 1 }); // work
+			log.record({ loop: "scout", llmCalls: 0, skipReason: "budget", detail: "budget reached" }); // skip
 			await Bun.sleep(30); // spool is fire-and-forget; give the append a tick to land
 			expect(existsSync(automationPath(dir))).toBe(true);
-			const lines = readFileSync(automationPath(dir), "utf8").trim().split("\n");
-			expect(lines.length).toBe(1); // only the meaningful one persisted
-			expect(JSON.parse(lines[0]).loop).toBe("scout");
-			// but BOTH are in the live ring
-			expect(log.recent().length).toBe(2);
+			const lines = readFileSync(automationPath(dir), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			expect(lines.map((e) => e.loop)).toEqual(["scout", "scout"]);
+			expect(lines.map((e) => e.skipReason)).toEqual([undefined, "budget"]);
+			// all three events are in the live ring
+			expect(log.recent().length).toBe(3);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

@@ -250,8 +250,9 @@ One unit of background-loop work. Scout emits one per reasoning scan (each = one
 		filed: { type: 'number', description: 'Issues/tickets actually filed this unit.' },
 		deduped: { type: 'number', description: 'Candidates skipped as already-seen or duplicate of open work.' },
 		spawned: { type: 'number', description: 'Dispatch only: agents spawned this tick.' },
+		skipReason: { type: '"budget"', description: 'Structured reason this unit intentionally skipped work. Skip events are persisted to automation.jsonl even when no work/cost was recorded.' },
 		level: { type: '"info" | "warn" | "error"', description: 'Severity. warn/error events are persisted to automation.jsonl even when no work was done.' },
-		detail: { type: 'string', description: 'Optional human-readable detail (a filed issue title, an error message).' },
+		detail: { type: 'string', description: 'Optional human-readable detail (a filed issue title, an error message, or skip explanation).' },
 	}}
 />
 
