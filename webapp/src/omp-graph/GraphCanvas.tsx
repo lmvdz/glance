@@ -21,7 +21,6 @@ const AXIS_H = 28;
 const HEADER_H = 44;
 const GROUP_H = 24;
 const TRACK_GAP = 10;
-const MAX_VIEWPORT = 660; // graph viewport height; taller content scrolls inside
 const MAX_BAR = 18; // cap bar width so a day-wide bin isn't a giant block
 
 const fmtV = (v: number): string => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10_000 ? 0 : 1)}k` : `${Math.round(v)}`);
@@ -172,8 +171,8 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
     return { rows: out, totalH: y + AXIS_H, groupExtents: extents };
   }, [doc, collapsed, blend]);
 
-  const viewportH = Math.min(totalH, MAX_VIEWPORT);
-  const view = useGraphView(doc.range, LABEL_W, PAD_R, totalH, viewportH);
+  const view = useGraphView(doc.range, LABEL_W, PAD_R, totalH);
+  const viewportH = Math.max(120, view.viewportH); // fills its container
 
   const x = scaleTime().domain([new Date(view.domain[0]), new Date(view.domain[1])]).range([view.plotX0, view.plotX1]);
   const inView = (t: number): boolean => t >= view.domain[0] - 1 && t <= view.domain[1] + 1;
@@ -464,8 +463,8 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
   return (
     <div
       ref={view.containerRef}
-      className="relative w-full select-none overflow-hidden rounded-xl border border-[#1e2430] bg-[#05060a]"
-      style={{ height: viewportH, cursor: 'grab', touchAction: 'none' }}
+      className="relative h-full w-full select-none overflow-hidden bg-[#05060a]"
+      style={{ cursor: 'grab', touchAction: 'none' }}
       onWheel={view.onWheel}
       onPointerDown={view.onPanStart}
       onMouseMove={onMove}

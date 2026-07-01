@@ -11,7 +11,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Waypoints, RefreshCw, Sparkles, MousePointer2 } from 'lucide-react';
 import { apiJson } from '../lib/api';
-import { PanelShell, VerdictBadge } from './ui';
+import { VerdictBadge } from './ui';
 import { GraphCanvas } from '../omp-graph/GraphCanvas';
 import type { GraphDoc } from '../omp-graph/types';
 
@@ -75,100 +75,67 @@ export const OmpGraphPanel: React.FC = () => {
   const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : `${Math.round(n)}`);
   const hasData = doc ? doc.tracks.some((t) => (t.type === 'bars' ? t.bins.some((b) => b.v > 0) : t.type === 'series' ? t.points.some((p) => p.v > 0) : t.type === 'spans' ? t.spans.length : t.type === 'events' ? t.marks.length : t.segments.length)) : false;
 
-  const subtitle = (
-    <span className="flex items-center gap-2">
-      <VerdictBadge verdict="healthy">{doc ? `${doc.sources.length} sources · ${doc.tracks.length} tracks` : 'living dashboard'}</VerdictBadge>
-    </span>
-  );
-
-  const refresh = (
-    <button
-      onClick={() => void load()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-      title="Refresh"
-      aria-label="Refresh graph data"
-    >
-      <RefreshCw className="h-3 w-3" aria-hidden="true" />
-    </button>
+  const controls = (
+    <div className="flex items-center gap-2">
+      <div className="flex overflow-hidden rounded-md border border-gray-200 dark:border-gray-700">
+        {RANGES.map((r) => (
+          <button key={r} onClick={() => setDays(r)} className={`px-2.5 py-1 text-xs font-medium tabular-nums transition-colors ${days === r ? 'bg-orange-500 text-white' : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'}`} aria-pressed={days === r}>
+            {r}d
+          </button>
+        ))}
+      </div>
+      <button onClick={() => setFuture((v) => !v)} className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${future ? 'border-cyan-500 bg-cyan-500/15 text-cyan-600 dark:text-cyan-300' : 'border-gray-200 dark:border-gray-700 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`} aria-pressed={future} title="Extend the window 3 days ahead for upcoming meetings / renewals">
+        + upcoming
+      </button>
+      <button onClick={() => setBlend((v) => !v)} className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${blend ? 'border-orange-500 bg-orange-500/15 text-orange-600 dark:text-orange-300' : 'border-gray-200 dark:border-gray-700 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`} aria-pressed={blend} title="Fuse related tracks into richer lanes: SHIPPED (commits + tickets) and a FLEET PULSE (cost · runs · llm · state)">
+        ⊕ blend
+      </button>
+    </div>
   );
 
   return (
-    <PanelShell icon={<Waypoints className="h-4 w-4 text-orange-500" aria-hidden="true" />} title="Graph" subtitle={subtitle} actions={refresh}>
-      {!loaded && !error && (
-        <div className="space-y-2 animate-pulse" aria-label="Loading graph">
-          {[1, 2, 3, 4, 5, 6].map((n) => (
-            <div key={n} className="h-4 rounded bg-gray-100 dark:bg-gray-800" />
-          ))}
+    <main className="flex h-full flex-1 flex-col overflow-hidden bg-white dark:bg-gray-950">
+      {/* compact header + controls in one bar */}
+      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-gray-200 px-4 py-2 dark:border-gray-800">
+        <div className="flex min-w-0 items-center gap-3">
+          <Waypoints className="h-4 w-4 flex-shrink-0 text-orange-500" aria-hidden="true" />
+          <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Graph</h1>
+          <VerdictBadge verdict="healthy">{doc ? `${doc.sources.length} sources · ${doc.tracks.length} tracks` : 'living dashboard'}</VerdictBadge>
+          <div className="ml-1">{controls}</div>
         </div>
-      )}
-
-      {loaded && error && (
-        <div role="alert" className="rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30 p-4 text-sm text-red-700 dark:text-red-300">
-          {error}
+        <div className="flex items-center gap-4">
+          <Stat label="commits" value={fmtK(totals.commits)} />
+          <Stat label="churned" value={fmtK(totals.churn)} />
+          <Stat label="spend" value={`$${Math.round(totals.cost)}`} />
+          <Stat label="runs" value={fmtK(totals.sessions)} />
+          <Stat label="milestones" value={fmtK(totals.milestones)} />
+          <button onClick={() => void load()} className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800" title="Refresh" aria-label="Refresh graph data">
+            <RefreshCw className="h-3 w-3" aria-hidden="true" />
+          </button>
         </div>
-      )}
+      </div>
 
-      {loaded && !error && doc && (
-        <>
-          {/* controls + totals */}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 py-2.5">
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">Range</span>
-              <div className="flex overflow-hidden rounded-md border border-gray-200 dark:border-gray-700">
-                {RANGES.map((r) => (
-                  <button
-                    key={r}
-                    onClick={() => setDays(r)}
-                    className={`px-2.5 py-1 text-xs font-medium tabular-nums transition-colors ${days === r ? 'bg-orange-500 text-white' : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
-                    aria-pressed={days === r}
-                  >
-                    {r}d
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={() => setFuture((v) => !v)}
-                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${future ? 'border-cyan-500 bg-cyan-500/15 text-cyan-600 dark:text-cyan-300' : 'border-gray-200 dark:border-gray-700 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
-                aria-pressed={future}
-                title="Extend the window 3 days ahead for upcoming meetings / renewals (once those adapters land)"
-              >
-                + upcoming
-              </button>
-              <button
-                onClick={() => setBlend((v) => !v)}
-                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${blend ? 'border-orange-500 bg-orange-500/15 text-orange-600 dark:text-orange-300' : 'border-gray-200 dark:border-gray-700 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
-                aria-pressed={blend}
-                title="Fuse related tracks into richer lanes: SHIPPED (commits + tickets) and a FLEET PULSE (cost · runs · llm · state)"
-              >
-                ⊕ blend
-              </button>
-            </div>
-            <div className="flex items-center gap-4">
-              <Stat label="commits" value={fmtK(totals.commits)} />
-              <Stat label="churned" value={fmtK(totals.churn)} />
-              <Stat label="spend" value={`$${Math.round(totals.cost)}`} />
-              <Stat label="runs" value={fmtK(totals.sessions)} />
-              <Stat label="milestones" value={fmtK(totals.milestones)} />
-            </div>
-          </div>
-
-          {hasData ? (
-            <>
-              <GraphCanvas doc={doc} blend={blend} />
-              <div className="flex items-center gap-2 px-1 text-[11px] text-gray-400">
-                <MousePointer2 className="h-3 w-3" aria-hidden="true" />
-                Scroll to zoom time · drag to pan · hover to read every track · click a group label to collapse it
-              </div>
-            </>
+      {/* full-bleed graph fills ALL remaining space */}
+      <div className="relative min-h-0 flex-1">
+        {!loaded && !error && <div className="flex h-full items-center justify-center text-sm text-gray-400">Loading…</div>}
+        {loaded && error && <div role="alert" className="flex h-full items-center justify-center p-4 text-sm text-red-600 dark:text-red-400">{error}</div>}
+        {loaded && !error && doc &&
+          (hasData ? (
+            <GraphCanvas doc={doc} blend={blend} />
           ) : (
-            <div className="flex flex-col items-center gap-2 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/20 px-6 py-8 text-center">
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
               <Sparkles className="h-7 w-7 text-emerald-400" aria-hidden="true" />
               <div className="text-sm font-semibold text-gray-600 dark:text-gray-300">No activity in the last {days} days</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">git, receipts, and automation adapters found nothing to chart yet.</div>
             </div>
-          )}
-        </>
-      )}
-    </PanelShell>
+          ))}
+      </div>
+
+      {/* tiny hint footer */}
+      <div className="flex flex-shrink-0 items-center gap-2 border-t border-gray-200 px-4 py-1 text-[11px] text-gray-400 dark:border-gray-800">
+        <MousePointer2 className="h-3 w-3" aria-hidden="true" />
+        Scroll to zoom · drag to pan (x + y) · hover to read every track · click a group label to collapse
+      </div>
+    </main>
   );
 };

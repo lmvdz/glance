@@ -15,6 +15,8 @@ const MIN_SPAN_MS = 60 * 60 * 1000; // never zoom in past a 1-hour window
 export interface GraphView {
   domain: [number, number];
   width: number;
+  /** measured viewport height (the canvas fills its container). */
+  viewportH: number;
   /** vertical scroll offset into the (taller) content, in px. */
   offsetY: number;
   maxOffsetY: number;
@@ -28,14 +30,15 @@ export interface GraphView {
   plotX1: number;
 }
 
-export function useGraphView(range: TimeRange, labelW: number, padR: number, contentH: number, viewportH: number): GraphView {
+export function useGraphView(range: TimeRange, labelW: number, padR: number, contentH: number): GraphView {
   const full: [number, number] = useMemo(() => [range.start, range.end], [range.start, range.end]);
   const [domain, setDomain] = useState<[number, number]>(full);
   const [offsetY, setOffsetY] = useState(0);
-  const [box, setBox] = useState({ width: 900, left: 0, top: 0 });
+  const [box, setBox] = useState({ width: 900, height: 600, left: 0, top: 0 });
   const elRef = useRef<HTMLDivElement | null>(null);
   const drag = useRef<{ px: number; py: number; domain: [number, number]; offsetY: number } | null>(null);
 
+  const viewportH = box.height;
   const maxOffsetY = Math.max(0, contentH - viewportH);
 
   useEffect(() => setDomain(full), [full]);
@@ -46,7 +49,7 @@ export function useGraphView(range: TimeRange, labelW: number, padR: number, con
     if (!el) return;
     const measure = () => {
       const r = el.getBoundingClientRect();
-      setBox({ width: r.width, left: r.left, top: r.top });
+      setBox({ width: r.width, height: r.height, left: r.left, top: r.top });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -111,5 +114,5 @@ export function useGraphView(range: TimeRange, labelW: number, padR: number, con
   const reset = useCallback(() => { setDomain(full); setOffsetY(0); }, [full]);
   const zoomed = domain[0] !== full[0] || domain[1] !== full[1];
 
-  return { domain, width: box.width, offsetY, maxOffsetY, containerRef, timeAt, onWheel, onPanStart, reset, zoomed, plotX0, plotX1 };
+  return { domain, width: box.width, viewportH, offsetY, maxOffsetY, containerRef, timeAt, onWheel, onPanStart, reset, zoomed, plotX0, plotX1 };
 }
