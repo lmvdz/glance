@@ -18,6 +18,7 @@ import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecisi
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
+import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
@@ -991,6 +992,7 @@ export class SquadServer {
 		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
 		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
+		if (url.pathname === "/api/graph") return Response.json(await graphPayload(url));
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/presence") {
@@ -1526,6 +1528,19 @@ async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<
 		source: "receipts.filesTouched (per day×hour, server-local)",
 		generatedAt: Date.now(),
 	};
+}
+
+/**
+ * The normalized omp-graph document (GET /api/graph) — the source-agnostic wire
+ * format the living dashboard consumes. Composes the default adapter set (git +
+ * receipts + automation) over the last `days`. Reconstructs the daemon's state
+ * dir the same way index.ts does, so receipts/automation read the real history.
+ */
+async function graphPayload(url: URL): Promise<GraphDoc> {
+	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const repo = url.searchParams.get("repo") ?? process.cwd();
+	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	return buildGraph({ repo, stateDir }, { days });
 }
 
 
