@@ -38,6 +38,7 @@ const Stat: React.FC<{ label: string; value: string }> = ({ label, value }) => (
 export const OmpGraphPanel: React.FC = () => {
   const [days, setDays] = useState<(typeof RANGES)[number]>(7);
   const [future, setFuture] = useState(false);
+  const [blend, setBlend] = useState(true);
   const [doc, setDoc] = useState<GraphDoc | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
@@ -133,6 +134,14 @@ export const OmpGraphPanel: React.FC = () => {
               >
                 + upcoming
               </button>
+              <button
+                onClick={() => setBlend((v) => !v)}
+                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${blend ? 'border-orange-500 bg-orange-500/15 text-orange-600 dark:text-orange-300' : 'border-gray-200 dark:border-gray-700 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
+                aria-pressed={blend}
+                title="Fuse related tracks into richer lanes: SHIPPED (commits + tickets) and a FLEET PULSE (cost · runs · llm · state)"
+              >
+                ⊕ blend
+              </button>
             </div>
             <div className="flex items-center gap-4">
               <Stat label="commits" value={fmtK(totals.commits)} />
@@ -145,7 +154,7 @@ export const OmpGraphPanel: React.FC = () => {
 
           {hasData ? (
             <>
-              <GraphCanvas doc={doc} />
+              <GraphCanvas doc={doc} blend={blend} />
               <div className="flex items-center gap-2 px-1 text-[11px] text-gray-400">
                 <MousePointer2 className="h-3 w-3" aria-hidden="true" />
                 Scroll to zoom time · drag to pan · hover to read every track · click a group label to collapse it

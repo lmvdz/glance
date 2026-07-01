@@ -58,6 +58,27 @@ const SUBLABEL: Record<string, string> = {
 const RIDGE_OVERLAY: Record<string, string> = { 'git.commits': 'git.churn' };
 const overlayIds = new Set(Object.values(RIDGE_OVERLAY));
 
+// ── blend: fuse semantically-related tracks into one richer lane ──────────────
+
+/** Merge same-type EVENTS tracks into one annotated rail ("everything that shipped"). */
+const MERGE_EVENTS = [{ id: 'shipped', label: 'SHIPPED', sublabel: 'commits · tickets', group: 'fleet', sources: ['git.milestones', 'plane.closed'] }];
+
+/** A composite "instrument" lane that layers several tracks into one blend. */
+type PulseRole = 'band' | 'line' | 'lineDim' | 'ticks';
+const PULSE = {
+  id: 'pulse',
+  label: 'FLEET PULSE',
+  sublabel: 'cost · runs · llm · state',
+  group: 'fleet',
+  height: 118,
+  layers: [
+    { id: 'receipts.state', role: 'band' as PulseRole }, // power: was the fleet on
+    { id: 'receipts.cost', role: 'line' as PulseRole }, // amplitude: $ heartbeat
+    { id: 'automation.llm', role: 'lineDim' as PulseRole }, // automation shadow
+    { id: 'receipts.sessions', role: 'ticks' as PulseRole }, // individual beats
+  ],
+};
+
 /** Right-edge value-scale labels (max + ~40%) for a bars/series track. */
 function valueTicks(mx: number, s: (v: number) => number, y: number, plotX1: number, money: boolean): React.ReactNode {
   const fmt = (v: number): string => (money ? `$${Math.round(v)}` : fmtV(v));
@@ -77,15 +98,17 @@ function valueScale(vals: number[], h: number, scale: Scale | undefined) {
 }
 
 interface Row {
-  kind: 'group' | 'track';
+  kind: 'group' | 'track' | 'pulse';
   label: string;
+  sublabel?: string;
   groupId: string;
   y: number;
   h: number;
   track?: GraphTrack;
+  pulseLayers?: { role: PulseRole; track: GraphTrack }[];
 }
 
-export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
+export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc, blend = true }) => {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
 
@@ -93,25 +116,61 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
   const { rows, totalH, groupExtents } = useMemo(() => {
     const out: Row[] = [];
     const extents: { id: string; label: string; y0: number; y1: number }[] = [];
+
+    // blend preprocessing: which tracks fuse, and into what.
+    const consumed = new Set<string>(overlayIds); // churn always folds into commits
+    const mergedByGroup = new Map<string, GraphTrack[]>();
+    const subById = new Map<string, string>();
+    let pulseLayers: { role: PulseRole; track: GraphTrack }[] = [];
+    if (blend) {
+      for (const m of MERGE_EVENTS) {
+        const marks: EventMark[] = [];
+        for (const id of m.sources) {
+          const t = doc.tracks.find((z) => z.id === id);
+          if (t && t.type === 'events') { marks.push(...t.marks); consumed.add(id); }
+        }
+        if (!marks.length) continue;
+        marks.sort((a, b) => a.t - b.t);
+        const synth: GraphTrack = { id: m.id, label: m.label, group: m.group, source: 'merged', type: 'events', marks };
+        const arr = mergedByGroup.get(m.group) ?? [];
+        arr.push(synth);
+        mergedByGroup.set(m.group, arr);
+        subById.set(m.id, m.sublabel);
+      }
+      const layers = PULSE.layers.map((l) => ({ role: l.role, track: doc.tracks.find((z) => z.id === l.id) })).filter((l): l is { role: PulseRole; track: GraphTrack } => !!l.track);
+      if (layers.length) { pulseLayers = layers; for (const l of PULSE.layers) consumed.add(l.id); }
+    }
+
     let y = HEADER_H;
     for (const g of doc.groups) {
-      const tracks = doc.tracks.filter((t) => t.group === g.id);
-      if (!tracks.length) continue;
+      const merged = mergedByGroup.get(g.id) ?? [];
+      const remaining = doc.tracks.filter((t) => t.group === g.id && !consumed.has(t.id));
+      const hasPulse = blend && PULSE.group === g.id && pulseLayers.length > 0;
+      if (!merged.length && !remaining.length && !hasPulse) continue;
       const y0 = y;
       out.push({ kind: 'group', label: g.label, groupId: g.id, y, h: GROUP_H });
       y += GROUP_H;
       if (!collapsed.has(g.id)) {
-        for (const t of tracks) {
-          if (overlayIds.has(t.id)) continue; // folded into its host bars track (churn → commits)
-          const h = trackHeight(t);
-          out.push({ kind: 'track', label: t.label, groupId: g.id, y, h, track: t });
+        // merged rails first, then remaining tracks, then the pulse instrument
+        for (const s of merged) {
+          const h = trackHeight(s);
+          out.push({ kind: 'track', label: s.label, sublabel: subById.get(s.id), groupId: g.id, y, h, track: s });
           y += h + TRACK_GAP;
+        }
+        for (const t of remaining) {
+          const h = trackHeight(t);
+          out.push({ kind: 'track', label: t.label, sublabel: SUBLABEL[t.id], groupId: g.id, y, h, track: t });
+          y += h + TRACK_GAP;
+        }
+        if (hasPulse) {
+          out.push({ kind: 'pulse', label: PULSE.label, sublabel: PULSE.sublabel, groupId: g.id, y, h: PULSE.height, pulseLayers });
+          y += PULSE.height + TRACK_GAP;
         }
       }
       extents.push({ id: g.id, label: g.label, y0, y1: y - TRACK_GAP });
     }
     return { rows: out, totalH: y + AXIS_H, groupExtents: extents };
-  }, [doc, collapsed]);
+  }, [doc, collapsed, blend]);
 
   const viewportH = Math.min(totalH, MAX_VIEWPORT);
   const view = useGraphView(doc.range, LABEL_W, PAD_R, totalH, viewportH);
@@ -134,6 +193,67 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
   }, [view.domain]);
 
   const spanDays = (view.domain[1] - view.domain[0]) / 86_400_000;
+
+  // ── FLEET PULSE composite: state (power) + cost (amplitude) + llm (shadow) + sessions (beats) ──
+  function renderPulse(layers: { role: PulseRole; track: GraphTrack }[], y: number, h: number): React.ReactNode {
+    const els: React.ReactNode[] = [];
+    const bandT = layers.find((l) => l.role === 'band')?.track;
+    const lineT = layers.find((l) => l.role === 'line')?.track;
+    const dimT = layers.find((l) => l.role === 'lineDim')?.track;
+    const ticksT = layers.find((l) => l.role === 'ticks')?.track;
+    const tickStrip = 13;
+    const waveBottom = y + h - tickStrip - 2;
+    const waveTop = y + 12;
+
+    // power: active/idle band as a faint wash behind everything
+    if (bandT?.type === 'bands') {
+      bandT.segments.forEach((sg, i) => {
+        if (sg.t1 < view.domain[0] || sg.t0 > view.domain[1]) return;
+        const sx = Math.max(view.plotX0, x(new Date(sg.t0)));
+        els.push(<rect key={`pb${i}`} x={sx} y={y + 2} width={Math.max(1, x(new Date(sg.t1)) - sx)} height={h - 4} fill="#3d7dff" fillOpacity={0.05} />);
+      });
+    }
+    // automation shadow: llm bars → a dim magenta line
+    if (dimT?.type === 'bars') {
+      const mx = Math.max(1, ...dimT.bins.map((b) => b.v));
+      const s = scaleSqrt().domain([0, mx]).range([waveBottom, waveTop]);
+      const ln = line<{ t: number; v: number }>().x((b) => x(new Date(b.t + dimT.binMs / 2))).y((b) => s(b.v)).curve(curveMonotoneX);
+      els.push(<path key="pllm" d={ln(dimT.bins.filter((b) => inView(b.t))) ?? undefined} fill="none" stroke="#b5307a" strokeOpacity={0.5} strokeWidth={0.9} />);
+    }
+    // amplitude: cost/hr as the hero waveform
+    if (lineT?.type === 'series') {
+      const mx = Math.max(1, ...lineT.points.map((p) => p.v));
+      const s = scaleSqrt().domain([0, mx]).range([waveBottom, waveTop]);
+      const ar = area<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y0(waveBottom).y1((p) => s(p.v)).curve(curveMonotoneX);
+      const ln = line<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y((p) => s(p.v)).curve(curveMonotoneX);
+      els.push(<path key="pca" d={ar(lineT.points) ?? undefined} fill="#f2913d" fillOpacity={0.13} />);
+      els.push(<path key="pcl" d={ln(lineT.points) ?? undefined} fill="none" stroke="#f2913d" strokeWidth={1.3} style={{ filter: 'drop-shadow(0 0 2px #f2913d55)' }} />);
+      const peak = lineT.points.reduce((m, p) => (p.v > m.v ? p : m), { t: 0, v: 0 });
+      if (peak.v > 0 && inView(peak.t)) {
+        els.push(<circle key="pcp" cx={x(new Date(peak.t))} cy={s(peak.v)} r={2.5} fill="#fbe9a0" />);
+        els.push(<text key="pct" x={x(new Date(peak.t))} y={s(peak.v) - 5} fontSize={8.5} fontWeight={700} textAnchor="middle" fill="#f2c46b" className="tabular-nums">{`$${peak.v.toFixed(1)}/hr`}</text>);
+      }
+      els.push(<text key="pv1" x={view.plotX1 + 3} y={s(mx) + 3} fontSize={7} fill="#3f4653" className="tabular-nums">{`$${Math.round(mx)}`}</text>);
+      els.push(<text key="pv2" x={view.plotX1 + 3} y={s(mx * 0.4) + 3} fontSize={7} fill="#3f4653" className="tabular-nums">{`$${Math.round(mx * 0.4)}`}</text>);
+    }
+    // baseline + beats: each agent run as a tick along the bottom strip
+    els.push(<line key="pbase" x1={view.plotX0} y1={waveBottom} x2={view.plotX1} y2={waveBottom} stroke="#1b2130" strokeWidth={0.8} />);
+    if (ticksT?.type === 'spans') {
+      ticksT.spans.forEach((sp, i) => {
+        if (sp.t1 < view.domain[0] || sp.t0 > view.domain[1]) return;
+        const tx = x(new Date(sp.t0));
+        if (tx < view.plotX0 || tx > view.plotX1) return;
+        els.push(<line key={`pt${i}`} x1={tx} y1={y + h - tickStrip} x2={tx} y2={y + h - 3} stroke={statusColor(sp.status)} strokeOpacity={0.8} strokeWidth={1} />);
+      });
+    }
+    // legend
+    let lx = view.plotX1;
+    for (const it of [{ c: '#3d7dff', t: 'runs' }, { c: '#b5307a', t: 'llm' }, { c: '#f2913d', t: 'cost' }]) {
+      lx -= it.t.length * 4.6 + 14;
+      els.push(<g key={`plg${it.t}`} pointerEvents="none"><rect x={lx} y={y + 1} width={7} height={7} rx={1} fill={it.c} /><text x={lx + 10} y={y + 8} fontSize={7.5} fill="#7a8390">{it.t}</text></g>);
+    }
+    return els;
+  }
 
   // ── per-track renderers (drawn inside the translated tracks group) ──────────
   function renderTrack(t: GraphTrack, y: number, h: number): React.ReactNode {
@@ -388,10 +508,10 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
               return (
                 <g key={`t${i}`}>
                   <text x={LABEL_W - 8} y={r.y + 12} textAnchor="end" fontSize={9} fontWeight={600} letterSpacing="0.06em" fill="#8a92a0">{r.label}</text>
-                  {r.track && SUBLABEL[r.track.id] && (
-                    <text x={LABEL_W - 8} y={r.y + 22} textAnchor="end" fontSize={7} letterSpacing="0.02em" fill="#4a515e">{SUBLABEL[r.track.id]}</text>
+                  {r.sublabel && (
+                    <text x={LABEL_W - 8} y={r.y + 22} textAnchor="end" fontSize={7} letterSpacing="0.02em" fill="#4a515e">{r.sublabel}</text>
                   )}
-                  {r.track && renderTrack(r.track, r.y, r.h)}
+                  {r.kind === 'pulse' && r.pulseLayers ? renderPulse(r.pulseLayers, r.y, r.h) : r.track ? renderTrack(r.track, r.y, r.h) : null}
                 </g>
               );
             })}
