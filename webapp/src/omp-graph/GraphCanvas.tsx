@@ -16,7 +16,7 @@ import { useGraphView } from './useGraphView';
 import { kindColor, statusColor, type EventMark, type GraphDoc, type GraphTrack, type Scale } from './types';
 
 const LABEL_W = 118;
-const PAD_R = 18;
+const PAD_R = 34; // right margin holds the value-scale labels
 const AXIS_H = 28;
 const HEADER_H = 44;
 const GROUP_H = 24;
@@ -33,6 +33,42 @@ const cat = (c: string): string => (c === 'active' ? '#3d7dff' : c === 'busy' ? 
 const eventsHeight = (n: number): number => (n <= 2 ? 52 : n <= 6 ? 88 : n <= 14 ? 128 : 176);
 const trackHeight = (t: GraphTrack): number =>
   t.type === 'events' ? eventsHeight(t.marks.length) : t.type === 'series' ? 72 : t.type === 'bars' ? 72 : t.type === 'spans' ? 116 : 24;
+
+/** Second-line descriptor under each track name (the poster's structured labels). */
+const SUBLABEL: Record<string, string> = {
+  'git.milestones': 'commits · Δchurn',
+  'git.commits': '+ churn ridge',
+  'receipts.cost': 'usd · receipts',
+  'receipts.sessions': 'agent runs',
+  'receipts.state': 'active / idle',
+  'automation.loops': 'scout · dispatch',
+  'automation.llm': 'calls / hr',
+  'plane.closed': 'issues closed',
+  'plane.closedPerDay': 'per day',
+  'plane.issues': 'in flight',
+  'gcal.meetings': 'events',
+  'gcal.perDay': 'per day',
+  'gcal.busy': 'busy / free',
+  'crm.touches': 'per day',
+  'crm.events': 'in / out',
+  'crm.contacts': 'conversations',
+};
+
+/** A bars track that renders another (churn) as a ridge BEHIND it, fused into one lane. */
+const RIDGE_OVERLAY: Record<string, string> = { 'git.commits': 'git.churn' };
+const overlayIds = new Set(Object.values(RIDGE_OVERLAY));
+
+/** Right-edge value-scale labels (max + ~40%) for a bars/series track. */
+function valueTicks(mx: number, s: (v: number) => number, y: number, plotX1: number, money: boolean): React.ReactNode {
+  const fmt = (v: number): string => (money ? `$${Math.round(v)}` : fmtV(v));
+  return (
+    <g pointerEvents="none">
+      {[mx, mx * 0.4].map((v, i) => (
+        <text key={`vt${i}`} x={plotX1 + 3} y={y + s(v) + 3} fontSize={7} fill="#3f4653" className="tabular-nums">{fmt(v)}</text>
+      ))}
+    </g>
+  );
+}
 
 function valueScale(vals: number[], h: number, scale: Scale | undefined) {
   const mx = Math.max(1, ...vals);
@@ -66,6 +102,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       y += GROUP_H;
       if (!collapsed.has(g.id)) {
         for (const t of tracks) {
+          if (overlayIds.has(t.id)) continue; // folded into its host bars track (churn → commits)
           const h = trackHeight(t);
           out.push({ kind: 'track', label: t.label, groupId: g.id, y, h, track: t });
           y += h + TRACK_GAP;
@@ -103,44 +140,35 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
     if (t.type === 'bars') {
       const { s, mx } = valueScale(t.bins.map((b) => b.v), h, t.scale);
       const peak = t.bins.reduce((m, b) => (b.v > m.v ? b : m), { t: 0, v: 0 });
+      const els: React.ReactNode[] = [];
 
-      // churn (and other big-sqrt bars) read better as a filled ridge than columns.
-      if (t.id.endsWith('churn')) {
-        const pts = t.bins.filter((b) => inView(b.t));
-        const ln = line<{ t: number; v: number }>().x((b) => x(new Date(b.t + t.binMs / 2))).y((b) => y + s(b.v)).curve(curveMonotoneX);
-        const ar = area<{ t: number; v: number }>().x((b) => x(new Date(b.t + t.binMs / 2))).y0(y + h).y1((b) => y + s(b.v)).curve(curveMonotoneX);
-        return (
-          <>
-            <path d={ar(pts) ?? undefined} fill="#7b1f6f" fillOpacity={0.28} />
-            <path d={ln(pts) ?? undefined} fill="none" stroke="#b5307a" strokeOpacity={0.7} strokeWidth={1} />
-            {peak.v > 0 && inView(peak.t) && (
-              <text x={x(new Date(peak.t))} y={y - 3} fontSize={8} fontWeight={600} textAnchor="middle" fill="#8a92a0" className="tabular-nums">{`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>
-            )}
-          </>
-        );
+      // churn ridge fused BEHIND the commit bars — the poster's "COMMITS + churn ridge".
+      const ridge = RIDGE_OVERLAY[t.id] ? doc.tracks.find((z) => z.id === RIDGE_OVERLAY[t.id]) : undefined;
+      if (ridge && ridge.type === 'bars') {
+        const { s: rs } = valueScale(ridge.bins.map((b) => b.v), h, ridge.scale);
+        const pts = ridge.bins.filter((b) => inView(b.t));
+        const ar = area<{ t: number; v: number }>().x((b) => x(new Date(b.t + ridge.binMs / 2))).y0(y + h).y1((b) => y + rs(b.v)).curve(curveMonotoneX);
+        const ln = line<{ t: number; v: number }>().x((b) => x(new Date(b.t + ridge.binMs / 2))).y((b) => y + rs(b.v)).curve(curveMonotoneX);
+        els.push(<path key="rgA" d={ar(pts) ?? undefined} fill="#7b1f6f" fillOpacity={0.26} />);
+        els.push(<path key="rgL" d={ln(pts) ?? undefined} fill="none" stroke="#b5307a" strokeOpacity={0.6} strokeWidth={0.9} />);
+        const rp = ridge.bins.reduce((m, b) => (b.v > m.v ? b : m), { t: 0, v: 0 });
+        if (rp.v > 0 && inView(rp.t)) els.push(<text key="rgP" x={x(new Date(rp.t))} y={y + 8} fontSize={8} fontWeight={600} textAnchor="middle" fill="#b5307a" className="tabular-nums">{`Δ${fmtV(rp.v)} churn`}</text>);
       }
 
-      return (
-        <>
-          {t.bins
-            .filter((b) => b.v > 0 && inView(b.t))
-            .map((b, i) => {
-              const bl = x(new Date(b.t));
-              const binW = x(new Date(b.t + t.binMs)) - bl;
-              const bw = Math.max(1, Math.min(binW - 0.6, MAX_BAR));
-              const bx = bl + (binW - bw) / 2; // center the (capped) bar in its bin
-              const by = y + s(b.v);
-              const isPeak = b.t === peak.t;
-              return <rect key={i} x={bx} y={by} width={bw} height={y + h - by} fill={magma(mx > 0 ? b.v / mx : 0)} style={isPeak ? { filter: 'drop-shadow(0 0 4px #fbe9a0aa)' } : undefined} />;
-            })}
-          {peak.v > 0 && inView(peak.t) && (
-            <text x={x(new Date(peak.t))} y={y - 3} fontSize={8} fontWeight={600} textAnchor="middle" fill="#8a92a0" className="tabular-nums">{`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>
-          )}
-        </>
-      );
+      for (const b of t.bins.filter((z) => z.v > 0 && inView(z.t))) {
+        const bl = x(new Date(b.t));
+        const binW = x(new Date(b.t + t.binMs)) - bl;
+        const bw = Math.max(1, Math.min(binW - 0.6, MAX_BAR));
+        const by = y + s(b.v);
+        els.push(<rect key={`b${b.t}`} x={bl + (binW - bw) / 2} y={by} width={bw} height={y + h - by} fill={magma(mx > 0 ? b.v / mx : 0)} style={b.t === peak.t ? { filter: 'drop-shadow(0 0 4px #fbe9a0aa)' } : undefined} />);
+      }
+      // peak label top-LEFT (header strip), not over the data on the right
+      if (peak.v > 0) els.push(<text key="pk" x={view.plotX0 + 2} y={y + 8} fontSize={8} fontWeight={600} fill="#8a92a0" className="tabular-nums">{`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>);
+      els.push(<React.Fragment key="vt">{valueTicks(mx, s, y, view.plotX1, false)}</React.Fragment>);
+      return <>{els}</>;
     }
     if (t.type === 'series') {
-      const { s } = valueScale(t.points.map((p) => p.v), h, t.scale);
+      const { s, mx } = valueScale(t.points.map((p) => p.v), h, t.scale);
       const peak = t.points.reduce((m, p) => (p.v > m.v ? p : m), { t: 0, v: 0 });
       const ln = line<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y((p) => y + s(p.v)).curve(curveMonotoneX);
       const ar = area<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y0(y + h).y1((p) => y + s(p.v)).curve(curveMonotoneX);
@@ -155,15 +183,16 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
               <text x={x(new Date(peak.t))} y={y + s(peak.v) - 5} fontSize={8.5} fontWeight={700} textAnchor="middle" fill="#f2c46b" className="tabular-nums">{money ? `$${peak.v.toFixed(1)}/hr` : `${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>
             </g>
           )}
+          {valueTicks(mx, s, y, view.plotX1, money)}
         </>
       );
     }
     if (t.type === 'events') {
       const marks = t.marks.filter((m) => inView(m.t)).sort((a, b) => a.t - b.t);
-      const railY = y + 7;
+      const railY = y + 18; // leave a top strip for the legend so it never overlaps annotations
       const lineH = 11;
       const CHAR = 4.5;
-      const top0 = railY + 12;
+      const top0 = railY + 10;
       const bottomLimit = y + h - 2;
 
       const clusters: { marks: EventMark[]; x: number }[] = [];
@@ -227,9 +256,10 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       return els;
     }
     if (t.type === 'spans') {
+      const strip = 12; // top strip for the status legend
       const laneH = 8;
       const gap = 2;
-      const maxLanes = Math.max(1, Math.floor(h / (laneH + gap)));
+      const maxLanes = Math.max(1, Math.floor((h - strip) / (laneH + gap)));
       const laneEnds: number[] = [];
       const out: React.ReactNode[] = [];
       [...t.spans]
@@ -241,8 +271,20 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
           if (lane >= maxLanes) lane = maxLanes - 1;
           const sx = Math.max(view.plotX0, x(new Date(sp.t0)));
           const sw = Math.max(1, x(new Date(sp.t1)) - sx);
-          out.push(<rect key={i} x={sx} y={y + lane * (laneH + gap)} width={sw} height={laneH} rx={1.5} fill={statusColor(sp.status)} fillOpacity={0.85} />);
+          out.push(<rect key={i} x={sx} y={y + strip + lane * (laneH + gap)} width={sw} height={laneH} rx={1.5} fill={statusColor(sp.status)} fillOpacity={0.85} />);
         });
+      // status legend, top-right strip (above the lanes)
+      const statuses = [...new Set(t.spans.map((sp) => sp.status ?? 'idle'))].slice(0, 5);
+      let lx = view.plotX1;
+      for (const st of [...statuses].reverse()) {
+        lx -= st.length * 4.6 + 14;
+        out.push(
+          <g key={`sl${st}`} pointerEvents="none">
+            <rect x={lx} y={y + 1} width={7} height={7} rx={1} fill={statusColor(st)} />
+            <text x={lx + 10} y={y + 8} fontSize={7.5} fill="#7a8390">{st}</text>
+          </g>,
+        );
+      }
       return out;
     }
     // bands
@@ -340,7 +382,10 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
               }
               return (
                 <g key={`t${i}`}>
-                  <text x={LABEL_W - 8} y={r.y + 12} textAnchor="end" fontSize={9} fontWeight={600} letterSpacing="0.06em" fill="#7a8390">{r.label}</text>
+                  <text x={LABEL_W - 8} y={r.y + 12} textAnchor="end" fontSize={9} fontWeight={600} letterSpacing="0.06em" fill="#8a92a0">{r.label}</text>
+                  {r.track && SUBLABEL[r.track.id] && (
+                    <text x={LABEL_W - 8} y={r.y + 22} textAnchor="end" fontSize={7} letterSpacing="0.02em" fill="#4a515e">{SUBLABEL[r.track.id]}</text>
+                  )}
                   {r.track && renderTrack(r.track, r.y, r.h)}
                 </g>
               );
