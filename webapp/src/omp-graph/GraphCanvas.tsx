@@ -229,7 +229,10 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
   // ── interaction: every discrete datum is hoverable + clickable ───────────────
   // px/py are container-relative screen coords: canvasY minus the vertical scroll
   // offset, so the tooltip/detail line up with where the mark actually sits.
-  const sameDatum = (a: GraphDatum | null | undefined, b: GraphDatum): boolean => !!a && a.trackId === b.trackId && a.variant === b.variant && a.t === b.t;
+  // t alone collides — commits share per-second timestamps, spans can share t0 — so
+  // also disambiguate on end-time + title, else selecting one rings its twin too.
+  const sameDatum = (a: GraphDatum | null | undefined, b: GraphDatum): boolean =>
+    !!a && a.trackId === b.trackId && a.variant === b.variant && a.t === b.t && a.t1 === b.t1 && a.title === b.title;
   const eventDatum = (tr: GraphTrack, m: EventMark): GraphDatum => ({ variant: 'event', trackId: tr.id, trackLabel: tr.label, source: tr.source, t: m.t, title: m.label, kind: m.kind, value: m.value, meta: m.meta });
   const spanDatum = (tr: GraphTrack, sp: Span): GraphDatum => ({ variant: 'span', trackId: tr.id, trackLabel: tr.label, source: tr.source, t: sp.t0, t1: sp.t1, title: sp.label, status: sp.status, value: sp.value, meta: sp.meta });
   const barDatum = (tr: GraphTrack, b: { t: number; v: number }, binMs: number): GraphDatum => ({ variant: 'bar', trackId: tr.id, trackLabel: tr.label, source: tr.source, t: b.t, t1: b.t + binMs, title: tr.label, value: b.v, unit: tr.unit });

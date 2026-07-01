@@ -53,7 +53,11 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 	// token cache-hit rate — context reuse, the cheapest cost lever
 	const cacheRead = inWin.reduce((a, r) => a + (r.tokens?.cacheRead ?? 0), 0);
 	const inputTok = inWin.reduce((a, r) => a + (r.tokens?.input ?? 0), 0);
-	const cacheHit = cacheRead + inputTok > 0 ? cacheRead / (cacheRead + inputTok) : 0;
+	const cacheWrite = inWin.reduce((a, r) => a + (r.tokens?.cacheWrite ?? 0), 0);
+	// reuse = cached-read ÷ ALL input-side tokens (fresh input + cache read + cache write);
+	// omitting cacheWrite overstated the hit rate on cache-heavy cold-start runs.
+	const cacheDenom = cacheRead + inputTok + cacheWrite;
+	const cacheHit = cacheDenom > 0 ? cacheRead / cacheDenom : 0;
 
 	// idle burn — spend on runs that produced no files
 	const idleRuns = inWin.filter((r) => (r.filesTouched?.length ?? 0) === 0);
@@ -79,9 +83,14 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 			}
 		}
 	}
-	const days = Math.max(1, Math.round((range.end - range.start) / DAY_MS));
-	const commitsPerDay = totalCommits / days;
-	const velTrend = halfTrend(commitsByDay);
+	// Only ELAPSED time counts for rates/trends: a future window (upcoming meetings /
+	// renewals) must not dilute velocity or fake a "↓" trend from its empty trailing
+	// days. Clamp the denominator + trim future-day bins before the half-over-half.
+	const elapsedEnd = Math.min(range.end, now);
+	const elapsedDays = Math.max(1, Math.round((elapsedEnd - range.start) / DAY_MS));
+	const elapsed = (bins: Bin[]): Bin[] => bins.filter((b) => b.t < elapsedEnd);
+	const commitsPerDay = totalCommits / elapsedDays;
+	const velTrend = halfTrend(elapsed(commitsByDay));
 
 	// ── derived tracks ──
 	const tracks: GraphTrack[] = [];
@@ -92,7 +101,7 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 	if (idleByDay.some((b) => b.v > 0)) tracks.push({ id: "derived.idleBurn", label: "IDLE $ / DAY", group: "efficiency", source: "derived", unit: "$", type: "bars", binMs: DAY_MS, scale: "linear", bins: idleByDay });
 
 	// ── insight callouts ──
-	const costTrend = halfTrend(costByDay);
+	const costTrend = halfTrend(elapsed(costByDay));
 	const insights: Insight[] = [
 		{
 			id: "cpt",

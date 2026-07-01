@@ -48,8 +48,10 @@ export async function buildGraph(
 	const range = opts.range ?? windowRange(opts.days ?? 7, opts.futureDays ?? 0, now);
 	const doc = await composeGraph(range, ctx, opts.adapters ?? DEFAULT_ADAPTERS, { now });
 
-	// derive the "so what?" layer from the assembled tracks + raw receipts.
-	const receipts = ctx.stateDir ? await readAllReceipts(ctx.stateDir) : [];
+	// derive the "so what?" layer from the assembled tracks + raw receipts. Guarded so
+	// a corrupt receipts dir degrades to no-insights instead of 500-ing the whole doc —
+	// the same failure isolation composeGraph gives each adapter.
+	const receipts = ctx.stateDir ? await readAllReceipts(ctx.stateDir).catch(() => []) : [];
 	const { tracks, insights } = derive(doc, receipts, range, now);
 	if (tracks.length) {
 		doc.tracks.push(...tracks);

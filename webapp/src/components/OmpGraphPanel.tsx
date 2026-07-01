@@ -8,7 +8,7 @@
  * Calendar, Plane, CRM) lights up here for free the moment its adapter is added.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Waypoints, RefreshCw, Sparkles, MousePointer2 } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
@@ -87,34 +87,40 @@ export const OmpGraphPanel: React.FC = () => {
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<GraphDatum | null>(null);
 
+  // Monotonic request id: a slow response for an old range (or after unmount) must
+  // not overwrite a newer one or setState on a dead component.
+  const reqId = useRef(0);
   const load = useCallback(async (opts?: { force?: boolean }) => {
+    const id = ++reqId.current;
     const key = cacheKey(days, future);
     const cached = readGraphCache(key);
     if (cached && !opts?.force) { setDoc(cached); setLoaded(true); } // instant paint from cache
     if (opts?.force) setRefreshing(true);
     try {
       const d = await apiJson<GraphDoc>(`/api/graph?days=${days}${future ? '&future=3' : ''}${opts?.force ? '&fresh=1' : ''}`);
+      writeGraphCache(key, d); // valid for its key regardless of arrival order
+      if (id !== reqId.current) return; // a newer load superseded this one
       setDoc(d);
-      writeGraphCache(key, d);
       setError('');
     } catch {
-      if (!cached) setError('Could not reach the daemon for graph data.'); // a failed refresh keeps the cached view
+      if (id === reqId.current && !cached) setError('Could not reach the daemon for graph data.'); // a failed refresh keeps the cached view
     } finally {
-      setLoaded(true);
-      setRefreshing(false);
+      if (id === reqId.current) { setLoaded(true); setRefreshing(false); }
     }
   }, [days, future]);
 
   useEffect(() => {
     void load();
     const iv = setInterval(() => void load(), 20_000);
-    return () => clearInterval(iv);
+    return () => { clearInterval(iv); reqId.current++; }; // invalidate any in-flight fetch on unmount / range change
   }, [load]);
 
   // reuse the task's existing plan view (TaskDetail) when a datum resolves to an issue
   const openTask = useCallback((id: string) => {
     const key = id.toLowerCase();
-    const task = tasks.find((t) => t.id.toLowerCase() === key) ?? tasks.find((t) => t.title.toLowerCase().includes(key));
+    // word-boundary match, not raw substring — else "OMPSQ-3" opens task "OMPSQ-343".
+    const rx = new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    const task = tasks.find((t) => t.id.toLowerCase() === key) ?? tasks.find((t) => rx.test(t.title));
     if (task) { selectTask(task.id); setView('tasks'); }
   }, [tasks, selectTask, setView]);
 
