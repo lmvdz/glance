@@ -992,8 +992,11 @@ export class SquadServer {
 		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
 		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
-		if (url.pathname === "/api/graph") return Response.json(await graphPayload(url));
-		if (url.pathname === "/api/graph/commit") return Response.json(await commitDetailPayload(url));
+		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit") {
+			const repo = resolveGraphRepo(url, manager);
+			if (!repo) return new Response("repo not allowed", { status: 403 });
+			return Response.json(url.pathname === "/api/graph" ? await graphPayload(url, repo) : await commitDetailPayload(url, repo));
+		}
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/presence") {
@@ -1553,10 +1556,23 @@ const graphCache = new Map<string, { at: number; doc: GraphDoc }>();
  * (for upcoming meetings/renewals once those adapters land). Reconstructs the
  * daemon state dir like index.ts, and passes per-adapter secrets from env.
  */
-async function graphPayload(url: URL): Promise<GraphDoc> {
+/**
+ * Resolve the `?repo=` param against the allowlist (known project repos + the daemon
+ * cwd). Returns null when a caller asks for a repo outside it — so an authenticated
+ * viewer can't drive `git show` / adapter reads against arbitrary repos on the host.
+ * No param → the daemon cwd (the webapp never sends one).
+ */
+function resolveGraphRepo(url: URL, manager: SquadManager): string | null {
+	const raw = url.searchParams.get("repo");
+	if (!raw) return process.cwd();
+	const resolved = path.resolve(raw);
+	const allowed = new Set([path.resolve(process.cwd()), ...manager.projects().map((p) => path.resolve(p.repo))]);
+	return allowed.has(resolved) ? resolved : null;
+}
+
+async function graphPayload(url: URL, repo: string): Promise<GraphDoc> {
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
 	const future = boundedNumber(url.searchParams.get("future"), 0, 0, 14);
-	const repo = url.searchParams.get("repo") ?? process.cwd();
 	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
 	const key = `${days}:${future}:${repo}`;
 	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
@@ -1636,10 +1652,9 @@ function parseUnifiedDiff(patch: string): { files: CommitFile[]; truncated: bool
 	return { files, truncated };
 }
 
-async function commitDetailPayload(url: URL): Promise<CommitDetail | { error: string }> {
+async function commitDetailPayload(url: URL, repo: string): Promise<CommitDetail | { error: string }> {
 	const sha = (url.searchParams.get("sha") ?? "").trim();
 	if (!SHA_RE.test(sha)) return { error: "invalid sha" }; // guard against arg injection
-	const repo = url.searchParams.get("repo") ?? process.cwd();
 	const US = "\x1f";
 	const RS = "\x1e";
 	try {

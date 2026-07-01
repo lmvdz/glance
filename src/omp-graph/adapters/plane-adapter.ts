@@ -26,6 +26,9 @@ export function planeTracks(issues: PlaneIssueTemporal[], range: TimeRange, grou
 		group,
 		source,
 		type: "events",
+		// annotated marks are capped at `limit` (most-recent) for legibility; the
+		// CLOSED/DAY bars below count ALL closes, so they're the source of truth for
+		// totals/rates (derive reads the bars, not these marks).
 		marks: completed
 			.slice()
 			.sort((a, b) => b.completedAt - a.completedAt)

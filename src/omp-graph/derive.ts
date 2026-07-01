@@ -18,9 +18,10 @@ function daySums(doc: GraphDoc, id: string, range: TimeRange): Bin[] {
 	return bucketSums(range, DAY_MS, t.bins.map((b) => ({ t: b.t, v: b.v })));
 }
 
-function markCount(doc: GraphDoc, id: string): number {
+/** Sum a bars track's bins by id — the true, uncapped count (marks may be capped for legibility). */
+function sumBars(doc: GraphDoc, id: string): number {
 	const t = doc.tracks.find((z) => z.id === id);
-	return t && t.type === "events" ? t.marks.length : 0;
+	return t && t.type === "bars" ? t.bins.reduce((a, b) => a + b.v, 0) : 0;
 }
 
 /** First-half vs second-half fractional change of a per-day series. */
@@ -48,7 +49,9 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 	const costByDay = bucketSums(range, DAY_MS, inWin.map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })));
 	const commitsByDay = daySums(doc, "git.commits", range);
 	const totalCommits = commitsByDay.reduce((a, b) => a + b.v, 0);
-	const ticketsClosed = markCount(doc, "plane.closed");
+	// true closed count from the uncapped daily bars — plane.closed MARKS cap at `limit`
+	// for legibility, so counting them understated cost/ticket once past the cap.
+	const ticketsClosed = sumBars(doc, "plane.closedPerDay");
 
 	// token cache-hit rate — context reuse, the cheapest cost lever
 	const cacheRead = inWin.reduce((a, r) => a + (r.tokens?.cacheRead ?? 0), 0);
