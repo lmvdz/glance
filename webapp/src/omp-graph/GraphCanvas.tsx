@@ -13,14 +13,19 @@ import { scaleLinear, scaleSqrt, scaleSymlog, scaleTime } from 'd3-scale';
 import { area, curveMonotoneX, line } from 'd3-shape';
 import { magma } from '../lib/heatmap';
 import { useGraphView } from './useGraphView';
-import { kindColor, statusColor, type GraphDoc, type GraphTrack, type Scale } from './types';
+import { kindColor, statusColor, type EventMark, type GraphDoc, type GraphTrack, type Scale } from './types';
 
 const LABEL_W = 118;
 const PAD_R = 18;
-const AXIS_H = 30;
+const AXIS_H = 26;
+const HEADER_H = 44; // top band for big weekday/date column headers
 const GROUP_H = 24;
-const TRACK_H: Record<GraphTrack['type'], number> = { events: 70, series: 74, bars: 74, spans: 130, bands: 24 };
+const TRACK_H: Record<GraphTrack['type'], number> = { events: 176, series: 72, bars: 72, spans: 116, bands: 24 };
 const TRACK_GAP = 10;
+
+/** Compact churn/Δ formatter (865 → "865", 16400 → "16.4k"). */
+const fmtV = (v: number): string => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10_000 ? 0 : 1)}k` : `${Math.round(v)}`);
+const hhmm = (d: Date): string => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
 interface Row {
   kind: 'group' | 'track';
@@ -49,7 +54,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
   // Vertical layout — independent of the time domain, so it memoizes cleanly.
   const { rows, totalH } = useMemo(() => {
     const out: Row[] = [];
-    let y = 6;
+    let y = HEADER_H;
     for (const g of doc.groups) {
       const tracks = doc.tracks.filter((t) => t.group === g.id);
       if (!tracks.length) continue;
@@ -75,10 +80,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
 
   // ── day separators + ticks ────────────────────────────────────────────────
   const dayTicks = useMemo(() => {
-    const ticks: { t: number; weekday: string; date: string }[] = [];
-    const d = new Date(view.domain[0]);
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() + 1); // first midnight strictly inside is fine; also include the starting day label
+    const ticks: { t: number; weekday: string; weekdayLong: string; date: string }[] = [];
     const start = new Date(view.domain[0]);
     start.setHours(0, 0, 0, 0);
     for (let cur = start.getTime(); cur <= view.domain[1]; cur += 86_400_000) {
@@ -86,6 +88,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       ticks.push({
         t: cur,
         weekday: dd.toLocaleDateString(undefined, { weekday: 'short' }),
+        weekdayLong: dd.toLocaleDateString(undefined, { weekday: 'long' }),
         date: dd.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }),
       });
     }
@@ -106,50 +109,122 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
   function renderTrack(t: GraphTrack, y: number, h: number): React.ReactNode {
     if (t.type === 'bars') {
       const { s, mx } = valueScale(t.bins.map((b) => b.v), h, t.scale);
-      return t.bins
-        .filter((b) => b.v > 0 && inView(b.t))
-        .map((b, i) => {
-          const bx = x(new Date(b.t));
-          const bw = Math.max(1, x(new Date(b.t + t.binMs)) - bx - 0.5);
-          const by = y + s(b.v);
-          const col = magma(mx > 0 ? b.v / mx : 0);
-          const hot = b.v / mx > 0.66;
-          return <rect key={i} x={bx} y={by} width={bw} height={y + h - by} fill={col} style={hot ? { filter: 'drop-shadow(0 0 3px ' + col + ')' } : undefined} />;
-        });
+      const peak = t.bins.reduce((m, b) => (b.v > m.v ? b : m), { t: 0, v: 0 });
+      return (
+        <>
+          {t.bins
+            .filter((b) => b.v > 0 && inView(b.t))
+            .map((b, i) => {
+              const bx = x(new Date(b.t));
+              const bw = Math.max(1, x(new Date(b.t + t.binMs)) - bx - 0.6);
+              const by = y + s(b.v);
+              const isPeak = b.t === peak.t;
+              // crisp: glow ONLY on the single peak bar, not every hot one
+              return <rect key={i} x={bx} y={by} width={bw} height={y + h - by} fill={magma(mx > 0 ? b.v / mx : 0)} style={isPeak ? { filter: 'drop-shadow(0 0 4px #fbe9a0aa)' } : undefined} />;
+            })}
+          {peak.v > 0 && inView(peak.t) && (
+            <text x={x(new Date(peak.t))} y={y - 3} fontSize={8} fontWeight={600} textAnchor="middle" fill="#8a92a0" className="tabular-nums">
+              {`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}
+            </text>
+          )}
+        </>
+      );
     }
     if (t.type === 'series') {
       const { s } = valueScale(t.points.map((p) => p.v), h, t.scale);
       const pts = t.points;
+      const peak = pts.reduce((m, p) => (p.v > m.v ? p : m), { t: 0, v: 0 });
       const ln = line<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y((p) => y + s(p.v)).curve(curveMonotoneX);
       const ar = area<{ t: number; v: number }>().x((p) => x(new Date(p.t))).y0(y + h).y1((p) => y + s(p.v)).curve(curveMonotoneX);
+      const money = t.unit === '$';
       return (
         <>
-          <path d={ar(pts) ?? undefined} fill="#f2913d" fillOpacity={0.12} />
-          <path d={ln(pts) ?? undefined} fill="none" stroke="#f2913d" strokeWidth={1.4} style={{ filter: 'drop-shadow(0 0 3px #f2913d88)' }} />
+          <path d={ar(pts) ?? undefined} fill="#f2913d" fillOpacity={0.14} />
+          <path d={ln(pts) ?? undefined} fill="none" stroke="#f2913d" strokeWidth={1.3} style={{ filter: 'drop-shadow(0 0 2px #f2913d55)' }} />
+          {peak.v > 0 && inView(peak.t) && (
+            <g pointerEvents="none">
+              <circle cx={x(new Date(peak.t))} cy={y + s(peak.v)} r={2.5} fill="#fbe9a0" />
+              <text x={x(new Date(peak.t))} y={y + s(peak.v) - 5} fontSize={8.5} fontWeight={700} textAnchor="middle" fill="#f2c46b" className="tabular-nums">
+                {money ? `$${peak.v.toFixed(1)}/hr` : `${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}
+              </text>
+            </g>
+          )}
         </>
       );
     }
     if (t.type === 'events') {
-      const marks = t.marks.filter((m) => inView(m.t));
-      const showLabels = marks.length <= 22;
-      const base = y + h - 12;
-      const offs = [0, 14, 28, 42];
-      return marks.map((m, i) => {
-        const mx = x(new Date(m.t));
-        const col = kindColor(m.kind);
-        const ly = y + 4 + offs[i % offs.length];
-        return (
-          <g key={i}>
-            {showLabels && <line x1={mx} y1={ly + 8} x2={mx} y2={base} stroke={col} strokeOpacity={0.35} strokeWidth={0.75} />}
-            <circle cx={mx} cy={base} r={3.2} fill={col} style={{ filter: `drop-shadow(0 0 3px ${col}aa)` }} />
-            {showLabels && (
-              <text x={mx + 4} y={ly + 8} fontSize={8.5} fill="#9aa1ad" className="tabular-nums">
-                {short(m.label, 34)}
-              </text>
-            )}
-          </g>
-        );
+      // Cluster nearby marks, then hang a labeled block from the top rail for each.
+      // Blocks are placed by priority (bigger / land-feat clusters first) with true
+      // rectangle collision-avoidance — anything that can't fit stays just a dot. The
+      // Felton "One Week" annotation style, made robust to dense real data.
+      const marks = t.marks.filter((m) => inView(m.t)).sort((a, b) => a.t - b.t);
+      const railY = y + 7;
+      const lineH = 11;
+      const CHAR = 4.5;
+      const top0 = railY + 12;
+      const bottomLimit = y + h - 2;
+
+      const clusters: { marks: EventMark[]; x: number }[] = [];
+      for (const m of marks) {
+        const last = clusters[clusters.length - 1];
+        if (last && x(new Date(m.t)) - x(new Date(last.marks[last.marks.length - 1].t)) <= 11) last.marks.push(m);
+        else clusters.push({ marks: [m], x: x(new Date(m.t)) });
+      }
+
+      const els: React.ReactNode[] = [];
+      for (const m of marks) els.push(<circle key={`d${m.t}`} cx={x(new Date(m.t))} cy={railY} r={2.2} fill={kindColor(m.kind)} />);
+
+      type L = { kind?: string; text: string; delta?: string; color: string };
+      const blocks = clusters.map((cl) => {
+        const lines: L[] = [];
+        if (cl.marks.length > 1) lines.push({ text: `${cl.marks.length}× ${hhmm(new Date(cl.marks[0].t))}–${hhmm(new Date(cl.marks[cl.marks.length - 1].t))}`, color: '#6d7480' });
+        for (const m of cl.marks.slice(0, 5)) lines.push({ kind: (m.kind ?? '').toUpperCase(), text: short(m.label.replace(/^[✓→←·]\s*/, ''), 24), delta: m.value ? `Δ${fmtV(m.value)}` : undefined, color: kindColor(m.kind) });
+        if (cl.marks.length > 5) lines.push({ text: `+${cl.marks.length - 5}`, color: '#5a6270' });
+        const w = 10 + Math.max(...lines.map((l) => ((l.kind ? l.kind.length + 1 : 0) + l.text.length + (l.delta ? l.delta.length + 1 : 0)) * CHAR));
+        const important = cl.marks.some((m) => m.kind === 'land' || m.kind === 'feat');
+        return { cl, lines, w, bh: lines.length * lineH, priority: cl.marks.length + (important ? 6 : 0) };
       });
+
+      const placed: { x0: number; x1: number; y0: number; y1: number }[] = [];
+      const hits = (a: { x0: number; x1: number; y0: number; y1: number }, b: { x0: number; x1: number; y0: number; y1: number }) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+      for (const blk of [...blocks].sort((a, b) => b.priority - a.priority)) {
+        const xc = blk.cl.x;
+        const rightAlign = xc + blk.w > view.plotX1 - 4; // near the right edge → grow leftward
+        const rx0 = rightAlign ? xc - blk.w : xc - 1;
+        const rx1 = rightAlign ? xc + 1 : xc + blk.w;
+        let top: number | null = null;
+        for (let cand = top0; cand + blk.bh <= bottomLimit; cand += lineH) {
+          const rect = { x0: rx0, x1: rx1, y0: cand, y1: cand + blk.bh };
+          if (!placed.some((p) => hits(rect, p))) { top = cand; placed.push(rect); break; }
+        }
+        if (top === null) continue; // no room → the dot already stands in for it
+        els.push(<line key={`c${xc}`} x1={xc} y1={railY + 2} x2={xc} y2={top - 1} stroke={kindColor(blk.cl.marks[0].kind)} strokeOpacity={0.22} strokeWidth={0.6} />);
+        blk.lines.forEach((l, li) => {
+          const ly = top! + li * lineH + 8;
+          els.push(
+            <text key={`l${xc}-${li}`} x={rightAlign ? xc - 4 : xc + 4} y={ly} textAnchor={rightAlign ? 'end' : 'start'} fontSize={8} className="tabular-nums">
+              {l.kind && <tspan fontWeight={700} fill={l.color}>{l.kind} </tspan>}
+              <tspan fill={l.kind ? '#9aa1ad' : l.color} fontWeight={l.kind ? 400 : 600}>{l.text}</tspan>
+              {l.delta && <tspan fill="#5a6270"> {l.delta}</tspan>}
+            </text>,
+          );
+        });
+      }
+
+      // kind legend, top-right of the track
+      const kinds = [...new Set(marks.map((m) => m.kind ?? 'other'))].slice(0, 6);
+      let lx = view.plotX1;
+      for (const k of [...kinds].reverse()) {
+        const w = k.length * 4.6 + 14;
+        lx -= w;
+        els.push(
+          <g key={`lg${k}`} pointerEvents="none">
+            <rect x={lx} y={y + 1} width={7} height={7} rx={1} fill={kindColor(k)} />
+            <text x={lx + 10} y={y + 8} fontSize={7.5} fill="#7a8390">{k}</text>
+          </g>,
+        );
+      }
+      return els;
     }
     if (t.type === 'spans') {
       const laneH = 8;
@@ -235,14 +310,24 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
       style={{ cursor: 'crosshair' }}
     >
       <svg width={view.width} height={totalH} className="block">
-        {/* day separators + top labels */}
+        {/* day separators (full height) */}
         {dayTicks.map((d, i) => (
-          <g key={`d${i}`}>
-            <line x1={x(new Date(d.t))} y1={0} x2={x(new Date(d.t))} y2={axisY} stroke="#141922" strokeWidth={1} />
-          </g>
+          <line key={`d${i}`} x1={x(new Date(d.t))} y1={HEADER_H - 26} x2={x(new Date(d.t))} y2={axisY} stroke="#131820" strokeWidth={1} />
         ))}
         {hourTicks.map((t, i) => (
-          <line key={`h${i}`} x1={x(new Date(t))} y1={0} x2={x(new Date(t))} y2={axisY} stroke="#0e131b" strokeWidth={1} />
+          <line key={`h${i}`} x1={x(new Date(t))} y1={HEADER_H} x2={x(new Date(t))} y2={axisY} stroke="#0d1119" strokeWidth={1} />
+        ))}
+
+        {/* big day-column headers (top band) */}
+        {dayTicks.map((d, i) => (
+          <g key={`hd${i}`} pointerEvents="none">
+            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 18} fontSize={12.5} fontWeight={700} letterSpacing="0.08em" fill="#c4c9d2">
+              {d.weekdayLong.toUpperCase()}
+            </text>
+            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 6} fontSize={9} letterSpacing="0.04em" fill="#6d7480" className="tabular-nums">
+              {d.date}
+            </text>
+          </g>
         ))}
 
         {/* rows */}
@@ -268,24 +353,20 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
           );
         })}
 
-        {/* time axis */}
+        {/* time axis — per-day hours ruler (00·06·12·18) */}
         <line x1={view.plotX0} y1={axisY} x2={view.plotX1} y2={axisY} stroke="#1e2430" />
-        {dayTicks.map((d, i) => (
-          <g key={`dl${i}`}>
-            <text x={x(new Date(d.t)) + 4} y={axisY + 12} fontSize={9} fontWeight={600} fill="#9aa1ad">
-              {d.weekday}
-            </text>
-            <text x={x(new Date(d.t)) + 4} y={axisY + 23} fontSize={8} fill="#5a6270" className="tabular-nums">
-              {d.date}
-            </text>
-          </g>
-        ))}
-        {spanDays <= 3 &&
-          hourTicks.filter((_, i) => i % 3 === 0).map((t, i) => (
-            <text key={`ht${i}`} x={x(new Date(t))} y={axisY + 12} fontSize={7} textAnchor="middle" fill="#4a515e" className="tabular-nums">
-              {new Date(t).getHours().toString().padStart(2, '0')}
-            </text>
-          ))}
+        {spanDays <= 10 &&
+          dayTicks.flatMap((d, i) =>
+            [0, 6, 12, 18].map((hr) => {
+              const tt = d.t + hr * 3_600_000;
+              if (tt < view.domain[0] || tt > view.domain[1]) return null;
+              return (
+                <text key={`hr${i}-${hr}`} x={x(new Date(tt))} y={axisY + 11} fontSize={7} textAnchor="middle" fill="#4a515e" className="tabular-nums">
+                  {String(hr).padStart(2, '0')}
+                </text>
+              );
+            }),
+          )}
 
         {/* now marker + faint future shading (visible only when the window reaches past now) */}
         {doc.generatedAt > view.domain[0] && doc.generatedAt < view.domain[1] && (
