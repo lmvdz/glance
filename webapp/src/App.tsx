@@ -6,6 +6,7 @@
 import React from 'react';
 import { WorkbenchPane } from './components/WorkbenchPane';
 import { TaskDetail } from './components/TaskDetail';
+import { TaskListView } from './components/TaskListView';
 import { TaskProvider, useTaskContext } from './context/TaskContext';
 import { GlobalShortcuts } from './components/GlobalShortcuts';
 import { ToastContainer } from './components/ToastContainer';
@@ -30,7 +31,7 @@ const readStoredBoolean = (key: string, fallback: boolean) => {
 };
 
 const MainContent = () => {
-  const { view } = useTaskContext();
+  const { view, selectedTaskId } = useTaskContext();
 
   if (view === 'attention') return <AttentionPanel />;
   if (view === 'active') return <ActiveWorkPane />;
@@ -42,6 +43,7 @@ const MainContent = () => {
   if (view === 'omp-graph') return <OmpGraphPanel />;
   if (view === 'knowledge') return <KnowledgePanel />;
   if (view === 'federation') return <FederationPanel />;
+  if (view === 'tasks' && !selectedTaskId) return <TaskListView />;
 
   return (
     <>
