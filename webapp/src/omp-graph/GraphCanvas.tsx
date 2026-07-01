@@ -340,7 +340,9 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
 
       const placed: { x0: number; x1: number; y0: number; y1: number }[] = [];
       const hits = (a: { x0: number; x1: number; y0: number; y1: number }, b: { x0: number; x1: number; y0: number; y1: number }) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
-      [...blocks].sort((a, b) => b.priority - a.priority).forEach((blk, bi) => {
+      // Place right-to-left (most-recent on top): a block's connector then always
+      // sits LEFT of the text above it, so the vertical line never crosses a label.
+      [...blocks].sort((a, b) => b.cl.x - a.cl.x).forEach((blk, bi) => {
         const xc = blk.cl.x;
         const rightAlign = xc + blk.w > view.plotX1 - 4;
         const rx0 = rightAlign ? xc - blk.w : xc - 1;
