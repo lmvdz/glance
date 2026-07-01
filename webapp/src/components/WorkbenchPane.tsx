@@ -30,9 +30,10 @@ import {
   Trash2,
   Waypoints,
   Zap,
+  type LucideIcon,
 } from 'lucide-react';
 import { getCategoryBadge } from '../utils';
-import { useTaskContext, type TaskFilter, type ArchivedFeature } from '../context/TaskContext';
+import { useTaskContext, type AppView, type TaskFilter, type ArchivedFeature } from '../context/TaskContext';
 import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus';
 import { activeWork } from '../lib/insights';
 import { taskRef } from '../lib/task-model';
@@ -46,6 +47,42 @@ const taskFilters: Array<{ key: TaskFilter; label: string }> = [
 ];
 
 const categories: Array<'all' | Task['category']> = ['all', 'frontend', 'backend', 'devops', 'mcp', 'database'];
+
+/** Grouped VERTICAL navigation — a list that grows down instead of tab rows that
+ *  overflow sideways. Sections give structure (the reference-timeline sidebar idiom). */
+const NAV_SECTIONS: { title: string; items: { view: AppView; label: string; icon: LucideIcon }[] }[] = [
+  {
+    title: 'Attention',
+    items: [
+      { view: 'attention', label: 'Needs you', icon: Bell },
+      { view: 'active', label: 'Active work', icon: Radar },
+    ],
+  },
+  {
+    title: 'Plan',
+    items: [
+      { view: 'tasks', label: 'Tasks', icon: Inbox },
+      { view: 'capabilities', label: 'Capabilities', icon: Boxes },
+    ],
+  },
+  {
+    title: 'Observe',
+    items: [
+      { view: 'automation', label: 'Automation', icon: Zap },
+      { view: 'fleet-health', label: 'Fleet health', icon: Activity },
+      { view: 'heat', label: 'Heat map', icon: Thermometer },
+      { view: 'activity-heatmap', label: 'Activity rhythm', icon: CalendarClock },
+      { view: 'omp-graph', label: 'Graph', icon: Waypoints },
+    ],
+  },
+  {
+    title: 'Network',
+    items: [
+      { view: 'federation', label: 'Federation', icon: Network },
+      { view: 'knowledge', label: 'Knowledge base', icon: Library },
+    ],
+  },
+];
 
 interface WorkbenchPaneProps {
   collapsed: boolean;
@@ -412,62 +449,36 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </button>
         </div>
 
-        <div className="mt-2 flex flex-col gap-1">
-          <div className="flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
-            <button onClick={() => setView('attention')} className={`relative flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'attention' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Bell className="h-3.5 w-3.5" aria-hidden="true" />
-              Needs you
-              {needsYouCount > 0 && (
-                <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${view === 'attention' ? 'bg-blue-600 text-white' : 'bg-red-500 text-white'}`}>{needsYouCount}</span>
-              )}
-            </button>
-            <button onClick={() => setView('active')} className={`relative flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'active' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Radar className="h-3.5 w-3.5" aria-hidden="true" />
-              Active
-              {activeWorkCount > 0 && (
-                <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${view === 'active' ? 'bg-blue-600 text-white' : 'bg-emerald-500 text-white'}`}>{activeWorkCount}</span>
-              )}
-            </button>
-            <button onClick={() => setView('tasks')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Inbox className="h-3.5 w-3.5" aria-hidden="true" />
-              Tasks
-            </button>
-            <button onClick={() => setView('capabilities')} className={`flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'capabilities' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Boxes className="h-3.5 w-3.5" aria-hidden="true" />
-              Capabilities
-            </button>
-          </div>
-          <div className="flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
-            <button onClick={() => setView('automation')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'automation' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Zap className="h-3 w-3" aria-hidden="true" />
-              Auto
-            </button>
-            <button onClick={() => setView('fleet-health')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'fleet-health' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Activity className="h-3 w-3" aria-hidden="true" />
-              Health
-            </button>
-            <button onClick={() => setView('heat')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'heat' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Thermometer className="h-3 w-3" aria-hidden="true" />
-              Heat
-            </button>
-            <button onClick={() => setView('activity-heatmap')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'activity-heatmap' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <CalendarClock className="h-3 w-3" aria-hidden="true" />
-              Rhythm
-            </button>
-            <button onClick={() => setView('omp-graph')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'omp-graph' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Waypoints className="h-3 w-3" aria-hidden="true" />
-              Graph
-            </button>
-            <button onClick={() => setView('federation')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Network className="h-3 w-3" aria-hidden="true" />
-              Fed
-            </button>
-            <button onClick={() => setView('knowledge')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'knowledge' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
-              <Library className="h-3 w-3" aria-hidden="true" />
-              KB
-            </button>
-          </div>
-        </div>
+        <nav className="mt-2 space-y-1.5">
+          {NAV_SECTIONS.map((section) => (
+            <div key={section.title}>
+              <div className="px-1 pb-0.5 text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">{section.title}</div>
+              <div className="space-y-0.5">
+                {section.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = view === item.view;
+                  const badge = item.view === 'attention' ? needsYouCount : item.view === 'active' ? activeWorkCount : item.view === 'capabilities' ? capabilities.packs.length : 0;
+                  return (
+                    <button
+                      key={item.view}
+                      onClick={() => setView(item.view)}
+                      aria-current={active ? 'page' : undefined}
+                      className={`group flex min-h-7 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${active ? 'bg-blue-50 font-medium text-blue-700 dark:bg-blue-950/50 dark:text-blue-300' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/70 dark:hover:text-gray-200'}`}
+                    >
+                      <Icon className={`h-4 w-4 flex-shrink-0 ${active ? '' : 'text-gray-400 group-hover:text-gray-500 dark:group-hover:text-gray-300'}`} aria-hidden="true" />
+                      <span className="flex-1 truncate text-left">{item.label}</span>
+                      {badge > 0 && (
+                        <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${active ? 'bg-blue-600 text-white' : item.view === 'attention' ? 'bg-red-500 text-white' : item.view === 'active' ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
+                          {badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
 
         <div className="mt-2">
           <label className="sr-only" htmlFor="workbench-search">Search tasks or jump</label>
