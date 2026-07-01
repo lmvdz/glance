@@ -14,6 +14,7 @@ import { receiptTracks, coalesceActive } from "../src/omp-graph/adapters/receipt
 import { automationTracks, summarizeAutomation } from "../src/omp-graph/adapters/automation-adapter.ts";
 import { planeTracks } from "../src/omp-graph/adapters/plane-adapter.ts";
 import { parseGcalTsv, busyBands, calendarTracks, type CalendarEvent } from "../src/omp-graph/adapters/google-calendar-adapter.ts";
+import { toTouch, parseTouches, crmTracks } from "../src/omp-graph/adapters/crm-adapter.ts";
 import type { RunReceipt, AutomationEvent } from "../src/types.ts";
 import type { PlaneIssueTemporal } from "../src/plane.ts";
 
@@ -251,6 +252,48 @@ test("calendarTracks emits meeting spans, meetings/day bars, and busy bands", ()
 	}
 	const perDay = tracks.find((t) => t.id === "gcal.perDay");
 	if (perDay?.type === "bars") expect(perDay.bins.reduce((a, b) => a + b.v, 0)).toBe(2); // timed meetings only
+});
+
+// ───────────────────────────── crm adapter ─────────────────────────────
+
+test("toTouch maps DerivedInteraction, Interaction, and native shapes tolerantly", () => {
+	// DerivedInteraction (local-extractor push): peerUsername + ISO at + inbound/outbound
+	const d = toTouch({ peerUsername: "alice", peerExternalId: "123", channel: "telegram", at: "2026-06-25T10:00:00Z", direction: "inbound", summary: "8 in / 4 out over 30d" });
+	expect(d).toMatchObject({ contact: "alice", direction: "in", channel: "telegram" });
+	expect(d?.at).toBe(Date.parse("2026-06-25T10:00:00Z"));
+	// Interaction (SoR): contactId + outbound
+	expect(toTouch({ contactId: "c_7", channel: "telegram", at: "2026-06-25T11:00:00Z", direction: "outbound", summary: "sent deck" })).toMatchObject({ contact: "c_7", direction: "out" });
+	// no timestamp → null
+	expect(toTouch({ contact: "x" })).toBeNull();
+});
+
+test("parseTouches handles both a JSON array and JSONL", () => {
+	const arr = JSON.stringify([{ contact: "a", at: hour(1) }, { contact: "b", at: hour(2) }]);
+	expect(parseTouches(arr).length).toBe(2);
+	const jsonl = [`{"contact":"a","at":${hour(1)}}`, "torn{", `{"contact":"b","at":${hour(2)}}`].join("\n");
+	expect(parseTouches(jsonl).length).toBe(2); // torn line tolerated
+});
+
+test("crmTracks emits touches/day bars, touch events, and per-contact conversation spans", () => {
+	const touches = [
+		{ contact: "alice", at: hour(9), direction: "in" as const },
+		{ contact: "alice", at: hour(11), direction: "out" as const },
+		{ contact: "bob", at: hour(14), direction: "out" as const },
+	];
+	const tracks = crmTracks(touches, RANGE, "crm", "crm");
+	expect(tracks.map((t) => t.id)).toEqual(["crm.touches", "crm.events", "crm.contacts"]);
+
+	const bars = tracks.find((t) => t.id === "crm.touches");
+	if (bars?.type === "bars") expect(bars.bins.reduce((a, b) => a + b.v, 0)).toBe(3);
+
+	const spans = tracks.find((t) => t.id === "crm.contacts");
+	if (spans?.type === "spans") {
+		expect(spans.spans.length).toBe(2); // alice + bob
+		const alice = spans.spans.find((s) => s.label === "alice");
+		expect(alice?.t0).toBe(hour(9));
+		expect(alice?.t1).toBe(hour(11)); // first→last touch
+		expect(alice?.status).toBe("mixed"); // 1 in + 1 out
+	}
 });
 
 // ───────────────────────────── compose ─────────────────────────────

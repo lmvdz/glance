@@ -95,6 +95,9 @@ export const KIND_COLOR: Record<string, string> = {
   scope: '#7b4bd0',
   // plane delivery
   done: '#6fce4f',
+  // crm touch direction
+  in: '#6fce4f',
+  out: '#3d7dff',
 };
 
 /** status → span color for the SESSIONS track. */
@@ -116,6 +119,10 @@ export const STATUS_COLOR: Record<string, string> = {
   // calendar
   busy: '#3d7dff',
   tentative: '#f5c518',
+  // crm touch direction
+  in: '#6fce4f',
+  out: '#3d7dff',
+  mixed: '#7b4bd0',
 };
 
 export function kindColor(kind: string | undefined): string {
