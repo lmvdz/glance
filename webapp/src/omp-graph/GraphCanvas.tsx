@@ -560,20 +560,36 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
             {rows.map((r, i) => {
               if (r.kind === 'group') {
                 const collapsedNow = isCol(r.groupId);
+                const ext = groupExtents.find((g) => g.id === r.groupId);
+                // the rotated group label (far left) only draws when the group is tall
+                // enough; name the group horizontally when it isn't, or when collapsed.
+                const rotatedFits = !collapsedNow && !!ext && ext.y1 - ext.y0 >= r.label.length * 8 + 16;
                 return (
                   <g key={`g${i}`} style={{ cursor: 'pointer' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => toggleGroup(r.groupId)}>
-                    <text x={26} y={r.y + 16} fontSize={10} fontWeight={700} letterSpacing="0.1em" fill="#c4c9d2">
-                      {collapsedNow ? '▸ ' : '▾ '}
-                      {r.label}
+                    <rect x={0} y={r.y} width={LABEL_W} height={GROUP_H} fill="transparent" />
+                    <text x={20} y={r.y + 17} fontSize={10} fontWeight={700} letterSpacing="0.1em" fill={collapsedNow ? '#c4c9d2' : '#6d7480'}>
+                      {collapsedNow ? '▸' : '▾'}
+                      {rotatedFits ? '' : ` ${r.label}`}
                     </text>
                   </g>
                 );
               }
+              // Vertical (rotated) track labels — the editorial poster look — centered on
+              // the lane; short lanes (bands) fall back to a horizontal right-aligned label.
+              const vertical = r.h >= 60;
+              const cy = r.y + r.h / 2;
               return (
                 <g key={`t${i}`}>
-                  <text x={LABEL_W - 8} y={r.y + 12} textAnchor="end" fontSize={9} fontWeight={600} letterSpacing="0.06em" fill="#8a92a0">{r.label}</text>
-                  {r.sublabel && (
-                    <text x={LABEL_W - 8} y={r.y + 22} textAnchor="end" fontSize={7} letterSpacing="0.02em" fill="#4a515e">{r.sublabel}</text>
+                  {vertical ? (
+                    <>
+                      <text transform={`translate(72, ${cy}) rotate(-90)`} textAnchor="middle" fontSize={9} fontWeight={600} letterSpacing="0.12em" fill="#8a92a0">{r.label}</text>
+                      {r.sublabel && <text transform={`translate(87, ${cy}) rotate(-90)`} textAnchor="middle" fontSize={7} letterSpacing="0.05em" fill="#4a515e">{r.sublabel}</text>}
+                    </>
+                  ) : (
+                    <>
+                      <text x={LABEL_W - 8} y={cy + 2} textAnchor="end" fontSize={9} fontWeight={600} letterSpacing="0.06em" fill="#8a92a0">{r.label}</text>
+                      {r.sublabel && <text x={LABEL_W - 8} y={cy + 12} textAnchor="end" fontSize={7} letterSpacing="0.02em" fill="#4a515e">{r.sublabel}</text>}
+                    </>
                   )}
                   {r.kind === 'pulse' && r.pulseLayers ? renderPulse(r.pulseLayers, r.y, r.h) : r.track ? renderTrack(r.track, r.y, r.h) : null}
                 </g>
