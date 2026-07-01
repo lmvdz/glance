@@ -993,6 +993,7 @@ export class SquadServer {
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
 		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
 		if (url.pathname === "/api/graph") return Response.json(await graphPayload(url));
+		if (url.pathname === "/api/graph/commit") return Response.json(await commitDetailPayload(url));
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/presence") {
@@ -1559,11 +1560,104 @@ async function graphPayload(url: URL): Promise<GraphDoc> {
 	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
 	const key = `${days}:${future}:${repo}`;
 	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
+	const fresh = url.searchParams.get("fresh"); // reload icon bypasses the cache
 	const hit = graphCache.get(key);
-	if (hit && Date.now() - hit.at < ttl) return hit.doc;
+	if (hit && !fresh && Date.now() - hit.at < ttl) return hit.doc;
 	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, { days, futureDays: future });
 	graphCache.set(key, { at: Date.now(), doc });
 	return doc;
+}
+
+// ── commit detail (GET /api/graph/commit?sha=) — the "click a milestone → diff" drilldown ──
+
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+const MAX_DIFF_LINES = 900; // bound the payload; huge refactors get a "truncated" flag
+
+interface CommitLine {
+	t: "ctx" | "add" | "del" | "hunk";
+	s: string;
+}
+interface CommitFile {
+	path: string;
+	status: "added" | "deleted" | "modified" | "renamed";
+	additions: number;
+	deletions: number;
+	lines: CommitLine[];
+}
+export interface CommitDetail {
+	sha: string;
+	author: string;
+	dateMs: number;
+	subject: string;
+	files: CommitFile[];
+	additions: number;
+	deletions: number;
+	truncated: boolean;
+}
+
+/** Parse a `git show` unified patch into per-file typed lines. Pure. */
+function parseUnifiedDiff(patch: string): { files: CommitFile[]; truncated: boolean } {
+	const files: CommitFile[] = [];
+	let cur: CommitFile | null = null;
+	let total = 0;
+	let truncated = false;
+	const push = (line: CommitLine): void => {
+		if (total < MAX_DIFF_LINES) cur?.lines.push(line);
+		else truncated = true;
+		total++;
+	};
+	for (const raw of patch.split("\n")) {
+		if (raw.startsWith("diff --git")) {
+			const m = raw.match(/ b\/(.+)$/);
+			cur = { path: m ? m[1] : "?", status: "modified", additions: 0, deletions: 0, lines: [] };
+			files.push(cur);
+		} else if (!cur) {
+			continue;
+		} else if (raw.startsWith("new file")) {
+			cur.status = "added";
+		} else if (raw.startsWith("deleted file")) {
+			cur.status = "deleted";
+		} else if (raw.startsWith("rename ")) {
+			cur.status = "renamed";
+		} else if (raw.startsWith("@@")) {
+			push({ t: "hunk", s: raw });
+		} else if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("index ") || raw.startsWith("similarity ") || raw.startsWith("old mode") || raw.startsWith("new mode") || raw.startsWith("Binary files")) {
+			// metadata lines — skip
+		} else if (raw.startsWith("+")) {
+			cur.additions++;
+			push({ t: "add", s: raw.slice(1) });
+		} else if (raw.startsWith("-")) {
+			cur.deletions++;
+			push({ t: "del", s: raw.slice(1) });
+		} else if (raw.startsWith(" ")) {
+			push({ t: "ctx", s: raw.slice(1) });
+		}
+	}
+	return { files, truncated };
+}
+
+async function commitDetailPayload(url: URL): Promise<CommitDetail | { error: string }> {
+	const sha = (url.searchParams.get("sha") ?? "").trim();
+	if (!SHA_RE.test(sha)) return { error: "invalid sha" }; // guard against arg injection
+	const repo = url.searchParams.get("repo") ?? process.cwd();
+	const US = "\x1f";
+	const RS = "\x1e";
+	try {
+		const proc = Bun.spawn(["git", "-C", repo, "show", "--no-color", "--no-notes", "--patch", `--format=format:%H${US}%an${US}%aI${US}%s${RS}`, sha], { stdout: "pipe", stderr: "ignore" });
+		const out = await new Response(proc.stdout).text();
+		const code = await proc.exited;
+		if (code !== 0 || !out) return { error: "commit not found" };
+		const rsIdx = out.indexOf(RS);
+		const header = rsIdx >= 0 ? out.slice(0, rsIdx) : out;
+		const patch = rsIdx >= 0 ? out.slice(rsIdx + 1) : "";
+		const [hsha = sha, author = "", iso = "", subject = ""] = header.split(US);
+		const { files, truncated } = parseUnifiedDiff(patch);
+		const additions = files.reduce((a, f) => a + f.additions, 0);
+		const deletions = files.reduce((a, f) => a + f.deletions, 0);
+		return { sha: hsha, author, dateMs: Date.parse(iso) || 0, subject, files, additions, deletions, truncated };
+	} catch {
+		return { error: "git show failed" };
+	}
 }
 
 

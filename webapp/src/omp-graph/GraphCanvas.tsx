@@ -13,7 +13,7 @@ import { scaleLinear, scaleSqrt, scaleSymlog, scaleTime } from 'd3-scale';
 import { area, curveMonotoneX, line } from 'd3-shape';
 import { magma } from '../lib/heatmap';
 import { useGraphView } from './useGraphView';
-import { kindColor, statusColor, type EventMark, type GraphDoc, type GraphTrack, type Scale } from './types';
+import { kindColor, statusColor, type EventMark, type GraphDatum, type GraphDoc, type GraphTrack, type Scale, type Span } from './types';
 
 const LABEL_W = 118;
 const PAD_R = 34; // right margin holds the value-scale labels
@@ -109,9 +109,9 @@ interface Row {
   pulseLayers?: { role: PulseRole; track: GraphTrack }[];
 }
 
-export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc, blend = true }) => {
+export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: (d: GraphDatum) => void; selected?: GraphDatum | null }> = ({ doc, blend = true, onSelect, selected }) => {
   const [userCollapsed, setUserCollapsed] = useState<Record<string, boolean>>({});
-  const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
+  const [hoverDatum, setHoverDatum] = useState<{ d: GraphDatum; px: number; py: number } | null>(null);
 
   // Groups whose data is thin OR time-clustered collapse by default, so the graph
   // leads with the dense, meaningful lanes and tucks sparse ones into a header you
@@ -201,6 +201,22 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
 
   const view = useGraphView(doc.range, LABEL_W, PAD_R, totalH);
   const viewportH = Math.max(120, view.viewportH); // fills its container
+
+  // ── interaction: every discrete datum is hoverable + clickable ───────────────
+  // px/py are container-relative screen coords: canvasY minus the vertical scroll
+  // offset, so the tooltip/detail line up with where the mark actually sits.
+  const sameDatum = (a: GraphDatum | null | undefined, b: GraphDatum): boolean => !!a && a.trackId === b.trackId && a.variant === b.variant && a.t === b.t;
+  const eventDatum = (tr: GraphTrack, m: EventMark): GraphDatum => ({ variant: 'event', trackId: tr.id, trackLabel: tr.label, source: tr.source, t: m.t, title: m.label, kind: m.kind, value: m.value, meta: m.meta });
+  const spanDatum = (tr: GraphTrack, sp: Span): GraphDatum => ({ variant: 'span', trackId: tr.id, trackLabel: tr.label, source: tr.source, t: sp.t0, t1: sp.t1, title: sp.label, status: sp.status, value: sp.value, meta: sp.meta });
+  const barDatum = (tr: GraphTrack, b: { t: number; v: number }, binMs: number): GraphDatum => ({ variant: 'bar', trackId: tr.id, trackLabel: tr.label, source: tr.source, t: b.t, t1: b.t + binMs, title: tr.label, value: b.v, unit: tr.unit });
+  const seriesDatum = (tr: GraphTrack, p: { t: number; v: number }): GraphDatum => ({ variant: 'series', trackId: tr.id, trackLabel: tr.label, source: tr.source, t: p.t, title: tr.label, value: p.v, unit: tr.unit });
+  const POINTER = { cursor: 'pointer' as const };
+  const markHandlers = (d: GraphDatum, px: number, py: number) => ({
+    onMouseEnter: () => setHoverDatum({ d, px, py }),
+    onMouseLeave: () => setHoverDatum(null),
+    onPointerDown: (e: React.PointerEvent) => e.stopPropagation(), // click a mark, don't start a pan
+    onClick: (e: React.MouseEvent) => { e.stopPropagation(); onSelect?.(d); },
+  });
 
   const x = scaleTime().domain([new Date(view.domain[0]), new Date(view.domain[1])]).range([view.plotX0, view.plotX1]);
   const inView = (t: number): boolean => t >= view.domain[0] - 1 && t <= view.domain[1] + 1;
@@ -307,7 +323,9 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
         const binW = x(new Date(b.t + t.binMs)) - bl;
         const bw = Math.max(1, Math.min(binW - 0.6, MAX_BAR));
         const by = y + s(b.v);
-        els.push(<rect key={`b${b.t}`} x={bl + (binW - bw) / 2} y={by} width={bw} height={y + h - by} fill={magma(mx > 0 ? b.v / mx : 0)} style={b.t === peak.t ? { filter: 'drop-shadow(0 0 4px #fbe9a0aa)' } : undefined} />);
+        const d = barDatum(t, b, t.binMs);
+        const sel = sameDatum(selected, d);
+        els.push(<rect key={`b${b.t}`} x={bl + (binW - bw) / 2} y={by} width={bw} height={y + h - by} fill={magma(mx > 0 ? b.v / mx : 0)} stroke={sel ? '#fbe9a0' : undefined} strokeWidth={sel ? 1 : undefined} style={{ cursor: 'pointer', ...(b.t === peak.t ? { filter: 'drop-shadow(0 0 4px #fbe9a0aa)' } : {}) }} {...markHandlers(d, bl + binW / 2, by - view.offsetY)} />);
       }
       // peak label top-LEFT (header strip), not over the data on the right
       if (peak.v > 0) els.push(<text key="pk" x={view.plotX0 + 2} y={y + 8} fontSize={8} fontWeight={600} fill="#8a92a0" className="tabular-nums">{`peak ${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>);
@@ -330,6 +348,18 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
               <text x={x(new Date(peak.t))} y={y + s(peak.v) - 5} fontSize={8.5} fontWeight={700} textAnchor="middle" fill="#f2c46b" className="tabular-nums">{money ? `$${peak.v.toFixed(1)}/hr` : `${fmtV(peak.v)}${t.unit ? ' ' + t.unit : ''}`}</text>
             </g>
           )}
+          {t.points.filter((p) => inView(p.t) && p.v > 0).map((p, i) => {
+            const cx = x(new Date(p.t));
+            const cy = y + s(p.v);
+            const d = seriesDatum(t, p);
+            const sel = sameDatum(selected, d);
+            return (
+              <g key={`sp${i}`} style={POINTER} {...markHandlers(d, cx, cy - view.offsetY)}>
+                {sel && <circle cx={cx} cy={cy} r={4} fill="none" stroke="#fbe9a0" strokeWidth={1.2} />}
+                <circle cx={cx} cy={cy} r={6} fill="transparent" />
+              </g>
+            );
+          })}
           {valueTicks(mx, s, y, view.plotX1, money)}
         </>
       );
@@ -352,7 +382,18 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
       const els: React.ReactNode[] = [];
       // index keys, NOT timestamps — commits share per-second dates, and duplicate
       // keys leave "ghost" dots that React can't reconcile away when the view changes.
-      marks.forEach((m, i) => els.push(<circle key={`d${i}`} cx={x(new Date(m.t))} cy={railY} r={2.2} fill={kindColor(m.kind)} />));
+      marks.forEach((m, i) => {
+        const cx = x(new Date(m.t));
+        const d = eventDatum(t, m);
+        const sel = sameDatum(selected, d);
+        els.push(
+          <g key={`d${i}`} style={POINTER} {...markHandlers(d, cx, railY - view.offsetY)}>
+            {sel && <circle cx={cx} cy={railY} r={5.5} fill="none" stroke="#fbe9a0" strokeWidth={1.3} />}
+            <circle cx={cx} cy={railY} r={sel ? 3.4 : 2.2} fill={kindColor(m.kind)} />
+            <circle cx={cx} cy={railY} r={7} fill="transparent" />
+          </g>,
+        );
+      });
 
       type L = { kind?: string; text: string; delta?: string; color: string };
       const blocks = clusters.map((cl) => {
@@ -422,7 +463,10 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
           if (lane >= maxLanes) lane = maxLanes - 1;
           const sx = Math.max(view.plotX0, x(new Date(sp.t0)));
           const sw = Math.max(1, x(new Date(sp.t1)) - sx);
-          out.push(<rect key={i} x={sx} y={y + strip + lane * (laneH + gap)} width={sw} height={laneH} rx={1.5} fill={statusColor(sp.status)} fillOpacity={0.85} />);
+          const d = spanDatum(t, sp);
+          const sel = sameDatum(selected, d);
+          const ry = y + strip + lane * (laneH + gap);
+          out.push(<rect key={i} x={sx} y={ry} width={sw} height={laneH} rx={1.5} fill={statusColor(sp.status)} fillOpacity={sel ? 1 : 0.85} stroke={sel ? '#fbe9a0' : undefined} strokeWidth={sel ? 1 : undefined} style={POINTER} {...markHandlers(d, sx + Math.min(sw / 2, 40), ry - view.offsetY)} />);
         });
       // status legend, top-right strip (above the lanes)
       const statuses = [...new Set(t.spans.map((sp) => sp.status ?? 'idle'))].slice(0, 5);
@@ -448,44 +492,6 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
       });
   }
 
-  // ── hover readout ──────────────────────────────────────────────────────────
-  const tip = useMemo(() => {
-    if (!hover) return null;
-    const t = hover.t;
-    const lines: { label: string; value: string; color?: string }[] = [];
-    for (const tr of doc.tracks) {
-      if (isCol(tr.group)) continue;
-      if (tr.type === 'bars') {
-        const b = tr.bins.find((bb) => t >= bb.t && t < bb.t + tr.binMs);
-        if (b && b.v > 0) lines.push({ label: tr.label, value: `${Math.round(b.v)}${tr.unit ? ' ' + tr.unit : ''}` });
-      } else if (tr.type === 'series') {
-        let best: { t: number; v: number } | null = null;
-        for (const p of tr.points) if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
-        if (best && best.v > 0) lines.push({ label: tr.label, value: `${tr.unit === '$' ? '$' : ''}${best.v.toFixed(tr.unit === '$' ? 2 : 0)}` });
-      } else if (tr.type === 'spans') {
-        const n = tr.spans.filter((sp) => t >= sp.t0 && t <= sp.t1).length;
-        if (n) lines.push({ label: tr.label, value: `${n} active` });
-      } else if (tr.type === 'bands') {
-        const sg = tr.segments.find((s) => t >= s.t0 && t < s.t1);
-        if (sg) lines.push({ label: tr.label, value: sg.category, color: sg.color ?? cat(sg.category) });
-      } else {
-        let best: { d: number; label: string; color: string } | null = null;
-        for (const m of tr.marks) {
-          const d = Math.abs(x(new Date(m.t)) - hover.x);
-          if (d < 6 && (!best || d < best.d)) best = { d, label: m.label, color: kindColor(m.kind) };
-        }
-        if (best) lines.push({ label: tr.label, value: short(best.label, 30), color: best.color });
-      }
-    }
-    return { when: new Date(t), lines };
-  }, [hover, doc.tracks, isCol, x]);
-
-  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
-    if (px < view.plotX0 || px > view.plotX1) { setHover(null); return; }
-    setHover({ x: px, t: view.timeAt(px) });
-  };
-
   const nowX = doc.generatedAt > view.domain[0] && doc.generatedAt < view.domain[1] ? x(new Date(doc.generatedAt)) : null;
 
   return (
@@ -495,8 +501,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
       style={{ cursor: 'grab', touchAction: 'none' }}
       onWheel={view.onWheel}
       onPointerDown={view.onPanStart}
-      onMouseMove={onMove}
-      onMouseLeave={() => setHover(null)}
+      onMouseLeave={() => setHoverDatum(null)}
     >
       <svg width={view.width} height={viewportH} className="block">
         <defs>
@@ -580,7 +585,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
             <text x={nowX + 3} y={HEADER_H - 30} fontSize={8} fontWeight={600} fill="#2fb6d6">now</text>
           </g>
         )}
-        {hover && <line x1={hover.x} y1={HEADER_H} x2={hover.x} y2={axisY} stroke="#f2913d" strokeOpacity={0.5} strokeWidth={1} pointerEvents="none" />}
+        {hoverDatum && <line x1={hoverDatum.px} y1={HEADER_H} x2={hoverDatum.px} y2={axisY} stroke="#f2913d" strokeOpacity={0.4} strokeWidth={1} pointerEvents="none" />}
       </svg>
 
       {/* vertical scroll hint */}
@@ -588,21 +593,22 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
         <div className="pointer-events-none absolute right-1.5 rounded-full bg-[#2a3240]" style={{ top: HEADER_H + 4 + (view.offsetY / view.maxOffsetY) * (axisY - HEADER_H - 40), width: 3, height: 36 }} />
       )}
 
-      {/* tooltip */}
-      {hover && tip && tip.lines.length > 0 && (
-        <div className="pointer-events-none absolute z-10 max-w-[240px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-1.5 text-[10px] shadow-xl" style={{ left: Math.min(hover.x + 12, view.width - 220), top: HEADER_H + 4 }}>
-          <div className="mb-1 font-semibold tabular-nums text-[#c4c9d2]">
-            {tip.when.toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' })} · {tip.when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+      {/* per-datum tooltip — describes exactly the mark under the cursor */}
+      {hoverDatum && (
+        <div
+          className="pointer-events-none absolute z-10 max-w-[260px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-2 text-[10px] shadow-xl"
+          style={{ left: Math.min(hoverDatum.px + 12, view.width - 250), top: Math.max(HEADER_H + 4, Math.min(hoverDatum.py - 6, viewportH - 96)) }}
+        >
+          <div className="mb-1 flex items-center gap-1.5">
+            <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: hoverDatum.d.kind ? kindColor(hoverDatum.d.kind) : hoverDatum.d.status ? statusColor(hoverDatum.d.status) : '#f2913d' }} />
+            <span className="font-semibold uppercase tracking-wider text-[#7a8390]">{hoverDatum.d.trackLabel}</span>
+            {hoverDatum.d.value != null && <span className="ml-auto tabular-nums text-[#c4c9d2]">{fmtV(hoverDatum.d.value)}{hoverDatum.d.unit ? ` ${hoverDatum.d.unit}` : ''}</span>}
           </div>
-          {tip.lines.map((l, i) => (
-            <div key={i} className="flex items-center justify-between gap-3 leading-relaxed">
-              <span className="flex items-center gap-1.5 text-[#7a8390]">
-                {l.color && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: l.color }} />}
-                {l.label}
-              </span>
-              <span className="tabular-nums text-[#c4c9d2]">{l.value}</span>
-            </div>
-          ))}
+          <div className="mb-1 font-medium leading-snug text-[#e5e8ee]">{short(hoverDatum.d.title, 64)}</div>
+          <div className="tabular-nums text-[#6d7480]">
+            {new Date(hoverDatum.d.t).toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' })} · {new Date(hoverDatum.d.t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+          </div>
+          <div className="mt-1 text-[9px] text-[#5a6270]">{hoverDatum.d.meta?.sha ? 'click for the diff →' : 'click to inspect →'}</div>
         </div>
       )}
     </div>

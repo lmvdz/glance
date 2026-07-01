@@ -90,6 +90,48 @@ export interface GraphDoc {
   generatedAt: TimeMs;
 }
 
+/**
+ * One hovered/selected datum on the canvas — the unit the detail pane routes on.
+ * A discrete mark (event), a duration (span), a bucket (bar), or a sample (series).
+ */
+export interface GraphDatum {
+  variant: 'event' | 'span' | 'bar' | 'series';
+  trackId: string;
+  trackLabel: string;
+  source: string;
+  t: TimeMs;
+  t1?: TimeMs;
+  title: string;
+  kind?: string;
+  status?: string;
+  value?: number;
+  unit?: string;
+  meta?: Record<string, string | number>;
+}
+
+// ── commit detail (GET /api/graph/commit) — mirrors src/server.ts CommitDetail ──
+export interface CommitLine {
+  t: 'ctx' | 'add' | 'del' | 'hunk';
+  s: string;
+}
+export interface CommitFile {
+  path: string;
+  status: 'added' | 'deleted' | 'modified' | 'renamed';
+  additions: number;
+  deletions: number;
+  lines: CommitLine[];
+}
+export interface CommitDetail {
+  sha: string;
+  author: string;
+  dateMs: number;
+  subject: string;
+  files: CommitFile[];
+  additions: number;
+  deletions: number;
+  truncated: boolean;
+}
+
 // ── kind → accent color (the moodboard "glow set" as categorical signal) ──
 export const KIND_COLOR: Record<string, string> = {
   land: '#f2913d',

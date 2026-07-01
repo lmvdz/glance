@@ -15,6 +15,7 @@ import type { AdapterContext, SourceAdapter } from "../adapter.ts";
 
 export interface GitCommit {
 	t: number;
+	sha: string;
 	subject: string;
 	author: string;
 	insertions: number;
@@ -35,8 +36,8 @@ export function classifyCommit(subject: string): CommitKind {
 }
 
 const MARK = "@@C@@";
-/** The `git log --pretty` format the parser expects (ISO author date, author, subject). */
-export const GIT_LOG_FORMAT = `${MARK}\t%aI\t%an\t%s`;
+/** The `git log --pretty` format the parser expects (sha, ISO author date, author, subject). */
+export const GIT_LOG_FORMAT = `${MARK}\t%H\t%aI\t%an\t%s`;
 
 /** Parse `git log --numstat` output (with GIT_LOG_FORMAT) into commits. Pure. */
 export function parseGitLog(raw: string): GitCommit[] {
@@ -44,13 +45,13 @@ export function parseGitLog(raw: string): GitCommit[] {
 	let cur: GitCommit | null = null;
 	for (const line of raw.split("\n")) {
 		if (line.startsWith(MARK)) {
-			const [, iso = "", author = "", subject = ""] = line.split("\t");
+			const [, sha = "", iso = "", author = "", subject = ""] = line.split("\t");
 			const t = Date.parse(iso);
 			if (Number.isNaN(t)) {
 				cur = null;
 				continue;
 			}
-			cur = { t, subject, author, insertions: 0, deletions: 0, files: 0 };
+			cur = { t, sha, subject, author, insertions: 0, deletions: 0, files: 0 };
 			commits.push(cur);
 		} else if (cur && line.trim()) {
 			// numstat: "<ins>\t<del>\t<path>" — binary files show "-\t-\t<path>".
@@ -92,7 +93,7 @@ export function commitTracks(commits: GitCommit[], range: TimeRange, group: stri
 			label: c.subject.slice(0, 72),
 			kind: classifyCommit(c.subject),
 			value: c.insertions + c.deletions,
-			meta: { files: c.files, author: c.author, churn: c.insertions + c.deletions },
+			meta: { files: c.files, author: c.author, churn: c.insertions + c.deletions, sha: c.sha },
 		})),
 	};
 
