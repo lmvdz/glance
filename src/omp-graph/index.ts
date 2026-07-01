@@ -24,11 +24,12 @@ import { gitAdapter } from "./adapters/git-adapter.ts";
 import { receiptsAdapter } from "./adapters/receipts-adapter.ts";
 import { automationAdapter } from "./adapters/automation-adapter.ts";
 import { planeAdapter } from "./adapters/plane-adapter.ts";
+import { googleCalendarAdapter } from "./adapters/google-calendar-adapter.ts";
 
-export { gitAdapter, receiptsAdapter, automationAdapter, planeAdapter };
+export { gitAdapter, receiptsAdapter, automationAdapter, planeAdapter, googleCalendarAdapter };
 
-/** The default omp-squad adapter set (fleet dev + cost + automation + delivery). */
-export const DEFAULT_ADAPTERS: SourceAdapter[] = [gitAdapter, receiptsAdapter, automationAdapter, planeAdapter];
+/** The default omp-squad adapter set (fleet dev + cost + automation + delivery + meetings). */
+export const DEFAULT_ADAPTERS: SourceAdapter[] = [gitAdapter, receiptsAdapter, automationAdapter, planeAdapter, googleCalendarAdapter];
 
 /**
  * Convenience for hosts: build a GraphDoc spanning `days` of history plus

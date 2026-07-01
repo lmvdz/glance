@@ -113,6 +113,9 @@ export const STATUS_COLOR: Record<string, string> = {
   backlog: '#5a6270',
   completed: '#6fce4f',
   cancelled: '#e0552f',
+  // calendar
+  busy: '#3d7dff',
+  tentative: '#f5c518',
 };
 
 export function kindColor(kind: string | undefined): string {

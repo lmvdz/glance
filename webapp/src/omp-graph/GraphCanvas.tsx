@@ -38,7 +38,7 @@ function valueScale(vals: number[], h: number, scale: Scale | undefined) {
   return { s: s.domain([0, mx]).range([h - 2, 2]), mx };
 }
 
-const cat = (c: string): string => (c === 'active' ? '#3d7dff' : '#7b4bd0');
+const cat = (c: string): string => (c === 'active' ? '#3d7dff' : c === 'busy' ? '#2fb6d6' : '#7b4bd0');
 const short = (s: string, n = 44): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {

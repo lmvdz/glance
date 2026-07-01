@@ -13,6 +13,7 @@ import { classifyCommit, parseGitLog, commitTracks } from "../src/omp-graph/adap
 import { receiptTracks, coalesceActive } from "../src/omp-graph/adapters/receipts-adapter.ts";
 import { automationTracks, summarizeAutomation } from "../src/omp-graph/adapters/automation-adapter.ts";
 import { planeTracks } from "../src/omp-graph/adapters/plane-adapter.ts";
+import { parseGcalTsv, busyBands, calendarTracks, type CalendarEvent } from "../src/omp-graph/adapters/google-calendar-adapter.ts";
 import type { RunReceipt, AutomationEvent } from "../src/types.ts";
 import type { PlaneIssueTemporal } from "../src/plane.ts";
 
@@ -210,6 +211,46 @@ test("planeTracks emits closed events, closed/day bars, and issue-lifetime spans
 		expect(open?.t1).toBe(RANGE.end);
 		expect(open?.status).toBe('started');
 	}
+});
+
+// ───────────────────────────── google calendar adapter ─────────────────────────────
+
+test("parseGcalTsv parses timed + all-day rows and skips malformed", () => {
+	const tsv = ["2026-06-25\t14:00\t2026-06-25\t15:00\tDesign review", "2026-06-26\t\t2026-06-27\t\tOffsite", "garbage"].join("\n");
+	const events = parseGcalTsv(tsv);
+	expect(events.length).toBe(2);
+	expect(events[0]).toMatchObject({ title: "Design review", allDay: false });
+	expect(events[0].end).toBeGreaterThan(events[0].start);
+	expect(events[1].allDay).toBe(true);
+});
+
+test("busyBands merges overlapping meetings into contiguous busy stretches", () => {
+	const evs: CalendarEvent[] = [
+		{ title: "a", start: hour(9), end: hour(10) },
+		{ title: "b", start: hour(10), end: hour(11) }, // touches a → merge
+		{ title: "c", start: hour(13), end: hour(14) }, // gap → separate
+	];
+	const bands = busyBands(evs, RANGE);
+	expect(bands.length).toBe(2);
+	expect(bands[0]).toMatchObject({ t0: hour(9), t1: hour(11), category: "busy" });
+});
+
+test("calendarTracks emits meeting spans, meetings/day bars, and busy bands", () => {
+	const evs: CalendarEvent[] = [
+		{ title: "standup", start: hour(9), end: hour(9) + 30 * 60_000, status: "confirmed" },
+		{ title: "1:1", start: hour(14), end: hour(15), status: "tentative" },
+		{ title: "all-day conf", start: hour(0), end: hour(0) + 86_400_000, allDay: true },
+	];
+	const tracks = calendarTracks(evs, RANGE, "meetings", "google");
+	expect(tracks.map((t) => t.id)).toEqual(["gcal.meetings", "gcal.perDay", "gcal.busy"]);
+
+	const spans = tracks.find((t) => t.id === "gcal.meetings");
+	if (spans?.type === "spans") {
+		expect(spans.spans.length).toBe(2); // all-day excluded from spans
+		expect(spans.spans.find((s) => s.label === "1:1")?.status).toBe("tentative");
+	}
+	const perDay = tracks.find((t) => t.id === "gcal.perDay");
+	if (perDay?.type === "bars") expect(perDay.bins.reduce((a, b) => a + b.v, 0)).toBe(2); // timed meetings only
 });
 
 // ───────────────────────────── compose ─────────────────────────────
