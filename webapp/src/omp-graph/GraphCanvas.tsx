@@ -252,12 +252,12 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
   const tracksTop = HEADER_H;
 
   const dayTicks = useMemo(() => {
-    const ticks: { t: number; weekdayLong: string; date: string }[] = [];
+    const ticks: { t: number; weekdayLong: string; weekdayShort: string; date: string }[] = [];
     const start = new Date(view.domain[0]);
     start.setHours(0, 0, 0, 0);
     for (let cur = start.getTime(); cur <= view.domain[1]; cur += 86_400_000) {
       const dd = new Date(cur);
-      ticks.push({ t: cur, weekdayLong: dd.toLocaleDateString(undefined, { weekday: 'long' }), date: dd.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }) });
+      ticks.push({ t: cur, weekdayLong: dd.toLocaleDateString(undefined, { weekday: 'long' }), weekdayShort: dd.toLocaleDateString(undefined, { weekday: 'short' }), date: dd.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }) });
     }
     return ticks;
   }, [view.domain]);
@@ -537,10 +537,13 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
           </clipPath>
         </defs>
 
-        {/* fixed: day separators (full height) */}
-        {dayTicks.map((d, i) => (
-          <line key={`d${i}`} x1={x(new Date(d.t))} y1={HEADER_H - 26} x2={x(new Date(d.t))} y2={axisY} stroke="#131820" strokeWidth={1} />
-        ))}
+        {/* fixed: day separators (full height) — skip the partial-day midnight that
+            lands in the left label gutter (or past the right edge) */}
+        {dayTicks.map((d, i) => {
+          const dx = x(new Date(d.t));
+          if (dx < view.plotX0 || dx > view.plotX1) return null;
+          return <line key={`d${i}`} x1={dx} y1={HEADER_H - 26} x2={dx} y2={axisY} stroke="#131820" strokeWidth={1} />;
+        })}
 
         {/* scrollable tracks (clipped between the pinned header + axis) */}
         <g clipPath="url(#omp-graph-tracks)">
@@ -581,12 +584,23 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
 
         {/* fixed: big day-column headers (top band) */}
         <rect x={0} y={0} width={view.width} height={HEADER_H} fill="#05060a" />
-        {dayTicks.map((d, i) => (
-          <g key={`hd${i}`} pointerEvents="none">
-            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 18} fontSize={12.5} fontWeight={700} letterSpacing="0.08em" fill="#c4c9d2">{d.weekdayLong.toUpperCase()}</text>
-            <text x={x(new Date(d.t)) + 7} y={HEADER_H - 6} fontSize={9} letterSpacing="0.04em" fill="#6d7480" className="tabular-nums">{d.date}</text>
-          </g>
-        ))}
+        {dayTicks.map((d, i) => {
+          // Pin a partial first day's label to the plot start (its midnight sits off-
+          // screen left); pick short/long weekday by the column's visible width so a
+          // narrow column neither clips nor overlaps the next day.
+          const tx = x(new Date(d.t));
+          const nextX = i + 1 < dayTicks.length ? x(new Date(dayTicks[i + 1].t)) : view.plotX1;
+          const left = Math.max(view.plotX0, tx);
+          const w = nextX - left;
+          if (w < 22) return null; // too narrow to label at all
+          const lx = left + 7;
+          return (
+            <g key={`hd${i}`} pointerEvents="none">
+              <text x={lx} y={HEADER_H - 18} fontSize={12.5} fontWeight={700} letterSpacing="0.08em" fill="#c4c9d2">{(w < 104 ? d.weekdayShort : d.weekdayLong).toUpperCase()}</text>
+              {w >= 40 && <text x={lx} y={HEADER_H - 6} fontSize={9} letterSpacing="0.04em" fill="#6d7480" className="tabular-nums">{d.date}</text>}
+            </g>
+          );
+        })}
 
         {/* fixed: hours ruler axis (bottom band) */}
         <rect x={0} y={axisY} width={view.width} height={AXIS_H} fill="#05060a" />
