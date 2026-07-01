@@ -51,6 +51,8 @@ const SUBLABEL: Record<string, string> = {
   'crm.touches': 'per day',
   'crm.events': 'in / out',
   'crm.contacts': 'conversations',
+  'derived.costPerCommit': 'usd ÷ commits',
+  'derived.idleBurn': '0-output spend',
 };
 
 /** A bars track that renders another (churn) as a ridge BEHIND it, fused into one lane. */

@@ -72,10 +72,20 @@ export interface GraphGroup {
   order?: number;
 }
 
+/** A computed "so what?" callout — the insight layer above the descriptive tracks. */
+export interface Insight {
+  id: string;
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: 'good' | 'warn' | 'bad' | 'neutral';
+}
+
 export interface GraphDoc {
   range: TimeRange;
   groups: GraphGroup[];
   tracks: GraphTrack[];
+  insights?: Insight[];
   sources: string[];
   generatedAt: TimeMs;
 }

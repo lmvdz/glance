@@ -99,11 +99,28 @@ export interface GraphGroup {
 	order?: number;
 }
 
+/**
+ * A computed headline callout — the "so what?" layer above the descriptive tracks.
+ * Answers a question ("am I spending well?") with a number that provokes a decision.
+ */
+export interface Insight {
+	id: string;
+	/** the question/metric, e.g. "cost / shipped ticket". */
+	label: string;
+	/** the headline value, e.g. "$18". */
+	value: string;
+	/** context / trend, e.g. "↑42% this week" or "3 shipped". */
+	sub?: string;
+	tone?: "good" | "warn" | "bad" | "neutral";
+}
+
 /** The full normalized document a renderer consumes — the omp-graph wire format. */
 export interface GraphDoc {
 	range: TimeRange;
 	groups: GraphGroup[];
 	tracks: GraphTrack[];
+	/** computed "so what?" callouts derived from the tracks + raw receipts. */
+	insights?: Insight[];
 	/** adapter ids that contributed (legend / debugging). */
 	sources: string[];
 	generatedAt: TimeMs;

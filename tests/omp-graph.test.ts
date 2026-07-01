@@ -13,6 +13,8 @@ import { classifyCommit, parseGitLog, commitTracks } from "../src/omp-graph/adap
 import { receiptTracks, coalesceActive } from "../src/omp-graph/adapters/receipts-adapter.ts";
 import { automationTracks, summarizeAutomation } from "../src/omp-graph/adapters/automation-adapter.ts";
 import { planeTracks } from "../src/omp-graph/adapters/plane-adapter.ts";
+import { derive } from "../src/omp-graph/derive.ts";
+import type { GraphDoc } from "../src/omp-graph/schema.ts";
 import { parseGcalTsv, busyBands, calendarTracks, type CalendarEvent } from "../src/omp-graph/adapters/google-calendar-adapter.ts";
 import { toTouch, parseTouches, crmTracks } from "../src/omp-graph/adapters/crm-adapter.ts";
 import type { RunReceipt, AutomationEvent } from "../src/types.ts";
@@ -294,6 +296,35 @@ test("crmTracks emits touches/day bars, touch events, and per-contact conversati
 		expect(alice?.t1).toBe(hour(11)); // first→last touch
 		expect(alice?.status).toBe("mixed"); // 1 in + 1 out
 	}
+});
+
+// ───────────────────────────── derive (insights) ─────────────────────────────
+
+test("derive computes efficiency tracks + insight callouts", () => {
+	const now = T0 + 7 * DAY_MS;
+	const range: TimeRange = { start: T0, end: now };
+	const doc: GraphDoc = {
+		range,
+		groups: [],
+		sources: [],
+		generatedAt: now,
+		tracks: [
+			{ id: 'git.commits', label: 'C', group: 'fleet', source: 'git', type: 'bars', binMs: HOUR_MS, bins: [{ t: hour(1), v: 2 }, { t: hour(2), v: 2 }] }, // 4 commits
+			{ id: 'plane.closed', label: 'X', group: 'delivery', source: 'plane', type: 'events', marks: [{ t: hour(5), label: 'OMPSQ-1', kind: 'done' }, { t: hour(6), label: 'OMPSQ-2', kind: 'done' }] }, // 2 tickets
+		],
+	};
+	const receipts = [
+		rc({ startedAt: hour(1), endedAt: hour(2), costUsd: 8, filesTouched: ['a'], tokens: { input: 100, output: 0, cacheRead: 300, cacheWrite: 0, total: 400 } }),
+		rc({ startedAt: hour(3), endedAt: hour(4), costUsd: 2, filesTouched: [], tokens: { input: 50, output: 0, cacheRead: 50, cacheWrite: 0, total: 100 } }), // idle: 0 files
+	];
+	const { tracks, insights } = derive(doc, receipts, range, now);
+
+	expect(insights.find((i) => i.id === 'cpt')?.value).toBe('$5'); // $10 / 2 tickets
+	expect(insights.find((i) => i.id === 'idle')?.value).toBe('20%'); // $2 idle / $10
+	expect(insights.find((i) => i.id === 'cache')?.value).toBe('70%'); // 350 / 500
+	expect(insights.find((i) => i.id === 'cpc')?.value).toBe('$2.5'); // $10 / 4 commits
+	expect(tracks.find((t) => t.id === 'derived.costPerCommit')?.type).toBe('series');
+	expect(tracks.find((t) => t.id === 'derived.idleBurn')?.type).toBe('bars');
 });
 
 // ───────────────────────────── compose ─────────────────────────────

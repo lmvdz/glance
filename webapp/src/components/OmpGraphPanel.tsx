@@ -35,6 +35,15 @@ const Stat: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   </div>
 );
 
+const toneClass = (t?: string): string =>
+  t === 'good'
+    ? 'text-emerald-600 dark:text-emerald-400'
+    : t === 'warn'
+      ? 'text-amber-600 dark:text-amber-400'
+      : t === 'bad'
+        ? 'text-red-600 dark:text-red-400'
+        : 'text-gray-900 dark:text-gray-100';
+
 export const OmpGraphPanel: React.FC = () => {
   const [days, setDays] = useState<(typeof RANGES)[number]>(7);
   const [future, setFuture] = useState(false);
@@ -114,6 +123,19 @@ export const OmpGraphPanel: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* INSIGHTS strip — the "so what?" callouts */}
+      {doc?.insights && doc.insights.length > 0 && (
+        <div className="flex flex-shrink-0 items-stretch gap-2.5 overflow-x-auto border-b border-gray-200 px-4 py-2 dark:border-gray-800">
+          {doc.insights.map((ins) => (
+            <div key={ins.id} className="flex min-w-[132px] flex-col justify-center rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 dark:border-gray-800 dark:bg-gray-900/60">
+              <div className={`text-lg font-semibold leading-none tabular-nums ${toneClass(ins.tone)}`}>{ins.value}</div>
+              <div className="mt-1 text-[10px] font-medium uppercase tracking-wider text-gray-400">{ins.label}</div>
+              {ins.sub && <div className="mt-0.5 truncate text-[10px] text-gray-500" title={ins.sub}>{ins.sub}</div>}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* full-bleed graph fills ALL remaining space */}
       <div className="relative min-h-0 flex-1">

@@ -15,11 +15,14 @@
 export * from "./schema.ts";
 export * from "./adapter.ts";
 export { composeGraph, type ComposeOptions } from "./compose.ts";
+export { derive } from "./derive.ts";
 
 import type { GraphDoc, TimeRange } from "./schema.ts";
 import { windowRange } from "./schema.ts";
 import type { AdapterContext, SourceAdapter } from "./adapter.ts";
 import { composeGraph } from "./compose.ts";
+import { derive } from "./derive.ts";
+import { readAllReceipts } from "../receipts.ts";
 import { gitAdapter } from "./adapters/git-adapter.ts";
 import { receiptsAdapter } from "./adapters/receipts-adapter.ts";
 import { automationAdapter } from "./adapters/automation-adapter.ts";
@@ -43,5 +46,16 @@ export async function buildGraph(
 ): Promise<GraphDoc> {
 	const now = opts.now ?? Date.now();
 	const range = opts.range ?? windowRange(opts.days ?? 7, opts.futureDays ?? 0, now);
-	return composeGraph(range, ctx, opts.adapters ?? DEFAULT_ADAPTERS, { now });
+	const doc = await composeGraph(range, ctx, opts.adapters ?? DEFAULT_ADAPTERS, { now });
+
+	// derive the "so what?" layer from the assembled tracks + raw receipts.
+	const receipts = ctx.stateDir ? await readAllReceipts(ctx.stateDir) : [];
+	const { tracks, insights } = derive(doc, receipts, range, now);
+	if (tracks.length) {
+		doc.tracks.push(...tracks);
+		if (!doc.groups.some((g) => g.id === "efficiency")) doc.groups.push({ id: "efficiency", label: "EFFICIENCY", order: 0.5 });
+		doc.groups.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.label.localeCompare(b.label));
+	}
+	doc.insights = insights;
+	return doc;
 }
