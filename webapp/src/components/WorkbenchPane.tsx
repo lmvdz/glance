@@ -28,6 +28,7 @@ import {
   Tag,
   Thermometer,
   Trash2,
+  Waypoints,
   Zap,
 } from 'lucide-react';
 import { getCategoryBadge } from '../utils';
@@ -336,6 +337,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     : view === 'fleet-health' ? 'Fleet Health'
     : view === 'heat' ? 'Heat Map'
     : view === 'activity-heatmap' ? 'Activity Rhythm'
+    : view === 'omp-graph' ? 'Graph'
     : view === 'federation' ? 'Federation'
     : view === 'knowledge' ? 'Knowledge'
     : '';
@@ -371,6 +373,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         </button>
         <button onClick={() => setView('activity-heatmap')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'activity-heatmap' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Activity Rhythm" title="Activity rhythm — day × hour">
           <CalendarClock className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button onClick={() => setView('omp-graph')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'omp-graph' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Graph" title="Graph — the living temporal dashboard">
+          <Waypoints className="h-4 w-4" aria-hidden="true" />
         </button>
         <button onClick={() => setView('federation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Federation" title="Federation">
           <Network className="h-4 w-4" aria-hidden="true" />
@@ -448,6 +453,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <button onClick={() => setView('activity-heatmap')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'activity-heatmap' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
               <CalendarClock className="h-3 w-3" aria-hidden="true" />
               Rhythm
+            </button>
+            <button onClick={() => setView('omp-graph')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'omp-graph' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <Waypoints className="h-3 w-3" aria-hidden="true" />
+              Graph
             </button>
             <button onClick={() => setView('federation')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
               <Network className="h-3 w-3" aria-hidden="true" />

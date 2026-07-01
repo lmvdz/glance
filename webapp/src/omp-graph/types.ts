@@ -1,0 +1,116 @@
+/**
+ * omp-graph client types — a verbatim mirror of the server wire format
+ * (src/omp-graph/schema.ts). Duplicated for now because the webapp and daemon
+ * build separately; when omp-graph is extracted to a standalone package this
+ * file and the server schema collapse into that package's single source of truth.
+ *
+ * Keep in lockstep with src/omp-graph/schema.ts.
+ */
+
+export type TimeMs = number;
+
+export interface TimeRange {
+  start: TimeMs;
+  end: TimeMs;
+}
+
+export type TrackType = 'events' | 'series' | 'bars' | 'spans' | 'bands';
+export type Scale = 'linear' | 'sqrt' | 'log';
+
+export interface EventMark {
+  t: TimeMs;
+  label: string;
+  kind?: string;
+  value?: number;
+  meta?: Record<string, string | number>;
+}
+
+export interface SeriesPoint {
+  t: TimeMs;
+  v: number;
+}
+
+export interface Bin {
+  t: TimeMs;
+  v: number;
+}
+
+export interface Span {
+  t0: TimeMs;
+  t1: TimeMs;
+  label: string;
+  status?: string;
+  value?: number;
+  meta?: Record<string, string | number>;
+}
+
+export interface BandSegment {
+  t0: TimeMs;
+  t1: TimeMs;
+  category: string;
+  color?: string;
+}
+
+interface TrackBase {
+  id: string;
+  label: string;
+  group: string;
+  source: string;
+  unit?: string;
+}
+
+export type GraphTrack =
+  | (TrackBase & { type: 'events'; marks: EventMark[] })
+  | (TrackBase & { type: 'series'; points: SeriesPoint[]; scale?: Scale })
+  | (TrackBase & { type: 'bars'; bins: Bin[]; binMs: number; scale?: Scale })
+  | (TrackBase & { type: 'spans'; spans: Span[] })
+  | (TrackBase & { type: 'bands'; segments: BandSegment[] });
+
+export interface GraphGroup {
+  id: string;
+  label: string;
+  order?: number;
+}
+
+export interface GraphDoc {
+  range: TimeRange;
+  groups: GraphGroup[];
+  tracks: GraphTrack[];
+  sources: string[];
+  generatedAt: TimeMs;
+}
+
+// ── kind → accent color (the moodboard "glow set" as categorical signal) ──
+export const KIND_COLOR: Record<string, string> = {
+  land: '#f2913d',
+  feat: '#f7c873',
+  fix: '#e0552f',
+  docs: '#3d7dff',
+  other: '#7b4bd0',
+  // automation loops
+  scout: '#2fb6d6',
+  observer: '#6fce4f',
+  dispatch: '#f5c518',
+  opportunity: '#c0327a',
+  scope: '#7b4bd0',
+};
+
+/** status → span color for the SESSIONS track. */
+export const STATUS_COLOR: Record<string, string> = {
+  working: '#3d7dff',
+  spawning: '#2fb6d6',
+  landing: '#6fce4f',
+  blocked: '#e0552f',
+  error: '#e0552f',
+  stopped: '#6d7480',
+  idle: '#6d7480',
+  done: '#6fce4f',
+};
+
+export function kindColor(kind: string | undefined): string {
+  return (kind && KIND_COLOR[kind]) || '#7b4bd0';
+}
+
+export function statusColor(status: string | undefined): string {
+  return (status && STATUS_COLOR[status]) || '#6d7480';
+}
