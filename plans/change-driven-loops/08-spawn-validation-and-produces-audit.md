@@ -1,6 +1,6 @@
 # Spawn-time requires check + post-run produces audit (git-diff sourced)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

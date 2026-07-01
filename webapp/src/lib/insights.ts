@@ -397,6 +397,8 @@ function cap1(s: string): string {
 function loopIntervalMs(loop: string): number {
   if (loop === 'scout') return 60_000;
   if (loop === 'dispatch') return 30_000;
+  // "scope" is event-driven (audit findings on demand), not periodic — never flag it as stuck.
+  if (loop === 'scope') return 24 * 60 * 60_000;
   return 300_000;
 }
 

@@ -5,7 +5,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { type Owner, ownershipConflict, ownershipOverlap, requiresConflict } from "../src/ownership.ts";
+import { type Owner, isWithinAny, outOfScopeWrites, ownershipConflict, ownershipOverlap, producesAllowlist, requiresConflict } from "../src/ownership.ts";
 
 test("ownershipOverlap: exact, nested (both ways), and normalized slashes hit", () => {
 	expect(ownershipOverlap(["src/web"], ["src/web"])).toEqual(["src/web"]);
@@ -79,4 +79,34 @@ test("requiresConflict: read deps ignore read-only, terminal, and disjoint agent
 	expect(requiresConflict([owner()], "/r", ["src/server.ts"])).toBeUndefined();
 	expect(requiresConflict([owner()], "/other", ["src/web"])).toBeUndefined();
 	expect(requiresConflict([owner()], "/r", [])).toBeUndefined();
+});
+
+// ── produces audit (concern 08) ──────────────────────────────────────────────
+
+test("isWithinAny: a file is in scope only when under a declared prefix (segment-safe)", () => {
+	expect(isWithinAny("src/web/app.tsx", ["src/web"])).toBe(true);
+	expect(isWithinAny("src/web", ["src/web"])).toBe(true); // the prefix itself
+	expect(isWithinAny("src/webapp/x.ts", ["src/web"])).toBe(false); // sibling lookalike, not nested
+	expect(isWithinAny("src/server.ts", ["src/web", "docs"])).toBe(false);
+	expect(isWithinAny("SRC/Web/app.ts", ["src/web"])).toBe(true); // case + normalization
+});
+
+test("outOfScopeWrites: flags only real writes outside declared produces, minus the allowlist", () => {
+	const allow = producesAllowlist();
+	const actual = ["src/web/app.tsx", "src/server.ts", "package.json", "bun.lock"];
+	// declared = src/web ⇒ server.ts is out of scope; lockfile + package.json are allowlisted.
+	expect(outOfScopeWrites(actual, ["src/web"], allow)).toEqual(["src/server.ts"]);
+});
+
+test("outOfScopeWrites: no declared scope ⇒ never flags (can't exceed a scope you never declared)", () => {
+	expect(outOfScopeWrites(["src/anything.ts"], [], producesAllowlist())).toEqual([]);
+});
+
+test("outOfScopeWrites: everything in scope ⇒ empty", () => {
+	expect(outOfScopeWrites(["src/web/a.ts", "src/web/b.ts"], ["src/web"], producesAllowlist())).toEqual([]);
+});
+
+test("producesAllowlist: OMP_SQUAD_PRODUCES_ALLOW extends the defaults (basename match)", () => {
+	const allow = producesAllowlist("codegen/schema.ts, .env.example");
+	expect(outOfScopeWrites(["codegen/schema.ts", "src/x.ts"], ["src/web"], allow)).toEqual(["src/x.ts"]);
 });

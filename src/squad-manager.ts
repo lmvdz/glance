@@ -44,7 +44,7 @@ import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedBy
 import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
-import { ownershipConflict, requiresConflict } from "./ownership.ts";
+import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
@@ -1865,6 +1865,31 @@ export class SquadManager extends EventEmitter {
 		const r = hardenedGitSync(["-C", a.repo, "ls-tree", "-r", "--name-only", a.branch]);
 		return r.code === 0 ? r.stdout.split("\n").filter((f) => f.length > 0) : [];
 	}
+
+	/**
+	 * Repo-relative files this agent ACTUALLY changed vs the main checkout's HEAD — the ground
+	 * truth for the produces audit. Sourced from git (committed branch diff, three-dot), NOT the
+	 * receipt's tool-frame filesTouched (which both under- and over-states the real change set).
+	 */
+	private changedFilesVsBase(a: AgentDTO): string[] {
+		if (!a.branch) return [];
+		const r = hardenedGitSync(["-C", a.repo, "diff", "--name-only", `HEAD...${a.branch}`]);
+		return r.code === 0 ? r.stdout.split("\n").filter((f) => f.length > 0) : [];
+	}
+
+	/**
+	 * Route a scope-contract finding through the automation observability channel (the "scope" loop):
+	 * a warn-level event that persists, surfaces in /api/automation + the automation panel, and is
+	 * advisory ONLY — it never blocks a spawn or a land. Best-effort; never throws.
+	 */
+	private fileScopeFinding(severity: "low" | "high", repo: string, message: string): void {
+		try {
+			this.log("warn", `scope finding (${severity}): ${message}`);
+			this.automation.for("scope", repo)({ durationMs: 0, level: "warn", detail: message });
+		} catch {
+			/* observability must never break the spawn/finalize path */
+		}
+	}
 	async verifyAgentWork(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec) return false;
@@ -1999,7 +2024,14 @@ export class SquadManager extends EventEmitter {
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {
 			const conflict = requiresConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.requires);
-			if (conflict) throw new Error(`scope requires conflict: ${conflict.paths.join(", ")} produced by agent "${conflict.agent}" — wait for that output or narrow the dependency`);
+			if (conflict) {
+				// Operator-declared scope → hard block (the enforced path). LLM-inferred → advisory only:
+				// never refuse a spawn on a hallucinated read-dependency; surface it as a low-sev finding.
+				if (opts.scopeSource === "operator") {
+					throw new Error(`scope requires conflict: ${conflict.paths.join(", ")} produced by agent "${conflict.agent}" — wait for that output or narrow the dependency`);
+				}
+				this.fileScopeFinding("low", opts.repo, `inferred requires of "${opts.name ?? "agent"}" overlaps live agent ${conflict.agent}: ${conflict.paths.join(", ")}`);
+			}
 		}
 		if (produces?.length) {
 			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, produces);
@@ -2873,9 +2905,33 @@ export class SquadManager extends EventEmitter {
 					.scan(reasoning, { agent: rec.dto.id, runId: receipt.runId, task: rec.options.task, issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name })
 					.catch((err) => this.log("warn", `scout scan failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		}
+		// Produces audit: did the agent write outside its declared scope? Ground truth is the git
+		// branch diff (not the receipt). Advisory low-sev finding only — never blocks a land.
+		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
 		rec.run = undefined;
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * Compare an agent's REAL changed files (git branch diff) against its declared `produces`
+	 * (falling back to `owns`). Files outside the declared scope — minus a shared-file allowlist —
+	 * raise one low-sev scope finding. No declared scope ⇒ nothing to audit. Best-effort.
+	 */
+	private auditProduces(rec: AgentRecord): void {
+		const declared = rec.dto.produces ?? rec.dto.owns ?? [];
+		if (!declared.length) return;
+		try {
+			const actual = this.changedFilesVsBase(rec.dto);
+			if (!actual.length) return;
+			const outOfScope = outOfScopeWrites(actual, declared, producesAllowlist(process.env.OMP_SQUAD_PRODUCES_ALLOW));
+			if (outOfScope.length) {
+				const shown = outOfScope.slice(0, 10).join(", ");
+				this.fileScopeFinding("low", rec.dto.repo, `agent "${rec.dto.name}" wrote outside declared produces: ${shown}${outOfScope.length > 10 ? ` (+${outOfScope.length - 10} more)` : ""}`);
+			}
+		} catch {
+			/* audit is advisory — a git edge must never break run completion */
+		}
 	}
 
 	/**
