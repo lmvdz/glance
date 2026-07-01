@@ -23,6 +23,18 @@ export interface AdapterContext {
 	stateDir?: string;
 	/** optional cap on how much an adapter should emit (marks/spans), for huge windows. */
 	limit?: number;
+	/**
+	 * Per-adapter config/secrets, keyed by adapter id → { KEY: value } (all strings,
+	 * so the SDK stays app-agnostic). External adapters (stripe, google, telegram) read
+	 * their credentials here, e.g. `ctx.config?.stripe?.KEY`. The host populates it
+	 * (the daemon reads OMP_GRAPH_<ADAPTER>_<KEY> env vars). Never logged.
+	 */
+	config?: Record<string, Record<string, string>>;
+}
+
+/** Convenience: read one config value for an adapter from a context. */
+export function adapterConfig(ctx: AdapterContext, adapterId: string, key: string): string | undefined {
+	return ctx.config?.[adapterId]?.[key];
 }
 
 /** A pluggable data source: range + context → normalized tracks. */

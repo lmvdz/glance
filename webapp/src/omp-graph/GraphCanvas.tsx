@@ -287,6 +287,17 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc }> = ({ doc }) => {
             </text>
           ))}
 
+        {/* now marker + faint future shading (visible only when the window reaches past now) */}
+        {doc.generatedAt > view.domain[0] && doc.generatedAt < view.domain[1] && (
+          <g pointerEvents="none">
+            <rect x={x(new Date(doc.generatedAt))} y={0} width={Math.max(0, view.plotX1 - x(new Date(doc.generatedAt)))} height={axisY} fill="#0a1420" fillOpacity={0.35} />
+            <line x1={x(new Date(doc.generatedAt))} y1={0} x2={x(new Date(doc.generatedAt))} y2={axisY} stroke="#2fb6d6" strokeWidth={1} strokeDasharray="3 3" />
+            <text x={x(new Date(doc.generatedAt)) + 3} y={10} fontSize={8} fontWeight={600} fill="#2fb6d6">
+              now
+            </text>
+          </g>
+        )}
+
         {/* hover cursor */}
         {hover && <line x1={hover.x} y1={0} x2={hover.x} y2={axisY} stroke="#f2913d" strokeOpacity={0.5} strokeWidth={1} pointerEvents="none" />}
       </svg>

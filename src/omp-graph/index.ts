@@ -17,27 +17,29 @@ export * from "./adapter.ts";
 export { composeGraph, type ComposeOptions } from "./compose.ts";
 
 import type { GraphDoc, TimeRange } from "./schema.ts";
-import { lastDays } from "./schema.ts";
+import { windowRange } from "./schema.ts";
 import type { AdapterContext, SourceAdapter } from "./adapter.ts";
 import { composeGraph } from "./compose.ts";
 import { gitAdapter } from "./adapters/git-adapter.ts";
 import { receiptsAdapter } from "./adapters/receipts-adapter.ts";
 import { automationAdapter } from "./adapters/automation-adapter.ts";
+import { planeAdapter } from "./adapters/plane-adapter.ts";
 
-export { gitAdapter, receiptsAdapter, automationAdapter };
+export { gitAdapter, receiptsAdapter, automationAdapter, planeAdapter };
 
-/** The default omp-squad adapter set (fleet dev + cost + automation). */
-export const DEFAULT_ADAPTERS: SourceAdapter[] = [gitAdapter, receiptsAdapter, automationAdapter];
+/** The default omp-squad adapter set (fleet dev + cost + automation + delivery). */
+export const DEFAULT_ADAPTERS: SourceAdapter[] = [gitAdapter, receiptsAdapter, automationAdapter, planeAdapter];
 
 /**
- * Convenience for hosts: build a GraphDoc for the last `days` using the default
- * adapters. `now` is injectable so callers/tests stay deterministic.
+ * Convenience for hosts: build a GraphDoc spanning `days` of history plus
+ * `futureDays` ahead (for upcoming meetings/renewals) using the default adapters.
+ * `now` is injectable so callers/tests stay deterministic.
  */
 export async function buildGraph(
 	ctx: AdapterContext,
-	opts: { days?: number; now?: number; range?: TimeRange; adapters?: SourceAdapter[] } = {},
+	opts: { days?: number; futureDays?: number; now?: number; range?: TimeRange; adapters?: SourceAdapter[] } = {},
 ): Promise<GraphDoc> {
 	const now = opts.now ?? Date.now();
-	const range = opts.range ?? lastDays(opts.days ?? 7, now);
+	const range = opts.range ?? windowRange(opts.days ?? 7, opts.futureDays ?? 0, now);
 	return composeGraph(range, ctx, opts.adapters ?? DEFAULT_ADAPTERS, { now });
 }

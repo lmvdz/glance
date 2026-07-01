@@ -37,13 +37,14 @@ const Stat: React.FC<{ label: string; value: string }> = ({ label, value }) => (
 
 export const OmpGraphPanel: React.FC = () => {
   const [days, setDays] = useState<(typeof RANGES)[number]>(7);
+  const [future, setFuture] = useState(false);
   const [doc, setDoc] = useState<GraphDoc | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const d = await apiJson<GraphDoc>(`/api/graph?days=${days}`);
+      const d = await apiJson<GraphDoc>(`/api/graph?days=${days}${future ? '&future=3' : ''}`);
       setDoc(d);
       setError('');
     } catch {
@@ -51,7 +52,7 @@ export const OmpGraphPanel: React.FC = () => {
     } finally {
       setLoaded(true);
     }
-  }, [days]);
+  }, [days, future]);
 
   useEffect(() => {
     void load();
@@ -124,6 +125,14 @@ export const OmpGraphPanel: React.FC = () => {
                   </button>
                 ))}
               </div>
+              <button
+                onClick={() => setFuture((v) => !v)}
+                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${future ? 'border-cyan-500 bg-cyan-500/15 text-cyan-600 dark:text-cyan-300' : 'border-gray-200 dark:border-gray-700 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
+                aria-pressed={future}
+                title="Extend the window 3 days ahead for upcoming meetings / renewals (once those adapters land)"
+              >
+                + upcoming
+              </button>
             </div>
             <div className="flex items-center gap-4">
               <Stat label="commits" value={fmtK(totals.commits)} />

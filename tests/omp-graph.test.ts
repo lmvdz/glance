@@ -6,13 +6,15 @@
  */
 
 import { expect, test } from "bun:test";
-import { bucketSums, HOUR_MS, DAY_MS, inRange, lastDays, type TimeRange } from "../src/omp-graph/schema.ts";
+import { bucketSums, HOUR_MS, DAY_MS, inRange, lastDays, windowRange, type TimeRange } from "../src/omp-graph/schema.ts";
 import { composeGraph } from "../src/omp-graph/compose.ts";
-import type { SourceAdapter } from "../src/omp-graph/adapter.ts";
+import { adapterConfig, type SourceAdapter } from "../src/omp-graph/adapter.ts";
 import { classifyCommit, parseGitLog, commitTracks } from "../src/omp-graph/adapters/git-adapter.ts";
 import { receiptTracks, coalesceActive } from "../src/omp-graph/adapters/receipts-adapter.ts";
 import { automationTracks, summarizeAutomation } from "../src/omp-graph/adapters/automation-adapter.ts";
+import { planeTracks } from "../src/omp-graph/adapters/plane-adapter.ts";
 import type { RunReceipt, AutomationEvent } from "../src/types.ts";
+import type { PlaneIssueTemporal } from "../src/plane.ts";
 
 const T0 = Date.parse("2026-06-24T00:00:00Z");
 const RANGE: TimeRange = { start: T0, end: T0 + 7 * DAY_MS };
@@ -38,6 +40,20 @@ test("inRange is half-open and lastDays anchors to now", () => {
 	expect(inRange(RANGE.end, RANGE)).toBe(false);
 	const r = lastDays(3, 1000 + 3 * DAY_MS);
 	expect(r.end - r.start).toBe(3 * DAY_MS);
+});
+
+test("windowRange reaches into the future and past around now", () => {
+	const now = 10 * DAY_MS;
+	const r = windowRange(7, 3, now);
+	expect(r.start).toBe(now - 7 * DAY_MS);
+	expect(r.end).toBe(now + 3 * DAY_MS);
+	// futureDays 0 collapses to a past-only window ending at now
+	expect(windowRange(7, 0, now).end).toBe(now);
+});
+
+test("adapterConfig reads a per-adapter secret from context", () => {
+	expect(adapterConfig({ config: { stripe: { KEY: "sk_test" } } }, "stripe", "KEY")).toBe("sk_test");
+	expect(adapterConfig({}, "stripe", "KEY")).toBeUndefined();
 });
 
 // ───────────────────────────── git adapter ─────────────────────────────
@@ -158,6 +174,42 @@ test("automationTracks marks only meaningful ticks and bins llm calls", () => {
 
 	const llm = tracks.find((t) => t.id === "automation.llm");
 	if (llm?.type === "bars") expect(llm.bins.reduce((a, b) => a + b.v, 0)).toBe(1);
+});
+
+// ───────────────────────────── plane adapter ─────────────────────────────
+
+const pi = (over: Partial<PlaneIssueTemporal>): PlaneIssueTemporal => ({ id: 'i', name: 'issue', ...over });
+
+test("planeTracks emits closed events, closed/day bars, and issue-lifetime spans", () => {
+	const issues = [
+		pi({ id: 'i1', identifier: 'OMPSQ-1', name: 'land x', state: 'completed', createdAt: hour(1), completedAt: hour(5) }),
+		pi({ id: 'i2', identifier: 'OMPSQ-2', name: 'wip y', state: 'started', createdAt: hour(2) }), // open → span to range.end
+		pi({ id: 'i3', name: 'old', state: 'completed', createdAt: T0 - 5 * DAY_MS, completedAt: T0 - DAY_MS }), // closed before window
+	];
+	const tracks = planeTracks(issues, RANGE, 'delivery', 'plane');
+	expect(tracks.map((t) => t.id)).toEqual(['plane.closed', 'plane.closedPerDay', 'plane.issues']);
+
+	const closed = tracks.find((t) => t.id === 'plane.closed');
+	if (closed?.type === 'events') {
+		expect(closed.marks.length).toBe(1); // only i1 completed in-window
+		expect(closed.marks[0].label).toContain('OMPSQ-1');
+		expect(closed.marks[0].kind).toBe('done');
+	}
+
+	const perDay = tracks.find((t) => t.id === 'plane.closedPerDay');
+	if (perDay?.type === 'bars') {
+		expect(perDay.binMs).toBe(DAY_MS);
+		expect(perDay.bins.reduce((a, b) => a + b.v, 0)).toBe(1);
+	}
+
+	const wip = tracks.find((t) => t.id === 'plane.issues');
+	if (wip?.type === 'spans') {
+		// i1 (closed) + i2 (open, extends to range.end); i3 ended before the window
+		expect(wip.spans.length).toBe(2);
+		const open = wip.spans.find((s) => s.label === 'OMPSQ-2');
+		expect(open?.t1).toBe(RANGE.end);
+		expect(open?.status).toBe('started');
+	}
 });
 
 // ───────────────────────────── compose ─────────────────────────────

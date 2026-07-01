@@ -141,3 +141,12 @@ export function lastDays(days: number, now: TimeMs): TimeRange {
 	const end = now;
 	return { start: end - days * DAY_MS, end };
 }
+
+/**
+ * A window spanning `pastDays` before now to `futureDays` after — so adapters
+ * with forward-looking data (upcoming meetings, scheduled renewals) have room to
+ * render. `futureDays` = 0 collapses to `lastDays`. The renderer marks `now`.
+ */
+export function windowRange(pastDays: number, futureDays: number, now: TimeMs): TimeRange {
+	return { start: now - pastDays * DAY_MS, end: now + Math.max(0, futureDays) * DAY_MS };
+}

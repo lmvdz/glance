@@ -93,6 +93,8 @@ export const KIND_COLOR: Record<string, string> = {
   dispatch: '#f5c518',
   opportunity: '#c0327a',
   scope: '#7b4bd0',
+  // plane delivery
+  done: '#6fce4f',
 };
 
 /** status → span color for the SESSIONS track. */
@@ -105,6 +107,12 @@ export const STATUS_COLOR: Record<string, string> = {
   stopped: '#6d7480',
   idle: '#6d7480',
   done: '#6fce4f',
+  // plane state groups
+  started: '#3d7dff',
+  unstarted: '#7a8390',
+  backlog: '#5a6270',
+  completed: '#6fce4f',
+  cancelled: '#e0552f',
 };
 
 export function kindColor(kind: string | undefined): string {

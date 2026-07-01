@@ -86,6 +86,54 @@ interface PlaneIssue {
 	state?: string;
 	project_detail?: { identifier?: string };
 	priority?: string;
+	created_at?: string;
+	updated_at?: string;
+	completed_at?: string;
+}
+
+/** A Plane issue reduced to what a temporal view needs: state group + parsed epoch timestamps.
+ *  Unlike listPlaneIssues, this KEEPS timestamps and does NOT drop completed/cancelled issues
+ *  (those are exactly the "closed" milestones a timeline wants). */
+export interface PlaneIssueTemporal {
+	id: string;
+	/** human identifier like OMPSQ-35, when the project prefix is resolvable. */
+	identifier?: string;
+	name: string;
+	/** state group: backlog | unstarted | started | completed | cancelled. */
+	state?: string;
+	priority?: string;
+	createdAt?: number;
+	updatedAt?: number;
+	completedAt?: number;
+}
+
+/** Read all issues for a repo's project (INCLUDING finished ones) with timestamps, for omp-graph.
+ *  `null` ⇒ Plane not configured / unreachable (caller degrades to no tracks). */
+export async function listPlaneIssuesRaw(repo: string): Promise<PlaneIssueTemporal[] | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return [];
+	const res = await throttledFetch(`${base}/issues/?per_page=100`, { headers });
+	if (!res || !res.ok) return null;
+	const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
+	const items = Array.isArray(data) ? data : (data?.results ?? []);
+	const [groups, prefix] = await Promise.all([fetchStateGroups(base, headers), projectPrefix(base, headers)]);
+	const ms = (s?: string): number | undefined => {
+		if (!s) return undefined;
+		const t = Date.parse(s);
+		return Number.isNaN(t) ? undefined : t;
+	};
+	return items.map((raw) => ({
+		id: raw.id,
+		identifier: prefix && raw.sequence_id != null ? `${prefix}-${raw.sequence_id}` : undefined,
+		name: raw.name ?? raw.id,
+		state: raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined),
+		priority: raw.priority,
+		createdAt: ms(raw.created_at),
+		updatedAt: ms(raw.updated_at),
+		completedAt: ms(raw.completed_at),
+	}));
 }
 
 /** True when an issue's name flags it for human review / do-NOT-auto-land. The dispatcher skips these,

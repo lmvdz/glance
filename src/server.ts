@@ -1530,17 +1530,40 @@ async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<
 	};
 }
 
+/** Per-adapter config/secrets from OMP_GRAPH_<ADAPTER>_<KEY> env vars → { adapter: { KEY: value } }. */
+function graphConfigFromEnv(): Record<string, Record<string, string>> {
+	const cfg: Record<string, Record<string, string>> = {};
+	for (const [k, v] of Object.entries(process.env)) {
+		if (!v) continue;
+		const m = /^OMP_GRAPH_([A-Z0-9]+)_(.+)$/.exec(k);
+		if (!m) continue;
+		(cfg[m[1].toLowerCase()] ??= {})[m[2]] = v;
+	}
+	return cfg;
+}
+
+/** Short-TTL cache so polling clients (and future slow external adapters) don't recompute every hit. */
+const graphCache = new Map<string, { at: number; doc: GraphDoc }>();
+
 /**
  * The normalized omp-graph document (GET /api/graph) — the source-agnostic wire
  * format the living dashboard consumes. Composes the default adapter set (git +
- * receipts + automation) over the last `days`. Reconstructs the daemon's state
- * dir the same way index.ts does, so receipts/automation read the real history.
+ * receipts + automation + plane) over `days` of history plus `future` days ahead
+ * (for upcoming meetings/renewals once those adapters land). Reconstructs the
+ * daemon state dir like index.ts, and passes per-adapter secrets from env.
  */
 async function graphPayload(url: URL): Promise<GraphDoc> {
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const future = boundedNumber(url.searchParams.get("future"), 0, 0, 14);
 	const repo = url.searchParams.get("repo") ?? process.cwd();
 	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
-	return buildGraph({ repo, stateDir }, { days });
+	const key = `${days}:${future}:${repo}`;
+	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
+	const hit = graphCache.get(key);
+	if (hit && Date.now() - hit.at < ttl) return hit.doc;
+	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, { days, futureDays: future });
+	graphCache.set(key, { at: Date.now(), doc });
+	return doc;
 }
 
 
