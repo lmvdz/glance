@@ -160,6 +160,14 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
 
   return (
     <div>
+      {graph.issues.length > 0 && (
+        <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <div className="mb-1 font-semibold uppercase tracking-wider">Plan dependency issues</div>
+          <ul className="list-disc space-y-0.5 pl-4">
+            {graph.issues.map((issue, i) => <li key={`${issue.kind}-${i}`}>{issue.message}</li>)}
+          </ul>
+        </div>
+      )}
       <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-950/40 p-1 scrollbar-custom">
         <div className="relative" style={{ width, height }}>
           {/* edge layer */}
@@ -321,7 +329,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
       )}
 
       <div className="flex items-center gap-3 px-2 py-1 text-[10px] text-gray-400">
-        <span>{graph.nodes.length} concerns · {graph.cols} batch{graph.cols === 1 ? '' : 'es'} · {doneCount} done</span>
+        <span>{graph.nodes.length} concerns · {graph.cols} batch{graph.cols === 1 ? '' : 'es'} · {doneCount} done{graph.issues.length ? ` · ${graph.issues.length} dependency issue${graph.issues.length === 1 ? '' : 's'}` : ''}</span>
         <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> done</span>
         <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-400" /> open</span>
         <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-blue-500" /> in&nbsp;progress</span>

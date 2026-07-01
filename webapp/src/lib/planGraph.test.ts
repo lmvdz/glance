@@ -94,15 +94,42 @@ describe('buildPlanGraph', () => {
     expect(g.nodes.find((n) => n.id === '02-b.md')!.col).toBe(1);
   });
 
+  test('does not fallback when overview row explicitly says no blockers', () => {
+    const ov = `## Dependency graph\n| Concern | BLOCKED_BY |\n|---|---|\n| 02 | none |\n`;
+    const concerns = [
+      c('01-a.md', 'A'),
+      c('02-b.md', 'B', { prerequisites: ['Blocked by concern 01'] }),
+    ];
+    expect(buildPlanGraph(concerns, ov).edges).toEqual([]);
+  });
+
   test('no edges → every node at column 0', () => {
     const g = buildPlanGraph([c('01-a.md', 'A'), c('02-b.md', 'B')], '');
     expect(g.nodes.every((n) => n.col === 0)).toBe(true);
     expect(g.cols).toBe(1);
   });
 
-  test('tolerates a dependency cycle without infinite-looping', () => {
+  test('reports dependency cycles without infinite-looping', () => {
     const ov = `## Dependency graph\n| Concern | BLOCKED_BY |\n|---|---|\n| 01 | 02 |\n| 02 | 01 |\n`;
     const g = buildPlanGraph([c('01-a.md', 'A'), c('02-b.md', 'B')], ov);
-    expect(g.nodes).toHaveLength(2); // did not hang
+    expect(g.nodes).toHaveLength(2);
+    expect(g.issues).toContainEqual({
+      kind: 'cycle',
+      message: 'Dependency cycle: 1 → 2 → 1.',
+      refs: [1, 2],
+      files: ['01-a.md', '02-b.md'],
+    });
+  });
+
+  test('reports unresolved blocker references', () => {
+    const ov = `## Dependency graph\n| Concern | BLOCKED_BY |\n|---|---|\n| 01 | 99 |\n`;
+    const g = buildPlanGraph([c('01-a.md', 'A')], ov);
+    expect(g.edges).toEqual([]);
+    expect(g.issues).toEqual([{
+      kind: 'unresolved',
+      message: 'Concern 1 depends on missing concern 99.',
+      refs: [99],
+      files: ['01-a.md'],
+    }]);
   });
 });
