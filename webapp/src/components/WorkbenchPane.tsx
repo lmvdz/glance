@@ -8,6 +8,7 @@ import {
   CalendarClock,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Circle,
   Download,
@@ -230,6 +231,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   // Live count of things currently being worked on — drives the Active nav badge.
   const activeWorkCount = React.useMemo(() => activeWork(agents, features).length, [agents, features]);
   const [workspaceOpen, setWorkspaceOpen] = useState(true);
+  const [drilled, setDrilled] = useState(false); // Tasks drill-down: hide the nav and focus the task list
+  const showTaskDrill = view === 'tasks' && drilled;
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
@@ -449,7 +452,19 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </button>
         </div>
 
-        <nav className="mt-2 space-y-1.5">
+        {showTaskDrill ? (
+          <button
+            onClick={() => setDrilled(false)}
+            className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold text-gray-900 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-100 dark:hover:bg-gray-800/70"
+            title="Back to navigation"
+          >
+            <ChevronLeft className="h-4 w-4 flex-shrink-0 text-gray-400" aria-hidden="true" />
+            <Inbox className="h-4 w-4 flex-shrink-0 text-blue-500" aria-hidden="true" />
+            Tasks
+            <span className="ml-auto font-mono text-[11px] text-gray-400">{filteredTasks.length}</span>
+          </button>
+        ) : (
+          <nav className="mt-2 space-y-1.5">
           {NAV_SECTIONS.map((section) => (
             <div key={section.title}>
               <div className="px-1 pb-0.5 text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">{section.title}</div>
@@ -461,7 +476,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                   return (
                     <button
                       key={item.view}
-                      onClick={() => setView(item.view)}
+                      onClick={() => { setView(item.view); setDrilled(item.view === 'tasks'); }}
                       aria-current={active ? 'page' : undefined}
                       className={`group flex min-h-7 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${active ? 'bg-blue-50 font-medium text-blue-700 dark:bg-blue-950/50 dark:text-blue-300' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/70 dark:hover:text-gray-200'}`}
                     >
@@ -478,7 +493,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               </div>
             </div>
           ))}
-        </nav>
+          </nav>
+        )}
 
         <div className="mt-2">
           <label className="sr-only" htmlFor="workbench-search">Search tasks or jump</label>
@@ -524,6 +540,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </div>
         </div>
 
+        {!showTaskDrill && (
         <section className="border-b border-gray-200 dark:border-gray-800">
           <button onClick={() => setWorkspaceOpen((open) => !open)} className="flex min-h-9 w-full items-center gap-1 px-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-gray-300">
             {workspaceOpen ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
@@ -560,8 +577,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             </div>
           )}
         </section>
+        )}
 
-        {view === 'tasks' ? (
+        {showTaskDrill ? (
           <>
             <section className="border-b border-gray-200 dark:border-gray-800">
               <button onClick={() => setFiltersOpen((open) => !open)} className="flex min-h-9 w-full items-center justify-between px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-900/70">
