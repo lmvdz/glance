@@ -990,6 +990,7 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
+		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/presence") {
@@ -1467,6 +1468,62 @@ async function heatPayload(manager: SquadManager, url: URL): Promise<{
 		hotAreas,
 		insights: hotAreas.length ? [`${hotAreas.length} files touched in recent receipts`] : ["No receipt-backed file writes in this window"],
 		source: "receipts.filesTouched",
+		generatedAt: Date.now(),
+	};
+}
+
+/**
+ * Day×hour activity matrix for the "Activity rhythm" heatmap: for each of the last
+ * `days` calendar days, how many file-touches landed in each hour 00–23. Same
+ * receipt source as heatPayload (filesTouched), just bucketed by hour-of-day too,
+ * so the two views agree on totals.
+ *
+ * Server-LOCAL time throughout (the daemon runs on the operator's machine, so its
+ * wall clock is the rhythm the operator actually lives) — a (day, hour) cell is
+ * internally consistent because both come from the same local Date.
+ */
+async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<{
+	days: string[];
+	hours: number[];
+	matrix: { day: string; hourly: number[] }[];
+	max: number;
+	total: number;
+	source: string;
+	generatedAt: number;
+}> {
+	const count = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const repo = url.searchParams.get("repo") ?? undefined;
+	const localDay = (d: Date): string =>
+		`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+	const end = new Date();
+	const days = Array.from({ length: count }, (_, i) => {
+		const d = new Date(end);
+		d.setDate(end.getDate() - (count - i - 1));
+		return localDay(d);
+	});
+	const rowByDay = new Map(days.map((d) => [d, new Array<number>(24).fill(0)]));
+	const agents = manager.list().filter((a) => !repo || a.repo === repo);
+	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat();
+	let max = 0;
+	let total = 0;
+	for (const r of receipts) {
+		const touched = r.filesTouched.length;
+		if (touched === 0) continue;
+		const when = new Date(r.endedAt ?? r.startedAt);
+		const row = rowByDay.get(localDay(when));
+		if (!row) continue;
+		const hour = when.getHours();
+		row[hour] += touched;
+		total += touched;
+		if (row[hour] > max) max = row[hour];
+	}
+	return {
+		days,
+		hours: Array.from({ length: 24 }, (_, i) => i),
+		matrix: days.map((day) => ({ day, hourly: rowByDay.get(day) ?? new Array<number>(24).fill(0) })),
+		max,
+		total,
+		source: "receipts.filesTouched (per day×hour, server-local)",
 		generatedAt: Date.now(),
 	};
 }
