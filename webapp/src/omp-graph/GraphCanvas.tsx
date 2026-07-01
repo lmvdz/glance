@@ -8,7 +8,7 @@
  * primitive type. d3-scale/shape for scales + line/area paths.
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { scaleLinear, scaleSqrt, scaleSymlog, scaleTime } from 'd3-scale';
 import { area, curveMonotoneX, line } from 'd3-shape';
 import { magma } from '../lib/heatmap';
@@ -110,8 +110,34 @@ interface Row {
 }
 
 export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc, blend = true }) => {
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [userCollapsed, setUserCollapsed] = useState<Record<string, boolean>>({});
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
+
+  // Groups whose data is thin OR time-clustered collapse by default, so the graph
+  // leads with the dense, meaningful lanes and tucks sparse ones into a header you
+  // can expand — no more empty sections dangling at the bottom.
+  const autoCollapsed = useMemo(() => {
+    const set = new Set<string>();
+    const span = Math.max(1, doc.range.end - doc.range.start);
+    for (const g of doc.groups) {
+      let count = 0;
+      let minT = Infinity;
+      let maxT = -Infinity;
+      const note = (t: number): void => { if (t < minT) minT = t; if (t > maxT) maxT = t; };
+      for (const t of doc.tracks.filter((z) => z.group === g.id)) {
+        if (t.type === 'events') for (const m of t.marks) { count++; note(m.t); }
+        else if (t.type === 'bars') for (const b of t.bins) { if (b.v > 0) { count++; note(b.t); } }
+        else if (t.type === 'series') for (const p of t.points) { if (p.v > 0) { count++; note(p.t); } }
+        else if (t.type === 'spans') for (const s of t.spans) { count++; note(s.t0); note(s.t1); }
+        else for (const s of t.segments) { count++; note(s.t0); note(s.t1); }
+      }
+      const coverage = maxT > minT ? (maxT - minT) / span : 0;
+      if (count < 6 || coverage < 0.25) set.add(g.id);
+    }
+    return set;
+  }, [doc]);
+  const isCol = useCallback((id: string): boolean => (id in userCollapsed ? userCollapsed[id] : autoCollapsed.has(id)), [userCollapsed, autoCollapsed]);
+  const toggleGroup = useCallback((id: string): void => setUserCollapsed((u) => ({ ...u, [id]: !(id in u ? u[id] : autoCollapsed.has(id)) })), [autoCollapsed]);
 
   // Vertical layout — independent of the time domain, so it memoizes cleanly.
   const { rows, totalH, groupExtents } = useMemo(() => {
@@ -151,7 +177,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
       const y0 = y;
       out.push({ kind: 'group', label: g.label, groupId: g.id, y, h: GROUP_H });
       y += GROUP_H;
-      if (!collapsed.has(g.id)) {
+      if (!isCol(g.id)) {
         // merged rails first, then remaining tracks, then the pulse instrument
         for (const s of merged) {
           const h = trackHeight(s);
@@ -171,7 +197,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
       extents.push({ id: g.id, label: g.label, y0, y1: y - TRACK_GAP });
     }
     return { rows: out, totalH: y + AXIS_H, groupExtents: extents };
-  }, [doc, collapsed, blend]);
+  }, [doc, isCol, blend]);
 
   const view = useGraphView(doc.range, LABEL_W, PAD_R, totalH);
   const viewportH = Math.max(120, view.viewportH); // fills its container
@@ -428,7 +454,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
     const t = hover.t;
     const lines: { label: string; value: string; color?: string }[] = [];
     for (const tr of doc.tracks) {
-      if (collapsed.has(tr.group)) continue;
+      if (isCol(tr.group)) continue;
       if (tr.type === 'bars') {
         const b = tr.bins.find((bb) => t >= bb.t && t < bb.t + tr.binMs);
         if (b && b.v > 0) lines.push({ label: tr.label, value: `${Math.round(b.v)}${tr.unit ? ' ' + tr.unit : ''}` });
@@ -452,7 +478,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
       }
     }
     return { when: new Date(t), lines };
-  }, [hover, doc.tracks, collapsed, x]);
+  }, [hover, doc.tracks, isCol, x]);
 
   const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
@@ -498,11 +524,11 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean }> = ({ doc,
             )}
             {rows.map((r, i) => {
               if (r.kind === 'group') {
-                const isCol = collapsed.has(r.groupId);
+                const collapsedNow = isCol(r.groupId);
                 return (
-                  <g key={`g${i}`} style={{ cursor: 'pointer' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => setCollapsed((s) => { const n = new Set(s); n.has(r.groupId) ? n.delete(r.groupId) : n.add(r.groupId); return n; })}>
+                  <g key={`g${i}`} style={{ cursor: 'pointer' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => toggleGroup(r.groupId)}>
                     <text x={26} y={r.y + 16} fontSize={10} fontWeight={700} letterSpacing="0.1em" fill="#c4c9d2">
-                      {isCol ? '▸ ' : '▾ '}
+                      {collapsedNow ? '▸ ' : '▾ '}
                       {r.label}
                     </text>
                   </g>
