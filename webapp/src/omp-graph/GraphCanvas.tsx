@@ -19,8 +19,8 @@ const LABEL_W = 118;
 const PAD_R = 34; // right margin holds the value-scale labels
 const AXIS_H = 28;
 const HEADER_H = 44;
-const GROUP_H = 24;
-const TRACK_GAP = 10;
+const GROUP_H = 28;
+const TRACK_GAP = 14;
 const MAX_BAR = 18; // cap bar width so a day-wide bin isn't a giant block
 
 const fmtV = (v: number): string => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10_000 ? 0 : 1)}k` : `${Math.round(v)}`);
@@ -29,9 +29,9 @@ const short = (s: string, n = 24): string => (s.length > n ? `${s.slice(0, n - 1
 const cat = (c: string): string => (c === 'active' ? '#3d7dff' : c === 'busy' ? '#2fb6d6' : '#7b4bd0');
 
 /** Sparse event tracks don't deserve the full milestones height. */
-const eventsHeight = (n: number): number => (n <= 2 ? 52 : n <= 6 ? 88 : n <= 14 ? 128 : 176);
+const eventsHeight = (n: number): number => (n <= 2 ? 60 : n <= 6 ? 100 : n <= 14 ? 148 : 200);
 const trackHeight = (t: GraphTrack): number =>
-  t.type === 'events' ? eventsHeight(t.marks.length) : t.type === 'series' ? 72 : t.type === 'bars' ? 72 : t.type === 'spans' ? 116 : 24;
+  t.type === 'events' ? eventsHeight(t.marks.length) : t.type === 'series' ? 88 : t.type === 'bars' ? 88 : t.type === 'spans' ? 132 : 28;
 
 /** Second-line descriptor under each track name (the poster's structured labels). */
 const SUBLABEL: Record<string, string> = {
@@ -139,68 +139,92 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
   const isCol = useCallback((id: string): boolean => (id in userCollapsed ? userCollapsed[id] : autoCollapsed.has(id)), [userCollapsed, autoCollapsed]);
   const toggleGroup = useCallback((id: string): void => setUserCollapsed((u) => ({ ...u, [id]: !(id in u ? u[id] : autoCollapsed.has(id)) })), [autoCollapsed]);
 
-  // Vertical layout — independent of the time domain, so it memoizes cleanly.
-  const { rows, totalH, groupExtents } = useMemo(() => {
-    const out: Row[] = [];
-    const extents: { id: string; label: string; y0: number; y1: number }[] = [];
+  // Vertical layout as a function of a lane-height scale, so we can lay out once at
+  // 1×, measure, then re-lay-out scaled UP to fill the viewport when the content is
+  // shorter than the available height. That's the anti-squish: lanes breathe into
+  // the space instead of sitting short with dead space below. Group headers keep a
+  // fixed height; only the data lanes (and the gaps between them) scale.
+  const layoutOf = useCallback(
+    (laneScale: number): { rows: Row[]; totalH: number; groupExtents: { id: string; label: string; y0: number; y1: number }[] } => {
+      const out: Row[] = [];
+      const extents: { id: string; label: string; y0: number; y1: number }[] = [];
+      const gap = TRACK_GAP * laneScale;
+      const laneH = (h: number): number => Math.round(h * laneScale);
 
-    // blend preprocessing: which tracks fuse, and into what.
-    const consumed = new Set<string>(overlayIds); // churn always folds into commits
-    const mergedByGroup = new Map<string, GraphTrack[]>();
-    const subById = new Map<string, string>();
-    let pulseLayers: { role: PulseRole; track: GraphTrack }[] = [];
-    if (blend) {
-      for (const m of MERGE_EVENTS) {
-        const marks: EventMark[] = [];
-        for (const id of m.sources) {
-          const t = doc.tracks.find((z) => z.id === id);
-          if (t && t.type === 'events') { marks.push(...t.marks); consumed.add(id); }
+      // blend preprocessing: which tracks fuse, and into what.
+      const consumed = new Set<string>(overlayIds); // churn always folds into commits
+      const mergedByGroup = new Map<string, GraphTrack[]>();
+      const subById = new Map<string, string>();
+      let pulseLayers: { role: PulseRole; track: GraphTrack }[] = [];
+      if (blend) {
+        for (const m of MERGE_EVENTS) {
+          const marks: EventMark[] = [];
+          for (const id of m.sources) {
+            const t = doc.tracks.find((z) => z.id === id);
+            if (t && t.type === 'events') { marks.push(...t.marks); consumed.add(id); }
+          }
+          if (!marks.length) continue;
+          marks.sort((a, b) => a.t - b.t);
+          const synth: GraphTrack = { id: m.id, label: m.label, group: m.group, source: 'merged', type: 'events', marks };
+          const arr = mergedByGroup.get(m.group) ?? [];
+          arr.push(synth);
+          mergedByGroup.set(m.group, arr);
+          subById.set(m.id, m.sublabel);
         }
-        if (!marks.length) continue;
-        marks.sort((a, b) => a.t - b.t);
-        const synth: GraphTrack = { id: m.id, label: m.label, group: m.group, source: 'merged', type: 'events', marks };
-        const arr = mergedByGroup.get(m.group) ?? [];
-        arr.push(synth);
-        mergedByGroup.set(m.group, arr);
-        subById.set(m.id, m.sublabel);
+        const layers = PULSE.layers.map((l) => ({ role: l.role, track: doc.tracks.find((z) => z.id === l.id) })).filter((l): l is { role: PulseRole; track: GraphTrack } => !!l.track);
+        if (layers.length) { pulseLayers = layers; for (const l of PULSE.layers) consumed.add(l.id); }
       }
-      const layers = PULSE.layers.map((l) => ({ role: l.role, track: doc.tracks.find((z) => z.id === l.id) })).filter((l): l is { role: PulseRole; track: GraphTrack } => !!l.track);
-      if (layers.length) { pulseLayers = layers; for (const l of PULSE.layers) consumed.add(l.id); }
-    }
 
-    let y = HEADER_H;
-    for (const g of doc.groups) {
-      const merged = mergedByGroup.get(g.id) ?? [];
-      const remaining = doc.tracks.filter((t) => t.group === g.id && !consumed.has(t.id));
-      const hasPulse = blend && PULSE.group === g.id && pulseLayers.length > 0;
-      if (!merged.length && !remaining.length && !hasPulse) continue;
-      const y0 = y;
-      out.push({ kind: 'group', label: g.label, groupId: g.id, y, h: GROUP_H });
-      y += GROUP_H;
-      if (!isCol(g.id)) {
-        // merged rails first, then remaining tracks, then the pulse instrument
-        for (const s of merged) {
-          const h = trackHeight(s);
-          out.push({ kind: 'track', label: s.label, sublabel: subById.get(s.id), groupId: g.id, y, h, track: s });
-          y += h + TRACK_GAP;
+      let y = HEADER_H;
+      for (const g of doc.groups) {
+        const merged = mergedByGroup.get(g.id) ?? [];
+        const remaining = doc.tracks.filter((t) => t.group === g.id && !consumed.has(t.id));
+        const hasPulse = blend && PULSE.group === g.id && pulseLayers.length > 0;
+        if (!merged.length && !remaining.length && !hasPulse) continue;
+        const y0 = y;
+        out.push({ kind: 'group', label: g.label, groupId: g.id, y, h: GROUP_H });
+        y += GROUP_H;
+        if (!isCol(g.id)) {
+          // merged rails first, then remaining tracks, then the pulse instrument
+          for (const s of merged) {
+            const h = laneH(trackHeight(s));
+            out.push({ kind: 'track', label: s.label, sublabel: subById.get(s.id), groupId: g.id, y, h, track: s });
+            y += h + gap;
+          }
+          for (const t of remaining) {
+            const h = laneH(trackHeight(t));
+            out.push({ kind: 'track', label: t.label, sublabel: SUBLABEL[t.id], groupId: g.id, y, h, track: t });
+            y += h + gap;
+          }
+          if (hasPulse) {
+            const h = laneH(PULSE.height);
+            out.push({ kind: 'pulse', label: PULSE.label, sublabel: PULSE.sublabel, groupId: g.id, y, h, pulseLayers });
+            y += h + gap;
+          }
         }
-        for (const t of remaining) {
-          const h = trackHeight(t);
-          out.push({ kind: 'track', label: t.label, sublabel: SUBLABEL[t.id], groupId: g.id, y, h, track: t });
-          y += h + TRACK_GAP;
-        }
-        if (hasPulse) {
-          out.push({ kind: 'pulse', label: PULSE.label, sublabel: PULSE.sublabel, groupId: g.id, y, h: PULSE.height, pulseLayers });
-          y += PULSE.height + TRACK_GAP;
-        }
+        extents.push({ id: g.id, label: g.label, y0, y1: y - gap });
       }
-      extents.push({ id: g.id, label: g.label, y0, y1: y - TRACK_GAP });
-    }
-    return { rows: out, totalH: y + AXIS_H, groupExtents: extents };
-  }, [doc, isCol, blend]);
+      return { rows: out, totalH: y + AXIS_H, groupExtents: extents };
+    },
+    [doc, isCol, blend],
+  );
 
-  const view = useGraphView(doc.range, LABEL_W, PAD_R, totalH);
+  const base = useMemo(() => layoutOf(1), [layoutOf]);
+  const view = useGraphView(doc.range, LABEL_W, PAD_R, base.totalH);
   const viewportH = Math.max(120, view.viewportH); // fills its container
+
+  // Grow-to-fill: solve for the lane scale that makes the 1× layout exactly fill the
+  // track area (group headers are fixed overhead; lanes + gaps scale). Clamp to
+  // [1, 2.4] — never shrink (tall content just scrolls), never balloon a lone lane.
+  const laneScale = useMemo(() => {
+    const groupHeaders = base.rows.reduce((a, r) => a + (r.kind === 'group' ? GROUP_H : 0), 0);
+    const scalable = base.totalH - HEADER_H - AXIS_H - groupHeaders; // lanes + gaps at 1×
+    const avail = viewportH - HEADER_H - AXIS_H;
+    if (scalable <= 0 || avail < 80) return 1;
+    return Math.max(1, Math.min(2.4, (avail - groupHeaders) / scalable));
+  }, [base, viewportH]);
+
+  const { rows, groupExtents } = useMemo(() => (laneScale <= 1.001 ? base : layoutOf(laneScale)), [base, laneScale, layoutOf]);
 
   // ── interaction: every discrete datum is hoverable + clickable ───────────────
   // px/py are container-relative screen coords: canvasY minus the vertical scroll
