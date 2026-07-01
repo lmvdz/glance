@@ -61,17 +61,27 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 	const idlePct = totalCost > 0 ? idleCost / totalCost : 0;
 	const idleByDay = bucketSums(range, DAY_MS, idleRuns.map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })));
 
-	// oldest in-flight ticket — an open plane-issue span still reaching the window end
+	// flow metrics from plane issues: oldest in-flight, WIP, cycle time
 	let oldest: { name: string; ms: number } | null = null;
+	let wip = 0;
+	let cycleSum = 0;
+	let cycleN = 0;
 	const issues = doc.tracks.find((z) => z.id === "plane.issues");
 	if (issues && issues.type === "spans") {
 		for (const sp of issues.spans) {
-			if (sp.t1 >= range.end - DAY_MS && sp.status !== "completed") {
+			if (sp.status === "completed") {
+				cycleSum += sp.t1 - sp.t0;
+				cycleN += 1;
+			} else if (sp.t1 >= range.end - DAY_MS) {
+				wip += 1;
 				const age = now - sp.t0;
 				if (!oldest || age > oldest.ms) oldest = { name: sp.label, ms: age };
 			}
 		}
 	}
+	const days = Math.max(1, Math.round((range.end - range.start) / DAY_MS));
+	const commitsPerDay = totalCommits / days;
+	const velTrend = halfTrend(commitsByDay);
 
 	// ── derived tracks ──
 	const tracks: GraphTrack[] = [];
@@ -113,6 +123,23 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 			tone: "neutral",
 		},
 	];
+	insights.push({
+		id: "velocity",
+		label: "velocity",
+		value: `${commitsPerDay.toFixed(1)}/d`,
+		sub: `${arrow(velTrend)} ${pct(velTrend)} commits`.trim(),
+		tone: "neutral",
+	});
+	if (issues && issues.type === "spans" && (cycleN > 0 || wip > 0)) {
+		insights.push({
+			id: "cycle",
+			label: "cycle time",
+			value: cycleN > 0 ? fmtAge(cycleSum / cycleN) : "—",
+			sub: `${cycleN} closed`,
+			tone: cycleN > 0 && cycleSum / cycleN > 3 * DAY_MS ? "warn" : "neutral",
+		});
+		insights.push({ id: "wip", label: "work in flight", value: `${wip}`, sub: "open tickets", tone: wip > 10 ? "warn" : "neutral" });
+	}
 	if (oldest) insights.push({ id: "oldest", label: "oldest in-flight", value: fmtAge(oldest.ms), sub: oldest.name, tone: oldest.ms > 3 * DAY_MS ? "warn" : "neutral" });
 
 	return { tracks, insights };
