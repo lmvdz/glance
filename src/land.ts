@@ -11,6 +11,7 @@
  */
 
 import { detectVerify } from "./intake.ts";
+import { gateEnv } from "./gate-env.ts";
 import { proofGate } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
@@ -125,7 +126,8 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 
 /** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output. */
 async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
-	const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe" });
+	// gateEnv: the verify command runs agent-authored tests — scrub the daemon's secrets.
+	const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe", env: gateEnv() });
 	const timer = setTimeout(() => proc.kill(), timeoutMs);
 	try {
 		const [stdout, stderr, code] = await Promise.all([

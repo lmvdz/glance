@@ -37,6 +37,7 @@ import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
+import { gateEnv } from "./gate-env.ts";
 import { Opportunity } from "./opportunity.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
@@ -1967,7 +1968,8 @@ export class SquadManager extends EventEmitter {
 		try {
 			const command = await detectVerify(repo);
 			if (!command) return { ok: true };
-			const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+			// gateEnv: the suite is agent-authored code — it must not see the daemon's secrets.
+			const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe", env: gateEnv() });
 			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 			if (code === 0) return { ok: true };
 			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.

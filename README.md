@@ -949,6 +949,7 @@ this *staged* outcome as a hold — never a blocked land — so it neither re-me
 | `OMP_SQUAD_AUTORESOLVE_CONFIRM` | An AUTO land that had to auto-resolve a conflict is **staged** for a one-tap Land instead of merged with no human (on by default; `=0` to auto-merge resolved conflicts). A clean auto land still merges; operator lands always merge |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 | `OMP_SQUAD_AUTOLAND_FAIL_CAP` | Consecutive failed auto-lands before a branch is parked instead of re-merged (default `3`); restart-safe via a persisted, branch-keyed ledger (`<stateDir>/land-failures.json`). Operator land bypasses it; the Observer files a bug for the parked branch |
+| `OMP_SQUAD_GATE_ENV` | Comma-separated env var names re-admitted into verify/proof/regression gate runs. Gates execute agent-authored test code, so they get a **secret-scrubbed** env by default (`OMP_SQUAD_*`, secret-shaped names like `*_API_KEY`/`*_TOKEN`/`*_SECRET`, `DATABASE_URL` removed; toolchain vars pass through). Name a var here if a suite legitimately needs it |
 
 ## Sandboxed execution — agents off your laptop
 
