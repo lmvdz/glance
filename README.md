@@ -1023,9 +1023,17 @@ extends to cross-host gossip once a coordinator URL is set.
 - `tailscale whois` for peer identity — resolves only on a real tailnet; without it, inbound
   command actors are unverified and fall back to `viewer`.
 
-**Remote steering** (driving a teammate's live agent from your command center) — the receive
-side exists (`onRemoteCommand` + `applyCommand(cmd, actor)`) but no code yet *sends* a command
-frame to a peer. That remains the principal outstanding cross-operator capability.
+**Remote steering** (driving a teammate's live agent from your command center) — both halves
+exist now. The receive side (`onRemoteCommand` + `applyCommand(cmd, actor)`) authorizes via
+whois-verified actor + RBAC; the send side is `bus.sendCommand(cmd, to)` behind
+`POST /api/federation/command` (`{to: "<operator id>", cmd: {type, …}}`, operator-tier,
+audited as `federation.command`). Frames are addressed — peers drop commands not meant for
+them — and the coordinator stamps the sender's real socket address as `ip` (any client-sent
+`ip` is overwritten), so the receiver's `tailscale whois` verifies the true sender, never a
+claimed identity. Sending grants nothing: an unverified sender lands as read-only `viewer`
+on the receiving daemon. Still missing for a full remote-steering UX: a command-center UI
+affordance on the Federation panel (the API is the seam) and a reply/ack channel (effects
+surface through the peer's gossiped presence).
 
 See [`docs/federation.md`](docs/federation.md) for the full architecture and runbook.
 

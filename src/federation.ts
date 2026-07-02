@@ -53,6 +53,16 @@ export interface FederationBus {
 	/** A peer wants to steer one of *our* agents. The manager authorizes via policy + actor before applying. */
 	onRemoteCommand(cb: (remote: RemoteCommand) => void): void;
 
+	/**
+	 * Steer a PEER operator's agent — the outbound half of `onRemoteCommand` (this was the
+	 * principal missing cross-operator capability: the receive side existed, nothing sent).
+	 * `to` addresses one operator id; receivers drop frames not addressed to them. The
+	 * receiving manager still authorizes via whois-verified actor + RBAC — sending grants
+	 * nothing. Fire-and-forget: no delivery guarantee, no reply channel (the effect shows
+	 * up in the peer's gossiped presence).
+	 */
+	sendCommand(cmd: ClientCommand, to?: string): void;
+
 	/** Team chat. */
 	sendMessage(text: string): void;
 	onMessage(cb: (msg: TeamMessage) => void): void;
@@ -71,6 +81,7 @@ export class NullFederationBus implements FederationBus {
 	publishPresence(_presence: OperatorPresence): void {}
 	onPresence(_cb: (presence: OperatorPresence) => void): void {}
 	onRemoteCommand(_cb: (remote: RemoteCommand) => void): void {}
+	sendCommand(_cmd: ClientCommand, _to?: string): void {}
 	sendMessage(_text: string): void {}
 	onMessage(_cb: (msg: TeamMessage) => void): void {}
 	publishLeases(_repoId: string, _leases: LeaseEntry[]): void {}
@@ -253,7 +264,7 @@ const MAX_BACKOFF_MS = 30_000;
 /** Wire frames exchanged with the coordinator. */
 type FederationFrame =
 	| { kind: "presence"; presence: OperatorPresence }
-	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string }
+	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string; to?: string }
 	| { kind: "message"; from: Actor; text: string; ts: number }
 	| { kind: "leases"; repoId: string; operator: Actor; leases: LeaseEntry[] };
 
@@ -374,6 +385,12 @@ export class TailnetFederationBus implements FederationBus {
 		this.commandCbs.push(cb);
 	}
 
+	sendCommand(cmd: ClientCommand, to?: string): void {
+		// `actor` here is only a CLAIM for the peer's audit trail — the receiver derives
+		// authority solely from the coordinator-stamped ip via whois (remoteCommandActor).
+		this.send({ kind: "command", cmd, actor: this.operator, to });
+	}
+
 	sendMessage(text: string): void {
 		this.send({ kind: "message", from: this.operator, text, ts: Date.now() });
 	}
@@ -448,6 +465,8 @@ export class TailnetFederationBus implements FederationBus {
 					for (const cb of this.presenceCbs) cb(frame.presence);
 					break;
 				case "command": {
+					// Addressed to a specific operator ⇒ everyone else drops it (the coordinator broadcasts).
+					if (frame.to !== undefined && frame.to !== this.operator.id) break;
 					const actor = await this.resolveActor(frame);
 					for (const cb of this.commandCbs) cb({ cmd: frame.cmd, actor });
 					break;
@@ -560,6 +579,16 @@ export class LocalFederationBus implements FederationBus {
 
 	onRemoteCommand(cb: (remote: RemoteCommand) => void): void {
 		this.commandCbs.push(cb);
+	}
+
+	sendCommand(cmd: ClientCommand, to?: string): void {
+		// Self-addressed (or single-host, no peer): loopback through the same remote-command
+		// path a peer delivery would take — same code path, locally-verified identity.
+		if (to === undefined || to === this.operator.id) {
+			this.fanoutCommand({ cmd, actor: { id: this.operator.id, displayName: this.operator.displayName, origin: "remote" } });
+			if (to === this.operator.id) return;
+		}
+		this.peer?.sendCommand(cmd, to);
 	}
 
 	sendMessage(text: string): void {

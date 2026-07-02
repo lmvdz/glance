@@ -1028,6 +1028,23 @@ export class SquadServer {
 			return Response.json(issues.filter((i) => i.name.includes("[opportunity]")));
 		}
 		if (url.pathname === "/api/federation") return Response.json(this.federationSnapshot(manager));
+		if (url.pathname === "/api/federation/command" && req.method === "POST") {
+			// Outbound remote steering: send a ClientCommand to a peer operator's daemon. The
+			// local manager gates on operator tier; the RECEIVER re-authorizes independently
+			// (whois-verified actor + RBAC), so this can never grant authority it doesn't have.
+			const body: unknown = await req.json().catch(() => null);
+			const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+			const to = typeof rec.to === "string" ? rec.to.trim() : "";
+			const cmd = rec.cmd && typeof rec.cmd === "object" && typeof (rec.cmd as Record<string, unknown>).type === "string" ? (rec.cmd as ClientCommand) : undefined;
+			if (!to || !cmd) return new Response("to (operator id) and cmd ({type,...}) required", { status: 400 });
+			try {
+				manager.sendFederationCommand(to, cmd, actor);
+				return Response.json({ ok: true, sent: cmd.type, to });
+			} catch (err) {
+				if (err instanceof RbacDenied) return new Response(err.message, { status: 403 });
+				return new Response(err instanceof Error ? err.message : String(err), { status: 400 });
+			}
+		}
 		if (url.pathname === "/api/audit") {
 			const q = url.searchParams;
 			const limit = Number(q.get("limit"));

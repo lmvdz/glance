@@ -19,6 +19,7 @@ import {
 	mergeRosters,
 	PEER_PRESENCE_TTL_MS,
 	PeerRoster,
+	type RemoteCommand,
 	type RemoteLeases,
 	remoteCommandActor,
 	stampRepoIds,
@@ -563,4 +564,70 @@ test("OMP_SQUAD_FEDERATION opt-out: a bus with no coordinator is local-only and 
 	expect(bSaw).toEqual([]);
 	expect(a.roster.live()).toEqual([]);
 	expect(b.roster.live()).toEqual([]);
+});
+
+// ── sendCommand: the outbound half of remote steering ─────────────────────────
+
+test("sendCommand: A steers B through the coordinator; identity comes from the stamped ip + whois, not the claimed actor", async () => {
+	coord = runCoordinator({ port: 0 });
+	// whois: any coordinator-stamped ip resolves to alice's tailnet identity on the RECEIVER.
+	const whois = async (_ip: string): Promise<Actor | undefined> => ({ id: "alice@tailnet", displayName: "Alice", origin: "remote" });
+	const a = new LocalFederationBus({ operator: { id: "alice", origin: "local" }, coordinatorUrl: coord.url, whois });
+	const b = new LocalFederationBus({ operator: { id: "bob", origin: "local" }, coordinatorUrl: coord.url, whois });
+	const c = new LocalFederationBus({ operator: { id: "carol", origin: "local" }, coordinatorUrl: coord.url, whois });
+	liveBuses.push(a, b, c);
+	await Promise.all([a.start(), b.start(), c.start()]);
+	await waitFor(() => coord?.clients() === 3);
+
+	const got = Promise.withResolvers<RemoteCommand>();
+	b.onRemoteCommand((remote) => got.resolve(remote));
+	const carolSaw: RemoteCommand[] = [];
+	c.onRemoteCommand((remote) => carolSaw.push(remote));
+
+	// The sender CLAIMS to be alice — the receiver must derive identity from whois, and any
+	// forged role on the wire must be dropped (remoteCommandActor never copies role/origin).
+	a.sendCommand({ type: "prompt", id: "bob-agent-1", message: "please run the tests" }, "bob");
+
+	const remote = await got.promise;
+	expect(remote.cmd).toEqual({ type: "prompt", id: "bob-agent-1", message: "please run the tests" });
+	expect(remote.actor.id).toBe("alice@tailnet"); // whois-verified, not the wire claim
+	expect(remote.actor.origin).toBe("remote");
+	expect(remote.actor.role).toBeUndefined(); // authority is never taken from the wire
+
+	// Addressed to bob ⇒ carol's bus dropped it even though the coordinator broadcast it.
+	await new Promise((r) => setTimeout(r, 50));
+	expect(carolSaw).toEqual([]);
+});
+
+test("sendCommand: without tailnet verification the actor stays role-less (viewer tier)", async () => {
+	coord = runCoordinator({ port: 0 });
+	const whois = async (): Promise<Actor | undefined> => undefined; // no tailnet
+	const a = new LocalFederationBus({ operator: { id: "alice", origin: "local" }, coordinatorUrl: coord.url, whois });
+	const b = new LocalFederationBus({ operator: { id: "bob", origin: "local" }, coordinatorUrl: coord.url, whois });
+	liveBuses.push(a, b);
+	await Promise.all([a.start(), b.start()]);
+	await waitFor(() => coord?.clients() === 2);
+
+	const got = Promise.withResolvers<RemoteCommand>();
+	b.onRemoteCommand((remote) => got.resolve(remote));
+	a.sendCommand({ type: "interrupt", id: "bob-agent-1" }, "bob");
+
+	const remote = await got.promise;
+	expect(remote.actor.id).toBe("alice"); // claimed id kept for audit only
+	expect(remote.actor.role).toBeUndefined();
+	expect(effectiveRole(remote.actor)).toBe("viewer"); // read-only until verified
+});
+
+test("sendCommand: single-host self-address loops back through the same remote-command path", async () => {
+	const solo = new LocalFederationBus({ operator: { id: "solo", origin: "local" } });
+	liveBuses.push(solo);
+	await solo.start();
+
+	const seen: RemoteCommand[] = [];
+	solo.onRemoteCommand((remote) => seen.push(remote));
+	solo.sendCommand({ type: "prompt", id: "own-agent", message: "loopback" }, "solo");
+
+	expect(seen.length).toBe(1);
+	expect(seen[0].cmd.type).toBe("prompt");
+	expect(seen[0].actor.origin).toBe("remote"); // same trust path as a real peer delivery
 });

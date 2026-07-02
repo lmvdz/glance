@@ -2954,6 +2954,20 @@ export class SquadManager extends EventEmitter {
 		return text;
 	}
 
+	/**
+	 * Steer a federation PEER's agent — the outbound half of the remote-command path.
+	 * Only a local operator/admin may send (a viewer or remote actor is refused before the
+	 * frame leaves this host); the RECEIVING manager still authorizes independently via its
+	 * whois-verified actor + RBAC, so sending grants nothing. `to` is required: an
+	 * unaddressed broadcast command would execute on every peer that ran it as viewer-plus.
+	 */
+	sendFederationCommand(to: string, cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): void {
+		if (!to.trim()) throw new Error("sendFederationCommand: target operator id required");
+		if (!roleAtLeast(effectiveRole(actor), "operator")) throw new RbacDenied("operator", effectiveRole(actor), "federation command send");
+		this.bus.sendCommand(cmd, to);
+		void this.recordAudit(actor, "federation.command", to, "ok", `${cmd.type} → ${to}`);
+	}
+
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
 	async receipts(id: string): Promise<RunReceipt[]> {
 		return readReceipts(this.stateDir, id);
