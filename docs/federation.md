@@ -159,8 +159,58 @@ coordinator URL is configured — no companion process needed.
   unrelated repos no longer false-collide.
 - ✅ `/api/federation`, `/api/leases`, `/api/fabric` — real data (per-org scoped in DB mode).
 - ✅ Daemon auto-start of `federation-sync` when a coordinator is configured.
-- ⏳ Remote steering (sending a command frame to a peer) — receive side exists
-  (`onRemoteCommand` + `applyCommand`); outbound command + delegation/availability policy
-  is the remaining cross-operator capability.
-- ⏳ `tailscale whois` peer identity — resolves only on a real tailnet; requires a deployed
-  coordinator + second physical host.
+- ✅ Remote steering — outbound `sendCommand` + `POST /api/federation/command`, addressed
+  frames, coordinator ip-stamping, reply/ack channel, Federation-panel steer UI; a
+  two-daemon E2E over a real coordinator pins the wire path + viewer security floor (§6).
+- ⏳ Delegation/availability policy — verified peers stay viewer until authz.ts grows a
+  backing system; granting more is deliberately NOT modeled yet.
+- ⏳ `tailscale whois` on a REAL tailnet — see the second-host runbook (§7). The whois call
+  is timeout-bounded (3 s) so a missing binary can't stall inbound command processing.
+
+## 6. Remote steering (send side + ack) — live
+
+Both halves exist now. Sending:
+
+```bash
+# From alice's daemon, steer bob's agent (operator-tier token required):
+curl -X POST "$ALICE/api/federation/command" \
+  -H "authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -d '{"to":"bob","cmd":{"type":"prompt","id":"<bob-agent-id>","message":"run the tests"}}'
+# → { ok, sent, to, cmdId, ack: { outcome: "applied"|"denied"|"error", detail? } | null }
+```
+
+- Frames are **addressed** (`to`): peers drop commands not meant for them.
+- The coordinator **stamps the sender's real socket address** as `ip` on command frames
+  (any client-sent `ip` is overwritten) — the receiver's `tailscale whois <ip>` therefore
+  verifies the true sender, never a claimed identity. `whois` is bounded at 3 s; timeout ⇒
+  unverified.
+- The receiver authorizes independently at `applyCommand`: an unverified (or verified but
+  role-less) peer is **viewer** — mutating commands are denied until a delegation policy
+  exists. Sending grants nothing; the security floor is pinned by
+  `tests/federation-e2e.test.ts` (two live managers over a real coordinator).
+- The ack is advisory (it resolves a local waiter and a UI toast; it carries no authority).
+  `ack: null` after ~4 s ⇒ sent, peer offline or older version.
+- UI: the command center's Federation panel has an inline **steer** input per peer agent.
+
+## 7. Second-host runbook (real tailnet)
+
+What the single-host E2E cannot cover is `tailscale whois` resolving a REAL peer IP. To
+bring up a genuine two-host federation:
+
+1. **Both hosts on one tailnet.** Install tailscale, `tailscale up`, confirm each host can
+   `ping` the other's 100.x address and that `tailscale whois <peer-ip>` prints the peer's
+   SSO login. That login string is the verified `Actor.id` commands arrive under.
+2. **Deploy the coordinator** on either host (or any third tailnet node):
+   `OMP_SQUAD_COORDINATOR_HOST=0.0.0.0 OMP_SQUAD_COORDINATOR_TOKEN=<shared> bun src/coordinator-main.ts`
+   (a non-loopback bind REFUSES to start without a token).
+3. **Point both daemons at it:** `OMP_SQUAD_COORDINATOR=ws://<coordinator-tailnet-ip>:7900`
+   `OMP_SQUAD_COORDINATOR_TOKEN=<shared>` — restart each daemon; boot logs show the bus
+   connecting, and each Federation panel lists the other operator within one presence tick.
+4. **Verify the trust boundary before granting anything:** steer a peer agent from the
+   panel — expect the toast `Peer denied it: … requires operator …`. That denial is the
+   system working: identity resolved (check the peer's audit log actor id = your tailnet
+   login), authority correctly withheld. Granting verified peers more than viewer is the
+   deferred delegation-policy work (authz.ts) — do NOT shortcut it by trusting wire roles.
+5. **Collision check:** open the same GitHub repo on both hosts on the same branch — the
+   Federation panel should flag the shared-branch collision keyed on the normalized origin
+   URL, not the host paths.

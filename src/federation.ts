@@ -310,7 +310,10 @@ interface TailscaleWhoisResult {
 async function tailscaleWhois(ip: string): Promise<Actor | undefined> {
 	try {
 		const proc = Bun.spawn(["tailscale", "whois", "--json", ip], { stdout: "pipe", stderr: "ignore" });
-		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		// Bounded: a missing/hung tailscale binary must not stall inbound command processing
+		// (a failed PATH lookup alone costs ~14s on WSL). Timeout ⇒ unverified ⇒ viewer.
+		const timer = setTimeout(() => proc.kill(), 3000);
+		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]).finally(() => clearTimeout(timer));
 		if (code !== 0) return undefined;
 		const parsed = JSON.parse(out) as TailscaleWhoisResult;
 		const id = parsed.UserProfile?.LoginName;
