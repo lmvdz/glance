@@ -1038,8 +1038,11 @@ export class SquadServer {
 			const cmd = rec.cmd && typeof rec.cmd === "object" && typeof (rec.cmd as Record<string, unknown>).type === "string" ? (rec.cmd as ClientCommand) : undefined;
 			if (!to || !cmd) return new Response("to (operator id) and cmd ({type,...}) required", { status: 400 });
 			try {
-				manager.sendFederationCommand(to, cmd, actor);
-				return Response.json({ ok: true, sent: cmd.type, to });
+				const cmdId = manager.sendFederationCommand(to, cmd, actor);
+				// Best-effort outcome: wait briefly for the peer's ack. null ⇒ sent, no ack
+				// (peer offline / older version) — the send itself still succeeded.
+				const ack = await manager.waitForAck(cmdId);
+				return Response.json({ ok: true, sent: cmd.type, to, cmdId, ack });
 			} catch (err) {
 				if (err instanceof RbacDenied) return new Response(err.message, { status: 403 });
 				return new Response(err instanceof Error ? err.message : String(err), { status: 400 });

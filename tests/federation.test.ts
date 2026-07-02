@@ -631,3 +631,47 @@ test("sendCommand: single-host self-address loops back through the same remote-c
 	expect(seen[0].cmd.type).toBe("prompt");
 	expect(seen[0].actor.origin).toBe("remote"); // same trust path as a real peer delivery
 });
+
+test("command → ack round trip: the receiver's outcome comes back to the sender, matched by cmdId", async () => {
+	coord = runCoordinator({ port: 0 });
+	const whois = async (): Promise<Actor | undefined> => ({ id: "bob@tailnet", origin: "remote" });
+	const a = new LocalFederationBus({ operator: { id: "alice", origin: "local" }, coordinatorUrl: coord.url, whois });
+	const b = new LocalFederationBus({ operator: { id: "bob", origin: "local" }, coordinatorUrl: coord.url, whois });
+	liveBuses.push(a, b);
+	await Promise.all([a.start(), b.start()]);
+	await waitFor(() => coord?.clients() === 2);
+
+	// Bob's daemon: apply the command and ack the outcome back to the CLAIMED sender.
+	b.onRemoteCommand((remote) => {
+		expect(remote.replyTo).toBe("alice");
+		b.sendAck({ cmdId: remote.cmdId!, outcome: "denied", detail: "viewer tier" }, remote.replyTo!);
+	});
+
+	const got = Promise.withResolvers<{ cmdId: string; outcome: string; detail?: string }>();
+	a.onAck((ack) => got.resolve(ack));
+
+	const cmdId = a.sendCommand({ type: "kill", id: "bob-agent" }, "bob");
+	expect(cmdId).toMatch(/^cmd-/);
+
+	const ack = await got.promise;
+	expect(ack.cmdId).toBe(cmdId); // correlated to the exact send
+	expect(ack.outcome).toBe("denied");
+	expect(ack.detail).toBe("viewer tier");
+});
+
+test("self-addressed command acks loop back locally without a coordinator", async () => {
+	const solo = new LocalFederationBus({ operator: { id: "solo", origin: "local" } });
+	liveBuses.push(solo);
+	await solo.start();
+
+	solo.onRemoteCommand((remote) => {
+		solo.sendAck({ cmdId: remote.cmdId!, outcome: "applied" }, remote.replyTo!);
+	});
+	const acks: { cmdId: string; outcome: string }[] = [];
+	solo.onAck((ack) => acks.push(ack));
+
+	const cmdId = solo.sendCommand({ type: "prompt", id: "own", message: "hi" }, "solo");
+	expect(acks.length).toBe(1);
+	expect(acks[0].cmdId).toBe(cmdId);
+	expect(acks[0].outcome).toBe("applied");
+});

@@ -150,7 +150,12 @@ const PeerAgentSteer: React.FC<{
         cmd: { type: 'prompt', id: agent.id, message },
       }));
       if (res.ok) {
-        showToast(`Sent to ${agent.name} @ ${operatorId} — the peer daemon decides whether to apply it`, 'success');
+        const body = await res.json().catch(() => null) as { ack?: { outcome?: string; detail?: string } | null } | null;
+        const ack = body?.ack;
+        if (ack?.outcome === 'applied') showToast(`${agent.name} @ ${operatorId} accepted the instruction`, 'success');
+        else if (ack?.outcome === 'denied') showToast(`Peer denied it: ${ack.detail ?? 'not authorized'}`, 'error');
+        else if (ack?.outcome === 'error') showToast(`Peer errored: ${ack.detail ?? 'unknown'}`, 'error');
+        else showToast(`Sent to ${agent.name} @ ${operatorId} — no ack (peer offline?)`, 'info');
         setText('');
         setOpen(false);
       } else {

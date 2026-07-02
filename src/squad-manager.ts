@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
+import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
@@ -610,10 +610,28 @@ export class SquadManager extends EventEmitter {
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
 			// RBAC authorization happens inside applyCommand against remote.actor's tier (a role-less
 			// peer is read-only). NullFederationBus never fires this; a denied command is logged there,
-			// so swallow the rejection here rather than crash the bus listener.
-			void this.applyCommand(remote.cmd, remote.actor).catch((err) => {
-				if (!(err instanceof RbacDenied)) this.log("error", `remote command failed: ${err instanceof Error ? err.message : String(err)}`);
-			});
+			// so swallow the rejection here rather than crash the bus listener. When the frame carries
+			// a correlation id, the outcome is acked back to the CLAIMED sender — advisory only.
+			const ack = (outcome: "applied" | "denied" | "error", detail?: string): void => {
+				if (remote.cmdId && remote.replyTo) this.bus.sendAck({ cmdId: remote.cmdId, outcome, detail }, remote.replyTo);
+			};
+			void this.applyCommand(remote.cmd, remote.actor)
+				.then(() => ack("applied"))
+				.catch((err) => {
+					if (err instanceof RbacDenied) {
+						ack("denied", err.message);
+						return;
+					}
+					ack("error", err instanceof Error ? err.message : String(err));
+					this.log("error", `remote command failed: ${err instanceof Error ? err.message : String(err)}`);
+				});
+		});
+		this.bus.onAck((ack) => {
+			const waiter = this.ackWaiters.get(ack.cmdId);
+			if (waiter) {
+				this.ackWaiters.delete(ack.cmdId);
+				waiter(ack);
+			}
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
 		await this.refreshPlanFeatureSignature();
@@ -2954,18 +2972,41 @@ export class SquadManager extends EventEmitter {
 		return text;
 	}
 
+	/** Pending ack waiters keyed by cmdId (resolved by the bus onAck listener; timed out by the caller). */
+	private readonly ackWaiters = new Map<string, (ack: CommandAck) => void>();
+
 	/**
 	 * Steer a federation PEER's agent — the outbound half of the remote-command path.
 	 * Only a local operator/admin may send (a viewer or remote actor is refused before the
 	 * frame leaves this host); the RECEIVING manager still authorizes independently via its
 	 * whois-verified actor + RBAC, so sending grants nothing. `to` is required: an
 	 * unaddressed broadcast command would execute on every peer that ran it as viewer-plus.
+	 * Returns the correlation id; pair with `waitForAck` for the peer's outcome.
 	 */
-	sendFederationCommand(to: string, cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): void {
+	sendFederationCommand(to: string, cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): string {
 		if (!to.trim()) throw new Error("sendFederationCommand: target operator id required");
 		if (!roleAtLeast(effectiveRole(actor), "operator")) throw new RbacDenied("operator", effectiveRole(actor), "federation command send");
-		this.bus.sendCommand(cmd, to);
+		const cmdId = this.bus.sendCommand(cmd, to);
 		void this.recordAudit(actor, "federation.command", to, "ok", `${cmd.type} → ${to}`);
+		return cmdId;
+	}
+
+	/**
+	 * Wait briefly for the peer's ack to a sent command. `null` after `timeoutMs` — the send
+	 * is fire-and-forget underneath; an absent ack means "peer offline / older version", not failure.
+	 */
+	waitForAck(cmdId: string, timeoutMs = 4000): Promise<CommandAck | null> {
+		if (!cmdId) return Promise.resolve(null);
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				this.ackWaiters.delete(cmdId);
+				resolve(null);
+			}, timeoutMs);
+			this.ackWaiters.set(cmdId, (ack) => {
+				clearTimeout(timer);
+				resolve(ack);
+			});
+		});
 	}
 
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
