@@ -130,10 +130,14 @@
   const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
 
   const DAYS = [
-    { name: 'THURSDAY', date: '25 JUN' }, { name: 'FRIDAY', date: '26 JUN' },
-    { name: 'SATURDAY', date: '27 JUN' }, { name: 'SUNDAY', date: '28 JUN' },
-    { name: 'MONDAY', date: '29 JUN' }, { name: 'TUESDAY', date: '30 JUN' },
-    { name: 'WEDNESDAY', date: '01 JUL' }, { name: 'THURSDAY', date: '02 JUL' },
+    { name: 'THURSDAY', date: '25 JUN', caption: '2 lands · fabric ships' },
+    { name: 'FRIDAY', date: '26 JUN', caption: 'quiet · planning' },
+    { name: 'SATURDAY', date: '27 JUN', caption: 'federation E2E lands' },
+    { name: 'SUNDAY', date: '28 JUN', caption: 'webapp redesign wave' },
+    { name: 'MONDAY', date: '29 JUN', caption: '15 closed · record day' },
+    { name: 'TUESDAY', date: '30 JUN', caption: 'quiet · 2 commits' },
+    { name: 'WEDNESDAY', date: '01 JUL', caption: 'graph renderer built' },
+    { name: 'THURSDAY', date: '02 JUL', caption: 'today · fixtures green' },
   ];
   const N_DAYS = DAYS.length, HOURS = N_DAYS * 24;
   const NOW_H = 7 * 24 + 13.4;
@@ -221,6 +225,8 @@
       sessions.push({ t0, t1: Math.min(t0 + dur, NOW_H), status: r > 0.93 ? 'error' : r > 0.8 ? 'stopped' : 'working' });
     }
   }
+  // one agent is blocked on a question RIGHT NOW — the imperative layer's test case
+  sessions.push({ t0: NOW_H - 2.1, t1: NOW_H, status: 'blocked' });
   sessions.sort((a, b) => a.t0 - b.t0);
   // pack runs into rows ONCE (row identity survives pan/zoom)
   {
@@ -267,6 +273,9 @@
     { h: 140.2, kind: 'SCOUT', label: 'skip: fleet idle' },
     { h: 170.6, kind: 'DISPATCH', label: 'spawned 1 agent' },
     { h: 180.3, kind: 'OBSERVER', label: 'found 1 concern' },
+    // the needs-you items ride the same pipeline — they're outcomes-in-waiting
+    { h: 179.4, kind: 'BLOCKED', label: 'vpb-03 · needs answer: overwrite legacy shell?', big: true },
+    { h: 181.2, kind: 'READY', label: 'vpb-02-wireframe · proof green, awaiting land', big: true },
   ].sort((a, b) => a.h - b.h);
   const autoTicks = [];
   for (let h = 2; h < NOW_H; h += 2.6 + rnd() * 2.4) autoTicks.push(h);
@@ -274,9 +283,9 @@
   const kindCol = {
     LAND: '#F2913D', FEAT: '#E8B24A', DOCS: '#8A8F9B', OTHER: '#6B7280',
     DONE: '#4CAF7A', SCOUT: '#4E7FDB', OBSERVER: '#5FA8D3', DISPATCH: '#7B9FE0',
-    COST: '#C9B79A',
+    COST: '#C9B79A', BLOCKED: '#E5484D', READY: '#F2913D', NEEDS: '#E5484D',
   };
-  const sessCol = { working: '#4E7FDB', stopped: '#565C68', error: '#E5484D' };
+  const sessCol = { working: '#4E7FDB', stopped: '#565C68', error: '#E5484D', blocked: '#E5484D' };
 
   // ── layout: one composition around a central spine, on a zoomable canvas ──
   const PAD_L = 40, PAD_R = 20; // left gutter: the rotated zone labels breathe at x≈12, plot starts at 40
@@ -371,7 +380,20 @@
       el('line', { x1: nx, y1: RAIL - 10, x2: nx, y2: H - 28, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.5 });
       el('circle', { cx: nx, cy: RAIL - 10, r: 3.5, fill: 'var(--ember)', class: 'now-dot' });
       txt(nx + 8, RAIL - 7, 'NOW', 'day-date', { fill: 'var(--ember)', 'letter-spacing': '0.2em' });
+      // the imperative chip: decisions waiting at the living edge
+      const needs = below.filter(e => e.kind === 'BLOCKED' || e.kind === 'READY').length;
+      if (needs > 0) {
+        // the chip hangs just left of the living edge, above the rail — always on-canvas
+        const chipX = Math.max(PAD_L + 4, nx - 98);
+        const chip = el('g', { cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${needs} items need you — open the queue` });
+        el('rect', { x: chipX, y: 20, width: 92, height: 16, rx: 8, fill: 'rgba(229,72,77,0.16)', stroke: 'var(--alert)', 'stroke-width': 1, class: 'now-dot' }, chip);
+        txt(chipX + 10, 31, `${needs} NEED YOU`, 'day-date', { fill: 'var(--alert)', 'font-weight': 700, 'letter-spacing': '0.14em' }, chip);
+        chip.addEventListener('click', () => openDetail({ h: NOW_H, kind: 'NEEDS', label: 'Decision queue' }));
+        chip.addEventListener('keydown', e => { if (e.key === 'Enter') openDetail({ h: NOW_H, kind: 'NEEDS', label: 'Decision queue' }); });
+      }
     }
+
+    applyTrace(); // an active thread survives zoom/pan — positions recompute from fresh registries
   }
 
   // ── milestones hang DOWN from the top rail — every one renders; the visible
@@ -553,6 +575,14 @@
       const dn = el('text', { x: x0 + 8, y: SPINE + 25, class: 'day-name' }, g);
       const n1 = document.createElementNS(NS, 'tspan'); n1.textContent = DAYS[d].name; dn.appendChild(n1);
       const n2 = document.createElementNS(NS, 'tspan'); n2.setAttribute('class', 'day-date'); n2.setAttribute('dx', 10); n2.textContent = DAYS[d].date; dn.appendChild(n2);
+      // the editorial caption rides the spine too — appended, MEASURED, and dropped
+      // if the full line would spill into the next day's name
+      const n3 = document.createElementNS(NS, 'tspan');
+      n3.setAttribute('class', 'day-date'); n3.setAttribute('dx', 10);
+      n3.style.fill = 'var(--ember)'; n3.style.opacity = '0.75';
+      n3.textContent = DAYS[d].caption;
+      dn.appendChild(n3);
+      if (8 + dn.getComputedTextLength() > (x(d * 24 + 24) - x(d * 24)) - 14) dn.removeChild(n3);
       for (let hh = 0; hh < 24; hh += tickEvery) {
         const th = d * 24 + hh;
         if (th < view.start || th > view.end) continue;
@@ -574,7 +604,11 @@
       const y = SESS_TOP + s.row * 9;
       const rx0 = Math.max(x(s.t0), PAD_L), rx1 = Math.min(x(s.t1), W - PAD_R);
       if (rx1 <= rx0) continue;
-      el('rect', { x: rx0, y, width: Math.max(2, rx1 - rx0), height: 5, rx: 2.5, fill: sessCol[s.status], opacity: s.status === 'working' ? 0.85 : 0.7 }, g);
+      el('rect', {
+        x: rx0, y, width: Math.max(2, rx1 - rx0), height: 5, rx: 2.5,
+        fill: sessCol[s.status], opacity: s.status === 'working' ? 0.85 : 0.7,
+        ...(s.status === 'blocked' ? { class: 'now-dot', filter: 'url(#heatglow)' } : {}),
+      }, g);
     }
     txt(PAD_L + 6, SESS_TOP - 8, `${sessions.length} runs · packed`, 'annot', {}, g);
     for (const h of autoTicks) {
@@ -589,8 +623,10 @@
     const LABEL_W = 190;
     // interval packing that knows which way each label extends: right-anchored
     // labels occupy [cx, cx+W], edge labels flip and occupy [cx−W, cx].
+    // Imperative items pack FIRST so they always win the rows nearest the spine.
+    const packOrder = [...below.filter(e => e.kind === 'BLOCKED' || e.kind === 'READY'), ...below.filter(e => e.kind !== 'BLOCKED' && e.kind !== 'READY')];
     const rowEnds = []; // per row, the x where that row's last label ends
-    for (const e of below) {
+    for (const e of packOrder) {
       if (!vis(e.h, 4)) continue;
       const cx = x(e.h);
       const anchorEnd = cx > W - 220;
@@ -603,6 +639,8 @@
       el('line', { x1: cx, y1: SPINE + 46, x2: cx, y2: depth - 14, stroke: kindCol[e.kind], 'stroke-width': 0.6, opacity: 0.35 }, g);
       const mk = el('g', { cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${e.kind}: ${e.label}` }, g);
       if (e.kind === 'DONE') el('rect', { x: cx - 3, y: depth - 17, width: 6, height: 6, transform: `rotate(45 ${cx} ${depth - 14})`, fill: kindCol[e.kind], ...(e.big ? { filter: 'url(#heatglow)' } : {}) }, mk);
+      else if (e.kind === 'READY') el('rect', { x: cx - 3.5, y: depth - 17.5, width: 7, height: 7, transform: `rotate(45 ${cx} ${depth - 14})`, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.5, class: 'now-dot', filter: 'url(#heatglow)' }, mk);
+      else if (e.kind === 'BLOCKED') el('circle', { cx, cy: depth - 14, r: 3.5, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.5, class: 'now-dot', filter: 'url(#heatglow)' }, mk);
       else el('circle', { cx, cy: depth - 14, r: e.big ? 3.2 : 2.4, fill: kindCol[e.kind] }, mk);
       const t = el('text', { x: anchorEnd ? cx - 7 : cx + 7, y: depth - 11, class: 'mark-label', ...(anchorEnd ? { 'text-anchor': 'end' } : {}) }, mk);
       const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[e.kind]; k.style.fontWeight = '600'; k.textContent = e.kind + ' · ' + hhmm(e.h) + ' ';
@@ -747,8 +785,48 @@
   });
   svg.addEventListener('pointerleave', hideReadout);
 
+  // ── thread tracing: one shipped ticket's story lit across every zone ──────────
+  // In the real build the provenance endpoint names the exact run/commits; the mock
+  // resolves them by proximity, which is what that endpoint computes anyway.
+  let activeThread = null, lastDetail = null;
+  function applyTrace() {
+    const old = svg.querySelector('#tracelayer');
+    if (old) old.remove();
+    if (!activeThread) return;
+    const t = activeThread;
+    const layer = el('g', { id: 'tracelayer', 'pointer-events': 'none' });
+    el('rect', { x: PAD_L, y: RAIL - 10, width: W - PAD_L - PAD_R, height: H - RAIL - 18, fill: 'var(--ground)', opacity: 0.78 }, layer);
+    const dashed = (x1, y1, x2, y2) => el('line', { x1, y1, x2, y2, stroke: '#FFE9C4', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.8 }, layer);
+    const ring2 = (cx, cy2, rr, color) => el('circle', { cx, cy: cy2, r: rr, fill: 'none', stroke: color, 'stroke-width': 1.5, filter: 'url(#heatglow)' }, layer);
+    // the ticket itself
+    const done = belowHits.find(z => z.e.h === t.h);
+    const dp = done ? { x: done.cx, y: done.y } : { x: x(t.h), y: EVT_BASE - 14 };
+    ring2(dp.x, dp.y, 8, kindCol.DONE);
+    // the run(s) that shipped it
+    const runs = sessions.filter(s => s.row <= 10 && s.t1 > t.h - 6 && s.t0 < t.h + 1)
+      .sort((a, b) => (b.t1 - b.t0) - (a.t1 - a.t0)).slice(0, 2);
+    for (const s of runs) {
+      const mx = (x(s.t0) + x(s.t1)) / 2, my = SESS_TOP + s.row * 9 + 2.5;
+      el('rect', { x: x(s.t0) - 2, y: my - 5.5, width: x(s.t1) - x(s.t0) + 4, height: 11, rx: 5, fill: 'none', stroke: '#4E7FDB', 'stroke-width': 1.5, filter: 'url(#heatglow)' }, layer);
+      dashed(mx, my + 6, dp.x, dp.y - 9);
+      // the commits that run produced
+      for (const z of railHits.filter(z => Math.abs(z.m.h - t.h) < 9).slice(0, 3)) {
+        ring2(z.cx, RAIL, 7, kindCol[z.m.kind]);
+        dashed(z.cx, RAIL + 8, mx, my - 6);
+      }
+    }
+    txt(dp.x + 12, dp.y + 4, 'provenance thread — plan → run → commits → shipped', 'annot', { fill: '#FFE9C4' }, layer);
+  }
+  function clearTrace() { activeThread = null; const l = svg.querySelector('#tracelayer'); if (l) l.remove(); }
+
   // ── the drill drawer: commits open a diff, shipped tickets open their pipeline ──
   const detail = document.getElementById('detail');
+  detail.addEventListener('click', ev => {
+    if (ev.target && ev.target.id === 'd-trace' && lastDetail) {
+      activeThread = { h: lastDetail.h };
+      applyTrace();
+    }
+  });
   const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const shaOf = s => { let a = 7; for (const c of s) a = (a * 31 + c.charCodeAt(0)) & 0xffffff; return a.toString(16).padStart(7, 'a'); };
   const FILE_POOL = ['src/squad-manager.ts', 'src/proof.ts', 'src/land.ts', 'webapp/src/components/TaskDetail.tsx', 'src/federation.ts', 'src/plan-sync.ts', 'webapp/src/omp-graph/GraphCanvas.tsx', 'docs/federation.md', 'src/gate-runner.ts', 'tests/omp-graph.test.ts'];
@@ -791,7 +869,7 @@
       ${step('#4E7FDB', 'AGENT', 'worktree squad/' + id.toLowerCase() + ' · 2.1h · $4.20', '31 tool calls · 2 fixup rounds')}
       ${step('#F2913D', 'PROOF', 'bun test · exit 0', 'fingerprint fresh · tree clean · TTL ok')}
       ${step('#4CAF7A', 'LAND', 'merged ' + shaOf(id) + ' → main', 'Δ' + (300 + (id.charCodeAt(6) * 7) % 600) + ' lines · no conflicts')}
-      <div class="actions"><button type="button">Open ticket</button><button type="button">View land diff</button><button type="button">Open plan</button></div>
+      <div class="actions"><button type="button" id="d-trace">✦ Trace on canvas</button><button type="button">Open ticket</button><button type="button">View land diff</button></div>
       <div class="sect" style="margin-top:16px">In the real build</div>
       <div class="meta" style="color:var(--ink-low)">each step links: plan concern → agent transcript → proof receipt → land commit. The drill IS the navigation.</div>`;
   }
@@ -832,20 +910,36 @@
       <div class="meta" style="color:var(--ink-low)">receipts already carry model + cost per run; harness is one field on the receipt. API-equivalent pricing comes from the token counts × published rates.</div>`;
   }
 
+  function needsBody() {
+    const step = (color, k, v, s, act) => `<div class="step"><span class="sdot now-dot" style="background:${color}"></span><span style="min-width:0; flex:1">
+      <div class="sk">${k}</div><div class="sv">${v}</div><div class="ss">${s}</div>
+      <div class="actions" style="margin-top:8px">${act}</div></span></div>`;
+    return `<div class="title2">Decision queue — the fleet is waiting on you</div>
+      <div class="meta">2 items · everything else is running clean</div>
+      ${step('#E5484D', 'BLOCKED · 2.1H', 'vpb-03-canvas · agent question', '“the legacy shell conflicts with the new canvas mount — overwrite it or keep both behind the flag?”',
+        '<button type="button">Answer: overwrite</button><button type="button">Answer: keep both</button><button type="button">Open transcript</button>')}
+      ${step('#F2913D', 'LAND READY · 12M', 'squad/vpb-02-wireframe', 'proof green · bun test exit 0 · fingerprint fresh · no conflicts vs main',
+        '<button type="button">Land it</button><button type="button">View diff first</button>')}
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">this is the Attention queue rendered in place: answer and land actions POST to the daemon, and the marks leave the canvas the moment the fleet unblocks.</div>`;
+  }
+
   function openDetail(m) {
     const chip = document.getElementById('d-kind');
     chip.textContent = m.kind;
     chip.style.color = kindCol[m.kind];
     chip.style.borderColor = (kindCol[m.kind] || '#F2913D') + '59';
-    document.getElementById('d-when').textContent = m.kind === 'COST' ? 'this week' : when(m.h);
+    document.getElementById('d-when').textContent = m.kind === 'COST' ? 'this week' : m.kind === 'NEEDS' ? 'right now' : when(m.h);
+    lastDetail = m;
     document.getElementById('d-body').innerHTML =
       m.kind === 'COST' ? costBody() :
+      m.kind === 'NEEDS' || m.kind === 'BLOCKED' || m.kind === 'READY' ? needsBody() :
       m.kind === 'DONE' ? ticketBody(m) : (m.kind === 'SCOUT' || m.kind === 'OBSERVER' || m.kind === 'DISPATCH') ? loopBody(m) : commitBody(m);
     detail.classList.add('open');
     document.getElementById('d-close').focus();
   }
-  document.getElementById('d-close').addEventListener('click', () => detail.classList.remove('open'));
-  window.addEventListener('keydown', e => { if (e.key === 'Escape') detail.classList.remove('open'); });
+  document.getElementById('d-close').addEventListener('click', () => { detail.classList.remove('open'); clearTrace(); });
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') { detail.classList.remove('open'); clearTrace(); } });
 
   let rT;
   window.addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(build, 150); });
