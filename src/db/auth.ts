@@ -71,6 +71,10 @@ export function authOptions({ dialect, type, trustedOrigins, baseURL }: AuthConf
 				discoveryUrl: workosDiscoveryUrl(workos.clientId),
 				scopes: ["openid", "profile", "email"],
 				pkce: true,
+				// WorkOS's /authorize requires an IdP selector. provider=authkit routes to AuthKit's hosted
+				// screen (email-first detection across every connection + social) — the "one button, all IdPs"
+				// UX. Per-tenant pinning later swaps this for organization_id/connection_id (can be a fn of ctx).
+				authorizationUrlParams: { provider: "authkit" },
 				mapProfileToUser: (profile: Record<string, unknown>) => {
 					const name =
 						(typeof profile.name === "string" && profile.name) ||
