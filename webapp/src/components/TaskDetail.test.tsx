@@ -32,25 +32,29 @@ test("parseMeta reads key values and quoted values", () => {
 test("PlanMarkdown dispatches registered visual plan blocks", () => {
   const html = renderToStaticMarkup(<PlanMarkdown content={"```callout tone=decision id=source-of-truth\nUse the event journal.\n```"} />);
 
-  expect(html).toContain("[callout stub] decision");
+  expect(html).toContain('data-block-id="source-of-truth"');
+  expect(html).toContain("DECISION"); // the callout tone label — a real block, not a code fence
   expect(html).toContain("Use the event journal.");
 });
 
-test("PlanMarkdown keeps normal code fences on the syntax highlighter path", () => {
+test("PlanMarkdown keeps normal code fences on the (lazy) syntax highlighter path", () => {
   const html = renderToStaticMarkup(<PlanMarkdown content={"```ts\nconst ok = true;\n```"} />);
 
-  expect(html).toContain("language-ts");
-  expect(html).toContain("const");
+  // Prism loads lazily (it was ~500KB of the main bundle) — a static render shows the
+  // plain <pre> fallback with the code intact; highlighting hydrates on the client.
+  expect(html).toContain("const ok = true;");
+  expect(html).toContain("font-mono");
   expect(BLOCK_REGISTRY.ts).toBeUndefined();
 });
 
-test("PlanMarkdown renders the visual block fixture as stubs", () => {
+test("PlanMarkdown renders every fixture block through a real block component", () => {
   const fixture = readFileSync(new URL("./blocks/__fixtures__/example-plan.md", import.meta.url), "utf8");
   const html = renderToStaticMarkup(<PlanMarkdown content={fixture} />);
 
-  for (const label of ["[callout stub]", "[wireframe stub]", "[diagram stub]", "[filetree stub]", "[questions stub]", "[annotated-code stub]", "[columns stub]"]) {
-    expect(html).toContain(label);
-  }
+  // Blocks are implemented now — nothing may fall back to the old placeholder stubs,
+  // and each fixture block must mount as a dispatched block host.
+  expect(html).not.toContain("stub]");
+  expect((html.match(/data-block-id=/g) ?? []).length).toBeGreaterThanOrEqual(7);
 });
 
 test("PlanMarkdownLoading visibly reports that plan documents are loading", () => {

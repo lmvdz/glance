@@ -1,10 +1,12 @@
 /**
  * Federation coordinator — a dumb, protocol-agnostic WebSocket relay/hub.
  *
- * Every TailnetFederationBus (see federation.ts) connects here. The coordinator
- * never parses the frames it carries: each message received from one client is
- * rebroadcast verbatim to every OTHER connected client. That keeps the wire
- * protocol owned entirely by the buses — the hub is pure transport.
+ * Every TailnetFederationBus (see federation.ts) connects here. Each message
+ * received from one client is rebroadcast to every OTHER connected client,
+ * verbatim — with ONE security exception: command frames get the sender's real
+ * socket address stamped as `ip` (see stampCommandIp), since receivers verify
+ * identity via `tailscale whois <ip>` and only the hub knows the true peer
+ * address. Everything else keeps the wire protocol owned by the buses.
  *
  * The library is silent (no console output); coordinator-main.ts is the CLI.
  */
@@ -34,6 +36,22 @@ export interface CoordinatorOptions {
 
 interface SocketData {
 	id: number;
+}
+
+/**
+ * Overwrite `ip` on a command frame with the sender's REAL socket address (any client-sent
+ * value is dropped — it's an identity-forgery vector). Everything else passes verbatim.
+ */
+export function stampCommandIp(raw: string | Buffer, remoteAddress: string | undefined): string | Buffer {
+	if (typeof raw !== "string" || !raw.includes('"command"')) return raw;
+	try {
+		const frame = JSON.parse(raw) as { kind?: unknown; ip?: unknown };
+		if (frame.kind !== "command") return raw;
+		frame.ip = remoteAddress;
+		return JSON.stringify(frame);
+	} catch {
+		return raw;
+	}
 }
 
 /**
@@ -69,11 +87,17 @@ export function runCoordinator(opts: CoordinatorOptions = {}): CoordinatorHandle
 				sockets.delete(ws);
 			},
 			message(ws, raw) {
-				// Opaque fan-out: rebroadcast to everyone but the sender, never parsing.
+				// Opaque fan-out: rebroadcast to everyone but the sender. The ONE exception to
+				// "never parse": a command frame gets the sender's transport address stamped as
+				// `ip`, because receivers derive the actor's identity from `tailscale whois <ip>`
+				// and only the hub knows the socket's real peer address — a self-reported ip
+				// would let a sender impersonate any tailnet identity. Non-command and unparsable
+				// frames are relayed verbatim.
+				const out = stampCommandIp(raw, ws.remoteAddress);
 				for (const sock of sockets) {
 					if (sock === ws) continue;
 					try {
-						sock.send(raw);
+						sock.send(out);
 					} catch {
 						// swallow: one dead client must never break the fan-out to the rest
 					}

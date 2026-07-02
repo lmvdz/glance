@@ -22,7 +22,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Radar, RefreshCw, FolderGit2, GitBranch, MessageSquare, Send, GitMerge, RotateCw, UserPlus, ExternalLink, Loader2, X, History, AlertTriangle, type LucideIcon } from 'lucide-react';
 import { apiJson, jsonInit } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
-import { answerCommand, restartCommand } from '../lib/agent-control';
+import { answerCommand, canLand, restartCommand } from '../lib/agent-control';
+import type { AgentDTO } from '../lib/dto';
 import { activeWork, activeWorkAction, ACTIVE_WORK_STATUS_LABEL, type ActiveWorkItem, type ActiveWorkStatus, type ActiveWorkAction, type ActiveWorkActionKind, type ActiveWorkAgentLine } from '../lib/insights';
 import { fleetActivityLines, fleetActivityRollup, type FleetActivityLine, type FleetActivityKind } from '../lib/fleetActivity';
 import { PanelShell, VerdictBadge, SectionCard, StatTile, relativeAge, toneClasses, type Tone } from './ui';
@@ -302,6 +303,69 @@ function AnswerComposer({
   );
 }
 
+// ── Fleet board — one row per roster agent, the README's original promise ────
+
+const FLEET_DOT: Record<string, string> = {
+  working: 'bg-emerald-500 animate-pulse',
+  starting: 'bg-emerald-400',
+  input: 'bg-amber-500',
+  error: 'bg-red-500',
+  idle: 'bg-gray-400',
+  stopped: 'bg-gray-300 dark:bg-gray-600',
+};
+
+function shortBranch(branch?: string): string {
+  return branch ? branch.replace(/^squad\//, '') : '';
+}
+
+/** One glance per agent: state, where it is, what it's doing, what it costs, whether it can land. */
+const FleetAgentRow: React.FC<{
+  agent: AgentDTO;
+  busy: boolean;
+  onOpen: (id: string) => void;
+  onLand: (id: string) => void;
+}> = ({ agent, busy, onOpen, onLand }) => {
+  const ctx = agent.contextPct != null ? `${Math.round(agent.contextPct * 100)}%` : null;
+  const cost = agent.receipt?.costUsd != null ? `$${agent.receipt.costUsd.toFixed(2)}` : null;
+  const landable = canLand(agent) && (agent.landReady || agent.availableActions?.includes('land'));
+  const detail = agent.blockedReason ?? agent.activity ?? '';
+  return (
+    <div className="flex items-center gap-2 px-4 py-2">
+      <button
+        onClick={() => onOpen(agent.id)}
+        className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-md text-left hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900/60"
+        aria-label={`Open agent ${agent.name}`}
+      >
+        <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${FLEET_DOT[agent.status] ?? 'bg-gray-400'}`} aria-label={agent.status} />
+        <span className="flex-shrink-0 text-sm font-medium text-gray-900 dark:text-gray-100">{agent.name}</span>
+        {agent.branch && (
+          <span className="hidden min-w-0 items-center gap-1 truncate font-mono text-[11px] text-gray-500 sm:flex dark:text-gray-400">
+            <GitBranch className="h-3 w-3 flex-shrink-0" aria-hidden="true" />
+            {shortBranch(agent.branch)}
+          </span>
+        )}
+        {detail && <span className={`min-w-0 flex-1 truncate text-xs ${agent.blockedReason ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}`}>{detail}</span>}
+      </button>
+      <span className="flex flex-shrink-0 items-center gap-1.5 text-[11px] tabular-nums text-gray-500 dark:text-gray-400">
+        {ctx && <span title="context used">{ctx}</span>}
+        {cost && <span title="run cost">{cost}</span>}
+        {agent.landReady && <span className="rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">✓ ready</span>}
+        {!agent.landReady && agent.verificationState === 'fresh' && <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">proof fresh</span>}
+      </span>
+      {landable && (
+        <button
+          onClick={() => onLand(agent.id)}
+          disabled={busy}
+          className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-2 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+          aria-label={`Land ${agent.name}`}
+        >
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <GitMerge className="h-3 w-3" aria-hidden="true" />} Land
+        </button>
+      )}
+    </div>
+  );
+};
+
 export const ActiveWorkPane: React.FC = () => {
   const { agents, features, audit, tasks, connected, reload, selectTask, setView, openConsole, sendConsoleCommand, showToast } = useTaskContext();
 
@@ -331,6 +395,30 @@ export const ActiveWorkPane: React.FC = () => {
   const openAgent = useCallback((id?: string) => {
     if (id) openConsole(id);
   }, [openConsole]);
+
+  // Fleet board data: every roster agent, blocked first, then working, then the rest.
+  const fleetAgents = useMemo(() => {
+    const rank: Record<string, number> = { input: 0, error: 0, working: 1, starting: 1, idle: 2, stopped: 3 };
+    return [...agents].sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2) || b.lastActivity - a.lastActivity);
+  }, [agents]);
+  const readyToLand = useMemo(
+    () => fleetAgents.filter((a) => canLand(a) && (a.landReady || a.availableActions?.includes('land'))),
+    [fleetAgents],
+  );
+  const [landingAgentId, setLandingAgentId] = useState<string | null>(null);
+  const landFleetAgent = useCallback(async (id: string) => {
+    setLandingAgentId(id);
+    type LandResult = { ok: boolean; merged?: boolean; staged?: boolean; detail?: string; message?: string };
+    try {
+      const res = await apiJson<LandResult>(`/api/agents/${encodeURIComponent(id)}/land`, jsonInit('POST', {})).catch((e: Error): LandResult => ({ ok: false, detail: e.message }));
+      if (res.ok) showToast(res.merged ? 'Landed and merged' : 'Land completed', 'success');
+      else if (res.staged) showToast('Conflict auto-resolved — land again to merge', 'info');
+      else showToast(res.detail || res.message || 'Land blocked — proof gate not satisfied', 'error');
+    } finally {
+      setLandingAgentId(null);
+      void reload();
+    }
+  }, [showToast, reload]);
 
   const openFeature = useCallback((item: ActiveWorkItem) => {
     if (!item.featureId) {
@@ -446,7 +534,29 @@ export const ActiveWorkPane: React.FC = () => {
 
   return (
     <PanelShell icon={<Radar className="h-4 w-4 text-blue-500" />} title="Active work" subtitle={subtitle} actions={refresh}>
-      {items.length === 0 ? (
+      {/* Landing lane — the factory's finish line, always first when anything is ready. */}
+      {readyToLand.length > 0 && (
+        <SectionCard title={<span className="flex items-center gap-1.5"><GitMerge className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />Ready to land</span>} right={`${readyToLand.length}`}>
+          <div className="divide-y divide-gray-100 dark:divide-gray-800">
+            {readyToLand.map((agent) => (
+              <FleetAgentRow key={agent.id} agent={agent} busy={landingAgentId === agent.id} onOpen={openConsole} onLand={(id) => void landFleetAgent(id)} />
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      {/* Fleet board — one row per agent: state, branch, activity, context, cost, land readiness. */}
+      {fleetAgents.length > 0 && (
+        <SectionCard title="Fleet" right={`${fleetAgents.length} agent${fleetAgents.length === 1 ? '' : 's'}`}>
+          <div className="divide-y divide-gray-100 dark:divide-gray-800">
+            {fleetAgents.map((agent) => (
+              <FleetAgentRow key={agent.id} agent={agent} busy={landingAgentId === agent.id} onOpen={openConsole} onLand={(id) => void landFleetAgent(id)} />
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      {items.length === 0 && fleetAgents.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-gray-200 bg-gray-50 px-6 py-12 text-center dark:border-gray-800 dark:bg-gray-900/40">
           <Radar className="h-8 w-8 text-gray-400" aria-hidden="true" />
           <div className="text-base font-semibold text-gray-700 dark:text-gray-200">Nothing is being worked on</div>

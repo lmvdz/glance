@@ -433,6 +433,8 @@ a red-then-green pair is logged as flaky and nothing is filed (OMPSQ-184).
 | Env | Meaning |
 |---|---|
 | `OMP_SQUAD_OBSERVE` | Self-audit loop — **on** when Plane is configured (`=0` to disable; then no timer is armed) |
+| `OMP_SQUAD_PLANSYNC` | Plan STATUS reconciler — **on** when Plane is configured (`=0` to disable). Every tick, each `plans/<x>/NN-concern.md` carrying a `PLANE: <ID>` pointer is checked against the tracker: a completed/cancelled issue closes the doc's STATUS, a started issue moves an open doc to `in_progress`. It NEVER reopens a done doc — that drift is logged + surfaced on the Automation feed as a conflict instead |
+| `OMP_SQUAD_PLANSYNC_INTERVAL_MS` | Plan-sync tick interval (default `300000` = 5 min) |
 | `OMP_SQUAD_OBSERVE_MAX` | Hard cap on observer-filed *open* issues (default `10`); past it, log + skip |
 | `OMP_SQUAD_OBSERVE_AUTODISPATCH` | `=1` files plain findings *without* the do-not-auto-land marker so the dispatcher fixes them; structural findings stay needs-triage regardless |
 | `OMP_SQUAD_OBSERVE_AUTOFIX` | `=1` lets the loop action autofixable findings directly (reap a landed survivor); never touches main/code; default off |
@@ -949,6 +951,9 @@ this *staged* outcome as a hold — never a blocked land — so it neither re-me
 | `OMP_SQUAD_AUTORESOLVE_CONFIRM` | An AUTO land that had to auto-resolve a conflict is **staged** for a one-tap Land instead of merged with no human (on by default; `=0` to auto-merge resolved conflicts). A clean auto land still merges; operator lands always merge |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 | `OMP_SQUAD_AUTOLAND_FAIL_CAP` | Consecutive failed auto-lands before a branch is parked instead of re-merged (default `3`); restart-safe via a persisted, branch-keyed ledger (`<stateDir>/land-failures.json`). Operator land bypasses it; the Observer files a bug for the parked branch |
+| `OMP_SQUAD_GATE_ENV` | Comma-separated env var names re-admitted into verify/proof/regression gate runs. Gates execute agent-authored test code, so they get a **secret-scrubbed** env by default (`OMP_SQUAD_*`, secret-shaped names like `*_API_KEY`/`*_TOKEN`/`*_SECRET`, `DATABASE_URL` removed; toolchain vars pass through). Name a var here if a suite legitimately needs it |
+| `OMP_SQUAD_GATE_SANDBOX` | Container image for gate runs. When set, every verify/proof/regression gate executes inside `docker run --rm --network none` with only the worktree (+ its main repo, for the worktree gitdir pointer) bind-mounted at their host paths and the scrubbed env passed explicitly — agent-authored tests can no longer read the daemon's filesystem or call out. The image must provide `bash` + the repo's toolchain (e.g. an `oven/bun` derivative). Unset ⇒ host execution as before |
+| `OMP_SQUAD_GATE_SANDBOX_NETWORK` | Docker network mode for sandboxed gates (default `none`; set `bridge` for suites that legitimately need network) |
 
 ## Sandboxed execution — agents off your laptop
 
@@ -1022,9 +1027,17 @@ extends to cross-host gossip once a coordinator URL is set.
 - `tailscale whois` for peer identity — resolves only on a real tailnet; without it, inbound
   command actors are unverified and fall back to `viewer`.
 
-**Remote steering** (driving a teammate's live agent from your command center) — the receive
-side exists (`onRemoteCommand` + `applyCommand(cmd, actor)`) but no code yet *sends* a command
-frame to a peer. That remains the principal outstanding cross-operator capability.
+**Remote steering** (driving a teammate's live agent from your command center) — both halves
+exist now. The receive side (`onRemoteCommand` + `applyCommand(cmd, actor)`) authorizes via
+whois-verified actor + RBAC; the send side is `bus.sendCommand(cmd, to)` behind
+`POST /api/federation/command` (`{to: "<operator id>", cmd: {type, …}}`, operator-tier,
+audited as `federation.command`). Frames are addressed — peers drop commands not meant for
+them — and the coordinator stamps the sender's real socket address as `ip` (any client-sent
+`ip` is overwritten), so the receiver's `tailscale whois` verifies the true sender, never a
+claimed identity. Sending grants nothing: an unverified sender lands as read-only `viewer`
+on the receiving daemon. Still missing for a full remote-steering UX: a command-center UI
+affordance on the Federation panel (the API is the seam) and a reply/ack channel (effects
+surface through the peer's gossiped presence).
 
 See [`docs/federation.md`](docs/federation.md) for the full architecture and runbook.
 

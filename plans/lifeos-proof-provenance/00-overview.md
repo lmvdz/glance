@@ -1,8 +1,13 @@
 # LifeOS-style proof and provenance
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
+
+> 2026-07-01 reconcile: the whole plan is on `main` — the formerly stranded branch landed via
+> `970d296` + conflict fix `4daf014` (readiness API + `FeatureProofAggregate`, `ProofProvenancePanel`,
+> `PlanRevisionCandidate` with `/plan-candidates` accept/reject/supersede endpoints, docs + tests).
+> Every concern previously said `open`; code-verified done.
 
 > WIP gate: scanner showed 5 existing plan dirs with 18 open concerns. Proceeded because the operator explicitly said `proceed`.
 

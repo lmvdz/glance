@@ -66,3 +66,46 @@ export const KNOWN_MODELS: readonly string[] = [
   'claude-sonnet-4',
   'claude-haiku-4',
 ];
+
+/**
+ * Land/verify controls. The daemon has always exposed POST /api/agents/:id/verify and /land,
+ * but the webapp shell replacement dropped every UI that called them — ad-hoc agents in
+ * particular could only be merged by hand from a terminal. An agent is landable when it has
+ * a branch and its own worktree to merge from; whether the land may *proceed* stays the
+ * server's call (proofGate: verify-before-land).
+ */
+export function canLand(agent: Pick<AgentDTO, 'branch' | 'worktree' | 'repo'> | null | undefined): boolean {
+  return !!agent?.branch && agent.worktree !== agent.repo;
+}
+
+export interface LandResultDTO {
+  ok: boolean;
+  committed?: boolean;
+  merged?: boolean;
+  staged?: boolean;
+  message?: string;
+  detail?: string;
+}
+
+export interface ProofResultDTO {
+  ok: boolean;
+  command?: string;
+  detail?: string;
+}
+
+export type ToastTone = 'success' | 'error' | 'info';
+
+/** Human toast for a land response (including the staged confirm-hold outcome). */
+export function landToast(res: LandResultDTO): { text: string; tone: ToastTone } {
+  const detail = res.detail ?? res.message ?? '';
+  if (res.staged) return { text: `Ready to land — conflict auto-resolved, land again to merge${detail ? ` (${detail})` : ''}`, tone: 'info' };
+  if (res.ok) return { text: res.merged ? `Landed${detail ? `: ${detail}` : ''}` : `Land made no merge${detail ? `: ${detail}` : ''}`, tone: 'success' };
+  return { text: `Land blocked: ${detail || 'unknown reason'}`, tone: 'error' };
+}
+
+/** Human toast for a verify (proof) response. */
+export function verifyToast(proof: ProofResultDTO): { text: string; tone: ToastTone } {
+  if (proof.ok) return { text: 'Proof green — this branch can land', tone: 'success' };
+  const tail = (proof.detail ?? '').split('\n').filter(Boolean).slice(-1)[0] ?? '';
+  return { text: `Proof RED${tail ? ` — ${tail}` : ''}`, tone: 'error' };
+}

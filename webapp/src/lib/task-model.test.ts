@@ -26,7 +26,8 @@ test("taskFromFeature preserves the starter task shape with live feature ids", (
     colorClass: "bg-blue-500",
   });
 
-  expect(task.id).toBe("OMP-1");
+  expect(task.id).toBe("feat-1"); // STABLE feature id — never the async-loading tracker id
+  expect(task.displayId).toBe("OMP-1");
   expect(task.sourceId).toBe("feat-1");
   expect(task.planDir).toBe("plans/web-dashboard");
   expect(task.category).toBe("frontend");
@@ -35,8 +36,18 @@ test("taskFromFeature preserves the starter task shape with live feature ids", (
 });
 
 test("taskRef prefers a real Plane ticket identifier", () => {
-  expect(taskRef({ id: "OMPSQ-306", planDir: "plans/x" })).toBe("OMPSQ-306");
-  expect(taskRef({ id: "OMP-1", planDir: undefined })).toBe("OMP-1");
+  expect(taskRef({ id: "feat-1", displayId: "OMPSQ-306", planDir: "plans/x" })).toBe("OMPSQ-306");
+  expect(taskRef({ id: "OMP-1", planDir: undefined })).toBe("OMP-1"); // legacy: id itself is a ticket
+});
+
+test("task identity is STABLE across the async ticket load (the click-selection bug)", () => {
+  const project = { id: feature.repo, name: "omp-squad", shortCode: "OS", colorClass: "bg-blue-500" };
+  const beforeTickets = taskFromFeature({ ...feature, issueIdentifiers: undefined }, [], project);
+  const afterTickets = taskFromFeature(feature, [], project);
+  // The id used to flip feat-1 → OMP-1 when Plane identifiers arrived, which made
+  // reconcileSelectedTaskId clear every click-selection. It must never change.
+  expect(beforeTickets.id).toBe(afterTickets.id);
+  expect(afterTickets.displayId).toBe("OMP-1");
 });
 
 test("taskRef falls back to the plan slug when the id is a synthetic feature id", () => {

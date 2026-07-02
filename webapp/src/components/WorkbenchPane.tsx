@@ -95,6 +95,7 @@ interface WorkbenchPaneProps {
  * agent posture (blocked/errored = red, stopped/land = amber, working = green),
  * so what needs you reads at a glance — the parent sorts these so they float up.
  */
+
 export const TaskRailRow: React.FC<{
   task: Task;
   status?: TaskStatus;

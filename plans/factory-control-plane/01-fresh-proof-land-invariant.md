@@ -1,5 +1,15 @@
 # Fresh proof and land invariant
-STATUS: open
+STATUS: done
+
+> 2026-07-01 reconcile: verified in code — the full fingerprint from the Approach is implemented
+> in src/proof.ts (`Proof`/`ProofFingerprint`: commit, tree, branch, dirty, baseCommit, repo/
+> worktree identity, commandHash, TTL), `proofGate` names the exact staleness reason, and every
+> land path gates (manager pre-gate + `landAgent`'s internal `requireProof` gate that re-checks
+> AFTER the WIP sweep). The STATUS line never caught up with the code.
+> Same day, one residual was found and closed: `dirty` ignored untracked files while the land's
+> WIP sweep (`git add -A`) committed them — a file created after the proof landed untested. The
+> fingerprint's dirty is now untracked-aware and the sweep excludes `.omp/` (evidence dir) so the
+> gate and the sweep see the same tree.
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

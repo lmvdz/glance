@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
+import { gateExec } from "./gate-runner.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 let proofRoot = path.join(os.homedir(), ".omp", "squad", "proof");
@@ -180,9 +181,20 @@ async function treeHash(worktree: string): Promise<string> {
 	return gitOut(["rev-parse", "HEAD^{tree}"], worktree).catch(() => "");
 }
 
-async function trackedDirty(worktree: string): Promise<boolean> {
-	const status = await gitOut(["status", "--porcelain", "--untracked-files=no"], worktree).catch(() => "dirty");
-	return status.length > 0;
+/**
+ * Anything the land's WIP sweep (`git add -A`) would commit: tracked changes AND untracked
+ * files. Untracked-file content created after a proof used to slip the gate — the proof was
+ * commit/tree-keyed, tracked-clean, yet commitWip swept brand-new files into the merge
+ * untested. Paths under `.omp/` are excluded on both sides (here and in the land sweep):
+ * that's the daemon's own evidence dir (vision screenshots), never part of the landed work.
+ */
+async function landableDirty(worktree: string): Promise<boolean> {
+	const status = await gitOut(["status", "--porcelain"], worktree).catch(() => "?? dirty");
+	return status.split("\n").some((line) => {
+		if (!line.trim()) return false;
+		const p = line.slice(3);
+		return !(p.startsWith(".omp/") || p === ".omp" || p.startsWith('".omp/'));
+	});
 }
 
 export async function proofFingerprint(repo: string, worktree: string, command?: string): Promise<ProofFingerprint> {
@@ -190,7 +202,7 @@ export async function proofFingerprint(repo: string, worktree: string, command?:
 		commit: await headCommit(worktree),
 		tree: await treeHash(worktree),
 		branch: await currentBranch(worktree),
-		dirty: await trackedDirty(worktree),
+		dirty: await landableDirty(worktree),
 		baseCommit: await headCommit(repo),
 		repo: path.resolve(repo),
 		worktree: path.resolve(worktree),
@@ -214,8 +226,10 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 	let code = 1;
 	try {
 		if (!existsSync(opts.worktree)) throw new Error(`worktree missing: ${opts.worktree}`);
-		if (before?.dirty) throw new Error("worktree has uncommitted tracked changes — commit or discard them before Verify");
-		const proc = Bun.spawn(["bash", "-lc", opts.command], { cwd: opts.worktree, stdout: "pipe", stderr: "pipe" });
+		if (before?.dirty) throw new Error("worktree has uncommitted changes (tracked edits or new files) — commit or discard them before Verify");
+		// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
+		const plan = gateExec(opts.command, opts.worktree, { mounts: [opts.repo] });
+		const proc = Bun.spawn(plan.argv, { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: plan.env });
 		const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 		out = o;
 		err = e;
@@ -228,7 +242,7 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 	const dirty = before?.dirty === true || after?.dirty === true;
 	if (dirty && code === 0) {
 		code = 1;
-		err = `${err}\nworktree has uncommitted tracked changes after Verify — proof would not match landed content`.trim();
+		err = `${err}\nworktree has uncommitted changes after Verify (tracked edits or new files) — proof would not match landed content`.trim();
 	}
 	const tail = `${out}\n${err}`.trim().split("\n").slice(-20).join("\n");
 	const proof: Proof = {
@@ -268,7 +282,7 @@ export async function proofGate(repo: string, worktree: string, branch?: string,
 	const proof = await proofFor(repo, worktree);
 	const fp = await proofFingerprint(repo, worktree, command);
 	if (isFresh(proof, fp)) return undefined;
-	if (fp.dirty) return "worktree has uncommitted tracked changes — commit or discard them before landing (or force)";
+	if (fp.dirty) return "worktree has uncommitted changes (tracked edits or new files) — commit or discard them before landing (or force)";
 	if (!proof) return "no proof — run Verify before landing (or force)";
 	if (!proof.ok) return "last proof FAILED — fix and re-verify before landing (or force)";
 	if (!proof.tree) return "proof is stale (missing tree fingerprint) — re-verify before landing (or force)";

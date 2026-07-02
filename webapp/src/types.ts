@@ -50,7 +50,10 @@ export interface TaskProofProvenance {
 }
 
 export interface Task {
+  /** STABLE identity — always the feature id (selection depends on it never changing across renders). */
   id: string;
+  /** Human tracker handle (e.g. "OMPSQ-306") when a Plane ticket is linked — display only, loads async. */
+  displayId?: string;
   sourceId?: string;
   /** plans/<name>/ directory when this task is a plan — the readable handle the list shows. */
   planDir?: string;

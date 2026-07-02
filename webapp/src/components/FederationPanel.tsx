@@ -24,8 +24,8 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Network, RefreshCw, ExternalLink } from 'lucide-react';
-import { apiJson } from '../lib/api';
+import { Network, RefreshCw, ExternalLink, Send } from 'lucide-react';
+import { apiFetch, apiJson, jsonInit } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
 import { detectCollisions, type UsagePayload, type UsageRun } from '../lib/insights';
 import { PanelShell, VerdictBadge, Callout, SectionCard, relativeAge } from './ui';
@@ -125,10 +125,91 @@ function filesInFlight(
   return byFile;
 }
 
+/**
+ * Inline remote steering — the send half of cross-operator federation. Submits a
+ * `prompt` ClientCommand addressed to the peer operator via POST /api/federation/command.
+ * Fire-and-forget by design: the receiving daemon authorizes independently (whois +
+ * RBAC), and the effect shows up in the peer's gossiped presence on the next poll.
+ */
+const PeerAgentSteer: React.FC<{
+  operatorId: string;
+  agent: FedAgent;
+  showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+}> = ({ operatorId, agent, showToast }) => {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+
+  const send = async () => {
+    const message = text.trim();
+    if (!message || sending) return;
+    setSending(true);
+    try {
+      const res = await apiFetch('/api/federation/command', jsonInit('POST', {
+        to: operatorId,
+        cmd: { type: 'prompt', id: agent.id, message },
+      }));
+      if (res.ok) {
+        const body = await res.json().catch(() => null) as { ack?: { outcome?: string; detail?: string } | null } | null;
+        const ack = body?.ack;
+        if (ack?.outcome === 'applied') showToast(`${agent.name} @ ${operatorId} accepted the instruction`, 'success');
+        else if (ack?.outcome === 'denied') showToast(`Peer denied it: ${ack.detail ?? 'not authorized'}`, 'error');
+        else if (ack?.outcome === 'error') showToast(`Peer errored: ${ack.detail ?? 'unknown'}`, 'error');
+        else showToast(`Sent to ${agent.name} @ ${operatorId} — no ack (peer offline?)`, 'info');
+        setText('');
+        setOpen(false);
+      } else {
+        showToast(`Steer failed: ${await res.text().catch(() => res.status)}`, 'error');
+      }
+    } catch (error) {
+      showToast(`Steer failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="ml-auto flex-shrink-0 text-[11px] text-blue-600 dark:text-blue-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        aria-label={`Steer ${agent.name}`}
+      >
+        steer
+      </button>
+    );
+  }
+  return (
+    <span className="ml-auto flex min-w-0 flex-1 items-center gap-1 pl-2">
+      <input
+        autoFocus
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void send();
+          if (e.key === 'Escape') setOpen(false);
+        }}
+        placeholder={`Instruction for ${agent.name}…`}
+        className="min-w-0 flex-1 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200"
+        aria-label={`Instruction for ${agent.name}`}
+      />
+      <button
+        onClick={() => void send()}
+        disabled={sending || !text.trim()}
+        className="flex-shrink-0 rounded p-0.5 text-blue-600 disabled:opacity-40 dark:text-blue-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        title="Send"
+        aria-label="Send steering instruction"
+      >
+        <Send className="h-3 w-3" aria-hidden="true" />
+      </button>
+    </span>
+  );
+};
+
 // ── component ─────────────────────────────────────────────────────────────────
 
 export const FederationPanel: React.FC = () => {
-  const { agents, currentProject, openConsole } = useTaskContext();
+  const { agents, currentProject, openConsole, showToast } = useTaskContext();
 
   const [fed, setFed] = useState<FederationResponse | null>(null);
   const [leases, setLeases] = useState<Lease[]>([]);
@@ -328,6 +409,9 @@ export const FederationPanel: React.FC = () => {
                                       {shortBase(a.repo)}
                                       {a.branch ? ` · ${a.branch}` : ''}
                                     </span>
+                                  )}
+                                  {op.operator?.id && (
+                                    <PeerAgentSteer operatorId={op.operator.id} agent={a} showToast={showToast} />
                                   )}
                                 </div>
                               ))}

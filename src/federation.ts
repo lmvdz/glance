@@ -24,6 +24,19 @@ export const LOCAL_ACTOR: Actor = { id: "local", origin: "local" };
 export interface RemoteCommand {
 	cmd: ClientCommand;
 	actor: Actor;
+	/** Sender-minted correlation id — echo it in the ack so the sender can match the outcome. */
+	cmdId?: string;
+	/** CLAIMED sender operator id — used ONLY to address the ack frame, never for authority. */
+	replyTo?: string;
+}
+
+/** The outcome of a remote command, reported back to its sender. Advisory — never authority. */
+export interface CommandAck {
+	cmdId: string;
+	outcome: "applied" | "denied" | "error";
+	detail?: string;
+	/** Claimed responder operator id (display/audit only). */
+	from?: string;
 }
 
 export interface TeamMessage {
@@ -53,6 +66,22 @@ export interface FederationBus {
 	/** A peer wants to steer one of *our* agents. The manager authorizes via policy + actor before applying. */
 	onRemoteCommand(cb: (remote: RemoteCommand) => void): void;
 
+	/**
+	 * Steer a PEER operator's agent — the outbound half of `onRemoteCommand` (this was the
+	 * principal missing cross-operator capability: the receive side existed, nothing sent).
+	 * `to` addresses one operator id; receivers drop frames not addressed to them. The
+	 * receiving manager still authorizes via whois-verified actor + RBAC — sending grants
+	 * nothing. Returns the minted correlation id; the peer's outcome arrives on `onAck`
+	 * (best-effort — no delivery guarantee).
+	 */
+	sendCommand(cmd: ClientCommand, to?: string): string;
+
+	/** Report a remote command's outcome back to its sender (advisory; carries no authority). */
+	sendAck(ack: CommandAck, to: string): void;
+
+	/** An ack for a command THIS host sent arrived. */
+	onAck(cb: (ack: CommandAck) => void): void;
+
 	/** Team chat. */
 	sendMessage(text: string): void;
 	onMessage(cb: (msg: TeamMessage) => void): void;
@@ -71,6 +100,11 @@ export class NullFederationBus implements FederationBus {
 	publishPresence(_presence: OperatorPresence): void {}
 	onPresence(_cb: (presence: OperatorPresence) => void): void {}
 	onRemoteCommand(_cb: (remote: RemoteCommand) => void): void {}
+	sendCommand(_cmd: ClientCommand, _to?: string): string {
+		return "";
+	}
+	sendAck(_ack: CommandAck, _to: string): void {}
+	onAck(_cb: (ack: CommandAck) => void): void {}
 	sendMessage(_text: string): void {}
 	onMessage(_cb: (msg: TeamMessage) => void): void {}
 	publishLeases(_repoId: string, _leases: LeaseEntry[]): void {}
@@ -253,9 +287,15 @@ const MAX_BACKOFF_MS = 30_000;
 /** Wire frames exchanged with the coordinator. */
 type FederationFrame =
 	| { kind: "presence"; presence: OperatorPresence }
-	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string }
+	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string; to?: string; cmdId?: string }
+	| { kind: "command-ack"; cmdId: string; to: string; from?: string; outcome: CommandAck["outcome"]; detail?: string }
 	| { kind: "message"; from: Actor; text: string; ts: number }
 	| { kind: "leases"; repoId: string; operator: Actor; leases: LeaseEntry[] };
+
+/** Correlation id for a command → ack round trip. */
+function mintCmdId(): string {
+	return `cmd-${crypto.randomUUID()}`;
+}
 
 /** Shape of `tailscale whois --json <ip>` output we care about. */
 interface TailscaleWhoisResult {
@@ -270,7 +310,10 @@ interface TailscaleWhoisResult {
 async function tailscaleWhois(ip: string): Promise<Actor | undefined> {
 	try {
 		const proc = Bun.spawn(["tailscale", "whois", "--json", ip], { stdout: "pipe", stderr: "ignore" });
-		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		// Bounded: a missing/hung tailscale binary must not stall inbound command processing
+		// (a failed PATH lookup alone costs ~14s on WSL). Timeout ⇒ unverified ⇒ viewer.
+		const timer = setTimeout(() => proc.kill(), 3000);
+		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]).finally(() => clearTimeout(timer));
 		if (code !== 0) return undefined;
 		const parsed = JSON.parse(out) as TailscaleWhoisResult;
 		const id = parsed.UserProfile?.LoginName;
@@ -320,6 +363,7 @@ export class TailnetFederationBus implements FederationBus {
 	private readonly whois: (ip: string) => Promise<Actor | undefined>;
 	private readonly presenceCbs: ((presence: OperatorPresence) => void)[] = [];
 	private readonly commandCbs: ((remote: RemoteCommand) => void)[] = [];
+	private readonly ackCbs: ((ack: CommandAck) => void)[] = [];
 	private readonly messageCbs: ((msg: TeamMessage) => void)[] = [];
 	private readonly leasesCbs: ((frame: RemoteLeases) => void)[] = [];
 	private ws?: WebSocket;
@@ -372,6 +416,22 @@ export class TailnetFederationBus implements FederationBus {
 
 	onRemoteCommand(cb: (remote: RemoteCommand) => void): void {
 		this.commandCbs.push(cb);
+	}
+
+	sendCommand(cmd: ClientCommand, to?: string): string {
+		// `actor` here is only a CLAIM for the peer's audit trail — the receiver derives
+		// authority solely from the coordinator-stamped ip via whois (remoteCommandActor).
+		const cmdId = mintCmdId();
+		this.send({ kind: "command", cmd, actor: this.operator, to, cmdId });
+		return cmdId;
+	}
+
+	sendAck(ack: CommandAck, to: string): void {
+		this.send({ kind: "command-ack", cmdId: ack.cmdId, to, from: this.operator.id, outcome: ack.outcome, detail: ack.detail });
+	}
+
+	onAck(cb: (ack: CommandAck) => void): void {
+		this.ackCbs.push(cb);
 	}
 
 	sendMessage(text: string): void {
@@ -448,8 +508,16 @@ export class TailnetFederationBus implements FederationBus {
 					for (const cb of this.presenceCbs) cb(frame.presence);
 					break;
 				case "command": {
+					// Addressed to a specific operator ⇒ everyone else drops it (the coordinator broadcasts).
+					if (frame.to !== undefined && frame.to !== this.operator.id) break;
 					const actor = await this.resolveActor(frame);
-					for (const cb of this.commandCbs) cb({ cmd: frame.cmd, actor });
+					// The CLAIMED sender id addresses the ack only — never authority (that's `actor`).
+					for (const cb of this.commandCbs) cb({ cmd: frame.cmd, actor, cmdId: frame.cmdId, replyTo: frame.actor?.id });
+					break;
+				}
+				case "command-ack": {
+					if (frame.to !== this.operator.id) break;
+					for (const cb of this.ackCbs) cb({ cmdId: frame.cmdId, outcome: frame.outcome, detail: frame.detail, from: frame.from });
 					break;
 				}
 				case "message":
@@ -504,6 +572,7 @@ export class LocalFederationBus implements FederationBus {
 	private readonly operator: Actor;
 	private readonly presenceCbs: ((presence: OperatorPresence) => void)[] = [];
 	private readonly commandCbs: ((remote: RemoteCommand) => void)[] = [];
+	private readonly ackCbs: ((ack: CommandAck) => void)[] = [];
 	private readonly messageCbs: ((msg: TeamMessage) => void)[] = [];
 	private readonly leasesCbs: ((frame: RemoteLeases) => void)[] = [];
 	/** Peer transport; created only when a coordinator URL is configured. */
@@ -526,6 +595,7 @@ export class LocalFederationBus implements FederationBus {
 			this.peer.onLeases((f) => this.fanoutLeases(f));
 			this.peer.onMessage((m) => this.fanoutMessage(m));
 			this.peer.onRemoteCommand((c) => this.fanoutCommand(c));
+			this.peer.onAck((a) => this.fanoutAck(a));
 		}
 	}
 
@@ -560,6 +630,40 @@ export class LocalFederationBus implements FederationBus {
 
 	onRemoteCommand(cb: (remote: RemoteCommand) => void): void {
 		this.commandCbs.push(cb);
+	}
+
+	sendCommand(cmd: ClientCommand, to?: string): string {
+		// Self-addressed (or single-host, no peer): loopback through the same remote-command
+		// path a peer delivery would take — same code path, locally-verified identity.
+		if (to === undefined || to === this.operator.id) {
+			const cmdId = mintCmdId();
+			this.fanoutCommand({ cmd, actor: { id: this.operator.id, displayName: this.operator.displayName, origin: "remote" }, cmdId, replyTo: this.operator.id });
+			if (to === this.operator.id || this.peer === undefined) return cmdId;
+		}
+		return this.peer?.sendCommand(cmd, to) ?? "";
+	}
+
+	sendAck(ack: CommandAck, to: string): void {
+		// Self-addressed acks loop back (the solo/self-steer case); peer acks ride the coordinator.
+		if (to === this.operator.id) {
+			this.fanoutAck({ ...ack, from: this.operator.id });
+			return;
+		}
+		this.peer?.sendAck(ack, to);
+	}
+
+	onAck(cb: (ack: CommandAck) => void): void {
+		this.ackCbs.push(cb);
+	}
+
+	private fanoutAck(ack: CommandAck): void {
+		for (const cb of this.ackCbs) {
+			try {
+				cb(ack);
+			} catch {
+				// swallow
+			}
+		}
 	}
 
 	sendMessage(text: string): void {

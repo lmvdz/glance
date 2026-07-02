@@ -101,3 +101,15 @@ test("a token-gated relay still serves the health GET without a token", async ()
 	const res = await fetch(handle.url.replace("ws://", "http://"));
 	expect(res.status).toBe(200);
 });
+
+test("stampCommandIp overwrites any client-supplied ip on command frames and leaves other frames verbatim", async () => {
+	const { stampCommandIp } = await import("../src/coordinator.ts");
+	const forged = JSON.stringify({ kind: "command", cmd: { type: "kill", id: "x" }, actor: { id: "mallory" }, ip: "100.64.0.99" });
+	const stamped = JSON.parse(stampCommandIp(forged, "100.64.0.7") as string) as { ip?: string };
+	expect(stamped.ip).toBe("100.64.0.7"); // the forged ip is gone — identity can't be borrowed
+
+	const presence = JSON.stringify({ kind: "presence", presence: { operator: { id: "p" } } });
+	expect(stampCommandIp(presence, "100.64.0.7")).toBe(presence); // verbatim
+
+	expect(stampCommandIp("{not json", "100.64.0.7")).toBe("{not json"); // garbage passes through
+});

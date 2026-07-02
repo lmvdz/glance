@@ -76,7 +76,11 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
   const done = feature.workflowProgress?.done ?? 0;
   const total = feature.workflowProgress?.total ?? 0;
   return {
-    id: feature.issueIdentifiers?.[0] ?? feature.id,
+    // STABLE identity: always the feature id. The Plane identifier used to be preferred here,
+    // but it loads async — the id flipped between renders and reconcileSelectedTaskId cleared
+    // every click-selection (the "clicking a task does nothing" bug). Tracker id is display-only.
+    id: feature.id,
+    displayId: feature.issueIdentifiers?.[0],
     sourceId: feature.id,
     planDir: feature.planDir,
     title: feature.title,
@@ -113,13 +117,14 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
 const PLANE_ID_RE = /^[A-Z][A-Z0-9]+-\d+$/;
 
 /**
- * The readable secondary handle for a task row. Prefer a real Plane ticket id;
- * otherwise the plan's directory slug (the thing the operator actually
- * recognizes); otherwise null — a synthetic feature UUID like
- * "plan:repo:plans/x" or a bare hash is noise, not a handle, so the row simply
- * leads with its human title instead.
+ * The readable secondary handle for a task row. Prefer a real Plane ticket id
+ * (now carried as displayId — task.id is the stable feature id); otherwise the
+ * plan's directory slug (the thing the operator actually recognizes); otherwise
+ * null — a synthetic feature UUID like "plan:repo:plans/x" or a bare hash is
+ * noise, not a handle, so the row simply leads with its human title instead.
  */
-export function taskRef(task: Pick<Task, "id" | "planDir">): string | null {
+export function taskRef(task: Pick<Task, "id" | "displayId" | "planDir">): string | null {
+  if (task.displayId && PLANE_ID_RE.test(task.displayId)) return task.displayId;
   if (PLANE_ID_RE.test(task.id)) return task.id;
   if (task.planDir) return task.planDir.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
   return null;

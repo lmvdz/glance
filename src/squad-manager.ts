@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
+import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
@@ -36,11 +36,19 @@ import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
+import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
+import { gateExec } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
+import { syncPlanStatuses } from "./plan-sync.ts";
+import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
+import { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
+import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
+export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
@@ -197,34 +205,6 @@ function commandTarget(cmd: ClientCommand): string | undefined {
 	return cmd.type === "message" ? cmd.to : "id" in cmd ? cmd.id : undefined;
 }
 
-function escapeHtml(value: string): string {
-	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function htmlList(title: string, items: string[]): string {
-	const clean = items.map((item) => item.trim()).filter(Boolean);
-	if (!clean.length) return "";
-	return `<h3>${escapeHtml(title)}</h3><ul>${clean.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
-}
-
-function renderPlanConcernIssueHtml(feature: PersistedFeature, concern: PlanConcern): string {
-	return [
-		"<h2>Plan concern</h2>",
-		`<p><strong>Feature:</strong> ${escapeHtml(feature.title)}</p>`,
-		`<p><strong>Plan path:</strong> ${escapeHtml(concern.path)}</p>`,
-		`<p><strong>Status:</strong> ${escapeHtml(concern.status)}</p>`,
-		htmlList("Acceptance Criteria", concern.acceptanceCriteria),
-		htmlList("Prerequisites", concern.prerequisites),
-		htmlList("Touches", concern.touches),
-		"<h3>Scope</h3>",
-		`<p>Implement the concern described by <code>${escapeHtml(concern.path)}</code>. Keep plan text as context; repo instructions and operator prompts remain authoritative.</p>`,
-	].filter(Boolean).join("\n");
-}
-
-function planConcernTicketMatches(concern: PlanConcern, issue: IssueRef, body: string): boolean {
-	return issue.name.trim() === concern.title.trim() && body.includes(concern.path);
-}
-
 function autoLandFailCap(): number {
 	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
 }
@@ -240,86 +220,11 @@ function autoresolveConfirm(): boolean {
 	return process.env.OMP_SQUAD_AUTORESOLVE_CONFIRM !== "0";
 }
 
-// liveAgents + the WIP cap live in ./scheduler.ts now; re-export keeps the public import path stable.
+// liveAgents + the WIP cap live in ./scheduler.ts; spawn identity/adoption policy in ./spawn-identity.ts;
+// profile/model parsing in ./agent-profiles.ts. Re-exports keep the public import paths stable.
 export { liveAgents };
-
-/** Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway fan-out can't
- *  melt the host. Default ≈ the host's CPU count (min 3) so a bare launch is bounded; override with OMP_SQUAD_MAX_AGENTS. */
-export function hardAgentCeiling(): number {
-	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3);
-}
-
-/** Render a capability profile's tool-grant allow-list as a hard system-prompt constraint. This is the part
- *  of capability tool-scoping (#3) that reaches the omp child (via --append-system-prompt); host tool calls
- *  outside the list are additionally hard-denied at the onHostTool seam. Returns undefined for an empty grant. */
-export function toolGrantsPrompt(grants: string[] | undefined): string | undefined {
-	if (!grants || grants.length === 0) return undefined;
-	return [
-		"--- Capability tool grant (hard constraint) ---",
-		`You are scoped to ONLY these tools: ${grants.join(", ")}.`,
-		"Do not use, request, or attempt any tool outside this list. Tool calls outside the grant are denied by the host.",
-	].join("\n");
-}
-
-/** Persisted agents to take over on restart: not already reattached (live), not flue, and whose worktree
- *  still holds context on disk. Live hosts are reattached by reconnectLive; a gone worktree re-dispatches. */
-export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: string; parentId?: string }>(
-	persisted: T[],
-	rosterIds: ReadonlySet<string>,
-	worktreeExists: (worktree: string) => boolean,
-): T[] {
-	// Exclude parallel-branch children (parentId set): a branch belongs to its parent run, whose own
-	// resume re-drives the fan-out. Adopting a branch as a plain agent would direct-land it independently
-	// of the join → a double-land (and revives completed wait_all branches on the next restart).
-	return persisted.filter((p) => p.kind !== "flue-service" && !p.parentId && !rosterIds.has(p.id) && !!p.worktree && worktreeExists(p.worktree));
-}
-
-/**
- * From the adoptable set, resume only agents that still have UNLANDED work, capped at `cap`. A restart
- * otherwise re-spawned EVERY orphaned worktree at once (adoptOrphanedAgents uses bypassCap, so MAX_AGENTS
- * didn't hold) — N simultaneous omp hosts that OOM the box. Done/clean agents are skipped (their open
- * issue, if any, is re-dispatched gradually under the WIP cap); `cap<=0` ⇒ adopt none.
- */
-export function selectAdoptable<T extends { id: string }>(eligible: T[], hasWork: (a: T) => boolean, cap: number): T[] {
-	if (cap <= 0) return [];
-	return eligible.filter(hasWork).slice(0, cap);
-}
-
-/**
- * The resumable records NOT taken this boot (dropped by the ceiling). They must be PRESERVED, not
- * erased: the full-snapshot-replace persist would otherwise overwrite an un-adopted checkpointed
- * workflow into permanent loss (D1). persistNow folds these back into the snapshot so a later routine
- * restart re-attempts them. Resumability is the operative signal — a plain over-ceiling agent re-dispatches
- * from its still-open issue, but a workflow checkpoint has nothing to re-dispatch it.
- */
-export function deferredResumable<T extends { id: string }>(eligible: T[], resumable: (p: T) => boolean, adopted: T[]): T[] {
-	const adoptedIds = new Set(adopted.map((a) => a.id));
-	return eligible.filter((p) => resumable(p) && !adoptedIds.has(p.id));
-}
-
-let agentIdSeq = 0;
-
-/**
- * Unique agent id: name + time + process-local sequence + random suffix. The branch and worktree derive
- * from this id (NOT the agent's display name), so two agents — even same name, even spawned in the same
- * millisecond or across a daemon restart — never share a branch or worktree. (The name alone collides:
- * dispatched agents fall back to `agent-N` whose counter resets every restart, so "agent-1" gets reused.)
- */
-export function newAgentId(name: string): string {
-	return `${name}-${Date.now().toString(36)}-${(++agentIdSeq).toString(36)}-${randomBytes(4).toString("hex")}`;
-}
-
-function slugPart(text: string, max = 60): string {
-	return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
-}
-
-/** Descriptive, stable branch for Plane-driven work: `squad/ompsq-319-short-title`. */
-export function planeIssueBranch(issue: IssueRef): string {
-	const ident = slugPart(issue.identifier ?? issue.id, 32);
-	const title = slugPart(issue.name);
-	return `squad/${[ident, title].filter(Boolean).join("-") || "plane-issue"}`;
-}
-
+export { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable } from "./spawn-identity.ts";
+export { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
@@ -340,69 +245,6 @@ const AUTO_ACTOR: Actor = { id: "auto-supervise", displayName: "auto-supervise",
  */
 const RISKY_RE =
 	/force[- ]?push|--force\b|reset --hard|\bdelete\b|\bdestroy\b|\bdrop\b|rm\s+-rf|\bpublish\b|\bdeploy\b|\brelease\b|\bproduction\b|\bprod\b|\bmainnet\b|\bsecret\b|\bcredential\b|\bpassword\b|\bwipe\b|\btruncate\b|\boverwrite\b|push.*\bmain\b|merge.*\bmain\b/i;
-
-export interface RuntimeModelOption {
-	label: string;
-	value: string;
-}
-
-export function modelOptionsFromRuntime(models: unknown): RuntimeModelOption[] {
-	if (!Array.isArray(models)) return [];
-	const seen = new Set<string>();
-	return models.flatMap((item): RuntimeModelOption[] => {
-		if (!item || typeof item !== "object") return [];
-		const rec = item as Record<string, unknown>;
-		const id = typeof rec.id === "string" ? rec.id.trim() : "";
-		if (!id) return [];
-		const provider = typeof rec.provider === "string" ? rec.provider.trim() : "";
-		const value = provider ? `${provider}/${id}` : id;
-		if (seen.has(value)) return [];
-		seen.add(value);
-		return [{ label: value, value }];
-	});
-}
-
-export function profileOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AgentProfile[] {
-	const configured = parseProfiles(env.OMP_SQUAD_PROFILES);
-	const fallback: AgentProfile = {
-		id: "default",
-		name: "Default OMP operator",
-		description: "Live omp --mode rpc session with the daemon's default model and write approvals.",
-		runtime: "omp-operator",
-		approvalMode: "write",
-		default: true,
-	};
-	return configured.length ? configured : [fallback];
-}
-
-function parseProfiles(raw: string | undefined): AgentProfile[] {
-	if (!raw?.trim()) return [];
-	try {
-		const parsed = JSON.parse(raw) as unknown;
-		if (!Array.isArray(parsed)) return [];
-		return parsed.flatMap((item): AgentProfile[] => {
-			if (!item || typeof item !== "object") return [];
-			const r = item as Record<string, unknown>;
-			const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : "";
-			const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : id;
-			const runtime = r.runtime === "flue-service" || r.runtime === "workflow" ? r.runtime : "omp-operator";
-			if (!id) return [];
-			return [{
-				id,
-				name,
-				description: typeof r.description === "string" ? r.description : undefined,
-				runtime,
-				model: typeof r.model === "string" ? r.model : undefined,
-				approvalMode: r.approvalMode === "always-ask" || r.approvalMode === "write" || r.approvalMode === "yolo" ? r.approvalMode : undefined,
-				capabilities: Array.isArray(r.capabilities) ? r.capabilities.filter((v): v is string => typeof v === "string") : undefined,
-				memory: typeof r.memory === "string" ? r.memory : undefined,
-				default: r.default === true,
-			}];
-		});
-	} catch {
-		return [];
-	}
-}
 
 function isAgentDisconnected(err: unknown): boolean {
 	return err instanceof Error && /agent (not connected|connection lost)/i.test(err.message);
@@ -502,12 +344,16 @@ export class SquadManager extends EventEmitter {
 	private orchestrator?: Orchestrator;
 	/** Observers — one per configured Plane repo so every repo's backlog is audited (OMPSQ-137). */
 	private readonly observers: Observer[] = [];
+	/** Plan-sync tick timers (one per configured Plane repo); cleared in stop(). */
+	private readonly planSyncTimers: Timer[] = [];
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
-	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning. */
-	private readonly scoutCursor = new Map<string, number>();
+	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning.
+	 *  Persisted (scout-cursor.json) so a warm daemon restart doesn't re-scan whole transcripts —
+	 *  each re-scan was a redundant Scout LLM call per reattached agent. Loaded in the constructor. */
+	private readonly scoutCursor: Map<string, number>;
 	/** Observability spine for the background loops (scout/observer/opportunity/dispatch) — the surface
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
@@ -537,6 +383,7 @@ export class SquadManager extends EventEmitter {
 		this.bus = opts.bus ?? new NullFederationBus();
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
 		setProofRoot(this.stateDir);
+		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -605,10 +452,28 @@ export class SquadManager extends EventEmitter {
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
 			// RBAC authorization happens inside applyCommand against remote.actor's tier (a role-less
 			// peer is read-only). NullFederationBus never fires this; a denied command is logged there,
-			// so swallow the rejection here rather than crash the bus listener.
-			void this.applyCommand(remote.cmd, remote.actor).catch((err) => {
-				if (!(err instanceof RbacDenied)) this.log("error", `remote command failed: ${err instanceof Error ? err.message : String(err)}`);
-			});
+			// so swallow the rejection here rather than crash the bus listener. When the frame carries
+			// a correlation id, the outcome is acked back to the CLAIMED sender — advisory only.
+			const ack = (outcome: "applied" | "denied" | "error", detail?: string): void => {
+				if (remote.cmdId && remote.replyTo) this.bus.sendAck({ cmdId: remote.cmdId, outcome, detail }, remote.replyTo);
+			};
+			void this.applyCommand(remote.cmd, remote.actor)
+				.then(() => ack("applied"))
+				.catch((err) => {
+					if (err instanceof RbacDenied) {
+						ack("denied", err.message);
+						return;
+					}
+					ack("error", err instanceof Error ? err.message : String(err));
+					this.log("error", `remote command failed: ${err instanceof Error ? err.message : String(err)}`);
+				});
+		});
+		this.bus.onAck((ack) => {
+			const waiter = this.ackWaiters.get(ack.cmdId);
+			if (waiter) {
+				this.ackWaiters.delete(ack.cmdId);
+				waiter(ack);
+			}
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
 		await this.refreshPlanFeatureSignature();
@@ -673,6 +538,28 @@ export class SquadManager extends EventEmitter {
 				this.observers.push(observer);
 			});
 			this.log("info", `observer on (auditing ${observeRepos.join(", ")})`);
+		}
+
+		// Plan-sync — keeps plans/<x>/NN-concern.md STATUS lines truthful against their PLANE:
+		// pointers (a landed issue's doc otherwise stays `open` and the WIP counters lie). One
+		// slow tick per configured Plane repo; conservative one-way transitions (see plan-sync.ts).
+		if (process.env.OMP_SQUAD_PLANSYNC !== "0" && observeRepos.length > 0) {
+			const intervalMs = Number(process.env.OMP_SQUAD_PLANSYNC_INTERVAL_MS) || 300_000;
+			for (const repo of observeRepos) {
+				const tick = (): void => {
+					void syncPlanStatuses({
+						repo,
+						listIssues: () => listPlaneIssuesAllStates(repo),
+						log: (m) => this.log("info", m),
+						record: this.automation.for("plan-sync", repo),
+					}).then((r) => {
+						if (r.updated.length) this.emitFeaturesChanged();
+					}).catch(() => {});
+				};
+				this.planSyncTimers.push(setInterval(tick, intervalMs));
+				setTimeout(tick, 15_000); // first pass shortly after boot, off the hot startup path
+			}
+			this.log("info", `plan-sync on (reconciling STATUS lines for ${observeRepos.join(", ")} every ${Math.round(intervalMs / 1000)}s)`);
 		}
 
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
@@ -769,6 +656,7 @@ export class SquadManager extends EventEmitter {
 		this.dispatcher?.stop();
 		this.orchestrator?.stop();
 		for (const o of this.observers) o.stop();
+		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		await this.persist();
@@ -1963,7 +1851,9 @@ export class SquadManager extends EventEmitter {
 		try {
 			const command = await detectVerify(repo);
 			if (!command) return { ok: true };
-			const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+			// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
+			const plan = gateExec(command, repo);
+			const proc = Bun.spawn(plan.argv, { cwd: repo, stdout: "pipe", stderr: "pipe", env: plan.env });
 			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 			if (code === 0) return { ok: true };
 			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
@@ -2650,7 +2540,7 @@ export class SquadManager extends EventEmitter {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});
 		}
 		this.agents.delete(id);
-		this.scoutCursor.delete(id);
+		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
 	}
@@ -2941,8 +2831,48 @@ export class SquadManager extends EventEmitter {
 	 */
 	private takeScoutReasoning(rec: AgentRecord): string {
 		const { text, cursor } = unscannedReasoning(rec.transcript, this.scoutCursor.get(rec.dto.id) ?? 0);
-		if (text) this.scoutCursor.set(rec.dto.id, cursor);
+		if (text) {
+			this.scoutCursor.set(rec.dto.id, cursor);
+			writeScoutCursors(this.stateDir, this.scoutCursor);
+		}
 		return text;
+	}
+
+	/** Pending ack waiters keyed by cmdId (resolved by the bus onAck listener; timed out by the caller). */
+	private readonly ackWaiters = new Map<string, (ack: CommandAck) => void>();
+
+	/**
+	 * Steer a federation PEER's agent — the outbound half of the remote-command path.
+	 * Only a local operator/admin may send (a viewer or remote actor is refused before the
+	 * frame leaves this host); the RECEIVING manager still authorizes independently via its
+	 * whois-verified actor + RBAC, so sending grants nothing. `to` is required: an
+	 * unaddressed broadcast command would execute on every peer that ran it as viewer-plus.
+	 * Returns the correlation id; pair with `waitForAck` for the peer's outcome.
+	 */
+	sendFederationCommand(to: string, cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): string {
+		if (!to.trim()) throw new Error("sendFederationCommand: target operator id required");
+		if (!roleAtLeast(effectiveRole(actor), "operator")) throw new RbacDenied("operator", effectiveRole(actor), "federation command send");
+		const cmdId = this.bus.sendCommand(cmd, to);
+		void this.recordAudit(actor, "federation.command", to, "ok", `${cmd.type} → ${to}`);
+		return cmdId;
+	}
+
+	/**
+	 * Wait briefly for the peer's ack to a sent command. `null` after `timeoutMs` — the send
+	 * is fire-and-forget underneath; an absent ack means "peer offline / older version", not failure.
+	 */
+	waitForAck(cmdId: string, timeoutMs = 4000): Promise<CommandAck | null> {
+		if (!cmdId) return Promise.resolve(null);
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				this.ackWaiters.delete(cmdId);
+				resolve(null);
+			}, timeoutMs);
+			this.ackWaiters.set(cmdId, (ack) => {
+				clearTimeout(timer);
+				resolve(ack);
+			});
+		});
 	}
 
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
@@ -3582,87 +3512,5 @@ function normalizeCommands(raw: unknown): CommandInfo[] {
 	return out;
 }
 
-/**
- * Resolve a `--workflow` spec to a graph file: an existing path is used as-is;
- * otherwise a bare name resolves to a bundled graph (`<pkg>/workflows/<name>/workflow.fabro`),
- * making `--workflow research-plan-implement` (and plan-implement / fan-out) first-class.
- */
-export function resolveWorkflowPath(spec: string): string {
-	if (existsSync(spec)) return spec;
-	const bundledDir = path.join(import.meta.dir, "..", "workflows", spec, "workflow.fabro");
-	if (existsSync(bundledDir)) return bundledDir;
-	const bundledFile = path.join(import.meta.dir, "..", "workflows", spec.endsWith(".fabro") ? spec : `${spec}.fabro`);
-	if (existsSync(bundledFile)) return bundledFile;
-	return spec;
-}
-
-/** Filesystem-safe slug for a capability binding key (`cap:slug:id`) used as a workflow filename. */
-function slugifyForFile(value: string): string {
-	return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "capability-workflow";
-}
-
-/**
- * Render a capability WorkflowDefinition (inline step graph) into a DOT/`.fabro` source the WorkflowEngine
- * can run. The capability dialect (steps with id/label/owner/next) has no explicit entry/exit, so we
- * synthesize a single `start` (Mdiamond) and single `exit` (Msquare):
- *   - start → every step with no inbound edge (graph roots),
- *   - each step → its declared `next` steps,
- *   - every leaf step (no outbound `next`) → exit.
- * Each step becomes an agent node whose prompt is its label + owner, so the engine executes a real turn.
- * Step ids are sanitized to valid DOT identifiers with a stable id↔dotId map so edges stay consistent.
- */
-export function capabilityWorkflowToDot(def: WorkflowDefinition): string {
-	const steps = def.steps;
-	const dotIds = new Map<string, string>();
-	const used = new Set<string>(["start", "exit"]);
-	for (const step of steps) {
-		let base = step.id.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, "");
-		if (!base) base = "step";
-		let id = base;
-		let n = 1;
-		while (used.has(id)) id = `${base}_${n++}`;
-		used.add(id);
-		dotIds.set(step.id, id);
-	}
-	const inbound = new Set<string>();
-	for (const step of steps) for (const nxt of step.next) if (dotIds.has(nxt)) inbound.add(nxt);
-	const roots = steps.filter((step) => !inbound.has(step.id));
-	const leaves = steps.filter((step) => step.next.filter((nxt) => dotIds.has(nxt)).length === 0);
-
-	const lines: string[] = [`digraph ${slugifyForFile(def.id).replace(/[^A-Za-z0-9_]/g, "_") || "capability"} {`];
-	lines.push(`  goal = ${dotString(def.label || def.id)};`);
-	lines.push(`  start [shape=Mdiamond, label="Start"];`);
-	lines.push(`  exit [shape=Msquare, label="Exit"];`);
-	for (const step of steps) {
-		const id = dotIds.get(step.id)!;
-		const owner = step.owner ? ` (owner: ${step.owner})` : "";
-		const prompt = `${step.label}${owner}. Complete this step toward the goal, then stop.`;
-		lines.push(`  ${id} [shape=box, label=${dotString(step.label)}, prompt=${dotString(prompt)}];`);
-	}
-	for (const root of roots.length ? roots : steps.slice(0, 1)) lines.push(`  start -> ${dotIds.get(root.id)};`);
-	for (const step of steps) {
-		for (const nxt of step.next) {
-			const to = dotIds.get(nxt);
-			if (to) lines.push(`  ${dotIds.get(step.id)} -> ${to};`);
-		}
-	}
-	for (const leaf of leaves.length ? leaves : steps.slice(-1)) lines.push(`  ${dotIds.get(leaf.id)} -> exit;`);
-	lines.push("}");
-	return lines.join("\n");
-}
-
-/** Quote a DOT attribute value, escaping `"` and `\` so multi-word labels/prompts parse cleanly. */
-function dotString(value: string): string {
-	return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-let commissionWorkflow: Workflow | undefined;
-
-/** Parse (once) the bundled commission graph that drives author → validate → onboard. */
-async function loadCommissionWorkflow(): Promise<Workflow> {
-	if (!commissionWorkflow) {
-		const file = path.join(import.meta.dir, "..", "workflows", "commission", "workflow.fabro");
-		commissionWorkflow = parseWorkflow(await fs.readFile(file, "utf8"));
-	}
-	return commissionWorkflow;
-}
+// Workflow graph sources (resolveWorkflowPath / capabilityWorkflowToDot / loadCommissionWorkflow)
+// live in ./workflow-source.ts; the re-export keeps the public import path stable.

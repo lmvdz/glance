@@ -96,7 +96,27 @@ test("proofGate: dirty same-commit tree invalidates a previously passing proof",
 
 	await fs.writeFile(path.join(wt, "f.txt"), "changed but uncommitted\n");
 	expect(await headCommit(wt)).toBe((await proofFor(repo, wt))?.commit);
-	expect(await proofGate(repo, wt, "dirty-feat")).toMatch(/uncommitted tracked changes/);
+	expect(await proofGate(repo, wt, "dirty-feat")).toMatch(/uncommitted changes/);
+});
+
+test("proofGate: an UNTRACKED file created after the proof blocks the land (commitWip would sweep it untested)", async () => {
+	const repo = await baseRepo();
+	const wt = await branchWorktree(repo, "untracked-feat", "f.txt");
+	await runProof({ repo, worktree: wt, command: "true" });
+	expect(await proofGate(repo, wt, "untracked-feat")).toBeUndefined();
+
+	await fs.writeFile(path.join(wt, "brand-new.txt"), "never verified\n");
+	expect(await proofGate(repo, wt, "untracked-feat")).toMatch(/uncommitted changes/);
+});
+
+test("proofGate: the daemon's own .omp/ evidence dir never dirties the fingerprint", async () => {
+	const repo = await baseRepo();
+	const wt = await branchWorktree(repo, "evidence-feat", "f.txt");
+	await runProof({ repo, worktree: wt, command: "true" });
+
+	await fs.mkdir(path.join(wt, ".omp", "proof"), { recursive: true });
+	await fs.writeFile(path.join(wt, ".omp", "proof", "shot.png"), "png\n");
+	expect(await proofGate(repo, wt, "evidence-feat")).toBeUndefined();
 });
 
 test("runProof refuses to record a passing proof for a dirty worktree", async () => {
@@ -106,7 +126,7 @@ test("runProof refuses to record a passing proof for a dirty worktree", async ()
 	const proof = await runProof({ repo, worktree: wt, command: "true" });
 	expect(proof.ok).toBe(false);
 	expect(proof.dirty).toBe(true);
-	expect(proof.detail).toContain("uncommitted tracked changes");
+	expect(proof.detail).toContain("uncommitted changes");
 });
 
 test("proofGate: in-place agents (worktree === repo, or no branch) need no proof", async () => {

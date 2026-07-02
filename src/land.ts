@@ -11,6 +11,7 @@
  */
 
 import { detectVerify } from "./intake.ts";
+import { gateExec } from "./gate-runner.ts";
 import { proofGate } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
@@ -125,7 +126,9 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 
 /** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output. */
 async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
-	const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe" });
+	// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
+	const plan = gateExec(cmd, cwd);
+	const proc = Bun.spawn(plan.argv, { cwd, stdout: "pipe", stderr: "pipe", env: plan.env });
 	const timer = setTimeout(() => proc.kill(), timeoutMs);
 	try {
 		const [stdout, stderr, code] = await Promise.all([
@@ -254,11 +257,14 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe
 	// (agent idle/stopped). For a LIVE agent (working/starting/input) commitWip is false: we merge
 	// only its committed history and never touch its in-progress edits.
+	// `.omp/` is excluded from the sweep on both sides: it's the daemon's own evidence dir
+	// (vision screenshots, proof artifacts) — sweeping it committed screenshots into main AND,
+	// because the proof fingerprint also ignores `.omp/`, would land content the gate never saw.
 	let committed = false;
 	if (commitWip) {
-		const status = await git(["status", "--porcelain"], worktree);
+		const status = await git(["status", "--porcelain", "--", ".", ":(exclude).omp"], worktree);
 		if (status.code === 0 && status.stdout.length > 0) {
-			const add = await git(["add", "-A"], worktree);
+			const add = await git(["add", "-A", "--", ".", ":(exclude).omp"], worktree);
 			if (add.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git add failed: ${add.stderr}` };
 			const commit = await git(["commit", "-m", message], worktree);
 			if (commit.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git commit failed: ${commit.stderr || commit.stdout}` };
