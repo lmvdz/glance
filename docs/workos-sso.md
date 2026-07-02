@@ -52,28 +52,29 @@ more IdPs later — you connect them in the WorkOS dashboard.
 
 ## What's implemented vs. deferred
 
-**Implemented and verified locally:**
-- SSO sign-in via AuthKit OIDC (better-auth mints the session). New SSO users land as `viewer` (no org)
-  until mapped — the same safe default as any new user.
+**Implemented and verified against a live WorkOS tenant:**
+- SSO sign-in via AuthKit OIDC. WorkOS exposes no userinfo endpoint and its access-token JWT omits email,
+  so `workosUserInfo` (src/workos.ts) decodes the token for `sub`/`org_id`/`role` and fetches email/name
+  from the WorkOS User API; better-auth then mints the session.
+- **JIT org mapping** (src/workos-provision.ts + `POST /api/workos/sync`). On first login the SPA reconciles
+  the user's WorkOS Organization memberships → better-auth orgs + members (the WorkOS org id IS the
+  better-auth org id; `workosOrgId` also stored in metadata), maps the WorkOS role (admin/owner→admin, else
+  member), and sets `session.activeOrganizationId`. The user lands in their tenant with the bridged RBAC
+  tier + Postgres RLS `org_id`. Idempotent; runs on every login. Bypasses `allowUserToCreateOrganization`
+  by design (that guards user self-minting, not IdP provisioning). Verified: WorkOS "Test Organization" +
+  admin membership → better-auth org + admin member + active org.
 - The `/api/auth/mode` `sso` advertisement + the login button.
 - The Directory Sync webhook **ingress + HMAC signature verification** (valid → 200; tampered / stale /
   unsigned → rejected). See `tests/workos.test.ts`.
 
-**Deferred (needs a live WorkOS directory to finalize) — the provisioning seam:**
-The webhook currently verifies and logs each `dsync.*` event. Turning those events into DB writes is the
-next step, and is deliberately not shipped untested:
+**Deferred — SCIM (Directory Sync) provisioning:**
+The webhook currently verifies and logs each `dsync.*` event; turning them into DB writes is the remaining
+piece and needs a live connected directory (SCIM) to validate end to end:
 
-- **Org auto-mapping / JIT.** Map a WorkOS Organization → a local better-auth organization (create-if-missing,
-  persist the WorkOS org id on org metadata), so an SSO user is placed into the right tenant on first login.
-  Whether the WorkOS org id arrives as an OIDC claim on the sign-in profile (path a) or must be fetched via
-  the WorkOS SDK `authenticateWithCode` (path b, `@workos-inc/node`) is the open decision — confirm against a
-  live AuthKit OIDC claim set.
-- **SCIM reconcile.** `dsync.user.created/updated/deleted` and `dsync.group.user_added/removed` →
-  create/deactivate better-auth users and add/remove org memberships (with role mapping).
-
-The seam is: `src/server.ts` `/api/workos/webhook` (verified event in hand) → a provisioning module that
-calls better-auth's org/admin APIs. Wire it once a WorkOS account + connected directory exist so it can be
-validated end to end.
+- `dsync.user.created/updated/deleted` and `dsync.group.user_added/removed` → create/deactivate better-auth
+  users and add/remove org memberships. The org/member write path already exists (`reconcileWorkosOrgs` in
+  src/workos-provision.ts) — SCIM handlers reuse it, keyed by the WorkOS org id. Wire once an enterprise
+  IdP directory is connected in WorkOS.
 
 ## Cost (verify — WorkOS pricing changes)
 
