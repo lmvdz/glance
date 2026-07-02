@@ -23,8 +23,10 @@
   html, body { margin: 0; padding: 0; }
   body { background: var(--ground); color: var(--ink-hi); font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow: hidden; }
 
-  /* no masthead — the graph is the page; context lives in one micro-line inside it */
-  .stage { position: relative; padding: 6px 14px 4px; height: 100vh; }
+  /* no masthead — the graph is the page; context lives in one micro-line inside it.
+     The app is a split: canvas + a right pane that takes 30% when something is open. */
+  .app { display: flex; height: 100vh; width: 100%; overflow: hidden; }
+  .stage { position: relative; padding: 6px 14px 4px; flex: 1 1 auto; min-width: 0; }
   .stage svg { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   .stage svg.dragging { cursor: grabbing; }
   text { font-family: var(--mono); user-select: none; -webkit-user-select: none; }
@@ -52,16 +54,15 @@
   .readout .row .val { color: var(--ink-hi); }
   .readout .row .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; }
 
-  /* the drill drawer — click a milestone or shipped ticket and dig */
+  /* the inspector — a true SPLIT PANE, not an overlay: the canvas yields the right
+     30% and reflows, so nothing is ever hidden behind the details you're reading */
   .detail {
-    position: absolute; top: 34px; right: 14px; bottom: 34px; z-index: 7; width: 420px;
-    background: rgba(10, 11, 15, 0.97); border: 1px solid var(--hairline-2); border-radius: 8px;
-    box-shadow: 0 14px 50px rgba(0,0,0,0.65);
-    display: flex; flex-direction: column; overflow: hidden;
-    opacity: 0; transform: translateX(16px); pointer-events: none; visibility: hidden;
-    transition: opacity 180ms cubic-bezier(0,0,0.2,1), transform 180ms cubic-bezier(0,0,0.2,1), visibility 0s 180ms;
+    flex: 0 0 0px; width: 0; min-width: 0; overflow: hidden;
+    border-left: 1px solid var(--hairline-2); background: #0B0C10;
+    display: flex; flex-direction: column;
+    transition: flex-basis 200ms cubic-bezier(0,0,0.2,1), min-width 200ms cubic-bezier(0,0,0.2,1);
   }
-  .detail.open { opacity: 1; transform: none; pointer-events: auto; visibility: visible; transition: opacity 180ms cubic-bezier(0,0,0.2,1), transform 180ms cubic-bezier(0,0,0.2,1); }
+  .detail.open { flex-basis: 30%; min-width: 380px; }
   .detail .dhead { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--hairline); flex-shrink: 0; }
   .detail .kind-chip { font: 600 9px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ember); border: 1px solid rgba(242,145,61,0.35); border-radius: 3px; padding: 2px 6px; flex-shrink: 0; }
   .detail .dhead .when { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-low); font-variant-numeric: tabular-nums; }
@@ -109,17 +110,19 @@
   @media (prefers-reduced-motion: reduce) { .now-dot { animation: none; } * { transition-duration: 0ms !important; } }
 </style>
 
-<div class="stage" id="stage">
-  <svg id="chart" role="img" aria-label="One week of fleet activity: milestones and the cost-and-commits pulse above the day spine; agent runs, shipped tickets, and automation below. Scroll to zoom, drag to pan."></svg>
-  <div class="readout" id="readout" hidden></div>
-  <div class="detail" id="detail" role="dialog" aria-label="Inspector" aria-live="polite">
+<div class="app" id="app">
+  <div class="stage" id="stage">
+    <svg id="chart" role="img" aria-label="One week of fleet activity: milestones and the cost-and-commits pulse above the day spine; agent runs, shipped tickets, failures, and automation below. Scroll to zoom, drag to pan."></svg>
+    <div class="readout" id="readout" hidden></div>
+  </div>
+  <aside class="detail" id="detail" role="complementary" aria-label="Inspector" aria-live="polite">
     <div class="dhead">
       <span class="kind-chip" id="d-kind">LAND</span>
       <span class="when" id="d-when">—</span>
       <button type="button" class="xbtn" id="d-close" aria-label="Close inspector">✕</button>
     </div>
     <div class="dbody" id="d-body"></div>
-  </div>
+  </aside>
 </div>
 
 <script>
@@ -140,7 +143,7 @@
     { name: 'THURSDAY', date: '02 JUL', caption: 'today · fixtures green' },
   ];
   const N_DAYS = DAYS.length, HOURS = N_DAYS * 24;
-  const NOW_H = 7 * 24 + 13.4;
+  let NOW_H = 7 * 24 + 13.4; // advances live — every draw site gates on it at render time
 
   const bursts = [
     [14.5, 2.5, 6], [23, 2, 4], [35, 2, 3],
@@ -149,17 +152,19 @@
     [112.5, 1.5, 5], [116.5, 3.5, 9], [121.5, 2.5, 6],
     [138.5, 1, 2],
     [153.5, 2, 4], [158.5, 2.5, 6], [168.2, 1.5, 5],
-    [178, 2.5, 5], [181, 1.5, 3],
+    [178, 2.5, 5], [181, 1.5, 3], [184.5, 2, 5], [189, 2, 4],
   ];
   const at = (h, arr) => arr.reduce((s, [c, w, ht]) => s + ht * Math.exp(-((h - c) ** 2) / (2 * w * w)), 0);
 
+  // data exists for the FULL range; what's "happened" is decided at draw time by
+  // NOW_H, so the live edge can advance into precomputed territory
   const commits = [], cost = [], churn = [], stateBand = [];
   for (let h = 0; h < HOURS; h++) {
     const base = at(h + 0.5, bursts);
-    commits.push(h < NOW_H ? Math.round(Math.max(0, base * 0.8 + (rnd() - 0.75) * 1.2)) : 0);
-    cost.push(h < NOW_H ? Math.max(0, base * 1.15 + rnd() * 0.5 - 0.2) : 0);
-    churn.push(h < NOW_H ? Math.max(0, base * 0.9 + rnd() * 1.4 - 0.4) : 0);
-    stateBand.push(h >= NOW_H ? 'future' : base > 0.9 ? 'active' : 'idle');
+    commits.push(Math.round(Math.max(0, base * 0.8 + (rnd() - 0.75) * 1.2)));
+    cost.push(Math.max(0, base * 1.15 + rnd() * 0.5 - 0.2));
+    churn.push(Math.max(0, base * 0.9 + rnd() * 1.4 - 0.4));
+    stateBand.push(base > 0.9 ? 'active' : 'idle');
   }
 
   // ── cost attribution is a HIERARCHY, not two dimensions: every run is
@@ -202,17 +207,22 @@
       cum.push(acc);
     }
   }
-  const modelTotal = { fable: 0, sonnet: 0, haiku: 0 };
-  for (const mc of modelCost) for (const k of MODEL_LIST) modelTotal[k] += mc[k];
-  const harnessTotal = { omp: 0, codex: 0, 'claude-code': 0, hermes: 0 };
-  for (const hc of harnessCost) for (const k of HARNESS_LIST) harnessTotal[k] += hc[k];
-  const cumTotal = cum[HOURS - 1] || 1;
-
-  // subscription-worth: everything above is API-EQUIVALENT pricing; if the spend
-  // actually rides a subscription, the ratio says whether the plan pays for itself
+  // totals are refreshed per draw, gated to NOW — the live edge moves them
   const PLAN = { name: 'claude max 20×', monthly: 200 };
   const planWeekly = PLAN.monthly * 12 / 52;
-  const planWorth = cumTotal / planWeekly;
+  let modelTotal, harnessTotal, cumTotal = 1, planWorth = 0;
+  function refreshTotals() {
+    modelTotal = { fable: 0, sonnet: 0, haiku: 0 };
+    harnessTotal = { omp: 0, codex: 0, 'claude-code': 0, hermes: 0 };
+    const upto = Math.min(HOURS, Math.ceil(NOW_H));
+    for (let h = 0; h < upto; h++) {
+      for (const k of MODEL_LIST) modelTotal[k] += modelCost[h][k];
+      for (const k of HARNESS_LIST) harnessTotal[k] += harnessCost[h][k];
+    }
+    cumTotal = cum[upto - 1] || 1;
+    planWorth = cumTotal / planWeekly;
+  }
+  refreshTotals();
 
   const sessions = [];
   for (const [c, w, ht] of bursts) {
@@ -276,6 +286,14 @@
     // the needs-you items ride the same pipeline — they're outcomes-in-waiting
     { h: 179.4, kind: 'BLOCKED', label: 'vpb-03 · needs answer: overwrite legacy shell?', big: true },
     { h: 181.2, kind: 'READY', label: 'vpb-02-wireframe · proof green, awaiting land', big: true },
+    // scar tissue — the factory's failures are data, not shame
+    { h: 66.4, kind: 'GATEFAIL', label: 'payments · sandbox gate: network blocked' },
+    { h: 117.9, kind: 'GATEFAIL', label: 'vpb-08 · verify red ×2 → fixed in 40m' },
+    { h: 96.2, kind: 'CATA', label: 'agent died mid-run · daemon restarted' },
+    // scheduled work ghosts right of NOW — the future is not a void
+    { h: 186.2, kind: 'PLANNED', label: 'queued: vpb-05-tokens' },
+    { h: 189.5, kind: 'PLANNED', label: 'queued: federation send-side' },
+    { h: 187.6, kind: 'MEETING', label: 'standup · 19:30' },
   ].sort((a, b) => a.h - b.h);
   const autoTicks = [];
   for (let h = 2; h < NOW_H; h += 2.6 + rnd() * 2.4) autoTicks.push(h);
@@ -284,6 +302,8 @@
     LAND: '#F2913D', FEAT: '#E8B24A', DOCS: '#8A8F9B', OTHER: '#6B7280',
     DONE: '#4CAF7A', SCOUT: '#4E7FDB', OBSERVER: '#5FA8D3', DISPATCH: '#7B9FE0',
     COST: '#C9B79A', BLOCKED: '#E5484D', READY: '#F2913D', NEEDS: '#E5484D',
+    GATEFAIL: '#E5484D', CATA: '#B3283C', PLANNED: '#565C68', MEETING: '#2FB6D6',
+    RUN: '#4E7FDB', HOUR: '#F2913D',
   };
   const sessCol = { working: '#4E7FDB', stopped: '#565C68', error: '#E5484D', blocked: '#E5484D' };
 
@@ -329,6 +349,7 @@
     W = Math.max(900, stage.clientWidth - 28);
     svg.innerHTML = '';
     railHits = []; aboveHits = []; belowHits = [];
+    refreshTotals(); // the live edge moves the legends, the plan chip, the dossier line
     const plotW = W - PAD_L - PAD_R;
     const span = view.end - view.start;
     x = h => PAD_L + ((h - view.start) / span) * plotW;
@@ -354,8 +375,9 @@
     // the dossier line — all the context the deleted masthead used to carry,
     // computed from the same data the graph draws so the numbers always agree
     txt(PAD_L, TOPLINE, 'OMP-SQUAD · FLEET ACTIVITY · 25 JUN — 02 JUL 2026', 'footer-line', { fill: 'var(--ink-low)' });
-    const totCommits = commits.reduce((a, b) => a + b, 0);
-    const totChurn = Math.round(churn.reduce((a, b) => a + b, 0) * 400 / 1000);
+    const upto = Math.min(HOURS, Math.ceil(NOW_H));
+    const totCommits = commits.slice(0, upto).reduce((a, b) => a + b, 0);
+    const totChurn = Math.round(churn.slice(0, upto).reduce((a, b) => a + b, 0) * 400 / 1000);
     txt(W - PAD_R, TOPLINE, `${totCommits} COMMITS · ${totChurn}K CHURNED · $${Math.round(cumTotal)} SPEND · ${sessions.length} RUNS · ${below.filter(e => e.kind === 'DONE').length + 13} SHIPPED`, 'footer-line', { 'text-anchor': 'end', fill: 'var(--ink-low)' });
 
     const zone = (y, s) => txt(12, y, s, 'zone-label', { transform: `rotate(-90 12 ${y})`, 'text-anchor': 'middle' });
@@ -419,16 +441,22 @@
       let yy = RAIL + 22;
       el('line', { x1: x(ms[0].h), y1: RAIL + 4, x2: x(ms[0].h), y2: yy - 9, stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
       txt(x0 + 8, yy - 11, `${ms.length}× ${hhmm(ms[0].h)}–${hhmm(ms[ms.length - 1].h)}`, 'mark-time', {}, g);
-      for (const m of ms) {
-        const t = el('text', { x: x0 + 8, y: yy, class: 'mark-label', cursor: 'pointer' }, g);
-        const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[m.kind]; k.style.fontWeight = '600'; k.textContent = m.kind + ' ';
-        const b = document.createElementNS(NS, 'tspan'); b.textContent = trim(m.label, 19);
-        t.appendChild(k); t.appendChild(b);
-        t.addEventListener('click', () => openDetail(m));
-        // hit-test against the RENDERED width, not a guess — hovering past the
-        // end of a short label must read as empty air
-        aboveHits.push({ m, lx: x0 + 8, y: yy, w: t.getComputedTextLength() });
-        yy += 13;
+      // the label budget follows the day's rendered width — narrow days keep
+      // the marks + cluster header and drop the text before it can collide
+      const dayW = x(d * 24 + 24) - x(d * 24);
+      const chars = Math.floor((dayW - 20) / 5.7);
+      if (chars >= 12) {
+        for (const m of ms) {
+          const t = el('text', { x: x0 + 8, y: yy, class: 'mark-label', cursor: 'pointer' }, g);
+          const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[m.kind]; k.style.fontWeight = '600'; k.textContent = m.kind + ' ';
+          const b = document.createElementNS(NS, 'tspan'); b.textContent = trim(m.label, Math.max(6, chars - m.kind.length - 1));
+          t.appendChild(k); t.appendChild(b);
+          t.addEventListener('click', () => openDetail(m));
+          // hit-test against the RENDERED width, not a guess — hovering past the
+          // end of a short label must read as empty air
+          aboveHits.push({ m, lx: x0 + 8, y: yy, w: t.getComputedTextLength() });
+          yy += 13;
+        }
       }
     }
   }
@@ -454,10 +482,14 @@
     // commit bars from the shared baseline (magma ramp + glow)
     const bw = Math.max(1.6, plotW / (view.end - view.start) - 1.2);
     for (let h = h0; h < h1; h++) {
-      if (!commits[h] || !vis(h)) continue;
+      if (h >= NOW_H || !commits[h] || !vis(h)) continue;
       const t = commits[h] / maxC;
       const bh = 4 + t * (BAR_MAX - 4);
       el('rect', { x: x(h) + 0.5, y: PULSE_BASE - bh, width: bw, height: bh, fill: heatColor(t), opacity: 0.92, ...(t > 0.6 ? { filter: 'url(#heatglow)' } : {}) }, g);
+    }
+    // idle burn made visible: spend with zero output gets a red underline scar
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) {
+      if (cost[h] > 0.5 && commits[h] === 0) el('rect', { x: x(h), y: PULSE_BASE + 3, width: Math.max(1.6, plotW / (view.end - view.start)), height: 2.5, fill: 'var(--alert)', opacity: 0.5 }, g);
     }
 
     // cost line + stipple over the top — the heartbeat rides above the bars
@@ -558,9 +590,9 @@
     for (let h = 1; h <= HOURS; h++) {
       if (h === HOURS || stateBand[h] !== stateBand[run]) {
         const s = stateBand[run];
-        if (s !== 'future' && h >= view.start && run <= view.end) {
+        if (run < NOW_H && h >= view.start && run <= view.end) {
           const thick = s === 'active';
-          const rx0 = Math.max(x(run), PAD_L), rx1 = Math.min(x(h), W - PAD_R);
+          const rx0 = Math.max(x(run), PAD_L), rx1 = Math.min(x(Math.min(h, NOW_H)), W - PAD_R);
           if (rx1 > rx0) el('rect', { x: rx0, y: SPINE - (thick ? 5 : 1.5), width: rx1 - rx0, height: thick ? 10 : 3, fill: thick ? 'var(--ember)' : 'var(--ember-deep)', opacity: thick ? 0.9 : 0.5, rx: 1.5 }, g);
         }
         run = h;
@@ -574,7 +606,9 @@
       const x0 = Math.max(x(d * 24), PAD_L);
       const dn = el('text', { x: x0 + 8, y: SPINE + 25, class: 'day-name' }, g);
       const n1 = document.createElementNS(NS, 'tspan'); n1.textContent = DAYS[d].name; dn.appendChild(n1);
-      const n2 = document.createElementNS(NS, 'tspan'); n2.setAttribute('class', 'day-date'); n2.setAttribute('dx', 10); n2.textContent = DAYS[d].date; dn.appendChild(n2);
+      if (x(d * 24 + 24) - x(d * 24) > 138) {
+        const n2 = document.createElementNS(NS, 'tspan'); n2.setAttribute('class', 'day-date'); n2.setAttribute('dx', 10); n2.textContent = DAYS[d].date; dn.appendChild(n2);
+      }
       // the editorial caption rides the spine too — appended, MEASURED, and dropped
       // if the full line would spill into the next day's name
       const n3 = document.createElementNS(NS, 'tspan');
@@ -604,11 +638,14 @@
       const y = SESS_TOP + s.row * 9;
       const rx0 = Math.max(x(s.t0), PAD_L), rx1 = Math.min(x(s.t1), W - PAD_R);
       if (rx1 <= rx0) continue;
-      el('rect', {
+      const pill = el('rect', {
         x: rx0, y, width: Math.max(2, rx1 - rx0), height: 5, rx: 2.5,
         fill: sessCol[s.status], opacity: s.status === 'working' ? 0.85 : 0.7,
+        cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `Agent run, ${s.status}, ${(s.t1 - s.t0).toFixed(1)} hours`,
         ...(s.status === 'blocked' ? { class: 'now-dot', filter: 'url(#heatglow)' } : {}),
       }, g);
+      pill.addEventListener('click', () => openDetail({ kind: 'RUN', h: s.t0, s }));
+      pill.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openDetail({ kind: 'RUN', h: s.t0, s }); } });
     }
     txt(PAD_L + 6, SESS_TOP - 8, `${sessions.length} runs · packed`, 'annot', {}, g);
     for (const h of autoTicks) {
@@ -628,6 +665,8 @@
     const rowEnds = []; // per row, the x where that row's last label ends
     for (const e of packOrder) {
       if (!vis(e.h, 4)) continue;
+      // ghosts are only ghosts while they're still in the future
+      if ((e.kind === 'PLANNED' || e.kind === 'MEETING') && e.h <= NOW_H) continue;
       const cx = x(e.h);
       const anchorEnd = cx > W - 220;
       const lx0 = anchorEnd ? cx - LABEL_W : cx, lx1 = anchorEnd ? cx : cx + LABEL_W;
@@ -641,7 +680,15 @@
       if (e.kind === 'DONE') el('rect', { x: cx - 3, y: depth - 17, width: 6, height: 6, transform: `rotate(45 ${cx} ${depth - 14})`, fill: kindCol[e.kind], ...(e.big ? { filter: 'url(#heatglow)' } : {}) }, mk);
       else if (e.kind === 'READY') el('rect', { x: cx - 3.5, y: depth - 17.5, width: 7, height: 7, transform: `rotate(45 ${cx} ${depth - 14})`, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.5, class: 'now-dot', filter: 'url(#heatglow)' }, mk);
       else if (e.kind === 'BLOCKED') el('circle', { cx, cy: depth - 14, r: 3.5, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.5, class: 'now-dot', filter: 'url(#heatglow)' }, mk);
-      else el('circle', { cx, cy: depth - 14, r: e.big ? 3.2 : 2.4, fill: kindCol[e.kind] }, mk);
+      else if (e.kind === 'GATEFAIL' || e.kind === 'CATA') {
+        // scar marks: an X you can't mistake for a success diamond
+        const r2 = e.kind === 'CATA' ? 4 : 3;
+        el('line', { x1: cx - r2, y1: depth - 14 - r2, x2: cx + r2, y2: depth - 14 + r2, stroke: kindCol[e.kind], 'stroke-width': 1.6 }, mk);
+        el('line', { x1: cx - r2, y1: depth - 14 + r2, x2: cx + r2, y2: depth - 14 - r2, stroke: kindCol[e.kind], 'stroke-width': 1.6 }, mk);
+      } else if (e.kind === 'PLANNED' || e.kind === 'MEETING') {
+        // ghosts: scheduled, not yet real — dashed and hollow in the future's dimness
+        el('circle', { cx, cy: depth - 14, r: 3.2, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.2, 'stroke-dasharray': '2 2' }, mk);
+      } else el('circle', { cx, cy: depth - 14, r: e.big ? 3.2 : 2.4, fill: kindCol[e.kind] }, mk);
       const t = el('text', { x: anchorEnd ? cx - 7 : cx + 7, y: depth - 11, class: 'mark-label', ...(anchorEnd ? { 'text-anchor': 'end' } : {}) }, mk);
       const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[e.kind]; k.style.fontWeight = '600'; k.textContent = e.kind + ' · ' + hhmm(e.h) + ' ';
       t.appendChild(k);
@@ -689,15 +736,28 @@
     view.start = start; view.end = start + span;
     schedule();
   });
-  let suppressClick = false;
+  let suppressClick = false, wasPan = false;
   const endDrag = ev => {
-    if (drag && drag.moved) suppressClick = true; // a pan is not a click
+    wasPan = !!(drag && drag.moved);
+    if (wasPan) suppressClick = true; // a pan is not a click
     if (drag && ev && svg.hasPointerCapture && svg.hasPointerCapture(ev.pointerId)) svg.releasePointerCapture(ev.pointerId);
     drag = null; svg.classList.remove('dragging');
   };
   svg.addEventListener('pointerup', endDrag);
   svg.addEventListener('pointercancel', endDrag);
   svg.addEventListener('click', ev => { if (suppressClick) { ev.stopPropagation(); suppressClick = false; } }, true);
+
+  // clicking the pulse itself inspects that HOUR — the fused instrument has detail too
+  svg.addEventListener('click', ev => {
+    if (wasPan) { wasPan = false; return; }
+    if (ev.target.closest && ev.target.closest('[role="button"]')) return;
+    const u = toUser(ev);
+    if (u.x < PAD_L || u.x > W - PAD_R) return;
+    if (u.y < PULSE_TOP - 24 || u.y > PULSE_BASE + 6) return;
+    const span = view.end - view.start;
+    const h = Math.floor(view.start + ((u.x - PAD_L) / (W - PAD_L - PAD_R)) * span);
+    if (h >= 0 && h < NOW_H && (cost[h] > 0.05 || commits[h] > 0)) openDetail({ kind: 'HOUR', h });
+  });
 
   // ── zone-aware hover: x picks the instant, y picks the layer; empty air says
   //    nothing. The ruler tracks the CURSOR exactly (never snaps to bins) and
@@ -740,6 +800,7 @@
         const ly = PULSE_BASE - (cost[h] / pulseMax) * (PULSE_BASE - PULSE_TOP);
         hoverMark = ring(x(h + 0.5), ly, 4, '#FFE9C4'); // the dot rides the heartbeat
         html = `<div class="rt">${when(hf)}</div>` + row('cost', `$${cost[h].toFixed(1)}/hr`, '#F2913D');
+        if (commits[h] === 0 && cost[h] > 0.5) html += row('idle burn', 'zero output', '#E5484D');
         // the hierarchy, not two flat lists: harness → model pairs, biggest first
         const pairs = [];
         for (const hn of HARNESS_LIST) for (const mn of MODEL_LIST) {
@@ -924,6 +985,76 @@
       <div class="meta" style="color:var(--ink-low)">this is the Attention queue rendered in place: answer and land actions POST to the daemon, and the marks leave the canvas the moment the fleet unblocks.</div>`;
   }
 
+  function runBody(s) {
+    const hn = HARNESS_LIST.reduce((b, k) => harnessCost[Math.floor(s.t0)][k] > harnessCost[Math.floor(s.t0)][b] ? k : b, 'omp');
+    const mn = MODEL_LIST.reduce((b, k) => (HARNESS_MIX[hn][k] > HARNESS_MIX[hn][b] ? k : b), 'sonnet');
+    const dur = s.t1 - s.t0;
+    const blockedQ = s.status === 'blocked'
+      ? `<div class="sect">Waiting on you</div>
+         <div class="step"><span class="sdot now-dot" style="background:#E5484D"></span><span style="flex:1">
+           <div class="sv">“the legacy shell conflicts with the new canvas mount — overwrite it or keep both behind the flag?”</div>
+           <div class="actions" style="margin-top:8px"><button type="button">Answer: overwrite</button><button type="button">Answer: keep both</button></div>
+         </span></div>` : '';
+    return `<div class="title2">Agent run · ${s.status}</div>
+      <div class="meta">started ${when(s.t0)} · ${dur.toFixed(1)}h${s.status === 'blocked' ? ' and counting' : ''} · <span class="sw" style="background:${HARNESS_COL[hn]}"></span>${hn} → <span class="sw" style="background:${MODEL_COL[mn]}"></span>${mn} · ~$${(dur * 1.9).toFixed(2)}</div>
+      ${blockedQ}
+      <div class="sect">What it touched</div>
+      <div class="dfile"><div class="dfhead"><span>src/squad-manager.ts</span><span class="stat"><b class="plus">+118</b> <b class="minus">−34</b></span></div></div>
+      <div class="dfile"><div class="dfhead"><span>webapp/src/omp-graph/GraphCanvas.tsx</span><span class="stat"><b class="plus">+236</b> <b class="minus">−41</b></span></div></div>
+      <div class="sect">Timeline</div>
+      <div class="step"><span class="sdot" style="background:#4E7FDB"></span><span><div class="sk">SPAWN</div><div class="ss">worktree created · plan concern loaded · cold-start primer</div></span></div>
+      <div class="step"><span class="sdot" style="background:#F2913D"></span><span><div class="sk">WORK</div><div class="ss">${Math.round(dur * 14)} tool calls · 2 verify rounds</div></span></div>
+      <div class="step"><span class="sdot" style="background:${sessCol[s.status]}"></span><span><div class="sk">${s.status.toUpperCase()}</div><div class="ss">${s.status === 'working' ? 'still running' : s.status === 'blocked' ? 'awaiting your answer' : s.status === 'error' ? 'died — see catastrophe log' : 'stopped clean'}</div></span></div>
+      <div class="actions"><button type="button">Open transcript</button><button type="button">View worktree diff</button></div>`;
+  }
+
+  function hourBody(h) {
+    const pairs = [];
+    for (const hn of HARNESS_LIST) for (const mn of MODEL_LIST) {
+      const v = spendMatrix[h][hn][mn];
+      if (v > 0.05) pairs.push({ hn, mn, v });
+    }
+    pairs.sort((a, b) => b.v - a.v);
+    const live = sessions.filter(s => s.t0 <= h + 1 && s.t1 >= h).length;
+    const idle = commits[h] === 0 && cost[h] > 0.5;
+    return `<div class="title2">The fleet at ${when(h)}</div>
+      <div class="meta">$${cost[h].toFixed(2)}/hr · ${commits[h]} commits · ~${Math.round(churn[h] * 400)} lines churned · ${live} runs live · fleet ${stateBand[h]}</div>
+      ${idle ? '<div class="meta" style="color:var(--alert)">⚠ idle burn — spend with zero output this hour</div>' : ''}
+      <div class="sect">Who was burning</div>
+      <table class="ctable" aria-label="Spend pairs this hour">
+        <tr><th>harness → model</th><th>$/hr</th></tr>
+        ${pairs.map(p => `<tr><td><span class="sw" style="background:${HARNESS_COL[p.hn]}"></span>${p.hn} → <span class="sw" style="background:${MODEL_COL[p.mn]}"></span>${p.mn}</td><td>$${p.v.toFixed(2)}</td></tr>`).join('') || '<tr><td class="dim" colspan="2">fleet asleep</td></tr>'}
+      </table>
+      <div class="sect">Position in the week</div>
+      <div class="meta">cumulative $${Math.round(cum[h])} of $${Math.round(cumTotal)} · ${Math.round((cum[h] / cumTotal) * 100)}% of the spend so far</div>
+      <div class="actions"><button type="button">Zoom to this hour</button><button type="button">Open usage log</button></div>`;
+  }
+
+  function failBody(e) {
+    const cata = e.kind === 'CATA';
+    return `<div class="title2">${esc(e.label)}</div>
+      <div class="meta">${cata ? 'catastrophe · daemon-level' : 'gate failure · unit-level'} · ${when(e.h)}</div>
+      <div class="sect">What happened</div>
+      <div class="meta" style="color:var(--ink-mid); line-height:1.7">${cata
+        ? 'The agent process died mid-run. The daemon restarted, the worktree survived, and the unit re-queued — no work was lost, but the run’s cost was sunk.'
+        : 'The proof gate rejected the land: the verify command exited non-zero inside the sandbox. The unit stayed on its branch; nothing touched main.'}</div>
+      <div class="sect">The trail</div>
+      <div class="step"><span class="sdot" style="background:${kindCol[e.kind]}"></span><span><div class="sk">${e.kind}</div><div class="ss">${cata ? 'catastrophe logged · audit trail intact' : 'receipt kept · fingerprint marked stale'}</div></span></div>
+      <div class="actions"><button type="button">${cata ? 'Open catastrophe log' : 'Open gate log'}</button><button type="button">${cata ? 'Inspect worktree' : 'Retry verify'}</button></div>
+      <div class="sect" style="margin-top:16px">Why this is on the canvas</div>
+      <div class="meta" style="color:var(--ink-low)">a factory instrument that hides scar tissue overstates health — failures are data.</div>`;
+  }
+
+  function ghostBody(e) {
+    return `<div class="title2">${esc(e.label)}</div>
+      <div class="meta">scheduled · ${when(e.h)} · ${e.kind === 'MEETING' ? 'google calendar' : 'dispatch queue'}</div>
+      <div class="sect">Not yet real</div>
+      <div class="meta" style="color:var(--ink-mid); line-height:1.7">${e.kind === 'MEETING'
+        ? 'From the calendar adapter — the fleet quiets around meetings, so the ghost tells you when not to expect throughput.'
+        : 'Queued by the dispatch loop. It becomes a live run the moment a slot frees; the ghost mark becomes a pill.'}</div>
+      <div class="actions">${e.kind === 'MEETING' ? '<button type="button">Open event</button>' : '<button type="button">Bump priority</button><button type="button">Unqueue</button>'}</div>`;
+  }
+
   function openDetail(m) {
     const chip = document.getElementById('d-kind');
     chip.textContent = m.kind;
@@ -934,6 +1065,10 @@
     document.getElementById('d-body').innerHTML =
       m.kind === 'COST' ? costBody() :
       m.kind === 'NEEDS' || m.kind === 'BLOCKED' || m.kind === 'READY' ? needsBody() :
+      m.kind === 'RUN' ? runBody(m.s) :
+      m.kind === 'HOUR' ? hourBody(m.h) :
+      m.kind === 'GATEFAIL' || m.kind === 'CATA' ? failBody(m) :
+      m.kind === 'PLANNED' || m.kind === 'MEETING' ? ghostBody(m) :
       m.kind === 'DONE' ? ticketBody(m) : (m.kind === 'SCOUT' || m.kind === 'OBSERVER' || m.kind === 'DISPATCH') ? loopBody(m) : commitBody(m);
     detail.classList.add('open');
     document.getElementById('d-close').focus();
@@ -943,6 +1078,21 @@
 
   let rT;
   window.addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(build, 150); });
+  // the canvas reflows as the pane opens/closes — observe the stage, not the window
+  new ResizeObserver(() => schedule()).observe(document.getElementById('stage'));
+  detail.addEventListener('transitionend', () => schedule());
+
+  // ── liveness: the edge advances, the blocked run grows, loop ticks arrive.
+  //    In the real build this is the daemon's WebSocket; here it's a metronome. ──
+  const ongoing = sessions.find(s => s.status === 'blocked');
+  setInterval(() => {
+    if (NOW_H >= HOURS - 0.2) return;
+    NOW_H = Math.min(HOURS - 0.2, NOW_H + 0.16);
+    if (ongoing) ongoing.t1 = NOW_H;
+    if (rnd() < 0.35) autoTicks.push(NOW_H - 0.04);
+    schedule();
+  }, 2600);
+
   build();
 })();
 </script>
