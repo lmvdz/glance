@@ -13,6 +13,8 @@ export interface AuthMode {
   mode: 'file' | 'db';
   allowSignup: boolean;
   socialProviders: SocialProvider[];
+  /** WorkOS enterprise SSO configured server-side ⇒ show the "Sign in with SSO" button. */
+  sso: boolean;
 }
 
 // The authenticated identity (GET /api/me in db mode).

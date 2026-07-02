@@ -86,7 +86,7 @@ test("DB mode: sign-up ⇒ viewer (read-only), cannot mutate, and cannot self-mi
 	const { url, origin } = await setupDbServer({ allowSignup: true });
 
 	// Public probe advertises DB mode; /api is session-gated, not bearer-gated.
-	expect(await (await fetch(`${url}/api/auth/mode`)).json()).toEqual({ mode: "db", allowSignup: true, socialProviders: [] });
+	expect(await (await fetch(`${url}/api/auth/mode`)).json()).toEqual({ mode: "db", allowSignup: true, socialProviders: [], sso: false });
 	expect((await fetch(`${url}/api/agents`)).status).toBe(401);
 
 	const jar = new Map<string, string>();
@@ -183,8 +183,8 @@ test("FILE mode: no auth instance ⇒ mode=file and today's tokenless gate (loop
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	// File mode never advertises social providers; allowSignup reflects the env (closed by default here).
-	expect(await (await fetch(`${url}/api/auth/mode`)).json()).toEqual({ mode: "file", allowSignup: false, socialProviders: [] });
+	// File mode never advertises social providers or SSO; allowSignup reflects the env (closed by default here).
+	expect(await (await fetch(`${url}/api/auth/mode`)).json()).toEqual({ mode: "file", allowSignup: false, socialProviders: [], sso: false });
 	// Tokenless server = loopback/unit-test mode: every request is admin, so /api/agents is open.
 	expect((await fetch(`${url}/api/agents`)).status).toBe(200);
 	// /api/me in FILE mode returns the bare mode marker.

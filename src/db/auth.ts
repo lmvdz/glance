@@ -15,8 +15,10 @@
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { organization } from "better-auth/plugins/organization";
+import { genericOAuth } from "better-auth/plugins/generic-oauth";
 import type { Dialect } from "kysely";
 import type { DbKind } from "./index.ts";
+import { workosConfig, workosDiscoveryUrl } from "../workos.ts";
 
 export interface AuthConfig {
 	dialect: Dialect;
@@ -55,6 +57,34 @@ export function signupOpen(): boolean {
 export function authOptions({ dialect, type, trustedOrigins, baseURL }: AuthConfig) {
 	const resolvedBase = baseURL || process.env.BETTER_AUTH_URL || "http://localhost:7878";
 	const github = githubProvider();
+	const workos = workosConfig();
+	// Enterprise SSO via WorkOS AuthKit as a single OIDC upstream: one client multiplexes every customer's
+	// SAML/OIDC/social connection, and better-auth mints the local session in /api/auth/oauth2/callback/workos.
+	// New SSO users bridge to viewer (no org) until mapped to an org — org auto-mapping is the documented
+	// follow-up (docs/workos-sso.md), so this stays a safe, additive sign-in path.
+	const ssoPlugins = workos
+		? [genericOAuth({
+			config: [{
+				providerId: "workos",
+				clientId: workos.clientId,
+				clientSecret: workos.apiKey,
+				discoveryUrl: workosDiscoveryUrl(workos.clientId),
+				scopes: ["openid", "profile", "email"],
+				pkce: true,
+				mapProfileToUser: (profile: Record<string, unknown>) => {
+					const name =
+						(typeof profile.name === "string" && profile.name) ||
+						[profile.given_name, profile.family_name].filter((p) => typeof p === "string").join(" ").trim() ||
+						(typeof profile.email === "string" ? profile.email : "");
+					return {
+						email: typeof profile.email === "string" ? profile.email : undefined,
+						name: name || undefined,
+						image: typeof profile.picture === "string" ? profile.picture : undefined,
+					};
+				},
+			}],
+		})]
+		: [];
 	return {
 		database: { dialect, type },
 		secret: process.env.BETTER_AUTH_SECRET || DEV_INSECURE_SECRET,
@@ -64,7 +94,7 @@ export function authOptions({ dialect, type, trustedOrigins, baseURL }: AuthConf
 		emailAndPassword: { enabled: true, disableSignUp: process.env.OMP_SQUAD_ALLOW_SIGNUP !== "1" },
 		// allowUserToCreateOrganization:false ⇒ org ownership (→ admin tier) can't be self-minted;
 		// the loopback bootstrap admin provisions the first org/members out-of-band.
-		plugins: [organization({ allowUserToCreateOrganization: false })],
+		plugins: [organization({ allowUserToCreateOrganization: false }), ...ssoPlugins],
 		// Throttle sign-in/up regardless of NODE_ENV (better-auth only rate-limits in production by default).
 		rateLimit: { enabled: true, window: 60, max: 30 },
 		// Secure cookies when the public origin is https (e.g. behind a TLS tunnel); plain http for loopback dev.

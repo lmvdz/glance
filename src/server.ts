@@ -31,6 +31,7 @@ import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
+import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -583,7 +584,23 @@ export class SquadServer {
 		// The SPA reads this pre-login to choose its auth style and render only affordances the server backs:
 		// file mode ⇒ bearer token (no login page); db mode ⇒ session login, with sign-up + social buttons
 		// gated by what's actually configured server-side.
-		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file", allowSignup: signupOpen(), socialProviders: this.dbMode ? configuredSocialProviders() : [] });
+		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file", allowSignup: signupOpen(), socialProviders: this.dbMode ? configuredSocialProviders() : [], sso: this.dbMode && ssoEnabled() });
+		// WorkOS Directory Sync (SCIM) webhook. Unauthenticated by session — authenticated by the HMAC
+		// signature over the RAW body (verifyWorkosSignature). Placed OUTSIDE /api/auth/* so better-auth's
+		// catch-all doesn't intercept it. 404 when no secret is configured (feature off).
+		if (url.pathname === "/api/workos/webhook" && req.method === "POST") {
+			const secret = process.env.WORKOS_WEBHOOK_SECRET;
+			if (!secret) return new Response("not found", { status: 404 });
+			const raw = await req.text();
+			const verdict = verifyWorkosSignature({ rawBody: raw, sigHeader: req.headers.get("workos-signature"), secret, now: Date.now() });
+			if (!verdict.ok) return new Response(`invalid signature: ${verdict.reason}`, { status: 400 });
+			const evt = parseWorkosEvent(raw);
+			// SECURELY RECEIVED. Provisioning (create org / add-remove membership on dsync.*) is the documented
+			// follow-up in docs/workos-sso.md — it needs a live WorkOS directory to finalize the org mapping,
+			// so we log the verified event here rather than ship untested identity-mutating DB writes.
+			if (evt) console.log(`[workos] dsync event received: ${evt.event} (${evt.id})`);
+			return new Response("ok");
+		}
 		if (url.pathname === "/llms.txt") return new Response("# omp-squad capability API\n\n- GET /api/capability-discovery\n- GET /api/capability-catalog\n- GET /api/capability-packs\n- POST /api/capability-sources\n- POST /api/capability-installs\n- GET /api/federation/capabilities\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
 		if (url.pathname === "/openapi.json") return Response.json({ openapi: "3.1.0", info: { title: "omp-squad capability API", version: this.uiVersion }, paths: { "/api/capability-discovery": { get: {} }, "/api/capability-catalog": { get: {} }, "/api/capability-packs": { get: {} }, "/api/capability-sources": { get: {}, post: {} }, "/api/capability-installs": { get: {}, post: {} }, "/api/federation/capabilities": { get: {} } } });
 		// DB mode: better-auth owns the rest of /api/auth/* (sign-in/up/out, org, members). Reachable

@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { Mail, KeyRound, User, Loader2 } from 'lucide-react';
+import { Mail, KeyRound, User, Loader2, Building2 } from 'lucide-react';
 import { authClient } from '../lib/auth-client';
 import { useAuth } from '../context/AuthContext';
 import loginArt from '../assets/login-art.png';
@@ -37,6 +37,7 @@ export const Login = () => {
 
   const allowSignup = config?.allowSignup ?? false;
   const hasGithub = (config?.socialProviders ?? []).includes('github');
+  const hasSso = config?.sso ?? false;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,6 +75,25 @@ export const Login = () => {
       // On success the browser navigates away; leave `busy` set.
     } catch (err) {
       setError(err instanceof Error ? err.message : 'GitHub sign-in failed.');
+      setBusy(false);
+    }
+  };
+
+  const sso = async () => {
+    if (busy) return;
+    setError(null);
+    setBusy(true);
+    try {
+      // WorkOS AuthKit (providerId "workos") handles enterprise IdP selection + social; better-auth mints
+      // the local session on return via /api/auth/oauth2/callback/workos.
+      const res = await authClient.signIn.oauth2({ providerId: 'workos', callbackURL: window.location.origin });
+      if (res.error) {
+        setError(res.error.message || 'SSO sign-in failed.');
+        setBusy(false);
+      }
+      // On success the browser navigates away to the IdP; leave `busy` set.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'SSO sign-in failed.');
       setBusy(false);
     }
   };
@@ -172,30 +192,45 @@ export const Login = () => {
               </p>
             )}
 
-            {hasGithub && (
+            {(hasSso || hasGithub) && (
               <>
                 <div className="my-5 flex items-center gap-3">
                   <div className="h-px flex-1 bg-[#1f1f23]" />
                   <span className="text-[11px] text-[#5c5c62]">or</span>
                   <div className="h-px flex-1 bg-[#1f1f23]" />
                 </div>
-                <button
-                  type="button"
-                  onClick={github}
-                  disabled={busy}
-                  className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-[#2a2a2e] bg-black text-[14px] font-medium text-white transition-colors hover:bg-[#161618] disabled:opacity-60"
-                >
-                  <GithubMark className="h-4 w-4" />
-                  Login with Github
-                </button>
+                <div className="flex flex-col gap-2.5">
+                  {hasSso && (
+                    <button
+                      type="button"
+                      onClick={sso}
+                      disabled={busy}
+                      className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-[#2a2a2e] bg-black text-[14px] font-medium text-white transition-colors hover:bg-[#161618] disabled:opacity-60"
+                    >
+                      <Building2 className="h-4 w-4" />
+                      Sign in with SSO
+                    </button>
+                  )}
+                  {hasGithub && (
+                    <button
+                      type="button"
+                      onClick={github}
+                      disabled={busy}
+                      className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-[#2a2a2e] bg-black text-[14px] font-medium text-white transition-colors hover:bg-[#161618] disabled:opacity-60"
+                    >
+                      <GithubMark className="h-4 w-4" />
+                      Login with Github
+                    </button>
+                  )}
+                </div>
               </>
             )}
           </div>
         </div>
 
-        {/* Right — ASCII columns + globe */}
+        {/* Right — ASCII columns + globe (full frame; cover fills the panel, no letterbox bars) */}
         <div className="relative hidden flex-1 overflow-hidden border-l border-[#1c1c20] bg-black md:block">
-          <img src={loginArt} alt="" aria-hidden className="absolute inset-0 h-full w-full object-contain" />
+          <img src={loginArt} alt="" aria-hidden className="absolute inset-0 h-full w-full object-cover object-center" />
         </div>
       </div>
     </div>
