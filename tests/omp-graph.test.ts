@@ -62,13 +62,14 @@ test("adapterConfig reads a per-adapter secret from context", () => {
 
 // ───────────────────────────── git adapter ─────────────────────────────
 
+// Log format carries the sha right after the mark (click-to-split commit detail keys on it).
 const GIT_RAW = [
-	"@@C@@\t2026-06-25T14:22:40Z\tAlice\tsquad(x): land x",
+	"@@C@@\taaa1111\t2026-06-25T14:22:40Z\tAlice\tsquad(x): land x",
 	"10\t2\tsrc/a.ts",
 	"5\t0\tsrc/b.ts",
-	"@@C@@\t2026-06-25T15:00:00Z\tBob\tchore: tidy",
+	"@@C@@\tbbb2222\t2026-06-25T15:00:00Z\tBob\tchore: tidy",
 	"1\t1\tsrc/c.ts",
-	"@@C@@\t2026-06-26T09:00:00Z\tCarol\tfeat: big feature",
+	"@@C@@\tccc3333\t2026-06-26T09:00:00Z\tCarol\tfeat: big feature",
 	"300\t20\tsrc/d.ts",
 	"-\t-\tassets/bin.png", // binary → counts as a file, 0 churn
 ].join("\n");
@@ -310,7 +311,8 @@ test("derive computes efficiency tracks + insight callouts", () => {
 		generatedAt: now,
 		tracks: [
 			{ id: 'git.commits', label: 'C', group: 'fleet', source: 'git', type: 'bars', binMs: HOUR_MS, bins: [{ t: hour(1), v: 2 }, { t: hour(2), v: 2 }] }, // 4 commits
-			{ id: 'plane.closed', label: 'X', group: 'delivery', source: 'plane', type: 'events', marks: [{ t: hour(5), label: 'OMPSQ-1', kind: 'done' }, { t: hour(6), label: 'OMPSQ-2', kind: 'done' }] }, // 2 tickets
+			// ticketsClosed reads the closedPerDay BARS track (the events track is display-only).
+			{ id: 'plane.closedPerDay', label: 'X', group: 'delivery', source: 'plane', type: 'bars', binMs: HOUR_MS, bins: [{ t: hour(5), v: 1 }, { t: hour(6), v: 1 }] }, // 2 tickets
 		],
 	};
 	const receipts = [
