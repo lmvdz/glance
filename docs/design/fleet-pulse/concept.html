@@ -369,6 +369,30 @@
     return { c, d };
   };
 
+  // 10-minute grain for the massif: history rows precompute their fine series;
+  // the live row samples the real arrays through a FIXED jitter field, so the
+  // terrain is richly noisy but never flickers across live rebuilds.
+  const J10 = { c: [], d: [], ch: [] };
+  for (let k = 0; k < 168 * 6; k++) { J10.c.push(0.55 + rnd() * 0.9); J10.d.push(0.55 + rnd() * 0.9); J10.ch.push(0.55 + rnd() * 0.9); }
+  for (const wr of WEEK_ROWS) {
+    wr.c10 = []; wr.d10 = []; wr.ch10 = [];
+    for (let k = 0; k < 168 * 6; k++) {
+      const hh = k / 6, i = Math.floor(hh), f = hh - i;
+      const lerp = a => (a[i] ?? 0) * (1 - f) + (a[Math.min(i + 1, 167)] ?? 0) * f;
+      wr.c10.push(lerp(wr.c) * (0.55 + rnd() * 0.9));
+      wr.d10.push(lerp(wr.d) * (0.55 + rnd() * 0.9));
+      wr.ch10.push(lerp(wr.ch) * (0.55 + rnd() * 0.9));
+    }
+  }
+  const weekAt10 = (w, k) => {
+    if (w < 7) return { c: WEEK_ROWS[w].c10[k], d: WEEK_ROWS[w].d10[k], ch: WEEK_ROWS[w].ch10[k] };
+    const hh = 24 + k / 6;
+    if (hh >= NOW_H) return { c: 0, d: 0, ch: 0 };
+    const i = Math.floor(hh), f = hh - i;
+    const lerp = a => (a[i] ?? 0) * (1 - f) + (a[Math.min(i + 1, HOURS - 1)] ?? 0) * f;
+    return { c: lerp(commits) * J10.c[k], d: lerp(cost) * J10.d[k], ch: lerp(churn) * J10.ch[k] };
+  };
+
   const svg = document.getElementById('chart');
   const NS = 'http://www.w3.org/2000/svg';
   const el = (n, attrs, parent) => { const e = document.createElementNS(NS, n); for (const k in attrs) e.setAttribute(k, attrs[k]); (parent || svg).appendChild(e); return e; };
@@ -761,30 +785,32 @@
     }
   }
 
-  // ── DEPTH: the isometric massif — time runs down-right, weeks recede up-right
-  //    (the reference's true angle). Hover a row: the rest fade, it lifts and grows.
-  //    Click flattens it into the operator instrument. Any metric can be the terrain. ──
+  // ── DEPTH: the isometric massif in the reference's orientation — each week's
+  //    TIME axis runs up-right (short), the WEEK axis recedes down-right (long),
+  //    newest week in front. 10-MINUTE grain, rendered as continuous gradient
+  //    silhouettes (terrain, not bars). Hover isolates; click flattens. ──
+  const SPH = 6, NBINS = 168 * SPH; // 10-minute bins
   function buildDepth(plotW) {
     const g = el('g', {});
     const n = 8;
-    const usable = Math.max(560, W - 640);
-    const T = { x: usable / 168, y: (usable / 168) * 0.3 };  // time axis: down-right
-    const R = { x: 40, y: -26 };                             // row axis: up-right
-    const OX = PAD_L + 168, OY = H - 312;                    // front row (this week), k=0
-    const P = (w, k) => { const dz = 7 - w; return { x: OX + dz * R.x + k * T.x, y: OY + dz * R.y + k * T.y }; };
+    const rowLenX = Math.max(520, W - 820);
+    const T = { x: rowLenX / NBINS, y: -(rowLenX / NBINS) * 0.30 }; // time: up-right
+    const R = { x: 50, y: 33 };                                     // weeks: down-right
+    const OX = PAD_L + 214, OY = 330;                               // OLDEST row (back, top-left), k=0
+    const P = (w, k) => ({ x: OX + w * R.x + k * T.x, y: OY + w * R.y + k * T.y });
     const angle = Math.atan2(T.y, T.x) * 180 / Math.PI;
-    const hMax = 118;
+    const hMax = 128;
 
-    // metric machinery: any datapoint can be the terrain
+    // metric machinery at 10-minute grain
     const Mdef = DEPTH_METRICS.find(m => m.id === depthMetric);
     const series = [];
     let vMax = 0.001, tMax = 0.001;
     for (let w = 0; w < n; w++) {
       const v = [], tt = [];
       let acc = 0;
-      for (let k = 0; k < 168; k++) {
-        const s = weekAt(w, k);
-        const raw = depthMetric === 'commits' ? s.c : depthMetric === 'cost' ? s.d : depthMetric === 'churn' ? s.ch : (acc += s.d);
+      for (let k = 0; k < NBINS; k++) {
+        const s = weekAt10(w, k);
+        const raw = depthMetric === 'commits' ? s.c : depthMetric === 'cost' ? s.d : depthMetric === 'churn' ? s.ch : (acc += s.d / SPH);
         const rate = depthMetric === 'commits' ? s.c : depthMetric === 'churn' ? s.ch : s.d;
         v.push(raw); tt.push(rate);
         vMax = Math.max(vMax, raw); tMax = Math.max(tMax, rate);
@@ -795,10 +821,9 @@
       ? t => (t > 0.85 ? '#FFD9EC' : t > 0.6 ? '#E86BA8' : t > 0.35 ? '#A03A6E' : '#5A2140')
       : heatColor;
 
-    // the reference's label block, top-left
+    // label block, top-left
     txt(PAD_L, 104, 'EIGHT WEEKS', 'day-name', { 'font-size': 21, 'letter-spacing': '0.3em' }, g);
-    txt(PAD_L, 122, 'NEWEST IN FRONT · HOVER ISOLATES · CLICK FLATTENS', 'annot', {}, g);
-    // metric switcher — the terrain can be any datapoint
+    txt(PAD_L, 122, '10-MINUTE GRAIN · NEWEST IN FRONT · HOVER ISOLATES · CLICK FLATTENS', 'annot', {}, g);
     let mx = PAD_L;
     for (const m of DEPTH_METRICS) {
       const on = m.id === depthMetric;
@@ -808,7 +833,7 @@
       mx += m.label.length * 5.9 + 24;
     }
 
-    // colour legend, top-right
+    // colour legend + the reference's little axes diagram, top-right
     const grad2 = el('linearGradient', { id: 'depthbar', x1: 0, y1: 1, x2: 0, y2: 0 }, g);
     const stops = depthMetric === 'churn' ? [[0, '#5A2140'], [0.45, '#A03A6E'], [0.75, '#E86BA8'], [1, '#FFD9EC']] : [[0, '#B25E1E'], [0.45, '#F2913D'], [0.75, '#FFC96B'], [1, '#FFE9C4']];
     for (const [o, c2] of stops) el('stop', { offset: o, 'stop-color': c2 }, grad2);
@@ -817,40 +842,57 @@
     el('rect', { x: W - PAD_R - 8, y: 68, width: 8, height: 56, rx: 2, fill: 'url(#depthbar)' }, g);
     txt(W - PAD_R - 14, 76, 'hot', 'hour-tick', { 'text-anchor': 'end' }, g);
     txt(W - PAD_R - 14, 124, 'quiet', 'hour-tick', { 'text-anchor': 'end' }, g);
+    const ax = { x: W - PAD_R - 150, y: 176 };
+    el('line', { x1: ax.x, y1: ax.y, x2: ax.x + 74, y2: ax.y - 22, stroke: 'var(--ink-low)', 'stroke-width': 0.8 }, g);
+    txt(ax.x + 80, ax.y - 24, 'TIME', 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${ax.x + 80} ${ax.y - 24})` }, g);
+    el('line', { x1: ax.x, y1: ax.y, x2: ax.x + 52, y2: ax.y + 34, stroke: 'var(--ink-low)', 'stroke-width': 0.8 }, g);
+    txt(ax.x + 56, ax.y + 44, 'WEEKS', 'hour-tick', { transform: `rotate(33 ${ax.x + 56} ${ax.y + 44})` }, g);
 
-    // rows: deepest first (painter's order). Each row = content group (fades/lifts)
-    // + a hit polygon that stays put so hover can't jitter.
+    // rows: back (oldest, top-left) first — painter's order toward the viewer
     depthRowEls = [];
     for (let w = 0; w < n; w++) {
       const rowG = el('g', {}, g);
       const content = el('g', { class: 'dr-c' }, rowG);
       const live = w === 7;
-      const b0 = P(w, 0), b1 = P(w, 168);
-      // dotted ground-plane extension, the reference's grid whisper
-      el('line', { x1: b0.x - 52, y1: b0.y - 52 * (T.y / T.x), x2: b1.x + 36, y2: b1.y + 36 * (T.y / T.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 5', opacity: 0.85 }, content);
-      // the terrain: contiguous vertical quads on the slanted baseline (opaque = occluding)
-      const qw = T.x + 0.35;
-      for (let k = 0; k < 168; k++) {
-        const val = series[w].v[k];
-        if (val / vMax < 0.005) continue;
-        const p = P(w, k);
-        const hp = (val / vMax) * hMax;
-        const t = series[w].t[k] / tMax;
-        el('rect', { x: p.x, y: p.y - hp, width: qw, height: hp, fill: colorFor(t), ...(t > 0.8 ? { filter: 'url(#heatglow)' } : {}) }, content);
+      const b0 = P(w, 0), b1 = P(w, NBINS);
+      // dotted ground-plane extension
+      el('line', { x1: b0.x - 40, y1: b0.y - 40 * (T.y / T.x), x2: b1.x + 44, y2: b1.y + 44 * (T.y / T.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 5', opacity: 0.85 }, content);
+      // terrain silhouette: one path, filled with a per-x intensity gradient along
+      // the time axis (the reference's continuous coloured ridge, not bars)
+      const gid = `ridge${w}${depthMetric}`;
+      const rg = el('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: b0.x, y1: b0.y, x2: b1.x, y2: b1.y }, content);
+      const STEP = 16;
+      for (let k = 0; k <= NBINS - 1; k += STEP) {
+        el('stop', { offset: (k / NBINS).toFixed(4), 'stop-color': colorFor(series[w].t[k] / tMax) }, rg);
       }
+      let dPath = `M ${b0.x.toFixed(1)} ${b0.y.toFixed(1)}`;
+      for (let k = 0; k < NBINS; k++) {
+        const p = P(w, k + 0.5);
+        dPath += ` L ${p.x.toFixed(1)} ${(p.y - (series[w].v[k] / vMax) * hMax).toFixed(1)}`;
+      }
+      dPath += ` L ${b1.x.toFixed(1)} ${b1.y.toFixed(1)} Z`;
+      el('path', { d: dPath, fill: `url(#${gid})` }, content);
+      // base shadow: terrain darkens toward its own baseline (the reference's depth cue)
+      const cid = `rclip${w}${depthMetric}`;
+      const cp = el('clipPath', { id: cid }, content);
+      el('path', { d: dPath }, cp);
+      const sg = el('linearGradient', { id: `rshade${w}`, gradientUnits: 'userSpaceOnUse', x1: 0, y1: b0.y - hMax, x2: 0, y2: b0.y + R.y * 0.2 }, content);
+      el('stop', { offset: 0, 'stop-color': 'rgba(8,9,12,0)' }, sg);
+      el('stop', { offset: 1, 'stop-color': 'rgba(8,9,12,0.6)' }, sg);
+      el('rect', { x: Math.min(b0.x, b1.x) - 4, y: b1.y - hMax - 8, width: Math.abs(b1.x - b0.x) + 8, height: hMax + (b0.y - b1.y) + 16, fill: `url(#rshade${w})`, 'clip-path': `url(#${cid})` }, content);
       el('line', { x1: b0.x, y1: b0.y, x2: b1.x, y2: b1.y, stroke: live ? 'var(--ember)' : 'var(--hairline-2)', 'stroke-width': live ? 1.2 : 1, opacity: live ? 0.8 : 0.95 }, content);
-      // shoulder label rides the row (fades and lifts with it)
+      // shoulder label at the row's near (down-left) end
       const tot = weekTotals(w);
-      txt(b0.x - 12, b0.y - 2, WEEK_ROWS[w].label, live ? 'day-name' : 'annot', { 'text-anchor': 'end', ...(live ? { fill: 'var(--ember)' } : {}) }, content);
-      txt(b0.x - 12, b0.y + 10, `$${Math.round(tot.d)} · ${tot.c}c`, 'hour-tick', { 'text-anchor': 'end' }, content);
+      txt(b0.x - 12, b0.y + 4, WEEK_ROWS[w].label, live ? 'day-name' : 'annot', { 'text-anchor': 'end', ...(live ? { fill: 'var(--ember)' } : {}) }, content);
+      txt(b0.x - 12, b0.y + 16, `$${Math.round(tot.d)} · ${tot.c}c`, 'hour-tick', { 'text-anchor': 'end' }, content);
       if (live && NOW_H < 192) {
-        const np = P(w, NOW_H - 24);
+        const np = P(w, (NOW_H - 24) * SPH);
         el('line', { x1: np.x, y1: np.y - hMax, x2: np.x, y2: np.y + 4, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.5 }, content);
         el('circle', { cx: np.x, cy: np.y - hMax, r: 3, fill: 'var(--ember)', class: 'now-dot' }, content);
       }
-      // the hit surface: a slanted band matching the row, outside the lifting group
+      // hit surface outside the lifting group so hover can't jitter
       const hit = el('polygon', {
-        points: `${b0.x - 66},${b0.y - hMax - 30} ${b1.x + 24},${b1.y - hMax - 30} ${b1.x + 24},${b1.y + 14} ${b0.x - 66},${b0.y + 14}`,
+        points: `${b0.x - 70},${b0.y - hMax - 30} ${b1.x + 30},${b1.y - hMax - 30} ${b1.x + 30},${b1.y + 14} ${b0.x - 70},${b0.y + 20}`,
         fill: 'transparent', cursor: 'pointer', tabindex: 0, role: 'button',
         'aria-label': `${WEEK_ROWS[w].label}: hover isolates, click opens the flat view`, 'data-w': w,
       }, rowG);
@@ -860,22 +902,21 @@
     }
     applyDepthHover(); // hover state survives live rebuilds
 
-    // front axis: day labels rotated ALONG the time axis, the reference's move
+    // day labels along the FRONT row's time axis, rotated with it
     for (let dd = 0; dd <= 7; dd++) {
-      const p = P(7, dd * 24);
+      const p = P(7, dd * 24 * SPH);
       el('line', { x1: p.x, y1: p.y + 5, x2: p.x, y2: p.y + 10, stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
       if (dd < 7) {
-        const lx = p.x + 6, ly = p.y + 21;
+        const lx = p.x + 8, ly = p.y + 22;
         txt(lx, ly, ['THU', 'FRI', 'SAT', 'SUN', 'MON', 'TUE', 'WED'][dd], 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${lx} ${ly})` }, g);
       }
     }
 
-    // AVERAGE — the daily-rhythm panel, bottom-right like the reference:
-    // the fleet's mean day (per hour-of-day, current metric's rate) across all 8 weeks
-    const A0 = { x: W - 372, y: H - 118 };
-    const at2 = { x: 8.6, y: 8.6 * 0.3 };
+    // AVERAGE — the daily-rhythm panel, bottom-right, on the same time angle
+    const A0 = { x: W - 400, y: H - 64 };
+    const at2 = { x: 8.4, y: 8.4 * T.y / T.x };
     const prof = new Array(24).fill(0);
-    for (let w = 0; w < n; w++) for (let k = 0; k < 168; k++) prof[k % 24] += series[w].t[k];
+    for (let w = 0; w < n; w++) for (let k = 0; k < NBINS; k++) prof[Math.floor((k / SPH) % 24)] += series[w].t[k];
     const pMax = Math.max(...prof, 0.001);
     el('line', { x1: A0.x - 10, y1: A0.y - 10 * (at2.y / at2.x), x2: A0.x + 24 * at2.x + 12, y2: A0.y + (24 * at2.x + 12) * (at2.y / at2.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 4' }, g);
     for (let hh = 0; hh < 24; hh++) {
