@@ -7,7 +7,7 @@ import React from 'react';
 import { Mail, KeyRound, User, Loader2 } from 'lucide-react';
 import { authClient } from '../lib/auth-client';
 import { useAuth } from '../context/AuthContext';
-import { ColumnsArt } from './ColumnsArt';
+import loginArt from '../assets/login-art.png';
 
 // GitHub wordmark glyph (lucide dropped brand icons in v1), inlined so the social button matches the mark.
 const GithubMark = ({ className }: { className?: string }) => (
@@ -193,9 +193,9 @@ export const Login = () => {
           </div>
         </div>
 
-        {/* Right — dissolving columns */}
-        <div className="relative hidden flex-1 overflow-hidden border-l border-[#1c1c20] bg-[#0b0b0d] md:block">
-          <ColumnsArt />
+        {/* Right — ASCII columns + globe */}
+        <div className="relative hidden flex-1 overflow-hidden border-l border-[#1c1c20] bg-black md:block">
+          <img src={loginArt} alt="" aria-hidden className="absolute inset-0 h-full w-full object-contain" />
         </div>
       </div>
     </div>
