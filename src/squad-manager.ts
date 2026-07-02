@@ -36,6 +36,7 @@ import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
+import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
 import { Opportunity } from "./opportunity.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
@@ -506,8 +507,10 @@ export class SquadManager extends EventEmitter {
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
-	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning. */
-	private readonly scoutCursor = new Map<string, number>();
+	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning.
+	 *  Persisted (scout-cursor.json) so a warm daemon restart doesn't re-scan whole transcripts —
+	 *  each re-scan was a redundant Scout LLM call per reattached agent. Loaded in the constructor. */
+	private readonly scoutCursor: Map<string, number>;
 	/** Observability spine for the background loops (scout/observer/opportunity/dispatch) — the surface
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
@@ -537,6 +540,7 @@ export class SquadManager extends EventEmitter {
 		this.bus = opts.bus ?? new NullFederationBus();
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
 		setProofRoot(this.stateDir);
+		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -2650,7 +2654,7 @@ export class SquadManager extends EventEmitter {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});
 		}
 		this.agents.delete(id);
-		this.scoutCursor.delete(id);
+		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
 	}
@@ -2941,7 +2945,10 @@ export class SquadManager extends EventEmitter {
 	 */
 	private takeScoutReasoning(rec: AgentRecord): string {
 		const { text, cursor } = unscannedReasoning(rec.transcript, this.scoutCursor.get(rec.dto.id) ?? 0);
-		if (text) this.scoutCursor.set(rec.dto.id, cursor);
+		if (text) {
+			this.scoutCursor.set(rec.dto.id, cursor);
+			writeScoutCursors(this.stateDir, this.scoutCursor);
+		}
 		return text;
 	}
 

@@ -18,10 +18,9 @@
  * Tickets are always filed for human triage (do-not-auto-land) — LLM-extracted work
  * is unvetted, so the dispatcher must never auto-spawn the fleet on it.
  *
- * ponytail: the per-agent scan cursor is in-memory; a daemon restart re-scans a
- * reattached agent's transcript once (the persisted seen-set still prevents dup
- * tickets — only one redundant LLM call). Upgrade path: persist the cursor if that
- * call ever matters.
+ * The per-agent scan cursor is persisted (src/scout-cursor.ts, scout-cursor.json in
+ * the state dir), so a warm daemon restart scans only reasoning newer than the last
+ * scan instead of burning one redundant LLM call per reattached agent.
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
