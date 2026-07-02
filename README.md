@@ -433,6 +433,8 @@ a red-then-green pair is logged as flaky and nothing is filed (OMPSQ-184).
 | Env | Meaning |
 |---|---|
 | `OMP_SQUAD_OBSERVE` | Self-audit loop — **on** when Plane is configured (`=0` to disable; then no timer is armed) |
+| `OMP_SQUAD_PLANSYNC` | Plan STATUS reconciler — **on** when Plane is configured (`=0` to disable). Every tick, each `plans/<x>/NN-concern.md` carrying a `PLANE: <ID>` pointer is checked against the tracker: a completed/cancelled issue closes the doc's STATUS, a started issue moves an open doc to `in_progress`. It NEVER reopens a done doc — that drift is logged + surfaced on the Automation feed as a conflict instead |
+| `OMP_SQUAD_PLANSYNC_INTERVAL_MS` | Plan-sync tick interval (default `300000` = 5 min) |
 | `OMP_SQUAD_OBSERVE_MAX` | Hard cap on observer-filed *open* issues (default `10`); past it, log + skip |
 | `OMP_SQUAD_OBSERVE_AUTODISPATCH` | `=1` files plain findings *without* the do-not-auto-land marker so the dispatcher fixes them; structural findings stay needs-triage regardless |
 | `OMP_SQUAD_OBSERVE_AUTOFIX` | `=1` lets the loop action autofixable findings directly (reap a landed survivor); never touches main/code; default off |

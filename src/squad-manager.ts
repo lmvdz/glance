@@ -42,7 +42,8 @@ import { Opportunity } from "./opportunity.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
+import { syncPlanStatuses } from "./plan-sync.ts";
 import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
@@ -504,6 +505,8 @@ export class SquadManager extends EventEmitter {
 	private orchestrator?: Orchestrator;
 	/** Observers — one per configured Plane repo so every repo's backlog is audited (OMPSQ-137). */
 	private readonly observers: Observer[] = [];
+	/** Plan-sync tick timers (one per configured Plane repo); cleared in stop(). */
+	private readonly planSyncTimers: Timer[] = [];
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
@@ -698,6 +701,28 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `observer on (auditing ${observeRepos.join(", ")})`);
 		}
 
+		// Plan-sync — keeps plans/<x>/NN-concern.md STATUS lines truthful against their PLANE:
+		// pointers (a landed issue's doc otherwise stays `open` and the WIP counters lie). One
+		// slow tick per configured Plane repo; conservative one-way transitions (see plan-sync.ts).
+		if (process.env.OMP_SQUAD_PLANSYNC !== "0" && observeRepos.length > 0) {
+			const intervalMs = Number(process.env.OMP_SQUAD_PLANSYNC_INTERVAL_MS) || 300_000;
+			for (const repo of observeRepos) {
+				const tick = (): void => {
+					void syncPlanStatuses({
+						repo,
+						listIssues: () => listPlaneIssuesAllStates(repo),
+						log: (m) => this.log("info", m),
+						record: this.automation.for("plan-sync", repo),
+					}).then((r) => {
+						if (r.updated.length) this.emitFeaturesChanged();
+					}).catch(() => {});
+				};
+				this.planSyncTimers.push(setInterval(tick, intervalMs));
+				setTimeout(tick, 15_000); // first pass shortly after boot, off the hot startup path
+			}
+			this.log("info", `plan-sync on (reconciling STATUS lines for ${observeRepos.join(", ")} every ${Math.round(intervalMs / 1000)}s)`);
+		}
+
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
 		// reasoning and files the latent items they surfaced but didn't do. One per configured Plane repo
 		// (OMPSQ-137); each only harvests agents whose repo it owns (scoutFor), so a finding lands in the
@@ -792,6 +817,7 @@ export class SquadManager extends EventEmitter {
 		this.dispatcher?.stop();
 		this.orchestrator?.stop();
 		for (const o of this.observers) o.stop();
+		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		await this.persist();

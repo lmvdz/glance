@@ -120,33 +120,57 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 }
 
 async function listPlaneIssuesUncached(repo: string): Promise<IssueRef[] | null> {
+	const all = await fetchIssueRefs(repo, 1);
+	if (all === null) return null;
+	const open = all.filter((i) => i.state !== "completed" && i.state !== "cancelled");
 	const ctx = planeContext(repo);
-	if (!ctx) return null;
-	const { cfg, headers, projectId, base } = ctx;
-	if (!projectId) return [];
-	const res = await throttledFetch(`${base}/issues/?per_page=50`, { headers });
-	if (!res || !res.ok) return null; // unreachable ⇒ null (uncached) so the next poll retries, not a stale []
-	const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
-	const items = Array.isArray(data) ? data : (data?.results ?? []);
-	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so the
-	// completed/cancelled filter actually works (else finished issues get auto-dispatched).
-	// The list endpoint omits project_detail, so fetch the project's identifier prefix to build human ids
-	// (e.g. OMPSQ-35) — without it dispatched agents fall back to agent-N and collide on names.
-	const [groups, prefix] = await Promise.all([fetchStateGroups(base, headers), projectPrefix(base, headers)]);
-	const open = items
-		.map((raw) => {
-			const ref = toIssueRef(raw, cfg, projectId, prefix);
-			const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
-			if (group) ref.state = group;
-			return ref;
-		})
-		.filter((i) => i.state !== "completed" && i.state !== "cancelled");
+	if (!ctx) return open;
 	// Populate blocked_by relations so the dispatcher can defer an issue while a blocker is still open.
 	// Sequential (not concurrent): Plane rate-limits, and a burst of N /relations/ calls trips 429 —
 	// which would silently empty blockedBy and let a blocked issue dispatch. Ceiling: O(open) serial
 	// requests per poll; fine for a normal backlog, add bounded concurrency if one ever runs large.
-	for (const ref of open) ref.blockedBy = await fetchBlockedBy(base, headers, ref.id);
+	for (const ref of open) ref.blockedBy = await fetchBlockedBy(ctx.base, ctx.headers, ref.id);
 	return open;
+}
+
+/** Fetch up to `maxPages`×50 issues in EVERY state (terminal included), state resolved to its group. */
+async function fetchIssueRefs(repo: string, maxPages: number): Promise<IssueRef[] | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { cfg, headers, projectId, base } = ctx;
+	if (!projectId) return [];
+	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so
+	// completed/cancelled are recognizable. It also omits project_detail, so fetch the project's
+	// identifier prefix to build human ids (e.g. OMPSQ-35) — without it dispatched agents fall
+	// back to agent-N and collide on names.
+	const [groups, prefix] = await Promise.all([fetchStateGroups(base, headers), projectPrefix(base, headers)]);
+	const out: IssueRef[] = [];
+	for (let page = 1; page <= maxPages; page++) {
+		const res = await throttledFetch(`${base}/issues/?per_page=50&page=${page}`, { headers });
+		if (!res || !res.ok) return page === 1 ? null : out; // first-page failure ⇒ unreachable; later ⇒ partial is fine
+		const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
+		const items = Array.isArray(data) ? data : (data?.results ?? []);
+		for (const raw of items) {
+			const ref = toIssueRef(raw, cfg, projectId, prefix);
+			const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
+			if (group) ref.state = group;
+			out.push(ref);
+		}
+		if (items.length < 50) break;
+	}
+	return out;
+}
+
+const allStatesCache = makeCache<IssueRef[] | null>();
+
+/**
+ * Issues in EVERY state (Done/Cancelled included) — what a reconciler needs; the open-only
+ * `listPlaneIssues` never sees a closure. Bounded to 4 pages (200 newest issues) and cached
+ * longer than the open list (reconciliation is a slow loop). No blockedBy enrichment.
+ */
+export async function listPlaneIssuesAllStates(repo: string): Promise<IssueRef[] | null> {
+	const ttl = Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000;
+	return allStatesCache.get(repo, Math.max(ttl, 60_000), () => fetchIssueRefs(repo, 4), (v) => v !== null);
 }
 
 interface PlaneIssueDetail {
