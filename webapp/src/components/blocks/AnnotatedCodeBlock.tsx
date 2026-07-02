@@ -1,6 +1,5 @@
 import type { CSSProperties } from 'react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { CodeHighlight } from '../CodeHighlight';
 import type { BlockProps } from '../PlanBlocks';
 
 type AnnotationNote = {
@@ -57,9 +56,8 @@ export default function AnnotatedCodeBlock({ body, params, blockId }: BlockProps
 
       <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_18rem]">
         <div className="min-w-0 overflow-x-auto bg-gray-950">
-          <SyntaxHighlighter
+          <CodeHighlight
             language={language}
-            style={vscDarkPlus}
             showLineNumbers
             wrapLines
             lineProps={(lineNumber): { style: CSSProperties } => ({
@@ -78,10 +76,9 @@ export default function AnnotatedCodeBlock({ body, params, blockId }: BlockProps
               paddingRight: '1em',
               color: 'var(--wf-text-subtle)',
             }}
-            PreTag="div"
           >
             {code}
-          </SyntaxHighlighter>
+          </CodeHighlight>
         </div>
 
         {notes.length > 0 && (

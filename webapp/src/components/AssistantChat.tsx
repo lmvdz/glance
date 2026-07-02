@@ -3,8 +3,7 @@ import { Sparkles, Plus, Mic, Paperclip, ArrowUp, X, ChevronRight, Copy, Check, 
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { CodeHighlight } from './CodeHighlight';
 import { useTaskContext } from '../context/TaskContext';
 import { apiFetch, apiJson, jsonInit } from '../lib/api';
 import { answerCommand, canLand, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../lib/agent-control';
@@ -135,13 +134,12 @@ const CodeBlock = ({ inline, className, children, ...props }: any) => {
         </button>
       </div>
       <div className="p-4 overflow-x-auto text-sm text-gray-700 dark:text-gray-300">
-        <SyntaxHighlighter
+        <CodeHighlight
           language={match[1]}
-          style={vscDarkPlus}
           customStyle={{ margin: 0, padding: 0, background: 'transparent' }}
         >
           {String(children).replace(/\n$/, '')}
-        </SyntaxHighlighter>
+        </CodeHighlight>
       </div>
     </div>
   );

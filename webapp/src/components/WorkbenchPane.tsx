@@ -55,6 +55,8 @@ interface WorkbenchPaneProps {
  * agent posture (blocked/errored = red, stopped/land = amber, working = green),
  * so what needs you reads at a glance — the parent sorts these so they float up.
  */
+const SYSTEM_VIEWS = new Set(['automation', 'fleet-health', 'heat', 'federation', 'knowledge']);
+
 export const TaskRailRow: React.FC<{
   task: Task;
   status?: TaskStatus;
@@ -185,6 +187,17 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   }, [view]);
   // Lightweight "needs you" count for the nav badge — blocked, errored, or ready to land.
   // (The Attention panel does the full synthesis; this is just enough for a glanceable badge.)
+  const [systemOpen, setSystemOpenState] = useState(() => {
+    try { return window.localStorage.getItem('omp.rail.systemOpen') === '1'; } catch { return false; }
+  });
+  const setSystemOpen = (update: (open: boolean) => boolean) => {
+    setSystemOpenState((open) => {
+      const next = update(open);
+      try { window.localStorage.setItem('omp.rail.systemOpen', next ? '1' : '0'); } catch { /* storage may be blocked */ }
+      return next;
+    });
+  };
+
   const needsYouCount = agents.filter(
     (a) => a.status === 'input' || a.status === 'error' || a.pending.length > 0 || a.landReady,
   ).length;
@@ -427,6 +440,18 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               Capabilities
             </button>
           </div>
+          {/* System observability surfaces — secondary to the four primary views, so they
+              fold away behind one quiet toggle (open state persists; auto-opens when the
+              current view lives inside the group so the active chip is never hidden). */}
+          <button
+            onClick={() => setSystemOpen((open) => !open)}
+            className="flex min-h-7 items-center gap-1 rounded px-1.5 text-[10px] font-semibold uppercase tracking-widest text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-gray-300"
+            aria-expanded={systemOpen || SYSTEM_VIEWS.has(view)}
+          >
+            <ChevronRight className={`h-3 w-3 transition-transform ${systemOpen || SYSTEM_VIEWS.has(view) ? 'rotate-90' : ''}`} aria-hidden="true" />
+            System
+          </button>
+          {(systemOpen || SYSTEM_VIEWS.has(view)) && (
           <div className="flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
             <button onClick={() => setView('automation')} className={`flex min-h-7 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'automation' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
               <Zap className="h-3 w-3" aria-hidden="true" />
@@ -449,6 +474,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               KB
             </button>
           </div>
+          )}
         </div>
 
         <div className="mt-2">

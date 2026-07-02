@@ -1,6 +1,5 @@
 import React from 'react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { CodeHighlight } from './CodeHighlight';
 import type { ArtifactCommentDTO } from '../lib/dto';
 import {
   AnnotatedCodeBlock,
@@ -141,14 +140,12 @@ export function MarkdownCode({ node: _node, className, children, ...props }: Mar
   const match = /language-(\w+)/.exec(className || '');
   if (match) {
     return (
-      <SyntaxHighlighter
+      <CodeHighlight
         language={match[1]}
-        style={vscDarkPlus}
         customStyle={{ margin: 0, borderRadius: '0.5rem', background: 'transparent' }}
-        PreTag="div"
       >
         {String(children).replace(/\n$/, '')}
-      </SyntaxHighlighter>
+      </CodeHighlight>
     );
   }
   return <code className={className} {...props}>{children}</code>;

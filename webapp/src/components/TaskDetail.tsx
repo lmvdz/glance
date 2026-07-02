@@ -9,6 +9,7 @@ import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
 import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS } from '../lib/agent-control';
+import { taskRef } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
 import { AgentStatusStrip } from './AgentStatusStrip';
@@ -327,7 +328,7 @@ function promptsFromContent(content: string): Map<string, string> {
 }
 
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole } = useTaskContext();
+  const { tasks, selectedTaskId, selectTask, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
@@ -1207,10 +1208,37 @@ export const TaskDetail = () => {
       </div>
 
       {!task ? (
-        <div className="flex-1 flex flex-col items-center justify-center text-gray-400 p-8 text-center bg-gray-50/30 dark:bg-gray-900/30 transition-colors duration-200">
-          <EmptyStateIllustration />
-          <h2 className="text-xl font-semibold text-gray-700 dark:text-gray-300 mb-2">No task selected</h2>
-          <p className="text-sm max-w-sm">Select a task from the list on the left to view its details, properties, and criteria.</p>
+        // Master list in the MAIN pane — the viewport used to sit empty while the actual task
+        // list hid below the fold of the 300px rail. Click a row to open its detail here.
+        <div className="flex-1 overflow-y-auto scrollbar-custom bg-gray-50/30 p-6 transition-colors duration-200 dark:bg-gray-900/30">
+          {tasks.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
+              <EmptyStateIllustration />
+              <h2 className="mb-2 text-xl font-semibold text-gray-700 dark:text-gray-300">No tasks yet</h2>
+              <p className="max-w-sm text-sm">Create a task from the rail, run /plan, or dispatch a Plane issue — plans and features show up here.</p>
+            </div>
+          ) : (
+            <div className="mx-auto max-w-3xl">
+              <div className="mb-3 flex items-baseline justify-between">
+                <h2 className="text-sm font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Tasks</h2>
+                <span className="text-xs text-gray-400">{tasks.length} total — select one to open its plan, proof, and agents</span>
+              </div>
+              <div className="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white dark:divide-gray-800 dark:border-gray-800 dark:bg-gray-950">
+                {tasks.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => selectTask(item.id)}
+                    className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 dark:hover:bg-gray-900/60"
+                  >
+                    <span className={`h-2 w-2 flex-shrink-0 rounded-full ${item.status === 'done' ? 'bg-emerald-500' : item.status === 'active' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`} aria-label={item.status} />
+                    <span className="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{item.title}</span>
+                    {taskRef(item) && <span className="flex-shrink-0 font-mono text-[11px] text-gray-400 dark:text-gray-500">{taskRef(item)}</span>}
+                    <span className="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500 dark:bg-gray-900 dark:text-gray-400">{item.properties.status}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div
@@ -1221,10 +1249,10 @@ export const TaskDetail = () => {
           <section className="min-w-0 flex-1 overflow-y-auto scrollbar-custom lg:flex-none lg:[flex-basis:var(--detail-pane-width)]">
             <div className="mx-auto max-w-5xl px-4 py-5 lg:px-5">
               <div className="flex items-start justify-between mb-4">
-                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-xs mb-2"><span className="font-medium text-gray-700 dark:text-gray-300">{task.id}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
+                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-xs mb-2"><span className="font-medium text-gray-700 dark:text-gray-300">{taskRef(task) ?? task.properties.project.shortCode}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
                 <div className="flex items-center gap-2">
                   <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties" aria-label="Toggle properties panel" aria-expanded={showProperties}><PanelRight className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => { navigator.clipboard.writeText(`${task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => { navigator.clipboard.writeText(`${taskRef(task) ?? task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
 

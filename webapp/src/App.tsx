@@ -4,6 +4,7 @@
  */
 
 import React from 'react';
+import { Bot } from 'lucide-react';
 import { WorkbenchPane } from './components/WorkbenchPane';
 import { TaskDetail } from './components/TaskDetail';
 import { TaskProvider, useTaskContext } from './context/TaskContext';
@@ -58,8 +59,18 @@ const AppContent = () => {
     <div className="h-screen w-full flex overflow-hidden text-sm font-sans bg-[#f7f8f9] dark:bg-gray-950 text-gray-800 dark:text-gray-200 transition-colors duration-200">
       <WorkbenchPane collapsed={workbenchCollapsed} onToggleCollapsed={() => setWorkbenchCollapsed((collapsed) => !collapsed)} />
       <MainContent />
-      {isChatOpen && (
+      {isChatOpen ? (
         <AssistantChat onClose={() => setIsChatOpen(false)} />
+      ) : (
+        // Steering must be reachable from EVERY view, not just Tasks — the chat panel is
+        // where agent controls (answer, verify, land) live.
+        <button
+          onClick={() => setIsChatOpen(true)}
+          className="fixed bottom-4 right-4 z-40 flex min-h-10 items-center gap-1.5 rounded-full bg-gray-900 px-3.5 py-2 text-xs font-semibold text-white shadow-lg transition-colors hover:bg-black focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:focus-visible:ring-offset-gray-950"
+          aria-label="Open agent chat"
+        >
+          <Bot className="h-4 w-4" aria-hidden="true" /> Agent
+        </button>
       )}
     </div>
   );
