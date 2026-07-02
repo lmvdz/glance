@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { getCategoryBadge } from '../utils';
 import { useTaskContext, type TaskFilter } from '../context/TaskContext';
+import { AccountMenu } from './AccountMenu';
 import type { Task } from '../types';
 
 const taskFilters: Array<{ key: TaskFilter; label: string }> = [
@@ -210,9 +211,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               {connected ? 'LIVE' : 'OFFLINE'}
             </span>
           </div>
-          <button onClick={onToggleCollapsed} className="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Collapse workbench pane" title="Collapse workbench pane">
-            <Menu className="h-4 w-4" aria-hidden="true" />
-          </button>
+          <div className="flex flex-shrink-0 items-center gap-1.5">
+            <AccountMenu />
+            <button onClick={onToggleCollapsed} className="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Collapse workbench pane" title="Collapse workbench pane">
+              <Menu className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
         <div className="mt-2 flex rounded-md border border-gray-200 bg-white p-0.5 dark:border-gray-800 dark:bg-gray-900">
