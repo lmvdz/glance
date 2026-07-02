@@ -52,6 +52,11 @@ async function setupDbServer(opts: { token?: string; allowSignup?: boolean } = {
 	const dbFile = path.join(dir, "app.sqlite");
 	const prevUrl = process.env.DATABASE_URL;
 	const prevSignup = process.env.OMP_SQUAD_ALLOW_SIGNUP;
+	// Ambient WorkOS creds (e.g. a dev .env that Bun auto-loads) would flip `sso` on and make these
+	// assertions non-deterministic — neutralize them for the duration of the server.
+	const prevWorkos = { id: process.env.WORKOS_CLIENT_ID, key: process.env.WORKOS_API_KEY };
+	delete process.env.WORKOS_CLIENT_ID;
+	delete process.env.WORKOS_API_KEY;
 	process.env.DATABASE_URL = `sqlite:${dbFile}`;
 	// disableSignUp is read at makeAuth time, so set the env BEFORE building the auth instance.
 	if (opts.allowSignup) process.env.OMP_SQUAD_ALLOW_SIGNUP = "1";
@@ -78,6 +83,8 @@ async function setupDbServer(opts: { token?: string; allowSignup?: boolean } = {
 		else process.env.DATABASE_URL = prevUrl;
 		if (prevSignup === undefined) delete process.env.OMP_SQUAD_ALLOW_SIGNUP;
 		else process.env.OMP_SQUAD_ALLOW_SIGNUP = prevSignup;
+		if (prevWorkos.id !== undefined) process.env.WORKOS_CLIENT_ID = prevWorkos.id;
+		if (prevWorkos.key !== undefined) process.env.WORKOS_API_KEY = prevWorkos.key;
 	});
 	return { url, origin, port };
 }
