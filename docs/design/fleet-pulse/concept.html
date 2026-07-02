@@ -1,0 +1,854 @@
+<title>Fleet Pulse — omp-graph redesign concept</title>
+<style>
+  :root {
+    --ground: #08090C;
+    --hairline: #171B23;
+    --hairline-2: #232936;
+    --ink-hi: #ECE7DC;
+    --ink-mid: #9BA0AB;
+    --ink-low: #565C68;
+    --ink-faint: #363B46;
+    --ember: #F2913D;
+    --ember-hot: #FFC96B;
+    --ember-white: #FFE9C4;
+    --ember-deep: #B25E1E;
+    --churn: #A03A6E;
+    --cool: #4E7FDB;
+    --good: #4CAF7A;
+    --alert: #E5484D;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: var(--ground); color: var(--ink-hi); font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow: hidden; }
+
+  /* no masthead — the graph is the page; context lives in one micro-line inside it */
+  .stage { position: relative; padding: 6px 14px 4px; height: 100vh; }
+  .stage svg { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  .stage svg.dragging { cursor: grabbing; }
+  text { font-family: var(--mono); user-select: none; -webkit-user-select: none; }
+  .day-name { font-size: 11px; font-weight: 700; letter-spacing: 0.22em; fill: var(--ink-hi); }
+  .day-date { font-size: 9px; fill: var(--ink-low); letter-spacing: 0.1em; }
+  .zone-label { font-size: 9px; font-weight: 600; letter-spacing: 0.24em; fill: var(--ink-faint); }
+  .mark-label { font-size: 9.5px; fill: var(--ink-mid); }
+  .mark-time { font-size: 8.5px; fill: var(--ink-low); }
+  .hour-tick { font-size: 8px; fill: var(--ink-faint); }
+  .annot { font-size: 9px; fill: var(--ink-mid); letter-spacing: 0.06em; opacity: 0.9; }
+  .peak-call { font-size: 10px; font-weight: 600; fill: var(--ink-hi); }
+  .peak-sub { font-size: 8px; letter-spacing: 0.18em; fill: var(--ink-low); }
+  .footer-line { font-size: 9px; letter-spacing: 0.2em; fill: var(--ink-faint); }
+
+  .ruler-line { stroke: var(--ink-mid); stroke-width: 1; stroke-dasharray: 1 3; }
+  .readout {
+    position: absolute; top: 0; pointer-events: none; z-index: 6;
+    background: rgba(10, 11, 15, 0.96); border: 1px solid var(--hairline-2); border-radius: 5px;
+    padding: 8px 10px; min-width: 150px; max-width: 260px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-mid);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.55);
+  }
+  .readout .rt { color: var(--ink-hi); font-weight: 600; margin-bottom: 5px; letter-spacing: 0.04em; }
+  .readout .row { display: flex; justify-content: space-between; gap: 14px; padding: 1px 0; font-variant-numeric: tabular-nums; }
+  .readout .row .val { color: var(--ink-hi); }
+  .readout .row .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; }
+
+  /* the drill drawer — click a milestone or shipped ticket and dig */
+  .detail {
+    position: absolute; top: 34px; right: 14px; bottom: 34px; z-index: 7; width: 420px;
+    background: rgba(10, 11, 15, 0.97); border: 1px solid var(--hairline-2); border-radius: 8px;
+    box-shadow: 0 14px 50px rgba(0,0,0,0.65);
+    display: flex; flex-direction: column; overflow: hidden;
+    opacity: 0; transform: translateX(16px); pointer-events: none; visibility: hidden;
+    transition: opacity 180ms cubic-bezier(0,0,0.2,1), transform 180ms cubic-bezier(0,0,0.2,1), visibility 0s 180ms;
+  }
+  .detail.open { opacity: 1; transform: none; pointer-events: auto; visibility: visible; transition: opacity 180ms cubic-bezier(0,0,0.2,1), transform 180ms cubic-bezier(0,0,0.2,1); }
+  .detail .dhead { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--hairline); flex-shrink: 0; }
+  .detail .kind-chip { font: 600 9px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ember); border: 1px solid rgba(242,145,61,0.35); border-radius: 3px; padding: 2px 6px; flex-shrink: 0; }
+  .detail .dhead .when { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-low); font-variant-numeric: tabular-nums; }
+  .detail .dhead .xbtn { appearance: none; background: none; border: none; color: var(--ink-low); font: 600 14px var(--sans); cursor: pointer; padding: 4px 6px; border-radius: 4px; min-height: 28px; }
+  .detail .dhead .xbtn:hover { color: var(--ink-hi); background: var(--hairline); }
+  .detail .dhead .xbtn:focus-visible { outline: 2px solid var(--ember); }
+  .detail .dbody { overflow-y: auto; padding: 14px 16px 16px; }
+  .detail .title2 { font-size: 13px; font-weight: 600; line-height: 1.35; }
+  .detail .meta { font-family: var(--mono); font-size: 10.5px; color: var(--ink-low); margin-top: 5px; font-variant-numeric: tabular-nums; }
+  .detail .meta .plus { color: var(--good); } .detail .meta .minus { color: var(--alert); }
+  .detail .sect { margin-top: 14px; font-size: 9px; font-weight: 600; letter-spacing: 0.2em; color: var(--ink-faint); text-transform: uppercase; }
+  .dfile { margin-top: 8px; border: 1px solid var(--hairline); border-radius: 5px; overflow: hidden; }
+  .dfhead { display: flex; align-items: center; gap: 8px; padding: 5px 9px; background: #0D0F14; border-bottom: 1px solid var(--hairline); font-family: var(--mono); font-size: 10px; color: var(--ink-mid); }
+  .dfhead .stat { margin-left: auto; flex-shrink: 0; } .dfhead .stat b { font-weight: 600; }
+  .dlines { overflow-x: auto; }
+  .dln { font-family: var(--mono); font-size: 10.5px; line-height: 1.6; white-space: pre; padding: 1px 9px; color: var(--ink-low); min-width: max-content; }
+  .dln.add { color: #8ED0A8; background: rgba(76,175,122,0.07); }
+  .dln.del { color: #E08A8E; background: rgba(229,72,77,0.07); }
+  .dln.hunk { color: #5B8DEF; background: rgba(78,127,219,0.06); }
+  .step { display: flex; gap: 11px; padding: 9px 0; border-bottom: 1px solid var(--hairline); }
+  .step:last-child { border-bottom: none; }
+  .step .sdot { width: 8px; height: 8px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; }
+  .step .sk { font-family: var(--mono); font-size: 9px; font-weight: 600; letter-spacing: 0.14em; color: var(--ink-low); }
+  .step .sv { font-size: 12px; color: var(--ink-hi); margin-top: 2px; }
+  .step .ss { font-family: var(--mono); font-size: 10px; color: var(--ink-low); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .ctable { width: 100%; border-collapse: collapse; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .ctable th { font-size: 9px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-low); text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--hairline-2); }
+  .ctable th:first-child, .ctable td:first-child { text-align: left; }
+  .ctable td { padding: 4px 6px; text-align: right; color: var(--ink-mid); border-bottom: 1px solid var(--hairline); }
+  .ctable td.dim { color: var(--ink-faint); }
+  .ctable tr.tot td { color: var(--ink-hi); font-weight: 600; border-top: 1px solid var(--hairline-2); border-bottom: none; }
+  .ctable .sw { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+  .detail .actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .detail .actions button {
+    appearance: none; font: 600 11px var(--sans); color: var(--ink-hi);
+    background: transparent; border: 1px solid var(--hairline-2); border-radius: 5px;
+    padding: 7px 12px; cursor: pointer; min-height: 32px;
+    transition: border-color 120ms cubic-bezier(0,0,0.2,1), background-color 120ms cubic-bezier(0,0,0.2,1);
+  }
+  .detail .actions button:hover { border-color: var(--ember); background: rgba(242,145,61,0.12); }
+  .detail .actions button:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+
+  @keyframes nowpulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.3; } }
+  .now-dot { animation: nowpulse 2.4s cubic-bezier(0.4,0,0.2,1) infinite; }
+  @media (prefers-reduced-motion: reduce) { .now-dot { animation: none; } * { transition-duration: 0ms !important; } }
+</style>
+
+<div class="stage" id="stage">
+  <svg id="chart" role="img" aria-label="One week of fleet activity: milestones and the cost-and-commits pulse above the day spine; agent runs, shipped tickets, and automation below. Scroll to zoom, drag to pan."></svg>
+  <div class="readout" id="readout" hidden></div>
+  <div class="detail" id="detail" role="dialog" aria-label="Inspector" aria-live="polite">
+    <div class="dhead">
+      <span class="kind-chip" id="d-kind">LAND</span>
+      <span class="when" id="d-when">—</span>
+      <button type="button" class="xbtn" id="d-close" aria-label="Close inspector">✕</button>
+    </div>
+    <div class="dbody" id="d-body"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  let seed = 1337;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+
+  const DAYS = [
+    { name: 'THURSDAY', date: '25 JUN' }, { name: 'FRIDAY', date: '26 JUN' },
+    { name: 'SATURDAY', date: '27 JUN' }, { name: 'SUNDAY', date: '28 JUN' },
+    { name: 'MONDAY', date: '29 JUN' }, { name: 'TUESDAY', date: '30 JUN' },
+    { name: 'WEDNESDAY', date: '01 JUL' }, { name: 'THURSDAY', date: '02 JUL' },
+  ];
+  const N_DAYS = DAYS.length, HOURS = N_DAYS * 24;
+  const NOW_H = 7 * 24 + 13.4;
+
+  const bursts = [
+    [14.5, 2.5, 6], [23, 2, 4], [35, 2, 3],
+    [50.5, 3, 5], [53.5, 2.5, 6],
+    [93, 3.5, 7], [99, 2, 4],
+    [112.5, 1.5, 5], [116.5, 3.5, 9], [121.5, 2.5, 6],
+    [138.5, 1, 2],
+    [153.5, 2, 4], [158.5, 2.5, 6], [168.2, 1.5, 5],
+    [178, 2.5, 5], [181, 1.5, 3],
+  ];
+  const at = (h, arr) => arr.reduce((s, [c, w, ht]) => s + ht * Math.exp(-((h - c) ** 2) / (2 * w * w)), 0);
+
+  const commits = [], cost = [], churn = [], stateBand = [];
+  for (let h = 0; h < HOURS; h++) {
+    const base = at(h + 0.5, bursts);
+    commits.push(h < NOW_H ? Math.round(Math.max(0, base * 0.8 + (rnd() - 0.75) * 1.2)) : 0);
+    cost.push(h < NOW_H ? Math.max(0, base * 1.15 + rnd() * 0.5 - 0.2) : 0);
+    churn.push(h < NOW_H ? Math.max(0, base * 0.9 + rnd() * 1.4 - 0.4) : 0);
+    stateBand.push(h >= NOW_H ? 'future' : base > 0.9 ? 'active' : 'idle');
+  }
+
+  // ── cost attribution is a HIERARCHY, not two dimensions: every run is
+  //    harness → model, and the dollars bill to the MODEL (Anthropic per-token
+  //    pricing) no matter which harness drove it. spendMatrix[h][harness][model]
+  //    is the source of truth; the model and harness views are its marginals. ──
+  const MODEL_LIST = ['fable', 'sonnet', 'haiku'];
+  const MODEL_COL = { fable: '#E8B24A', sonnet: '#7B9FE0', haiku: '#8A8F9B' };
+  const HARNESS_LIST = ['omp', 'codex', 'claude-code', 'hermes'];
+  const HARNESS_COL = { omp: '#F2913D', codex: '#66C7B0', 'claude-code': '#B08BE8', hermes: '#E08A8E' };
+  // what each harness reaches for: omp = sonnet bulk + haiku scouts + fable judgment,
+  // claude-code = interactive fable-heavy, codex = sonnet grinder, hermes = fable specialist
+  const HARNESS_MIX = {
+    omp: { fable: 0.2, sonnet: 0.6, haiku: 0.2 },
+    codex: { fable: 0.05, sonnet: 0.85, haiku: 0.1 },
+    'claude-code': { fable: 0.55, sonnet: 0.45, haiku: 0 },
+    hermes: { fable: 0.8, sonnet: 0, haiku: 0.2 },
+  };
+  const spendMatrix = [], modelCost = [], harnessCost = [], cum = [];
+  {
+    let acc = 0;
+    for (let h = 0; h < HOURS; h++) {
+      const cdx = cost[h] * (0.1 + 0.25 * Math.sin(h / 14 + 2) ** 2);
+      const ccd = cost[h] * (0.08 + 0.2 * Math.sin(h / 23 + 5) ** 2);
+      const hrm = cost[h] * (rnd() < 0.08 ? 0.25 : 0.02);
+      const byHarness = { omp: Math.max(0, cost[h] - cdx - ccd - hrm), codex: cdx, 'claude-code': ccd, hermes: hrm };
+      const cell = {}, mSum = { fable: 0, sonnet: 0, haiku: 0 };
+      for (const hn of HARNESS_LIST) {
+        cell[hn] = {};
+        for (const mn of MODEL_LIST) {
+          const v = byHarness[hn] * HARNESS_MIX[hn][mn];
+          cell[hn][mn] = v;
+          mSum[mn] += v;
+        }
+      }
+      spendMatrix.push(cell);
+      harnessCost.push(byHarness);
+      modelCost.push(mSum);
+      acc += cost[h];
+      cum.push(acc);
+    }
+  }
+  const modelTotal = { fable: 0, sonnet: 0, haiku: 0 };
+  for (const mc of modelCost) for (const k of MODEL_LIST) modelTotal[k] += mc[k];
+  const harnessTotal = { omp: 0, codex: 0, 'claude-code': 0, hermes: 0 };
+  for (const hc of harnessCost) for (const k of HARNESS_LIST) harnessTotal[k] += hc[k];
+  const cumTotal = cum[HOURS - 1] || 1;
+
+  // subscription-worth: everything above is API-EQUIVALENT pricing; if the spend
+  // actually rides a subscription, the ratio says whether the plan pays for itself
+  const PLAN = { name: 'claude max 20×', monthly: 200 };
+  const planWeekly = PLAN.monthly * 12 / 52;
+  const planWorth = cumTotal / planWeekly;
+
+  const sessions = [];
+  for (const [c, w, ht] of bursts) {
+    const n = Math.round(ht * 1.1);
+    for (let i = 0; i < n; i++) {
+      const t0 = Math.max(0, c - w + rnd() * 2 * w);
+      const dur = 0.4 + rnd() * 3;
+      if (t0 >= NOW_H) continue;
+      const r = rnd();
+      sessions.push({ t0, t1: Math.min(t0 + dur, NOW_H), status: r > 0.93 ? 'error' : r > 0.8 ? 'stopped' : 'working' });
+    }
+  }
+  sessions.sort((a, b) => a.t0 - b.t0);
+  // pack runs into rows ONCE (row identity survives pan/zoom)
+  {
+    const ends = [];
+    for (const s of sessions) {
+      let r = ends.findIndex(e => e <= s.t0);
+      if (r === -1) { ends.push(s.t1 + 0.3); r = ends.length - 1; } else ends[r] = s.t1 + 0.3;
+      s.row = r;
+    }
+  }
+
+  const M = (h, kind, label, delta, big) => ({ h, kind, label, delta, big: !!big });
+  const above = [
+    M(14.4, 'LAND', 'squad(agent-context-fabric)', 'Δ865', true),
+    M(14.8, 'LAND', 'squad(fleet-observability)', 'Δ812'),
+    M(23.2, 'DOCS', 'docs: reorganize planning corpus', 'Δ7.8k'),
+    M(35.4, 'FEAT', 'feat: add control-plane APIs', 'Δ6.2k'),
+    M(50.6, 'OTHER', 'chore: plan housekeeping', 'Δ5.7k'),
+    M(53.1, 'FEAT', 'feat(payments): real federation', 'Δ721', true),
+    M(54.0, 'DOCS', 'docs(d2): update federation', 'Δ466'),
+    M(93.1, 'FEAT', 'feat(webapp): synthesis dashboard', 'Δ1.8k', true),
+    M(94.3, 'FEAT', 'feat: redesign HeatPanel', 'Δ599'),
+    M(95.2, 'FEAT', 'feat: redesign FederationPanel', 'Δ768'),
+    M(116.2, 'LAND', 'squad(vpb-01-authoring)', 'Δ383'),
+    M(117.6, 'LAND', 'squad(vpb-08-wireframe)', 'Δ552', true),
+    M(138.6, 'FEAT', 'feat(webapp): ActiveWork pane', 'Δ1.0k'),
+    M(158.6, 'FEAT', 'feat(omp-graph): caching', 'Δ861'),
+    M(168.3, 'FEAT', 'feat(webui): activity rhythm', 'Δ361'),
+    M(169.0, 'FEAT', 'feat(omp-graph): interaction', 'Δ733', true),
+    M(178.2, 'FEAT', 'feat(webui): slotted rows', 'Δ368'),
+    M(179.5, 'FEAT', 'feat(omp-graph): fixtures green', 'Δ383', true),
+  ];
+  const below = [
+    { h: 112.6, kind: 'DONE', label: 'OMPSQ-336 Link Plane-di…', big: true },
+    { h: 114.1, kind: 'DONE', label: 'OMPSQ-308 Serialized verify' },
+    { h: 115.0, kind: 'DONE', label: 'OMPSQ-311 Workflow milestones' },
+    { h: 118.4, kind: 'DONE', label: 'OMPSQ-321 Capability map' },
+    { h: 119.1, kind: 'DONE', label: 'OMPSQ-322 Tenant persist' },
+    { h: 153.4, kind: 'DONE', label: 'OMPSQ-396 REST request', big: true },
+    { h: 154.2, kind: 'DONE', label: 'OMPSQ-397 WebSocket org' },
+    { h: 16.5, kind: 'SCOUT', label: 'found 3 candidates' },
+    { h: 52.0, kind: 'DISPATCH', label: 'spawned 2 agents' },
+    { h: 96.8, kind: 'OBSERVER', label: 'filed OMPSQ-372', big: true },
+    { h: 140.2, kind: 'SCOUT', label: 'skip: fleet idle' },
+    { h: 170.6, kind: 'DISPATCH', label: 'spawned 1 agent' },
+    { h: 180.3, kind: 'OBSERVER', label: 'found 1 concern' },
+  ].sort((a, b) => a.h - b.h);
+  const autoTicks = [];
+  for (let h = 2; h < NOW_H; h += 2.6 + rnd() * 2.4) autoTicks.push(h);
+
+  const kindCol = {
+    LAND: '#F2913D', FEAT: '#E8B24A', DOCS: '#8A8F9B', OTHER: '#6B7280',
+    DONE: '#4CAF7A', SCOUT: '#4E7FDB', OBSERVER: '#5FA8D3', DISPATCH: '#7B9FE0',
+    COST: '#C9B79A',
+  };
+  const sessCol = { working: '#4E7FDB', stopped: '#565C68', error: '#E5484D' };
+
+  // ── layout: one composition around a central spine, on a zoomable canvas ──
+  const PAD_L = 40, PAD_R = 20; // left gutter: the rotated zone labels breathe at x≈12, plot starts at 40
+  const TOPLINE = 16;
+  const RAIL = 44;
+  const PULSE_TOP = 262, PULSE_BASE = 478;  // cost line + commit bars OVERLAID, one baseline
+  const SPINE = 500;
+  const SESS_TOP = 552;
+  const METRO_Y = 664;
+  const EVT_BASE = 686, EVT_ROW_H = 25;
+  const H = 852;
+  const BAR_MAX = 128;                       // commit bars rise from the shared baseline
+
+  // the viewport onto time — wheel zooms it, drag pans it
+  const view = { start: 0, end: HOURS };
+  const MIN_SPAN = 6;
+
+  const svg = document.getElementById('chart');
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (n, attrs, parent) => { const e = document.createElementNS(NS, n); for (const k in attrs) e.setAttribute(k, attrs[k]); (parent || svg).appendChild(e); return e; };
+  const txt = (x, y, s, cls, attrs, parent) => { const t = el('text', Object.assign({ x, y, class: cls }, attrs || {}), parent); t.textContent = s; return t; };
+  const trim = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+  const hhmm = (h) => `${String(Math.floor(h % 24)).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}`;
+
+  let W = 1400;
+  let railHits = [], aboveHits = [], belowHits = [];
+  let x = h => h; // rebuilt per draw
+
+  // client → viewBox coords through the SVG's REAL transform. The element and the
+  // viewBox rarely share an aspect ratio, so the content letterboxes — a linear
+  // width/height mapping lands the hit-test below the cursor. The CTM never lies.
+  const toUser = ev => {
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    const p = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(ctm.inverse());
+    return { x: p.x, y: p.y };
+  };
+
+  function build() {
+    const stage = document.getElementById('stage');
+    W = Math.max(900, stage.clientWidth - 28);
+    svg.innerHTML = '';
+    railHits = []; aboveHits = []; belowHits = [];
+    const plotW = W - PAD_L - PAD_R;
+    const span = view.end - view.start;
+    x = h => PAD_L + ((h - view.start) / span) * plotW;
+    const hAt = px => view.start + ((px - PAD_L) / plotW) * span;
+    const vis = (h, m = 2) => h >= view.start - m && h <= view.end + m;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+    const defs = el('defs', {});
+    const grad = el('linearGradient', { id: 'breath', x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+    el('stop', { offset: '0%', 'stop-color': '#08090C' }, grad);
+    el('stop', { offset: '78%', 'stop-color': '#1C1109' }, grad);
+    el('stop', { offset: '100%', 'stop-color': '#241307' }, grad);
+    const pat = el('pattern', { id: 'stipple', width: 4, height: 4, patternUnits: 'userSpaceOnUse' }, defs);
+    el('circle', { cx: 1, cy: 1, r: 0.6, fill: '#F2913D', opacity: 0.5 }, pat);
+    el('circle', { cx: 3, cy: 3, r: 0.45, fill: '#F2913D', opacity: 0.28 }, pat);
+    const glow = el('filter', { id: 'heatglow', x: '-80%', y: '-80%', width: '260%', height: '260%' }, defs);
+    el('feGaussianBlur', { stdDeviation: 2.4, result: 'b' }, glow);
+    const mrg = el('feMerge', {}, glow);
+    el('feMergeNode', { in: 'b' }, mrg); el('feMergeNode', { in: 'SourceGraphic' }, mrg);
+
+    el('rect', { x: PAD_L, y: PULSE_TOP - 38, width: plotW, height: PULSE_BASE - PULSE_TOP + 38, fill: 'url(#breath)', opacity: 0.85 });
+
+    // the dossier line — all the context the deleted masthead used to carry,
+    // computed from the same data the graph draws so the numbers always agree
+    txt(PAD_L, TOPLINE, 'OMP-SQUAD · FLEET ACTIVITY · 25 JUN — 02 JUL 2026', 'footer-line', { fill: 'var(--ink-low)' });
+    const totCommits = commits.reduce((a, b) => a + b, 0);
+    const totChurn = Math.round(churn.reduce((a, b) => a + b, 0) * 400 / 1000);
+    txt(W - PAD_R, TOPLINE, `${totCommits} COMMITS · ${totChurn}K CHURNED · $${Math.round(cumTotal)} SPEND · ${sessions.length} RUNS · ${below.filter(e => e.kind === 'DONE').length + 13} SHIPPED`, 'footer-line', { 'text-anchor': 'end', fill: 'var(--ink-low)' });
+
+    const zone = (y, s) => txt(12, y, s, 'zone-label', { transform: `rotate(-90 12 ${y})`, 'text-anchor': 'middle' });
+    zone(150, 'MILESTONES'); zone(370, 'FLEET PULSE'); zone(600, 'AGENT RUNS'); zone(765, 'SHIPPED · LOOPS');
+
+    // day separators — only the visible ones
+    const d0 = Math.max(0, Math.floor(view.start / 24)), d1 = Math.min(N_DAYS, Math.ceil(view.end / 24));
+    for (let d = d0; d <= d1; d++) {
+      el('line', { x1: x(d * 24), y1: RAIL - 10, x2: x(d * 24), y2: H - 28, stroke: 'var(--hairline)', 'stroke-width': 1, opacity: 0.9 });
+    }
+
+    drawMilestones(d0, d1);
+    drawPulse(plotW, vis);
+    drawSpine(d0, d1, span);
+    drawSessions(vis);
+    drawBelow(vis);
+
+    // NOW — the living edge
+    if (vis(NOW_H, 0)) {
+      const nx = x(NOW_H);
+      el('rect', { x: nx, y: RAIL - 10, width: Math.max(0, W - PAD_R - nx), height: H - RAIL - 18, fill: 'rgba(8,9,12,0.62)' });
+      el('line', { x1: nx, y1: RAIL - 10, x2: nx, y2: H - 28, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.5 });
+      el('circle', { cx: nx, cy: RAIL - 10, r: 3.5, fill: 'var(--ember)', class: 'now-dot' });
+      txt(nx + 8, RAIL - 7, 'NOW', 'day-date', { fill: 'var(--ember)', 'letter-spacing': '0.2em' });
+    }
+  }
+
+  // ── milestones hang DOWN from the top rail — every one renders; the visible
+  //    window IS the virtual list (pan/zoom changes what's mounted, never a cap) ──
+  function drawMilestones(d0, d1) {
+    const g = el('g', {});
+    el('line', { x1: PAD_L, y1: RAIL, x2: W - PAD_R, y2: RAIL, stroke: 'var(--hairline-2)', 'stroke-width': 1 }, g);
+    for (let d = d0; d < d1; d++) {
+      const ms = above.filter(m => Math.floor(m.h / 24) === d).sort((a, b) => a.h - b.h);
+      if (!ms.length) continue;
+      for (const m of ms) {
+        const cx = x(m.h);
+        const mk = el('rect', {
+          x: cx - (m.big ? 3.5 : 2.5), y: RAIL - (m.big ? 3.5 : 2.5), width: m.big ? 7 : 5, height: m.big ? 7 : 5,
+          fill: kindCol[m.kind], cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${m.kind}: ${m.label}`,
+          ...(m.big ? { filter: 'url(#heatglow)' } : {}),
+        }, g);
+        mk.addEventListener('click', () => openDetail(m));
+        mk.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(m); } });
+        railHits.push({ m, cx });
+      }
+      const x0 = Math.max(x(d * 24), PAD_L);
+      let yy = RAIL + 22;
+      el('line', { x1: x(ms[0].h), y1: RAIL + 4, x2: x(ms[0].h), y2: yy - 9, stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
+      txt(x0 + 8, yy - 11, `${ms.length}× ${hhmm(ms[0].h)}–${hhmm(ms[ms.length - 1].h)}`, 'mark-time', {}, g);
+      for (const m of ms) {
+        const t = el('text', { x: x0 + 8, y: yy, class: 'mark-label', cursor: 'pointer' }, g);
+        const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[m.kind]; k.style.fontWeight = '600'; k.textContent = m.kind + ' ';
+        const b = document.createElementNS(NS, 'tspan'); b.textContent = trim(m.label, 19);
+        t.appendChild(k); t.appendChild(b);
+        t.addEventListener('click', () => openDetail(m));
+        // hit-test against the RENDERED width, not a guess — hovering past the
+        // end of a short label must read as empty air
+        aboveHits.push({ m, lx: x0 + 8, y: yy, w: t.getComputedTextLength() });
+        yy += 13;
+      }
+    }
+  }
+
+  // ── FLEET PULSE: cost heartbeat + commit bars overlaid on ONE baseline ──
+  // the magma ramp is shared by the bars AND the tooltip swatch, so the legend
+  // always matches the exact bar under the cursor
+  const heatColor = t => (t > 0.85 ? '#FFE9C4' : t > 0.6 ? '#FFC96B' : t > 0.35 ? '#F2913D' : '#B25E1E');
+  const maxCommits = Math.max(...commits, 1);
+  let pulseMax = 1; // exposed so the hover can put a dot on the cost line
+  function drawPulse(plotW, vis) {
+    const g = el('g', {});
+    const maxCost = Math.max(...cost, 1), maxC = Math.max(...commits, 1), maxCh = Math.max(...churn, 1);
+    pulseMax = maxCost;
+    const cy = v => PULSE_BASE - (v / maxCost) * (PULSE_BASE - PULSE_TOP);
+    const h0 = Math.max(0, Math.floor(view.start) - 1), h1 = Math.min(HOURS, Math.ceil(view.end) + 1);
+
+    // churn ridge, quietest layer
+    let dR = '';
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) dR += (dR ? ' L' : 'M') + ` ${x(h + 0.5).toFixed(1)} ${(PULSE_BASE - (churn[h] / maxCh) * BAR_MAX * 0.8).toFixed(1)}`;
+    if (dR) el('path', { d: dR + ` L ${x(Math.min(h1, NOW_H))} ${PULSE_BASE} L ${x(h0)} ${PULSE_BASE} Z`, fill: 'var(--churn)', opacity: 0.2 }, g);
+
+    // commit bars from the shared baseline (magma ramp + glow)
+    const bw = Math.max(1.6, plotW / (view.end - view.start) - 1.2);
+    for (let h = h0; h < h1; h++) {
+      if (!commits[h] || !vis(h)) continue;
+      const t = commits[h] / maxC;
+      const bh = 4 + t * (BAR_MAX - 4);
+      el('rect', { x: x(h) + 0.5, y: PULSE_BASE - bh, width: bw, height: bh, fill: heatColor(t), opacity: 0.92, ...(t > 0.6 ? { filter: 'url(#heatglow)' } : {}) }, g);
+    }
+
+    // cost line + stipple over the top — the heartbeat rides above the bars
+    let dArea = '', dLine = '';
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) {
+      const px = x(h + 0.5), py = cy(cost[h]);
+      dArea += (dArea ? ' L' : 'M') + ` ${px.toFixed(1)} ${py.toFixed(1)}`;
+      dLine += (dLine ? ' L' : 'M') + ` ${px.toFixed(1)} ${py.toFixed(1)}`;
+    }
+    if (dLine) {
+      const clip = el('clipPath', { id: 'costclip' }, g);
+      el('path', { d: dArea + ` L ${x(Math.min(h1, NOW_H))} ${PULSE_BASE} L ${x(h0)} ${PULSE_BASE} Z` }, clip);
+      el('rect', { x: PAD_L, y: PULSE_TOP, width: plotW, height: PULSE_BASE - PULSE_TOP, fill: 'url(#stipple)', 'clip-path': 'url(#costclip)', opacity: 0.5 }, g);
+      el('path', { d: dLine, fill: 'none', stroke: 'var(--ember)', 'stroke-width': 1.4 }, g);
+    }
+
+    // peak callout for the visible window
+    let pk = -1;
+    for (let h = Math.max(0, Math.ceil(view.start)); h < Math.min(NOW_H, view.end); h++) if (pk === -1 || cost[h] > cost[pk]) pk = h;
+    if (pk >= 0 && cost[pk] > 0.5) {
+      const px = x(pk + 0.5), py = cy(cost[pk]);
+      el('circle', { cx: px, cy: py, r: 3, fill: 'var(--ember-white)', filter: 'url(#heatglow)' }, g);
+      // callout flips below the dot when the peak crowds the band strips at the top
+      const above = py > PULSE_TOP + 34;
+      txt(px, above ? py - 16 : py + 26, `$${cost[pk].toFixed(1)}/hr`, 'peak-call', { 'text-anchor': 'middle' }, g);
+      txt(px, above ? py - 6 : py + 36, 'PEAK SPEND', 'peak-sub', { 'text-anchor': 'middle' }, g);
+    }
+    txt(W - PAD_R - 2, PULSE_TOP + 4, `$${Math.round(maxCost)}/hr · ${maxC} commits/hr peak`, 'annot', { 'text-anchor': 'end' }, g);
+
+    // ── cumulative spend: one thin monotonic line on its own scale — a different
+    //    channel from the spiky rate, so the two can share the zone without noise ──
+    const cumY = v => PULSE_BASE - (v / cumTotal) * (PULSE_BASE - PULSE_TOP - 34);
+    let dC = '';
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) dC += (dC ? ' L' : 'M') + ` ${x(h + 0.5).toFixed(1)} ${cumY(cum[h]).toFixed(1)}`;
+    if (dC) {
+      el('path', { d: dC, fill: 'none', stroke: '#C9B79A', 'stroke-width': 1, opacity: 0.7 }, g);
+      const lastH = Math.min(Math.ceil(NOW_H), h1) - 1;
+      if (lastH >= h0 && vis(lastH, 0)) {
+        const ex = x(lastH + 0.5), ey = cumY(cum[lastH]);
+        el('circle', { cx: ex, cy: ey, r: 2.2, fill: '#C9B79A' }, g);
+        const fits = ex + 110 < W - PAD_R; // flip to the left of the dot at the edge
+        txt(fits ? ex + 6 : ex - 6, ey - 5, `$${Math.round(cum[lastH])} cumulative`, 'annot', { fill: '#C9B79A', ...(fits ? {} : { 'text-anchor': 'end' }) }, g);
+      }
+    }
+
+    // ── attribution bands: dominant MODEL and dominant HARNESS per hour as two slim
+    //    categorical strips (the state-band idiom) — WHO was burning WHEN; the exact
+    //    split lives in the hover, the week totals in the legend rows. ──
+    const drawBand = (perHour, list, colors, y) => {
+      const domAt = h => list.reduce((best, k) => (perHour[h][k] > perHour[h][best] ? k : best), list[0]);
+      let run = -1, dom = '';
+      const flush = end => {
+        if (run < 0) return;
+        const rx0 = Math.max(x(run), PAD_L), rx1 = Math.min(x(end), W - PAD_R);
+        if (rx1 > rx0) el('rect', { x: rx0, y, width: rx1 - rx0, height: 4, rx: 1, fill: colors[dom], opacity: 0.75 }, g);
+        run = -1;
+      };
+      for (let h = Math.max(0, Math.floor(view.start)); h <= Math.min(HOURS, Math.ceil(view.end)); h++) {
+        const active = h < NOW_H && h < HOURS && cost[h] > 0.15;
+        const d = active ? domAt(h) : '';
+        // dom resets on EVERY flush — else a burst whose dominant matches the
+        // previous burst's never restarts the run and the band silently vanishes
+        if (!active || d !== dom) { flush(h); dom = d; if (active) run = h; }
+      }
+      flush(Math.min(HOURS, Math.ceil(view.end)));
+    };
+    // legends are the marginals of ONE harness→model matrix: harness = who ran it,
+    // model = what Anthropic bills. Clicking anything here opens the full breakdown.
+    const legendG = el('g', { cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': 'Open the cost breakdown' }, g);
+    legendG.addEventListener('click', () => openDetail({ h: NOW_H, kind: 'COST', label: 'Spend attribution — harness → model' }));
+    legendG.addEventListener('keydown', e => { if (e.key === 'Enter') openDetail({ h: NOW_H, kind: 'COST', label: 'Spend attribution — harness → model' }); });
+    const legend = (title, list, colors, totals, y) => {
+      let lx = PAD_L + 6;
+      txt(lx, y, title, 'peak-sub', {}, legendG); lx += 100;
+      for (const k of list) {
+        el('rect', { x: lx, y: y - 6.5, width: 7, height: 7, rx: 2, fill: colors[k] }, legendG);
+        const label = `${k} $${Math.round(totals[k])}`;
+        txt(lx + 11, y, label, 'annot', {}, legendG);
+        lx += 11 + label.length * 5.6 + 16;
+      }
+    };
+    legend('BILLED · MODEL', MODEL_LIST, MODEL_COL, modelTotal, PULSE_TOP - 31);
+    legend('VIA · HARNESS', HARNESS_LIST, HARNESS_COL, harnessTotal, PULSE_TOP - 19);
+    // subscription-worth chip: API-equivalent spend vs the plan's pro-rated week
+    const worthTone = planWorth >= 1.5 ? '#4CAF7A' : planWorth >= 0.9 ? '#E8B24A' : '#E5484D';
+    const worthTxt = txt(W - PAD_R - 2, PULSE_TOP - 19, '', 'annot', { 'text-anchor': 'end' }, legendG);
+    const w1 = document.createElementNS(NS, 'tspan'); w1.textContent = `PLAN ${PLAN.name} · $${Math.round(planWeekly)}/wk → $${Math.round(cumTotal)} api-equiv · `;
+    const w2 = document.createElementNS(NS, 'tspan'); w2.style.fill = worthTone; w2.style.fontWeight = '600'; w2.textContent = `${planWorth.toFixed(1)}× worth`;
+    worthTxt.appendChild(w1); worthTxt.appendChild(w2);
+    drawBand(modelCost, MODEL_LIST, MODEL_COL, PULSE_TOP - 13);
+    drawBand(harnessCost, HARNESS_LIST, HARNESS_COL, PULSE_TOP - 7);
+  }
+
+  // ── the spine: state band + adaptive hour ruler + sun arcs + day names ──
+  function drawSpine(d0, d1, span) {
+    const g = el('g', {});
+    let run = 0;
+    for (let h = 1; h <= HOURS; h++) {
+      if (h === HOURS || stateBand[h] !== stateBand[run]) {
+        const s = stateBand[run];
+        if (s !== 'future' && h >= view.start && run <= view.end) {
+          const thick = s === 'active';
+          const rx0 = Math.max(x(run), PAD_L), rx1 = Math.min(x(h), W - PAD_R);
+          if (rx1 > rx0) el('rect', { x: rx0, y: SPINE - (thick ? 5 : 1.5), width: rx1 - rx0, height: thick ? 10 : 3, fill: thick ? 'var(--ember)' : 'var(--ember-deep)', opacity: thick ? 0.9 : 0.5, rx: 1.5 }, g);
+        }
+        run = h;
+      }
+    }
+    el('line', { x1: PAD_L, y1: SPINE + 9, x2: W - PAD_R, y2: SPINE + 9, stroke: 'var(--hairline-2)', 'stroke-width': 1 }, g);
+    // adaptive tick density: zoom in and the ruler grows resolution
+    const tickEvery = span > 96 ? 3 : span > 30 ? 1 : 1;
+    const labelEvery = span > 96 ? 6 : span > 30 ? 3 : 1;
+    for (let d = d0; d < d1; d++) {
+      const x0 = Math.max(x(d * 24), PAD_L);
+      const dn = el('text', { x: x0 + 8, y: SPINE + 25, class: 'day-name' }, g);
+      const n1 = document.createElementNS(NS, 'tspan'); n1.textContent = DAYS[d].name; dn.appendChild(n1);
+      const n2 = document.createElementNS(NS, 'tspan'); n2.setAttribute('class', 'day-date'); n2.setAttribute('dx', 10); n2.textContent = DAYS[d].date; dn.appendChild(n2);
+      for (let hh = 0; hh < 24; hh += tickEvery) {
+        const th = d * 24 + hh;
+        if (th < view.start || th > view.end) continue;
+        const tx = x(th);
+        el('line', { x1: tx, y1: SPINE + 9, x2: tx, y2: SPINE + (hh % labelEvery === 0 ? 14 : 12), stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
+        if (hh % labelEvery === 0 && hh > 0) txt(tx, SPINE + 41, String(hh).padStart(2, '0'), 'hour-tick', { 'text-anchor': 'middle' }, g);
+      }
+      const sx0 = x(d * 24 + 6), sx1 = x(d * 24 + 18), sxm = x(d * 24 + 12);
+      el('path', { d: `M ${sx0} ${SPINE - 12} Q ${sxm} ${SPINE - 34} ${sx1} ${SPINE - 12}`, fill: 'none', stroke: 'var(--ink-low)', 'stroke-width': 0.75, 'stroke-dasharray': '1 3', opacity: 0.6 }, g);
+      el('circle', { cx: sxm, cy: SPINE - 23, r: 1.8, fill: 'var(--ember)', opacity: 0.7 }, g);
+    }
+  }
+
+  // ── agent runs hang below as duration pills in their packed rows ──
+  function drawSessions(vis) {
+    const g = el('g', {});
+    for (const s of sessions) {
+      if (s.row > 10 || s.t1 < view.start || s.t0 > view.end) continue;
+      const y = SESS_TOP + s.row * 9;
+      const rx0 = Math.max(x(s.t0), PAD_L), rx1 = Math.min(x(s.t1), W - PAD_R);
+      if (rx1 <= rx0) continue;
+      el('rect', { x: rx0, y, width: Math.max(2, rx1 - rx0), height: 5, rx: 2.5, fill: sessCol[s.status], opacity: s.status === 'working' ? 0.85 : 0.7 }, g);
+    }
+    txt(PAD_L + 6, SESS_TOP - 8, `${sessions.length} runs · packed`, 'annot', {}, g);
+    for (const h of autoTicks) {
+      if (!vis(h, 0)) continue;
+      el('rect', { x: x(h), y: METRO_Y, width: 1.4, height: 7, fill: 'var(--cool)', opacity: 0.55 }, g);
+    }
+  }
+
+  // ── shipped tickets + loop notes: greedy row packing, collision-free by construction ──
+  function drawBelow(vis) {
+    const g = el('g', {});
+    const LABEL_W = 190;
+    // interval packing that knows which way each label extends: right-anchored
+    // labels occupy [cx, cx+W], edge labels flip and occupy [cx−W, cx].
+    const rowEnds = []; // per row, the x where that row's last label ends
+    for (const e of below) {
+      if (!vis(e.h, 4)) continue;
+      const cx = x(e.h);
+      const anchorEnd = cx > W - 220;
+      const lx0 = anchorEnd ? cx - LABEL_W : cx, lx1 = anchorEnd ? cx : cx + LABEL_W;
+      let r = rowEnds.findIndex(end => end < lx0 - 8);
+      if (r === -1) { rowEnds.push(0); r = rowEnds.length - 1; }
+      rowEnds[r] = lx1;
+      const depth = EVT_BASE + r * EVT_ROW_H;
+      if (depth > H - 36) continue; // beyond the fold — the real build scrolls/virtualizes here
+      el('line', { x1: cx, y1: SPINE + 46, x2: cx, y2: depth - 14, stroke: kindCol[e.kind], 'stroke-width': 0.6, opacity: 0.35 }, g);
+      const mk = el('g', { cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${e.kind}: ${e.label}` }, g);
+      if (e.kind === 'DONE') el('rect', { x: cx - 3, y: depth - 17, width: 6, height: 6, transform: `rotate(45 ${cx} ${depth - 14})`, fill: kindCol[e.kind], ...(e.big ? { filter: 'url(#heatglow)' } : {}) }, mk);
+      else el('circle', { cx, cy: depth - 14, r: e.big ? 3.2 : 2.4, fill: kindCol[e.kind] }, mk);
+      const t = el('text', { x: anchorEnd ? cx - 7 : cx + 7, y: depth - 11, class: 'mark-label', ...(anchorEnd ? { 'text-anchor': 'end' } : {}) }, mk);
+      const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[e.kind]; k.style.fontWeight = '600'; k.textContent = e.kind + ' · ' + hhmm(e.h) + ' ';
+      t.appendChild(k);
+      const t2 = el('text', { x: anchorEnd ? cx - 7 : cx + 7, y: depth + 1, class: 'mark-time', ...(anchorEnd ? { 'text-anchor': 'end' } : {}) }, mk);
+      t2.textContent = trim(e.label, 30);
+      mk.addEventListener('click', () => openDetail({ h: e.h, kind: e.kind, label: e.label, big: e.big }));
+      mk.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openDetail({ h: e.h, kind: e.kind, label: e.label }); } });
+      const wpx = Math.max(t.getComputedTextLength(), t2.getComputedTextLength());
+      belowHits.push({ e, cx, y: depth - 14, x0: anchorEnd ? cx - 7 - wpx : cx - 4, x1: anchorEnd ? cx + 4 : cx + 7 + wpx });
+    }
+  }
+
+  // ── canvas semantics: wheel zooms around the cursor, drag pans ──
+  let raf = 0;
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; build(); }); };
+
+  svg.addEventListener('wheel', ev => {
+    ev.preventDefault();
+    const px = toUser(ev).x;
+    const span = view.end - view.start;
+    const anchor = view.start + ((px - PAD_L) / (W - PAD_L - PAD_R)) * span;
+    const factor = ev.deltaY > 0 ? 1.14 : 1 / 1.14;
+    let ns = Math.min(HOURS, Math.max(MIN_SPAN, span * factor));
+    let start = anchor - ((anchor - view.start) / span) * ns;
+    start = Math.max(0, Math.min(start, HOURS - ns));
+    view.start = start; view.end = start + ns;
+    schedule();
+  }, { passive: false });
+
+  let drag = null;
+  svg.addEventListener('pointerdown', ev => {
+    drag = { ux0: toUser(ev).x, cx0: ev.clientX, start0: view.start, moved: false };
+    svg.setPointerCapture(ev.pointerId);
+  });
+  svg.addEventListener('pointermove', ev => {
+    if (!drag) return;
+    if (Math.abs(ev.clientX - drag.cx0) > 4) drag.moved = true;
+    if (!drag.moved) return;
+    svg.classList.add('dragging');
+    hideReadout();
+    const span = view.end - view.start;
+    const dux = toUser(ev).x - drag.ux0;
+    let start = drag.start0 - (dux / (W - PAD_L - PAD_R)) * span;
+    start = Math.max(0, Math.min(start, HOURS - span));
+    view.start = start; view.end = start + span;
+    schedule();
+  });
+  let suppressClick = false;
+  const endDrag = ev => {
+    if (drag && drag.moved) suppressClick = true; // a pan is not a click
+    if (drag && ev && svg.hasPointerCapture && svg.hasPointerCapture(ev.pointerId)) svg.releasePointerCapture(ev.pointerId);
+    drag = null; svg.classList.remove('dragging');
+  };
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+  svg.addEventListener('click', ev => { if (suppressClick) { ev.stopPropagation(); suppressClick = false; } }, true);
+
+  // ── zone-aware hover: x picks the instant, y picks the layer; empty air says
+  //    nothing. The ruler tracks the CURSOR exactly (never snaps to bins) and
+  //    every discrete hit gets a visible highlight so pointing feels anchored. ──
+  const readout = document.getElementById('readout');
+  let ruler = null, hoverMark = null;
+  const clearMark = () => { if (hoverMark) { hoverMark.remove(); hoverMark = null; } };
+  const hideReadout = () => { readout.hidden = true; clearMark(); if (ruler) { ruler.remove(); ruler = null; } };
+  const row = (k, v, c) => `<div class="row"><span>${c ? `<span class="swatch" style="background:${c}"></span>` : ''}${k}</span>${v !== '' ? `<span class="val">${v}</span>` : ''}</div>`;
+  const when = h => { const d = Math.floor(h / 24); return `${DAYS[d].name.slice(0, 3)} ${DAYS[d].date} · ${hhmm(h)}`; };
+  const ring = (cx, cy2, rr, color) => el('circle', { cx, cy: cy2, r: rr, fill: 'none', stroke: color, 'stroke-width': 1.2, opacity: 0.9, 'pointer-events': 'none' });
+
+  svg.addEventListener('pointermove', ev => {
+    if (drag && drag.moved) return;
+    const r = svg.getBoundingClientRect();
+    const u = toUser(ev);
+    const px = u.x, py = u.y;
+    if (px < PAD_L || px > W - PAD_R) { hideReadout(); return; }
+    const span = view.end - view.start;
+    const hf = view.start + ((px - PAD_L) / (W - PAD_L - PAD_R)) * span;
+    const h = Math.min(HOURS - 1, Math.max(0, Math.floor(hf)));
+    if (!ruler) ruler = el('line', { class: 'ruler-line' });
+    ruler.setAttribute('x1', px); ruler.setAttribute('x2', px); // the ruler IS the cursor
+    ruler.setAttribute('y1', RAIL - 6); ruler.setAttribute('y2', H - 30);
+    clearMark();
+
+    let html = null;
+    if (py < PULSE_TOP - 24) {
+      const nearMark = railHits.filter(z => Math.abs(z.cx - px) < 10 && py > RAIL - 14 && py < RAIL + 14).sort((a, b) => Math.abs(a.cx - px) - Math.abs(b.cx - px))[0];
+      const nearLabel = aboveHits.filter(z => px >= z.lx - 2 && px <= z.lx + z.w + 2 && Math.abs(z.y - 3 - py) < 7)[0];
+      const zHit = nearMark || nearLabel;
+      if (zHit) {
+        const m = zHit.m;
+        hoverMark = ring(nearMark ? zHit.cx : x(m.h), RAIL, 7, kindCol[m.kind]);
+        html = `<div class="rt" style="color:${kindCol[m.kind]}">${m.kind} · ${when(m.h)}</div>` + row(trim(m.label, 26), m.delta || '', null) + row('click to open the diff', '', null);
+      }
+    } else if (py <= PULSE_BASE + 4) {
+      // the pulse is one fused instrument — pointing at it reads both pulses at that instant
+      if (h < NOW_H && (cost[h] > 0.05 || commits[h] > 0)) {
+        const ly = PULSE_BASE - (cost[h] / pulseMax) * (PULSE_BASE - PULSE_TOP);
+        hoverMark = ring(x(h + 0.5), ly, 4, '#FFE9C4'); // the dot rides the heartbeat
+        html = `<div class="rt">${when(hf)}</div>` + row('cost', `$${cost[h].toFixed(1)}/hr`, '#F2913D');
+        // the hierarchy, not two flat lists: harness → model pairs, biggest first
+        const pairs = [];
+        for (const hn of HARNESS_LIST) for (const mn of MODEL_LIST) {
+          const v = spendMatrix[h][hn][mn];
+          if (v > 0.15) pairs.push({ hn, mn, v });
+        }
+        pairs.sort((a, b) => b.v - a.v);
+        for (const p of pairs.slice(0, 4)) html += row(`· ${p.hn} → ${p.mn}`, `$${p.v.toFixed(1)}`, MODEL_COL[p.mn]);
+        if (pairs.length > 4) html += row(`· +${pairs.length - 4} more pairs`, '', null);
+        html += row('cumulative', `$${Math.round(cum[h])} of $${Math.round(cumTotal)}`, '#C9B79A') + row('commits', commits[h], heatColor(commits[h] / maxCommits)) + row('churn', `~${Math.round(churn[h] * 400)} lines`, '#A03A6E');
+      }
+    } else if (py <= SPINE + 46) {
+      if (h < NOW_H) html = `<div class="rt">${when(hf)}</div>` + row('fleet', stateBand[h], stateBand[h] === 'active' ? '#F2913D' : '#565C68');
+    } else if (py < METRO_Y - 4) {
+      const rIdx = Math.round((py - SESS_TOP - 2.5) / 9);
+      const s = sessions.find(z => z.row === rIdx && hf >= z.t0 - 0.15 && hf <= z.t1 + 0.15);
+      if (s) {
+        const yq = SESS_TOP + s.row * 9;
+        hoverMark = el('rect', { x: x(s.t0) - 1.5, y: yq - 1.5, width: Math.max(2, x(s.t1) - x(s.t0)) + 3, height: 8, rx: 4, fill: 'none', stroke: sessCol[s.status], 'stroke-width': 1, 'pointer-events': 'none' });
+        html = `<div class="rt" style="color:${sessCol[s.status]}">AGENT RUN · ${s.status}</div>` + row('started', when(s.t0), null) + row('duration', `${(s.t1 - s.t0).toFixed(1)}h`, null);
+      }
+    } else if (py < EVT_BASE - 24) {
+      const tk = autoTicks.filter(t => Math.abs(x(t) - px) < 6).sort((a, b) => Math.abs(x(a) - px) - Math.abs(x(b) - px))[0];
+      if (tk !== undefined) {
+        hoverMark = ring(x(tk) + 0.7, METRO_Y + 3.5, 6, '#4E7FDB');
+        html = `<div class="rt" style="color:#4E7FDB">LOOP TICK · ${when(tk)}</div>` + row('automation heartbeat', '', null);
+      }
+    } else {
+      // marker proximity, or inside the label's REAL extent (both text lines)
+      const near = belowHits.filter(z => (Math.abs(z.cx - px) < 12 && Math.abs(z.y - py) < 14) || (px >= z.x0 && px <= z.x1 && py >= z.y - 8 && py <= z.y + 18))
+        .sort((a, b) => Math.abs(a.cx - px) - Math.abs(b.cx - px))[0];
+      if (near) {
+        hoverMark = ring(near.cx, near.y, 7, kindCol[near.e.kind]);
+        html = `<div class="rt" style="color:${kindCol[near.e.kind]}">${near.e.kind} · ${when(near.e.h)}</div>` + row(trim(near.e.label, 28), '', null) + row(near.e.kind === 'DONE' ? 'click to open the pipeline' : 'click to open the loop log', '', null);
+      }
+    }
+
+    if (!html) { readout.hidden = true; return; }
+    readout.hidden = false;
+    readout.innerHTML = html;
+    readout.style.left = Math.min(ev.clientX - r.left + 18, r.width - 210) + 'px';
+    readout.style.top = Math.min(ev.clientY - r.top + 14, r.height - 110) + 'px';
+  });
+  svg.addEventListener('pointerleave', hideReadout);
+
+  // ── the drill drawer: commits open a diff, shipped tickets open their pipeline ──
+  const detail = document.getElementById('detail');
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const shaOf = s => { let a = 7; for (const c of s) a = (a * 31 + c.charCodeAt(0)) & 0xffffff; return a.toString(16).padStart(7, 'a'); };
+  const FILE_POOL = ['src/squad-manager.ts', 'src/proof.ts', 'src/land.ts', 'webapp/src/components/TaskDetail.tsx', 'src/federation.ts', 'src/plan-sync.ts', 'webapp/src/omp-graph/GraphCanvas.tsx', 'docs/federation.md', 'src/gate-runner.ts', 'tests/omp-graph.test.ts'];
+
+  function commitBody(m) {
+    const sha = shaOf(m.label);
+    const total = parseFloat((m.delta || 'Δ300').replace(/[^\d.]/g, '')) * ((m.delta || '').includes('k') ? 1000 : 1);
+    let s2 = 11; const prand = () => { s2 = (s2 * 1103515245 + 12345) & 0x7fffffff; return s2 / 0x7fffffff; };
+    const nf = 2 + Math.floor(prand() * 3);
+    let html = `<div class="title2">${esc(m.label)}</div>
+      <div class="meta">${sha} · fleet/agent-0${1 + Math.floor(prand() * 6)} · <span class="plus">+${Math.round(total * 0.8)}</span> <span class="minus">−${Math.round(total * 0.2)}</span> in ${nf} files · proof gate ✓ fresh fingerprint</div>
+      <div class="sect">Changed files</div>`;
+    for (let i = 0; i < nf; i++) {
+      const f = FILE_POOL[Math.floor(prand() * FILE_POOL.length)];
+      const add = Math.round(total * (0.2 + prand() * 0.3)), del = Math.round(add * 0.3);
+      html += `<div class="dfile"><div class="dfhead"><span>${f}</span><span class="stat"><b class="plus">+${add}</b> <b class="minus">−${del}</b></span></div>`;
+      if (i === 0) {
+        html += `<div class="dlines"><div class="dln hunk">@@ −41,6 +41,${6 + Math.floor(prand() * 8)} @@</div>
+          <div class="dln"> const gate = resolveGate(unit);</div>
+          <div class="dln del">− await runProof(unit, { skipSandbox: true });</div>
+          <div class="dln add">+ const env = gateEnv(process.env); // secrets scrubbed</div>
+          <div class="dln add">+ await runProof(unit, { env, sandbox: gateSandbox() });</div>
+          <div class="dln"> receipt.fingerprint = fingerprintOf(unit);</div></div>`;
+      }
+      html += `</div>`;
+    }
+    html += `<div class="actions"><button type="button">Open full diff</button><button type="button">Open in Tasks</button></div>
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">this drawer is GET /api/graph/commit?sha=${sha} — the same GitHub-style diff the current GraphDetail already renders.</div>`;
+    return html;
+  }
+
+  function ticketBody(m) {
+    const id = (m.label.match(/OMPSQ-\d+/) || ['OMPSQ-372'])[0];
+    const step = (color, k, v, s) => `<div class="step"><span class="sdot" style="background:${color}"></span><span style="min-width:0"><div class="sk">${k}</div><div class="sv">${v}</div>${s ? `<div class="ss">${s}</div>` : ''}</span></div>`;
+    return `<div class="title2">${esc(m.label)}</div>
+      <div class="meta">${id} · closed ${when(m.h)} · cycle time 1d 4h</div>
+      <div class="sect">How it shipped</div>
+      ${step('#9BA0AB', 'PLAN', 'plans/factory-control-plane/03-verify-gates.md', 'STATUS done · promoted with Tier-2 schema')}
+      ${step('#4E7FDB', 'AGENT', 'worktree squad/' + id.toLowerCase() + ' · 2.1h · $4.20', '31 tool calls · 2 fixup rounds')}
+      ${step('#F2913D', 'PROOF', 'bun test · exit 0', 'fingerprint fresh · tree clean · TTL ok')}
+      ${step('#4CAF7A', 'LAND', 'merged ' + shaOf(id) + ' → main', 'Δ' + (300 + (id.charCodeAt(6) * 7) % 600) + ' lines · no conflicts')}
+      <div class="actions"><button type="button">Open ticket</button><button type="button">View land diff</button><button type="button">Open plan</button></div>
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">each step links: plan concern → agent transcript → proof receipt → land commit. The drill IS the navigation.</div>`;
+  }
+
+  function loopBody(m) {
+    return `<div class="title2">${esc(m.kind + ' · ' + m.label)}</div>
+      <div class="meta">automation.jsonl · 1 LLM call · 3.2s</div>
+      <div class="sect">Loop context</div>
+      <div class="meta" style="color:var(--ink-mid); line-height:1.7">Opens the automation log filtered to this loop — recent ticks, LLM spend, skip reasons. The old Automation panel lives here now, one click down and already scoped.</div>
+      <div class="actions"><button type="button">Open loop log</button></div>`;
+  }
+
+  function costBody() {
+    const fmt = v => (v < 0.5 ? '<td class="dim">—</td>' : `<td>$${Math.round(v)}</td>`);
+    let rows = '';
+    for (const hn of HARNESS_LIST) {
+      const cells = MODEL_LIST.map(mn => fmt(spendMatrix.reduce((a, c) => a + c[hn][mn], 0))).join('');
+      rows += `<tr><td><span class="sw" style="background:${HARNESS_COL[hn]}"></span>${hn}</td>${cells}<td>$${Math.round(harnessTotal[hn])}</td></tr>`;
+    }
+    const totCells = MODEL_LIST.map(mn => `<td>$${Math.round(modelTotal[mn])}</td>`).join('');
+    const worthTone = planWorth >= 1.5 ? 'var(--good)' : planWorth >= 0.9 ? '#E8B24A' : 'var(--alert)';
+    return `<div class="title2">Spend attribution — harness → model</div>
+      <div class="meta">every run is a harness driving a model; the dollars bill to the model’s per-token pricing</div>
+      <table class="ctable" aria-label="Cost by harness and model">
+        <tr><th>via ↓ · billed →</th>${MODEL_LIST.map(mn => `<th><span class="sw" style="background:${MODEL_COL[mn]}"></span>${mn}</th>`).join('')}<th>total</th></tr>
+        ${rows}
+        <tr class="tot"><td>anthropic bill</td>${totCells}<td>$${Math.round(cumTotal)}</td></tr>
+      </table>
+      <div class="sect">Is the plan worth it?</div>
+      <div class="step"><span class="sdot" style="background:#C9B79A"></span><span>
+        <div class="sk">SUBSCRIPTION</div>
+        <div class="sv">${PLAN.name} · $${PLAN.monthly}/mo → $${Math.round(planWeekly)}/wk pro-rated</div>
+        <div class="ss">this week at API pricing: $${Math.round(cumTotal)} · <b style="color:${worthTone}">${planWorth.toFixed(1)}× the plan cost</b></div>
+      </span></div>
+      <div class="meta" style="color:var(--ink-low); margin-top:8px">above ~1× the plan pays for itself; the week's break-even point was ${(() => { let i = 0; while (i < HOURS && cum[i] < planWeekly) i++; return i < HOURS ? when(i) : 'not reached'; })()}</div>
+      <div class="actions"><button type="button">Open usage log</button><button type="button">Export CSV</button></div>
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">receipts already carry model + cost per run; harness is one field on the receipt. API-equivalent pricing comes from the token counts × published rates.</div>`;
+  }
+
+  function openDetail(m) {
+    const chip = document.getElementById('d-kind');
+    chip.textContent = m.kind;
+    chip.style.color = kindCol[m.kind];
+    chip.style.borderColor = (kindCol[m.kind] || '#F2913D') + '59';
+    document.getElementById('d-when').textContent = m.kind === 'COST' ? 'this week' : when(m.h);
+    document.getElementById('d-body').innerHTML =
+      m.kind === 'COST' ? costBody() :
+      m.kind === 'DONE' ? ticketBody(m) : (m.kind === 'SCOUT' || m.kind === 'OBSERVER' || m.kind === 'DISPATCH') ? loopBody(m) : commitBody(m);
+    detail.classList.add('open');
+    document.getElementById('d-close').focus();
+  }
+  document.getElementById('d-close').addEventListener('click', () => detail.classList.remove('open'));
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') detail.classList.remove('open'); });
+
+  let rT;
+  window.addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(build, 150); });
+  build();
+})();
+</script>
