@@ -9,6 +9,11 @@ import { authClient } from '../lib/auth-client';
 import { useAuth } from '../context/AuthContext';
 import loginArt from '../assets/login-art.png';
 
+// Self-contained film-grain (inline SVG feTurbulence, no external asset — CSP-safe). Overlaid faintly to
+// echo the artwork's grain and warm the flat form panel.
+const GRAIN =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E\")";
+
 // GitHub wordmark glyph (lucide dropped brand icons in v1), inlined so the social button matches the mark.
 const GithubMark = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden className={className}>
@@ -99,138 +104,158 @@ export const Login = () => {
   };
 
   const inputCls =
-    'w-full rounded-md bg-[#161618] border border-[#2a2a2e] pl-9 pr-3 py-2.5 text-[13px] text-[#e7e7e9] placeholder:text-[#5c5c62] outline-none focus:border-[#54545c] focus:ring-1 focus:ring-[#54545c]/60 transition-colors';
+    'w-full rounded-lg border border-[#2a2a2e] bg-[#151517] py-2.5 pl-9 pr-3 text-[13px] text-[#e7e7e9] placeholder:text-[#5c5c62] outline-none transition-colors focus:border-[#f0a35a]/50 focus:ring-2 focus:ring-[#f0a35a]/20';
+  const socialCls =
+    'flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-[#2a2a2e] bg-[#0f0f11] text-[14px] font-medium text-white transition-colors hover:border-[#3b3b42] hover:bg-[#161618] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0a35a]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0c0c0e] disabled:opacity-60';
 
   return (
     <div className="fixed inset-0 z-50 flex bg-[#0a0a0b] p-3 text-[#e7e7e9]">
-      <div className="flex w-full overflow-hidden rounded-xl border border-[#1c1c20] bg-[#0d0d0f]">
+      <div className="relative flex w-full overflow-hidden rounded-2xl border border-[#1c1c20] bg-[#0c0c0e]">
         {/* Left — form */}
-        <div className="flex w-full max-w-[520px] shrink-0 flex-col justify-center px-10 sm:px-16">
-          <div className="mx-auto w-full max-w-[300px]">
-            <div className="mb-12">
-              <Logo />
-            </div>
+        <div className="relative flex w-full flex-col md:max-w-[560px] md:shrink-0">
+          {/* Atmosphere: a warm ember glow pulled from the artwork + faint film grain. */}
+          <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+            <div className="absolute -left-20 -top-24 h-72 w-72 rounded-full bg-[#f0a35a]/10 blur-[110px]" />
+            <div className="absolute inset-0 opacity-[0.035] mix-blend-overlay" style={{ backgroundImage: GRAIN, backgroundSize: '130px' }} />
+          </div>
 
-            <form onSubmit={submit} className="flex flex-col gap-4">
-              {mode === 'signup' && (
+          <div className="relative flex flex-1 flex-col justify-center px-8 py-12 sm:px-14">
+            <div className="login-rise mx-auto w-full max-w-[320px]">
+              {/* Brand lockup */}
+              <div className="mb-9 flex items-center gap-2.5">
+                <Logo />
+                <span className="text-[15px] font-semibold tracking-tight text-[#f4f4f5]">omp-squad</span>
+              </div>
+
+              {/* Headline */}
+              <div className="mb-7">
+                <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-white">
+                  {mode === 'signup' ? 'Create your account' : 'Welcome back'}
+                </h1>
+                <p className="mt-1.5 text-[13.5px] text-[#8a8a90]">
+                  {mode === 'signup' ? 'Set up access to your fleet.' : 'Sign in to command your fleet.'}
+                </p>
+              </div>
+
+              <form onSubmit={submit} className="flex flex-col gap-4">
+                {mode === 'signup' && (
+                  <div>
+                    <label className="mb-1.5 block text-[13px] font-medium text-[#c7c7cc]">Name</label>
+                    <div className="relative">
+                      <User className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c5c62]" />
+                      <input
+                        className={inputCls}
+                        type="text"
+                        autoComplete="name"
+                        placeholder="Ada Lovelace"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+
                 <div>
-                  <label className="mb-1.5 block text-[13px] font-semibold text-[#e7e7e9]">Name</label>
+                  <label className="mb-1.5 block text-[13px] font-medium text-[#c7c7cc]">Email</label>
                   <div className="relative">
-                    <User className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c5c62]" />
+                    <Mail className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c5c62]" />
                     <input
                       className={inputCls}
-                      type="text"
-                      autoComplete="name"
-                      placeholder="Ada Lovelace"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
+                      type="email"
+                      autoComplete="email"
+                      required
+                      placeholder="you@company.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
                     />
                   </div>
                 </div>
-              )}
 
-              <div>
-                <label className="mb-1.5 block text-[13px] font-semibold text-[#e7e7e9]">Email</label>
-                <div className="relative">
-                  <Mail className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c5c62]" />
-                  <input
-                    className={inputCls}
-                    type="email"
-                    autoComplete="email"
-                    required
-                    placeholder="hello@0.email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                  />
+                <div>
+                  <label className="mb-1.5 block text-[13px] font-medium text-[#c7c7cc]">Password</label>
+                  <div className="relative">
+                    <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c5c62]" />
+                    <input
+                      className={inputCls}
+                      type="password"
+                      autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                      required
+                      placeholder="••••••••••••"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div>
-                <label className="mb-1.5 block text-[13px] font-semibold text-[#e7e7e9]">Password</label>
-                <div className="relative">
-                  <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c5c62]" />
-                  <input
-                    className={inputCls}
-                    type="password"
-                    autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-                    required
-                    placeholder="Your password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </div>
-              </div>
+                {error && (
+                  <p className="text-[12px] leading-snug text-[#f87171]" role="alert">
+                    {error}
+                  </p>
+                )}
 
-              {error && (
-                <p className="text-[12px] leading-snug text-[#f87171]" role="alert">
-                  {error}
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="mt-1 flex h-11 items-center justify-center rounded-lg bg-white text-[14px] font-semibold text-black shadow-[0_10px_30px_-12px_rgba(240,163,90,0.45)] transition-all hover:shadow-[0_14px_44px_-12px_rgba(240,163,90,0.6)] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0a35a]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0c0c0e] disabled:opacity-60"
+                >
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : mode === 'signup' ? 'Create account' : 'Sign in'}
+                </button>
+              </form>
+
+              {allowSignup && (
+                <p className="mt-4 text-[12.5px] text-[#8a8a90]">
+                  {mode === 'signin' ? "Don't have an account? " : 'Already have an account? '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode(mode === 'signin' ? 'signup' : 'signin');
+                      setError(null);
+                    }}
+                    className="font-medium text-[#f0b478] underline-offset-2 transition-colors hover:text-[#f8cfa0]"
+                  >
+                    {mode === 'signin' ? 'Sign up' : 'Sign in'}
+                  </button>
                 </p>
               )}
 
-              <button
-                type="submit"
-                disabled={busy}
-                className="mt-2 flex h-11 items-center justify-center rounded-md bg-white text-[14px] font-medium text-black transition-colors hover:bg-[#e9e9ea] disabled:opacity-60"
-              >
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : mode === 'signup' ? 'Sign up' : 'Login'}
-              </button>
-            </form>
+              {(hasSso || hasGithub) && (
+                <>
+                  <div className="my-5 flex items-center gap-3">
+                    <div className="h-px flex-1 bg-[#1f1f23]" />
+                    <span className="text-[11px] uppercase tracking-wider text-[#5c5c62]">or</span>
+                    <div className="h-px flex-1 bg-[#1f1f23]" />
+                  </div>
+                  <div className="flex flex-col gap-2.5">
+                    {hasSso && (
+                      <button type="button" onClick={sso} disabled={busy} className={socialCls}>
+                        <Building2 className="h-4 w-4" />
+                        Sign in with SSO
+                      </button>
+                    )}
+                    {hasGithub && (
+                      <button type="button" onClick={github} disabled={busy} className={socialCls}>
+                        <GithubMark className="h-4 w-4" />
+                        Continue with GitHub
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
 
-            {allowSignup && (
-              <p className="mt-4 text-center text-[12px] text-[#8a8a90]">
-                {mode === 'signin' ? "Don't have an account? " : 'Already have an account? '}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode(mode === 'signin' ? 'signup' : 'signin');
-                    setError(null);
-                  }}
-                  className="text-[#e7e7e9] underline underline-offset-2 hover:text-white"
-                >
-                  {mode === 'signin' ? 'Sign up' : 'Login'}
-                </button>
-              </p>
-            )}
-
-            {(hasSso || hasGithub) && (
-              <>
-                <div className="my-5 flex items-center gap-3">
-                  <div className="h-px flex-1 bg-[#1f1f23]" />
-                  <span className="text-[11px] text-[#5c5c62]">or</span>
-                  <div className="h-px flex-1 bg-[#1f1f23]" />
-                </div>
-                <div className="flex flex-col gap-2.5">
-                  {hasSso && (
-                    <button
-                      type="button"
-                      onClick={sso}
-                      disabled={busy}
-                      className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-[#2a2a2e] bg-black text-[14px] font-medium text-white transition-colors hover:bg-[#161618] disabled:opacity-60"
-                    >
-                      <Building2 className="h-4 w-4" />
-                      Sign in with SSO
-                    </button>
-                  )}
-                  {hasGithub && (
-                    <button
-                      type="button"
-                      onClick={github}
-                      disabled={busy}
-                      className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-[#2a2a2e] bg-black text-[14px] font-medium text-white transition-colors hover:bg-[#161618] disabled:opacity-60"
-                    >
-                      <GithubMark className="h-4 w-4" />
-                      Login with Github
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
+          {/* Footer */}
+          <div className="relative px-8 pb-6 sm:px-14">
+            <p className="mx-auto max-w-[320px] text-[11px] text-[#4b4b52]">
+              Protected by end-to-end encrypted sessions.
+            </p>
           </div>
         </div>
 
-        {/* Right — ASCII columns + globe (full frame; cover fills the panel, no letterbox bars) */}
-        <div className="relative hidden flex-1 overflow-hidden border-l border-[#1c1c20] bg-black md:block">
+        {/* Right — artwork (full-bleed cover; a soft seam gradient blends it into the form panel). */}
+        <div className="relative hidden flex-1 overflow-hidden bg-black md:block">
           <img src={loginArt} alt="" aria-hidden className="absolute inset-0 h-full w-full object-cover object-center" />
+          <div aria-hidden className="absolute inset-y-0 left-0 w-28 bg-gradient-to-r from-[#0c0c0e] to-transparent" />
         </div>
       </div>
     </div>
