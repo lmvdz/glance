@@ -37,7 +37,7 @@ import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
-import { gateEnv } from "./gate-env.ts";
+import { gateExec } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
@@ -1986,8 +1986,9 @@ export class SquadManager extends EventEmitter {
 		try {
 			const command = await detectVerify(repo);
 			if (!command) return { ok: true };
-			// gateEnv: the suite is agent-authored code — it must not see the daemon's secrets.
-			const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe", env: gateEnv() });
+			// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
+			const plan = gateExec(command, repo);
+			const proc = Bun.spawn(plan.argv, { cwd: repo, stdout: "pipe", stderr: "pipe", env: plan.env });
 			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 			if (code === 0) return { ok: true };
 			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.

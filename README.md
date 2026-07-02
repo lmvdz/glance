@@ -950,6 +950,8 @@ this *staged* outcome as a hold — never a blocked land — so it neither re-me
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 | `OMP_SQUAD_AUTOLAND_FAIL_CAP` | Consecutive failed auto-lands before a branch is parked instead of re-merged (default `3`); restart-safe via a persisted, branch-keyed ledger (`<stateDir>/land-failures.json`). Operator land bypasses it; the Observer files a bug for the parked branch |
 | `OMP_SQUAD_GATE_ENV` | Comma-separated env var names re-admitted into verify/proof/regression gate runs. Gates execute agent-authored test code, so they get a **secret-scrubbed** env by default (`OMP_SQUAD_*`, secret-shaped names like `*_API_KEY`/`*_TOKEN`/`*_SECRET`, `DATABASE_URL` removed; toolchain vars pass through). Name a var here if a suite legitimately needs it |
+| `OMP_SQUAD_GATE_SANDBOX` | Container image for gate runs. When set, every verify/proof/regression gate executes inside `docker run --rm --network none` with only the worktree (+ its main repo, for the worktree gitdir pointer) bind-mounted at their host paths and the scrubbed env passed explicitly — agent-authored tests can no longer read the daemon's filesystem or call out. The image must provide `bash` + the repo's toolchain (e.g. an `oven/bun` derivative). Unset ⇒ host execution as before |
+| `OMP_SQUAD_GATE_SANDBOX_NETWORK` | Docker network mode for sandboxed gates (default `none`; set `bridge` for suites that legitimately need network) |
 
 ## Sandboxed execution — agents off your laptop
 

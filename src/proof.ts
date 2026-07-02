@@ -15,7 +15,7 @@ import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
-import { gateEnv } from "./gate-env.ts";
+import { gateExec } from "./gate-runner.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 let proofRoot = path.join(os.homedir(), ".omp", "squad", "proof");
@@ -227,8 +227,9 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 	try {
 		if (!existsSync(opts.worktree)) throw new Error(`worktree missing: ${opts.worktree}`);
 		if (before?.dirty) throw new Error("worktree has uncommitted changes (tracked edits or new files) — commit or discard them before Verify");
-		// gateEnv: the acceptance command executes agent-authored code — scrub the daemon's secrets.
-		const proc = Bun.spawn(["bash", "-lc", opts.command], { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: gateEnv() });
+		// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
+		const plan = gateExec(opts.command, opts.worktree, { mounts: [opts.repo] });
+		const proc = Bun.spawn(plan.argv, { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: plan.env });
 		const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 		out = o;
 		err = e;
