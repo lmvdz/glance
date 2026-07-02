@@ -67,7 +67,34 @@ more IdPs later — you connect them in the WorkOS dashboard.
 - The Directory Sync webhook **ingress + HMAC signature verification** (valid → 200; tampered / stale /
   unsigned → rejected). See `tests/workos.test.ts`.
 
-**Deferred — SCIM (Directory Sync) provisioning:**
+## New-user onboarding
+
+On first login an org-less user runs through a decision tree (`onboardWorkosUser`, called by
+`POST /api/workos/sync`):
+
+1. **Already a WorkOS org member** → mapped to that better-auth org (admin/member).
+2. **Verified email-domain match** → the matched org's **join policy** decides:
+   - `auto` → added as a member immediately (lands in the company org).
+   - `approval` (default) → a **join request** is recorded; the user sees a "pending approval" screen until
+     an admin approves.
+3. **No company match** → a **personal workspace** is created (better-auth-native org, user = owner).
+
+Security: only **verified** domains match, and public email providers (gmail, outlook, icloud, …) never map
+to a tenant — those users always get a personal workspace. Company orgs live in WorkOS (verified domains);
+personal orgs are better-auth-only (we don't mint a WorkOS org per individual).
+
+**Per-org join policy** is stored in the WorkOS Organization's `metadata`:
+
+```
+metadata: { "join_policy": "auto" }     # auto-join on verified-domain match
+metadata: { "join_policy": "approval" } # or omit entirely → default: require admin approval
+```
+
+Admins review pending requests in the account menu (**Join requests** → approve/deny), backed by
+`GET /api/workos/join-requests` + `POST /api/workos/join-requests/decide` (admin-only, scoped to the
+caller's active org). Approving creates the WorkOS membership and reconciles it into better-auth.
+
+## Deferred — SCIM (Directory Sync) provisioning
 The webhook currently verifies and logs each `dsync.*` event; turning them into DB writes is the remaining
 piece and needs a live connected directory (SCIM) to validate end to end:
 
