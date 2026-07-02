@@ -632,8 +632,9 @@ export const AgentMetaBar = ({ agent, changedFiles, children }: { agent?: AgentD
 export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; showToast: (message: string, type?: ToastTone) => void }) => {
   const [busy, setBusy] = React.useState<null | 'verify' | 'land'>(null);
   const [forceArmed, setForceArmed] = React.useState(false);
+  const [lastBlock, setLastBlock] = React.useState('');
   const agentKey = agent?.id;
-  React.useEffect(() => { setForceArmed(false); }, [agentKey]);
+  React.useEffect(() => { setForceArmed(false); setLastBlock(''); }, [agentKey]);
   if (!agent || !canLand(agent)) return null;
   const id = agent.id;
 
@@ -654,13 +655,17 @@ export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; show
   const runLand = async (force: boolean) => {
     setBusy('land');
     try {
-      const res = await apiFetch(`/api/agents/${encodeURIComponent(id)}/land`, jsonInit('POST', force ? { force: true } : {}));
+      // A force land must carry an operator reason (the manager refuses without one) — the
+      // prior block detail IS the reason the operator saw and chose to override.
+      const payload = force ? { force: true, reason: `web operator override — prior block: ${lastBlock || 'unknown'}` } : {};
+      const res = await apiFetch(`/api/agents/${encodeURIComponent(id)}/land`, jsonInit('POST', payload));
       const body = await res.json().catch(() => null) as LandResultDTO | null;
       if (!body) { showToast(`Land failed: HTTP ${res.status}`, 'error'); return; }
       const toast = landToast(body);
       showToast(toast.text, toast.tone);
       // A blocked land (usually the proof gate) arms a one-shot, visibly-distinct Force.
       setForceArmed(!body.ok && !body.staged);
+      setLastBlock(!body.ok && !body.staged ? (body.detail ?? body.message ?? 'blocked') : '');
     } catch (error) {
       showToast(`Land failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
     } finally {

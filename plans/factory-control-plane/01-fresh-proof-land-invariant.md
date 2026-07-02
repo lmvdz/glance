@@ -1,14 +1,15 @@
 # Fresh proof and land invariant
 STATUS: done
 
-> 2026-07-01 reconcile: verified in code — `proofGate` (src/proof.ts:174) refuses a missing/failed/
-> stale proof keyed to the worktree HEAD, and the land paths call it before any merge
-> (src/server.ts `/api/agents/:id/land`, `manager.land`/`landFeature`). The 2026-06-30 plan audit
-> already found the core proof-before-land invariant done; the STATUS line never caught up.
-> Residual gap (tracked, not blocking `done`): freshness is commit-keyed only — the fingerprint
-> extensions in the Approach (dirty status, tree hash, target base HEAD, command hash/TTL) are not
-> implemented, so a worktree holding a green proof at HEAD *plus uncommitted edits* can have those
-> edits swept in by `commitWip` and merged under a proof that never tested them.
+> 2026-07-01 reconcile: verified in code — the full fingerprint from the Approach is implemented
+> in src/proof.ts (`Proof`/`ProofFingerprint`: commit, tree, branch, dirty, baseCommit, repo/
+> worktree identity, commandHash, TTL), `proofGate` names the exact staleness reason, and every
+> land path gates (manager pre-gate + `landAgent`'s internal `requireProof` gate that re-checks
+> AFTER the WIP sweep). The STATUS line never caught up with the code.
+> Same day, one residual was found and closed: `dirty` ignored untracked files while the land's
+> WIP sweep (`git add -A`) committed them — a file created after the proof landed untested. The
+> fingerprint's dirty is now untracked-aware and the sweep excludes `.omp/` (evidence dir) so the
+> gate and the sweep see the same tree.
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

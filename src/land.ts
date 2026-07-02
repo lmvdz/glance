@@ -254,11 +254,14 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe
 	// (agent idle/stopped). For a LIVE agent (working/starting/input) commitWip is false: we merge
 	// only its committed history and never touch its in-progress edits.
+	// `.omp/` is excluded from the sweep on both sides: it's the daemon's own evidence dir
+	// (vision screenshots, proof artifacts) — sweeping it committed screenshots into main AND,
+	// because the proof fingerprint also ignores `.omp/`, would land content the gate never saw.
 	let committed = false;
 	if (commitWip) {
-		const status = await git(["status", "--porcelain"], worktree);
+		const status = await git(["status", "--porcelain", "--", ".", ":(exclude).omp"], worktree);
 		if (status.code === 0 && status.stdout.length > 0) {
-			const add = await git(["add", "-A"], worktree);
+			const add = await git(["add", "-A", "--", ".", ":(exclude).omp"], worktree);
 			if (add.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git add failed: ${add.stderr}` };
 			const commit = await git(["commit", "-m", message], worktree);
 			if (commit.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git commit failed: ${commit.stderr || commit.stdout}` };
