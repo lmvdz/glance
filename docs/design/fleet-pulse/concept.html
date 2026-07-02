@@ -105,6 +105,14 @@
   .detail .actions button:hover { border-color: var(--ember); background: rgba(242,145,61,0.12); }
   .detail .actions button:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
 
+  /* depth rows: hover isolates — everyone else fades, the hovered week lifts and grows */
+  .dr-c {
+    transition: opacity 180ms cubic-bezier(0,0,0.2,1), transform 220ms cubic-bezier(0,0,0.2,1);
+    transform-box: fill-box; transform-origin: 50% 100%;
+  }
+  .dr-c.dim { opacity: 0.12; }
+  .dr-c.lift { transform: translateY(-18px) scale(1.06); }
+
   @keyframes nowpulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.3; } }
   .now-dot { animation: nowpulse 2.4s cubic-bezier(0.4,0,0.2,1) infinite; }
   @media (prefers-reduced-motion: reduce) { .now-dot { animation: none; } * { transition-duration: 0ms !important; } }
@@ -326,7 +334,14 @@
   // FLAT is the operator instrument; DEPTH is the comparison instrument —
   // the same canvas, rows of weeks receding isometrically (the ridgeline idiom)
   let viz = 'flat';
-  let depthHits = [];
+  let depthHits = [], depthRowEls = [], hoveredWeek = null;
+  let depthMetric = 'commits';
+  const DEPTH_METRICS = [
+    { id: 'commits', label: 'COMMITS/HR' },
+    { id: 'cost', label: '$/HR' },
+    { id: 'cum', label: 'CUMULATIVE $' },
+    { id: 'churn', label: 'CHURN' },
+  ];
   const WEEK_ROWS = [];
   {
     // seven weeks of history synthesized from the live week's shape (phase-shifted,
@@ -334,19 +349,20 @@
     // In the real build each row is one /api/graph window.
     for (let w = 0; w < 8; w++) {
       const grow = 0.45 + 0.075 * w + 0.16 * Math.sin(w * 1.9);
-      const c = [], d = [];
+      const c = [], d = [], ch = [];
       for (let k = 0; k < 168; k++) {
-        if (w === 7) { c.push(0); d.push(0); continue; } // live row reads the real arrays at draw time
+        if (w === 7) { c.push(0); d.push(0); ch.push(0); continue; } // live row reads the real arrays at draw time
         const src = (k + w * 29) % 168;
         c.push(Math.round(commits[src] * grow * (0.7 + rnd() * 0.6)));
         d.push(cost[src] * grow * (0.7 + rnd() * 0.6));
+        ch.push(churn[src] * grow * (0.7 + rnd() * 0.6));
       }
-      WEEK_ROWS.push({ label: w === 7 ? 'THIS WEEK' : `WK ${20 + w}`, dates: w === 7 ? '25 JUN – 02 JUL' : `${4 + w * 7} MAY –`, c, d });
+      WEEK_ROWS.push({ label: w === 7 ? 'THIS WEEK' : `WK ${20 + w}`, dates: w === 7 ? '25 JUN – 02 JUL' : `${4 + w * 7} MAY –`, c, d, ch });
     }
   }
   const weekAt = (w, k) => w === 7
-    ? { c: (24 + k) < NOW_H ? commits[24 + k] : 0, d: (24 + k) < NOW_H ? cost[24 + k] : 0 }
-    : { c: WEEK_ROWS[w].c[k], d: WEEK_ROWS[w].d[k] };
+    ? { c: (24 + k) < NOW_H ? commits[24 + k] : 0, d: (24 + k) < NOW_H ? cost[24 + k] : 0, ch: (24 + k) < NOW_H ? churn[24 + k] : 0 }
+    : { c: WEEK_ROWS[w].c[k], d: WEEK_ROWS[w].d[k], ch: WEEK_ROWS[w].ch[k] };
   const weekTotals = w => {
     let c = 0, d = 0;
     for (let k = 0; k < 168; k++) { const v = weekAt(w, k); c += v.c; d += v.d; }
@@ -412,8 +428,8 @@
         fill: on ? 'var(--ember)' : 'var(--ink-low)', 'font-weight': on ? 700 : 400,
         cursor: 'pointer', tabindex: 0, role: 'button', 'aria-pressed': String(on), 'aria-label': `${mode} view`,
       });
-      tb.addEventListener('click', () => { hideReadout(); viz = mode; build(); });
-      tb.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); viz = mode; build(); } });
+      tb.addEventListener('click', () => { hideReadout(); clearDepthHover(); viz = mode; build(); });
+      tb.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); clearDepthHover(); viz = mode; build(); } });
       tgx += mode.length * 6.4 + 16;
     }
     const upto = Math.min(HOURS, Math.ceil(NOW_H));
@@ -745,84 +761,142 @@
     }
   }
 
-  // ── DEPTH: the ridgeline massif — weeks recede isometrically, the live week
-  //    in front, an AVERAGE ghost ridge beneath it. Height = $/hr, colour = commits.
-  //    Click a row and it flattens into the operator instrument. ──
+  // ── DEPTH: the isometric massif — time runs down-right, weeks recede up-right
+  //    (the reference's true angle). Hover a row: the rest fade, it lifts and grows.
+  //    Click flattens it into the operator instrument. Any metric can be the terrain. ──
   function buildDepth(plotW) {
     const g = el('g', {});
     const n = 8;
-    const stepX = 30, stepY = 62;               // the recession vector (up-right)
-    const ox = PAD_L + 96, oy = H - 168;        // front row baseline (this week)
-    const rw = plotW - 200 - (n - 1) * stepX;   // ridge width
-    const hMax = 132;
-    let maxD = 0.1, maxCw = 1;
-    for (let w = 0; w < n; w++) for (let k = 0; k < 168; k++) { const v = weekAt(w, k); maxD = Math.max(maxD, v.d); maxCw = Math.max(maxCw, v.c); }
+    const usable = Math.max(560, W - 640);
+    const T = { x: usable / 168, y: (usable / 168) * 0.3 };  // time axis: down-right
+    const R = { x: 40, y: -26 };                             // row axis: up-right
+    const OX = PAD_L + 168, OY = H - 312;                    // front row (this week), k=0
+    const P = (w, k) => { const dz = 7 - w; return { x: OX + dz * R.x + k * T.x, y: OY + dz * R.y + k * T.y }; };
+    const angle = Math.atan2(T.y, T.x) * 180 / Math.PI;
+    const hMax = 118;
 
-    // legend, reference-style: what the axes of the massif mean
-    txt(W - PAD_R, 44, 'DEPTH — 8 WEEKS', 'day-name', { 'text-anchor': 'end' }, g);
-    txt(W - PAD_R, 58, 'height $/hr · colour commits/hr · front row is live', 'annot', { 'text-anchor': 'end' }, g);
-    const lg = el('linearGradient', { id: 'magmabar', x1: 0, y1: 1, x2: 0, y2: 0 }, g);
-    for (const [o, c2] of [[0, '#B25E1E'], [0.45, '#F2913D'], [0.75, '#FFC96B'], [1, '#FFE9C4']]) el('stop', { offset: o, 'stop-color': c2 }, lg);
-    el('rect', { x: W - PAD_R - 8, y: 68, width: 8, height: 56, rx: 2, fill: 'url(#magmabar)' }, g);
+    // metric machinery: any datapoint can be the terrain
+    const Mdef = DEPTH_METRICS.find(m => m.id === depthMetric);
+    const series = [];
+    let vMax = 0.001, tMax = 0.001;
+    for (let w = 0; w < n; w++) {
+      const v = [], tt = [];
+      let acc = 0;
+      for (let k = 0; k < 168; k++) {
+        const s = weekAt(w, k);
+        const raw = depthMetric === 'commits' ? s.c : depthMetric === 'cost' ? s.d : depthMetric === 'churn' ? s.ch : (acc += s.d);
+        const rate = depthMetric === 'commits' ? s.c : depthMetric === 'churn' ? s.ch : s.d;
+        v.push(raw); tt.push(rate);
+        vMax = Math.max(vMax, raw); tMax = Math.max(tMax, rate);
+      }
+      series.push({ v, t: tt });
+    }
+    const colorFor = depthMetric === 'churn'
+      ? t => (t > 0.85 ? '#FFD9EC' : t > 0.6 ? '#E86BA8' : t > 0.35 ? '#A03A6E' : '#5A2140')
+      : heatColor;
+
+    // the reference's label block, top-left
+    txt(PAD_L, 104, 'EIGHT WEEKS', 'day-name', { 'font-size': 21, 'letter-spacing': '0.3em' }, g);
+    txt(PAD_L, 122, 'NEWEST IN FRONT · HOVER ISOLATES · CLICK FLATTENS', 'annot', {}, g);
+    // metric switcher — the terrain can be any datapoint
+    let mx = PAD_L;
+    for (const m of DEPTH_METRICS) {
+      const on = m.id === depthMetric;
+      const tb = txt(mx, 146, m.label, 'annot', { fill: on ? 'var(--ember)' : 'var(--ink-low)', 'font-weight': on ? 700 : 400, cursor: 'pointer', tabindex: 0, role: 'button', 'aria-pressed': String(on), 'aria-label': `terrain metric: ${m.label}` }, g);
+      tb.addEventListener('click', () => { hideReadout(); depthMetric = m.id; build(); });
+      tb.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); depthMetric = m.id; build(); } });
+      mx += m.label.length * 5.9 + 24;
+    }
+
+    // colour legend, top-right
+    const grad2 = el('linearGradient', { id: 'depthbar', x1: 0, y1: 1, x2: 0, y2: 0 }, g);
+    const stops = depthMetric === 'churn' ? [[0, '#5A2140'], [0.45, '#A03A6E'], [0.75, '#E86BA8'], [1, '#FFD9EC']] : [[0, '#B25E1E'], [0.45, '#F2913D'], [0.75, '#FFC96B'], [1, '#FFE9C4']];
+    for (const [o, c2] of stops) el('stop', { offset: o, 'stop-color': c2 }, grad2);
+    txt(W - PAD_R, 44, `TERRAIN — ${Mdef.label}`, 'day-name', { 'text-anchor': 'end' }, g);
+    txt(W - PAD_R, 58, depthMetric === 'cum' ? 'height cumulative $ · colour $/hr rate' : 'height = colour = intensity', 'annot', { 'text-anchor': 'end' }, g);
+    el('rect', { x: W - PAD_R - 8, y: 68, width: 8, height: 56, rx: 2, fill: 'url(#depthbar)' }, g);
     txt(W - PAD_R - 14, 76, 'hot', 'hour-tick', { 'text-anchor': 'end' }, g);
     txt(W - PAD_R - 14, 124, 'quiet', 'hour-tick', { 'text-anchor': 'end' }, g);
 
-    // rows, painter's order: oldest (deepest) first
+    // rows: deepest first (painter's order). Each row = content group (fades/lifts)
+    // + a hit polygon that stays put so hover can't jitter.
+    depthRowEls = [];
     for (let w = 0; w < n; w++) {
-      const offX = ox + (n - 1 - w) * stepX, offY = oy - (n - 1 - w) * stepY;
-      const kx = k => offX + (k / 168) * rw;
+      const rowG = el('g', {}, g);
+      const content = el('g', { class: 'dr-c' }, rowG);
       const live = w === 7;
-      // opaque ground under the ridge occludes the rows behind it
-      let dArea = `M ${kx(0)} ${offY}`;
-      for (let k = 0; k < 168; k++) dArea += ` L ${kx(k + 0.5).toFixed(1)} ${(offY - (weekAt(w, k).d / maxD) * hMax).toFixed(1)}`;
-      dArea += ` L ${kx(168)} ${offY} Z`;
-      el('path', { d: dArea, fill: 'var(--ground)' }, g);
-      // the massif: per-hour quads, magma by commit intensity
-      const qw = Math.max(1.2, rw / 168 - 0.4);
+      const b0 = P(w, 0), b1 = P(w, 168);
+      // dotted ground-plane extension, the reference's grid whisper
+      el('line', { x1: b0.x - 52, y1: b0.y - 52 * (T.y / T.x), x2: b1.x + 36, y2: b1.y + 36 * (T.y / T.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 5', opacity: 0.85 }, content);
+      // the terrain: contiguous vertical quads on the slanted baseline (opaque = occluding)
+      const qw = T.x + 0.35;
       for (let k = 0; k < 168; k++) {
-        const v = weekAt(w, k);
-        if (v.d < 0.06) continue;
-        const t = v.c / maxCw;
-        el('rect', { x: kx(k), y: offY - (v.d / maxD) * hMax, width: qw, height: (v.d / maxD) * hMax, fill: heatColor(t), opacity: live ? 0.95 : 0.8, ...(t > 0.8 ? { filter: 'url(#heatglow)' } : {}) }, g);
+        const val = series[w].v[k];
+        if (val / vMax < 0.005) continue;
+        const p = P(w, k);
+        const hp = (val / vMax) * hMax;
+        const t = series[w].t[k] / tMax;
+        el('rect', { x: p.x, y: p.y - hp, width: qw, height: hp, fill: colorFor(t), ...(t > 0.8 ? { filter: 'url(#heatglow)' } : {}) }, content);
       }
-      el('line', { x1: kx(0), y1: offY, x2: kx(168), y2: offY, stroke: live ? 'var(--ember)' : 'var(--hairline-2)', 'stroke-width': live ? 1.2 : 1, opacity: live ? 0.8 : 0.9 }, g);
+      el('line', { x1: b0.x, y1: b0.y, x2: b1.x, y2: b1.y, stroke: live ? 'var(--ember)' : 'var(--hairline-2)', 'stroke-width': live ? 1.2 : 1, opacity: live ? 0.8 : 0.95 }, content);
+      // shoulder label rides the row (fades and lifts with it)
       const tot = weekTotals(w);
-      // live edge marker on the front row
-      if (live && (24 + 168) > NOW_H) {
-        const nk = kx(NOW_H - 24);
-        el('line', { x1: nk, y1: offY - hMax, x2: nk, y2: offY + 4, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.5 }, g);
-        el('circle', { cx: nk, cy: offY - hMax, r: 3, fill: 'var(--ember)', class: 'now-dot' }, g);
+      txt(b0.x - 12, b0.y - 2, WEEK_ROWS[w].label, live ? 'day-name' : 'annot', { 'text-anchor': 'end', ...(live ? { fill: 'var(--ember)' } : {}) }, content);
+      txt(b0.x - 12, b0.y + 10, `$${Math.round(tot.d)} · ${tot.c}c`, 'hour-tick', { 'text-anchor': 'end' }, content);
+      if (live && NOW_H < 192) {
+        const np = P(w, NOW_H - 24);
+        el('line', { x1: np.x, y1: np.y - hMax, x2: np.x, y2: np.y + 4, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.5 }, content);
+        el('circle', { cx: np.x, cy: np.y - hMax, r: 3, fill: 'var(--ember)', class: 'now-dot' }, content);
       }
-      // the whole row is a target: hover reads it, click flattens into it
-      const hit = el('rect', { x: offX - 88, y: offY - hMax - 8, width: rw + 96, height: hMax + 20, fill: 'transparent', cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${WEEK_ROWS[w].label}: open flat view` }, g);
-      hit.addEventListener('click', () => { hideReadout(); viz = 'flat'; build(); openDetail({ kind: 'WEEK', h: NOW_H, w }); });
-      hit.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); viz = 'flat'; build(); openDetail({ kind: 'WEEK', h: NOW_H, w }); } });
-      depthHits.push({ w, offX, offY, rw, hMax, tot });
+      // the hit surface: a slanted band matching the row, outside the lifting group
+      const hit = el('polygon', {
+        points: `${b0.x - 66},${b0.y - hMax - 30} ${b1.x + 24},${b1.y - hMax - 30} ${b1.x + 24},${b1.y + 14} ${b0.x - 66},${b0.y + 14}`,
+        fill: 'transparent', cursor: 'pointer', tabindex: 0, role: 'button',
+        'aria-label': `${WEEK_ROWS[w].label}: hover isolates, click opens the flat view`, 'data-w': w,
+      }, rowG);
+      hit.addEventListener('click', () => { hideReadout(); clearDepthHover(); viz = 'flat'; build(); openDetail({ kind: 'WEEK', h: NOW_H, w }); });
+      hit.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); clearDepthHover(); viz = 'flat'; build(); openDetail({ kind: 'WEEK', h: NOW_H, w }); } });
+      depthRowEls.push({ w, content });
     }
-    // labels in a second pass so the rows in front can't bury them
-    for (const z of depthHits) {
-      const live = z.w === 7;
-      txt(z.offX - 10, z.offY - 2, WEEK_ROWS[z.w].label, live ? 'day-name' : 'annot', { 'text-anchor': 'end', ...(live ? { fill: 'var(--ember)' } : {}) }, g);
-      txt(z.offX - 10, z.offY + 10, `$${Math.round(z.tot.d)} · ${z.tot.c}c`, 'hour-tick', { 'text-anchor': 'end' }, g);
-    }
-    // day ticks on the front row's baseline
+    applyDepthHover(); // hover state survives live rebuilds
+
+    // front axis: day labels rotated ALONG the time axis, the reference's move
     for (let dd = 0; dd <= 7; dd++) {
-      const tx = ox + (dd * 24 / 168) * rw;
-      el('line', { x1: tx, y1: oy + 4, x2: tx, y2: oy + 9, stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
-      if (dd < 7) txt(tx + 3, oy + 18, ['THU', 'FRI', 'SAT', 'SUN', 'MON', 'TUE', 'WED'][dd], 'hour-tick', {}, g);
+      const p = P(7, dd * 24);
+      el('line', { x1: p.x, y1: p.y + 5, x2: p.x, y2: p.y + 10, stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
+      if (dd < 7) {
+        const lx = p.x + 6, ly = p.y + 21;
+        txt(lx, ly, ['THU', 'FRI', 'SAT', 'SUN', 'MON', 'TUE', 'WED'][dd], 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${lx} ${ly})` }, g);
+      }
     }
-    // AVERAGE — the hollow ghost ridge beneath the live row, the reference's move
-    const avgY = oy + 64;
-    let dAvg = '';
-    for (let k = 0; k < 168; k++) {
-      let s = 0;
-      for (let w = 0; w < n; w++) s += weekAt(w, k).d;
-      dAvg += (dAvg ? ' L' : 'M') + ` ${(ox + ((k + 0.5) / 168) * rw).toFixed(1)} ${(avgY - (s / n / maxD) * hMax * 0.8).toFixed(1)}`;
+
+    // AVERAGE — the daily-rhythm panel, bottom-right like the reference:
+    // the fleet's mean day (per hour-of-day, current metric's rate) across all 8 weeks
+    const A0 = { x: W - 372, y: H - 118 };
+    const at2 = { x: 8.6, y: 8.6 * 0.3 };
+    const prof = new Array(24).fill(0);
+    for (let w = 0; w < n; w++) for (let k = 0; k < 168; k++) prof[k % 24] += series[w].t[k];
+    const pMax = Math.max(...prof, 0.001);
+    el('line', { x1: A0.x - 10, y1: A0.y - 10 * (at2.y / at2.x), x2: A0.x + 24 * at2.x + 12, y2: A0.y + (24 * at2.x + 12) * (at2.y / at2.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 4' }, g);
+    for (let hh = 0; hh < 24; hh++) {
+      const p = { x: A0.x + hh * at2.x, y: A0.y + hh * at2.y };
+      el('rect', { x: p.x, y: p.y - (prof[hh] / pMax) * 52, width: at2.x * 0.72, height: (prof[hh] / pMax) * 52, fill: '#8A8F9B', opacity: 0.55 }, g);
     }
-    el('path', { d: dAvg, fill: 'none', stroke: '#8A8F9B', 'stroke-width': 1, 'stroke-dasharray': '2 3', opacity: 0.8 }, g);
-    el('line', { x1: ox, y1: avgY, x2: ox + rw, y2: avgY, stroke: 'var(--hairline-2)', 'stroke-width': 1 }, g);
-    txt(ox - 10, avgY - 2, 'AVERAGE', 'annot', { 'text-anchor': 'end', fill: '#8A8F9B' }, g);
+    for (const [hh, lab] of [[0, '00'], [12, '12'], [23, '24']]) {
+      const p = { x: A0.x + hh * at2.x + 3, y: A0.y + hh * at2.y + 16 };
+      txt(p.x, p.y, lab, 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${p.x} ${p.y})` }, g);
+    }
+    const ae = { x: A0.x + 24 * at2.x + 10, y: A0.y + 24 * at2.y - 4 };
+    txt(ae.x, ae.y, 'AVERAGE DAY', 'annot', { fill: '#8A8F9B', transform: `rotate(${angle.toFixed(1)} ${ae.x} ${ae.y})` }, g);
   }
+
+  function applyDepthHover() {
+    for (const z of depthRowEls) {
+      z.content.classList.toggle('dim', hoveredWeek !== null && z.w !== hoveredWeek);
+      z.content.classList.toggle('lift', z.w === hoveredWeek);
+    }
+  }
+  function clearDepthHover() { hoveredWeek = null; applyDepthHover(); }
 
   function weekBody(w) {
     const tot = weekTotals(w);
@@ -920,15 +994,22 @@
     const u = toUser(ev);
     const px = u.x, py = u.y;
     if (viz === 'depth') {
-      // front-most row under the cursor wins
-      const hitRow = [...depthHits].reverse().find(z => px >= z.offX - 88 && px <= z.offX + z.rw + 8 && py >= z.offY - z.hMax - 8 && py <= z.offY + 12);
-      if (!hitRow) { hideReadout(); return; }
-      const tot = weekTotals(hitRow.w);
-      readout.hidden = false;
-      readout.innerHTML = `<div class="rt">${WEEK_ROWS[hitRow.w].label}</div>` +
-        row('commits', tot.c, '#F2913D') + row('spend', `$${Math.round(tot.d)}`, '#C9B79A') + row('click to flatten', '', null);
-      readout.style.left = Math.min(ev.clientX - r.left + 18, r.width - 200) + 'px';
-      readout.style.top = Math.min(ev.clientY - r.top + 14, r.height - 90) + 'px';
+      // hover is target-driven: the front-most hit polygon under the cursor owns
+      // the row; everything else fades while the owned row lifts
+      const tg = ev.target;
+      if (tg && tg.tagName === 'polygon' && tg.getAttribute('data-w') !== null) {
+        const wv = +tg.getAttribute('data-w');
+        if (hoveredWeek !== wv) { hoveredWeek = wv; applyDepthHover(); }
+        const tot = weekTotals(wv);
+        readout.hidden = false;
+        readout.innerHTML = `<div class="rt">${WEEK_ROWS[wv].label}</div>` +
+          row('commits', tot.c, '#F2913D') + row('spend', `$${Math.round(tot.d)}`, '#C9B79A') + row('click to flatten', '', null);
+        readout.style.left = Math.min(ev.clientX - r.left + 18, r.width - 200) + 'px';
+        readout.style.top = Math.min(ev.clientY - r.top + 14, r.height - 90) + 'px';
+      } else {
+        if (hoveredWeek !== null) clearDepthHover();
+        hideReadout();
+      }
       return;
     }
     if (px < PAD_L || px > W - PAD_R) { hideReadout(); return; }
