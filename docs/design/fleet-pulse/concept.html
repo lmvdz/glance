@@ -793,13 +793,18 @@
   function buildDepth(plotW) {
     const g = el('g', {});
     const n = 8;
-    const rowLenX = Math.max(520, W - 820);
-    const T = { x: rowLenX / NBINS, y: -(rowLenX / NBINS) * 0.30 }; // time: up-right
+    const hMax = 128;
     const R = { x: 50, y: 33 };                                     // weeks: down-right
-    const OX = PAD_L + 214, OY = 330;                               // OLDEST row (back, top-left), k=0
+    // adaptive layout: the massif sizes itself from the canvas. The time-axis rise
+    // is capped so the back row's peaks stay under the header, the front row's
+    // labels stay above the bottom edge, and the whole thing centers horizontally.
+    const riseMax = H - 100 - hMax - 7 * R.y - 34 - 6;
+    const rowLenX = Math.max(420, Math.min(W - 700, riseMax / 0.3));
+    const T = { x: rowLenX / NBINS, y: -(rowLenX / NBINS) * 0.30 }; // time: up-right
+    const OX = Math.max(180, (W - (7 * R.x + rowLenX)) / 2 + 30);
+    const OY = 100 + hMax + rowLenX * 0.3;                          // OLDEST row (back, top-left), k=0
     const P = (w, k) => ({ x: OX + w * R.x + k * T.x, y: OY + w * R.y + k * T.y });
     const angle = Math.atan2(T.y, T.x) * 180 / Math.PI;
-    const hMax = 128;
 
     // metric machinery at 10-minute grain
     const Mdef = DEPTH_METRICS.find(m => m.id === depthMetric);
@@ -886,9 +891,10 @@
       txt(b0.x - 12, b0.y + 4, WEEK_ROWS[w].label, live ? 'day-name' : 'annot', { 'text-anchor': 'end', ...(live ? { fill: 'var(--ember)' } : {}) }, content);
       txt(b0.x - 12, b0.y + 16, `$${Math.round(tot.d)} · ${tot.c}c`, 'hour-tick', { 'text-anchor': 'end' }, content);
       if (live && NOW_H < 192) {
+        // the live edge hugs the terrain instead of floating at full lane height
         const np = P(w, (NOW_H - 24) * SPH);
-        el('line', { x1: np.x, y1: np.y - hMax, x2: np.x, y2: np.y + 4, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.5 }, content);
-        el('circle', { cx: np.x, cy: np.y - hMax, r: 3, fill: 'var(--ember)', class: 'now-dot' }, content);
+        el('line', { x1: np.x, y1: np.y - 34, x2: np.x, y2: np.y + 4, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.6 }, content);
+        el('circle', { cx: np.x, cy: np.y - 34, r: 2.6, fill: 'var(--ember)', class: 'now-dot' }, content);
       }
       // hit surface outside the lifting group so hover can't jitter
       const hit = el('polygon', {
@@ -912,23 +918,45 @@
       }
     }
 
-    // AVERAGE — the daily-rhythm panel, bottom-right, on the same time angle
-    const A0 = { x: W - 400, y: H - 64 };
+    // AVERAGE DAY vs TODAY — the panel earns its place by answering a question:
+    // is today's rhythm normal? Heat bars = the mean day across all 8 weeks;
+    // pale dots = today so far; the caption is the verdict.
+    const A0 = {
+      x: Math.min(W - 400, OX + 7 * R.x + rowLenX - 300),
+      y: Math.min(H - 66, OY + 7 * R.y + 26),
+    };
     const at2 = { x: 8.4, y: 8.4 * T.y / T.x };
     const prof = new Array(24).fill(0);
     for (let w = 0; w < n; w++) for (let k = 0; k < NBINS; k++) prof[Math.floor((k / SPH) % 24)] += series[w].t[k];
     const pMax = Math.max(...prof, 0.001);
+    // today's actual rhythm from the live arrays (today = the current day, hour 168+)
+    const rateOf = h2 => (depthMetric === 'commits' ? commits[h2] : depthMetric === 'churn' ? churn[h2] : cost[h2]);
+    const hoursToday = Math.max(1, Math.floor(NOW_H - 168));
+    const today = new Array(24).fill(null);
+    for (let hh2 = 0; hh2 < 24 && 168 + hh2 < NOW_H; hh2++) today[hh2] = rateOf(168 + hh2);
+    const pMean = pMax / n; // the mean day's peak rate — today plots on the same scale
+    // verdict: today so far vs the same hours of a typical day
+    let sumT = 0, sumA = 0;
+    for (let hh2 = 0; hh2 < hoursToday; hh2++) { sumT += today[hh2] ?? 0; sumA += prof[hh2] / n; }
+    const delta = sumA > 0.01 ? Math.round(((sumT - sumA) / sumA) * 100) : 0;
+    let peak = 0; for (let hh2 = 1; hh2 < 24; hh2++) if (prof[hh2] > prof[peak]) peak = hh2;
+    txt(A0.x, A0.y - 76, 'AVERAGE DAY vs TODAY', 'annot', { fill: 'var(--ink-mid)', 'font-weight': 700, 'letter-spacing': '0.14em' }, g);
+    txt(A0.x, A0.y - 64, `typical peak ${String(peak).padStart(2, '0')}:00 · today ${delta >= 0 ? '+' : ''}${delta}% vs typical`, 'hour-tick', { fill: delta >= 0 ? 'var(--good)' : 'var(--ink-low)' }, g);
     el('line', { x1: A0.x - 10, y1: A0.y - 10 * (at2.y / at2.x), x2: A0.x + 24 * at2.x + 12, y2: A0.y + (24 * at2.x + 12) * (at2.y / at2.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 4' }, g);
-    for (let hh = 0; hh < 24; hh++) {
-      const p = { x: A0.x + hh * at2.x, y: A0.y + hh * at2.y };
-      el('rect', { x: p.x, y: p.y - (prof[hh] / pMax) * 52, width: at2.x * 0.72, height: (prof[hh] / pMax) * 52, fill: '#8A8F9B', opacity: 0.55 }, g);
+    for (let hh2 = 0; hh2 < 24; hh2++) {
+      const p = { x: A0.x + hh2 * at2.x, y: A0.y + hh2 * at2.y };
+      const t = prof[hh2] / pMax;
+      el('rect', { x: p.x, y: p.y - t * 52, width: at2.x * 0.72, height: t * 52, fill: colorFor(t), opacity: 0.75 }, g);
+      if (hh2 === peak) el('circle', { cx: p.x + at2.x * 0.36, cy: p.y - t * 52 - 5, r: 1.6, fill: 'var(--ember)' }, g);
+      if (today[hh2] !== null) {
+        const dotH = Math.min(62, (today[hh2] / Math.max(pMean, 0.001)) * 52);
+        el('circle', { cx: p.x + at2.x * 0.36, cy: p.y - dotH, r: 1.8, fill: '#FFE9C4', opacity: 0.95 }, g);
+      }
     }
-    for (const [hh, lab] of [[0, '00'], [12, '12'], [23, '24']]) {
-      const p = { x: A0.x + hh * at2.x + 3, y: A0.y + hh * at2.y + 16 };
+    for (const [hh2, lab] of [[0, '00'], [12, '12'], [23, '24']]) {
+      const p = { x: A0.x + hh2 * at2.x + 3, y: A0.y + hh2 * at2.y + 16 };
       txt(p.x, p.y, lab, 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${p.x} ${p.y})` }, g);
     }
-    const ae = { x: A0.x + 24 * at2.x + 10, y: A0.y + 24 * at2.y - 4 };
-    txt(ae.x, ae.y, 'AVERAGE DAY', 'annot', { fill: '#8A8F9B', transform: `rotate(${angle.toFixed(1)} ${ae.x} ${ae.y})` }, g);
   }
 
   function applyDepthHover() {
