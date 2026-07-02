@@ -42,6 +42,81 @@ export function workosDiscoveryUrl(clientId: string): string {
 	return `https://api.workos.com/user_management/${clientId}/.well-known/openid-configuration`;
 }
 
+/** Decode a JWT's payload WITHOUT verifying its signature. Safe here: the token was just handed to us by
+ *  WorkOS over TLS in the code→token exchange, and we only read non-authoritative profile claims from it
+ *  (identity/session are still owned by better-auth). Returns null on any malformed input. */
+export function decodeJwtPayload(jwt: string | undefined | null): Record<string, unknown> | null {
+	if (!jwt) return null;
+	const parts = jwt.split(".");
+	if (parts.length < 2 || !parts[1]) return null;
+	try {
+		return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
+/** Normalized profile from a WorkOS sign-in, plus the WorkOS org/role for later JIT org mapping. */
+export interface WorkosProfile {
+	id: string;
+	email: string;
+	emailVerified: boolean;
+	name: string;
+	image?: string;
+	/** WorkOS Organization id from the token claims (present when the login was org-scoped). */
+	workosOrgId?: string;
+	/** WorkOS org-membership role from the token claims. */
+	workosRole?: string;
+}
+
+const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+
+/**
+ * Resolve the sign-in profile from WorkOS tokens — the custom getUserInfo for our genericOAuth provider.
+ *
+ * WHY custom: WorkOS's OIDC discovery exposes NO userinfo endpoint, and its access-token JWT omits email,
+ * so better-auth's default (decode id_token OR call userinfo) yields nothing → "user_info_is_missing". We
+ * decode the token for sub/org_id/role, then fetch email/name from the WorkOS User Management API. Returns
+ * null (better-auth then surfaces user_info_is_missing) only if we can't get a subject + email.
+ */
+export async function workosUserInfo(tokens: { idToken?: string | null; accessToken?: string | null }): Promise<WorkosProfile | null> {
+	const cfg = workosConfig();
+	const claims = decodeJwtPayload(tokens.idToken) ?? decodeJwtPayload(tokens.accessToken);
+	const sub = str(claims?.sub);
+	const orgId = str(claims?.org_id) ?? str(claims?.organization_id);
+	const role = str(claims?.role);
+	let email = str(claims?.email);
+	let name = str(claims?.name);
+	let image = str(claims?.picture);
+	let emailVerified = claims?.email_verified === true;
+
+	// WorkOS access-token JWTs carry sub/org/role but not email/name — fetch those from the User API.
+	if (sub && (!email || !name) && cfg) {
+		try {
+			const r = await fetch(`https://api.workos.com/user_management/users/${sub}`, {
+				headers: { Authorization: `Bearer ${cfg.apiKey}` },
+			});
+			if (r.ok) {
+				const u = (await r.json()) as Record<string, unknown>;
+				email = str(u.email) ?? email;
+				const full = [str(u.first_name), str(u.last_name)].filter(Boolean).join(" ").trim();
+				if (full) name = full;
+				image = str(u.profile_picture_url) ?? image;
+				if (typeof u.email_verified === "boolean") emailVerified = u.email_verified;
+			}
+		} catch {
+			// Network failure ⇒ fall through; null return below yields a clean user_info_is_missing.
+		}
+	}
+
+	// Diagnostic (no secrets — presence flags + non-sensitive org/role + the claim key set) to characterize
+	// the real WorkOS token shape against a live tenant. Safe to remove once org mapping is finalized.
+	console.log(`[workos] user info: sub=${sub ? "y" : "n"} email=${email ? "y" : "n"} org_id=${orgId ?? "none"} role=${role ?? "none"} claimKeys=${claims ? Object.keys(claims).join("|") : "none"}`);
+
+	if (!sub || !email) return null;
+	return { id: sub, email, emailVerified, name: name || email, image, workosOrgId: orgId, workosRole: role };
+}
+
 /** Default replay-window for webhook timestamps (WorkOS recommends ~3–5 min). */
 export const WORKOS_WEBHOOK_TOLERANCE_MS = 5 * 60 * 1000;
 

@@ -18,7 +18,7 @@ import { organization } from "better-auth/plugins/organization";
 import { genericOAuth } from "better-auth/plugins/generic-oauth";
 import type { Dialect } from "kysely";
 import type { DbKind } from "./index.ts";
-import { workosConfig, workosDiscoveryUrl } from "../workos.ts";
+import { workosConfig, workosDiscoveryUrl, workosUserInfo } from "../workos.ts";
 
 export interface AuthConfig {
 	dialect: Dialect;
@@ -75,17 +75,10 @@ export function authOptions({ dialect, type, trustedOrigins, baseURL }: AuthConf
 				// screen (email-first detection across every connection + social) — the "one button, all IdPs"
 				// UX. Per-tenant pinning later swaps this for organization_id/connection_id (can be a fn of ctx).
 				authorizationUrlParams: { provider: "authkit" },
-				mapProfileToUser: (profile: Record<string, unknown>) => {
-					const name =
-						(typeof profile.name === "string" && profile.name) ||
-						[profile.given_name, profile.family_name].filter((p) => typeof p === "string").join(" ").trim() ||
-						(typeof profile.email === "string" ? profile.email : "");
-					return {
-						email: typeof profile.email === "string" ? profile.email : undefined,
-						name: name || undefined,
-						image: typeof profile.picture === "string" ? profile.picture : undefined,
-					};
-				},
+				// WorkOS has no userinfo endpoint and its access-token JWT omits email, so the default profile
+				// resolution fails ("user_info_is_missing"). workosUserInfo decodes the token + fetches the
+				// user from the WorkOS API. See src/workos.ts.
+				getUserInfo: (tokens) => workosUserInfo(tokens),
 			}],
 		})]
 		: [];

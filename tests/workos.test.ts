@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature, workosConfig, workosDiscoveryUrl } from "../src/workos.ts";
+import { decodeJwtPayload, parseWorkosEvent, ssoEnabled, verifyWorkosSignature, workosConfig, workosDiscoveryUrl } from "../src/workos.ts";
 
 const KEYS = ["WORKOS_CLIENT_ID", "WORKOS_API_KEY"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -80,6 +80,17 @@ test("verifyWorkosSignature rejects a missing or malformed header", () => {
 		ok: false,
 		reason: "malformed signature header",
 	});
+});
+
+test("decodeJwtPayload reads claims without verifying, and fails closed on junk", () => {
+	// hand-build a JWT: header.payload.signature (base64url), payload carries sub/org_id/email
+	const payload = { sub: "user_01", org_id: "org_01", role: "admin", email: "sso@acme.com" };
+	const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+	const jwt = `${b64({ alg: "none" })}.${b64(payload)}.sig`;
+	expect(decodeJwtPayload(jwt)).toMatchObject(payload);
+	expect(decodeJwtPayload(undefined)).toBeNull();
+	expect(decodeJwtPayload("not-a-jwt")).toBeNull();
+	expect(decodeJwtPayload("a.$$$.c")).toBeNull();
 });
 
 test("parseWorkosEvent extracts the envelope and rejects junk", () => {
