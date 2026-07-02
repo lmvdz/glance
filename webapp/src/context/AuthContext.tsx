@@ -53,6 +53,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [status, setStatus] = React.useState<Status>('loading');
   const [config, setConfig] = React.useState<AuthMode | null>(null);
   const [me, setMe] = React.useState<Me | null>(null);
+  // Attempt the WorkOS org sync at most once per authenticated session (reset on sign-out).
+  const syncAttempted = React.useRef(false);
 
   // Resolve the current session against a known mode. Returns the next status.
   const resolveSession = React.useCallback(async (mode: AuthMode): Promise<void> => {
@@ -69,12 +71,32 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       return;
     }
     if (!res.ok) throw new Error(`/api/me ${res.status}`);
-    const body = (await res.json()) as Me | { mode: 'file' };
+    let body = (await res.json()) as Me | { mode: 'file' };
     if (body.mode !== 'db') {
       // Server flipped to file mode between calls; treat as file.
       setMe(null);
       setStatus('file');
       return;
+    }
+    // Enterprise SSO: an org-less user may map to a WorkOS Organization. Reconcile once, then re-read
+    // identity so they land in their tenant (active org + admin/operator tier) instead of a viewer.
+    if (mode.sso && body.activeOrganizationId === null && !syncAttempted.current) {
+      syncAttempted.current = true;
+      try {
+        const sync = await apiFetch('/api/workos/sync', { method: 'POST' });
+        if (sync.ok) {
+          const s = (await sync.json()) as { mapped?: boolean; organizationId?: string | null };
+          if (s.mapped && s.organizationId) {
+            const again = await apiFetch('/api/me');
+            if (again.ok) {
+              const b2 = (await again.json()) as Me | { mode: 'file' };
+              if (b2.mode === 'db') body = b2;
+            }
+          }
+        }
+      } catch {
+        // Non-fatal — the user simply stays an org-less viewer until the next sync.
+      }
     }
     setMe(body);
     setStatus('authed');
@@ -106,6 +128,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     try {
       await authClient.signOut();
     } finally {
+      syncAttempted.current = false;
       setMe(null);
       setStatus('anon');
     }

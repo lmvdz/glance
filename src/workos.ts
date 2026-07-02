@@ -163,6 +163,51 @@ export function verifyWorkosSignature(args: {
 	return { ok: true };
 }
 
+/** A user's membership in a WorkOS Organization (from the org-memberships API). */
+export interface WorkosMembership {
+	organizationId: string;
+	organizationName?: string;
+	/** WorkOS role slug (e.g. "admin", "member"). */
+	role?: string;
+	status?: string;
+}
+
+/** Fetch a WorkOS user's ACTIVE organization memberships. Returns [] when SSO is unconfigured or the API
+ *  errors (caller treats that as "no orgs" — a safe, non-mutating default). */
+export async function fetchWorkosMemberships(workosUserId: string): Promise<WorkosMembership[]> {
+	const cfg = workosConfig();
+	if (!cfg) return [];
+	const url = `https://api.workos.com/user_management/organization_memberships?user_id=${encodeURIComponent(workosUserId)}&statuses=active&limit=100`;
+	try {
+		const r = await fetch(url, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+		if (!r.ok) return [];
+		const body = (await r.json()) as { data?: unknown[] };
+		const out: WorkosMembership[] = [];
+		for (const m of body.data ?? []) {
+			if (!m || typeof m !== "object") continue;
+			const o = m as Record<string, unknown>;
+			const orgId = str(o.organization_id);
+			if (!orgId) continue;
+			const roleObj = o.role && typeof o.role === "object" ? (o.role as Record<string, unknown>) : undefined;
+			out.push({
+				organizationId: orgId,
+				organizationName: str(o.organization_name),
+				role: str(roleObj?.slug),
+				status: str(o.status),
+			});
+		}
+		return out;
+	} catch {
+		return [];
+	}
+}
+
+/** Map a WorkOS role slug → a better-auth organization role. admin/owner ⇒ admin (→ RBAC admin tier via
+ *  bridgeRole); everything else ⇒ member (→ operator tier). */
+export function mapWorkosRole(slug: string | undefined): "admin" | "member" {
+	return slug === "admin" || slug === "owner" ? "admin" : "member";
+}
+
 /** The WorkOS event envelope. `data` is the Directory User/Group (or User Management user) object. */
 export interface WorkosEvent {
 	event: string;

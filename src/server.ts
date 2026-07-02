@@ -32,6 +32,7 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { reconcileWorkosOrgs } from "./workos-provision.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -629,6 +630,19 @@ export class SquadServer {
 			const resolved = resolveRole(req, this.authPolicy);
 			if (resolved === null) return new Response("unauthorized", { status: 401 });
 			role = resolved;
+		}
+		// WorkOS org sync — reconcile the caller's WorkOS org memberships into better-auth orgs + members and
+		// point their session at the active org. BEFORE the tier gate on purpose: a freshly-signed-in SSO user
+		// is org-less (⇒ viewer) and must be able to map themselves in. Acts only on the caller's own session.
+		if (url.pathname === "/api/workos/sync" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null || !ssoEnabled()) return Response.json({ mapped: false });
+			try {
+				const result = await reconcileWorkosOrgs(this.db.db, session.user.id);
+				return Response.json(result ? { mapped: true, ...result } : { mapped: false });
+			} catch (err) {
+				console.error("[workos] org sync failed:", err);
+				return Response.json({ mapped: false, error: "sync failed" }, { status: 500 });
+			}
 		}
 		if (!roleAtLeast(role, requiredRole(req.method, url.pathname))) return new Response("forbidden", { status: 403 });
 		if (url.pathname === "/api/me") {
