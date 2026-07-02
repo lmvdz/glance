@@ -15,6 +15,7 @@ import { AssistantChat } from './components/AssistantChat';
 import { CapabilityPanel } from './components/CapabilityPanel';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
+import { PendingApproval } from './components/PendingApproval';
 import { Loader2 } from 'lucide-react';
 
 const readStoredBoolean = (key: string, fallback: boolean) => {
@@ -68,6 +69,7 @@ const AuthGate = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (status === 'anon') return <Login />;
+  if (status === 'pending') return <PendingApproval />;
   return <>{children}</>;
 };
 

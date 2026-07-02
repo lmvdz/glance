@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { decodeJwtPayload, parseWorkosEvent, ssoEnabled, verifyWorkosSignature, workosConfig, workosDiscoveryUrl } from "../src/workos.ts";
+import { PUBLIC_EMAIL_DOMAINS, decodeJwtPayload, emailDomain, mapWorkosRole, parseWorkosEvent, ssoEnabled, verifyWorkosSignature, workosConfig, workosDiscoveryUrl } from "../src/workos.ts";
 
 const KEYS = ["WORKOS_CLIENT_ID", "WORKOS_API_KEY"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -23,6 +23,26 @@ test("WorkOS SSO is gated on BOTH client id and api key", () => {
 	process.env.WORKOS_API_KEY = "sk_abc";
 	expect(ssoEnabled()).toBe(true);
 	expect(workosConfig()).toEqual({ clientId: "client_123", apiKey: "sk_abc" });
+});
+
+test("emailDomain extracts the lowercased domain", () => {
+	expect(emailDomain("Jane@Acme.COM")).toBe("acme.com");
+	expect(emailDomain("no-at")).toBeNull();
+	expect(emailDomain("")).toBeNull();
+	expect(emailDomain(null)).toBeNull();
+});
+
+test("public email providers are recognized (never map to a company tenant)", () => {
+	expect(PUBLIC_EMAIL_DOMAINS.has("gmail.com")).toBe(true);
+	expect(PUBLIC_EMAIL_DOMAINS.has("icloud.com")).toBe(true);
+	expect(PUBLIC_EMAIL_DOMAINS.has("acme.com")).toBe(false);
+});
+
+test("mapWorkosRole bridges admin/owner → admin, else member", () => {
+	expect(mapWorkosRole("admin")).toBe("admin");
+	expect(mapWorkosRole("owner")).toBe("admin");
+	expect(mapWorkosRole("member")).toBe("member");
+	expect(mapWorkosRole(undefined)).toBe("member");
 });
 
 test("AuthKit OIDC discovery URL is built from the client id", () => {

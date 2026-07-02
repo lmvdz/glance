@@ -208,6 +208,85 @@ export function mapWorkosRole(slug: string | undefined): "admin" | "member" {
 	return slug === "admin" || slug === "owner" ? "admin" : "member";
 }
 
+/** Extract the lowercased domain from an email, or null. */
+export function emailDomain(email: string | undefined | null): string | null {
+	if (!email) return null;
+	const at = email.lastIndexOf("@");
+	const dom = at > 0 ? email.slice(at + 1).trim().toLowerCase() : "";
+	return dom || null;
+}
+
+/** Public/consumer email providers never map to a company tenant — those users always get a personal
+ *  workspace. Defense-in-depth beyond "only verified domains match" (no company verifies gmail.com). */
+export const PUBLIC_EMAIL_DOMAINS = new Set([
+	"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
+	"yahoo.com", "ymail.com", "icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com",
+	"aol.com", "gmx.com", "mail.com", "zoho.com", "yandex.com", "fastmail.com", "hey.com",
+]);
+
+/** Per-org self-serve join policy (stored in the WorkOS org's metadata as `join_policy`). Defaults to
+ *  "approval" (safest) when unset. */
+export type JoinPolicy = "auto" | "approval";
+
+export interface WorkosOrgMatch {
+	id: string;
+	name: string;
+	joinPolicy: JoinPolicy;
+}
+
+/**
+ * Find the company WorkOS Organization that owns a VERIFIED email domain. Returns null for public email
+ * providers, unverified domains, or no match. Verified-only is the security gate: a domain WorkOS has
+ * verified proves the company controls it, so a same-domain user is a legitimate join candidate (still
+ * subject to the org's join policy). We re-check `state === "verified"` on the exact domain rather than
+ * trusting the `?domains=` filter alone.
+ */
+export async function findWorkosOrgByDomain(domain: string | null): Promise<WorkosOrgMatch | null> {
+	const cfg = workosConfig();
+	if (!cfg || !domain || PUBLIC_EMAIL_DOMAINS.has(domain)) return null;
+	try {
+		const r = await fetch(`https://api.workos.com/organizations?domains=${encodeURIComponent(domain)}&limit=10`, {
+			headers: { Authorization: `Bearer ${cfg.apiKey}` },
+		});
+		if (!r.ok) return null;
+		const body = (await r.json()) as { data?: unknown[] };
+		for (const o of body.data ?? []) {
+			if (!o || typeof o !== "object") continue;
+			const org = o as Record<string, unknown>;
+			const id = str(org.id);
+			if (!id) continue;
+			const domains = Array.isArray(org.domains) ? org.domains : [];
+			const verified = domains.some((d) => {
+				const dd = d as Record<string, unknown>;
+				return str(dd?.domain)?.toLowerCase() === domain && dd?.state === "verified";
+			});
+			if (!verified) continue;
+			const meta = org.metadata && typeof org.metadata === "object" ? (org.metadata as Record<string, unknown>) : {};
+			const joinPolicy: JoinPolicy = meta.join_policy === "auto" ? "auto" : "approval";
+			return { id, name: str(org.name) ?? id, joinPolicy };
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/** Create a WorkOS organization membership (used by the auto-join path). Returns true on success. */
+export async function createWorkosMembership(workosUserId: string, orgId: string, roleSlug = "member"): Promise<boolean> {
+	const cfg = workosConfig();
+	if (!cfg) return false;
+	try {
+		const r = await fetch("https://api.workos.com/user_management/organization_memberships", {
+			method: "POST",
+			headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ user_id: workosUserId, organization_id: orgId, role_slug: roleSlug }),
+		});
+		return r.ok;
+	} catch {
+		return false;
+	}
+}
+
 /** The WorkOS event envelope. `data` is the Directory User/Group (or User Management user) object. */
 export interface WorkosEvent {
 	event: string;

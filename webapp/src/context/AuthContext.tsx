@@ -29,12 +29,22 @@ type Status =
   | 'loading' // fetching mode/session
   | 'file' // file mode — no login page, legacy bearer-token behavior
   | 'authed' // db mode, valid session
+  | 'pending' // db mode, join request awaiting an org admin's approval
   | 'anon'; // db mode, no session — show <Login/>
+
+/** Result of POST /api/workos/sync (onboarding decision). */
+type OnboardOutcome =
+  | { outcome: 'mapped' | 'joined'; organizationId: string; role: string }
+  | { outcome: 'pending'; organizationId: string; organizationName: string }
+  | { outcome: 'personal'; organizationId: string }
+  | { outcome: 'none' };
 
 interface AuthState {
   status: Status;
   config: AuthMode | null;
   me: Me | null;
+  /** When status === 'pending': the org name the user requested to join. */
+  pendingOrg: string | null;
   /** Re-check the session (call after a successful sign-in/sign-up). */
   refresh: () => Promise<void>;
   /** End the session and return to the login screen. */
@@ -53,7 +63,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [status, setStatus] = React.useState<Status>('loading');
   const [config, setConfig] = React.useState<AuthMode | null>(null);
   const [me, setMe] = React.useState<Me | null>(null);
-  // Attempt the WorkOS org sync at most once per authenticated session (reset on sign-out).
+  const [pendingOrg, setPendingOrg] = React.useState<string | null>(null);
+  // Attempt the WorkOS onboarding sync at most once per authenticated session (reset on sign-out).
   const syncAttempted = React.useRef(false);
 
   // Resolve the current session against a known mode. Returns the next status.
@@ -78,15 +89,21 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setStatus('file');
       return;
     }
-    // Enterprise SSO: an org-less user may map to a WorkOS Organization. Reconcile once, then re-read
-    // identity so they land in their tenant (active org + admin/operator tier) instead of a viewer.
+    // Enterprise SSO onboarding: an org-less user is mapped to their WorkOS org, auto-joins / requests a
+    // domain-matched company org, or gets a personal workspace. Run once, then re-read identity.
     if (mode.sso && body.activeOrganizationId === null && !syncAttempted.current) {
       syncAttempted.current = true;
       try {
         const sync = await apiFetch('/api/workos/sync', { method: 'POST' });
         if (sync.ok) {
-          const s = (await sync.json()) as { mapped?: boolean; organizationId?: string | null };
-          if (s.mapped && s.organizationId) {
+          const s = (await sync.json()) as OnboardOutcome;
+          if (s.outcome === 'pending') {
+            setMe(body);
+            setPendingOrg(s.organizationName);
+            setStatus('pending');
+            return;
+          }
+          if (s.outcome === 'mapped' || s.outcome === 'joined' || s.outcome === 'personal') {
             const again = await apiFetch('/api/me');
             if (again.ok) {
               const b2 = (await again.json()) as Me | { mode: 'file' };
@@ -130,13 +147,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     } finally {
       syncAttempted.current = false;
       setMe(null);
+      setPendingOrg(null);
       setStatus('anon');
     }
   }, []);
 
   const value = React.useMemo<AuthState>(
-    () => ({ status, config, me, refresh, signOut }),
-    [status, config, me, refresh, signOut],
+    () => ({ status, config, me, pendingOrg, refresh, signOut }),
+    [status, config, me, pendingOrg, refresh, signOut],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

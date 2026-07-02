@@ -32,7 +32,7 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { reconcileWorkosOrgs } from "./workos-provision.ts";
+import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser } from "./workos-provision.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -631,17 +631,16 @@ export class SquadServer {
 			if (resolved === null) return new Response("unauthorized", { status: 401 });
 			role = resolved;
 		}
-		// WorkOS org sync — reconcile the caller's WorkOS org memberships into better-auth orgs + members and
-		// point their session at the active org. BEFORE the tier gate on purpose: a freshly-signed-in SSO user
-		// is org-less (⇒ viewer) and must be able to map themselves in. Acts only on the caller's own session.
+		// WorkOS onboarding — map existing memberships, else domain-match (auto-join / request-to-join per the
+		// org's policy), else create a personal workspace; then point the session at the active org. BEFORE the
+		// tier gate on purpose: a freshly-signed-in SSO user is org-less (⇒ viewer) and must onboard themselves.
 		if (url.pathname === "/api/workos/sync" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null || !ssoEnabled()) return Response.json({ mapped: false });
+			if (!this.auth || !this.db || session === null || !ssoEnabled()) return Response.json({ outcome: "none" });
 			try {
-				const result = await reconcileWorkosOrgs(this.db.db, session.user.id);
-				return Response.json(result ? { mapped: true, ...result } : { mapped: false });
+				return Response.json(await onboardWorkosUser(this.db.db, session.user.id));
 			} catch (err) {
-				console.error("[workos] org sync failed:", err);
-				return Response.json({ mapped: false, error: "sync failed" }, { status: 500 });
+				console.error("[workos] onboarding failed:", err);
+				return Response.json({ outcome: "none", error: "onboarding failed" }, { status: 500 });
 			}
 		}
 		if (!roleAtLeast(role, requiredRole(req.method, url.pathname))) return new Response("forbidden", { status: 403 });
@@ -649,6 +648,24 @@ export class SquadServer {
 			if (!this.auth || session === null) return Response.json({ mode: "file" });
 			const u = session.user;
 			return Response.json({ mode: "db", user: { id: u.id, name: u.name, email: u.email, image: u.image ?? null }, activeOrganizationId: session.session.activeOrganizationId ?? null, role });
+		}
+		// Admin: pending join requests for the caller's active org (domain-match "require approval" policy).
+		// Exposes member emails ⇒ admin-only, scoped to the caller's own active org.
+		if (url.pathname === "/api/workos/join-requests" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json([]);
+			const orgId = session.session.activeOrganizationId;
+			return Response.json(orgId ? await listPendingJoinRequests(this.db.db, orgId) : []);
+		}
+		if (url.pathname === "/api/workos/join-requests/decide" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const body = (await req.json().catch(() => null)) as { id?: unknown; action?: unknown } | null;
+			const id = body && typeof body.id === "string" ? body.id : "";
+			if (!id) return new Response("missing id", { status: 400 });
+			const ok = body?.action === "deny" ? await denyJoinRequest(this.db.db, id, orgId) : await approveJoinRequest(this.db.db, id, orgId);
+			return Response.json({ ok });
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });

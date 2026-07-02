@@ -221,6 +221,28 @@ const usageTraceId: Migration = {
 	},
 };
 
+// Self-serve org join requests (domain-match onboarding, "require approval" policy). Deliberately NOT an
+// RLS/FK app table: it's written during onboarding OUTSIDE the org-scoped DAL context (the requester isn't
+// a member yet), like the better-auth-owned org/member tables. Admin reads scope by org_id explicitly.
+const createJoinRequests: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("org_join_requests")
+			.addColumn("id", "text", (c) => c.primaryKey())
+			.addColumn("org_id", "text", (c) => c.notNull())
+			.addColumn("user_id", "text", (c) => c.notNull())
+			.addColumn("email", "text", (c) => c.notNull())
+			.addColumn("status", "text", (c) => c.notNull().defaultTo("pending"))
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.execute();
+		await db.schema.createIndex("org_join_requests_org").on("org_join_requests").columns(["org_id", "status"]).execute();
+		await db.schema.createIndex("org_join_requests_user").on("org_join_requests").columns(["user_id"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("org_join_requests").execute();
+	},
+};
+
 /** Apply app-table + RLS migrations idempotently via Kysely's Migrator. */
 export async function migrateApp(db: Kysely<any>, type: DbKind): Promise<void> {
 	const provider: MigrationProvider = {
@@ -231,6 +253,7 @@ export async function migrateApp(db: Kysely<any>, type: DbKind): Promise<void> {
 				"0003_usage_trace_id": usageTraceId,
 				"0004_feedback_tables": createFeedbackTables,
 				"0005_feedback_rls": rlsMigration(type, FEEDBACK_TABLES),
+				"0006_join_requests": createJoinRequests,
 			};
 		},
 	};

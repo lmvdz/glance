@@ -6,6 +6,7 @@
 import React from 'react';
 import { LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { JoinRequests } from './JoinRequests';
 
 // Compact signed-in identity + sign-out, shown in the workbench header. Renders nothing in file mode
 // (no session concept there), so it's inert unless the daemon runs in db mode with a logged-in user.
@@ -57,6 +58,7 @@ export const AccountMenu = () => {
               )}
             </div>
           </div>
+          {role === 'admin' && <JoinRequests />}
           <div className="my-1 h-px bg-gray-100 dark:bg-gray-800" />
           <button
             onClick={() => {
