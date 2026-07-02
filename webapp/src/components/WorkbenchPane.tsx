@@ -202,8 +202,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
       <div className="border-b border-gray-200 bg-gray-50/70 px-3 py-2 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2 text-sm">
-            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-blue-600 text-[11px] font-semibold text-white">O</div>
-            <span className="font-semibold text-gray-900 dark:text-gray-100">omp-squad</span>
+            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-blue-600 text-[11px] font-semibold text-white">G</div>
+            <span className="font-semibold text-gray-900 dark:text-gray-100">glance</span>
             <ChevronRight className="h-3 w-3 flex-shrink-0 text-gray-400" aria-hidden="true" />
             <span className="truncate font-medium text-gray-600 dark:text-gray-300">{currentProject?.name ?? 'No project'}</span>
             <span className={`flex flex-shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
@@ -478,7 +478,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         </button>
         <div className="flex min-h-11 items-center justify-between px-3 text-gray-600 dark:text-gray-400">
           <div className="flex min-w-0 items-center gap-2">
-            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-gray-700 text-xs text-white">O</div>
+            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-gray-700 text-xs text-white">G</div>
             <span className="truncate text-xs">{connected ? 'Daemon live' : 'Daemon offline'}</span>
           </div>
           <Settings className="h-4 w-4 flex-shrink-0 text-gray-400" aria-hidden="true" />

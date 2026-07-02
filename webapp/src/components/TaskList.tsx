@@ -136,7 +136,7 @@ export const TaskList = ({ collapsed, onToggleCollapsed }: TaskListProps) => {
           <div className="w-5 h-5 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex items-center justify-center">
             <Layers className="w-3 h-3" />
           </div>
-          <span className="font-medium text-gray-700 dark:text-gray-200">omp-squad</span>
+          <span className="font-medium text-gray-700 dark:text-gray-200">glance</span>
           <ChevronRight className="w-3 h-3 text-gray-400" />
           <span className="truncate font-medium dark:text-gray-300">{currentProject?.name ?? 'No project'}</span>
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold flex items-center gap-1 ${connected ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'}`}>

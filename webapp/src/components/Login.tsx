@@ -21,7 +21,7 @@ const GithubMark = ({ className }: { className?: string }) => (
   </svg>
 );
 
-// The omp-squad mark — a stylized orbit (circle + ring), echoing the login reference.
+// The glance mark — a stylized orbit (circle + ring), echoing the login reference.
 const Logo = () => (
   <svg width="34" height="34" viewBox="0 0 34 34" fill="none" aria-hidden>
     <circle cx="17" cy="17" r="11" stroke="#e7e7e9" strokeWidth="1.5" />
@@ -124,7 +124,7 @@ export const Login = () => {
               {/* Brand lockup */}
               <div className="mb-9 flex items-center gap-2.5">
                 <Logo />
-                <span className="text-[15px] font-semibold tracking-tight text-[#f4f4f5]">omp-squad</span>
+                <span className="text-[15px] font-semibold tracking-tight text-[#f4f4f5]">glance</span>
               </div>
 
               {/* Headline */}

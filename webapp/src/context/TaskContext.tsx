@@ -108,7 +108,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   const reorderTasks = (_startIndex: number, _endIndex: number) => {
-    showToast('Live omp-squad ordering is driven by the daemon', 'info');
+    showToast('Live glance ordering is driven by the daemon', 'info');
   };
 
   const selectTask = (id: string | null) => setSelectedTaskId(id);
