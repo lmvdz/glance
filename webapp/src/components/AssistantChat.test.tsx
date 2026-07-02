@@ -20,10 +20,10 @@ test("TranscriptEntryView renders human-first tool output with raw payload tucke
   };
 
   const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
-  expect(html).toContain("Tool");
+  expect(html).toContain("Bash"); // human tool name, not the raw "bash"
   expect(html).toContain("Ran ps -ef");
   expect(html).toContain("UID PID CMD");
-  expect(html).toContain("Exit 0");
+  expect(html).toContain("exit 0");
   expect(html).toContain("Raw payload");
 });
 
