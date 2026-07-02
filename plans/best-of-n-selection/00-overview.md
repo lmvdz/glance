@@ -1,8 +1,11 @@
 # Overview — Best-of-N scored selection for workflow fan-out
 
-> **STATUS: IN PROGRESS — PRIORITY: p2 (low).** Dispatched to the fleet as agent
-> `best-of-n-mqr87z68-y6cg` (worktree `omp-squad-squad-best-of-n-...`), gate `bun run check && bun test`.
-> Was parked (operator marked low priority); operator then said "squad it". Lands on a green gate.
+> **STATUS: NOT STARTED — PRIORITY: p2 (low).** 2026-07-01 reconcile: the fleet dispatch below
+> never landed — no scoring/tournament code exists in src/workflow/ (code-verified today and by the
+> 2026-06-30 audit). Left as an honest not-started backlog item; re-dispatch deliberately if wanted.
+>
+> (Stale record: was dispatched as agent `best-of-n-mqr87z68-y6cg`, gate `bun run check && bun test`,
+> after the operator said "squad it".)
 
 Source research: `/research https://en.wikipedia.org/wiki/Evolved_antenna`. The transferable nucleus of
 an evolved antenna — *population-based parallel search + a numeric multi-objective fitness + selection by

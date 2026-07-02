@@ -1,5 +1,14 @@
 # Fresh proof and land invariant
-STATUS: open
+STATUS: done
+
+> 2026-07-01 reconcile: verified in code — `proofGate` (src/proof.ts:174) refuses a missing/failed/
+> stale proof keyed to the worktree HEAD, and the land paths call it before any merge
+> (src/server.ts `/api/agents/:id/land`, `manager.land`/`landFeature`). The 2026-06-30 plan audit
+> already found the core proof-before-land invariant done; the STATUS line never caught up.
+> Residual gap (tracked, not blocking `done`): freshness is commit-keyed only — the fingerprint
+> extensions in the Approach (dirty status, tree hash, target base HEAD, command hash/TTL) are not
+> implemented, so a worktree holding a green proof at HEAD *plus uncommitted edits* can have those
+> edits swept in by `commitWip` and merged under a proof that never tested them.
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

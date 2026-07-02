@@ -4,6 +4,11 @@ STATUS: open
 PRIORITY: p1
 REPOS: omp-squad
 
+> 2026-07-01 reconcile: this was BUILT once (commit `0f1323b`) and then DELETED by the `55e2637`
+> webapp-shell replacement (2026-06-30 audit) — the project drill-down is gone from the live UI.
+> `open` is honest, but an implementer should mine `0f1323b` for the prior task-model/view code
+> instead of starting blind, and build against the current TaskList/TaskDetail shell.
+
 Evolve the `webapp/` SPA from a fleet **monitor** into a piyaz-style planning **workspace**: a
 left sidebar you drill into per project, and a project view whose tasks show **description +
 acceptance criteria + context-bundle preview + properties**. Phase 2 (separate, later) adds the

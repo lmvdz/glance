@@ -1,5 +1,10 @@
 # App shell navigation + full issue workspace
-STATUS: done
+STATUS: open
+
+> 2026-07-01 reconcile: marked done but never built (2026-06-30 audit, re-verified today) — none of
+> the TOUCHES files exist (`webapp/src/components/layout/`, `views/`, `palette/`, `workbench/` are
+> absent; no hash routing). The `55e2637` shell replacement went a different direction (TaskList/
+> TaskDetail/AssistantChat shell); if this concern still matters, re-plan it against that shell.
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
