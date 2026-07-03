@@ -24,6 +24,7 @@ import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
 import { ActiveWorkPane } from './components/ActiveWorkPane';
+import { FactoryStatusStrip } from './components/FactoryStatusStrip';
 import { OrgSettings } from './components/OrgSettings';
 import { FirstRunSetup } from './components/FirstRunSetup';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -77,7 +78,14 @@ const AppContent = () => {
   return (
     <div className="h-screen w-full flex overflow-hidden text-sm font-sans bg-[#f7f8f9] dark:bg-gray-950 text-gray-800 dark:text-gray-200 transition-colors duration-200">
       <WorkbenchPane collapsed={workbenchCollapsed} onToggleCollapsed={() => setWorkbenchCollapsed((collapsed) => !collapsed)} />
-      <MainContent />
+      {/* Factory liveness is a first-glance concern, so the strip sits ABOVE every view — an idle-but-alive
+          fleet must never again be indistinguishable from a dead one, on any screen. */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <FactoryStatusStrip />
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <MainContent />
+        </div>
+      </div>
       {isChatOpen ? (
         <AssistantChat onClose={() => setIsChatOpen(false)} />
       ) : (
