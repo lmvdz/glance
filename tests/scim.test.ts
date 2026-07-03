@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Kysely, sql } from "kysely";
 import { resolveDialect } from "../src/db/index.ts";
-import { provisionScimEvent } from "../src/workos-provision.ts";
+import { ensurePersonalWorkspace, provisionScimEvent } from "../src/workos-provision.ts";
 import type { WorkosEvent } from "../src/workos.ts";
 
 let db: Kysely<Record<string, never>>;
@@ -71,4 +71,24 @@ test("events without an org id or email are not handled", async () => {
 	expect(await provisionScimEvent(db, ev("dsync.user.created", { organization_id: ORG, emails: [] }))).toEqual({ handled: false });
 	expect(await provisionScimEvent(db, ev("dsync.user.created", { emails: [{ primary: true, value: "x@y.com" }] }))).toEqual({ handled: false });
 	expect(await provisionScimEvent(db, ev("dsync.group.created", dirUser("ada@acme.com")))).toEqual({ handled: false });
+});
+
+test("ensurePersonalWorkspace gives an org-less user their own workspace (owner), idempotently", async () => {
+	const now = new Date().toISOString();
+	await sql`insert into "user" ("id","name","email","emailVerified","createdAt","updatedAt") values ('u_solo','Ada Solo','ada@personal.dev',0,${now},${now})`.execute(db);
+	const orgId = await ensurePersonalWorkspace(db, "u_solo");
+	expect(orgId).toBe("org_personal_u_solo");
+	const org = await sql<{ name: string }>`select "name" from "organization" where "id"='org_personal_u_solo'`.execute(db);
+	expect(org.rows[0]?.name).toBe("Ada Solo's Workspace");
+	const mem = await sql<{ role: string }>`select "role" from "member" where "organizationId"='org_personal_u_solo' and "userId"='u_solo'`.execute(db);
+	expect(mem.rows[0]?.role).toBe("owner");
+	// idempotent: already a member ⇒ no second org
+	expect(await ensurePersonalWorkspace(db, "u_solo")).toBeNull();
+});
+
+test("ensurePersonalWorkspace is a no-op for a user who already belongs to an org", async () => {
+	const now = new Date().toISOString();
+	await sql`insert into "user" ("id","name","email","emailVerified","createdAt","updatedAt") values ('u_hasorg','Has Org','h@co.com',0,${now},${now})`.execute(db);
+	await sql`insert into "member" ("id","organizationId","userId","role","createdAt") values ('m_x','org_existing','u_hasorg','member',${now})`.execute(db);
+	expect(await ensurePersonalWorkspace(db, "u_hasorg")).toBeNull();
 });

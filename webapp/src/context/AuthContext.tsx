@@ -89,9 +89,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setStatus('file');
       return;
     }
-    // Enterprise SSO onboarding: an org-less user is mapped to their WorkOS org, auto-joins / requests a
-    // domain-matched company org, or gets a personal workspace. Run once, then re-read identity.
-    if (mode.sso && body.activeOrganizationId === null && !syncAttempted.current) {
+    // Onboard an org-less user: WorkOS users map to their org / auto-join / request a domain-matched company
+    // org; everyone else (email, GitHub) gets a personal workspace. Run once, then re-read identity.
+    if (body.activeOrganizationId === null && !syncAttempted.current) {
       syncAttempted.current = true;
       try {
         const sync = await apiFetch('/api/workos/sync', { method: 'POST' });

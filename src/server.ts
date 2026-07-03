@@ -36,7 +36,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
+import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
@@ -655,11 +655,18 @@ export class SquadServer {
 		// org's policy), else create a personal workspace; then point the session at the active org. BEFORE the
 		// tier gate on purpose: a freshly-signed-in SSO user is org-less (⇒ viewer) and must onboard themselves.
 		if (url.pathname === "/api/workos/sync" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null || !ssoEnabled()) return Response.json({ outcome: "none" });
+			if (!this.auth || !this.db || session === null) return Response.json({ outcome: "none" });
 			try {
-				return Response.json(await onboardWorkosUser(this.db.db, session.user.id));
+				// WorkOS-linked users onboard via their org memberships / domain match; everyone else (email,
+				// GitHub) with no org gets a personal workspace so self-serve tenancy works without WorkOS.
+				const result = ssoEnabled() ? await onboardWorkosUser(this.db.db, session.user.id) : { outcome: "none" as const };
+				if (result.outcome === "none") {
+					const orgId = await ensurePersonalWorkspace(this.db.db, session.user.id);
+					if (orgId) return Response.json({ outcome: "personal", organizationId: orgId });
+				}
+				return Response.json(result);
 			} catch (err) {
-				console.error("[workos] onboarding failed:", err);
+				console.error("[auth] onboarding failed:", err);
 				return Response.json({ outcome: "none", error: "onboarding failed" }, { status: 500 });
 			}
 		}

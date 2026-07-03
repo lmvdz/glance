@@ -300,3 +300,16 @@ export async function provisionScimEvent(db: AnyKysely, event: WorkosEvent): Pro
 			return { handled: false };
 	}
 }
+
+/**
+ * Give a signed-in user who belongs to NO organization a personal workspace (they become its owner). This
+ * is the self-serve fallback for email/password + GitHub users (no WorkOS): without it a fresh signup lands
+ * org-less/read-only. Idempotent; returns the org id, or null if they already belong to an org.
+ */
+export async function ensurePersonalWorkspace(db: AnyKysely, betterAuthUserId: string): Promise<string | null> {
+	const member = await sql<{ id: string }>`select "id" from "member" where "userId" = ${betterAuthUserId} limit 1`.execute(db);
+	if (member.rows[0]) return null; // already in an org — nothing to do
+	const u = await sql<{ name: string; email: string }>`select "name","email" from "user" where "id" = ${betterAuthUserId} limit 1`.execute(db);
+	const displayName = u.rows[0]?.name || u.rows[0]?.email?.split("@")[0] || "User";
+	return createPersonalOrg(db, betterAuthUserId, displayName);
+}
