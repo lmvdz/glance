@@ -560,7 +560,10 @@ export class SquadServer {
 			return new Response("websocket upgrade failed", { status: 426 });
 		}
 		if (url.pathname === "/" || url.pathname === "/index.html") {
-			return new Response(indexFile, { headers: { "content-type": "text/html; charset=utf-8" } });
+			// index.html references content-hashed bundles by name, so it MUST revalidate every load —
+			// otherwise a browser caches it heuristically (no validator ⇒ stale for hours) and never
+			// picks up a new deploy, pinning the user to an old bundle. no-cache forces the refetch.
+			return new Response(indexFile, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
 		}
 		// No favicon is bundled; 204 (public, pre-auth) beats the 401 the auth gate would otherwise log.
 		if (url.pathname === "/favicon.ico") return new Response(null, { status: 204 });
@@ -572,7 +575,9 @@ export class SquadServer {
 			const resolved = path.join(WEBAPP_ASSETS, url.pathname.slice("/assets/".length));
 			if (resolved.startsWith(WEBAPP_ASSETS + path.sep) && existsSync(resolved)) {
 				const type = ASSET_TYPES[path.extname(resolved)] ?? "application/octet-stream";
-				return new Response(Bun.file(resolved), { headers: { "content-type": type } });
+				// Vite filenames embed a content hash, so a given URL is immutable — cache it hard.
+				// (index.html revalidates and always points at the current hashes.)
+				return new Response(Bun.file(resolved), { headers: { "content-type": type, "cache-control": "public, max-age=31536000, immutable" } });
 			}
 			return new Response("not found", { status: 404 });
 		}
