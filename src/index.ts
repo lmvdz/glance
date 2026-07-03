@@ -31,6 +31,7 @@ import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
 import { acquireStateLock, StateLockError } from "./state-lock.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
+import { planeRepos } from "./plane.ts";
 import { openDatabase } from "./db/index.ts";
 import { DbStore } from "./dal/store.ts";
 import type { OrgContext } from "./dal/context.ts";
@@ -42,6 +43,18 @@ import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
+
+/**
+ * Gating for the DB-mode root/operator factory (opt-in). In multi-tenant DB mode the per-org managers
+ * behind the registry are lazy + org-scoped, so the operator's OWN autonomous factory (Plane
+ * auto-dispatch → build → prove → auto-land → self-heal) never runs. This is the explicit trigger to
+ * ALSO stand up a single root SquadManager that owns the global Plane loops: OMP_SQUAD_ROOT_FACTORY=1
+ * AND at least one Plane repo configured (PLANE_PROJECT_MAP). Default OFF — a bare SaaS deployment never
+ * silently spins a global factory. Exported for the boot-gate test.
+ */
+export function rootFactoryEnabled(repoCount: number = planeRepos().length): boolean {
+	return process.env.OMP_SQUAD_ROOT_FACTORY === "1" && repoCount > 0;
+}
 
 const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
 
@@ -287,8 +300,8 @@ async function cmdUp(args: string[]): Promise<void> {
 	let manager: SquadManager | undefined;
 	let registry: ManagerRegistry | undefined;
 	if (dbHandle) {
-		// DB mode: one daemon, a per-org SquadManager fleet behind the registry. No single root manager
-		// and no global federation bus — each org manager runs isolated under <stateDir>/orgs/<orgId>.
+		// DB mode: one daemon, a per-org SquadManager fleet behind the registry. Each org manager runs
+		// isolated under <stateDir>/orgs/<orgId>, created lazily on the first webapp session for that org.
 		const ctx: OrgContext = { db: dbHandle.db, type: dbHandle.type };
 		registry = new ManagerRegistry({
 			root: stateDir,
@@ -298,6 +311,24 @@ async function cmdUp(args: string[]): Promise<void> {
 			listOrgIds: () => listOrgIds(stateDir),
 		});
 		registry.start();
+		// Root/operator factory (opt-in). The tenant registry above serves per-org webapp sessions, but
+		// those managers are LAZY and org-scoped — so the operator's OWN autonomous factory (Plane
+		// auto-dispatch → build → prove → auto-land → auto-close → self-heal/orchestrator) never runs in
+		// DB mode: enabling multi-tenancy silently turned the factory off. Fix: ALSO stand up a single
+		// root SquadManager at the state-dir root that owns the global Plane loops — alongside, and fully
+		// isolated from, the tenant registry (its own FileStore at the root, never a tenant DbStore).
+		//
+		// GATING: OMP_SQUAD_ROOT_FACTORY=1 AND planeRepos().length > 0. Default OFF — no SaaS deployment
+		// silently spins a global factory; the operator opts in from up.sh (which already wires
+		// PLANE_PROJECT_MAP). Federation stays inert (NullFederationBus): the WS supervisor + cross-host
+		// lease sync are file-mode-only for auth reasons (below), and the root factory is operator-local.
+		if (rootFactoryEnabled()) {
+			manager = new SquadManager({ bus: new NullFederationBus(), operator, stateDir, autoLand });
+			await manager.start();
+			process.stderr.write(`root factory: on — operator autonomous factory active for ${planeRepos().join(", ")}\n`);
+		} else if (process.env.OMP_SQUAD_ROOT_FACTORY === "1") {
+			process.stderr.write("root factory: OMP_SQUAD_ROOT_FACTORY=1 but no Plane repos configured (PLANE_PROJECT_MAP) — not started\n");
+		}
 	} else {
 		// File mode: today's single root manager at the state-dir root.
 		// Federation is ON by default — a real LocalFederationBus that works locally with no
@@ -325,7 +356,11 @@ async function cmdUp(args: string[]): Promise<void> {
 	const push = new PushService(stateDir);
 	await push.init();
 	const roleTokens = { operator: process.env.OMP_SQUAD_OPERATOR_TOKEN || undefined, viewer: process.env.OMP_SQUAD_VIEWER_TOKEN || undefined };
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings });
+	// In DB mode `manager` is the opt-in root factory (or undefined). Pass it as the single manager AND the
+	// registry: the server routes the operator's own org (OMP_SQUAD_ROOT_ORG) + the on-box loopback admin to
+	// the root factory, and every tenant org to its per-org registry manager (server.ts managerFor).
+	const rootOrgId = process.env.OMP_SQUAD_ROOT_ORG?.trim() || undefined;
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, rootOrgId });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
@@ -343,12 +378,14 @@ async function cmdUp(args: string[]): Promise<void> {
 	// separate coordinator socket, no standalone worker. (federation-sync-main.ts still runs the same
 	// engine standalone for hosts that want lease gossip decoupled from the daemon.) DB mode gossips
 	// nothing: each per-org manager runs a NullFederationBus, matching the prior no-global-sync behavior.
+	// The root factory (opt-in) also runs a NullFederationBus, so it adds no cross-host gossip either.
 
 	const shutdown = async () => {
 		stopSupervisor?.();
 		stopTracker();
 		if (registry) await registry.stopAll();
-		else await manager?.stop();
+		// Stop the root factory too (DB mode); in file mode this is the sole root manager. No-op when unset.
+		await manager?.stop();
 		server.stop();
 		if (dbHandle) await dbHandle.close();
 		lock.release();
@@ -359,7 +396,9 @@ async function cmdUp(args: string[]): Promise<void> {
 
 	const useTui = !flags["no-tui"] && process.stdin.isTTY;
 	const access = reachableUrls(host, port, tls ? "https" : "http").map((u) => `    ${u}/?token=${token}`).join("\n");
-	if (manager && useTui) {
+	// File mode drops into the TUI over the root manager; DB mode stays headless even with a root factory
+	// (the operator watches the factory in the webapp, mapped to OMP_SQUAD_ROOT_ORG / the loopback admin).
+	if (manager && !registry && useTui) {
 		process.stdout.write(`glance dashboard: ${url}\n  access token: ${token}\n`);
 		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
 		const tui = new SquadTui(manager);
