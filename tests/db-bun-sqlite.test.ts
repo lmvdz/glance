@@ -6,6 +6,9 @@
  * discriminate and these assertions fail.
  */
 import { expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { bunSqliteDatabase } from "../src/db/bun-sqlite.ts";
 
@@ -29,4 +32,28 @@ test("bun:sqlite adapter binds query parameters (run + all)", async () => {
 	} finally {
 		await db.destroy();
 	}
+});
+
+test("bun:sqlite adapter creates missing parent directories", () => {
+	// Regression: a DATABASE_URL like `sqlite:$HOME/.glance/glance.db` on a fresh box has no
+	// parent dir; SQLite fails such opens with the opaque "unable to open database file" and
+	// wedges the daemon at boot. The adapter must mkdir -p the parent first.
+	const root = mkdtempSync(join(tmpdir(), "glance-mkdir-"));
+	try {
+		const file = join(root, "a", "b", "c", "glance.db");
+		expect(existsSync(join(root, "a"))).toBe(false);
+		const db = bunSqliteDatabase(file);
+		expect(existsSync(file)).toBe(true);
+		db.close();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("bun:sqlite adapter leaves :memory: untouched (no mkdir attempt)", () => {
+	// The mkdir guard must skip the in-memory sentinels, else it would try to create a
+	// directory literally named ":memory:" in cwd.
+	const db = bunSqliteDatabase(":memory:");
+	expect(existsSync(":memory:")).toBe(false);
+	db.close();
 });
