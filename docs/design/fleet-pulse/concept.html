@@ -549,6 +549,23 @@
   // the magma ramp is shared by the bars AND the tooltip swatch, so the legend
   // always matches the exact bar under the cursor
   const heatColor = t => (t > 0.85 ? '#FFE9C4' : t > 0.6 ? '#FFC96B' : t > 0.35 ? '#F2913D' : '#B25E1E');
+  // continuous ramps for the depth terrain — the quantized steps above band badly
+  // when they feed a gradient, so gradients interpolate through these instead
+  const RAMP_MAGMA = [[0, '#7A3B12'], [0.35, '#B25E1E'], [0.6, '#F2913D'], [0.8, '#FFC96B'], [1, '#FFE9C4']];
+  const RAMP_CHURN = [[0, '#3D1230'], [0.35, '#5A2140'], [0.6, '#A03A6E'], [0.8, '#E86BA8'], [1, '#FFD9EC']];
+  function rampColor(ramp, t) {
+    t = Math.max(0, Math.min(1, t));
+    for (let i = 1; i < ramp.length; i++) {
+      if (t <= ramp[i][0]) {
+        const [t0, c0] = ramp[i - 1], [t1, c1] = ramp[i];
+        const f = (t - t0) / ((t1 - t0) || 1);
+        const hx = (c, j) => parseInt(c.slice(1 + j * 2, 3 + j * 2), 16);
+        const mix = j => Math.round(hx(c0, j) + (hx(c1, j) - hx(c0, j)) * f);
+        return `rgb(${mix(0)},${mix(1)},${mix(2)})`;
+      }
+    }
+    return ramp[ramp.length - 1][1];
+  }
   const maxCommits = Math.max(...commits, 1);
   let pulseMax = 1; // exposed so the hover can put a dot on the cost line
   function drawPulse(plotW, vis) {
@@ -822,9 +839,8 @@
       }
       series.push({ v, t: tt });
     }
-    const colorFor = depthMetric === 'churn'
-      ? t => (t > 0.85 ? '#FFD9EC' : t > 0.6 ? '#E86BA8' : t > 0.35 ? '#A03A6E' : '#5A2140')
-      : heatColor;
+    const colorFor = t => rampColor(depthMetric === 'churn' ? RAMP_CHURN : RAMP_MAGMA, t);
+    const isCum = depthMetric === 'cum';
 
     // label block, top-left
     txt(PAD_L, 104, 'EIGHT WEEKS', 'day-name', { 'font-size': 21, 'letter-spacing': '0.3em' }, g);
@@ -843,7 +859,7 @@
     const stops = depthMetric === 'churn' ? [[0, '#5A2140'], [0.45, '#A03A6E'], [0.75, '#E86BA8'], [1, '#FFD9EC']] : [[0, '#B25E1E'], [0.45, '#F2913D'], [0.75, '#FFC96B'], [1, '#FFE9C4']];
     for (const [o, c2] of stops) el('stop', { offset: o, 'stop-color': c2 }, grad2);
     txt(W - PAD_R, 44, `TERRAIN — ${Mdef.label}`, 'day-name', { 'text-anchor': 'end' }, g);
-    txt(W - PAD_R, 58, depthMetric === 'cum' ? 'height cumulative $ · colour $/hr rate' : 'height = colour = intensity', 'annot', { 'text-anchor': 'end' }, g);
+    txt(W - PAD_R, 58, depthMetric === 'cum' ? 'strands: height cumulative $ · colour $/hr rate' : 'height = colour = intensity', 'annot', { 'text-anchor': 'end' }, g);
     el('rect', { x: W - PAD_R - 8, y: 68, width: 8, height: 56, rx: 2, fill: 'url(#depthbar)' }, g);
     txt(W - PAD_R - 14, 76, 'hot', 'hour-tick', { 'text-anchor': 'end' }, g);
     txt(W - PAD_R - 14, 124, 'quiet', 'hour-tick', { 'text-anchor': 'end' }, g);
@@ -862,29 +878,45 @@
       const b0 = P(w, 0), b1 = P(w, NBINS);
       // dotted ground-plane extension
       el('line', { x1: b0.x - 40, y1: b0.y - 40 * (T.y / T.x), x2: b1.x + 44, y2: b1.y + 44 * (T.y / T.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 5', opacity: 0.85 }, content);
-      // terrain silhouette: one path, filled with a per-x intensity gradient along
-      // the time axis (the reference's continuous coloured ridge, not bars)
+      // per-x intensity gradient along the time axis — stops are WINDOW-AVERAGED
+      // through the continuous ramp, so no banding seams
       const gid = `ridge${w}${depthMetric}`;
       const rg = el('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: b0.x, y1: b0.y, x2: b1.x, y2: b1.y }, content);
-      const STEP = 16;
-      for (let k = 0; k <= NBINS - 1; k += STEP) {
-        el('stop', { offset: (k / NBINS).toFixed(4), 'stop-color': colorFor(series[w].t[k] / tMax) }, rg);
+      const STEP = 8;
+      for (let k = 0; k < NBINS; k += STEP) {
+        let s2 = 0, cnt = 0;
+        for (let j = k; j < Math.min(k + STEP, NBINS); j++) { s2 += series[w].t[j]; cnt++; }
+        el('stop', { offset: (k / NBINS).toFixed(4), 'stop-color': colorFor((s2 / cnt) / tMax) }, rg);
       }
-      let dPath = `M ${b0.x.toFixed(1)} ${b0.y.toFixed(1)}`;
+      // the profile itself
+      let dProfile = '';
       for (let k = 0; k < NBINS; k++) {
         const p = P(w, k + 0.5);
-        dPath += ` L ${p.x.toFixed(1)} ${(p.y - (series[w].v[k] / vMax) * hMax).toFixed(1)}`;
+        dProfile += (dProfile ? ' L' : 'M') + ` ${p.x.toFixed(1)} ${(p.y - (series[w].v[k] / vMax) * hMax).toFixed(1)}`;
       }
-      dPath += ` L ${b1.x.toFixed(1)} ${b1.y.toFixed(1)} Z`;
-      el('path', { d: dPath, fill: `url(#${gid})` }, content);
-      // base shadow: terrain darkens toward its own baseline (the reference's depth cue)
-      const cid = `rclip${w}${depthMetric}`;
-      const cp = el('clipPath', { id: cid }, content);
-      el('path', { d: dPath }, cp);
-      const sg = el('linearGradient', { id: `rshade${w}`, gradientUnits: 'userSpaceOnUse', x1: 0, y1: b0.y - hMax, x2: 0, y2: b0.y + R.y * 0.2 }, content);
-      el('stop', { offset: 0, 'stop-color': 'rgba(8,9,12,0)' }, sg);
-      el('stop', { offset: 1, 'stop-color': 'rgba(8,9,12,0.6)' }, sg);
-      el('rect', { x: Math.min(b0.x, b1.x) - 4, y: b1.y - hMax - 8, width: Math.abs(b1.x - b0.x) + 8, height: hMax + (b0.y - b1.y) + 16, fill: `url(#rshade${w})`, 'clip-path': `url(#${cid})` }, content);
+      if (isCum) {
+        // an ever-growing series makes a wall as filled terrain — render it as a
+        // STRAND instead: a thin rising curve, height = total, colour = burn rate
+        el('path', { d: `M ${b0.x.toFixed(1)} ${b0.y.toFixed(1)} ${dProfile.slice(1)} L ${b1.x.toFixed(1)} ${b1.y.toFixed(1)} Z`, fill: `url(#${gid})`, opacity: 0.07 }, content);
+        el('path', { d: dProfile, fill: 'none', stroke: `url(#${gid})`, 'stroke-width': live ? 2.4 : 1.8 }, content);
+        // end cap: where the week finished (or is now)
+        const endK = live ? Math.max(1, Math.floor((NOW_H - 24) * SPH) - 1) : NBINS - 1;
+        const ep = P(w, endK + 0.5);
+        const ey = ep.y - (series[w].v[endK] / vMax) * hMax;
+        el('circle', { cx: ep.x, cy: ey, r: 2.4, fill: '#FFE9C4' }, content);
+        txt(ep.x + 7, ey + 3, `$${Math.round(series[w].v[endK])}`, 'annot', { fill: '#FFE9C4' }, content);
+      } else {
+        const dPath = `M ${b0.x.toFixed(1)} ${b0.y.toFixed(1)} ${dProfile.slice(1)} L ${b1.x.toFixed(1)} ${b1.y.toFixed(1)} Z`;
+        el('path', { d: dPath, fill: `url(#${gid})` }, content);
+        // base shadow: terrain darkens toward its own baseline (the reference's depth cue)
+        const cid = `rclip${w}${depthMetric}`;
+        const cp = el('clipPath', { id: cid }, content);
+        el('path', { d: dPath }, cp);
+        const sg = el('linearGradient', { id: `rshade${w}`, gradientUnits: 'userSpaceOnUse', x1: 0, y1: b0.y - hMax, x2: 0, y2: b0.y + R.y * 0.2 }, content);
+        el('stop', { offset: 0, 'stop-color': 'rgba(8,9,12,0)' }, sg);
+        el('stop', { offset: 1, 'stop-color': 'rgba(8,9,12,0.6)' }, sg);
+        el('rect', { x: Math.min(b0.x, b1.x) - 4, y: b1.y - hMax - 8, width: Math.abs(b1.x - b0.x) + 8, height: hMax + (b0.y - b1.y) + 16, fill: `url(#rshade${w})`, 'clip-path': `url(#${cid})` }, content);
+      }
       el('line', { x1: b0.x, y1: b0.y, x2: b1.x, y2: b1.y, stroke: live ? 'var(--ember)' : 'var(--hairline-2)', 'stroke-width': live ? 1.2 : 1, opacity: live ? 0.8 : 0.95 }, content);
       // shoulder label at the row's near (down-left) end
       const tot = weekTotals(w);
