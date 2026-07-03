@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Kysely, sql } from "kysely";
 import { resolveDialect } from "../src/db/index.ts";
-import { getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "../src/org-admin.ts";
+import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "../src/org-admin.ts";
 
 // Minimal in-memory stand-ins for the better-auth-owned tables org-admin reads/writes.
 let db: Kysely<Record<string, never>>;
@@ -11,10 +11,10 @@ beforeEach(async () => {
 	db = new Kysely({ dialect: resolveDialect("sqlite::memory:").dialect });
 	await sql`create table "organization" ("id" text primary key, "name" text, "slug" text, "metadata" text)`.execute(db);
 	await sql`create table "member" ("id" text primary key, "organizationId" text, "userId" text, "role" text, "createdAt" text)`.execute(db);
-	await sql`create table "user" ("id" text primary key, "name" text, "email" text)`.execute(db);
+	await sql`create table "user" ("id" text primary key, "name" text, "email" text, "emailVerified" integer, "createdAt" text, "updatedAt" text)`.execute(db);
 	await sql`create table "session" ("userId" text, "activeOrganizationId" text)`.execute(db);
 	await sql`insert into "organization" values (${ORG}, 'Acme', ${ORG}, ${JSON.stringify({ workosOrgId: ORG })})`.execute(db);
-	await sql`insert into "user" values ('u1','Admin One','a1@acme.com'), ('u2','Two','a2@acme.com')`.execute(db);
+	await sql`insert into "user" ("id","name","email") values ('u1','Admin One','a1@acme.com'), ('u2','Two','a2@acme.com')`.execute(db);
 	await sql`insert into "member" values ('m1',${ORG},'u1','admin','2026-01-01'), ('m2',${ORG},'u2','member','2026-01-02')`.execute(db);
 });
 afterEach(async () => {
@@ -55,4 +55,16 @@ test("removeMember drops the row and clears their active org", async () => {
 	expect((await listOrgMembers(db, ORG)).some((m) => m.userId === "u2")).toBe(false);
 	const s = await sql<{ activeOrganizationId: string | null }>`select "activeOrganizationId" from "session" where "userId"='u2'`.execute(db);
 	expect(s.rows[0]?.activeOrganizationId).toBeNull();
+});
+
+test("addMemberByEmail: adds an existing user, creates a new one, rejects dup + bad email", async () => {
+	// existing user u2 (a2@acme.com) currently a member — adding them again is a dup
+	expect(await addMemberByEmail(db, ORG, "a2@acme.com", "member")).toEqual({ ok: false, error: "already a member" });
+	// brand-new email → creates the user + membership
+	const r = await addMemberByEmail(db, ORG, "New.Person@acme.com", "admin");
+	expect(r).toEqual({ ok: true, created: true });
+	const m = await listOrgMembers(db, ORG);
+	expect(m.find((x) => x.email === "new.person@acme.com")?.role).toBe("admin");
+	// invalid email rejected
+	expect(await addMemberByEmail(db, ORG, "not-an-email", "member")).toEqual({ ok: false, error: "enter a valid email" });
 });

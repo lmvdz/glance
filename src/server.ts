@@ -31,9 +31,9 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
-import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
 import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
-import { getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
+import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -718,6 +718,36 @@ export class SquadServer {
 					? await setMemberRole(this.db.db, orgId, userId, body && typeof body.role === "string" ? body.role : "")
 					: await removeMember(this.db.db, orgId, userId);
 			return Response.json(result);
+		}
+		if (url.pathname === "/api/org/members/invite" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const body = (await req.json().catch(() => null)) as { email?: unknown; role?: unknown } | null;
+			const email = body && typeof body.email === "string" ? body.email : "";
+			if (!email) return new Response("missing email", { status: 400 });
+			return Response.json(await addMemberByEmail(this.db.db, orgId, email, body && typeof body.role === "string" ? body.role : "member"));
+		}
+		// Domain-join policy (WorkOS orgs only) — read/set the org's auto|approval policy in WorkOS metadata.
+		if (url.pathname === "/api/org/join-policy" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json({ policy: null });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return Response.json({ policy: null });
+			const profile = await getOrgProfile(this.db.db, orgId);
+			if (!profile?.workosOrgId) return Response.json({ policy: null }); // not a WorkOS org
+			return Response.json({ policy: await getWorkosOrgPolicy(profile.workosOrgId) });
+		}
+		if (url.pathname === "/api/org/join-policy" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const profile = await getOrgProfile(this.db.db, orgId);
+			if (!profile?.workosOrgId) return Response.json({ ok: false, error: "not a WorkOS-backed organization" });
+			const body = (await req.json().catch(() => null)) as { policy?: unknown } | null;
+			const policy = body?.policy === "auto" ? "auto" : "approval";
+			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });

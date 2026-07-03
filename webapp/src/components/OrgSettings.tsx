@@ -33,6 +33,10 @@ export const OrgSettings = () => {
   const [loading, setLoading] = React.useState(true);
   const [savingName, setSavingName] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = React.useState('');
+  const [inviteRole, setInviteRole] = React.useState('member');
+  const [inviting, setInviting] = React.useState(false);
+  const [joinPolicy, setJoinPolicy] = React.useState<'auto' | 'approval' | null>(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -43,6 +47,7 @@ export const OrgSettings = () => {
       if (p && isAdmin) {
         setMembers(await apiJson<Member[]>('/api/org/members').catch(() => []));
         setRequests(await apiJson<JoinReq[]>('/api/workos/join-requests').catch(() => []));
+        if (p.workosOrgId) setJoinPolicy((await apiJson<{ policy: 'auto' | 'approval' | null }>('/api/org/join-policy').catch(() => ({ policy: null }))).policy);
       }
     } finally {
       setLoading(false);
@@ -84,6 +89,30 @@ export const OrgSettings = () => {
     await apiJson('/api/workos/join-requests/decide', jsonInit('POST', { id, action })).catch(() => {});
     setRequests((rs) => rs.filter((r) => r.id !== id));
     if (action === 'approve') void load();
+  };
+
+  const invite = async () => {
+    if (!inviteEmail.trim() || inviting) return;
+    setInviting(true);
+    setErr(null);
+    try {
+      const r = await apiJson<{ ok: boolean; error?: string }>('/api/org/members/invite', jsonInit('POST', { email: inviteEmail.trim(), role: inviteRole }));
+      if (r.ok) {
+        setInviteEmail('');
+        setMembers(await apiJson<Member[]>('/api/org/members').catch(() => members));
+      } else setErr(r.error ?? 'Could not add member.');
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const setPolicy = async (policy: 'auto' | 'approval') => {
+    setJoinPolicy(policy); // optimistic
+    const r = await apiJson<{ ok: boolean }>('/api/org/join-policy', jsonInit('POST', { policy })).catch(() => ({ ok: false }));
+    if (!r.ok) {
+      setErr('Could not update the join policy.');
+      void load();
+    }
   };
 
   if (loading) {
@@ -149,6 +178,25 @@ export const OrgSettings = () => {
 
         {isAdmin && (
           <>
+            {/* Domain-join policy (WorkOS-backed orgs) */}
+            {joinPolicy !== null && (
+              <section className={`${card} mb-5 p-4`}>
+                <h2 className="mb-1 text-sm font-semibold text-gray-900 dark:text-gray-100">Domain join</h2>
+                <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">How people with a verified company email domain join this organization.</p>
+                <div className="inline-flex rounded-md border border-gray-200 p-0.5 dark:border-gray-800">
+                  {(['approval', 'auto'] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => void setPolicy(p)}
+                      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${joinPolicy === p ? 'bg-[#f0a35a] text-black' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}
+                    >
+                      {p === 'approval' ? 'Require approval' : 'Auto-join'}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {/* Pending join requests */}
             {requests.length > 0 && (
               <section className={`${card} mb-5 p-4`}>
@@ -177,6 +225,36 @@ export const OrgSettings = () => {
               <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-gray-100">
                 <ShieldCheck className="h-4 w-4" /> Members
               </h2>
+              {/* Invite by email */}
+              <form
+                onSubmit={(e) => { e.preventDefault(); void invite(); }}
+                className="mb-3 flex gap-2"
+              >
+                <input
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  placeholder="teammate@company.com"
+                  className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+                  aria-label="Invite by email"
+                />
+                <select
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value)}
+                  className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-700 outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+                  aria-label="Invite role"
+                >
+                  <option value="member">Member</option>
+                  <option value="admin">Admin</option>
+                </select>
+                <button
+                  type="submit"
+                  disabled={inviting || !inviteEmail.trim()}
+                  className="flex items-center gap-1.5 rounded-md bg-[#f0a35a] px-3 py-1.5 text-xs font-semibold text-black transition-colors hover:bg-[#e89440] disabled:opacity-40"
+                >
+                  {inviting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <><UserPlus className="h-3.5 w-3.5" /> Add</>}
+                </button>
+              </form>
               <ul className="divide-y divide-gray-100 dark:divide-gray-800">
                 {members.map((m) => {
                   const isSelf = m.userId === selfId;
