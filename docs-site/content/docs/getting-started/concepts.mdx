@@ -1,6 +1,6 @@
 ---
 title: Concepts
-description: The omp-squad vocabulary — agent kinds and statuses, worktrees and branches, projects, features, pending requests, and the one-core/two-clients design.
+description: The glance vocabulary — agent kinds and statuses, worktrees and branches, projects, features, pending requests, and the one-core/two-clients design.
 ---
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
@@ -161,8 +161,10 @@ owns every agent, derives status, buffers transcripts, persists roster config to
 Both surfaces are thin clients of it:
 
 - the **TUI** (`src/tui.ts`) consumes the manager in-process;
-- the **web dashboard** (`src/web/index.html`, a zero-dependency SPA) is a
-  WebSocket client of the same `SquadEvent` stream served by `SquadServer`.
+- the **web dashboard** is a WebSocket client of the same `SquadEvent` stream
+  served by `SquadServer` — the React app in `webapp/` when built and enabled
+  with `GLANCE_WEBAPP=1`, else the zero-dependency fallback SPA in
+  `src/web/index.html`.
 
 Because there is one source of truth and one event stream, anything you do in one
 surface shows up in the other. The events flowing out (`roster`, `agent`,

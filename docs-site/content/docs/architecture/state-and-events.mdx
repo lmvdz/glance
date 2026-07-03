@@ -12,7 +12,7 @@ mutations back as **`ClientCommand`**s. This page is the wire reference for all 
 ## Persistence
 
 Roster config persists to `~/.omp/squad/state.json`. The directory is overridable with
-the `OMP_SQUAD_STATE_DIR` environment variable (it also holds the access token,
+the `GLANCE_STATE_DIR` environment variable (it also holds the access token,
 per-agent run receipts, resume digests, and commissioned-worker dirs).
 
 ```text title="default state dir"
@@ -98,10 +98,12 @@ agent is already accounted for, so it never trips the WIP cap):
 - a **`flue-service`** member is restored via its own path (no live process to
   reattach — it is re-onboarded);
 - a **`workflow`** run resumes from its persisted `workflowState` checkpoint: if the inner
-  omp thread is still alive it reattaches in place, otherwise it is respawned and the graph
-  continues from the last completed node boundary (a fresh inner thread) — completed stages
-  are **not** re-run and their commits are not duplicated. A run with no checkpoint cannot
-  resume; the checkpoint is what makes restart safe (OMPSQ-165);
+  omp thread is still alive it reattaches in place, otherwise it is respawned cold and the
+  graph continues from the **two-phase checkpoint** (one written at each node's entry, one at
+  its exit) — completed stages are **not** re-run and their commits are not duplicated; only a
+  node interrupted mid-execution re-runs, bounded by a resume poison cap of 3 cold re-entries
+  before escalating to a human. A run with no checkpoint cannot resume; the checkpoint is what
+  makes restart safe (OMPSQ-165);
 - an **`omp-operator`** is re-created, and because the agent's `agent-host` survived
   the restart, `RpcAgent.start()` simply reconnects to the live socket and replays the
   ring buffer — the agent kept running with full context the whole time.

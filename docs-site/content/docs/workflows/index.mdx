@@ -22,7 +22,7 @@ That graph is `workflows/plan-implement/workflow.fabro`, the canonical reviewabl
 
 ## A workflow is just another agent
 
-omp-squad's architecture is "anything implementing `AgentDriver` joins the roster, status
+glance's architecture is "anything implementing `AgentDriver` joins the roster, status
 derivation, transcript, TUI, web, federation, and Plane spawn" — the same contract that
 `RpcAgent` and `FlueServiceDriver` satisfy. `WorkflowDriver` (`src/workflow-driver.ts`) is
 that contract again, so `kind: "workflow"` lands a graph-driven, gated, multi-model-ready run
@@ -83,11 +83,16 @@ inner agent's per-turn `agent_start`/`agent_end` frames are swallowed so the run
 continuous working session.
 
 <Callout type="info">
-Workflow runs persist a resumable checkpoint at every node boundary (`WorkflowRunState` =
-engine checkpoint + rollup). After a daemon restart a run resumes from that checkpoint: if its
-inner thread is still alive it reattaches in place, otherwise it is respawned and the graph
-continues from the last completed node — completed stages are not re-run. Only a run with **no**
-checkpoint is unrecoverable; the manager logs a warning and does not restart it from scratch.
+Workflow runs are durable via a **two-phase checkpoint**: the engine persists one checkpoint
+at a node's *entry* (about to run) and one at its *exit* (finished, `currentNode` advanced to
+the successor). A *completed* node is therefore never re-run; the only re-runnable node is one
+interrupted between its own entry and exit — genuinely in-flight. After a daemon restart the
+run resumes from that checkpoint: a still-alive inner thread reattaches warm in place; a dead
+one is respawned **cold** and the in-flight node re-executes (so `.fabro` command and agent
+nodes should be idempotent / HEAD-keyed). A node that keeps crashing before reaching idle is
+bounded by a **resume poison cap** (3 cold re-entries), after which the run escalates to a
+human instead of looping forever. Only a run with **no** checkpoint is unrecoverable; the
+manager logs a warning and does not restart it from scratch.
 </Callout>
 
 ## Read next

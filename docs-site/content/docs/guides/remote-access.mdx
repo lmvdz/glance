@@ -16,15 +16,15 @@ By default the daemon binds `127.0.0.1`. To reach it from another device, bind a
 address:
 
 ```bash
-omp-squad up --no-tui --host 0.0.0.0
+glance up --no-tui --host 0.0.0.0
 ```
 
 <TypeTable
   type={{
-    "--host / OMP_SQUAD_HOST": { description: "Bind address; 0.0.0.0 exposes on the LAN/tailnet. The env var wins over the flag.", type: "string", default: "127.0.0.1" },
-    "--port / OMP_SQUAD_PORT": { description: "Daemon port.", type: "number", default: "7878" },
-    "OMP_SQUAD_TLS_CERT + OMP_SQUAD_TLS_KEY": { description: "PEM paths — terminate TLS in-process (both required). Switches the scheme to https.", type: "path", default: "plain HTTP" },
-    "OMP_SQUAD_STATE_DIR": { description: "Where the token, VAPID keys, and subscriptions live.", type: "path", default: "~/.omp/squad" },
+    "--host / GLANCE_HOST": { description: "Bind address; 0.0.0.0 exposes on the LAN/tailnet. The env var wins over the flag.", type: "string", default: "127.0.0.1" },
+    "--port / GLANCE_PORT": { description: "Daemon port.", type: "number", default: "7878" },
+    "GLANCE_TLS_CERT + GLANCE_TLS_KEY": { description: "PEM paths — terminate TLS in-process (both required). Switches the scheme to https.", type: "path", default: "plain HTTP" },
+    "GLANCE_STATE_DIR": { description: "Where the token, VAPID keys, and subscriptions live.", type: "path", default: "~/.omp/squad" },
   }}
 />
 
@@ -38,7 +38,7 @@ The control plane can spawn agents, land code, and re-exec itself, so **access i
 `<state-dir>/access-token` (mode `0600`), and prints it on boot:
 
 ```text
-omp-squad daemon running
+glance daemon running
   dashboard: http://0.0.0.0:7878
   access token: Bdnw7…IHo
   open from any device on this network (tap to sign in):
@@ -51,6 +51,40 @@ constant-time. The token is **required even on loopback**. Only the static shell
 manifest, service worker, and icons needed to bootstrap the PWA — is public; everything else is
 gated. The dashboard captures `?token=` into `localStorage`, strips it from the URL, and shows a
 sign-in overlay if it's missing or rejected.
+
+Two optional pre-shared tokens complement the generated one: `GLANCE_OPERATOR_TOKEN` (write
+access for scripts/CI) and `GLANCE_VIEWER_TOKEN` (read-only).
+
+## Multi-tenant mode (`DATABASE_URL`) — opt-in
+
+By default the daemon runs in **file mode** — the token-gated single-operator tool above. Set
+`DATABASE_URL` (`postgres://…` or `sqlite:<path>`) and it boots in **DB mode**: a multi-tenant
+identity layer backed by [BetterAuth](https://better-auth.com).
+
+- **Accounts + sessions replace the bearer token.** Email + password sign-in with httpOnly,
+  `SameSite=Lax` cookie sessions, rate-limited against brute force — plus **GitHub social
+  login** (`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`) and **WorkOS SSO with SCIM directory
+  provisioning** (`WORKOS_CLIENT_ID`/`WORKOS_API_KEY`/`WORKOS_WEBHOOK_SECRET`).
+- **Sign-up is closed by default** — set `GLANCE_ALLOW_SIGNUP=1` for self-service registration
+  (self-serve users get a personal workspace); otherwise the bootstrap admin provisions and
+  invites.
+- **Least privilege by default.** A signed-in user with no active org is a read-only `viewer`;
+  operator/admin tiers come only from an org membership (owner/admin → `admin`, member →
+  `operator`). Self-minting an org is disabled, so a remote user can't escalate.
+- **Bootstrap (break-glass).** A request **from loopback carrying the daemon's bearer token**
+  resolves to `admin` even in DB mode, so the operator on the machine can create the first org
+  and invite members; off-box requests must use sessions.
+- **`BETTER_AUTH_SECRET` is required** on a non-loopback DB-mode bind — the daemon refuses to
+  boot without a strong value. Behind a TLS tunnel, set `BETTER_AUTH_URL` to the external
+  `https://` origin so logins pass the origin check and the session cookie is `Secure`.
+- **Org management** lives in the dashboard's Settings surface: rename, invite by email,
+  member roles, join policy, and WorkOS join-request approval.
+
+<Callout type="warn">
+File mode remains the default — and the autonomous factory's native habitat: the TUI, the
+standing supervisor, and the local federation bus are file-mode features. DB mode previews the
+multi-tenant SaaS surface; today all org members of a DB-mode daemon still share one fleet.
+</Callout>
 
 ## Install the PWA on your phone
 
@@ -65,7 +99,7 @@ service workers and Web Push in a secure context. `http://localhost` is exempt; 
 Front the daemon with a real cert — no in-process TLS needed:
 
 ```bash
-omp-squad up --no-tui            # bound to localhost is fine
+glance up --no-tui            # bound to localhost is fine
 tailscale serve --bg 7878        # → https://<machine>.<tailnet>.ts.net
 ```
 
@@ -75,11 +109,11 @@ allow notifications. Tailnet ACLs gate who can reach it; the token gates the res
 </Tab>
 <Tab value="In-process TLS">
 
-Point `OMP_SQUAD_TLS_CERT` / `OMP_SQUAD_TLS_KEY` at a cert and bind `--host 0.0.0.0`:
+Point `GLANCE_TLS_CERT` / `GLANCE_TLS_KEY` at a cert and bind `--host 0.0.0.0`:
 
 ```bash
-OMP_SQUAD_TLS_CERT=./cert.pem OMP_SQUAD_TLS_KEY=./key.pem \
-  omp-squad up --no-tui --host 0.0.0.0
+GLANCE_TLS_CERT=./cert.pem GLANCE_TLS_KEY=./key.pem \
+  glance up --no-tui --host 0.0.0.0
 ```
 
 Self-signed works but browsers warn (and some refuse a service worker on an untrusted cert), so a
@@ -104,7 +138,7 @@ dir; the browser fetches the public key from `GET /api/push/key` and enrolls via
 
 | Env | Meaning | Default |
 |---|---|---|
-| `OMP_SQUAD_PUSH_SUBJECT` | VAPID `sub` contact (`mailto:` or `https:`) | `mailto:squad@localhost` |
+| `GLANCE_PUSH_SUBJECT` | VAPID `sub` contact (`mailto:` or `https:`) | `mailto:squad@localhost` |
 
 Server-side alerts are throttled per agent and seeded from the first roster, so a reconnect or
 replay never fires a notification storm.
@@ -113,7 +147,7 @@ replay never fires a notification storm.
 
 So a fleet keeps moving while you're away, the daemon runs a **standing auto-supervisor**
 (`src/supervisor.ts`) — a model-backed loop that answers blocked agents for you. It's **on by
-default**: the daemon starts it unless `OMP_SQUAD_AUTO_SUPERVISE=0` or `--no-supervise` is set.
+default**: the daemon starts it unless `GLANCE_AUTO_SUPERVISE=0` or `--no-supervise` is set.
 The boot line reports its state (`autonomy: session-tracker on · auto-supervisor on`).
 
 It opens the daemon's own WebSocket and, for every agent in `input`, decides and submits an
@@ -129,13 +163,13 @@ answer per pending request:
 
 | Env / flag | Meaning | Default |
 |---|---|---|
-| `OMP_SQUAD_AUTO_SUPERVISE` | Set to `0` to disable the standing supervisor loop | on |
+| `GLANCE_AUTO_SUPERVISE` | Set to `0` to disable the standing supervisor loop | on |
 | `--no-supervise` | Disable it for this run | — |
-| `OMP_SQUAD_SUPERVISE_MODEL` | Model the answerer uses | omp default |
+| `GLANCE_SUPERVISE_MODEL` | Model the answerer uses | omp default |
 
 <Callout type="info">
-This standing loop (`OMP_SQUAD_AUTO_SUPERVISE`, underscore, **on by default**) is distinct from
-the in-manager deterministic `OMP_SQUAD_AUTOSUPERVISE` path (no underscore, **off by default**)
+This standing loop (`GLANCE_AUTO_SUPERVISE`, underscore, **on by default**) is distinct from
+the in-manager deterministic `GLANCE_AUTOSUPERVISE` path (no underscore, **off by default**)
 described in [Autonomy](/docs/architecture/autonomy). The daemon also runs a session-tracker that
 surfaces raw `omp` sessions in presence.
 </Callout>

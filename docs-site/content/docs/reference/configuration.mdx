@@ -1,12 +1,16 @@
 ---
 title: Configuration
-description: Every environment variable omp-squad reads, with verified defaults, plus the on-disk state directory and its files.
+description: Every environment variable glance reads, with verified defaults, plus the on-disk state directory and its files.
 ---
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import { File, Folder, Files } from 'fumadocs-ui/components/files';
 
-omp-squad takes no config file — everything is environment variables plus a small on-disk state directory. Every variable and default below is traced to its read site in `src/`. Variables with no default are simply unset (the feature stays off or falls back as noted).
+glance takes no config file — everything is environment variables plus a small on-disk state directory. Every variable and default below is traced to its read site in `src/`. Variables with no default are simply unset (the feature stays off or falls back as noted). See [`.env.example`](https://github.com/lmvdz/glance/blob/main/.env.example) for a paste-ready template.
+
+<Callout type="info">
+**Naming.** The canonical prefix is **`GLANCE_*`**; the legacy **`OMP_SQUAD_*`** spelling of every prefixed variable is honored indefinitely (`src/env-compat.ts` mirrors the two at boot; `GLANCE_*` wins when both are set). Unprefixed vars (`PLANE_*`, `DATABASE_URL`, `BETTER_AUTH_*`, `GITHUB_*`, `WORKOS_*`, `OMP_EXT_DIR`) have a single spelling.
+</Callout>
 
 ## Daemon
 
@@ -14,51 +18,98 @@ Read by `src/index.ts` (`cmdUp`) and `src/server.ts` when starting the daemon.
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_PORT': { type: 'number', default: '7878', description: 'Port the daemon binds. Backs the --port flag.' },
-		'OMP_SQUAD_HOST': { type: 'string', default: '127.0.0.1', description: 'Bind address. Set 0.0.0.0 to reach the dashboard across your LAN. Backs the --host flag.' },
-		'OMP_SQUAD_TLS_CERT': { type: 'path', default: 'unset', description: 'PEM cert path. TLS is enabled in-process only when both CERT and KEY are set; the scheme becomes https.' },
-		'OMP_SQUAD_TLS_KEY': { type: 'path', default: 'unset', description: 'PEM key path. Required together with OMP_SQUAD_TLS_CERT.' },
-		'OMP_SQUAD_STATE_DIR': { type: 'path', default: '~/.omp/squad', description: 'Directory for state.json, the access token, and push keys.' },
-		'OMP_SQUAD_AUTO_SUPERVISE': { type: 'flag', default: 'on', description: 'The standing auto-supervisor loop. On unless set to 0 (or the --no-supervise flag is passed).' },
-		'OMP_SQUAD_SUPERVISE_MODEL': { type: 'string', default: 'omp default', description: 'Model the auto-supervisor answerer runs as. Unset uses the omp default.' },
+		'GLANCE_PORT': { type: 'number', default: '7878', description: 'Port the daemon binds. Backs the --port flag.' },
+		'GLANCE_HOST': { type: 'string', default: '127.0.0.1', description: 'Bind address. Set 0.0.0.0 to reach the dashboard across your LAN. Backs the --host flag.' },
+		'GLANCE_INSECURE': { type: 'flag', default: 'off', description: 'Allow a non-loopback bind without TLS (the bearer token then crosses the wire in clear). Default refuses.' },
+		'GLANCE_TLS_CERT': { type: 'path', default: 'unset', description: 'PEM cert path. TLS is enabled in-process only when both CERT and KEY are set; the scheme becomes https.' },
+		'GLANCE_TLS_KEY': { type: 'path', default: 'unset', description: 'PEM key path. Required together with GLANCE_TLS_CERT.' },
+		'GLANCE_STATE_DIR': { type: 'path', default: '~/.omp/squad', description: 'Directory for state.json, the access token, ledgers, and push keys. (The physical default keeps the historical path.)' },
+		'GLANCE_WEBAPP': { type: 'flag', default: 'off', description: 'Serve the built React dashboard (webapp/dist) at / instead of the zero-build fallback. Requires webapp/dist/index.html to exist.' },
+		'GLANCE_AUTO_SUPERVISE': { type: 'flag', default: 'on', description: 'The standing auto-supervisor loop (file mode). On unless set to 0 (or the --no-supervise flag is passed).' },
+		'GLANCE_SUPERVISE_MODEL': { type: 'string', default: 'omp default', description: 'Model the auto-supervisor answerer runs as. Unset uses the omp default (smol).' },
 	}}
 />
 
 <Callout type="warn">
-`OMP_SQUAD_AUTO_SUPERVISE` (with the underscore) gates the standing supervisor process started by `up`. It is **not** the same variable as `OMP_SQUAD_AUTOSUPERVISE` (no underscore) below, which controls the manager's per-request deterministic auto-answer. They are independent switches.
+`GLANCE_AUTO_SUPERVISE` (with the underscore) gates the standing supervisor process started by `up`. It is **not** the same variable as `GLANCE_AUTOSUPERVISE` (no underscore) below, which controls the manager's per-request deterministic auto-answer. They are independent switches.
 </Callout>
 
 ## Autonomy
 
-Drive how hands-free the fleet runs — the orchestrator, the WIP cap, repair/resolve budgets, and the manager-side auto-answer.
+Drive how hands-free the fleet runs — the orchestrator, the WIP cap, repair/resolve budgets, and the manager-side auto-answer. **These default on**; set `=0` to opt out of any one. See [Autonomy](/docs/architecture/autonomy).
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_AUTODRIVE': { type: 'flag', default: 'off', description: 'Enables the Orchestrator autonomy loop (src/orchestrator.ts). On when set to any value.' },
-		'OMP_SQUAD_MAX_WIP': { type: 'number', default: '6', description: 'Ceiling on simultaneously live agents (src/scheduler.ts). Spawns past it are refused unless queued.' },
-		'OMP_SQUAD_REPAIR_BUDGET': { type: 'number', default: '3', description: 'Retry attempts the resolver allows before escalating a failed gate to a human (src/resolver.ts).' },
-		'OMP_SQUAD_AUTORESOLVE': { type: 'flag', default: 'off', description: 'Auto-resolve rebase conflicts during land instead of escalating (src/land.ts). On when set to any value.' },
-		'OMP_SQUAD_QUEUE_ON_FULL': { type: 'flag', default: 'off', description: 'When the WIP cap is hit, queue the spawn (returning a synthetic queued DTO) instead of throwing (src/squad-manager.ts).' },
-		'OMP_SQUAD_AUTOSUPERVISE': { type: 'flag', default: 'off', description: 'Manager-side deterministic auto-answer of safe pending requests (src/squad-manager.ts). On when set to any value.' },
-		'OMP_SQUAD_AUTOSUPERVISE_BUDGET': { type: 'number', default: '5', description: 'Per-agent cap on those auto-answers before a request is left for a human.' },
+		'GLANCE_AUTODRIVE': { type: 'flag', default: 'on', description: 'The Orchestrator autonomy loop (src/orchestrator.ts). Set 0 to disable — then no timer is armed.' },
+		'GLANCE_AUTOLAND': { type: 'flag', default: 'on', description: 'A successful workflow run lands its own branch when green. Set 0 to disable.' },
+		'GLANCE_LAND_CONFIRM': { type: 'flag', default: 'on', description: 'A GREEN verify stages the branch as ✓ ready-to-land for a one-tap human Land instead of auto-merging. Set 0 to let green work merge unattended.' },
+		'GLANCE_AUTORESOLVE': { type: 'flag', default: 'on', description: 'Auto-resolve rebase conflicts during land (proven by gate + reviewer) instead of escalating (src/land.ts). Set 0 to disable.' },
+		'GLANCE_AUTORESOLVE_CONFIRM': { type: 'flag', default: 'on', description: 'A land that had to auto-resolve a conflict is staged for a one-tap Land instead of merged unattended. Set 0 to auto-merge resolved conflicts too.' },
+		'GLANCE_AUTOLAND_FAIL_CAP': { type: 'number', default: '3', description: 'Consecutive failed auto-lands before a branch is parked (branch-keyed, restart-safe ledger). Operator land bypasses the cap.' },
+		'GLANCE_MAX_WIP': { type: 'number', default: '~half host CPUs (min 2)', description: 'Ceiling on simultaneously live agents (src/scheduler.ts). Spawns past it are refused unless queued.' },
+		'GLANCE_MAX_AGENTS': { type: 'number', default: 'max(CPUs, 3)', description: 'Absolute host-process ceiling that even bypass-cap (fan-out) spawns respect.' },
+		'GLANCE_QUEUE_ON_FULL': { type: 'flag', default: 'off', description: 'When the WIP cap is hit, queue the spawn (returning a synthetic queued DTO) instead of throwing (src/squad-manager.ts).' },
+		'GLANCE_REPAIR_BUDGET': { type: 'number', default: '3', description: 'Retry attempts the resolver allows before escalating a failed gate to a human (src/resolver.ts).' },
+		'GLANCE_AUTOSUPERVISE': { type: 'flag', default: 'on', description: 'Manager-side deterministic auto-answer of safe pending requests (src/squad-manager.ts). Set 0 to disable.' },
+		'GLANCE_AUTOSUPERVISE_BUDGET': { type: 'number', default: '5', description: 'Per-agent cap on those auto-answers before a request is left for a human.' },
 	}}
 />
 
-## Dispatch
+## Land gates
 
-Read by `src/squad-manager.ts` at start when auto-dispatch is on; routing assist is read in the constructor.
+Deterministic checks a land must pass. Gates execute agent-authored test code, so they run with a **secret-scrubbed env** by default. See [Landing](/docs/guides/landing).
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_AUTODISPATCH': { type: 'flag', default: 'off', description: 'Enables the Plane-issue Dispatcher loop. On when set to any value.' },
-		'OMP_SQUAD_AUTOCLOSE': { type: 'flag', default: 'off', description: 'Close the tracking Plane issue when a dispatched agent finishes (closeOnDone). On when set to any value.' },
-		'OMP_SQUAD_DISPATCH_INTERVAL_MS': { type: 'number', default: '60000', description: 'Milliseconds between dispatch sweeps.' },
-		'OMP_SQUAD_DISPATCH_MAX': { type: 'number', default: '3', description: 'Max agents the dispatcher keeps active at once.' },
-		'OMP_SQUAD_LLM_ROUTER': { type: 'flag', default: 'off', description: 'Use an LLM to classify/route intake tasks instead of heuristics (src/squad-manager.ts). On when set to any value.' },
+		'GLANCE_REGRESSION_GATE': { type: 'flag', default: 'off', description: 'Every land runs the full detected suite on the merged result; only NEW failures (vs the pre-merge base) block the land.' },
+		'GLANCE_GATE_ENV': { type: 'csv', default: 'unset', description: 'Env var names re-admitted into gate runs. By default GLANCE_*/OMP_SQUAD_*, secret-shaped names (*_API_KEY, *_TOKEN, *_SECRET), and DATABASE_URL are removed.' },
+		'GLANCE_GATE_SANDBOX': { type: 'string', default: 'unset', description: 'Container image for gate runs. When set, every verify/proof/regression gate executes inside docker run --rm --network none with only the worktree (+ its main repo) bind-mounted. The image must provide bash + the repo toolchain.' },
+		'GLANCE_GATE_SANDBOX_NETWORK': { type: 'string', default: 'none', description: 'Docker network mode for sandboxed gates. Set bridge for suites that legitimately need network.' },
+		'GLANCE_STALE_GATE': { type: 'flag', default: 'on', description: 'Refuse a clean merge whose branch is stale against evolved main (it would silently clobber newer work). Set 0 to disable.' },
 	}}
 />
 
-See [Auto-dispatch](/docs/integrations/auto-dispatch) for the loop itself.
+## Dispatch & background loops
+
+Read by `src/squad-manager.ts` at start. All of these arm themselves when [Plane](/docs/integrations/plane) is configured; set `=0` to disable any one.
+
+<TypeTable
+	type={{
+		'GLANCE_AUTODISPATCH': { type: 'flag', default: 'on', description: 'The Plane-issue Dispatcher loop (issue → routed agent). Set 0 to disable.' },
+		'GLANCE_AUTOCLOSE': { type: 'flag', default: 'on', description: 'Close the tracking Plane issue when the branch lands. Set 0 to leave closing manual.' },
+		'GLANCE_DISPATCH_INTERVAL_MS': { type: 'number', default: '60000', description: 'Milliseconds between dispatch sweeps.' },
+		'GLANCE_DISPATCH_MAX': { type: 'number', default: '3', description: 'Max agents the dispatcher keeps active at once.' },
+		'GLANCE_LLM_ROUTER': { type: 'flag', default: 'off', description: 'Use an LLM to classify/route intake tasks instead of heuristics (falls back to heuristics on failure).' },
+		'GLANCE_OBSERVE': { type: 'flag', default: 'on', description: 'The Observer self-audit loop — confirms fleet/project state and files fix-issues on gaps.' },
+		'GLANCE_OBSERVE_MAX': { type: 'number', default: '10', description: 'Hard cap on observer-filed open issues; past it, log + skip.' },
+		'GLANCE_OBSERVE_AUTODISPATCH': { type: 'flag', default: 'off', description: 'File plain findings without the do-not-auto-land marker so the dispatcher fixes them; structural findings stay needs-triage regardless.' },
+		'GLANCE_OBSERVE_AUTOFIX': { type: 'flag', default: 'off', description: 'Let the Observer action autofixable findings directly (e.g. reap a landed survivor). Never touches main or code.' },
+		'GLANCE_SCOUT': { type: 'flag', default: 'on', description: 'The Scout reasoning harvester — files latent work items agents surfaced but did not do.' },
+		'GLANCE_SCOUT_MAX': { type: 'number', default: '20', description: 'Hard cap on scout-filed open issues.' },
+		'GLANCE_SCOUT_PER_RUN': { type: 'number', default: '3', description: 'Cap on tickets filed from a single scan, so a verbose run cannot flood.' },
+		'GLANCE_SCOUT_MAX_CALLS_PER_HOUR': { type: 'number', default: '30', description: 'Cap on Scout LLM calls per rolling hour across the fleet. 0 or negative = unlimited.' },
+		'GLANCE_OPPORTUNITY': { type: 'flag', default: 'on', description: 'The Opportunity loop — clusters recurring Scout items into one pattern issue.' },
+		'GLANCE_OPPORTUNITY_MIN': { type: 'number', default: '3', description: 'Minimum recurring Scout items across distinct runs/agents before filing one opportunity.' },
+		'GLANCE_OPPORTUNITY_MAX': { type: 'number', default: '5', description: 'Hard cap on opportunity-filed open issues.' },
+		'GLANCE_OPPORTUNITY_WINDOW': { type: 'number', default: '50', description: 'Most-recent open Scout items considered per tick.' },
+		'GLANCE_PLANSYNC': { type: 'flag', default: 'on', description: 'The plan STATUS reconciler — closes plan-doc STATUS lines whose PLANE: issue completed. Never reopens a done doc.' },
+		'GLANCE_PLANSYNC_INTERVAL_MS': { type: 'number', default: '300000', description: 'Plan-sync tick interval (5 minutes).' },
+		'GLANCE_WORKTREE_REAP': { type: 'flag', default: 'on', description: 'Prune provably-dead unowned worktrees (merged + clean, or issue closed). Set 0 to disable.' },
+		'GLANCE_WORKTREE_GRACE_MS': { type: 'number', default: '120000', description: 'Freshness window before a dead worktree is eligible for pruning.' },
+	}}
+/>
+
+### Plane API throttle
+
+Every in-process Plane caller routes through one chokepoint (`src/plane-throttle.ts`) so the daemon never bursts past the workspace rate limit.
+
+<TypeTable
+	type={{
+		'GLANCE_PLANE_MIN_INTERVAL_MS': { type: 'number', default: '500', description: 'Minimum spacing between Plane API requests.' },
+		'GLANCE_PLANE_BACKOFF_BASE_MS': { type: 'number', default: '500', description: 'Base for the exponential 429 backoff (doubles per retry, capped at 5s, Retry-After header wins).' },
+		'GLANCE_PLANE_CACHE_MS': { type: 'number', default: '15000', description: 'TTL for the listPlaneIssues read cache; writes invalidate it.' },
+	}}
+/>
 
 ## Federation
 
@@ -66,34 +117,46 @@ Cross-operator coordination. Read by `src/index.ts`, `src/server.ts`, `src/coord
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_FEDERATION': { type: 'flag', default: 'on', description: 'Federation is ON by default (a LocalFederationBus that works locally with no coordinator and gossips to peers when one is configured). Set to 0 to opt out and use the inert NullFederationBus instead.' },
-		'OMP_SQUAD_COORDINATOR': { type: 'ws url', default: 'unset', description: 'Coordinator WebSocket URL (ws://host:port). Set ⇒ this daemon joins federation and opens a peer-presence feed; unset ⇒ the federation surface stays inert.' },
-		'OMP_SQUAD_OPERATOR': { type: 'string', default: 'OS username, else "local"', description: 'This host operator identity, used in presence, leases, and the federation roster.' },
-		'OMP_SQUAD_COORDINATOR_PORT': { type: 'number', default: '7900', description: 'Port the standalone coordinator (coordinator-main.ts) listens on, when no port arg is passed.' },
-		'OMP_SQUAD_COORDINATOR_HOST': { type: 'string', default: '127.0.0.1', description: 'Coordinator bind address. 0.0.0.0 exposes the relay on the LAN/tailnet; a non-loopback bind then requires OMP_SQUAD_COORDINATOR_TOKEN (or OMP_SQUAD_INSECURE=1).' },
-		'OMP_SQUAD_COORDINATOR_TOKEN': { type: 'string', default: 'unset', description: 'Pre-shared secret gating the coordinator relay. The coordinator and every client (daemon, federation-sync, command center) must set the same value. Unset ⇒ no auth — only safe on the loopback default, since any reachable peer could otherwise snoop and spoof presence/lease frames.' },
-		'OMP_SQUAD_FED_REPOS': { type: 'csv', default: 'unset', description: 'Extra repo paths the federation-sync worker advertises, comma-separated.' },
+		'GLANCE_FEDERATION': { type: 'flag', default: 'on', description: 'Federation is ON by default (a LocalFederationBus that works locally with no coordinator and gossips to peers when one is configured). Set to 0 to opt out and use the inert NullFederationBus instead.' },
+		'GLANCE_COORDINATOR': { type: 'ws url', default: 'unset', description: 'Coordinator WebSocket URL (ws://host:port). Set ⇒ this daemon joins cross-host federation and opens a peer-presence feed.' },
+		'GLANCE_OPERATOR': { type: 'string', default: 'OS username, else "local"', description: 'This host operator identity, used in presence, leases, and the federation roster.' },
+		'GLANCE_COORDINATOR_PORT': { type: 'number', default: '7900', description: 'Port the standalone coordinator (coordinator-main.ts) listens on, when no port arg is passed.' },
+		'GLANCE_COORDINATOR_HOST': { type: 'string', default: '127.0.0.1', description: 'Coordinator bind address. 0.0.0.0 exposes the relay on the LAN/tailnet; a non-loopback bind then requires GLANCE_COORDINATOR_TOKEN (or GLANCE_INSECURE=1).' },
+		'GLANCE_COORDINATOR_TOKEN': { type: 'string', default: 'unset', description: 'Pre-shared secret gating the coordinator relay. The coordinator and every client must set the same value. Unset ⇒ no auth — only safe on the loopback default.' },
+		'GLANCE_FED_REPOS': { type: 'csv', default: 'unset', description: 'Extra repo paths the federation-sync worker advertises, comma-separated.' },
+		'GLANCE_PEERMSG_BUDGET': { type: 'number', default: '5', description: 'Per-sender advisory cap on agent-origin squad_message peer messages (process-lifetime).' },
 	}}
 />
 
 See [Federation](/docs/integrations/federation) for the topology.
 
-## Auth tokens
+## Auth tokens (file mode)
 
-File-mode extra bearer tokens (not needed in DB/auth mode where sessions are managed by Better Auth). Read by `src/index.ts` and `src/auth.ts`.
+File-mode extra bearer tokens (not needed in DB mode where sessions are managed by BetterAuth). Read by `src/index.ts` and `src/auth.ts`.
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_OPERATOR_TOKEN': { type: 'string', default: 'unset', description: 'Additional bearer token mapped to the operator role in file mode. Useful for scripts or CI callers that need write access without exposing the auto-generated access-token.' },
-		'OMP_SQUAD_VIEWER_TOKEN': { type: 'string', default: 'unset', description: 'Additional bearer token mapped to the viewer (read-only) role in file mode. Grants access to GET endpoints and the WebSocket stream, but all mutations are rejected with 403.' },
+		'GLANCE_OPERATOR_TOKEN': { type: 'string', default: 'unset', description: 'Additional bearer token mapped to the operator role in file mode. Useful for scripts or CI callers that need write access without exposing the auto-generated access-token.' },
+		'GLANCE_VIEWER_TOKEN': { type: 'string', default: 'unset', description: 'Additional bearer token mapped to the viewer (read-only) role in file mode. Grants access to GET endpoints and the WebSocket stream, but all mutations are rejected with 403.' },
 	}}
 />
 
 ## Multi-tenant (DB mode)
 
+Setting `DATABASE_URL` switches the daemon from file mode to DB mode — accounts, orgs, and cookie sessions. See [Remote access](/docs/guides/remote-access).
+
 <TypeTable
 	type={{
-		'OMP_SQUAD_ORG_IDLE_MS': { type: 'number', default: '600000', description: 'Evict an idle (agent-less) org manager after this many milliseconds in DB-registry mode. Default is 10 minutes (600 000 ms). Read by src/manager-registry.ts.' },
+		'DATABASE_URL': { type: 'string', default: 'unset ⇒ file mode', description: 'postgres(ql)://… ⇒ Postgres; sqlite:<path> or a bare path ⇒ SQLite. Presence enables DB mode; auth + app tables migrate on boot.' },
+		'BETTER_AUTH_SECRET': { type: 'string', default: 'unset', description: 'Session-signing secret. REQUIRED in DB mode on a non-loopback bind — the daemon refuses to boot without a strong value. Generate with openssl rand -hex 32.' },
+		'BETTER_AUTH_URL': { type: 'url', default: 'the bind URL', description: 'Public base URL for origin checks + the Secure cookie flag. Behind a TLS tunnel you MUST set this to the external https:// origin.' },
+		'GLANCE_ALLOW_SIGNUP': { type: 'flag', default: 'off', description: 'Open self-service sign-up. Default closed — users are provisioned by the bootstrap admin or invited.' },
+		'GITHUB_CLIENT_ID': { type: 'string', default: 'unset', description: 'GitHub OAuth app client id — enables "Login with GitHub" (with GITHUB_CLIENT_SECRET).' },
+		'GITHUB_CLIENT_SECRET': { type: 'string', default: 'unset', description: 'GitHub OAuth app client secret.' },
+		'WORKOS_CLIENT_ID': { type: 'string', default: 'unset', description: 'WorkOS client id — enables "Sign in with SSO".' },
+		'WORKOS_API_KEY': { type: 'string', default: 'unset', description: 'WorkOS API key (doubles as the OIDC client secret).' },
+		'WORKOS_WEBHOOK_SECRET': { type: 'string', default: 'unset', description: 'HMAC signing secret for the Directory Sync (SCIM) webhook POST /api/workos/webhook. Unset ⇒ the webhook 404s.' },
+		'GLANCE_ORG_IDLE_MS': { type: 'number', default: '600000', description: 'Evict an idle (agent-less) org manager after this many milliseconds in DB-registry mode (10 minutes).' },
 	}}
 />
 
@@ -103,47 +166,47 @@ Tune admission backoff and the watchdog thresholds. Read by `src/resource.ts`, `
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_RESOURCE_GATE': { type: 'flag', default: 'off', description: 'Enable load-aware admission backoff. When set (any value), the scheduler probes the host before admitting each spawn and defers when the host is under pressure (load1/ncpu > OMP_SQUAD_MAX_LOAD_PER_CPU or free memory below OMP_SQUAD_MIN_FREE_RATIO). Off by default — the WIP cap alone is enough for most setups.' },
-		'OMP_SQUAD_MAX_LOAD_PER_CPU': { type: 'number', default: '1.5 (admission gate) / 2.0 (watchdog)', description: 'load1 / logical-CPU threshold. The admission gate (src/resource.ts) uses 1.5; the watchdog (src/watchdog.ts) uses 2.0. Env-tunable per call — no restart needed. Set to a higher value if your machine can sustain more parallel builds.' },
-		'OMP_SQUAD_MAX_RSS_MB': { type: 'number', default: '1024', description: 'Daemon RSS ceiling in MB for the watchdog. Crossing it emits a log warning and is surfaced in /api/health warnings. Not a hard kill limit.' },
-		'OMP_SQUAD_MIN_FREE_RATIO': { type: 'number', default: '0.1', description: 'Minimum free-memory fraction (0–1) before the host is considered pressured. Shared by the admission gate and the watchdog.' },
+		'GLANCE_RESOURCE_GATE': { type: 'flag', default: 'off', description: 'Enable load-aware admission backoff. When set (any value), the scheduler probes the host before admitting each spawn and defers when the host is under pressure. Off by default — the WIP cap alone is enough for most setups (up.sh sets it).' },
+		'GLANCE_MAX_LOAD_PER_CPU': { type: 'number', default: '1.5 (admission gate) / 2.0 (watchdog)', description: 'load1 / logical-CPU threshold. Env-tunable per call — no restart needed.' },
+		'GLANCE_MAX_RSS_MB': { type: 'number', default: '1024', description: 'RSS ceiling in MB for the watchdog. Crossing it emits a log warning and is surfaced in /api/health warnings.' },
+		'GLANCE_MIN_FREE_RATIO': { type: 'number', default: '0.1', description: 'Minimum free-memory fraction (0–1) before the host is considered pressured. Shared by the admission gate and the watchdog.' },
 	}}
 />
 
-## Payments
+## Feedback intake & payments
 
-Reward disbursement for the Feedback Loop feature. Read by `src/payments/tremendous.ts` and `src/payments/index.ts`. If `OMP_SQUAD_TREMENDOUS_API_KEY` is unset, the daemon falls back to a Manual recorder (no network; the operator records out-of-band payouts).
+The public Feedback Loop widget and reward disbursement. Read by `src/feedback.ts`, `src/payments/tremendous.ts`, and `src/payments/index.ts`. See [Intake](/docs/integrations/intake) and [Payments](/docs/integrations/payments).
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_TREMENDOUS_API_KEY': { type: 'string', default: 'unset', description: 'Tremendous API Bearer token. Its presence is the activation switch — set it to enable real reward disbursement via the Tremendous Orders API. Unset ⇒ ManualProvider (no network, operator records payouts by hand).' },
-		'OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID': { type: 'string', default: 'unset', description: 'Tremendous funding source (balance / account) that funds each payout. Required for any real disbursement; missing ⇒ every payout resolves as failed with a clear error.' },
-		'OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID': { type: 'string', default: 'unset', description: 'Tremendous campaign id that controls which redemption options (gift cards, PayPal, ACH, Visa, …) the reward recipient sees. Required for real disbursement.' },
-		'OMP_SQUAD_TREMENDOUS_ENV': { type: '"sandbox" | "production"', default: '"sandbox"', description: 'Selects the Tremendous API base URL. sandbox → testflight.tremendous.com (default, safe for testing); production → api.tremendous.com (live money). Any value other than "production" is treated as sandbox.' },
+		'GLANCE_FEEDBACK': { type: 'flag', default: 'off', description: 'Enable the public feedback widget (/feedback/widget.js) and the public submission endpoint.' },
+		'GLANCE_FEEDBACK_RATE_LIMIT_PER_MIN': { type: 'number', default: '30', description: 'Public submissions per campaign/IP/minute (0 disables the limit).' },
+		'GLANCE_FEEDBACK_MAX_IMAGE_BYTES': { type: 'number', default: '2000000', description: 'Max screenshot upload size for public intake.' },
+		'GLANCE_TREMENDOUS_API_KEY': { type: 'string', default: 'unset', description: 'Tremendous API Bearer token. Its presence is the activation switch for real reward disbursement. Unset ⇒ ManualProvider (operator records payouts by hand).' },
+		'GLANCE_TREMENDOUS_FUNDING_SOURCE_ID': { type: 'string', default: 'unset', description: 'Tremendous funding source (balance / account) that funds each payout. Required for real disbursement.' },
+		'GLANCE_TREMENDOUS_CAMPAIGN_ID': { type: 'string', default: 'unset', description: 'Tremendous campaign id controlling which redemption options the recipient sees. Required for real disbursement.' },
+		'GLANCE_TREMENDOUS_ENV': { type: '"sandbox" | "production"', default: '"sandbox"', description: 'Selects the Tremendous API base URL. Any value other than "production" is treated as sandbox.' },
 	}}
 />
 
-## Observability — Scout rate-limit
+## Observability — trace export
+
+Receipts always keep lossless per-run rollups (tokens / cost / tool counts); fine `spans[]` detail is tail-sampled and exportable. Read by `src/trace-exporter.ts`. The exporter is only active when at least one `*_URL` is set.
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR': { type: 'number', default: '30', description: 'Cap on Scout LLM calls per rolling hour across the entire fleet. Scout fires one call per agent reasoning scan; a busy multi-agent fleet can otherwise burn dozens of one-shots per hour. Default 30. Set to 0 or a negative number for unlimited. Read by src/scout.ts.' },
-	}}
-/>
-
-## Observability — Trace export
-
-Span export to OTLP, Langfuse, or Datadog. Read by `src/trace-exporter.ts`. The exporter is only active when at least one `*_URL` is set.
-
-<TypeTable
-	type={{
-		'OMP_SQUAD_TRACE_ALLOW_PRIVATE': { type: 'flag', default: 'off', description: 'Set to 1 to allow trace export to reach operator-configured private/loopback/RFC1918 collector endpoints (a local OTLP agent, a self-hosted Langfuse, a tailnet Datadog gateway). When off (default), the SSRF guard blocks any private-range host. When on, ONLY the exact origins of the three configured collector env vars (OMP_SQUAD_TRACE_EXPORT_OTLP_URL, OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL, OMP_SQUAD_TRACE_EXPORT_DATADOG_URL) are exempted — all other private hosts, redirects, and the cloud-metadata IP remain blocked.' },
-		'OMP_SQUAD_TRACE_EXPORT_OTLP_URL': { type: 'url', default: 'unset', description: 'OTLP/HTTP JSON endpoint for span export (SSRF-guarded; set OMP_SQUAD_TRACE_ALLOW_PRIVATE=1 to reach a loopback collector).' },
-		'OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL': { type: 'url', default: 'unset', description: 'Langfuse ingest endpoint for span export. Requires OMP_SQUAD_TRACE_EXPORT_LANGFUSE_PUBLIC_KEY and OMP_SQUAD_TRACE_EXPORT_LANGFUSE_SECRET_KEY.' },
-		'OMP_SQUAD_TRACE_EXPORT_LANGFUSE_PUBLIC_KEY': { type: 'string', default: 'unset', description: 'Langfuse project public key. Used as the HTTP Basic auth username when exporting to Langfuse.' },
-		'OMP_SQUAD_TRACE_EXPORT_LANGFUSE_SECRET_KEY': { type: 'string', default: 'unset', description: 'Langfuse project secret key. Used as the HTTP Basic auth password when exporting to Langfuse.' },
-		'OMP_SQUAD_TRACE_EXPORT_DATADOG_URL': { type: 'url', default: 'unset', description: 'Datadog trace ingest endpoint for span export. Requires OMP_SQUAD_TRACE_EXPORT_DATADOG_API_KEY.' },
-		'OMP_SQUAD_TRACE_EXPORT_DATADOG_API_KEY': { type: 'string', default: 'unset', description: 'Datadog API key sent as the DD-API-KEY header on every span batch.' },
+		'GLANCE_TRACE': { type: 'flag', default: 'on', description: 'Set 0 to disable fine spans/export entirely; receipt rollups still persist.' },
+		'GLANCE_TRACE_SAMPLE': { type: 'number', default: '0.1', description: 'OK-run span sample ratio. Error runs and error spans are always kept.' },
+		'GLANCE_TRACE_MAX_SPANS': { type: 'number', default: '500', description: 'Per-run span cap; oldest OK tool spans shed first.' },
+		'GLANCE_TRACE_EXPORT_QUEUE': { type: 'number', default: '1000', description: 'Bounded in-memory export queue length (drop-oldest). Exporter failures drop spans, never block run finalization.' },
+		'GLANCE_TRACE_EXPORT_TIMEOUT_MS': { type: 'number', default: '5000', description: 'Per-export HTTP timeout.' },
+		'GLANCE_TRACE_ALLOW_PRIVATE': { type: 'flag', default: 'off', description: 'Allow trace export to reach operator-configured private/loopback collector endpoints. When on, ONLY the exact origins of the three configured collector URLs are exempted from the SSRF guard.' },
+		'GLANCE_TRACE_EXPORT_OTLP_URL': { type: 'url', default: 'unset', description: 'OTLP/HTTP JSON endpoint for span export (SSRF-guarded).' },
+		'GLANCE_TRACE_EXPORT_LANGFUSE_URL': { type: 'url', default: 'unset', description: 'Langfuse ingest endpoint. Requires the Langfuse public + secret keys.' },
+		'GLANCE_TRACE_EXPORT_LANGFUSE_PUBLIC_KEY': { type: 'string', default: 'unset', description: 'Langfuse project public key (HTTP Basic username).' },
+		'GLANCE_TRACE_EXPORT_LANGFUSE_SECRET_KEY': { type: 'string', default: 'unset', description: 'Langfuse project secret key (HTTP Basic password).' },
+		'GLANCE_TRACE_EXPORT_DATADOG_URL': { type: 'url', default: 'unset', description: 'Datadog trace ingest endpoint. Requires the API key.' },
+		'GLANCE_TRACE_EXPORT_DATADOG_API_KEY': { type: 'string', default: 'unset', description: 'Datadog API key sent as the DD-API-KEY header on every span batch.' },
 	}}
 />
 
@@ -151,9 +214,10 @@ Span export to OTLP, Langfuse, or Datadog. Read by `src/trace-exporter.ts`. The 
 
 <TypeTable
 	type={{
-		'OMP_SQUAD_REPO_ROOTS': { type: 'csv', default: 'parent of cwd, $HOME/sui, $HOME/src, $HOME/code', description: 'Comma-separated roots scanned to discover candidate repos for smart spawn (src/smart-spawn.ts).' },
-		'OMP_SQUAD_APP_URL': { type: 'url', default: 'unset', description: "Default URL for the vision pass (screenshot evidence) when a land/verify run captures one (src/proof.ts, src/server.ts). Its origin is also the one allowlist exemption for /api/agents/:id/vision's SSRF guard, so set it to screenshot a trusted local app (e.g. http://localhost:3000)." },
-		'OMP_SQUAD_PUSH_SUBJECT': { type: 'string', default: 'mailto:squad@localhost', description: 'VAPID subject for Web Push notifications (src/push.ts).' },
+		'GLANCE_REPO_ROOTS': { type: 'csv', default: 'parent of cwd, $HOME/sui, $HOME/src, $HOME/code', description: 'Comma-separated roots scanned to discover candidate repos for smart spawn (src/smart-spawn.ts).' },
+		'GLANCE_APP_URL': { type: 'url', default: 'unset', description: "Default URL for the vision pass (screenshot evidence) when a land/verify run captures one. Its origin is also the one allowlist exemption for /api/agents/:id/vision's SSRF guard." },
+		'GLANCE_PUSH_SUBJECT': { type: 'string', default: 'mailto:squad@localhost', description: 'VAPID subject for Web Push notifications (src/push.ts).' },
+		'GLANCE_HEAT_HALFLIFE_MS': { type: 'number', default: '604800000', description: 'Context-heat decay half-life for the heat map (7 days).' },
 		'OMP_EXT_DIR': { type: 'path', default: '~/.omp/agent/extensions', description: 'Where the omp extension hooks are installed (src/install-hooks.ts).' },
 	}}
 />
@@ -177,22 +241,42 @@ See [Plane integration](/docs/integrations/plane).
 
 ## State directory
 
-The state directory (`$OMP_SQUAD_STATE_DIR`, default `~/.omp/squad`) holds everything the daemon persists across restarts.
+The state directory (`$GLANCE_STATE_DIR`, default `~/.omp/squad`) holds everything the daemon persists across restarts.
 
 <Files>
 	<Folder name="~/.omp/squad" defaultOpen>
 		<File name="state.json" />
 		<File name="access-token" />
+		<File name="settings.json" />
+		<File name="transcripts.json" />
+		<File name="orchestrator-state.json" />
+		<File name="land-failures.json" />
+		<File name="dispatch-ledger.json" />
+		<File name="observer-seen.json" />
+		<File name="scout-seen.json" />
+		<File name="opportunity-seen.json" />
+		<File name="audit.jsonl" />
+		<File name="automation.jsonl" />
+		<File name="comments.jsonl" />
+		<File name="feedback.json" />
 		<File name="vapid.json" />
 		<File name="push-subs.json" />
+		<Folder name="worktrees" />
+		<Folder name="presence" />
+		<Folder name="leases" />
 	</Folder>
 </Files>
 
 <TypeTable
 	type={{
-		'state.json': { type: 'JSON', description: 'Persisted roster (PersistedAgent[]) and features (PersistedFeature[]), restored by up --restore (src/squad-manager.ts). Transcript text is redacted before it is written here.' },
-		'access-token': { type: 'text', description: 'Auto-generated bearer token, created on first boot. The CLI and the supervisor read it to authenticate to the daemon (src/auth.ts).' },
-		'vapid.json': { type: 'JSON', description: 'VAPID keypair for Web Push, generated on first push init (src/push.ts).' },
-		'push-subs.json': { type: 'JSON', description: 'Persisted browser push subscriptions (src/push.ts).' },
+		'state.json': { type: 'JSON', description: 'Persisted roster (PersistedAgent[]) and features (PersistedFeature[]). Transcript text is redacted before it is written here.' },
+		'access-token': { type: 'text', description: 'Auto-generated bearer token, created on first boot (mode 0600). The CLI and the supervisor read it to authenticate to the daemon.' },
+		'settings.json': { type: 'JSON', description: 'Feature-flag toggles persisted from the web Settings screen; applied on the next daemon boot.' },
+		'orchestrator-state.json': { type: 'JSON', description: 'Branch-keyed ledger of the control loop\'s terminal decisions (halted / landed / staged) — survives restarts.' },
+		'land-failures.json': { type: 'JSON', description: 'Branch-keyed consecutive auto-land failure streaks (the restart-safe fail cap).' },
+		'dispatch-ledger.json': { type: 'JSON', description: 'Issue ids already dispatched, so a restart never re-spawns finished work.' },
+		'observer-seen.json / scout-seen.json / opportunity-seen.json': { type: 'JSON', description: 'Dedup fingerprints for the audit loops (per-repo variants are suffixed .<repo>.json).' },
+		'audit.jsonl / automation.jsonl': { type: 'JSONL', description: 'Append-only fleet-action audit trail and background-loop activity feed.' },
+		'vapid.json / push-subs.json': { type: 'JSON', description: 'VAPID keypair + persisted browser push subscriptions for Web Push.' },
 	}}
 />

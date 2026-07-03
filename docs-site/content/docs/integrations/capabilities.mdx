@@ -8,7 +8,7 @@ import { Steps, Step } from 'fumadocs-ui/components/steps';
 
 A **capability pack** is a versioned, signed bundle that declares agent profiles, workflow
 step-graphs, tool scopes, and required environment variables. Once installed and enabled, a
-capability binding can be invoked via `omp-squad run cap:<binding-key>` to spawn a
+capability binding can be invoked via `glance run cap:<binding-key>` to spawn a
 pre-configured agent scoped to exactly the tools and workflow the capability declares.
 
 All capability logic lives in `src/capabilities/index.ts` and `src/squad-manager.ts`.
@@ -84,7 +84,7 @@ gate are the strongest enforcement reachable today. See `src/squad-manager.ts`.
 ## Required environment variables
 
 A pack can declare `requiredEnv: ["MY_KEY", "OTHER_KEY"]` in its manifest. Before spawning a
-capability-bound agent, omp-squad checks whether every declared env var is set and non-empty in
+capability-bound agent, glance checks whether every declared env var is set and non-empty in
 `process.env`. If any are missing, the spawn is **refused** with a clear error naming the missing
 variables — rather than spawning an agent that will fail opaquely later:
 
@@ -110,17 +110,34 @@ not allow the peer simply never shares that context.
 
 ## Running a capability
 
-```sh title="run a capability binding"
-omp-squad run cap:my-binding --repo /path/to/repo
-```
-
-This resolves the binding by key, enforces `requiredEnv`, resolves the workflow path (or
+An installed binding is launched from the dashboard's **Capabilities** view (or any surface
+that calls the manager's `runCapability(installId, bindingKey, { repo })`). The manager
+resolves the binding by key, enforces `requiredEnv`, resolves the workflow path (or
 materializes the inline step-graph), and spawns an agent under the capability's profile +
 tool-grant constraints.
+
+## The public catalog & discovery
+
+Packs come from two places, and neither installs anything by itself:
+
+- **Trusted source manifests** — an admin imports an agentcn-style manifest with
+  `POST /api/capability-sources`.
+- **The built-in public catalog** — `GET /api/capability-catalog` lists shipped recipes
+  (verified feature delivery, parallel solution race, conflict resolution, worker
+  commissioning, fleet stewardship, planning loops, …) with each recipe's profiles,
+  workflow, tools, skills, and required environment, so an operator can decide what to
+  trust *before* importing one by posting `{ "catalogId": "…" }` to the same source route.
+
+Install/enable still goes through `POST /api/capability-installs` and the **Capabilities**
+view; installed packs are checksum-pinned. Machine-readable discovery of this whole surface
+lives at `/llms.txt`, `/openapi.json`, and `GET /api/capability-discovery`; federation peers
+see **metadata only** at `GET /api/federation/capabilities` until explicit context policy
+allows more.
 
 ## Source
 
 - `src/capabilities/index.ts` — `verifyCapabilityPack`, `canExportCapabilityContext`, `redactCapabilityContext`, `capabilityWorkflowDefinitions`, `capabilityWorkflowToDot`
+- `src/capabilities/catalog.ts` — `publicCapabilityCatalog`, `publicCapabilityManifest` (the built-in catalog)
 - `src/squad-manager.ts` — `toolGrantsPrompt`, `create` (tool-grant injection), `runCapability` (binding resolution + `requiredEnv` enforcement), `resolveCapabilityWorkflowPath`
 
 <Cards>

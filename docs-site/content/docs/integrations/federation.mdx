@@ -1,12 +1,12 @@
 ---
 title: Federation
-description: Coordinate omp-squad operators across machines — shared presence, cross-host file leases, and collision detection keyed on repo identity.
+description: Coordinate glance operators across machines — shared presence, cross-host file leases, and collision detection keyed on repo identity.
 ---
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import { Steps, Step } from 'fumadocs-ui/components/steps';
 
-omp-squad coordinates agents on **one** machine through the shared registries under
+glance coordinates agents on **one** machine through the shared registries under
 `~/.omp/squad` (presence + leases, one file per claim, heartbeat-TTL). Federation promotes
 that coordination **across machines**, so two operators working the same repo from different
 hosts see each other's agents and file leases.
@@ -14,7 +14,7 @@ hosts see each other's agents and file leases.
 ```text
  host A                         coordinator                    host B
  ┌───────────────┐    ws        ┌───────────┐      ws       ┌───────────────┐
- │ omp-squad up  │─presence────▶│  relay    │◀────presence──│ omp-squad up  │
+ │ glance up  │─presence────▶│  relay    │◀────presence──│ glance up  │
  │ federation-   │─leases──────▶│ (fan-out) │─────leases───▶│ federation-   │
  │   sync        │◀─leases──────│           │◀────leases────│   sync        │
  └───────────────┘              └───────────┘               └───────────────┘
@@ -23,7 +23,7 @@ hosts see each other's agents and file leases.
 <Callout type="info">
 **Federation is on by default.** The daemon starts with a `LocalFederationBus` — a real bus that
 works on a single host with zero config (local pub/sub, own roster, collision detection). It
-gossips to peers only once `OMP_SQUAD_COORDINATOR` is set. `OMP_SQUAD_FEDERATION=0` opts all the
+gossips to peers only once `GLANCE_COORDINATOR` is set. `GLANCE_FEDERATION=0` opts all the
 way out, reverting to the inert `NullFederationBus`.
 </Callout>
 
@@ -40,26 +40,26 @@ No coordinator means no peers, no cross-host gossip — but everything that runs
 works fully, including collision detection between agents on that machine.
 
 ```sh title="disable federation entirely"
-OMP_SQUAD_FEDERATION=0 omp-squad up
-# → federation: disabled (OMP_SQUAD_FEDERATION=0)
+GLANCE_FEDERATION=0 glance up
+# → federation: disabled (GLANCE_FEDERATION=0)
 ```
 
 ## Joining a team room (cross-host)
 
-Set `OMP_SQUAD_COORDINATOR` to a coordinator WebSocket URL. The daemon's `LocalFederationBus`
+Set `GLANCE_COORDINATOR` to a coordinator WebSocket URL. The daemon's `LocalFederationBus`
 creates an inner `TailnetFederationBus` that connects in the background:
 
 <TypeTable
   type={{
-    OMP_SQUAD_COORDINATOR: {
+    GLANCE_COORDINATOR: {
       type: 'ws url',
       description: 'Coordinator WebSocket URL. Unset → local-only (single host). Set → gossips presence + leases to peers over the coordinator.',
     },
-    OMP_SQUAD_OPERATOR: {
+    GLANCE_OPERATOR: {
       type: 'string',
       description: 'This operator identity (Actor id) in the room. Defaults to the OS username, then "local".',
     },
-    OMP_SQUAD_FEDERATION: {
+    GLANCE_FEDERATION: {
       type: 'flag',
       default: 'on',
       description: 'Set to "0" to disable federation entirely (revert to NullFederationBus).',
@@ -68,20 +68,20 @@ creates an inner `TailnetFederationBus` that connects in the background:
 />
 
 ```sh title="join a team room"
-OMP_SQUAD_COORDINATOR=ws://coordinator-host:7900 \
-OMP_SQUAD_OPERATOR=alice \
-omp-squad up
+GLANCE_COORDINATOR=ws://coordinator-host:7900 \
+GLANCE_OPERATOR=alice \
+glance up
 # → federation: joined ws://coordinator-host:7900 as alice
 ```
 
-The operator identity is `OMP_SQUAD_OPERATOR || os.userInfo().username || "local"`, with
+The operator identity is `GLANCE_OPERATOR || os.userInfo().username || "local"`, with
 `origin: "local"`. The same resolution is mirrored in the server (for labelling the local
 roster) and in `federation-sync`, so every surface agrees on who "self" is.
 
 <Callout type="warn">
 True cross-host federation requires three things not available on a single workstation: (1) a
 **deployed coordinator** reachable by all hosts, (2) a **second physical host** running
-`omp-squad up` pointed at the same coordinator, and (3) a **Tailscale tailnet** for remote-operator
+`glance up` pointed at the same coordinator, and (3) a **Tailscale tailnet** for remote-operator
 identity — `tailscale whois` only resolves on a real tailnet; on localhost it falls back to `"local"`.
 The rest of this page explains what works without them.
 </Callout>
@@ -91,37 +91,37 @@ The rest of this page explains what works without them.
 `src/coordinator.ts` is a **dumb, protocol-agnostic WebSocket relay**: every frame received
 from one client is rebroadcast verbatim to every *other* client. It never parses frames, so
 the wire protocol stays owned entirely by the buses (`TailnetFederationBus`). A plain `GET`
-gets a tiny `omp-squad coordinator` health body; the upgrade is accepted on any path.
+gets a tiny `glance coordinator` health body; the upgrade is accepted on any path.
 
 The relay **binds `127.0.0.1` by default** and carries a **pre-shared-token auth gate** —
 without it any peer that can reach the port snoops every presence/lease frame and can
-spoof/impersonate. Exposing it (`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`) therefore requires
-`OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator and on every client; a non-loopback bind
-with no token is refused unless `OMP_SQUAD_INSECURE=1`. The token rides the WS handshake as
+spoof/impersonate. Exposing it (`GLANCE_COORDINATOR_HOST=0.0.0.0`) therefore requires
+`GLANCE_COORDINATOR_TOKEN` on the coordinator and on every client; a non-loopback bind
+with no token is refused unless `GLANCE_INSECURE=1`. The token rides the WS handshake as
 the `ompsq-token` subprotocol, exactly like the daemon's bearer token.
 
 Run one anywhere on the tailnet via `src/coordinator-main.ts`:
 
 ```sh title="run a coordinator"
-OMP_SQUAD_COORDINATOR_HOST=0.0.0.0 \
-OMP_SQUAD_COORDINATOR_TOKEN=$(openssl rand -hex 32) \
-OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
-# → omp-squad coordinator listening on ws://127.0.0.1:7900 (token-gated)
+GLANCE_COORDINATOR_HOST=0.0.0.0 \
+GLANCE_COORDINATOR_TOKEN=$(openssl rand -hex 32) \
+GLANCE_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
+# → glance coordinator listening on ws://127.0.0.1:7900 (token-gated)
 ```
 
 <TypeTable
   type={{
-    OMP_SQUAD_COORDINATOR_PORT: {
+    GLANCE_COORDINATOR_PORT: {
       type: 'number',
       default: '7900',
       description: 'Port the relay binds. A positional CLI arg (bun src/coordinator-main.ts 7901) overrides it.',
     },
-    OMP_SQUAD_COORDINATOR_HOST: {
+    GLANCE_COORDINATOR_HOST: {
       type: 'string',
       default: '127.0.0.1',
-      description: 'Coordinator bind address. 0.0.0.0 exposes it on the LAN/tailnet and then requires a token (or OMP_SQUAD_INSECURE=1).',
+      description: 'Coordinator bind address. 0.0.0.0 exposes it on the LAN/tailnet and then requires a token (or GLANCE_INSECURE=1).',
     },
-    OMP_SQUAD_COORDINATOR_TOKEN: {
+    GLANCE_COORDINATOR_TOKEN: {
       type: 'string',
       default: 'unset',
       description: 'Pre-shared secret gating the relay. Coordinator and every client must match. Unset ⇒ no auth (only safe on the loopback default).',
@@ -139,7 +139,7 @@ the caller — an unreachable coordinator simply means an empty, silent room.
 
 The transport is deliberately minimal: **Tailscale provides the secure network, identity, and
 NAT traversal; the coordinator provides fan-out.** Everything sensitive — encryption, who-is-who,
-reaching a host behind NAT — is delegated to the tailnet, leaving omp-squad with the ~85-line
+reaching a host behind NAT — is delegated to the tailnet, leaving glance with the ~85-line
 opaque relay above plus a gossip bus.
 
 A natural question is whether to replace this with a peer-to-peer networking stack such as
@@ -158,7 +158,7 @@ transport that already works and is opt-in.
 
 What each layer would map to, if the substitution were ever made:
 
-| omp-squad today | iroh equivalent |
+| glance today | iroh equivalent |
 |---|---|
 | Tailscale tailnet (encryption, NAT traversal, identity) | iroh endpoint — public-key identity, hole-punch + relay fallback, QUIC encryption |
 | `coordinator.ts` WS relay (central fan-out) | `iroh-gossip` (serverless pub/sub overlay) |
@@ -255,23 +255,23 @@ once the peer stops gossiping.
 Run it as its own process:
 
 ```sh title="run federation-sync"
-OMP_SQUAD_COORDINATOR=ws://coordinator-host:7900 \
-OMP_SQUAD_OPERATOR=alice \
-OMP_SQUAD_FED_REPOS=/home/alice/app,/home/alice/infra \
+GLANCE_COORDINATOR=ws://coordinator-host:7900 \
+GLANCE_OPERATOR=alice \
+GLANCE_FED_REPOS=/home/alice/app,/home/alice/infra \
 bun src/federation-sync-main.ts
 ```
 
 <TypeTable
   type={{
-    OMP_SQUAD_FED_REPOS: {
+    GLANCE_FED_REPOS: {
       type: 'comma-separated paths',
       description: 'Extra repo paths to always gossip leases for, beyond the cwd repo and any repo discovered in the local presence registry.',
     },
   }}
 />
 
-It watches the current working directory plus `OMP_SQUAD_FED_REPOS`, plus every repo
-discovered in the local presence registry. `OMP_SQUAD_COORDINATOR` is **required** — without
+It watches the current working directory plus `GLANCE_FED_REPOS`, plus every repo
+discovered in the local presence registry. `GLANCE_COORDINATOR` is **required** — without
 it the process prints a hint and exits.
 
 ### Cross-host repo identity
@@ -291,13 +291,32 @@ falls back to `name:<basename>` — best-effort, advisory only.
 
 ## API surface
 
-All three federation endpoints are real and available in both single-host and cross-host modes:
+The federation endpoints are real and available in both single-host and cross-host modes:
 
 | Route | Returns |
 |---|---|
 | `GET /api/federation` | `{ coordinator, operators, collisions }` — merged local+peer roster, cross-host collisions keyed on `repoId`. |
 | `GET /api/leases?repo=<path>` | Live file leases for the requested repo (or cwd). Per-org scoped in DB mode. |
 | `GET /api/fabric?repo=<path>` | Infra summary: roster, leases, and health for the requested repo. Always includes leases. |
+| `POST /api/federation/command` | Send an addressed remote command to a peer (see below). Operator-tier; audited as `federation.command`. |
+| `GET /api/federation/capabilities` | Capability-pack **metadata** advertised to peers — names/versions only, until explicit context policy allows more. |
+
+## Remote steering — commands across hosts
+
+Both halves of "drive a teammate's agent from your command center" exist:
+
+- **Send** — `POST /api/federation/command` with `{ to: "<operator id>", cmd: { type, … } }`
+  publishes an addressed `RemoteCommand` over the bus. Frames are addressed, so peers drop
+  commands not meant for them.
+- **Receive** — the peer daemon's `onRemoteCommand` re-authorizes every inbound command with
+  its *own* RBAC before applying it via `applyCommand(cmd, actor)`. The coordinator stamps
+  the sender's real socket address as `ip` (any client-sent `ip` is overwritten), so the
+  receiver's `tailscale whois` verifies the true sender — never a claimed identity. An
+  unverified sender resolves to the read-only `viewer` tier: sending grants nothing.
+
+Still missing for a full remote-steering UX: a command-center UI affordance on the Federation
+panel (the API is the seam) and a reply/ack channel — effects surface through the peer's
+gossiped presence.
 
 ## Related
 
