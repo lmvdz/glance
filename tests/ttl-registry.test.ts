@@ -54,7 +54,10 @@ test("repoKey is stable, path-resolved, and byte-compatible with the legacy form
 	expect(repoKey(repo)).toBe(repoKey(repo)); // deterministic
 	expect(repoKey("/tmp/ttl-repo-c/")).toBe(expected); // trailing slash resolves to the same key
 	expect(repoKey("/tmp/other")).not.toBe(expected); // distinct repos → distinct keys
-	expect(reg.dirFor(repo)).toBe(path.join(os.homedir(), ".omp", "squad", subdir, expected));
+	// dirFor now lives under OMP_SQUAD_STATE_DIR (falling back to ~/.omp/squad) so presence/leases share the
+	// daemon's state dir. The test preload sets OMP_SQUAD_STATE_DIR, so that's the base here.
+	const base = process.env.OMP_SQUAD_STATE_DIR ?? path.join(os.homedir(), ".omp", "squad");
+	expect(reg.dirFor(repo)).toBe(path.join(base, subdir, expected));
 });
 
 test("sweep removes repoKey dirs left with no live records, keeps live ones", async () => {

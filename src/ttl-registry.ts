@@ -52,7 +52,10 @@ export function repoKey(repo: string): string {
 }
 
 export function ttlRegistry<T extends TtlRecord>({ subdir, ttlMs, isRecord }: TtlRegistryOptions<T>): TtlRegistry<T> {
-	const root = path.join(os.homedir(), ".omp", "squad", subdir);
+	// Honor OMP_SQUAD_STATE_DIR (the daemon's stateDir already does) so presence/leases live UNDER the state
+	// dir instead of a hardcoded ~/.omp/squad — otherwise a custom state dir splits daemon state from
+	// presence/leases, and the test suite writes into the operator's real ~/.omp/squad (flaky isolation).
+	const root = path.join(process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad"), subdir);
 	const dirFor = (repo: string): string => path.join(root, repoKey(repo));
 
 	async function write(repo: string, entry: T): Promise<void> {
