@@ -8,7 +8,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { landFailureCount, readLandLedger, recordLandOutcome } from "../src/land-ledger.ts";
+import { landFailureCount, readForcedLands, readLandLedger, recordForcedLand, recordLandOutcome } from "../src/land-ledger.ts";
 
 async function tmpDir(): Promise<string> {
 	return fs.mkdtemp(path.join(os.tmpdir(), "ledger-"));
@@ -55,4 +55,25 @@ test("a missing/corrupt ledger reads as empty, never throws", async () => {
 	expect(readLandLedger(dir)).toEqual({});
 	await fs.writeFile(path.join(dir, "land-failures.json"), "{not json");
 	expect(readLandLedger(dir)).toEqual({});
+});
+
+test("recordForcedLand appends an audit record (actor + detail + timestamp), oldest first", async () => {
+	const dir = await tmpDir();
+	expect(readForcedLands(dir)).toEqual([]);
+	expect(recordForcedLand(dir, "squad/x", "operator@local", "no proof — forced", 1000)).toBe(1);
+	expect(recordForcedLand(dir, "squad/y", "ci-bot", "b".repeat(900), 2000)).toBe(2);
+	const list = readForcedLands(dir);
+	expect(list.length).toBe(2);
+	expect(list[0]).toEqual({ branch: "squad/x", actor: "operator@local", detail: "no proof — forced", at: 1000 });
+	expect(list[1].actor).toBe("ci-bot");
+	expect(list[1].detail.length).toBe(600); // capped
+});
+
+test("recordForcedLand is a no-op for an undefined branch and survives a corrupt file", async () => {
+	const dir = await tmpDir();
+	expect(recordForcedLand(dir, undefined, "x", "y")).toBe(0);
+	expect(readForcedLands(dir)).toEqual([]);
+	await fs.writeFile(path.join(dir, "land-forced.json"), "{not json");
+	expect(readForcedLands(dir)).toEqual([]); // corrupt ⇒ empty, never throws
+	expect(recordForcedLand(dir, "squad/z", "a", "b", 5)).toBe(1); // and recovers
 });

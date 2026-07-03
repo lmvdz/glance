@@ -34,6 +34,12 @@ export interface LandResult {
 	 * shared checkout) would otherwise permanently brick every healthy branch behind it.
 	 */
 	retryable?: boolean;
+	/**
+	 * A FORCED land (requireProof:false) merged/committed WITHOUT a passing proof gate — unproven trust
+	 * made legible. The caller records the audit fact (actor + timestamp) in the land ledger; `detail`
+	 * says so too. Absent/false on a normal land or a forced land that happened to have a fresh proof.
+	 */
+	forcedWithoutProof?: boolean;
 }
 
 /**
@@ -273,7 +279,26 @@ export function landAgent(opts: LandOpts): Promise<LandResult> {
 	return withRepoLandLock(opts.repo, () => landAgentLocked(opts));
 }
 
+/**
+ * Force-land audit seam: a FORCED land (requireProof === false, a deliberate human override — NOT the
+ * legacy `requireProof` undefined) that proceeds without a passing proof gate is unproven trust. We do
+ * NOT block it (force is intentional), but we make it LEGIBLE: evaluate the proof gate once WITHOUT
+ * blocking, and if it would have failed AND the land actually merged/committed, stamp the result so the
+ * caller records the audit fact (actor + timestamp) and the detail says so. A forced land that happened
+ * to carry a fresh proof is not flagged — no crying wolf.
+ */
 async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
+	const forced = opts.requireProof === false;
+	const unproven = forced ? (await proofGate(opts.repo, opts.worktree, opts.branch, opts.verify)) !== undefined : false;
+	const result = await landAgentImpl(opts);
+	if (forced && unproven && result.ok && (result.merged || result.committed)) {
+		result.forcedWithoutProof = true;
+		result.detail = result.detail ? `${result.detail}; landed WITHOUT a passing proof gate (FORCED)` : "landed WITHOUT a passing proof gate (FORCED)";
+	}
+	return result;
+}
+
+async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	const { repo, worktree, branch, message, commitWip } = opts;
 
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe

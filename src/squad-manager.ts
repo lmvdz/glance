@@ -111,7 +111,7 @@ import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
-import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
+import { landFailureCount, readLandLedger, recordForcedLand, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
@@ -1569,6 +1569,11 @@ export class SquadManager extends EventEmitter {
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
 			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, staleGate: !force, verify: pf.acceptance ?? undefined });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
+			// Forced member land without a passing proof gate — audit the override per branch.
+			if (res.forcedWithoutProof) {
+				recordForcedLand(this.stateDir, w.branch, actor.id, `${reason ? `${reason}: ` : ""}${res.detail ?? ""}`);
+				void this.store.appendAudit({ actor: actor.id, action: "land.forced-unproven", target: id, detail: { branch: w.branch, reason, at: Date.now() } }).catch(() => {});
+			}
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
 			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
 		}
@@ -1633,6 +1638,13 @@ export class SquadManager extends EventEmitter {
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
 		// never bump the streak for it, else transient dirty windows park a healthy branch.
 		if (!result.retryable && (auto || result.ok)) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
+		// Forced land that merged WITHOUT a passing proof gate — audit it so the override is never invisible trust.
+		if (result.forcedWithoutProof) {
+			const forceActor = opts.actor ?? LOCAL_ACTOR;
+			recordForcedLand(this.stateDir, dto.branch, forceActor.id, `${opts.reason ? `${opts.reason}: ` : ""}${result.detail ?? result.message}`);
+			void this.recordAudit(forceActor, "land", id, "ok", `landed WITHOUT proof (FORCED)${opts.reason ? `: ${opts.reason}` : ""}`);
+			void this.store.appendAudit({ actor: forceActor.id, action: "land.forced-unproven", target: id, detail: { branch: dto.branch, reason: opts.reason, at: Date.now() } }).catch(() => {});
+		}
 		if (result.ok) {
 			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
