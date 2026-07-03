@@ -21,6 +21,7 @@ import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
 import { buildProvenance, type ProvenanceDoc } from "./omp-graph/provenance.ts";
+import { maybeIngestClaudeCode } from "./ingest/claude-code.ts";
 import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
@@ -1693,6 +1694,9 @@ async function graphPayload(url: URL, repo: string): Promise<GraphDoc & { plan: 
 	const plan = planFromEnv() ?? null;
 	const hit = graphCache.get(key);
 	if (hit && !fresh && Date.now() - hit.at < ttl) return { ...hit.doc, plan };
+	// external-harness ledgers (Claude Code sessions) fold into receipts here,
+	// throttled — so the pulse attributes EVERY harness that worked this repo
+	await maybeIngestClaudeCode(stateDir, repo);
 	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, range ? { range } : { days, futureDays: future });
 	graphCache.set(key, { at: Date.now(), doc });
 	return { ...doc, plan };
@@ -1712,6 +1716,7 @@ async function attributionPayload(url: URL, repo: string): Promise<ReturnType<ty
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
 	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
 	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	await maybeIngestClaudeCode(stateDir, repo);
 	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
 	return buildAttribution(receipts, range, { plan: planFromEnv() });
 }
