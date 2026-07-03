@@ -22,7 +22,6 @@ import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
-import { startFederationSync } from "./federation-sync.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
 import { SquadServer, type AuthInstance } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
@@ -306,7 +305,13 @@ async function cmdUp(args: string[]): Promise<void> {
 		// URL is configured. OMP_SQUAD_FEDERATION=0 is the explicit opt-out back to the inert NullFederationBus.
 		const federationOff = process.env.OMP_SQUAD_FEDERATION === "0";
 		const bus = federationOff ? new NullFederationBus() : new LocalFederationBus({ operator, coordinatorUrl: coordinator, token: coordinatorToken });
-		manager = new SquadManager({ bus, operator, stateDir, autoLand });
+		// Extra repos to gossip file leases for, beyond those discovered from the presence registry.
+		// The daemon gossips leases IN-PROCESS over `bus` (SquadManager, SEAM 1) — no separate worker.
+		const fedRepos = (process.env.OMP_SQUAD_FED_REPOS ?? "")
+			.split(",")
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0);
+		manager = new SquadManager({ bus, operator, stateDir, autoLand, fedRepos });
 		await manager.start();
 		if (federationOff) process.stderr.write("federation: disabled (OMP_SQUAD_FEDERATION=0)\n");
 		else if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
@@ -333,33 +338,15 @@ async function cmdUp(args: string[]): Promise<void> {
 	const supervise = !dbHandle && process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
 	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
 
-	// Cross-host file leasing (file mode only): once a coordinator is configured, run the lease sync
-	// so this host's leases gossip to peers and peer leases mirror into our local registry (identity-keyed).
-	// No coordinator ⇒ nothing to start; the local bus already keeps leases local. DB mode runs no global sync.
-	const federationOn = process.env.OMP_SQUAD_FEDERATION !== "0";
-	let stopFederationSync: (() => Promise<void>) | undefined;
-	if (manager && coordinator && federationOn) {
-		const fedRepos = (process.env.OMP_SQUAD_FED_REPOS ?? "")
-			.split(",")
-			.map((s) => s.trim())
-			.filter((s) => s.length > 0);
-		const syncHandle = await startFederationSync({
-			coordinatorUrl: coordinator,
-			operator,
-			token: coordinatorToken,
-			repos: fedRepos,
-			onMirror: (frame) => process.stderr.write(`federation: mirrored ${frame.leases.length} lease(s) for ${frame.repoId} from ${frame.operator.id}\n`),
-		}).catch((err) => {
-			process.stderr.write(`federation: lease sync failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
-			return undefined;
-		});
-		if (syncHandle) stopFederationSync = () => syncHandle.stop();
-	}
+	// Cross-host file leasing: the file-mode daemon now gossips its own leases IN-PROCESS over the
+	// manager's LocalFederationBus (SquadManager, SEAM 1) and mirrors peers' leases the same way — no
+	// separate coordinator socket, no standalone worker. (federation-sync-main.ts still runs the same
+	// engine standalone for hosts that want lease gossip decoupled from the daemon.) DB mode gossips
+	// nothing: each per-org manager runs a NullFederationBus, matching the prior no-global-sync behavior.
 
 	const shutdown = async () => {
 		stopSupervisor?.();
 		stopTracker();
-		if (stopFederationSync) await stopFederationSync().catch(() => {});
 		if (registry) await registry.stopAll();
 		else await manager?.stop();
 		server.stop();
