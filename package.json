@@ -1,9 +1,10 @@
 {
-  "name": "omp-squad",
+  "name": "glance",
   "version": "0.1.0",
   "type": "module",
-  "description": "Manage a fleet of Oh My Pi agents running in parallel across git worktrees — terminal + web dashboard.",
+  "description": "glance — oversight for a fleet of Oh My Pi agents running in parallel across git worktrees. Terminal + web dashboard.",
   "bin": {
+    "glance": "src/index.ts",
     "omp-squad": "src/index.ts"
   },
   "scripts": {

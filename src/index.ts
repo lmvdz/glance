@@ -1,21 +1,22 @@
 #!/usr/bin/env bun
 /**
- * omp-squad CLI.
+ * glance CLI.
  *
- *   omp-squad up [--port N] [--no-tui] [--restore]   start the daemon (server + TUI)
- *   omp-squad add <repo> [--name --branch --model --approval --task]
- *   omp-squad list
- *   omp-squad prompt <id> <message…>
- *   omp-squad rm <id> [--delete-worktree]
- *   omp-squad open
+ *   glance up [--port N] [--no-tui] [--restore]   start the daemon (server + TUI)
+ *   glance add <repo> [--name --branch --model --approval --task]
+ *   glance list
+ *   glance prompt <id> <message…>
+ *   glance rm <id> [--delete-worktree]
+ *   glance open
  *
  * `up` is the long-lived process that owns the agents. The other verbs are thin
  * HTTP clients that talk to a running daemon's REST surface.
  */
 
+import "./env-compat.ts";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
@@ -41,20 +42,20 @@ import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, Com
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
 
-const HELP = `omp-squad — manage a fleet of Oh My Pi agents across git worktrees
+const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
 
 USAGE
-  omp-squad up [--port N] [--no-tui] [--restore]   Start the daemon (web + TUI)
-  omp-squad add <repo> [flags]                     Spawn an agent in a new worktree
-  omp-squad list                                   Show the roster
-  omp-squad prompt <id> <message...>               Send an instruction to an agent
-  omp-squad kill <id>                              Stop an agent but keep it in the roster
-  omp-squad rm <id> [--delete-worktree]            Remove an agent
-  omp-squad who [repo]                             Who/what is working a repo (any omp agent)
-  omp-squad logs <id> [--limit N]                  Print an agent's recent transcript
-  omp-squad automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
-  omp-squad open                                   Print the dashboard URL
-  omp-squad curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
+  glance up [--port N] [--no-tui] [--restore]   Start the daemon (web + TUI)
+  glance add <repo> [flags]                     Spawn an agent in a new worktree
+  glance list                                   Show the roster
+  glance prompt <id> <message...>               Send an instruction to an agent
+  glance kill <id>                              Stop an agent but keep it in the roster
+  glance rm <id> [--delete-worktree]            Remove an agent
+  glance who [repo]                             Who/what is working a repo (any omp agent)
+  glance logs <id> [--limit N]                  Print an agent's recent transcript
+  glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
+  glance open                                   Print the dashboard URL
+  glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
 
 ADD FLAGS
   --name <s>        Agent name (default: agent-N)
@@ -120,7 +121,13 @@ function base(flags: Record<string, string | boolean>): string {
 	return `http://127.0.0.1:${port}`;
 }
 function stateDirPath(): string {
-	return process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	// GLANCE_STATE_DIR is mirrored onto OMP_SQUAD_STATE_DIR by env-compat, so this honors either name.
+	if (process.env.OMP_SQUAD_STATE_DIR) return process.env.OMP_SQUAD_STATE_DIR;
+	const glance = path.join(os.homedir(), ".glance");
+	const legacy = path.join(os.homedir(), ".omp", "squad");
+	// Don't orphan existing state: if the legacy dir exists and the new one doesn't, keep using it.
+	if (!existsSync(glance) && existsSync(legacy)) return legacy;
+	return glance;
 }
 
 /** Enumerate org ids that have persisted state (the `<stateDir>/orgs/<id>` dir names). Tolerates a missing dir. */
@@ -163,7 +170,7 @@ async function postCommand(flags: Record<string, string | boolean>, cmd: ClientC
 			body: JSON.stringify(cmd),
 		});
 	} catch {
-		throw new Error(`No squad daemon on ${base(flags)}. Start one with: omp-squad up`);
+		throw new Error(`No squad daemon on ${base(flags)}. Start one with: glance up`);
 	}
 }
 
@@ -336,13 +343,13 @@ async function cmdUp(args: string[]): Promise<void> {
 	const useTui = !flags["no-tui"] && process.stdin.isTTY;
 	const access = reachableUrls(host, port, tls ? "https" : "http").map((u) => `    ${u}/?token=${token}`).join("\n");
 	if (manager && useTui) {
-		process.stdout.write(`omp-squad dashboard: ${url}\n  access token: ${token}\n`);
+		process.stdout.write(`glance dashboard: ${url}\n  access token: ${token}\n`);
 		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
 		const tui = new SquadTui(manager);
 		await tui.run();
 		await shutdown();
 	} else {
-		process.stdout.write(`omp-squad daemon running\n  dashboard: ${url}\n  access token: ${token}\n  open from any device on this network (tap to sign in):\n${access}\n  add an agent: omp-squad add <repo> --task "…"\n`);
+		process.stdout.write(`glance daemon running\n  dashboard: ${url}\n  access token: ${token}\n  open from any device on this network (tap to sign in):\n${access}\n  add an agent: glance add <repo> --task "…"\n`);
 		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
 		await new Promise<void>(() => {}); // run until signal
 	}
@@ -387,7 +394,7 @@ async function cmdList(args: string[]): Promise<void> {
 		const res = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() });
 		agents = (await res.json()) as AgentDTO[];
 	} catch {
-		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: omp-squad up\n`);
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
 		process.exit(1);
 	}
 	if (!agents.length) {
@@ -418,7 +425,7 @@ async function cmdPrompt(args: string[]): Promise<void> {
 	const id = positional[0];
 	const message = positional.slice(1).join(" ");
 	if (!id || !message) {
-		process.stderr.write("usage: omp-squad prompt <id> <message...>\n");
+		process.stderr.write("usage: glance prompt <id> <message...>\n");
 		process.exit(1);
 	}
 	const res = await postCommand(flags, { type: "prompt", id, message });
@@ -429,7 +436,7 @@ async function cmdRm(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	const id = positional[0];
 	if (!id) {
-		process.stderr.write("usage: omp-squad rm <id> [--delete-worktree]\n");
+		process.stderr.write("usage: glance rm <id> [--delete-worktree]\n");
 		process.exit(1);
 	}
 	const res = await postCommand(flags, { type: "remove", id, deleteWorktree: !!flags["delete-worktree"] });
@@ -440,7 +447,7 @@ async function cmdKill(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	const id = positional[0];
 	if (!id) {
-		process.stderr.write("usage: omp-squad kill <id>\n");
+		process.stderr.write("usage: glance kill <id>\n");
 		process.exit(1);
 	}
 	const res = await postCommand(flags, { type: "kill", id });
@@ -451,7 +458,7 @@ async function cmdLogs(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	const id = positional[0];
 	if (!id) {
-		process.stderr.write("usage: omp-squad logs <id> [--limit N]\n");
+		process.stderr.write("usage: glance logs <id> [--limit N]\n");
 		process.exit(1);
 	}
 	const limit = flags.limit ? Number(flags.limit) : 40;
@@ -460,7 +467,7 @@ async function cmdLogs(args: string[]): Promise<void> {
 		const res = await fetch(`${base(flags)}/api/agents/${encodeURIComponent(id)}/transcript`, { headers: tokenHeader() });
 		entries = (await res.json()) as TranscriptEntry[];
 	} catch {
-		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: omp-squad up\n`);
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
 		process.exit(1);
 	}
 	if (!entries.length) {
@@ -483,7 +490,7 @@ async function cmdCommission(args: string[]): Promise<void> {
 	const name = positional[0];
 	const purpose = typeof flags.purpose === "string" ? flags.purpose : "";
 	if (!name || !purpose) {
-		process.stderr.write('usage: omp-squad commission <name> --purpose "..." [--model <spec|false>] [--target node|cloudflare] [--capabilities a,b] [--accept-payload <json> --accept-expect <json>]\n');
+		process.stderr.write('usage: glance commission <name> --purpose "..." [--model <spec|false>] [--target node|cloudflare] [--capabilities a,b] [--accept-payload <json> --accept-expect <json>]\n');
 		process.exit(1);
 	}
 	const spec: CommissionSpec = { name, purpose, model: false };
@@ -559,7 +566,7 @@ function relAgo(ts: number): string {
 	return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
 }
 
-/** `omp-squad automation` — what the daemon's background loops (scout/observer/opportunity/dispatch) are
+/** `glance automation` — what the daemon's background loops (scout/observer/opportunity/dispatch) are
  *  doing on their own, and what the Scout is costing in LLM calls. The terminal twin of GET /api/automation. */
 async function cmdAutomation(args: string[]): Promise<void> {
 	const { flags } = parseArgs(args);
@@ -574,7 +581,7 @@ async function cmdAutomation(args: string[]): Promise<void> {
 		const res = await fetch(`${base(flags)}/api/automation?${q.toString()}`, { headers: tokenHeader() });
 		data = (await res.json()) as { events: AutomationEvent[]; rollup: AutomationRollupRow[] };
 	} catch {
-		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: omp-squad up\n`);
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
 		process.exit(1);
 		return;
 	}
