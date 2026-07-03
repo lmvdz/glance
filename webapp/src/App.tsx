@@ -13,6 +13,10 @@ import { ThemeProvider } from './context/ThemeContext';
 import { NotificationManager } from './components/NotificationManager';
 import { AssistantChat } from './components/AssistantChat';
 import { CapabilityPanel } from './components/CapabilityPanel';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { Login } from './components/Login';
+import { PendingApproval } from './components/PendingApproval';
+import { Loader2 } from 'lucide-react';
 
 const readStoredBoolean = (key: string, fallback: boolean) => {
   if (typeof window === 'undefined') return fallback;
@@ -53,15 +57,35 @@ const AppContent = () => {
   );
 };
 
+// Gate the app on auth. File mode renders straight through (legacy bearer-token behavior); db mode shows
+// the login screen until there's a valid session. A brief splash covers the initial mode/session probe.
+const AuthGate = ({ children }: { children: React.ReactNode }) => {
+  const { status } = useAuth();
+  if (status === 'loading') {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-[#0a0a0b]">
+        <Loader2 className="h-5 w-5 animate-spin text-[#5c5c62]" />
+      </div>
+    );
+  }
+  if (status === 'anon') return <Login />;
+  if (status === 'pending') return <PendingApproval />;
+  return <>{children}</>;
+};
+
 export default function App() {
   return (
     <ThemeProvider>
-      <TaskProvider>
-        <NotificationManager />
-        <GlobalShortcuts />
-        <AppContent />
-        <ToastContainer />
-      </TaskProvider>
+      <AuthProvider>
+        <AuthGate>
+          <TaskProvider>
+            <NotificationManager />
+            <GlobalShortcuts />
+            <AppContent />
+            <ToastContainer />
+          </TaskProvider>
+        </AuthGate>
+      </AuthProvider>
     </ThemeProvider>
   );
 }

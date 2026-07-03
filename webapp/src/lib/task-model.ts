@@ -4,7 +4,7 @@ import type { Project, Task } from "../types";
 const PROJECT_COLORS = ["bg-emerald-500", "bg-blue-500", "bg-purple-500", "bg-amber-500", "bg-gray-400"];
 
 function repoName(repo: string): string {
-  return repo.split(/[\\/]/).filter(Boolean).at(-1) || repo || "omp-squad";
+  return repo.split(/[\\/]/).filter(Boolean).at(-1) || repo || "glance";
 }
 
 function shortCode(name: string): string {
