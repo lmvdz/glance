@@ -6,17 +6,25 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildFeatures, landOrder } from "../src/features.ts";
+import { archivePlanDir, buildFeatures, deletePlanDir, landOrder, listPlanDirs, parsePlanDependencyGraph, restorePlanDir, setConcernBlockedBy, setConcernStatus, setOverviewDepRow, updatePlanConcern } from "../src/features.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { FeatureWorktreeStatus, LandReadiness, PersistedFeature } from "../src/types.ts";
 
 const tmps: string[] = [];
 const managers: SquadManager[] = [];
+const PLANE_ENV = ["PLANE_API_KEY", "PLANE_API_TOKEN", "PLANE_WORKSPACE", "PLANE_WORKSPACE_SLUG", "PLANE_PROJECT_MAP", "PLANE_BASE_URL", "PLANE_PROJECT_ID", "PLANE_APP_URL"] as const;
+const savedPlaneEnv: Record<string, string | undefined> = {};
+for (const key of PLANE_ENV) savedPlaneEnv[key] = process.env[key];
+
 afterEach(async () => {
 	for (const m of managers) await m.stop().catch(() => {});
 	managers.length = 0;
 	for (const t of tmps) await fs.rm(t, { recursive: true, force: true }).catch(() => {});
 	tmps.length = 0;
+	for (const key of PLANE_ENV) {
+		if (savedPlaneEnv[key] === undefined) delete process.env[key];
+		else process.env[key] = savedPlaneEnv[key];
+	}
 });
 
 async function git(repo: string, ...a: string[]): Promise<void> {
@@ -127,3 +135,359 @@ test("archiving a derived plan feature suppresses the scanned plan dir", async (
 	expect(archived?.archived).toBe(true);
 	expect((await mgr.features(repo)).some((feature) => feature.id === id)).toBe(false);
 });
+
+async function exists(p: string): Promise<boolean> {
+	try { await fs.stat(p); return true; } catch { return false; }
+}
+
+test("archivePlanDir/restorePlanDir round-trips a plan dir through plans/.archive; listPlanDirs skips it", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-plandir-"));
+	tmps.push(repo);
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\n");
+
+	expect(await archivePlanDir(repo, "plans/ctx")).toBe(true);
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(false);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx", "01.md"))).toBe(true);
+	// the archive root must NOT surface as a plan
+	expect((await listPlanDirs(repo)).some((d) => d.dir.includes(".archive"))).toBe(false);
+	// archiving again is a safe no-op
+	expect(await archivePlanDir(repo, "plans/ctx")).toBe(false);
+
+	expect(await restorePlanDir(repo, "plans/ctx")).toBe(true);
+	expect(await exists(path.join(repo, "plans", "ctx", "01.md"))).toBe(true);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx"))).toBe(false);
+});
+
+test("deletePlanDir permanently removes a plan dir from live OR archived location", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-deldir-"));
+	tmps.push(repo);
+	await fs.mkdir(path.join(repo, "plans", "live"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "live", "01.md"), "x\n");
+	await fs.mkdir(path.join(repo, "plans", ".archive", "stowed"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", ".archive", "stowed", "01.md"), "x\n");
+
+	expect(await deletePlanDir(repo, "plans/live")).toBe(true);
+	expect(await exists(path.join(repo, "plans", "live"))).toBe(false);
+	expect(await deletePlanDir(repo, "plans/stowed")).toBe(true); // resolves to the archived copy
+	expect(await exists(path.join(repo, "plans", ".archive", "stowed"))).toBe(false);
+	expect(await deletePlanDir(repo, "plans/missing")).toBe(false); // nothing to remove
+});
+
+test("updateFeature(archived) cascades the plan dir, and unarchive moves it back", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-arch-cascade-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-arch-cascade-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	const pf = mgr.createFeature({ title: "Ctx", repo, planDir: "plans/ctx" });
+
+	await mgr.updateFeature(pf.id, { repo, archived: true });
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(false);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx"))).toBe(true);
+	expect(mgr.archivedFeatures(repo).some((f) => f.id === pf.id && f.planDir === "plans/ctx")).toBe(true);
+
+	await mgr.updateFeature(pf.id, { repo, archived: false });
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(true);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx"))).toBe(false);
+	expect(mgr.archivedFeatures(repo).some((f) => f.id === pf.id)).toBe(false);
+});
+
+test("deleteFeature removes the feature + its plan dir (live or archived)", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-del-feature-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-del-feature-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+
+	// delete a live feature
+	const pf = mgr.createFeature({ title: "Ctx", repo, planDir: "plans/ctx" });
+	const res = await mgr.deleteFeature(pf.id, { repo });
+	expect(res).toMatchObject({ deleted: true, planDirRemoved: true });
+	expect(await exists(path.join(repo, "plans", "ctx"))).toBe(false);
+	expect((await mgr.features(repo)).some((f) => f.id === pf.id)).toBe(false);
+	expect(mgr.archivedFeatures(repo).some((f) => f.id === pf.id)).toBe(false);
+
+	// archived then hard-deleted: removes the .archive copy too
+	await fs.mkdir(path.join(repo, "plans", "ctx2"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx2", "01.md"), "# Ctx2\n");
+	const pf2 = mgr.createFeature({ title: "Ctx2", repo, planDir: "plans/ctx2" });
+	await mgr.updateFeature(pf2.id, { repo, archived: true });
+	const res2 = await mgr.deleteFeature(pf2.id, { repo });
+	expect(res2.planDirRemoved).toBe(true);
+	expect(await exists(path.join(repo, "plans", ".archive", "ctx2"))).toBe(false);
+
+	// deleting a non-existent feature is a clean no-op
+	expect((await mgr.deleteFeature("feat-nope", { repo })).deleted).toBe(false);
+});
+
+// ── concern editing (flow-diagram writes) ──
+
+test("setConcernStatus preserves notation (plain / **Status:** / ## Status:) and inserts when absent", () => {
+	expect(setConcernStatus("# C\n\nSTATUS: open\n\nbody", "done")).toContain("STATUS: done");
+	expect(setConcernStatus("# C\n\nSTATUS: open\n", "done")).not.toContain("STATUS: open");
+	expect(setConcernStatus("# C\n\n**Status:** open\n", "in-progress")).toContain("**Status:** in-progress");
+	expect(setConcernStatus("# C\n\n## Status: ✅ open\n", "blocked")).toContain("## Status: ✅ blocked");
+	// no STATUS line ⇒ inserted right after the H1 title
+	const inserted = setConcernStatus("# Title\n\nsome prose\n", "open");
+	expect(inserted).toMatch(/# Title\n\nSTATUS: open/);
+	// blank status is a no-op
+	expect(setConcernStatus("# C\nSTATUS: open\n", "  ")).toContain("STATUS: open");
+});
+
+test("setConcernBlockedBy rewrites/inserts BLOCKED_BY with dedup+sort; empty ⇒ none", () => {
+	expect(setConcernBlockedBy("# C\nSTATUS: open\nBLOCKED_BY: concern #9\n", [3, 1, 3])).toContain("BLOCKED_BY: concern #1, concern #3");
+	expect(setConcernBlockedBy("# C\nSTATUS: open\nBLOCKED_BY: concern #9\n", [])).toContain("BLOCKED_BY: none");
+	// absent ⇒ inserted on the line after STATUS
+	const added = setConcernBlockedBy("# C\nSTATUS: open\n\nbody\n", [2]);
+	expect(added).toMatch(/STATUS: open\nBLOCKED_BY: concern #2/);
+});
+
+test("setOverviewDepRow updates the matching row, preserves other columns, appends when missing", () => {
+	const ov = [
+		"# Overview",
+		"",
+		"## Dependency graph",
+		"",
+		"| Concern | BLOCKED_BY | VERIFY_BLOCKER |",
+		"| --- | --- | --- |",
+		"| 1 — runtime | none | none |",
+		"| 2 — api | 1 | none |",
+		"",
+		"## Batch order",
+	].join("\n");
+	const updated = setOverviewDepRow(ov, 2, [1, 3]);
+	expect(updated).toContain("| 2 — api | 1, 3 | none |"); // col0 label + col2 preserved
+	// appends a row for a concern with no existing row
+	const appended = setOverviewDepRow(ov, 4, [2]);
+	expect(appended).toMatch(/\| 4 \| 2 \| — \|/);
+	// emptying blockers writes "none"
+	expect(setOverviewDepRow(ov, 2, [])).toContain("| 2 — api | none | none |");
+	// no Dependency-graph table ⇒ unchanged
+	expect(setOverviewDepRow("# Plan\n\njust prose\n", 1, [2])).toBe("# Plan\n\njust prose\n");
+});
+
+test("parsePlanDependencyGraph reads blocker numbers from the overview table", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-dep-graph-"));
+	tmps.push(repo);
+	const dir = path.join(repo, "plans", "feat");
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(path.join(dir, "00-overview.md"), [
+		"# Feat", "", "## Dependency graph", "",
+		"| Concern | BLOCKED_BY | VERIFY_BLOCKER |", "| --- | --- | --- |",
+		"| 01 runtime | none | ok |", "| 02 api | concern #1, 03 | ok |", "",
+	].join("\n"));
+	expect([...(await parsePlanDependencyGraph(repo, "plans/feat"))]).toEqual([[1, []], [2, [1, 3]]]);
+});
+
+test("updatePlanConcern writes the concern STATUS + BLOCKED_BY and mirrors the overview table", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-concern-edit-"));
+	tmps.push(repo);
+	const dir = path.join(repo, "plans", "feat");
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(path.join(dir, "00-overview.md"), [
+		"# Feat", "", "## Dependency graph", "",
+		"| Concern | BLOCKED_BY |", "| --- | --- |", "| 1 | none |", "| 2 | 1 |", "",
+	].join("\n"));
+	await fs.writeFile(path.join(dir, "01-runtime.md"), "# Runtime\n\nSTATUS: open\n\nbody\n");
+	await fs.writeFile(path.join(dir, "02-api.md"), "# Api\n\nSTATUS: open\nBLOCKED_BY: concern #1\n\nbody\n");
+
+	const result = await updatePlanConcern(repo, "plans/feat", "02-api.md", { status: "done", blockedBy: [1, 3] });
+	expect(result?.status).toBe("done");
+	expect(result?.open).toBe(false);
+
+	const concernText = await fs.readFile(path.join(dir, "02-api.md"), "utf8");
+	expect(concernText).toContain("STATUS: done");
+	expect(concernText).toContain("BLOCKED_BY: concern #1, concern #3");
+	const overviewText = await fs.readFile(path.join(dir, "00-overview.md"), "utf8");
+	expect(overviewText).toContain("| 2 | 1, 3 |");
+
+	// the overview itself is not editable as a concern, and traversal is refused
+	expect(await updatePlanConcern(repo, "plans/feat", "00-overview.md", { status: "done" })).toBeUndefined();
+	expect(await updatePlanConcern(repo, "plans/feat", "../../../etc/passwd", { status: "x" })).toBeUndefined();
+});
+
+test("manager.updateConcern edits a derived plan feature's concern end-to-end", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-mgr-concern-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	const dir = path.join(repo, "plans", "ctx");
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(path.join(dir, "01-a.md"), "# A\n\nSTATUS: open\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-mgr-concern-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	const id = `plan:${repo}:plans/ctx`;
+	const concern = await mgr.updateConcern(id, { repo, file: "plans/ctx/01-a.md", status: "in-progress" });
+	expect(concern?.status).toBe("in-progress");
+	expect(await fs.readFile(path.join(dir, "01-a.md"), "utf8")).toContain("STATUS: in-progress");
+	// unknown feature ⇒ undefined, no throw
+	expect(await mgr.updateConcern("plan:nope", { repo, file: "plans/ctx/01-a.md", status: "done" })).toBeUndefined();
+});
+
+test("createFeatureModule can adopt a plan and fan out open concerns into Plane tickets", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-module-plan-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "00-overview.md"), [
+		"# Module Plan", "", "## Dependency graph", "",
+		"| Concern | BLOCKED_BY |", "| --- | --- |", "| 01 | none |", "| 02 | 01 |", "",
+	].join("\n"));
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01-api.md"), [
+		"# API slice",
+		"STATUS: open",
+		"TOUCHES: src/api.ts",
+		"",
+		"## Acceptance Criteria",
+		"- API exposes the plan action.",
+	].join("\n"));
+	await fs.writeFile(path.join(repo, "plans", "ctx", "02-worker.md"), "# Worker slice\nSTATUS: open\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-module-state-"));
+	tmps.push(stateDir);
+
+	const issues: { id: string; sequence_id: number; name: string }[] = [];
+	const moduleIssues: string[][] = [];
+	let moduleCreates = 0;
+	const issueBodies: string[] = [];
+	const relations: unknown[] = [];
+	const server = Bun.serve({
+		port: 0,
+		fetch: async (req) => {
+			const url = new URL(req.url);
+			if (req.method === "POST" && url.pathname.endsWith("/issues/")) {
+				const body = await req.json() as { name: string; description_html?: string };
+				issueBodies.push(body.description_html ?? "");
+				const issue = { id: `iss-${issues.length + 1}`, sequence_id: issues.length + 1, name: body.name };
+				issues.push(issue);
+				return Response.json(issue, { status: 201 });
+			}
+			if (req.method === "POST" && url.pathname.endsWith("/relations/")) {
+				relations.push(await req.json());
+				return Response.json({ ok: true }, { status: 201 });
+			}
+			if (req.method === "POST" && url.pathname.endsWith("/modules/")) {
+				moduleCreates += 1;
+				return Response.json({ id: "mod-1" }, { status: 201 });
+			}
+			if (req.method === "POST" && url.pathname.endsWith("/module-issues/")) {
+				const body = await req.json() as { issues?: string[] };
+				moduleIssues.push(body.issues ?? []);
+				return Response.json({ ok: true }, { status: 201 });
+			}
+			if (req.method === "GET" && url.pathname.endsWith("/issues/")) return Response.json({ results: [] });
+			if (req.method === "GET" && url.pathname.endsWith("/projects/proj-9/")) return Response.json({ identifier: "OMPSQ" });
+			return new Response("no", { status: 404 });
+		},
+	});
+	try {
+		process.env.PLANE_API_KEY = "secret";
+		process.env.PLANE_WORKSPACE = "acme";
+		process.env.PLANE_BASE_URL = `http://127.0.0.1:${server.port}`;
+		process.env.PLANE_APP_URL = "https://app.acme.test";
+		process.env.PLANE_PROJECT_MAP = JSON.stringify({ [repo]: "proj-9" });
+
+		const mgr = new SquadManager({ stateDir });
+		managers.push(mgr);
+		const id = `plan:${repo}:plans/ctx`;
+		const moduleOnly = await mgr.createFeatureModule(id, { repo });
+		const out = await mgr.createFeatureModule(id, { repo, createTickets: true });
+
+		expect(moduleOnly?.moduleUrl).toBe("https://app.acme.test/acme/projects/proj-9/modules/mod-1");
+		expect(out?.moduleUrl).toBe("https://app.acme.test/acme/projects/proj-9/modules/mod-1");
+		expect(out?.createdIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-1", "OMPSQ-2"]);
+		expect(out?.issueIdentifiers).toEqual(["OMPSQ-1", "OMPSQ-2"]);
+		expect(moduleIssues).toEqual([["iss-1", "iss-2"]]);
+		expect(relations).toEqual([{ relation_type: "blocked_by", related_issue: "iss-1" }]);
+		expect(moduleCreates).toBe(1);
+		expect(issueBodies[0]).toContain("API exposes the plan action.");
+		const feature = (await mgr.features(repo)).find((item) => item.id === id);
+		expect(feature?.persisted).toBe(true);
+		expect(feature?.issueIdentifiers).toEqual(["OMPSQ-1", "OMPSQ-2"]);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("repairFeatureModuleTickets links existing generated tickets and closes duplicates", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-repair-plan-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01-api.md"), [
+		"# API slice",
+		"STATUS: open",
+		"",
+		"## Acceptance Criteria",
+		"- API exposes the plan action.",
+	].join("\n"));
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-repair-state-"));
+	tmps.push(stateDir);
+
+	const issues = [
+		{ id: "iss-1", sequence_id: 1, name: "API slice", state: "s-open", body: "Plan path: plans/ctx/01-api.md" },
+		{ id: "iss-2", sequence_id: 2, name: "API slice", state: "s-open", body: "Plan path: plans/ctx/01-api.md" },
+	];
+	const moduleIssues: string[][] = [];
+	const closed: string[] = [];
+	const server = Bun.serve({
+		port: 0,
+		fetch: async (req) => {
+			const url = new URL(req.url);
+			if (req.method === "POST" && url.pathname.endsWith("/modules/")) return Response.json({ id: "mod-1" }, { status: 201 });
+			if (req.method === "POST" && url.pathname.endsWith("/module-issues/")) {
+				const body = await req.json() as { issues?: string[] };
+				moduleIssues.push(body.issues ?? []);
+				return Response.json({ ok: true }, { status: 201 });
+			}
+			if (req.method === "GET" && url.pathname.endsWith("/issues/")) return Response.json({ results: issues });
+			if (req.method === "GET" && url.pathname.endsWith("/states/")) return Response.json({ results: [{ id: "s-open", group: "backlog" }, { id: "s-done", group: "completed" }] });
+			if (req.method === "GET" && url.pathname.endsWith("/labels/")) return Response.json({ results: [] });
+			if (req.method === "GET" && url.pathname.endsWith("/relations/")) return Response.json({ blocked_by: [] });
+			if (req.method === "GET" && url.pathname.endsWith("/projects/proj-9/")) return Response.json({ identifier: "OMPSQ" });
+			const issueMatch = url.pathname.match(/\/issues\/([^/]+)\/$/);
+			if (req.method === "GET" && issueMatch) {
+				const issue = issues.find((item) => item.id === issueMatch[1]);
+				return issue ? Response.json({ ...issue, description_stripped: issue.body, project_detail: { identifier: "OMPSQ" } }) : new Response("no", { status: 404 });
+			}
+			if (req.method === "PATCH" && issueMatch) {
+				closed.push(issueMatch[1]);
+				return Response.json({ ok: true });
+			}
+			return new Response("no", { status: 404 });
+		},
+	});
+	try {
+		process.env.PLANE_API_KEY = "secret";
+		process.env.PLANE_WORKSPACE = "acme";
+		process.env.PLANE_BASE_URL = `http://127.0.0.1:${server.port}`;
+		process.env.PLANE_APP_URL = "https://app.acme.test";
+		process.env.PLANE_PROJECT_MAP = JSON.stringify({ [repo]: "proj-9" });
+
+		const mgr = new SquadManager({ stateDir });
+		managers.push(mgr);
+		const feature = mgr.createFeature({ title: "Repair", repo, planDir: "plans/ctx" });
+		const out = await mgr.repairFeatureModuleTickets(feature.id, { repo, closeOrphans: true });
+
+		expect(out?.linkedIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-1"]);
+		expect(out?.closedIssues.map((issue) => issue.identifier)).toEqual(["OMPSQ-2"]);
+		expect(moduleIssues).toEqual([["iss-1"]]);
+		expect(closed).toEqual(["iss-2"]);
+		const repaired = (await mgr.features(repo)).find((item) => item.id === feature.id);
+		expect(repaired?.issueIdentifiers).toEqual(["OMPSQ-1"]);
+	} finally {
+		server.stop(true);
+	}
+}, 12000);

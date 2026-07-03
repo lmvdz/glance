@@ -50,12 +50,56 @@ export function ownershipOverlap(a: readonly string[], b: readonly string[]): st
 	return [...hits];
 }
 
-/** A live agent's ownership claim, as seen by the partition check. */
+/** True if repo-relative `file` falls within any declared path prefix (segment-safe, normalized). */
+export function isWithinAny(file: string, prefixes: readonly string[]): boolean {
+	const f = norm(file);
+	if (!f) return false;
+	return prefixes.some((p) => {
+		const b = norm(p);
+		return b !== "" && under(f, b);
+	});
+}
+
+/** Shared files whose write should never trip the produces audit (lockfiles, root config). */
+const DEFAULT_PRODUCES_ALLOW = ["package.json", "bun.lock", "bun.lockb", "tsconfig.json", ".gitignore"];
+
+/** The produces-audit allowlist: defaults + `OMP_SQUAD_PRODUCES_ALLOW` (comma-separated), lowercased. */
+export function producesAllowlist(extra?: string): Set<string> {
+	const all = [...DEFAULT_PRODUCES_ALLOW, ...(extra ?? "").split(",").map((s) => s.trim()).filter(Boolean)];
+	return new Set(all.map((s) => norm(s)));
+}
+
+/**
+ * Files an agent actually changed that fall OUTSIDE its declared `produces` and aren't
+ * allowlisted — the produces-audit result. An empty `declared` means "no contract to
+ * audit against" ⇒ never flags (you can't exceed a scope you never declared).
+ * Allowlist matches either the full normalized path or its basename (lockfiles live at root
+ * but the basename match keeps it robust to nested checkouts).
+ */
+export function outOfScopeWrites(actual: readonly string[], declared: readonly string[], allow: Set<string>): string[] {
+	if (!declared.length) return [];
+	const out: string[] = [];
+	for (const f of actual) {
+		const nf = norm(f);
+		if (!nf) continue;
+		const base = nf.split("/").pop() ?? nf;
+		if (allow.has(nf) || allow.has(base)) continue;
+		if (!isWithinAny(f, declared)) out.push(nf);
+	}
+	return out;
+}
+
+/** A live agent's scope contract, as seen by spawn partition checks. */
 export interface Owner {
 	repo: string;
 	name: string;
 	status: AgentStatus;
+	/** Legacy/short-hand write claim. `produces` defaults to this. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent reads from. */
+	requires?: string[];
+	/** Repo-relative path prefixes this agent writes/creates. Defaults to `owns`. */
+	produces?: string[];
 }
 
 /** The first live agent in `repo` whose ownership overlaps `owns`, with the offending paths. */
@@ -64,6 +108,19 @@ export function ownershipConflict(live: readonly Owner[], repo: string, owns: re
 	for (const o of live) {
 		if (o.repo !== repo || o.status === "stopped" || o.status === "error" || !o.owns?.length) continue;
 		const hits = ownershipOverlap(owns, o.owns);
+		if (hits.length) return { agent: o.name, paths: hits };
+	}
+	return undefined;
+}
+
+/** The first live agent whose write outputs overlap the requested read dependencies. */
+export function requiresConflict(live: readonly Owner[], repo: string, requires: readonly string[]): { agent: string; paths: string[] } | undefined {
+	if (requires.length === 0) return undefined;
+	for (const o of live) {
+		if (o.repo !== repo || o.status === "stopped" || o.status === "error") continue;
+		const writes = o.produces?.length ? o.produces : o.owns;
+		if (!writes?.length) continue;
+		const hits = ownershipOverlap(requires, writes);
 		if (hits.length) return { agent: o.name, paths: hits };
 	}
 	return undefined;

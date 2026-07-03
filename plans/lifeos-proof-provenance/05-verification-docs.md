@@ -1,5 +1,5 @@
 # Verification and docs
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -28,9 +28,11 @@ Document the new operator workflow and leave small runnable checks that fail if 
 
 ## Acceptance Criteria
 
-- The README explains proof, evidence, provenance, candidate work, and promotion readiness in operator language.
-- The webapp README describes how the detail pane presents proof/provenance and plan revision candidates.
+- The README explains proof, evidence, provenance, candidate work, Plane modules/tickets, and promotion readiness in operator language.
+- The webapp README describes how to move from a plan to implementation, how to create a Plane module, and how concern tickets are generated.
 - Regression tests fail if verify commands reappear as acceptance criteria.
+- Regression tests cover derived-plan adoption before implementation or Plane module creation.
+- The documented workflow matches the visible webapp controls and does not require hidden CLI steps.
 
 ## Cross-Repo Side Effects
 

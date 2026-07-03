@@ -20,7 +20,8 @@ import { readdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { PushService } from "./push.ts";
-import { TailnetFederationBus } from "./federation.ts";
+import { LocalFederationBus, NullFederationBus } from "./federation.ts";
+import { startFederationSync } from "./federation-sync.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
 import { SquadServer, type AuthInstance } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
@@ -35,6 +36,7 @@ import { DbStore } from "./dal/store.ts";
 import type { OrgContext } from "./dal/context.ts";
 import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
 import { curatePlaneIssues, renderClusterReport } from "./plane-curator.ts";
+import { validatePlanConcerns } from "./features.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
@@ -55,6 +57,7 @@ USAGE
   omp-squad automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   omp-squad open                                   Print the dashboard URL
   omp-squad curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
+  omp-squad plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
 
 ADD FLAGS
   --name <s>        Agent name (default: agent-N)
@@ -294,10 +297,16 @@ async function cmdUp(args: string[]): Promise<void> {
 		registry.start();
 	} else {
 		// File mode: today's single root manager at the state-dir root.
-		const bus = coordinator ? new TailnetFederationBus({ coordinatorUrl: coordinator, operator, token: coordinatorToken }) : undefined;
+		// Federation is ON by default — a real LocalFederationBus that works locally with no
+		// coordinator (loopback pub/sub + own roster) and gossips to peers only once a coordinator
+		// URL is configured. OMP_SQUAD_FEDERATION=0 is the explicit opt-out back to the inert NullFederationBus.
+		const federationOff = process.env.OMP_SQUAD_FEDERATION === "0";
+		const bus = federationOff ? new NullFederationBus() : new LocalFederationBus({ operator, coordinatorUrl: coordinator, token: coordinatorToken });
 		manager = new SquadManager({ bus, operator, stateDir, autoLand });
 		await manager.start();
-		if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
+		if (federationOff) process.stderr.write("federation: disabled (OMP_SQUAD_FEDERATION=0)\n");
+		else if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
+		else process.stderr.write(`federation: local (no coordinator) as ${operator.id}\n`);
 		if (flags.restore) {
 			const n = await manager.loadPersisted();
 			if (n) process.stderr.write(`restored ${n} agent(s)\n`);
@@ -320,9 +329,33 @@ async function cmdUp(args: string[]): Promise<void> {
 	const supervise = !dbHandle && process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
 	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
 
+	// Cross-host file leasing (file mode only): once a coordinator is configured, run the lease sync
+	// so this host's leases gossip to peers and peer leases mirror into our local registry (identity-keyed).
+	// No coordinator ⇒ nothing to start; the local bus already keeps leases local. DB mode runs no global sync.
+	const federationOn = process.env.OMP_SQUAD_FEDERATION !== "0";
+	let stopFederationSync: (() => Promise<void>) | undefined;
+	if (manager && coordinator && federationOn) {
+		const fedRepos = (process.env.OMP_SQUAD_FED_REPOS ?? "")
+			.split(",")
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0);
+		const syncHandle = await startFederationSync({
+			coordinatorUrl: coordinator,
+			operator,
+			token: coordinatorToken,
+			repos: fedRepos,
+			onMirror: (frame) => process.stderr.write(`federation: mirrored ${frame.leases.length} lease(s) for ${frame.repoId} from ${frame.operator.id}\n`),
+		}).catch((err) => {
+			process.stderr.write(`federation: lease sync failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
+			return undefined;
+		});
+		if (syncHandle) stopFederationSync = () => syncHandle.stop();
+	}
+
 	const shutdown = async () => {
 		stopSupervisor?.();
 		stopTracker();
+		if (stopFederationSync) await stopFederationSync().catch(() => {});
 		if (registry) await registry.stopAll();
 		else await manager?.stop();
 		server.stop();
@@ -523,6 +556,37 @@ async function cmdCommission(args: string[]): Promise<void> {
 	}
 }
 
+/**
+ * Offline plan-DAG validator — reads a plan dir straight off disk (no daemon) and reports
+ * dependency cycles + dangling deps, using the same core the UI diagram uses. Exit 0 = clean,
+ * 1 = issues found (a signal the pipeline skills branch on, warning-first not a hard gate).
+ */
+async function cmdPlanValidate(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const dir = positional[0];
+	if (!dir) {
+		process.stderr.write("usage: omp-squad plan-validate <plan-dir> [--json]\n");
+		process.exit(1);
+		return;
+	}
+	// Accept an absolute or cwd-relative plan dir; validatePlanConcerns joins repo+planDir,
+	// so passing repo="" + the resolved absolute path works for both.
+	const abs = path.resolve(dir);
+	const issues = await validatePlanConcerns("", abs);
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify({ dir: abs, issues }, null, 2)}\n`);
+		if (issues.length) process.exit(1);
+		return;
+	}
+	if (!issues.length) {
+		process.stdout.write(`✓ ${path.basename(abs)} — plan dependency graph is clean (no cycles or dangling deps)\n`);
+		return;
+	}
+	process.stdout.write(`⚠ ${path.basename(abs)} — ${issues.length} plan dependency issue${issues.length === 1 ? "" : "s"}:\n`);
+	for (const issue of issues) process.stdout.write(`  • [${issue.kind}] ${issue.message}\n`);
+	process.exit(1);
+}
+
 async function cmdCuratePlane(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	loadEnvFile(path.join(os.homedir(), ".claude", "secrets", "plane.env"));
@@ -644,6 +708,10 @@ async function main(): Promise<void> {
 		case "curate-plane":
 		case "plane-curator":
 			await cmdCuratePlane(rest);
+			break;
+		case "plan-validate":
+		case "validate-plan":
+			await cmdPlanValidate(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

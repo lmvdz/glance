@@ -9,6 +9,7 @@
 import type { RpcExtensionUIRequest, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { WorkflowRunState } from "./workflow/types.ts";
 import type { Span } from "./spans.ts";
+import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -284,6 +285,45 @@ export interface FeatureContextSummary {
 	downstream: string;
 }
 
+export interface FeatureProofAggregate {
+	fresh: number;
+	failed: number;
+	stale: number;
+	none: number;
+	latestRanAt?: number;
+	artifacts: number;
+}
+
+export type FeatureReadinessState = "no-candidate" | "needs-proof" | "proof-failed" | "proof-stale" | "blocked-input" | "diverged" | "uncommitted" | "ready" | "landed" | "done";
+
+export interface FeatureReadiness {
+	/** True only when landable branches are cleanly landable and freshly proved. */
+	ready: boolean;
+	state: FeatureReadinessState;
+	/** Short machine-readable blocker codes for filtering and disabled-button reasons. */
+	blockers: string[];
+	/** One operator-facing next step. */
+	nextAction: string;
+}
+
+export type PlanRevisionCandidateState = "candidate" | "accepted" | "rejected" | "superseded";
+
+export interface PlanRevisionCandidate {
+	id: string;
+	featureId: string;
+	repo: string;
+	planPath: string;
+	producerAgentId?: string;
+	runId?: string;
+	traceId?: string;
+	summary: string;
+	diffRef?: string;
+	state: PlanRevisionCandidateState;
+	reason?: string;
+	reviewer?: string;
+	createdAt: number;
+	updatedAt: number;
+}
 /**
  * A Feature — a cross-cutting unit of work spanning a plan dir and/or a set of agents/worktrees.
  * Phase 1: fully DERIVED at read time (no persistence) from plan dirs + the roster + live git.
@@ -322,6 +362,8 @@ export interface FeatureDTO {
 	workflowStage?: string;
 	/** Workflow node rollup (completed/total) for a progress bar. */
 	workflowProgress?: { done: number; total: number };
+	/** Freshness of the workflow milestone proof backing any automatic land. */
+	workflowProof?: WorktreeProofSummary;
 	/** Human-readable description exposed in the React task detail pane. */
 	description?: string;
 	/** Acceptance criteria from plan docs / tickets / workflow / manual edits. */
@@ -330,8 +372,12 @@ export interface FeatureDTO {
 	decisions?: FeatureDecision[];
 	/** Linked issues/features/docs. */
 	relationships?: FeatureRelationship[];
+	/** Deterministic promotion/land explanation for operators and API clients. */
+	readiness: FeatureReadiness;
 	/** Precomputed context bundle summary for task-detail display and agent prompts. */
 	contextBundle?: FeatureContextSummary;
+	proof?: FeatureProofAggregate;
+	planRevisionCandidates?: PlanRevisionCandidate[];
 }
 
 export interface PlanAnnotationTarget {
@@ -339,6 +385,8 @@ export interface PlanAnnotationTarget {
 	lineStart?: number;
 	lineEnd?: number;
 	quote?: string;
+	/** Anchors the annotation to a specific rendered plan block (data-block-id). */
+	blockId?: string;
 }
 
 export interface ArtifactCommentDTO {
@@ -394,8 +442,13 @@ export interface AgentDTO {
 	parentId?: string;
 	/** flue-service only: passed the acceptance gate at onboard time. */
 	verified?: boolean;
-	/** Repo root the worktree was cut from. */
+	/** Repo root the worktree was cut from (host-local path; for display). */
 	repo: string;
+	/** Cross-host repo identity (normalized git origin — see repo-identity.ts). OPTIONAL: when
+	 *  absent, federation derives it lazily from `repo`. Carrying it on the DTO lets a peer's
+	 *  presence frame, gossiped over the wire, be collision-matched against ours without each host
+	 *  re-running git on the other's path (which it can't reach). */
+	repoId?: string;
 	/** Absolute path of this agent's git worktree (its cwd). */
 	worktree: string;
 	branch?: string;
@@ -434,12 +487,30 @@ export interface AgentDTO {
 	issue?: IssueRef;
 	/** Feature this agent belongs to (single source of truth for membership). */
 	featureId?: string;
-	/** Repo-relative path prefixes this agent owns — overlapping spawns are refused (partition). */
+	/** Repo-relative path prefixes this agent will read. */
+	requires?: string[];
+	/** Repo-relative path prefixes this agent owns — legacy shorthand for produced writes. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent will write/create. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
 	/** Workflow definition backing this agent, when kind === "workflow". */
 	workflow?: WorkflowMemberConfig;
 	/** Live workflow checkpoint/rollup, emitted on every stage boundary. */
 	workflowState?: WorkflowRunState;
+	/** Requested authority persisted for this run; effectiveMode is capped by daemon policy and blockers. */
+	autonomyMode?: AutonomyMode;
+	/** Actual authority after approval/env caps and blockers. */
+	effectiveMode?: AutonomyMode;
+	/** Current proof freshness summary for this agent's worktree. */
+	verificationState?: VerificationState;
+	/** Stable proof reference/fingerprint for display and audit correlation. */
+	proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+	/** Why authority is currently capped to observe. */
+	blockedReason?: string;
+	/** Actions this surface may offer for the current effective mode. */
+	availableActions?: AgentAction[];
 	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
 	landReady?: boolean;
 	/** Re-adopted from a surviving worktree on relaunch and not yet re-run (OMPSQ-164): its work was
@@ -494,6 +565,9 @@ export type ApprovalMode = "always-ask" | "write" | "yolo";
 
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
 
+/** Provenance for scope contracts. Operator-declared scopes are enforceable; inferred scopes are advisory until promoted. */
+export type ScopeSource = "inferred" | "operator";
+
 /** Persisted across restarts in ~/.omp/squad/state.json. */
 export interface PersistedAgent {
 	id: string;
@@ -504,6 +578,7 @@ export interface PersistedAgent {
 	model?: string;
 	profileId?: string;
 	approvalMode: ApprovalMode;
+	autonomyMode?: AutonomyMode;
 	/** Initial task prompt, if the agent was created with one. */
 	task?: string;
 	/** Extra system-prompt text appended for specialized surfaces, e.g. console chat. */
@@ -525,8 +600,14 @@ export interface PersistedAgent {
 	parentId?: string;
 	/** When set, run this agent inside a container instead of locally. */
 	sandbox?: SandboxConfig;
+	/** Repo-relative path prefixes this agent reads — restored so read/write hazards survive a restart. */
+	requires?: string[];
 	/** Repo-relative path prefixes this agent owns — restored so partition survives a restart. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent writes/creates. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
 }
 
 /** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */
@@ -561,7 +642,7 @@ export interface CreateAgentOptions {
 	repo: string;
 	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
 	runtime?: "omp" | "acp";
-	/** Branch to create/checkout for the worktree. Defaults to `squad/<name>`. */
+	/** Branch to create/checkout for the worktree. Defaults to a unique `squad/<agent-id>` branch. */
 	branch?: string;
 	/** Reuse an existing path as the cwd instead of cutting a worktree. */
 	existingPath?: string;
@@ -586,14 +667,21 @@ export interface CreateAgentOptions {
 	workflowState?: WorkflowRunState;
 	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
 	verify?: string;
+	autonomyMode?: AutonomyMode;
 	/** Parent workflow agent id, when spawning a fan-out branch. */
 	parentId?: string;
 	/** Run this agent inside a container (sandboxed execution); mounts the worktree by default. */
 	sandbox?: SandboxConfig;
 	/** Auto-pick a process (verify / plan-approve / fan-out) from the task. Default on; false = plain agent. */
 	autoRoute?: boolean;
-	/** Repo-relative path prefixes this agent will edit. A spawn whose paths overlap a live agent's is refused. */
+	/** Repo-relative path prefixes this agent will read; conflicts with live agents' owns/produces. */
+	requires?: string[];
+	/** Repo-relative path prefixes this agent will edit. A spawn whose paths overlap a live agent's writes is refused. */
 	owns?: string[];
+	/** Repo-relative path prefixes this agent will write/create. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
 	/** Auto-create + attach a tracking Plane issue for this spawn (work→Plane). Set at human/dispatch spawn entry points; off for restore/fan-out. */
 	track?: boolean;
 	/** Skip the global live-agent WIP cap (restore / fan-out paths that recreate already-accounted-for agents). */
@@ -602,6 +690,10 @@ export interface CreateAgentOptions {
 	 *  orchestrator auto-lands its already-complete work directly, since the event-driven auto-land that
 	 *  fires on a run-to-completion never re-fires for an adopted agent that doesn't re-run. */
 	adopted?: boolean;
+	/** Resuming a workflow run on a FRESH inner thread (the adopt path — the prior host is gone), so the
+	 *  in-flight graph node must re-execute and re-prime the goal rather than wait on a turn no thread is
+	 *  running. The warm reconnect path leaves this false. */
+	cold?: boolean;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */
@@ -717,7 +809,22 @@ export type SquadEvent =
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning (the only token-spending loop); Observer and
  *  Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch";
+// "scope" is event-driven (scope-contract audit findings), not a periodic loop like the others.
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync";
+
+/**
+ * Structured reason an automation loop intentionally skipped a unit without doing work.
+ * Proves a loop is alive-but-idle (not dead) and categorizes WHY so the UI can rank
+ * "at capacity" above "nothing to do". Pair with `detail` for the human-readable specifics.
+ */
+export type AutomationSkipReason =
+	| "budget" //          LLM/token budget for the window is spent
+	| "overlap" //         a previous tick of this loop is still running
+	| "wip-cap" //         concurrency / global WIP ceiling reached
+	| "idle" //            nothing to act on this tick (no candidates/findings)
+	| "already-handled" // all candidates already claimed / filed / deduped
+	| "human-review" //    work exists but is gated on human review / do-not-auto-land
+	| "blocked"; //        work exists but is blocked by open dependency issues
 
 /**
  * One unit of background-loop work, the observability record the audit log never carried (it logs only
@@ -746,9 +853,11 @@ export interface AutomationEvent {
 	deduped?: number;
 	/** Dispatch only: agents spawned this tick. */
 	spawned?: number;
+	/** Structured reason this unit intentionally skipped work; skip events persist even with zero work/cost. */
+	skipReason?: AutomationSkipReason;
 	/** Severity of the unit; "warn"/"error" force the event onto disk even with no work done. */
 	level?: "info" | "warn" | "error";
-	/** Optional human-readable detail (a filed title, an error message). */
+	/** Optional human-readable detail (a filed title, an error message, or the specifics behind a skipReason). */
 	detail?: string;
 }
 
@@ -784,7 +893,8 @@ export type ClientCommand =
 	| { type: "message"; to: string; text: string }
 	| { type: "snapshot" } // request a full roster + recent transcript replay
 	| { type: "subscribe"; id: string } // ask for transcript replay of one agent
-	| { type: "commission"; spec: CommissionSpec };
+	| { type: "commission"; spec: CommissionSpec }
+	| { type: "set-mode"; id: string; mode: AutonomyMode; reason?: string };
 
 // ── Federation (Phase 2): cross-operator coordination ───────────────────────
 

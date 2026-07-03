@@ -41,7 +41,7 @@ test("control tower read APIs return honest empty data", async () => {
 	expect(usage.toolCalls).toBe(0);
 
 	const action = await fetch(`${url}/api/action-items`).then((r) => r.json());
-	expect(action.items).toEqual([]);
+	expect(action.items.filter((item: { source?: string }) => item.source !== "health")).toEqual([]);
 
 	const governance = await fetch(`${url}/api/governance`).then((r) => r.json());
 	expect(governance.authMode).toBe("file");
@@ -58,4 +58,22 @@ test("/api/automation exposes the background-loop activity shape and accepts its
 	expect(filtered.status).toBe(200);
 	const body = await filtered.json();
 	expect(Array.isArray(body.events)).toBe(true);
+});
+
+test("feature pipeline returns inline readiness read model", async () => {
+	const url = await server();
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "ct-api-repo-"));
+	cleanups.push(() => fs.rm(repo, { recursive: true, force: true }));
+	const created = await fetch(`${url}/api/features`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ title: "Readiness", repo }),
+	});
+	expect(created.ok).toBe(true);
+	const features = await fetch(`${url}/api/features?repo=${encodeURIComponent(repo)}`).then((r) => r.json());
+	const feature = features.find((f: { title?: string }) => f.title === "Readiness");
+	expect(feature.readiness).toMatchObject({ ready: false, state: "no-candidate", blockers: ["no-candidate"] });
+	const pipeline = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/pipeline?repo=${encodeURIComponent(repo)}`).then((r) => r.json());
+	expect(pipeline.readiness).toEqual(feature.readiness);
+	expect(pipeline.feature.readiness).toEqual(feature.readiness);
 });

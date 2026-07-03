@@ -18,6 +18,17 @@
 import type { EventEmitter } from "node:events";
 import type { RpcExtensionUIRequest, RpcSessionState } from "./types.ts";
 
+/** A host-executed tool advertised to the runtime (omp `set_host_tools`). The model
+ *  may then call it; the call surfaces back as a "hosttool" event for the host to answer. */
+export interface HostToolDef {
+	name: string;
+	description: string;
+	/** JSON Schema for the tool arguments. */
+	parameters: Record<string, unknown>;
+	label?: string;
+	hidden?: boolean;
+}
+
 export interface AgentDriver extends EventEmitter {
 	/** True once the driver has emitted "ready". */
 	readonly isReady: boolean;
@@ -48,6 +59,10 @@ export interface AgentDriver extends EventEmitter {
 	getAvailableModels?(): Promise<{ models?: unknown[] }>;
 	/** Switch the session reasoning effort (minimal|low|medium|high|xhigh). Optional. */
 	setThinkingLevel?(level: string): Promise<unknown>;
+
+	/** Register host-executed tools with the runtime so the model can call them. Optional —
+	 *  a no-op for drivers whose runtime has no host-tool channel. */
+	setHostTools?(tools: HostToolDef[]): void;
 
 	/** Answer an extension UI request. No-op for non-interactive drivers. */
 	respondUi(requestId: string, payload: { value?: string; confirmed?: boolean; cancelled?: true }): void;

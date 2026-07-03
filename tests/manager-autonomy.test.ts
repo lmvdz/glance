@@ -94,7 +94,7 @@ function seed(mgr: TestManager, id: string, issue?: IssueRef): FakeDriver {
 		status: "idle",
 		kind: "omp-operator",
 		repo: "/r",
-		worktree: "/r/wt",
+		worktree: "/r",
 		branch: `squad/${id}`,
 		approvalMode: "yolo",
 		pending: [],
@@ -102,7 +102,7 @@ function seed(mgr: TestManager, id: string, issue?: IssueRef): FakeDriver {
 		messageCount: 0,
 		issue,
 	};
-	const options: PersistedAgent = { id, name: id, repo: "/r", worktree: "/r/wt", approvalMode: "yolo", issue };
+	const options: PersistedAgent = { id, name: id, repo: "/r", worktree: "/r", approvalMode: "yolo", issue };
 	mgr.agents.set(id, { dto, agent, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
 	return agent;
 }
@@ -144,6 +144,20 @@ test("single-agent land closes its tracking issue exactly once (idempotent acros
 		expect(r.ok).toBe(true);
 		await mgr.land("a1"); // already closed → no second PATCH
 		expect(patches()).toBe(1);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("single-agent no-op land does NOT close its tracking issue", async () => {
+	const { server, patches } = planeStub(true);
+	try {
+		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
+		mgr.landResult = { ok: true, committed: false, merged: false, message: "nothing to land" };
+		seed(mgr, "a1", trackedIssue);
+		const r = await mgr.land("a1");
+		expect(r.ok).toBe(true);
+		expect(patches()).toBe(0);
 	} finally {
 		server.stop(true);
 	}

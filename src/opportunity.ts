@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { FabricHotAreaFact, FabricScoutFact } from "./fabric.ts";
 import { jaccard, titleTokens } from "./scout.ts";
-import type { IssueRef } from "./types.ts";
+import type { AutomationSkipReason, IssueRef } from "./types.ts";
 
 export interface OpportunityDeps {
 	listIssues: () => Promise<IssueRef[] | null>;
@@ -167,8 +167,16 @@ export class Opportunity {
 			if (changed) this.saveSeen();
 		} finally {
 			this.running = false;
-			// One report per tick — clusters surfaced/filed are the work; a no-cluster tick is a heartbeat (ring-only).
-			this.deps.record?.({ durationMs: (this.deps.now ?? Date.now)() - t0, found, filed, deduped: Math.max(0, found - filed) });
+			// One report per tick — clusters surfaced/filed are the work; a no-op tick names why it did nothing.
+			const skipReason: AutomationSkipReason | undefined = found === 0 ? "idle" : filed === 0 ? "already-handled" : undefined;
+			this.deps.record?.({
+				durationMs: (this.deps.now ?? Date.now)() - t0,
+				found,
+				filed,
+				deduped: Math.max(0, found - filed),
+				skipReason,
+				detail: found === 0 ? "no qualifying opportunity clusters" : filed === 0 ? "opportunity clusters already filed or capped" : undefined,
+			});
 		}
 	}
 

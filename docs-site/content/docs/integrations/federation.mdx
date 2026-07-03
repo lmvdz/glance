@@ -1,6 +1,6 @@
 ---
 title: Federation
-description: Coordinate omp-squad operators across machines over a Tailscale tailnet — shared presence and cross-host file leases.
+description: Coordinate omp-squad operators across machines — shared presence, cross-host file leases, and collision detection keyed on repo identity.
 ---
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
@@ -8,8 +8,8 @@ import { Steps, Step } from 'fumadocs-ui/components/steps';
 
 omp-squad coordinates agents on **one** machine through the shared registries under
 `~/.omp/squad` (presence + leases, one file per claim, heartbeat-TTL). Federation promotes
-that coordination **across machines** over a Tailscale tailnet, so two operators working the
-same repo from different hosts see each other's agents and file leases.
+that coordination **across machines**, so two operators working the same repo from different
+hosts see each other's agents and file leases.
 
 ```text
  host A                         coordinator                    host B
@@ -21,24 +21,48 @@ same repo from different hosts see each other's agents and file leases.
 ```
 
 <Callout type="info">
-Federation is **opt-in and off by default**. With no coordinator set the manager uses a
-`NullFederationBus` — every federation path stays live but inert, and everything works as a
-single operator. Setting `OMP_SQUAD_COORDINATOR` swaps in the `TailnetFederationBus`.
+**Federation is on by default.** The daemon starts with a `LocalFederationBus` — a real bus that
+works on a single host with zero config (local pub/sub, own roster, collision detection). It
+gossips to peers only once `OMP_SQUAD_COORDINATOR` is set. `OMP_SQUAD_FEDERATION=0` opts all the
+way out, reverting to the inert `NullFederationBus`.
 </Callout>
 
-## Joining a team room
+## Single-host operation (zero config)
 
-The daemon joins a team room when `OMP_SQUAD_COORDINATOR` points at a coordinator WebSocket:
+`LocalFederationBus` is the default. With no coordinator URL it runs entirely locally:
+- Presence is published to a local loopback (the roster updates immediately).
+- File leases are tracked in the local registry.
+- Collision detection runs over the local roster.
+- `/api/federation`, `/api/leases`, and `/api/fabric` return real local data (operator roster,
+  live leases, infrastructure summary).
+
+No coordinator means no peers, no cross-host gossip — but everything that runs on one machine
+works fully, including collision detection between agents on that machine.
+
+```sh title="disable federation entirely"
+OMP_SQUAD_FEDERATION=0 omp-squad up
+# → federation: disabled (OMP_SQUAD_FEDERATION=0)
+```
+
+## Joining a team room (cross-host)
+
+Set `OMP_SQUAD_COORDINATOR` to a coordinator WebSocket URL. The daemon's `LocalFederationBus`
+creates an inner `TailnetFederationBus` that connects in the background:
 
 <TypeTable
   type={{
     OMP_SQUAD_COORDINATOR: {
       type: 'ws url',
-      description: 'Coordinator WebSocket URL. Unset → NullFederationBus (single operator). Set → TailnetFederationBus joins the room.',
+      description: 'Coordinator WebSocket URL. Unset → local-only (single host). Set → gossips presence + leases to peers over the coordinator.',
     },
     OMP_SQUAD_OPERATOR: {
       type: 'string',
       description: 'This operator identity (Actor id) in the room. Defaults to the OS username, then "local".',
+    },
+    OMP_SQUAD_FEDERATION: {
+      type: 'flag',
+      default: 'on',
+      description: 'Set to "0" to disable federation entirely (revert to NullFederationBus).',
     },
   }}
 />
@@ -53,6 +77,14 @@ omp-squad up
 The operator identity is `OMP_SQUAD_OPERATOR || os.userInfo().username || "local"`, with
 `origin: "local"`. The same resolution is mirrored in the server (for labelling the local
 roster) and in `federation-sync`, so every surface agrees on who "self" is.
+
+<Callout type="warn">
+True cross-host federation requires three things not available on a single workstation: (1) a
+**deployed coordinator** reachable by all hosts, (2) a **second physical host** running
+`omp-squad up` pointed at the same coordinator, and (3) a **Tailscale tailnet** for remote-operator
+identity — `tailscale whois` only resolves on a real tailnet; on localhost it falls back to `"local"`.
+The rest of this page explains what works without them.
+</Callout>
 
 ## The coordinator
 
@@ -169,7 +201,12 @@ Two pure primitives fold peer rosters together:
 - `mergeRosters(self, peers)` — dedupes by `operator.id`, newest `updatedAt` wins, and pins
   `self` to the head of the list.
 - `detectCollisions(presences)` — flags repos where agents owned by **different** operators
-  share the same branch.
+  share the same branch, keyed on the **normalized `repoId`** (see [Cross-host repo identity](#cross-host-repo-identity) below) — not the host-local path.
+
+This means:
+- Two hosts that cloned the **same origin at different local paths** still produce a collision — the `repoId` matches.
+- Two agents working on repos that **happen to share a directory name** but have different origins do NOT produce a false collision.
+- Each `AgentDTO` carries a `repoId` field stamped by `LocalFederationBus` before the presence frame leaves the host.
 
 `federationView` composes them; `PeerRoster` collects the newest presence frame per remote
 operator and prunes any peer that stops gossiping past the 90-second TTL
@@ -184,20 +221,14 @@ The server exposes `GET /api/federation` (bearer-gated like the rest), returning
 { coordinator: string | null, operators: OperatorPresence[], collisions: Collision[] }
 ```
 
-`self` (this host's live roster) is merged with peers reached through a **listener-only**
-`PeerPresenceTracker` — a second, read-only `TailnetFederationBus` connection that never
-publishes — created in `server.start()` only when `OMP_SQUAD_COORDINATOR` is set. The web
-dashboard renders this as the **Federation** panel: peer operators, their agents, and any
-shared-branch collisions. With no coordinator the `coordinator` field is `null` and the panel
-stays hidden; the endpoint still returns just `self` (no peers, no collisions) and nothing
-errors.
+`self` (this host's live roster) is always included. With no coordinator the `coordinator`
+field is `null`, the `operators` array contains only the local operator, and the panel in
+the web dashboard stays hidden. The endpoint never errors in either mode — it always returns
+real local data. In DB mode the roster is per-org scoped so one org never sees another's agents.
 
-<Callout type="warn">
-Collision detection keys on `AgentDTO.repo`, a **host-local path** — so cross-operator branch
-collisions fire reliably only when both hosts use the same checkout path. Full cross-host
-collision matching wants a normalized `repoId` on `AgentDTO`; until then, cross-host
-coordination leans on the lease layer below, which already keys on a normalized repo identity.
-</Callout>
+The **web dashboard** renders this as the **Federation** panel in the project view: peer
+operators, their agents, and any shared-branch collisions. With a coordinator configured and
+a second host connected, cross-host collisions surface here.
 
 ## Cross-host file leasing
 
@@ -257,6 +288,16 @@ ssh://git@github.com/acme/app.git
 It reads `git config --get remote.origin.url` (the raw configured URL, **not**
 `git remote get-url`, which expands per-machine `insteadOf` rewrites). A repo with no origin
 falls back to `name:<basename>` — best-effort, advisory only.
+
+## API surface
+
+All three federation endpoints are real and available in both single-host and cross-host modes:
+
+| Route | Returns |
+|---|---|
+| `GET /api/federation` | `{ coordinator, operators, collisions }` — merged local+peer roster, cross-host collisions keyed on `repoId`. |
+| `GET /api/leases?repo=<path>` | Live file leases for the requested repo (or cwd). Per-org scoped in DB mode. |
+| `GET /api/fabric?repo=<path>` | Infra summary: roster, leases, and health for the requested repo. Always includes leases. |
 
 ## Related
 

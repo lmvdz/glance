@@ -1,0 +1,129 @@
+---
+title: Capabilities
+description: Install, verify, and run capability packs — profiles, workflows, and tool grants that scope what a spawned agent can do.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+A **capability pack** is a versioned, signed bundle that declares agent profiles, workflow
+step-graphs, tool scopes, and required environment variables. Once installed and enabled, a
+capability binding can be invoked via `omp-squad run cap:<binding-key>` to spawn a
+pre-configured agent scoped to exactly the tools and workflow the capability declares.
+
+All capability logic lives in `src/capabilities/index.ts` and `src/squad-manager.ts`.
+
+## Lifecycle
+
+A pack moves through a state machine before it can run:
+
+```text
+imported → validated → approved → enabled
+                └─(failed)→ failed
+enabled → disabled → removed
+```
+
+Every state transition that touches a pack runs `verifyCapabilityPack` — so a pack that
+passes verification once but is later found to be incompatible is blocked at upgrade time.
+
+## Verification
+
+`verifyCapabilityPack` validates the pack at import, approve, and upgrade time. A failed verdict
+**blocks installation, enabling, and upgrade** — the pack stays in `failed` state until fixed.
+
+What it checks:
+
+- Required fields present: `id`, `slug`, `version`, `checksum`, `title`.
+- `schemaVersion` is a supported value.
+- `compatibility.ompSquad` semver range is satisfied by the running build (missing range is a
+  warning, not a failure).
+- Every declared file path is a safe install-relative path — no absolute paths, no `..` traversal,
+  no null bytes, no drive-absolute paths.
+
+Failures block the lifecycle; warnings are surfaced in the verification result but do not block.
+
+## Workflow bindings
+
+A capability's `workflow` binding declares an inline step-graph (a list of `{ id, label, next }` steps)
+or points at an authored `.fabro` file. Previously, inline step-graph bindings were silently
+dropped — the binding key was passed as the workflow path, which does not exist on disk, so the agent
+ran as a plain omp-operator and the declared steps never executed.
+
+Now, when a capability is invoked:
+
+1. If the binding has a `sourcePath` (an authored file), it is used directly.
+2. If the binding has an inline step-graph, it is materialized to a `.fabro` DOT graph file
+   in the per-install state directory, validated by the same parser the `WorkflowDriver` uses,
+   then passed to `create` as the `workflow` path.
+
+The result is that **inline step graphs actually run** — the `WorkflowDriver` executes the declared
+steps in order.
+
+## Tool grants and agent scoping
+
+A capability profile can declare an allow-list of host tools the spawned agent may use. When
+an agent is spawned from a capability binding, `toolGrantsPrompt` builds a hard system-prompt
+constraint naming the allowed tools, and the allow-list is recorded on the `AgentRecord` as
+`toolGrants`.
+
+Enforcement is two-layered:
+
+1. **System prompt** — the agent's system prompt includes a `Capability tool grant (hard constraint)`
+   section listing the allowed tools. The agent is instructed not to request or attempt any tool
+   outside the list.
+2. **Host-tool seam** — when an agent makes a host-tool call, `onHostTool` checks the call's
+   `toolName` against `rec.toolGrants`. A call outside the grant is hard-denied: the agent receives
+   an error (`tool "<name>" is not granted to this capability profile`) and the call is never executed.
+
+<Callout type="info">
+Hard enforcement of omp's core tools (Read, Edit, Bash) requires an `--allowed-tools` flag on the
+underlying `omp` process; that flag does not yet exist. The prompt constraint plus the host-tool
+gate are the strongest enforcement reachable today. See `src/squad-manager.ts`.
+</Callout>
+
+## Required environment variables
+
+A pack can declare `requiredEnv: ["MY_KEY", "OTHER_KEY"]` in its manifest. Before spawning a
+capability-bound agent, omp-squad checks whether every declared env var is set and non-empty in
+`process.env`. If any are missing, the spawn is **refused** with a clear error naming the missing
+variables — rather than spawning an agent that will fail opaquely later:
+
+```text
+Error: capability "my-cap" requires environment variable(s) not set: MY_KEY, OTHER_KEY
+```
+
+The refusal is also recorded in the audit log as `capability.run.blocked`.
+
+## Context sharing
+
+Capabilities can declare context imports and exports (`context.imports`, `context.exports`).
+Two guard functions in `src/capabilities/index.ts` gate every cross-capability context transfer:
+
+- `canExportCapabilityContext(install, namespace, peer)` — returns `true` only if the namespace
+  is in the install's declared `exports`, the peer is in `allowedPeers`, and the install's
+  `shareable` flag is set.
+- `redactCapabilityContext(context, policy)` — strips any field whose namespace matches the
+  install's `redactions` list before the context leaves the capability.
+
+Both guards run on every export; a capability that does not declare an export namespace or does
+not allow the peer simply never shares that context.
+
+## Running a capability
+
+```sh title="run a capability binding"
+omp-squad run cap:my-binding --repo /path/to/repo
+```
+
+This resolves the binding by key, enforces `requiredEnv`, resolves the workflow path (or
+materializes the inline step-graph), and spawns an agent under the capability's profile +
+tool-grant constraints.
+
+## Source
+
+- `src/capabilities/index.ts` — `verifyCapabilityPack`, `canExportCapabilityContext`, `redactCapabilityContext`, `capabilityWorkflowDefinitions`, `capabilityWorkflowToDot`
+- `src/squad-manager.ts` — `toolGrantsPrompt`, `create` (tool-grant injection), `runCapability` (binding resolution + `requiredEnv` enforcement), `resolveCapabilityWorkflowPath`
+
+<Cards>
+  <Card title="Workflows" href="/docs/workflows" description="Workflow authoring, step-graphs, and the engine the capability driver runs." />
+  <Card title="Configuration" href="/docs/reference/configuration" description="All environment variables in one place." />
+</Cards>

@@ -176,16 +176,22 @@ The web UI is an **organizational command center**, not a flat list:
 
 - **Projects** (sidebar) — agents grouped by repo, each with a live status rollup and a needs-input badge.
 - **Global views** (sidebar) — fleet-wide surfaces, each deep-linkable and reachable via the ⌘K command palette:
-  - **Features** — a kanban of in-flight features by lifecycle stage (planned → review → landed → done); spawn a research→plan→implement workflow that tracks itself across the columns.
+  - **Features** — a kanban of in-flight features by lifecycle stage (planned → review → landed → done); each feature carries structured canon source, candidate worktrees/plan revisions, proof freshness, and promotion readiness from the daemon instead of relying on agent prose.
   - **Queue** — an attention inbox of every agent blocked on input (and errored) across the whole fleet, answerable in place, oldest-first, so you supervise by exception.
   - **Workflows** — definitions for workflows and meta-workflows (assigned owners, allowed/disallowed capabilities, ordered steps) plus live workflow runs with checkpoint progress.
   - **Race** — a race-board: one lane per agent with the workflow's phases as a segmented track, filled by stage progress and labelled with the current phase, so you see who's where in the pipeline and who's stalled at a glance. Fan-out branches nest under their parent.
   - **Audit** — an append-only trail of every actor-initiated fleet action (create / prompt / answer / interrupt / kill / restart / remove / commission / land) with actor, target, and outcome, newest-first, filterable by action and live-updated. Backed by `GET /api/audit` (`?limit=&actor=&action=&target=`); persisted as JSONL under the state dir.
   - **Trace API** — `GET /api/trace/:id` pulls the North Star audit/diagnostics tree for a feature (`:id` or `feat:<id>`) or run (`run:<agentId>:<runId>`). Receipts keep lossless rollups (tokens/cost/tool counts) for every run; fine spans are tail-sampled, with errors always kept. `land` / comment-resolve lifecycle spans are derived from the audit log at read time, not written as a second store.
+- **Proof and provenance** — feature detail distinguishes canon (`plans/<name>/` markdown, persisted feature metadata, or linked Plane issues) from candidate work (agent branches/worktrees and planner-authored plan revisions). Deterministic proof is the land gate: fresh/failed/stale/none comes from recorded proof at the candidate HEAD; screenshots, traces, receipts, tokens, costs, and tool counts are evidence only. Readiness explains the current blocker (`needs-proof`, `proof-failed`, `proof-stale`, `blocked-input`, `diverged`, `uncommitted`, or `ready`) and the next operator action. Candidate plan revisions stay reviewable as `candidate`, `accepted`, `rejected`, or `superseded`; rejecting preserves provenance and never mutates canon.
 - **Project view** — the agents advancing that project, a *spawn-in-this-project* composer (type a task → agent), and a **Plane issues** panel (open issues; click to spawn an agent on one).
 - **Agent view** — transcript + composer + pending-answer controls, plus side panels:
   - **Subagents** — the live tree of `task`-spawned children (via omp's RPC subagent stream).
   - **Changes** — the agent's worktree git diff, so you can review before merging.
+  - **Agent controls** — interrupt (pause mid-run), restart (re-run from current state), remove (drop the agent; optionally delete its worktree), set model (change the LLM for the next run), and answer a blocked agent inline.
+- **Automation** — what the daemon's background loops (Scout, Observer, orchestrator, Plane poller) have been doing and any failures; driven by `GET /api/automation`.
+- **Fleet Health** — aggregate fleet state: WIP usage, error counts, needs-input counts, and resource pressure indicators.
+- **Heat** — code activity heat map across the fleet's active worktrees.
+- **Federation / Leases** — peer operators, their live agents, shared-branch collision warnings, and cross-host file leases in flight. Backed by `GET /api/federation`, `GET /api/leases`, and `GET /api/fabric`; hidden when no coordinator is configured.
 
 ### Plane integration
 
@@ -241,9 +247,26 @@ origins (avoid `*` outside local testing), and rotate by replacing the campaign 
 
 Operators use the authenticated feedback API to review `GET /api/feedback/items`, add validation
 votes, accept or reject, then promote accepted / needs-validation items to Plane with
-`POST /api/feedback/items/:id/promote`. Rewards are a ledger only: reward campaigns create `pending`
-entries; operators can approve, void, and mark paid with a manual/provider reference, but omp-squad
-never pays users automatically.
+`POST /api/feedback/items/:id/promote`. Rewards are a ledger by default; with the **Tremendous**
+integration configured they can pay out automatically.
+
+**Reward disbursement (opt-in via Tremendous).** Set `OMP_SQUAD_TREMENDOUS_API_KEY` to activate
+real payouts — the daemon delivers rewards via email through [Tremendous](https://www.tremendous.com)
+(gift card / PayPal / ACH / Visa, operator's choice). Idempotent: the reward id is used as the
+Tremendous order `external_id`, so a retried payout for the same reward never creates a second order.
+`markFeedbackRewardPaid` pays out then marks the reward paid; a failed payout leaves the reward
+`approved` (retry manually). Without the API key a manual recorder is used — the existing ledger
+workflow stays unchanged.
+
+| Env | Meaning |
+|---|---|
+| `OMP_SQUAD_TREMENDOUS_API_KEY` | Bearer token — presence activates Tremendous payouts |
+| `OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID` | Which Tremendous balance/account funds the payout |
+| `OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID` | Redemption-options campaign the recipient sees |
+| `OMP_SQUAD_TREMENDOUS_ENV` | `sandbox` (default) or `production` — use sandbox first |
+
+Go-live checklist: set the four vars (sandbox first), trigger one sandbox order to confirm the
+integration, then switch `OMP_SQUAD_TREMENDOUS_ENV=production`. See `src/payments/` for details.
 
 Safety notes: serve the widget over HTTPS; screenshots may contain PII; text/metadata/screenshot sizes
 are capped, feedback records persist to file/DB storage, and screenshot files live under the state dir —
@@ -253,7 +276,9 @@ prune/monitor disk growth for high-volume campaigns.
 and spawns a routed agent per new open issue (issue → routed run → verify → land → close), so work
 starts with nobody typing. Dispatch is ordered by Plane priority (`urgent` → `high` → `medium` →
 `low` → `none`), while `blocked_by`, `do-not-auto-land`, WIP caps, and rate-limit pauses still win.
-Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so a backlog can't storm:
+Spawned issue ids persist in `<stateDir>/dispatch-ledger.json`, so a daemon restart does not re-spawn
+finished/failed agents for still-open issues. Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so
+a backlog can't storm:
 
 | Env | Meaning |
 |---|---|
@@ -282,6 +307,19 @@ moving without a human. All bounded and **on by default** — set the matching `
 | `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
 | `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates) so blocked agents advance without you — **on by default** (`=0` to disable). Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
 | `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
+| `OMP_SQUAD_RESOURCE_GATE` | Set (any value) to enable host-pressure admission gating. When set, a spawn is refused if `load1/ncpu > OMP_SQUAD_MAX_LOAD_PER_CPU` or free-memory ratio drops below `OMP_SQUAD_MIN_FREE_RATIO`. Off by default (use `up.sh` which sets it). |
+| `OMP_SQUAD_MAX_LOAD_PER_CPU` | Block spawns when 1-minute load average / CPU count exceeds this value (default `1.5`). Read per-call, so adjustable without a restart. |
+| `OMP_SQUAD_MAX_RSS_MB` | Watchdog RSS ceiling per agent process (default `1024` MB); the agent is killed and set to error if exceeded. |
+| `OMP_SQUAD_MIN_FREE_RATIO` | Block spawns when host free-memory fraction drops below this value (default `0.1`). Read per-call. |
+| `OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR` | Per-hour LLM-call budget for the Scout backlog harvester (default `30`; `<=0` for unlimited). Bounds spend in verbose multi-agent fleets. |
+| `OMP_SQUAD_AUTO_SUPERVISE` | Start the external file-mode supervisor that answers routine agent prompts hands-free (default on; `=0` or `--no-supervise` to disable). File mode only. |
+| `OMP_SQUAD_SUPERVISE_MODEL` | Model override for the auto-supervisor's LLM calls. |
+
+**Background loop visibility.** The Scout, Observer, and orchestrator loops surface their activity
+and failures through the automation log. Use `omp-squad automation` (or `GET /api/automation`) to
+see what each loop has been doing, how many LLM calls the Scout has spent this hour, and any
+transient failures (Plane poll errors get one automatic retry before they are logged; no silent
+swallowing). The dashboard's **Automation** panel shows the same feed live.
 
 ### Trace export
 
@@ -297,6 +335,7 @@ Tracing is receipt-native: every receipt keeps its cost/token/tool rollup, while
 | `OMP_SQUAD_TRACE_EXPORT_OTLP_URL` | OTLP/HTTP JSON endpoint, fetched through the SSRF guard |
 | `OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL` | Langfuse ingest endpoint, fetched through the SSRF guard |
 | `OMP_SQUAD_TRACE_EXPORT_DATADOG_URL` | Datadog ingest endpoint, fetched through the SSRF guard |
+| `OMP_SQUAD_TRACE_ALLOW_PRIVATE` | `=1` allows trace export to private/loopback collector URLs (OTLP agent, private Langfuse, tailnet Datadog gateway). Default off — the SSRF guard blocks private-range IPs. When set, only the exact origins you configured in the three `OMP_SQUAD_TRACE_EXPORT_*_URL` vars above are exempted; any other private host (redirects, metadata IPs, unconfigured URLs) is still blocked. Set this when your collector runs on `localhost` or an RFC1918 address. |
 
 With auto-land on, work merges without a human in the loop, so the safety net is the **verify gate**
 (build + tests) plus the resolver's reviewer pass — and the risk gate that leaves every destructive
@@ -394,6 +433,8 @@ a red-then-green pair is logged as flaky and nothing is filed (OMPSQ-184).
 | Env | Meaning |
 |---|---|
 | `OMP_SQUAD_OBSERVE` | Self-audit loop — **on** when Plane is configured (`=0` to disable; then no timer is armed) |
+| `OMP_SQUAD_PLANSYNC` | Plan STATUS reconciler — **on** when Plane is configured (`=0` to disable). Every tick, each `plans/<x>/NN-concern.md` carrying a `PLANE: <ID>` pointer is checked against the tracker: a completed/cancelled issue closes the doc's STATUS, a started issue moves an open doc to `in_progress`. It NEVER reopens a done doc — that drift is logged + surfaced on the Automation feed as a conflict instead |
+| `OMP_SQUAD_PLANSYNC_INTERVAL_MS` | Plan-sync tick interval (default `300000` = 5 min) |
 | `OMP_SQUAD_OBSERVE_MAX` | Hard cap on observer-filed *open* issues (default `10`); past it, log + skip |
 | `OMP_SQUAD_OBSERVE_AUTODISPATCH` | `=1` files plain findings *without* the do-not-auto-land marker so the dispatcher fixes them; structural findings stay needs-triage regardless |
 | `OMP_SQUAD_OBSERVE_AUTOFIX` | `=1` lets the loop action autofixable findings directly (reap a landed survivor); never touches main/code; default off |
@@ -471,20 +512,39 @@ commit, so the prune can't delete a worktree out from under a running agent. Dis
 `OMP_SQUAD_WORKTREE_REAP=0`; tune the freshness window with `OMP_SQUAD_WORKTREE_GRACE_MS` (default
 120000).
 
-### Federation (opt-in)
+### Federation
 
-`OMP_SQUAD_COORDINATOR=<ws url>` joins the daemon to a team coordinator as `OMP_SQUAD_OPERATOR`
-(or your OS username) via `TailnetFederationBus`; unset → single-operator with `NullFederationBus`.
-The coordinator relay (`bun src/coordinator-main.ts`) binds `127.0.0.1` by default; to expose it
-(`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`) set a shared `OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator
-and every client, or it refuses to start (override with `OMP_SQUAD_INSECURE=1`). Without a token any
-reachable peer can snoop and spoof presence/lease frames.
+Federation is **on by default**. The daemon uses `LocalFederationBus` — a real bus that works
+locally with no config (loopback pub/sub: your own roster and leases are live and observable in
+the command center without any peer). `OMP_SQUAD_FEDERATION=0` is the explicit opt-out back to
+the inert `NullFederationBus` (hides the Federation panel entirely).
 
-When a coordinator is set, the command center surfaces who else is on the tailnet: a
-**Federation** panel (in each project view) lists peer operators, their live agents, and any
-**shared-branch collisions** — repos where agents owned by different operators sit on the same
-branch. It's backed by `GET /api/federation` (`{ coordinator, operators, collisions }`, bearer-gated).
-With no coordinator the panel stays hidden and the endpoint returns just your own roster.
+**Single-host (default, zero config).** The local bus keeps your roster, presence, and leases
+in-process. `/api/federation`, `/api/leases`, and `/api/fabric` return real data (per-org scoped
+in DB mode). No coordinator needed.
+
+**Cross-host.** Set `OMP_SQUAD_COORDINATOR=ws://<coordinator-host>:<port>` to join a team
+coordinator. The daemon starts a `TailnetFederationBus` that gossips presence and file leases
+to peers and receives theirs. The coordinator relay (`bun src/coordinator-main.ts`) binds
+`127.0.0.1` by default; to expose it (`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`), set a shared
+`OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator and every client — a non-loopback bind without
+a token is refused (override with `OMP_SQUAD_INSECURE=1`).
+
+When a coordinator is configured, the command center **Federation** panel lists peer operators,
+their live agents, and any **shared-branch collisions** — repos where agents owned by different
+operators sit on the same branch. Collisions are keyed on the repo's **normalized git origin URL**
+(via `src/repo-identity.ts`), not a host-local path: two operators on different machines checking
+out the same GitHub repo now collide correctly, and unrelated repos that share a basename don't
+false-collide. Each `AgentDTO` carries a `repoId` field for this cross-host identity.
+
+`GET /api/federation` (`{ coordinator, operators, collisions }`, bearer-gated) returns real data.
+With no coordinator the panel stays hidden and the endpoint returns just your own roster (no peers,
+no collisions).
+
+**What remains for full cross-host federation:** a deployed coordinator URL plus a second physical
+host. Remote-command identity uses `tailscale whois <peer-ip>` — this resolves only on a real
+tailnet. Without a verifiable tailnet IP, inbound command actors stay `origin:"remote"` and resolve
+to the read-only `viewer` tier.
 
 ## Remote access & mobile
 
@@ -556,9 +616,14 @@ mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-a
 
 | Env / flag | Meaning | Default |
 |---|---|---|
+| `$OMP_SQUAD_PORT` | HTTP/WS listen port | `7878` |
 | `--host` / `$OMP_SQUAD_HOST` | Bind address; `0.0.0.0` exposes on the LAN/tailnet | `127.0.0.1` |
 | `$OMP_SQUAD_TLS_CERT` + `$OMP_SQUAD_TLS_KEY` | Terminate TLS in-process (PEM paths) | plain HTTP |
 | `$OMP_SQUAD_PUSH_SUBJECT` | VAPID `sub` contact (`mailto:`/`https:`) | `mailto:squad@localhost` |
+| `$OMP_SQUAD_OPERATOR_TOKEN` | Pre-shared bearer token granting operator-tier access (alternative to the generated access token, e.g. for scripts). | _(unset)_ |
+| `$OMP_SQUAD_VIEWER_TOKEN` | Pre-shared bearer token granting read-only viewer-tier access. | _(unset)_ |
+| `$OMP_SQUAD_ORG_IDLE_MS` | TTL before an agent-less org manager is evicted from the registry in DB mode (default `600000` ms = 10 min). | `600000` |
+| `$OMP_SQUAD_REPO_ROOTS` | Comma-separated paths smart-spawn searches for repos (default: `<cwd>/..`, `~/sui`, `~/src`, `~/code`). | _(auto)_ |
 
 **HTTPS is required** to install the PWA and receive background push — browsers only allow
 service workers + Web Push in a secure context (`http://localhost` is exempt, a LAN IP is
@@ -849,6 +914,19 @@ with the detail noting it *landed onto a red baseline*. Green-base behavior is u
 that regresses a green base is still rolled back to keep `main` green. The base gate runs **only when
 the merged gate fails**, so the common green land still runs the gate exactly once.
 
+**Pre-land regression gate (opt-in).** Set `OMP_SQUAD_REGRESSION_GATE=1` to make every land
+prove the full test suite on the *exact merged result* before `main` advances. This is stricter
+than the per-feature acceptance gate (`verify:` / `opts.verify`), which can be narrower than the
+full suite. The gate runs `detectVerify(repo)` — the same Bun/Cargo/Go suite command the daemon
+uses for baseline checks — *after* the acceptance gate passes, so it is an additional layer, not
+a replacement. Failure semantics match the base-aware gate: if the full suite fails on merged
+`main`, `landAgent` resets to `head0`, runs the full suite on the base, and compares extracted
+failure sets (`decideRegressionGate`). Only **new** failures block the land (and leave `main` at
+`head0`); pre-existing failures that the branch didn't introduce allow a re-merge with a logged
+note. Auto-resolved conflict lands inherit the same gate before the reviewer call. Off by default
+to preserve existing behavior; enable on repos where a suite-wide regression cannot slip through a
+narrower per-feature acceptance gate.
+
 **Landing it automatically, too.** `OMP_SQUAD_AUTORESOLVE` decides what happens *when* a land
 conflicts; **`OMP_SQUAD_AUTOLAND=1`** decides *that a land happens at all* with no operator: a
 workflow run that finishes successfully (`--verify`, plan-implement, an auto-dispatched issue)
@@ -866,12 +944,16 @@ this *staged* outcome as a hold — never a blocked land — so it neither re-me
 
 | Env var | Effect |
 |---|---|
+| `OMP_SQUAD_REGRESSION_GATE` | `=1` makes every land run the full suite (`detectVerify`) on the merged result; blocks if new failures introduced vs base (off by default) |
 | `OMP_SQUAD_AUTORESOLVE` | `landAgent`'s in-process rebase conflict resolver, distinct from the manual `resolve-conflict` workflow (on by default; `=0` to disable) |
 | `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (on by default; `=0` to disable) |
 | `OMP_SQUAD_LAND_CONFIRM` | Safety valve: the auto-land loop still verifies idle agents, but a GREEN verify only marks them **✓ ready to land** (no merge) — the operator merges via the existing one-tap Land (off by default) |
 | `OMP_SQUAD_AUTORESOLVE_CONFIRM` | An AUTO land that had to auto-resolve a conflict is **staged** for a one-tap Land instead of merged with no human (on by default; `=0` to auto-merge resolved conflicts). A clean auto land still merges; operator lands always merge |
 | `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
 | `OMP_SQUAD_AUTOLAND_FAIL_CAP` | Consecutive failed auto-lands before a branch is parked instead of re-merged (default `3`); restart-safe via a persisted, branch-keyed ledger (`<stateDir>/land-failures.json`). Operator land bypasses it; the Observer files a bug for the parked branch |
+| `OMP_SQUAD_GATE_ENV` | Comma-separated env var names re-admitted into verify/proof/regression gate runs. Gates execute agent-authored test code, so they get a **secret-scrubbed** env by default (`OMP_SQUAD_*`, secret-shaped names like `*_API_KEY`/`*_TOKEN`/`*_SECRET`, `DATABASE_URL` removed; toolchain vars pass through). Name a var here if a suite legitimately needs it |
+| `OMP_SQUAD_GATE_SANDBOX` | Container image for gate runs. When set, every verify/proof/regression gate executes inside `docker run --rm --network none` with only the worktree (+ its main repo, for the worktree gitdir pointer) bind-mounted at their host paths and the scrubbed env passed explicitly — agent-authored tests can no longer read the daemon's filesystem or call out. The image must provide `bash` + the repo's toolchain (e.g. an `oven/bun` derivative). Unset ⇒ host execution as before |
+| `OMP_SQUAD_GATE_SANDBOX_NETWORK` | Docker network mode for sandboxed gates (default `none`; set `bridge` for suites that legitimately need network) |
 
 ## Sandboxed execution — agents off your laptop
 
@@ -912,37 +994,52 @@ omp-squad add ~/code/myproject --acp --task "Add rate limiting to the public API
   mappings are verified in the test suite against a fake in-process ACP agent — no auggie, no
   account, no tokens.
 
-## Phase 2 — cross-operator federation
+## Cross-operator federation — what's live
 
-The single-operator squad above is built **federation-ready**: the manager already
-programs against a transport-agnostic `FederationBus` (today a no-op `NullFederationBus`),
-carries per-agent collision metadata (repo / branch / worktree), and routes every
-command through one `applyCommand(cmd, actor)` entry point that accepts a remote actor.
+Federation is no longer a stub. The manager programs against a `FederationBus` seam, and
+`LocalFederationBus` is the daemon default — it works on a single host with zero config and
+extends to cross-host gossip once a coordinator URL is set.
 
-The Phase-2 goal: a whole team's squads federate so a coordinator can **see what everyone's
-agents are doing** and **steer a teammate's live agent** when they're away — their session
-already has the fresh context.
+**What is live today:**
 
-- **Transport: Tailscale.** Run the coordinator on the tailnet; identity comes for free
-  from `tailscale whois <peer-ip>` (sourced from your SSO), ACLs gate reachability, and
-  WireGuard encrypts everything — collapsing transport + identity + authz into the network
-  layer. (A `RelayFederationBus` over omp's content-blind `/collab` relay is the zero-infra
-  alternative for small / cross-org rooms.)
-- **What flows:** lightweight **presence** (operator, availability, agents, repos/branches/
-  files-in-flight) by default — not transcripts. Deep view stays opt-in, reusing `/collab`'s
-  view-link vs full-link split.
-- **Remote steering** *(not yet implemented)* — the design: a peer's `{command, actor}` rides
-  the bus to the owning squad, which authorizes it against the operator's **delegation/availability
-  policy** (away/ill can auto-grant to delegates) before applying — and **audits** every
-  cross-operator action. Today only the *receive* side exists (`onRemoteCommand` +
-  `applyCommand(cmd, actor)`); no code yet *sends* a command frame, so driving a teammate's live
-  agent is the remaining Phase-2 work.
-- **Collision avoidance** *(live)* — overlapping repo+path across operators surfaces as a
-  warning, so two people don't have agents editing the same file.
+- **`LocalFederationBus` as the default** — single-host loopback pub/sub; presence, leases,
+  and collision detection work in-process. `OMP_SQUAD_FEDERATION=0` to opt out entirely.
+- **Coordinator relay** (`bun src/coordinator-main.ts`) — dumb WebSocket fan-out; built,
+  tested, token-gated for non-loopback binds.
+- **Cross-host presence gossip + collision detection** — `TailnetFederationBus` publishes this
+  host's roster to the coordinator and receives peers'; `mergeRosters` + `detectCollisions`
+  (in `src/federation.ts`) fold them into a roster-of-rosters. Collisions key on the repo's
+  **normalized git origin URL** (`src/repo-identity.ts`), not a host-local path, so same-GitHub-
+  repo / different-machine checkouts collide and same-basename unrelated repos don't.
+  Each `AgentDTO` carries a `repoId` field stamped before it leaves the local host.
+- **Cross-host file leasing** — `federation-sync` publishes this host's leases (by repo
+  identity) and mirrors peers'; the lease-hook warns before you edit a file a remote teammate
+  holds. In file mode, the daemon auto-starts the sync when a coordinator is configured.
+- **Live API surfaces** — `/api/federation`, `/api/leases`, and `/api/fabric` return real data
+  (per-org scoped in DB mode); the command center Federation/Leases panel is not a placeholder.
+- **Transport security** — remote command actors are verified via `tailscale whois <peer-ip>`;
+  wire-asserted `role`/`origin` are NEVER trusted; an unverified peer stays at the read-only
+  `viewer` tier.
 
-`src/federation.ts` defines the seam. `TailnetFederationBus` is implemented for **presence** and
-**cross-host leases / collision detection** (live today); **remote steering** — the
-delegation/availability policy plus the outbound command frame — is the rest of Phase 2.
+**What still requires setup for true cross-host use:**
+
+- A deployed coordinator URL (`OMP_SQUAD_COORDINATOR=ws://…`) plus a second physical host.
+- `tailscale whois` for peer identity — resolves only on a real tailnet; without it, inbound
+  command actors are unverified and fall back to `viewer`.
+
+**Remote steering** (driving a teammate's live agent from your command center) — both halves
+exist now. The receive side (`onRemoteCommand` + `applyCommand(cmd, actor)`) authorizes via
+whois-verified actor + RBAC; the send side is `bus.sendCommand(cmd, to)` behind
+`POST /api/federation/command` (`{to: "<operator id>", cmd: {type, …}}`, operator-tier,
+audited as `federation.command`). Frames are addressed — peers drop commands not meant for
+them — and the coordinator stamps the sender's real socket address as `ip` (any client-sent
+`ip` is overwritten), so the receiver's `tailscale whois` verifies the true sender, never a
+claimed identity. Sending grants nothing: an unverified sender lands as read-only `viewer`
+on the receiving daemon. Still missing for a full remote-steering UX: a command-center UI
+affordance on the Federation panel (the API is the seam) and a reply/ack channel (effects
+surface through the peer's gossiped presence).
+
+See [`docs/federation.md`](docs/federation.md) for the full architecture and runbook.
 
 ## Layout
 
@@ -993,6 +1090,20 @@ delegation/availability policy plus the outbound command frame — is the rest o
 | `src/workflow/commission-executor.ts` | `CommissionExecutor` — runs the commission graph's action nodes |
 | `src/workflow/verify-workflow.ts` | `buildVerifyWorkflow` — synthesizes the `--verify` implement → verify → fixup loop |
 | `src/workflow/stylesheet.ts` | CSS-like `model_stylesheet` parser + per-node model/effort resolver |
+
+**Durable resume (survives a full daemon crash).** A workflow run resumes from its persisted checkpoint even
+after the inner thread *and* the daemon are gone — not only when the inner host survived. The engine writes a
+**two-phase checkpoint** per node: one at entry (warm reattach) and one after the node finishes with
+`currentNode` advanced to its successor. So a *completed* node is never re-run; the only re-runnable node is one
+interrupted between its own entry and exit checkpoints = genuinely in-flight. On a **cold** resume (fresh inner
+thread, the orphan-adoption path) that in-flight node re-executes and re-primes the goal, rather than waiting on
+a turn no live thread is running. Because a mid-execution node re-runs, **`.fabro` command and agent nodes must
+be idempotent / HEAD-keyed** — the two-phase checkpoint already prevents re-running a *finished* one. A node
+that keeps crashing the daemon before reaching idle is bounded by a **resume poison cap** (3 cold re-entries),
+after which the run escalates to a human instead of looping forever. The persisted checkpoint is **authoritative
+for restart adoption** (a resumable run counts as work even with a clean worktree) and is **preserved across a
+ceiling-constrained restart** (kept and re-attempted on a later boot instead of being erased by the
+full-snapshot persist); a resuming workflow is never direct-landed without completing its graph.
 
 ### Autonomy & orchestration
 

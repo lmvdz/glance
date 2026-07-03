@@ -4,6 +4,7 @@ PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: research
 TOUCHES: `src/context/*`, `src/fabric*`, `src/server.ts`, `src/capabilities/*`, `docs/*`, `tests/capabilities-context.test.ts`
+PLANE: OMPSQ-328 — https://app.plane.so/inkwell-finance/browse/OMPSQ-328/
 
 ## Goal
 

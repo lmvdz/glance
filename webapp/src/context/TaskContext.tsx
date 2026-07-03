@@ -3,7 +3,7 @@ import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
 import { useSquad } from '../hooks/useSquad';
-import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ClientCommand, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
+import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
 export interface ToastInfo {
   id: string;
@@ -11,8 +11,18 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'tasks' | 'capabilities';
+export type AppView = 'attention' | 'active' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'federation' | 'knowledge';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
+
+/** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
+export interface ArchivedFeature {
+  id: string;
+  title: string;
+  repo: string;
+  planDir?: string;
+  moduleUrl?: string;
+  updatedAt: number;
+}
 
 interface ApiComment {
   id: string;
@@ -35,6 +45,10 @@ interface TaskContextType {
   resolvedCommentEvents: Map<string, number>;
   connected: boolean;
   agents: AgentDTO[];
+  /** Raw live feature/plan list — the other half of the active-work join (agents being the first). */
+  features: FeatureDTO[];
+  /** Recent fleet audit trail (newest-first) — the narrative source for "what the fleet just did". */
+  audit: AuditEntry[];
   transcripts: Map<string, TranscriptEntry[]>;
   capabilities: CapabilitySnapshotDTO;
   publicCatalog: PublicCapabilityCatalogDTO[];
@@ -43,13 +57,20 @@ interface TaskContextType {
   view: AppView;
   taskFilter: TaskFilter;
   isChatOpen: boolean;
+  /** The agent that was most recently opened via openConsole(). AssistantChat reacts to switch its active session. */
+  openedConsoleAgentId: string | null;
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
   setIsChatOpen: (isOpen: boolean) => void;
+  /** Subscribe to an agent's transcript AND open the chat panel focused on that agent. No-op if agentId is undefined. */
+  openConsole: (agentId: string | undefined) => void;
   selectTask: (id: string | null) => void;
   addTask: (task: Partial<Task>) => void;
   deleteTask: (id: string) => void;
+  restoreFeature: (id: string, repo?: string) => Promise<void>;
+  hardDeleteFeature: (id: string, opts?: { repo?: string; plane?: 'keep' | 'detach' }) => Promise<void>;
+  loadArchivedFeatures: (repo?: string) => Promise<ArchivedFeature[]>;
   toggleTaskComplete: (id: string) => void;
   updateTask: (id: string, updates: Partial<Task>) => void;
   reorderTasks: (startIndex: number, endIndex: number) => void;
@@ -89,14 +110,29 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const projects = useMemo(() => projectsByTeam(squad.projects, squad.features), [squad.projects, squad.features]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastInfo[]>([]);
-  const [view, setView] = useState<AppView>('tasks');
+  const [view, setView] = useState<AppView>('attention');
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
     const nextSelectedTaskId = reconcileSelectedTaskId(selectedTaskId, tasks);
     if (nextSelectedTaskId !== selectedTaskId) setSelectedTaskId(nextSelectedTaskId);
   }, [tasks, selectedTaskId]);
+
+  // The fleet narrative isn't on the WS snapshot — poll the append-only audit log. Shared here so
+  // the Active Work pane and the assistant both narrate "what just happened" from one source.
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      apiJson<AuditEntry[] | { entries?: AuditEntry[] }>('/api/audit?limit=80')
+        .then((r) => { if (alive) setAudit(Array.isArray(r) ? r : r?.entries ?? []); })
+        .catch(() => { /* daemon offline / not yet up — keep the last good list */ });
+    void load();
+    const interval = setInterval(load, 15_000);
+    return () => { alive = false; clearInterval(interval); };
+  }, []);
 
   const selectedTask = tasks.find((task) => task.id === selectedTaskId);
   const currentProject = selectedTask?.properties.project ?? Object.values(projects)[0]?.[0] ?? null;
@@ -111,6 +147,13 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     showToast('Live glance ordering is driven by the daemon', 'info');
   };
 
+  const openConsole = (agentId: string | undefined) => {
+    if (!agentId) return;
+    squad.subscribe(agentId);
+    setOpenedConsoleAgentId(agentId);
+    setIsChatOpen(true);
+  };
+
   const selectTask = (id: string | null) => setSelectedTaskId(id);
 
   const addTask = (partialTask: Partial<Task>) => {
@@ -122,14 +165,39 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       .catch((error: Error) => showToast(error.message || 'Could not create feature', 'error'));
   };
 
+  // Archive = reversible: flips the flag AND (server-side) moves plans/<x>/ → plans/.archive/<x>/.
   const deleteTask = (id: string) => {
     const task = tasks.find((item) => item.id === id);
     const featureId = task?.sourceId ?? id;
     void apiJson(`/api/features/${encodeURIComponent(featureId)}`, jsonInit('PATCH', { repo: task?.properties.project.id, archived: true }))
       .then(() => squad.reload())
-      .then(() => showToast(`Feature archived: ${id}`))
+      .then(() => showToast(`Archived ${id} — restorable from Archived`))
       .catch((error: Error) => showToast(error.message || 'Could not archive feature', 'error'));
   };
+
+  // Restore an archived feature (un-flag + move the plan dir back out of .archive).
+  const restoreFeature = (id: string, repo?: string) =>
+    apiJson(`/api/features/${encodeURIComponent(id)}`, jsonInit('PATCH', { repo, archived: false }))
+      .then(() => squad.reload())
+      .then(() => showToast(`Restored ${id}`))
+      .catch((error: Error) => showToast(error.message || 'Could not restore feature', 'error'));
+
+  // Hard delete = permanent: removes the feature + its plan dir. `plane: "detach"` also drops the
+  // Plane module grouping (issues untouched). Destructive; callers confirm first.
+  const hardDeleteFeature = (id: string, opts: { repo?: string; plane?: 'keep' | 'detach' } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.repo) qs.set('repo', opts.repo);
+    if (opts.plane === 'detach') qs.set('plane', 'detach');
+    return apiJson(`/api/features/${encodeURIComponent(id)}${qs.toString() ? `?${qs}` : ''}`, { method: 'DELETE' })
+      .then(() => squad.reload())
+      .then(() => showToast(`Deleted ${id} permanently`))
+      .catch((error: Error) => showToast(error.message || 'Could not delete feature', 'error'));
+  };
+
+  const loadArchivedFeatures = (repo?: string) =>
+    apiJson<{ features: ArchivedFeature[] }>(`/api/features/archived${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`)
+      .then((r) => r.features)
+      .catch(() => [] as ArchivedFeature[]);
 
   const toggleTaskComplete = (id: string) => {
     const task = tasks.find((item) => item.id === id);
@@ -211,7 +279,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, selectTask, addTask, deleteTask, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

@@ -29,7 +29,10 @@ export interface RawPlan {
 	approval?: string;
 	thinking?: string;
 	reason?: string;
+	requires?: string[];
 	owns?: string[];
+	produces?: string[];
+	scopeSource?: "inferred" | "operator";
 }
 
 function isGitRepo(p: string): boolean {
@@ -104,12 +107,17 @@ export function pickRepoHeuristic(prompt: string, candidates: string[], cwd: str
 	return candidates[0] ?? resolvedCwd;
 }
 
+function stringArray(v: unknown): string[] | undefined {
+	return Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s.trim().length > 0).map((s) => s.trim()) : undefined;
+}
+
 /** Extract a single JSON object from model output and coerce its fields to strings. */
 export function parsePlanJson(text: string): RawPlan | undefined {
 	const r = extractJsonObject(text);
 	if (!r) return undefined;
 	const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined);
-	return { repo: str(r.repo), name: str(r.name), model: str(r.model), approval: str(r.approval), thinking: str(r.thinking), reason: str(r.reason), owns: Array.isArray(r.owns) ? r.owns.filter((s): s is string => typeof s === "string" && s.trim().length > 0).map((s) => s.trim()) : undefined };
+	const scopeSource = r.scopeSource === "operator" || r.scopeSource === "inferred" ? r.scopeSource : undefined;
+	return { repo: str(r.repo), name: str(r.name), model: str(r.model), approval: str(r.approval), thinking: str(r.thinking), reason: str(r.reason), requires: stringArray(r.requires), owns: stringArray(r.owns), produces: stringArray(r.produces), scopeSource };
 }
 
 const SYSTEM_PROMPT =
@@ -120,7 +128,10 @@ const SYSTEM_PROMPT =
 	'"model" (optional: "opus" for hard/architectural work, omit otherwise), ' +
 	'"approval" ("yolo" by default — squad agents run in isolated git worktrees, so auto-approve; use "write" or "always-ask" only if the task is risky and explicitly wants confirmation), ' +
 	'"thinking" ("low" default; "high" for complex reasoning; "minimal" for trivial), ' +
-	'"owns" (optional array of repo-relative path prefixes the task will edit, e.g. ["src/web"] — used to keep parallel agents from touching the same files; omit if unsure), ' +
+	'"requires" (optional array of repo-relative path prefixes the task must read before producing work, e.g. ["src/api"]), ' +
+	'"owns" (optional legacy array of repo-relative path prefixes the task will edit, e.g. ["src/web"] — used to keep parallel agents from touching the same files; omit if unsure), ' +
+	'"produces" (optional array of repo-relative path prefixes the task will write/create; defaults to owns when omitted), ' +
+	'"scopeSource" ("inferred" when you infer requires/owns/produces from the task; never use "operator" in this planner), ' +
 	'"reason" (<=12 words explaining the repo+name choice).';
 
 async function infer(prompt: string, candidates: string[]): Promise<RawPlan | undefined> {
@@ -148,6 +159,9 @@ export async function planSpawn(prompt: string, opts: { cwd: string; candidates:
 	const thinking = asThinking(raw?.thinking);
 	if (thinking !== undefined) plan.thinking = thinking;
 	if (raw?.reason !== undefined) plan.reason = raw.reason;
+	if (raw?.requires?.length) plan.requires = raw.requires;
 	if (raw?.owns?.length) plan.owns = raw.owns;
+	if (raw?.produces?.length) plan.produces = raw.produces;
+	if (raw?.requires?.length || raw?.owns?.length || raw?.produces?.length) plan.scopeSource = "inferred";
 	return plan;
 }

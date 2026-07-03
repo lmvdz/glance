@@ -39,3 +39,15 @@ Estimated total batches: 5.
 ## Shared-file analysis
 
 `src/types.ts`, `src/squad-manager.ts`, `src/server.ts`, and `src/proof.ts` overlap across concerns. Keep Concern 01 first because it fixes the unsafe land invariant. Keep Concern 03 before capability/journal work because it defines the mode vocabulary. If executing in parallel, give `src/types.ts` ownership to the autonomy/journal concern and pass the final contract to other agents.
+
+## Plane tracking
+
+- Project: **omp-squad** (`OMPSQ`) — resolved via repo `.plane.json`
+- Module: [Factory-inspired control plane](https://app.plane.so/inkwell-finance/projects/1eb181ba-f324-4767-a6d5-98953d5df011/modules/cbd7f561-79f0-44bb-910d-d617ef7475ab/)
+- Issues (filed in Backlog; parent links mirror the dependency graph):
+  - [01 Fresh proof and land invariant](https://app.plane.so/inkwell-finance/browse/OMPSQ-306/) — OMPSQ-306
+  - [02 Serialized verify and land orchestration](https://app.plane.so/inkwell-finance/browse/OMPSQ-308/) — OMPSQ-308 (parent: 01)
+  - [03 Canonical autonomy mode contract](https://app.plane.so/inkwell-finance/browse/OMPSQ-307/) — OMPSQ-307 (blocked by 01, 02)
+  - [04 Driver capabilities and proof runner boundary](https://app.plane.so/inkwell-finance/browse/OMPSQ-309/) — OMPSQ-309 (parent: 03)
+  - [05 Durable event journal for replay](https://app.plane.so/inkwell-finance/browse/OMPSQ-310/) — OMPSQ-310 (parent: 03)
+  - [06 Workflow milestone integration](https://app.plane.so/inkwell-finance/browse/OMPSQ-311/) — OMPSQ-311 (blocked by 03, 05)

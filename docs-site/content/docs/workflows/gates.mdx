@@ -112,5 +112,31 @@ not be reported as a green run.
 </Callout>
 
 This goal-gate loop is exactly what `omp-squad add --verify "<cmd>"` synthesizes around an
-ordinary task (`implement → verify → fixup`). See [verify loops](/docs/guides/verify-loops) and
-the [bundled workflows](/docs/workflows/bundled).
+ordinary task. See the [bundled workflows](/docs/workflows/bundled) for the full graph.
+
+## The codefix pre-pass
+
+The verify workflow synthesized by `omp-squad add --verify` includes a zero-token **codefix
+pre-pass** that runs before the AI fixup tier. `codefix` is a deterministic script
+(`src/workflow/codefix.ts`) that applies mechanical, zero-LLM fixes (e.g. unused-import removal,
+straightforward lint violations) to the working directory. It runs as a `command` node with
+`maxVisits: 1` and always exits 0 — it is a best-effort pre-pass, not a gate, so a codefix
+failure never blocks the cascade.
+
+The cascade on a failed verify gate is:
+
+```text
+verify ─(fail)→ codefix → fixup → escalate → verify
+```
+
+- **codefix** runs once (deterministic, zero tokens), then advances to `fixup`.
+- **fixup** uses a cheap AI call to fix what codefix didn't catch (bounded by `max_visits`).
+- **escalate** uses a grounded AI call with deeper package-inspection instructions.
+- Each tier overflows to the next when its visit budget exhausts.
+
+**Previously**, the codefix script was resolved relative to the calling process's working
+directory, which is the **target repo**, not the omp-squad install directory. Since
+`src/workflow/codefix.ts` does not exist in a target repo, the script silently failed to
+launch on every gate failure — every failure went straight to the paid AI fixup tier. The path
+is now resolved via `import.meta.dir` (the `src/workflow/` directory of the omp-squad install)
+so it is found correctly when omp-squad is run against any external repo.

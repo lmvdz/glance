@@ -17,6 +17,13 @@ import type { EngineCheckpoint, NodeExecutor, NodeResult, Outcome, RunContext, R
 
 const DEFAULT_NODE_VISITS = 50;
 
+/**
+ * Max cold (dead-thread) re-entries of one genuinely-in-flight node before we stop re-running it and
+ * escalate to a human. Bounds a run that crashes the daemon before reaching idle: the visit-cap does
+ * not re-count the resumed node, so without this a poison node would re-run on every restart forever.
+ */
+const RESUME_ATTEMPT_CAP = 3;
+
 /** Run-wide mutable state threaded through the walk and concurrent branches. */
 interface Shared {
 	visits: Record<string, number>;
@@ -47,7 +54,7 @@ export class WorkflowEngine {
 		this.cancelled = true;
 	}
 
-	async run(goal: string, opts?: { resume?: WorkflowRunState; checkpoint?: (c: EngineCheckpoint) => void }): Promise<RunResult> {
+	async run(goal: string, opts?: { resume?: WorkflowRunState; checkpoint?: (c: EngineCheckpoint) => void; escalate?: (reason: string) => void | Promise<void> }): Promise<RunResult> {
 		const resume = opts?.resume;
 		const ctx: RunContext = { goal, vars: resume ? { ...resume.vars } : {}, outcome: resume?.outcome, preferredLabel: resume?.preferredLabel };
 		const shared: Shared = { visits: resume ? { ...resume.visits } : {}, stages: [], cap: this.wf.maxNodeVisits ?? DEFAULT_NODE_VISITS, index: resume?.index ?? 0, goalOutputs: {} };
@@ -75,8 +82,23 @@ export class WorkflowEngine {
 				shared.visits[current] = (shared.visits[current] ?? 0) + 1;
 			}
 
+			// Poison cap: only the cold-resumed in-flight node (the one re-executed on a dead thread)
+			// is bounded here. A node that keeps crashing the daemon mid-execution would otherwise re-run
+			// on every restart unchecked. Forward progress (the exit checkpoint) resets resumeAttempts to 0.
+			let entryAttempts = 0;
+			if (resuming && resume?.cold) {
+				const prior = resume.resumeAttempts ?? 0;
+				if (prior >= RESUME_ATTEMPT_CAP) {
+					const reason = `cold resume of "${current}" hit the ${RESUME_ATTEMPT_CAP}-attempt cap — escalating instead of re-running`;
+					await opts?.escalate?.(reason);
+					return { outcome: "failed", reason: `resume poison cap: "${current}" re-ran ${RESUME_ATTEMPT_CAP}× without progress — escalated to a human`, stages: shared.stages };
+				}
+				entryAttempts = prior + 1;
+			}
+
 			const index = shared.index++;
-			opts?.checkpoint?.({ goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index });
+			// Entry checkpoint: "currentNode is about to run". Preserves the warm-reattach property.
+			opts?.checkpoint?.({ goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: entryAttempts });
 			this.stage(shared, index, node, "start", ctx);
 
 			let next: string | undefined;
@@ -95,6 +117,12 @@ export class WorkflowEngine {
 				const ok = ctx.outcome !== "failed";
 				return { outcome: ok ? "succeeded" : "failed", reason: ok ? `no outgoing edge from "${current}"` : `"${current}" failed with no recovery route`, stages: shared.stages };
 			}
+
+			// Exit checkpoint (the second phase): "currentNode FINISHED; advance to `next`". A finished
+			// node now has its successor on disk, so a cold restart never re-enters it — the only
+			// re-runnable node is one that crashed between its own entry and exit checkpoints =
+			// genuinely in-flight. resumeAttempts resets to 0 because the run made forward progress.
+			opts?.checkpoint?.({ goal, currentNode: next, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: 0 });
 			current = next;
 		}
 		return { outcome: "failed", reason: "ran off the end of the graph", stages: shared.stages };

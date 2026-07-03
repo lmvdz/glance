@@ -14,22 +14,22 @@ import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
-import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, SquadEvent } from "./types.ts";
+import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanRevisionCandidateState, PlanAnnotationTarget, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
-import { listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
+import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
+import { searchFabric, type KbDocType } from "./fabric-search.ts";
+import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
-import { proofGate, runProof } from "./proof.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
-import { detectVerify } from "./intake.ts";
 import { all, claim, release, who } from "./presence.ts";
-import { landAgent } from "./land.ts";
-import { leasesFor } from "./leases.ts";
+import { type LeaseEntry, leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
+import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
 import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser } from "./workos-provision.ts";
@@ -38,6 +38,7 @@ import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
+import { validateRequestedMode } from "./autonomy.ts";
 import { featureFlagStates, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
 import type { CapabilityInstallState } from "./capabilities/index.ts";
@@ -56,6 +57,13 @@ const ASSET_TYPES: Record<string, string> = {
 	".svg": "image/svg+xml",
 	".woff2": "font/woff2",
 };
+
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+	return Promise.race([
+		promise.catch(() => fallback),
+		new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+	]);
+}
 
 export const CONSOLE_SYSTEM_PROMPT = `You are the omp-squad interactive console agent.
 
@@ -161,7 +169,8 @@ function planAnnotationTarget(value: unknown): PlanAnnotationTarget | undefined 
 	const lineStart = typeof rec.lineStart === "number" && Number.isInteger(rec.lineStart) && rec.lineStart > 0 ? rec.lineStart : undefined;
 	const lineEnd = typeof rec.lineEnd === "number" && Number.isInteger(rec.lineEnd) && rec.lineEnd > 0 ? rec.lineEnd : lineStart;
 	const quote = typeof rec.quote === "string" && rec.quote.trim() ? rec.quote.trim().slice(0, 4000) : undefined;
-	return { planPath, lineStart, lineEnd, quote };
+	const blockId = typeof rec.blockId === "string" && rec.blockId.trim() ? rec.blockId.trim() : undefined;
+	return { planPath, lineStart, lineEnd, quote, blockId };
 }
 
 function planAnnotationPrompt(feature: FeatureDTO, comment: ArtifactCommentDTO): string {
@@ -701,52 +710,10 @@ export class SquadServer {
 				: actorForRole(role);
 		const manager = await this.managerFor(actor);
 		if (!manager) return this.noFleet(req, url);
-		if (url.pathname === "/api/feedback/campaigns" && req.method === "GET") return Response.json(await manager.listFeedbackCampaigns());
-		if (url.pathname === "/api/feedback/campaigns" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object") return new Response("campaign body required", { status: 400 });
-			if (!("name" in body) || typeof body.name !== "string" || !("repo" in body) || typeof body.repo !== "string" || !("token" in body) || typeof body.token !== "string") return new Response("name, repo, token required", { status: 400 });
-			const allowedOrigins = "allowedOrigins" in body && Array.isArray(body.allowedOrigins) ? body.allowedOrigins.filter((x): x is string => typeof x === "string") : undefined;
-			const rewardCents = "rewardCents" in body && typeof body.rewardCents === "number" ? body.rewardCents : undefined;
-			const rewardCurrency = "rewardCurrency" in body && typeof body.rewardCurrency === "string" ? body.rewardCurrency : undefined;
-			const id = "id" in body && typeof body.id === "string" ? body.id : undefined;
-			return Response.json(await manager.seedFeedbackCampaign({ id, name: body.name, repo: body.repo, token: body.token, allowedOrigins, rewardCents, rewardCurrency }));
-		}
-		if (url.pathname === "/api/feedback/items" && req.method === "GET") return Response.json(await manager.listFeedbackItems());
-		const mfitem = url.pathname.match(/^\/api\/feedback\/items\/([^/]+)(?:\/(.+))?$/);
-		if (mfitem) {
-			const id = decodeURIComponent(mfitem[1]);
-			const action = mfitem[2] ?? "";
-			try {
-				if (!action && req.method === "GET") {
-					const list = await manager.listFeedbackItems();
-					const item = list.raw.find((x) => x.id === id);
-					return item ? Response.json(item) : new Response("feedback item not found", { status: 404 });
-				}
-				if (action === "validate" && req.method === "POST") {
-					const body: unknown = await req.json().catch(() => ({}));
-					const input = body && typeof body === "object" ? {
-						respondent: "respondent" in body ? body.respondent : undefined,
-						vote: "vote" in body ? body.vote : undefined,
-						wouldUse: "wouldUse" in body ? body.wouldUse : undefined,
-						pain: "pain" in body ? body.pain : undefined,
-						note: "note" in body ? body.note : undefined,
-					} : {};
-					return Response.json(await manager.addFeedbackValidation(id, input, actor));
-				}
-				if (action === "reward/approve" && req.method === "POST") return Response.json(await manager.approveFeedbackReward(id, actor));
-				if (action === "reward/void" && req.method === "POST") return Response.json(await manager.voidFeedbackReward(id, actor));
-				if (action === "reward/mark-paid" && req.method === "POST") {
-					const body: unknown = await req.json().catch(() => ({}));
-					const provider = body && typeof body === "object" && "provider" in body && typeof body.provider === "string" && ["manual", "stripe", "tremendous"].includes(body.provider) ? body.provider : undefined;
-					const externalRef = body && typeof body === "object" && "externalRef" in body && typeof body.externalRef === "string" ? body.externalRef : undefined;
-					return Response.json(await manager.markFeedbackRewardPaid(id, { provider, externalRef }, actor));
-				}
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return new Response(message, { status: /not found/.test(message) ? 404 : 400 });
-			}
-		}
+		// Authenticated feedback routes live in ./feedback-routes.ts (the pre-auth widget
+		// submit + widget.js stay above — they need the server's rate limiter).
+		const feedbackResponse = await handleFeedbackRoutes(url, req, manager, actor);
+		if (feedbackResponse) return feedbackResponse;
 		if (url.pathname === "/api/agents") return Response.json(manager.list());
 		if (url.pathname === "/api/projects") return Response.json(manager.projects());
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(manager.list(), manager.capabilityWorkflowDefinitions()));
@@ -810,6 +777,7 @@ export class SquadServer {
 			return Response.json({ agent, installId: decodeURIComponent(mcinstall[1]), bindingKey });
 		}
 		if (url.pathname === "/api/features" && req.method === "GET") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
+		if (url.pathname === "/api/features/archived" && req.method === "GET") return Response.json({ features: manager.archivedFeatures(url.searchParams.get("repo") ?? undefined) });
 		if (url.pathname === "/api/features" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
 			if (!body || typeof body !== "object" || !("title" in body) || typeof body.title !== "string") return new Response("title required", { status: 400 });
@@ -856,6 +824,12 @@ export class SquadServer {
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
 		}
+		if (mfpatch && req.method === "DELETE") {
+			const repo = url.searchParams.get("repo") ?? undefined;
+			const plane = url.searchParams.get("plane") === "detach" ? "detach" : "keep";
+			const result = await manager.deleteFeature(decodeURIComponent(mfpatch[1]), { repo, plane });
+			return result.deleted ? Response.json(result) : new Response("no such feature", { status: 404 });
+		}
 		const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
 		if (mflink && req.method === "POST") {
 			const id = decodeURIComponent(mflink[1]);
@@ -863,13 +837,49 @@ export class SquadServer {
 			if (body && typeof body === "object" && "task" in body && typeof body.task === "string" && body.task.trim()) {
 				const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 				const name = "name" in body && typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-				const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: id, approvalMode: "yolo", track: true }, actor);
-				manager.linkAgent(id, dto.id);
+				const feature = await manager.updateFeature(id, { repo });
+				if (!feature) return new Response("no such feature", { status: 404 });
+				const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: feature.id, approvalMode: "yolo", track: true }, actor);
+				manager.linkAgent(feature.id, dto.id);
 				return Response.json({ agent: dto });
 			}
 			if (!body || typeof body !== "object" || !("agentId" in body) || typeof body.agentId !== "string") return new Response("agentId required", { status: 400 });
 			const unlink = "unlink" in body && body.unlink === true;
 			return Response.json({ ok: manager.linkAgent(id, body.agentId, unlink) });
+		}
+		const mfconcern = url.pathname.match(/^\/api\/features\/([^/]+)\/concerns$/);
+		if (mfconcern && req.method === "PATCH") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object" || !("file" in body) || typeof body.file !== "string" || !body.file.trim()) {
+				return new Response("file required", { status: 400 });
+			}
+			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const opts: { repo?: string; file: string; status?: string; blockedBy?: number[] } = { repo, file: body.file };
+			if ("status" in body && typeof body.status === "string" && body.status.trim()) opts.status = body.status.trim();
+			if ("blockedBy" in body && Array.isArray(body.blockedBy)) opts.blockedBy = body.blockedBy.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+			if (opts.status === undefined && opts.blockedBy === undefined) return new Response("nothing to update", { status: 400 });
+			const concern = await manager.updateConcern(decodeURIComponent(mfconcern[1]), opts);
+			return concern ? Response.json({ concern }) : new Response("no such concern", { status: 404 });
+		}
+		const mfanswer = url.pathname.match(/^\/api\/features\/([^/]+)\/answers$/);
+		if (mfanswer && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			if (!body || typeof body !== "object" || !("file" in body) || typeof body.file !== "string" || !body.file.trim()) {
+				return new Response("file required", { status: 400 });
+			}
+			const prompt = "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";
+			const value = "value" in body && typeof body.value === "string" ? body.value.trim() : "";
+			if (!prompt || !value) return new Response("prompt and value required", { status: 400 });
+			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const featureId = decodeURIComponent(mfanswer[1]);
+			const feature = (await manager.features(repo)).find((x) => x.id === featureId);
+			if (!feature || !feature.planDir) return new Response("no such feature", { status: 404 });
+			const concernPath = path.join(feature.planDir, path.basename(body.file));
+			const concern = await appendConcernDecision(feature.repo, concernPath, `Q: ${prompt} — A: ${value}`);
+			if (!concern) return new Response("no such concern", { status: 404 });
+			const detail = `${prompt} — ${value}`;
+			void manager.recordAudit(actor, "plan-answer", featureId, "ok", detail.length > 80 ? `${detail.slice(0, 79)}…` : detail);
+			return Response.json({ concern });
 		}
 		if (url.pathname === "/api/federation/capabilities") return Response.json({ capabilities: manager.capabilityFederation() });
 		if (url.pathname === "/api/capability-discovery") return Response.json({ name: "omp-squad capabilities", routes: ["/api/capability-catalog", "/api/capability-sources", "/api/capability-packs", "/api/capability-installs", "/api/federation/capabilities"], privateTenantData: false });
@@ -877,14 +887,26 @@ export class SquadServer {
 		if (mfland && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
 			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
-			return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force));
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason.trim() : undefined;
+			return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force, actor, reason));
 		}
 		const mftickets = url.pathname.match(/^\/api\/features\/([^/]+)\/tickets$/);
-		if (mftickets && req.method === "GET") return Response.json(await manager.featurePlaneTickets(decodeURIComponent(mftickets[1])));
+		if (mftickets && req.method === "GET") return Response.json(await withTimeout(manager.featurePlaneTickets(decodeURIComponent(mftickets[1])), 1500, { tickets: null }));
 		const mfmodule = url.pathname.match(/^\/api\/features\/([^/]+)\/module$/);
 		if (mfmodule && req.method === "POST") {
-			const out = await manager.createFeatureModule(decodeURIComponent(mfmodule[1]));
+			const body: unknown = await req.json().catch(() => null);
+			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const createTickets = !!(body && typeof body === "object" && "tickets" in body && body.tickets === true);
+			const out = await manager.createFeatureModule(decodeURIComponent(mfmodule[1]), { repo, createTickets });
 			return out ? Response.json(out) : new Response("module create failed (Plane not configured?)", { status: 501 });
+		}
+		const mfmoduleRepair = url.pathname.match(/^\/api\/features\/([^/]+)\/module\/repair$/);
+		if (mfmoduleRepair && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const closeOrphans = !!(body && typeof body === "object" && "closeOrphans" in body && body.closeOrphans === true);
+			const out = await manager.repairFeatureModuleTickets(decodeURIComponent(mfmoduleRepair[1]), { repo, closeOrphans });
+			return out ? Response.json(out) : new Response("module repair failed (Plane not configured?)", { status: 501 });
 		}
 		const mfpipe = url.pathname.match(/^\/api\/features\/([^/]+)\/pipeline$/);
 		if (mfpipe && req.method === "GET") {
@@ -897,13 +919,37 @@ export class SquadServer {
 			const ids = f.issueIdentifiers;
 			let issues: IssueRef[] = [];
 			if (ids && ids.length) {
-				const planeIssues = await listPlaneIssues(f.repo);
+				const planeIssues = await withTimeout(listPlaneIssues(f.repo), 1500, null);
 				if (planeIssues) issues = planeIssues.filter((i) => i.identifier !== undefined && ids.includes(i.identifier));
 			}
 			const comments = await manager.listComments({ repo: f.repo, subject: f.id });
-			return Response.json({ feature: f, concerns, documents, issues, comments, agentIds: f.agentIds });
+			const candidates = await manager.listPlanRevisionCandidates({ repo: f.repo, featureId: f.id });
+			return Response.json({ feature: f, readiness: f.readiness, concerns, documents, issues, comments, candidates, agentIds: f.agentIds });
 		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
+		const mcand = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates$/);
+		if (mcand && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			return Response.json(await manager.listPlanRevisionCandidates({ repo, featureId: decodeURIComponent(mcand[1]) }));
+		}
+		if (mcand && req.method === "POST") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(mcand[1]);
+			const body: unknown = await req.json().catch(() => null);
+			const rec = body && typeof body === "object" ? body as Record<string, unknown> : {};
+			const planPath = typeof rec.planPath === "string" && rec.planPath.trim() ? rec.planPath.trim() : "";
+			const summary = typeof rec.summary === "string" && rec.summary.trim() ? rec.summary.trim() : "";
+			if (!planPath || !summary) return new Response("planPath and summary required", { status: 400 });
+			return Response.json(await manager.addPlanRevisionCandidate({ repo, featureId, planPath, summary, producerAgentId: typeof rec.producerAgentId === "string" ? rec.producerAgentId : undefined, runId: typeof rec.runId === "string" ? rec.runId : undefined, traceId: typeof rec.traceId === "string" ? rec.traceId : undefined, diffRef: typeof rec.diffRef === "string" ? rec.diffRef : undefined }, actor));
+		}
+		const mcandState = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates\/([^/]+)\/(accept|reject|supersede)$/);
+		if (mcandState && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const state = ({ accept: "accepted", reject: "rejected", supersede: "superseded" } as Record<string, PlanRevisionCandidateState>)[mcandState[3]];
+			const candidate = await manager.transitionPlanRevisionCandidate(decodeURIComponent(mcandState[2]), state, actor, reason);
+			return candidate ? Response.json(candidate) : new Response("candidate not found", { status: 404 });
+		}
 		const mann = url.pathname.match(/^\/api\/features\/([^/]+)\/annotations$/);
 		if (mann && req.method === "GET") {
 			const repo = url.searchParams.get("repo") ?? process.cwd();
@@ -946,6 +992,7 @@ export class SquadServer {
 				return Response.json({ agentId, mode });
 			}
 			const dto = await manager.create({ repo, name: "plan-reviser", task: message, featureId, approvalMode: "write", autoRoute: false, track: true, owns: feature.planDir ? [feature.planDir] : undefined }, actor);
+			await manager.addPlanRevisionCandidate({ repo, featureId, planPath: comment.annotation?.planPath ?? feature.planDir ?? "plans", producerAgentId: dto.id, summary: comment.body, diffRef: comment.annotation?.planPath }, actor);
 			return Response.json({ agentId: dto.id, mode });
 		}
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
@@ -955,6 +1002,12 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
+		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
+		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit") {
+			const repo = resolveGraphRepo(url, manager);
+			if (!repo) return new Response("repo not allowed", { status: 403 });
+			return Response.json(url.pathname === "/api/graph" ? await graphPayload(url, repo) : await commitDetailPayload(url, repo));
+		}
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/presence") {
@@ -963,17 +1016,56 @@ export class SquadServer {
 			const repo = url.searchParams.get("repo");
 			return Response.json(repo ? await who(repo) : await all());
 		}
-		if (url.pathname === "/api/leases") return Response.json(this.registry ? [] : await leasesFor(url.searchParams.get("repo") ?? process.cwd()));
+		if (url.pathname === "/api/leases") {
+			const repo = url.searchParams.get("repo");
+			// Single-manager / file mode: serve the requested repo (or cwd) directly.
+			// DB-registry mode: the lease registry is machine-wide, so scope to repos THIS org's
+			// fleet actually works on — never blanket-empty, never leak another org's leases.
+			if (!this.registry) return Response.json(await leasesFor(repo ?? process.cwd()));
+			return Response.json(await this.orgScopedLeases(manager, repo));
+		}
 		if (url.pathname === "/api/fabric") {
 			const repo = url.searchParams.get("repo");
-			return Response.json(await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: !this.registry }));
+			// fabric is org-safe in both modes: leases are keyed to the manager's own agents/repos,
+			// so includeLeases never leaks cross-org. Always include them (real data, even in DB mode).
+			return Response.json(await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: true }));
+		}
+		if (url.pathname === "/api/fabric/search") {
+			// Ranked search over the SAME scoped snapshot — never widens what the actor can see.
+			const repo = url.searchParams.get("repo");
+			const q = url.searchParams.get("q") ?? "";
+			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
+			const type = (url.searchParams.get("type") ?? undefined) as KbDocType | undefined;
+			const snapshot = await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: true });
+			const results = q.trim() ? searchFabric(snapshot, q, { topK, type }) : [];
+			return Response.json({ query: q, results, counts: { agents: snapshot.agents.length, digests: snapshot.digests.length, hotAreas: snapshot.hotAreas.length, scout: snapshot.scout.length, leases: snapshot.leases.length, decisions: snapshot.decisions.length } });
 		}
 		if (url.pathname === "/api/opportunities") {
 			const repos = url.searchParams.get("repo") ? [url.searchParams.get("repo") as string] : (planeRepos().length ? planeRepos() : manager.projects().map((p) => p.repo));
 			const issues = (await Promise.all(repos.map((repo) => listPlaneIssues(repo).catch(() => null)))).flatMap((x) => x ?? []);
 			return Response.json(issues.filter((i) => i.name.includes("[opportunity]")));
 		}
-		if (url.pathname === "/api/federation") return Response.json(this.registry ? ({ coordinator: null, operators: [], collisions: [] } satisfies FederationSnapshot) : this.federationSnapshot());
+		if (url.pathname === "/api/federation") return Response.json(this.federationSnapshot(manager));
+		if (url.pathname === "/api/federation/command" && req.method === "POST") {
+			// Outbound remote steering: send a ClientCommand to a peer operator's daemon. The
+			// local manager gates on operator tier; the RECEIVER re-authorizes independently
+			// (whois-verified actor + RBAC), so this can never grant authority it doesn't have.
+			const body: unknown = await req.json().catch(() => null);
+			const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+			const to = typeof rec.to === "string" ? rec.to.trim() : "";
+			const cmd = rec.cmd && typeof rec.cmd === "object" && typeof (rec.cmd as Record<string, unknown>).type === "string" ? (rec.cmd as ClientCommand) : undefined;
+			if (!to || !cmd) return new Response("to (operator id) and cmd ({type,...}) required", { status: 400 });
+			try {
+				const cmdId = manager.sendFederationCommand(to, cmd, actor);
+				// Best-effort outcome: wait briefly for the peer's ack. null ⇒ sent, no ack
+				// (peer offline / older version) — the send itself still succeeded.
+				const ack = await manager.waitForAck(cmdId);
+				return Response.json({ ok: true, sent: cmd.type, to, cmdId, ack });
+			} catch (err) {
+				if (err instanceof RbacDenied) return new Response(err.message, { status: 403 });
+				return new Response(err instanceof Error ? err.message : String(err), { status: 400 });
+			}
+		}
 		if (url.pathname === "/api/audit") {
 			const q = url.searchParams;
 			const limit = Number(q.get("limit"));
@@ -1049,32 +1141,40 @@ export class SquadServer {
 		}
 		const mland = url.pathname.match(/^\/api\/agents\/([^/]+)\/land$/);
 		if (mland && req.method === "POST") {
-			const dto = manager.getAgent(decodeURIComponent(mland[1]));
+			const id = decodeURIComponent(mland[1]);
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			let message = `squad(${dto.name}): ${dto.issue?.name ?? "agent changes"}`;
 			const body: unknown = await req.json().catch(() => null);
+			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason.trim() : undefined;
 			if (body && typeof body === "object" && "message" in body && typeof body.message === "string" && body.message.trim()) {
 				message = body.message.trim();
 			}
-			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
-			if (!force) {
-				const reason = await proofGate(dto.repo, dto.worktree, dto.branch);
-				if (reason) return Response.json({ ok: false, committed: false, merged: false, message, detail: reason }, { status: 409 });
-			}
-			const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
-			const result = await landAgent({ repo: dto.repo, worktree: dto.worktree, branch: dto.branch, message, commitWip: !busy });
-			if (result.ok) void manager.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
-			void manager.recordAudit(actor, "land", dto.id, result.ok ? "ok" : "error", result.detail ?? result.message);
-			return Response.json(result);
+			const result = await manager.land(id, message, { auto: false, force, reason, actor });
+			return Response.json(result, { status: result.ok ? 200 : 409 });
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {
-			const dto = manager.getAgent(decodeURIComponent(mverify[1]));
+			const id = decodeURIComponent(mverify[1]);
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
-			const command = await detectVerify(dto.repo);
-			if (!command) return new Response("no acceptance command detected for this repo", { status: 422 });
-			const proof = await runProof({ repo: dto.repo, worktree: dto.worktree, command });
-			return Response.json(proof);
+			try {
+				const ok = await manager.verifyAgentWork(id, actor);
+				return Response.json({ ok });
+			} catch (err) {
+				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
+			}
+		}
+		const mmode = url.pathname.match(/^\/api\/agents\/([^/]+)\/mode$/);
+		if (mmode && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const mode = validateRequestedMode(body && typeof body === "object" && "mode" in body ? (body as { mode?: unknown }).mode : undefined);
+			if (!mode) return new Response("invalid mode", { status: 400 });
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const dto = await manager.transitionMode(decodeURIComponent(mmode[1]), mode, actor, reason);
+			if (!dto) return new Response("no such agent", { status: 404 });
+			return Response.json(dto);
 		}
 		const mvision = url.pathname.match(/^\/api\/agents\/([^/]+)\/vision$/);
 		if (mvision && req.method === "POST") {
@@ -1267,19 +1367,50 @@ export class SquadServer {
 	/**
 	 * Roster-of-rosters for the command center: this host's live roster merged
 	 * with any peer rosters gathered off the coordinator, plus cross-operator
-	 * branch collisions. Best-effort — with no coordinator the feed is absent, so
-	 * only self appears (no peers, no collisions) and the panel stays hidden.
+	 * branch collisions. Single-host with no peers returns the LOCAL operator's own
+	 * presence (its live agents) — never empty, never an error.
+	 *
+	 * Single-manager / file mode: self = the root manager's roster, peers = the
+	 * coordinator feed (absent ⇒ self only). DB-registry mode: self = the calling
+	 * org's manager roster; there's no global federation bus per org, so peers stay
+	 * empty (`coordinator: null`), but the org still sees its OWN operators/agents
+	 * instead of a blanket-empty payload (and never another org's).
 	 */
-	private federationSnapshot(): FederationSnapshot {
+	private federationSnapshot(manager: SquadManager): FederationSnapshot {
 		const self: OperatorPresence = {
 			operator: this.operator,
 			availability: "active",
 			host: os.hostname(),
-			agents: this.singleManager?.list() ?? [],
+			agents: manager.list(),
 			updatedAt: Date.now(),
 		};
-		const peers = this.peerPresence?.live() ?? [];
-		return { coordinator: this.coordinator, ...federationView(self, peers) };
+		// DB-registry mode has no per-org coordinator feed; only single-manager mode gossips peers.
+		const peers = this.registry ? [] : (this.peerPresence?.live() ?? []);
+		const coordinator = this.registry ? null : this.coordinator;
+		return { coordinator, ...federationView(self, peers) };
+	}
+
+	/**
+	 * DB-registry mode lease scope: leases for repos the calling org's fleet actually works on.
+	 * The on-disk lease registry is machine-wide (keyed by cross-host repo identity), so we must
+	 * NOT serve it wholesale in a multi-tenant daemon — that would leak another org's leases. We
+	 * instead derive the repo set from this org manager's live agents and union in an explicit
+	 * `?repo=` only when that org has an agent on it. Empty fleet ⇒ no repos ⇒ no leases.
+	 */
+	private async orgScopedLeases(manager: SquadManager, repo: string | null): Promise<LeaseEntry[]> {
+		const orgRepos = new Set(manager.list().map((a) => a.repo));
+		const repos = repo ? (orgRepos.has(repo) ? [repo] : []) : [...orgRepos];
+		const seen = new Set<string>();
+		const out: LeaseEntry[] = [];
+		for (const r of repos) {
+			for (const lease of await leasesFor(r).catch(() => [])) {
+				const key = `${lease.repo} ${lease.id}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				out.push(lease);
+			}
+		}
+		return out;
 	}
 
 	stop(): void {
@@ -1376,6 +1507,203 @@ async function heatPayload(manager: SquadManager, url: URL): Promise<{
 		source: "receipts.filesTouched",
 		generatedAt: Date.now(),
 	};
+}
+
+/**
+ * Day×hour activity matrix for the "Activity rhythm" heatmap: for each of the last
+ * `days` calendar days, how many file-touches landed in each hour 00–23. Same
+ * receipt source as heatPayload (filesTouched), just bucketed by hour-of-day too,
+ * so the two views agree on totals.
+ *
+ * Server-LOCAL time throughout (the daemon runs on the operator's machine, so its
+ * wall clock is the rhythm the operator actually lives) — a (day, hour) cell is
+ * internally consistent because both come from the same local Date.
+ */
+async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<{
+	days: string[];
+	hours: number[];
+	matrix: { day: string; hourly: number[] }[];
+	max: number;
+	total: number;
+	source: string;
+	generatedAt: number;
+}> {
+	const count = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const repo = url.searchParams.get("repo") ?? undefined;
+	const localDay = (d: Date): string =>
+		`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+	const end = new Date();
+	const days = Array.from({ length: count }, (_, i) => {
+		const d = new Date(end);
+		d.setDate(end.getDate() - (count - i - 1));
+		return localDay(d);
+	});
+	const rowByDay = new Map(days.map((d) => [d, new Array<number>(24).fill(0)]));
+	const agents = manager.list().filter((a) => !repo || a.repo === repo);
+	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat();
+	let max = 0;
+	let total = 0;
+	for (const r of receipts) {
+		const touched = r.filesTouched.length;
+		if (touched === 0) continue;
+		const when = new Date(r.endedAt ?? r.startedAt);
+		const row = rowByDay.get(localDay(when));
+		if (!row) continue;
+		const hour = when.getHours();
+		row[hour] += touched;
+		total += touched;
+		if (row[hour] > max) max = row[hour];
+	}
+	return {
+		days,
+		hours: Array.from({ length: 24 }, (_, i) => i),
+		matrix: days.map((day) => ({ day, hourly: rowByDay.get(day) ?? new Array<number>(24).fill(0) })),
+		max,
+		total,
+		source: "receipts.filesTouched (per day×hour, server-local)",
+		generatedAt: Date.now(),
+	};
+}
+
+/** Per-adapter config/secrets from OMP_GRAPH_<ADAPTER>_<KEY> env vars → { adapter: { KEY: value } }. */
+function graphConfigFromEnv(): Record<string, Record<string, string>> {
+	const cfg: Record<string, Record<string, string>> = {};
+	for (const [k, v] of Object.entries(process.env)) {
+		if (!v) continue;
+		const m = /^OMP_GRAPH_([A-Z0-9]+)_(.+)$/.exec(k);
+		if (!m) continue;
+		(cfg[m[1].toLowerCase()] ??= {})[m[2]] = v;
+	}
+	return cfg;
+}
+
+/** Short-TTL cache so polling clients (and future slow external adapters) don't recompute every hit. */
+const graphCache = new Map<string, { at: number; doc: GraphDoc }>();
+
+/**
+ * The normalized omp-graph document (GET /api/graph) — the source-agnostic wire
+ * format the living dashboard consumes. Composes the default adapter set (git +
+ * receipts + automation + plane) over `days` of history plus `future` days ahead
+ * (for upcoming meetings/renewals once those adapters land). Reconstructs the
+ * daemon state dir like index.ts, and passes per-adapter secrets from env.
+ */
+/**
+ * Resolve the `?repo=` param against the allowlist (known project repos + the daemon
+ * cwd). Returns null when a caller asks for a repo outside it — so an authenticated
+ * viewer can't drive `git show` / adapter reads against arbitrary repos on the host.
+ * No param → the daemon cwd (the webapp never sends one).
+ */
+function resolveGraphRepo(url: URL, manager: SquadManager): string | null {
+	const raw = url.searchParams.get("repo");
+	if (!raw) return process.cwd();
+	const resolved = path.resolve(raw);
+	const allowed = new Set([path.resolve(process.cwd()), ...manager.projects().map((p) => path.resolve(p.repo))]);
+	return allowed.has(resolved) ? resolved : null;
+}
+
+async function graphPayload(url: URL, repo: string): Promise<GraphDoc> {
+	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const future = boundedNumber(url.searchParams.get("future"), 0, 0, 14);
+	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const key = `${days}:${future}:${repo}`;
+	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
+	const fresh = url.searchParams.get("fresh"); // reload icon bypasses the cache
+	const hit = graphCache.get(key);
+	if (hit && !fresh && Date.now() - hit.at < ttl) return hit.doc;
+	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, { days, futureDays: future });
+	graphCache.set(key, { at: Date.now(), doc });
+	return doc;
+}
+
+// ── commit detail (GET /api/graph/commit?sha=) — the "click a milestone → diff" drilldown ──
+
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+const MAX_DIFF_LINES = 900; // bound the payload; huge refactors get a "truncated" flag
+
+interface CommitLine {
+	t: "ctx" | "add" | "del" | "hunk";
+	s: string;
+}
+interface CommitFile {
+	path: string;
+	status: "added" | "deleted" | "modified" | "renamed";
+	additions: number;
+	deletions: number;
+	lines: CommitLine[];
+}
+export interface CommitDetail {
+	sha: string;
+	author: string;
+	dateMs: number;
+	subject: string;
+	files: CommitFile[];
+	additions: number;
+	deletions: number;
+	truncated: boolean;
+}
+
+/** Parse a `git show` unified patch into per-file typed lines. Pure. */
+function parseUnifiedDiff(patch: string): { files: CommitFile[]; truncated: boolean } {
+	const files: CommitFile[] = [];
+	let cur: CommitFile | null = null;
+	let total = 0;
+	let truncated = false;
+	const push = (line: CommitLine): void => {
+		if (total < MAX_DIFF_LINES) cur?.lines.push(line);
+		else truncated = true;
+		total++;
+	};
+	for (const raw of patch.split("\n")) {
+		if (raw.startsWith("diff --git")) {
+			const m = raw.match(/ b\/(.+)$/);
+			cur = { path: m ? m[1] : "?", status: "modified", additions: 0, deletions: 0, lines: [] };
+			files.push(cur);
+		} else if (!cur) {
+			continue;
+		} else if (raw.startsWith("new file")) {
+			cur.status = "added";
+		} else if (raw.startsWith("deleted file")) {
+			cur.status = "deleted";
+		} else if (raw.startsWith("rename ")) {
+			cur.status = "renamed";
+		} else if (raw.startsWith("@@")) {
+			push({ t: "hunk", s: raw });
+		} else if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("index ") || raw.startsWith("similarity ") || raw.startsWith("old mode") || raw.startsWith("new mode") || raw.startsWith("Binary files")) {
+			// metadata lines — skip
+		} else if (raw.startsWith("+")) {
+			cur.additions++;
+			push({ t: "add", s: raw.slice(1) });
+		} else if (raw.startsWith("-")) {
+			cur.deletions++;
+			push({ t: "del", s: raw.slice(1) });
+		} else if (raw.startsWith(" ")) {
+			push({ t: "ctx", s: raw.slice(1) });
+		}
+	}
+	return { files, truncated };
+}
+
+async function commitDetailPayload(url: URL, repo: string): Promise<CommitDetail | { error: string }> {
+	const sha = (url.searchParams.get("sha") ?? "").trim();
+	if (!SHA_RE.test(sha)) return { error: "invalid sha" }; // guard against arg injection
+	const US = "\x1f";
+	const RS = "\x1e";
+	try {
+		const proc = Bun.spawn(["git", "-C", repo, "show", "--no-color", "--no-notes", "--patch", `--format=format:%H${US}%an${US}%aI${US}%s${RS}`, sha], { stdout: "pipe", stderr: "ignore" });
+		const out = await new Response(proc.stdout).text();
+		const code = await proc.exited;
+		if (code !== 0 || !out) return { error: "commit not found" };
+		const rsIdx = out.indexOf(RS);
+		const header = rsIdx >= 0 ? out.slice(0, rsIdx) : out;
+		const patch = rsIdx >= 0 ? out.slice(rsIdx + 1) : "";
+		const [hsha = sha, author = "", iso = "", subject = ""] = header.split(US);
+		const { files, truncated } = parseUnifiedDiff(patch);
+		const additions = files.reduce((a, f) => a + f.additions, 0);
+		const deletions = files.reduce((a, f) => a + f.deletions, 0);
+		return { sha: hsha, author, dateMs: Date.parse(iso) || 0, subject, files, additions, deletions, truncated };
+	} catch {
+		return { error: "git show failed" };
+	}
 }
 
 

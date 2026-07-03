@@ -125,3 +125,63 @@ test("resumeAgent: waits for an in-flight turn to end without re-prompting", asy
 	expect(r.outcome).toBe("succeeded");
 	expect(agent.prompted).toBe(false);
 });
+
+// ── C01: sound cold resume (D2) ─────────────────────────────────────────────
+
+test("resumeAgent COLD: a fresh thread RE-RUNS the in-flight node and re-primes the goal", async () => {
+	const agent = new ResumeFakeAgent(false); // fresh thread: idle, never received the goal
+	const exec = new SingleAgentExecutor({
+		cwd: "/tmp",
+		acquireAgent: () => Promise.resolve(agent),
+		emit: () => {},
+		gate: () => Promise.resolve(""),
+		cold: true,
+		scheduleIdleCheck: () => ({ cancel: () => {} }),
+	});
+	const pending = exec.resumeAgent({ id: "implement", kind: "agent", attrs: {} }, { goal: "g", vars: {} });
+	await flush();
+	agent.emitEnd(); // the re-sent turn completes
+	const r = await pending;
+	expect(r.outcome).toBe("succeeded");
+	expect(agent.prompted).toBe(true); // cold re-executes (warm would leave this false)
+});
+
+test("two-phase checkpoint: a completed node advances currentNode and is never re-entered on resume", async () => {
+	const wf = parseWorkflow(WF);
+	const checkpoints: EngineCheckpoint[] = [];
+	await new WorkflowEngine(wf, new RecordingExecutor()).run("g", { checkpoint: (c) => checkpoints.push(c) });
+	// After node `a` finished, an exit checkpoint advanced currentNode to `b` (the second-phase checkpoint).
+	const advanced = checkpoints.find((c) => c.currentNode === "b" && (c.resumeAttempts ?? 0) === 0);
+	expect(advanced).toBeDefined();
+	// Resuming from that post-`a` position must NOT re-enter `a`.
+	const exec2 = new RecordingExecutor();
+	const resume: WorkflowRunState = { ...advanced!, rollup: [] };
+	await new WorkflowEngine(wf, exec2).run("g", { resume });
+	expect(exec2.calls).not.toContain("run:a");
+	expect(exec2.calls).not.toContain("resume:a");
+});
+
+test("poison cap: a cold resume AT the attempt cap escalates instead of re-running the node", async () => {
+	const wf = parseWorkflow(WF);
+	const exec = new RecordingExecutor();
+	const escalated: string[] = [];
+	const resume: WorkflowRunState = { goal: "g", currentNode: "b", visits: { start: 1, a: 1, b: 1 }, vars: {}, index: 3, rollup: [], cold: true, resumeAttempts: 3 };
+	const result = await new WorkflowEngine(wf, exec).run("g", { resume, escalate: (r) => escalated.push(r) });
+	expect(result.outcome).toBe("failed");
+	expect(result.reason).toContain("poison cap");
+	expect(escalated).toHaveLength(1);
+	expect(exec.calls).toEqual([]); // the poison node was never executed again
+});
+
+test("poison cap: a cold resume BELOW the cap re-runs and records an incremented attempt, reset on progress", async () => {
+	const wf = parseWorkflow(WF);
+	const exec = new RecordingExecutor();
+	const checkpoints: EngineCheckpoint[] = [];
+	const resume: WorkflowRunState = { goal: "g", currentNode: "b", visits: { start: 1, a: 1, b: 1 }, vars: {}, index: 3, rollup: [], cold: true, resumeAttempts: 1 };
+	await new WorkflowEngine(wf, exec).run("g", { resume, checkpoint: (c) => checkpoints.push(c) });
+	expect(exec.calls).toEqual(["resume:b"]); // node still re-runs (below cap), `a` does not
+	expect(checkpoints[0]?.currentNode).toBe("b");
+	expect(checkpoints[0]?.resumeAttempts).toBe(2); // entry checkpoint = prior(1) + 1
+	const exitCp = checkpoints.find((c) => c.currentNode === "exit");
+	expect(exitCp?.resumeAttempts).toBe(0); // forward progress resets the poison counter
+});
