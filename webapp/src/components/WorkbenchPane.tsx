@@ -23,6 +23,7 @@ import {
 import { getCategoryBadge } from '../utils';
 import { useTaskContext, type TaskFilter } from '../context/TaskContext';
 import { AccountMenu } from './AccountMenu';
+import { GlanceLogo } from './GlanceLogo';
 import type { Task } from '../types';
 
 const taskFilters: Array<{ key: TaskFilter; label: string }> = [
@@ -202,7 +203,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
       <div className="border-b border-gray-200 bg-gray-50/70 px-3 py-2 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2 text-sm">
-            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-blue-600 text-[11px] font-semibold text-white">G</div>
+            <GlanceLogo size={20} className="flex-shrink-0 text-gray-900 dark:text-gray-100" />
             <span className="font-semibold text-gray-900 dark:text-gray-100">glance</span>
             <ChevronRight className="h-3 w-3 flex-shrink-0 text-gray-400" aria-hidden="true" />
             <span className="truncate font-medium text-gray-600 dark:text-gray-300">{currentProject?.name ?? 'No project'}</span>

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Search, Inbox, ChevronDown, ChevronRight, Settings, Menu, Download, Boxes, ListChecks } from 'lucide-react';
 import { useTaskContext, type TaskFilter } from '../context/TaskContext';
+import { GlanceLogo } from './GlanceLogo';
 
 const filters: Array<{ key: TaskFilter; label: string }> = [
   { key: 'open', label: 'Open' },
@@ -61,7 +62,7 @@ export const Sidebar = ({ collapsed, onToggleCollapsed }: SidebarProps) => {
     <aside className="w-56 flex-shrink-0 flex flex-col h-full bg-gray-50 dark:bg-[#18191b] border-r border-gray-200 dark:border-gray-800 z-10 transition-colors duration-200">
       <div className="h-10 border-b border-gray-200 dark:border-gray-800 flex items-center px-3 justify-between">
         <div className="flex items-center gap-2 font-semibold dark:text-gray-200">
-          <div className="w-5 h-5 bg-blue-600 rounded flex items-center justify-center text-white text-[11px]">G</div>
+          <GlanceLogo size={18} className="flex-shrink-0 text-gray-900 dark:text-gray-200" />
           glance
         </div>
         <button onClick={onToggleCollapsed} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 focus-visible:ring-2 focus-visible:ring-blue-500" aria-label="Collapse workspace pane" title="Collapse workspace pane">

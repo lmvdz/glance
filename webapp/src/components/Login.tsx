@@ -7,8 +7,8 @@ import React from 'react';
 import { Mail, KeyRound, User, Loader2, Building2 } from 'lucide-react';
 import { authClient } from '../lib/auth-client';
 import { useAuth } from '../context/AuthContext';
+import { GlanceLogo } from './GlanceLogo';
 import loginArt from '../assets/login-art.png';
-import logoLockup from '../assets/logo-lockup.png';
 
 // Self-contained film-grain (inline SVG feTurbulence, no external asset — CSP-safe). Overlaid faintly to
 // echo the artwork's grain and warm the flat form panel.
@@ -115,8 +115,9 @@ export const Login = () => {
           <div className="relative flex flex-1 flex-col justify-center px-8 py-12 sm:px-14">
             <div className="login-rise mx-auto w-full max-w-[320px]">
               {/* Brand lockup */}
-              <div className="mb-9">
-                <img src={logoLockup} alt="glance" className="h-8 w-auto" />
+              <div className="mb-9 flex items-center gap-2.5 text-[#f4f4f5]">
+                <GlanceLogo size={30} />
+                <span className="text-[18px] font-semibold lowercase tracking-tight">glance</span>
               </div>
 
               {/* Headline */}
