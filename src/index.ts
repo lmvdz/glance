@@ -16,7 +16,7 @@
 import "./env-compat.ts";
 import * as os from "node:os";
 import * as path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
@@ -122,12 +122,9 @@ function base(flags: Record<string, string | boolean>): string {
 }
 function stateDirPath(): string {
 	// GLANCE_STATE_DIR is mirrored onto OMP_SQUAD_STATE_DIR by env-compat, so this honors either name.
-	if (process.env.OMP_SQUAD_STATE_DIR) return process.env.OMP_SQUAD_STATE_DIR;
-	const glance = path.join(os.homedir(), ".glance");
-	const legacy = path.join(os.homedir(), ".omp", "squad");
-	// Don't orphan existing state: if the legacy dir exists and the new one doesn't, keep using it.
-	if (!existsSync(glance) && existsSync(legacy)) return legacy;
-	return glance;
+	// The physical dir stays ~/.omp/squad: it's referenced by absolute path in ttl-registry (presence/leases)
+	// and the agent-guard control-file regex, so moving it is a separate, careful migration — not a rename.
+	return process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
 }
 
 /** Enumerate org ids that have persisted state (the `<stateDir>/orgs/<id>` dir names). Tolerates a missing dir. */

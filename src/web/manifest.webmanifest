@@ -1,6 +1,6 @@
 {
-  "name": "omp-squad command center",
-  "short_name": "omp-squad",
+  "name": "glance command center",
+  "short_name": "glance",
   "description": "Control plane for parallel Oh My Pi agents — supervise by exception, from anywhere.",
   "start_url": "/",
   "scope": "/",

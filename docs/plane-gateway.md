@@ -7,7 +7,7 @@ rate-limit problem in practice; this gateway is the next step if/when cross-proc
 
 Plane cloud rate-limits per workspace token. Many independent processes share that one token:
 
-- the omp-squad daemon (dispatcher poll, observer poll + filing, worktree reaper, scout),
+- the glance daemon (dispatcher poll, observer poll + filing, worktree reaper, scout),
 - the Plane MCP server (used by interactive agent sessions),
 - any other agent/tool acting on the same workspace.
 

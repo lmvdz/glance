@@ -1,4 +1,4 @@
-# omp-squad
+# glance
 
 **Manage a fleet of [Oh My Pi](https://omp.sh) agents running in parallel — one per git worktree — from a terminal TUI *and* a web dashboard.**
 
@@ -11,7 +11,7 @@ federation layer — the same UI, with teammates' agents in the roster.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ omp-squad  3 agents · 1 need input                            + Add agent  │
+│ glance  3 agents · 1 need input                            + Add agent  │
 ├───────────────────────────────┬──────────────────────────────────────────┤
 │ ⛔ input   bravo  squad/bravo  │ bravo [input]  anthropic/claude-opus      │
 │ ◐ working  alpha  squad/alpha  │ ───────────────────────────────────────  │
@@ -29,7 +29,7 @@ federation layer — the same UI, with teammates' agents in the roster.
 
 You're running several coding agents at once (a refactor here, a bug hunt there, a
 spike in a third repo). Without a control plane you lose track of which is busy, which
-finished, and **which is blocked waiting for you**. omp-squad is that control plane:
+finished, and **which is blocked waiting for you**. glance is that control plane:
 
 - **Isolation by default** — each agent works in its own `git worktree`, so parallel
   agents never clobber each other's files.
@@ -44,7 +44,7 @@ finished, and **which is blocked waiting for you**. omp-squad is that control pl
 ## How it works
 
 ```
-        omp-squad (one process)
+        glance (one process)
         ┌─────────────────────────────────────────────┐
         │  SquadManager  ── roster, status, transcript │
         │     │                                        │
@@ -72,9 +72,9 @@ finished, and **which is blocked waiting for you**. omp-squad is that control pl
 Requires [Bun](https://bun.sh) ≥ 1.3.14 and `omp` on your `PATH`.
 
 ```bash
-cd omp-squad
+cd glance
 bun install
-bun link            # optional: makes `omp-squad` global
+bun link            # optional: makes `glance` global
 ```
 
 Run without linking via `bun src/index.ts <cmd>`.
@@ -83,10 +83,10 @@ Run without linking via `bun src/index.ts <cmd>`.
 
 ```bash
 # Start the daemon — opens the TUI and serves the web dashboard (default :7878)
-omp-squad up
+glance up
 
 # …or headless (web only), e.g. on a server
-omp-squad up --no-tui
+glance up --no-tui
 ```
 
 > One daemon per state dir. `up` takes a single-writer lock (`daemon.lock` in the state dir,
@@ -103,23 +103,23 @@ From another shell (talks to the running daemon):
 
 ```bash
 # Spawn an agent in a fresh worktree of a repo, with an initial task
-omp-squad add ~/code/myproject --name auth-refactor \
+glance add ~/code/myproject --name auth-refactor \
   --task "Refactor the auth module to use the new session API."
 
 # See the roster
-omp-squad list
+glance list
 
 # Send a follow-up instruction
-omp-squad prompt auth-refactor-<id> "Also update the tests."
+glance prompt auth-refactor-<id> "Also update the tests."
 
 # Emergency-stop an agent but keep its worktree/roster entry
-omp-squad kill auth-refactor-<id>
+glance kill auth-refactor-<id>
 
 # Remove it (and delete its worktree)
-omp-squad rm auth-refactor-<id> --delete-worktree
+glance rm auth-refactor-<id> --delete-worktree
 ```
 
-Open the dashboard in a browser: `omp-squad open` prints the URL (default
+Open the dashboard in a browser: `glance open` prints the URL (default
 `http://127.0.0.1:7878`). The **+ Add agent** button and per-agent composer/answer
 controls do everything the CLI does, including interrupt/restart/kill/remove controls. Task detail keeps lifecycle status as a dedicated status card (not buried in the description), renders a linked plan's `00-overview.md` as the description, and shows created/updated timestamps for both the plan and the selected markdown doc. The Assistant chat is backed by the same live transcript stream as the TUI: assistant and thinking text update while streaming, thinking is shown in a foldable **Thinking** row, agent todos render as a persistent collapsible plan panel above the transcript, and tool rows show human-first command/output/status views with the raw args/partial/result payload tucked under **Raw payload** for debugging. When chat-created tool output references `plans/<name>/...`, the dashboard promotes that plan into the plannable list immediately so its markdown and linked work can be reviewed without waiting for another refresh. The Settings gear persists daemon feature flags to `<stateDir>/settings.json`; restart-tagged flags are saved immediately and fully apply on the next daemon boot. The Control Tower model selector is populated from live `omp` model discovery when an agent is connected, plus any configured `OMP_SQUAD_MODELS="anthropic/claude-opus,openai/gpt-5.2"` fallback values.
 
@@ -163,10 +163,10 @@ The suite covers worktree ops, the pure board renderer, the RPC transport
 (`get_state` + `bash`), and the manager lifecycle. A full model-driven check:
 
 ```bash
-omp-squad up --no-tui &
-omp-squad add /path/to/git/repo --name demo --approval yolo \
+glance up --no-tui &
+glance add /path/to/git/repo --name demo --approval yolo \
   --task 'Create a file proof.txt containing OK via a shell command, then stop.'
-omp-squad list           # watch demo go working → idle
+glance list           # watch demo go working → idle
 cat ~/.omp/squad/worktrees/<repo>-squad-demo/proof.txt   # → OK
 ```
 
@@ -204,8 +204,8 @@ Unset → the issues panel shows "Plane not connected" and everything else works
 Run the issue curator when the backlog starts repeating itself:
 
 ```bash
-omp-squad curate-plane [repo]        # print recurring clusters
-omp-squad curate-plane [repo] --file # also file one [curator] do-not-auto-land issue per cluster
+glance curate-plane [repo]        # print recurring clusters
+glance curate-plane [repo] --file # also file one [curator] do-not-auto-land issue per cluster
 ```
 
 It groups open Plane issues that point at the same root cause (for example dirty auto-land,
@@ -242,7 +242,7 @@ origins (avoid `*` outside local testing), and rotate by replacing the campaign 
 Operators use the authenticated feedback API to review `GET /api/feedback/items`, add validation
 votes, accept or reject, then promote accepted / needs-validation items to Plane with
 `POST /api/feedback/items/:id/promote`. Rewards are a ledger only: reward campaigns create `pending`
-entries; operators can approve, void, and mark paid with a manual/provider reference, but omp-squad
+entries; operators can approve, void, and mark paid with a manual/provider reference, but glance
 never pays users automatically.
 
 Safety notes: serve the widget over HTTPS; screenshots may contain PII; text/metadata/screenshot sizes
@@ -499,7 +499,7 @@ surface. The token is required even on loopback (the control plane can spawn age
 code, and re-exec the daemon — it must not be open).
 
 ```
-omp-squad daemon running
+glance daemon running
   dashboard: http://0.0.0.0:7878
   access token: Bdnw7…IHo
   open from any device on this network (tap to sign in):
@@ -522,7 +522,7 @@ mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-a
   disabled (`allowUserToCreateOrganization: false`), so a remote user can't escalate to admin.
 - **Bootstrap (break-glass).** Provisioning the first org/members needs an admin, so a request
   **from loopback carrying the daemon's bearer token** (the access token printed at boot, used by
-  the `omp-squad` CLI on the same box) resolves to `admin` even in DB mode. Off-box requests get
+  the `glance` CLI on the same box) resolves to `admin` even in DB mode. Off-box requests get
   no token shortcut — they must use sessions. The operator on the machine bootstraps; attackers
   off-box cannot.
 - **Organizations, members, roles.** The bootstrap admin creates orgs, invites members by email,
@@ -566,7 +566,7 @@ not). Two ways to get it:
 
 - **Tailscale (recommended)** — front the daemon with a real cert, no in-process TLS:
   ```bash
-  omp-squad up --no-tui            # bound to localhost is fine
+  glance up --no-tui            # bound to localhost is fine
   tailscale serve --bg 7878        # → https://<machine>.<tailnet>.ts.net
   ```
   Open that URL on your phone (same tailnet), append `?token=…` once, **Add to Home
@@ -594,7 +594,7 @@ previous React dashboard has been kept under [`webapp-legacy/`](webapp-legacy/)
 for historical reference so useful pieces can be ripped forward before that old
 implementation is deleted.
 
-The starter's look stays canonical. Live omp-squad data is adapted underneath it:
+The starter's look stays canonical. Live glance data is adapted underneath it:
 the new webapp captures `?token=...`, adds Bearer auth for `/api/*`, connects to
 `/ws` with the `ompsq-token` subprotocol, and maps projects/features/agents into
 the starter task model. Legacy React code is a protocol reference only, not a UI
@@ -615,7 +615,7 @@ only metadata at `GET /api/federation/capabilities` until explicit context polic
 allows more. Machine-readable discovery lives at `/llms.txt`, `/openapi.json`,
 and `GET /api/capability-discovery`.
 
-The public catalog now includes the recurring omp-squad recipes we keep reusing:
+The public catalog now includes the recurring glance recipes we keep reusing:
 `verified-feature-delivery`, `parallel-solution-race`,
 `conflict-resolution-doctor`, `agent-factory-architect`, and
 `fleet-autonomy-steward`, alongside the planning/context recipes. Catalog
@@ -672,7 +672,7 @@ onboards it only if it passes an acceptance gate. The hire-replacement loop:
 
 ```bash
 # Deterministic worker (no model): author → validate → onboard if the gate passes
-omp-squad commission extract-emails \
+glance commission extract-emails \
   --purpose "Extract email addresses from payload.text; return { emails, count }." \
   --accept-payload '{"text":"a@x.io b@y.org"}' --accept-expect '{"count":2}'
 ```
@@ -706,7 +706,7 @@ need to tell an interactive operator from a commissioned worker. Design + ration
 
 The goal: a human **never has to do anything** but say what they want; the OS chooses
 *how*. Spawning takes one natural-language line (the per-project composer, a Plane issue,
-or `omp-squad add … --task`) — no forms, no flags. An **intake router** (`src/intake.ts`)
+or `glance add … --task`) — no forms, no flags. An **intake router** (`src/intake.ts`)
 reads the task + repo and routes it:
 
 - ordinary code change → an **autonomous verify loop** (implement → verify → fixup), using
@@ -735,7 +735,7 @@ driven over one persistent omp thread. The agent's *process* becomes a diffable,
 version-controlled artifact instead of being implicit in a free-text task.
 
 ```bash
-omp-squad add ~/code/myproject --name feature \
+glance add ~/code/myproject --name feature \
   --workflow workflows/plan-implement/workflow.fabro \
   --task "Add rate limiting to the public API."
 ```
@@ -750,7 +750,7 @@ omp-squad add ~/code/myproject --name feature \
 - **Parallel fan-out = real fleet agents.** A `component` fork spawns one **real, steerable
   roster agent per branch** (each in its own worktree), runs them concurrently (`max_parallel`),
   and a `tripleoctagon` merge joins them (`join_policy: wait_all | first_success`). This is
-  omp-squad's headline — parallel agents you can watch and steer — expressed as graph nodes.
+  glance's headline — parallel agents you can watch and steer — expressed as graph nodes.
   Branch agents **nest under their workflow** in the roster (TUI + web), and a kind glyph
   (`⚙` workflow · `⚒` service) tags each row.
 - **Gates reuse needs-input.** A `hexagon` human node surfaces as the manager's ordinary
@@ -769,7 +769,7 @@ implement → verify → fixup loop for you — no `.fabro` file needed — turn
 says it's done" into "done **and** the gate is green":
 
 ```bash
-omp-squad add ~/code/myproject --task "Add rate limiting to the public API." \
+glance add ~/code/myproject --task "Add rate limiting to the public API." \
   --verify "bun run check && bun test"
 ```
 
@@ -807,11 +807,11 @@ the single-agent `land(id)` path and the multi-branch `landFeature` path — so 
 leaves no stale open issue behind.
 
 When `main` has moved under a long-running branch, the merge **conflicts** — the point most
-fleet tools give up at. The bundled **`resolve-conflict`** workflow is omp-squad's answer,
+fleet tools give up at. The bundled **`resolve-conflict`** workflow is glance's answer,
 expressed as a reviewable graph rather than a black box:
 
 ```bash
-omp-squad add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
+glance add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
   --task "Make this branch land-able on main."
 ```
 
@@ -881,7 +881,7 @@ agent joins the roster / TUI / web / workflows like any other; only the transpor
 JSONL RPC over `docker exec -i`) and execution location change.
 
 ```bash
-omp-squad add ~/code/myproject --sandbox my-omp-image --approval yolo \
+glance add ~/code/myproject --sandbox my-omp-image --approval yolo \
   --task "Try the risky migration."
 ```
 
@@ -901,7 +901,7 @@ an ACP runtime joins the roster / TUI / web / status / receipts **identically** 
 transport (hand-rolled ACP JSON-RPC 2.0 over the child's stdio) and the agent runtime change.
 
 ```bash
-omp-squad add ~/code/myproject --acp --task "Add rate limiting to the public API."
+glance add ~/code/myproject --acp --task "Add rate limiting to the public API."
 ```
 
 - **`AcpAgentDriver`** spawns the runtime as a child, handshakes (`initialize` → `session/new`),

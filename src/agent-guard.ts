@@ -44,13 +44,13 @@ export interface GuardContext {
  */
 const FORBIDDEN_COMMANDS: { re: RegExp; reason: string }[] = [
 	// Daemon lifecycle: only the operator/watchdog runs these. An agent doing so spawns a rival daemon.
-	{ re: /\bomp-squad\b[^\n]*\b(up|down|restart|stop|reboot|shutdown)\b/, reason: "an agent must not control the squad daemon (omp-squad up/down/restart) — it spawns a rival daemon that fights for the state lock" },
+	{ re: /\b(?:omp-squad|glance)\b[^\n]*\b(up|down|restart|stop|reboot|shutdown)\b/, reason: "an agent must not control the glance daemon (glance up/down/restart) — it spawns a rival daemon that fights for the state lock" },
 	// (Re)launching the daemon via the launcher script — covers `./up.sh`, `bash …/up.sh`, watchdog loops.
 	{ re: /\.\/up\.sh\b/, reason: "an agent must not launch the daemon via up.sh" },
 	{ re: /\b(?:bash|sh|source|exec|nohup|setsid|env)\b[^\n]*\bup\.sh\b/, reason: "an agent must not launch the daemon via up.sh (that is the operator/watchdog's job)" },
 	// Process killing: an agent in a worktree never needs to mass-kill — it takes out the daemon + siblings.
 	{ re: /\b(?:pkill|killall)\b/, reason: "an agent must not mass-kill processes (pkill/killall) — it can take down the daemon and sibling agents" },
-	{ re: /\bkill\b[^\n|;&]*\b(?:bun|omp|omp-squad|daemon|squad)\b/, reason: "an agent must not kill the daemon or agent processes" },
+	{ re: /\bkill\b[^\n|;&]*\b(?:bun|omp|omp-squad|glance|daemon|squad)\b/, reason: "an agent must not kill the daemon or agent processes" },
 	{ re: /\bkill\s+(?:-9|-KILL|-SIGKILL|-s\s*(?:9|KILL|SIGKILL))\b/, reason: "an agent must not SIGKILL processes" },
 	// kill by NUMERIC pid: where did the number come from? Almost always the daemon's. An agent kills
 	// its own children with $! / %job (variables/job specs), never a literal pid — so block literals.
