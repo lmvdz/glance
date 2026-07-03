@@ -1,5 +1,5 @@
 # Fleet, Agent Profiles, and Memory Pages
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

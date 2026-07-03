@@ -1,5 +1,5 @@
 # Project Tree + Nested Agents
-STATUS: open
+STATUS: cancelled
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

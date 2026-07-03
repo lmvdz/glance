@@ -1,6 +1,6 @@
 # Overview — manager-grade Control Tower
 
-STATUS: partial
+STATUS: cancelled
 PRIORITY: p0
 REPOS: omp-squad
 

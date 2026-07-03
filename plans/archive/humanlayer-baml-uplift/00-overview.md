@@ -1,6 +1,6 @@
 # Overview — HumanLayer + BAML uplift
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 

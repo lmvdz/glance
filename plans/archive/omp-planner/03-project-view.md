@@ -1,6 +1,6 @@
 # Project view — plannable task list + properties
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,6 +1,6 @@
 # Design: Meta-Harness Dashboard Pages
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p0
 REPOS: omp-squad
 

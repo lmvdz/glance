@@ -1,6 +1,6 @@
 # Project model + drill-down sidebar
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,5 +1,5 @@
 # App shell navigation + full issue workspace
-STATUS: open
+STATUS: cancelled
 
 > 2026-07-01 reconcile: marked done but never built (2026-06-30 audit, re-verified today) — none of
 > the TOUCHES files exist (`webapp/src/components/layout/`, `views/`, `palette/`, `workbench/` are
