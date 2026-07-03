@@ -19,6 +19,9 @@ import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
+import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
+import { buildProvenance, type ProvenanceDoc } from "./omp-graph/provenance.ts";
+import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
@@ -1040,10 +1043,13 @@ export class SquadServer {
 		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
 		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
-		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit") {
+		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit" || url.pathname === "/api/graph/attribution" || url.pathname === "/api/graph/provenance") {
 			const repo = resolveGraphRepo(url, manager);
 			if (!repo) return new Response("repo not allowed", { status: 403 });
-			return Response.json(url.pathname === "/api/graph" ? await graphPayload(url, repo) : await commitDetailPayload(url, repo));
+			if (url.pathname === "/api/graph") return Response.json(await graphPayload(url, repo));
+			if (url.pathname === "/api/graph/commit") return Response.json(await commitDetailPayload(url, repo));
+			if (url.pathname === "/api/graph/attribution") return Response.json(await attributionPayload(url, repo));
+			return Response.json(await provenancePayload(url, repo, manager));
 		}
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
@@ -1638,18 +1644,54 @@ function resolveGraphRepo(url: URL, manager: SquadManager): string | null {
 	return allowed.has(resolved) ? resolved : null;
 }
 
-async function graphPayload(url: URL, repo: string): Promise<GraphDoc> {
+async function graphPayload(url: URL, repo: string): Promise<GraphDoc & { plan: { name: string; monthly: number } | null }> {
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
 	const future = boundedNumber(url.searchParams.get("future"), 0, 0, 14);
+	// explicit window (epoch ms) for history views — the DEPTH massif fetches one
+	// window per week row. Bounded to 32 days so a bad param can't walk all of git.
+	const range = explicitRange(url);
 	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
-	const key = `${days}:${future}:${repo}`;
+	const key = range ? `r${range.start}:${range.end}:${repo}` : `${days}:${future}:${repo}`;
 	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
 	const fresh = url.searchParams.get("fresh"); // reload icon bypasses the cache
+	const plan = planFromEnv() ?? null;
 	const hit = graphCache.get(key);
-	if (hit && !fresh && Date.now() - hit.at < ttl) return hit.doc;
-	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, { days, futureDays: future });
+	if (hit && !fresh && Date.now() - hit.at < ttl) return { ...hit.doc, plan };
+	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, range ? { range } : { days, futureDays: future });
 	graphCache.set(key, { at: Date.now(), doc });
-	return doc;
+	return { ...doc, plan };
+}
+
+/** Parse ?start=&end= (epoch ms) into a bounded TimeRange, or null when absent/invalid. */
+function explicitRange(url: URL): { start: number; end: number } | null {
+	const start = Number(url.searchParams.get("start"));
+	const end = Number(url.searchParams.get("end"));
+	if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start) return null;
+	const MAX_SPAN = 32 * 24 * 3_600_000;
+	return end - start > MAX_SPAN ? { start: end - MAX_SPAN, end } : { start, end };
+}
+
+/** GET /api/graph/attribution — the harness→model spend matrix behind the pulse bands. */
+async function attributionPayload(url: URL, repo: string): Promise<ReturnType<typeof buildAttribution>> {
+	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
+	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
+	return buildAttribution(receipts, range, { plan: planFromEnv() });
+}
+
+/** GET /api/graph/provenance?id=OMPSQ-336 — the plan→agent→proof→land thread for one ticket. */
+async function provenancePayload(url: URL, repo: string, manager: SquadManager): Promise<ProvenanceDoc | { error: string }> {
+	const id = (url.searchParams.get("id") ?? "").trim().toUpperCase();
+	if (!/^[A-Z][A-Z0-9]*-\d+$/.test(id)) return { error: "invalid ticket id" };
+	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const features = (await manager.features(repo).catch(() => [])).map((f) => ({
+		id: f.id,
+		title: f.title,
+		planDir: f.planDir,
+		issueIdentifiers: f.issueIdentifiers,
+	}));
+	return buildProvenance({ repo, stateDir, ticket: id, features });
 }
 
 // ── commit detail (GET /api/graph/commit?sha=) — the "click a milestone → diff" drilldown ──

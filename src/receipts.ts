@@ -31,6 +31,8 @@ export interface RunSeed {
 	issue?: string;
 	operator?: string;
 	org?: string;
+	/** Which harness drove the run; the daemon stamps "omp". */
+	harness?: string;
 }
 
 /**
@@ -134,6 +136,7 @@ export class RunAccumulator {
 			traceId: this.spans.id,
 			featureId: this.seed.featureId,
 			parentId: this.seed.parentId,
+			harness: this.seed.harness ?? "omp",
 		};
 		if (includeSpans) receipt.spans = this.spans.snapshot(opts.maxSpans ?? traceMaxSpans());
 		return receipt;
