@@ -1891,8 +1891,8 @@ export class SquadManager extends EventEmitter {
 		try {
 			const command = await detectVerify(repo);
 			if (!command) return { ok: true };
-			// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
-			const plan = gateExec(command, repo);
+			// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a legible host fallback).
+			const plan = await gateExec(command, repo);
 			const proc = Bun.spawn(plan.argv, { cwd: repo, stdout: "pipe", stderr: "pipe", env: plan.env });
 			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 			if (code === 0) return { ok: true };

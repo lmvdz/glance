@@ -12,7 +12,7 @@
 
 import { detectVerify } from "./intake.ts";
 import { gateExec } from "./gate-runner.ts";
-import { proofGate } from "./proof.ts";
+import { proofGate, recordProof } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
 export interface LandResult {
@@ -130,10 +130,16 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output. */
-async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
-	// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
-	const plan = gateExec(cmd, cwd);
+/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output + sandbox flag. */
+async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string; sandboxed: boolean }> {
+	// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a
+	// legible host fallback). A strict-mode fail-closed throw here rolls up as a failed gate (blocks the land).
+	let plan: Awaited<ReturnType<typeof gateExec>>;
+	try {
+		plan = await gateExec(cmd, cwd);
+	} catch (e) {
+		return { code: 1, output: e instanceof Error ? e.message : String(e), sandboxed: false };
+	}
 	const proc = Bun.spawn(plan.argv, { cwd, stdout: "pipe", stderr: "pipe", env: plan.env });
 	const timer = setTimeout(() => proc.kill(), timeoutMs);
 	try {
@@ -142,10 +148,20 @@ async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{
 			new Response(proc.stderr).text(),
 			proc.exited,
 		]);
-		return { code, output: `${stdout}${stderr}`.trim() };
+		return { code, output: `${stdout}${stderr}`.trim(), sandboxed: plan.sandboxed };
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * Durably record the land's post-merge acceptance gate as a proof of the merged main, so a landed
+ * main is always backed by an inspectable proof — not just an in-the-moment pass that vanishes.
+ * Keyed to the main checkout (worktree === repo), so it is an audit record, never a land gate.
+ * Best-effort: a proof-write failure must never fail an otherwise-successful land.
+ */
+async function recordMainProof(repo: string, command: string, ok: boolean, detail: string, sandboxed: boolean): Promise<void> {
+	await recordProof({ repo, worktree: repo, command, ok, detail, sandboxed }).catch(() => {});
 }
 
 /** Cap a string to `n` chars so a gate's failure dump doesn't bloat the land detail. */
