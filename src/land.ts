@@ -12,7 +12,7 @@
 
 import { detectVerify } from "./intake.ts";
 import { gateExec } from "./gate-runner.ts";
-import { proofGate } from "./proof.ts";
+import { proofGate, recordProof } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
 export interface LandResult {
@@ -34,6 +34,12 @@ export interface LandResult {
 	 * shared checkout) would otherwise permanently brick every healthy branch behind it.
 	 */
 	retryable?: boolean;
+	/**
+	 * A FORCED land (requireProof:false) merged/committed WITHOUT a passing proof gate — unproven trust
+	 * made legible. The caller records the audit fact (actor + timestamp) in the land ledger; `detail`
+	 * says so too. Absent/false on a normal land or a forced land that happened to have a fresh proof.
+	 */
+	forcedWithoutProof?: boolean;
 }
 
 /**
@@ -130,10 +136,16 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output. */
-async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
-	// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
-	const plan = gateExec(cmd, cwd);
+/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output + sandbox flag. */
+async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string; sandboxed: boolean }> {
+	// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a
+	// legible host fallback). A strict-mode fail-closed throw here rolls up as a failed gate (blocks the land).
+	let plan: Awaited<ReturnType<typeof gateExec>>;
+	try {
+		plan = await gateExec(cmd, cwd);
+	} catch (e) {
+		return { code: 1, output: e instanceof Error ? e.message : String(e), sandboxed: false };
+	}
 	const proc = Bun.spawn(plan.argv, { cwd, stdout: "pipe", stderr: "pipe", env: plan.env });
 	const timer = setTimeout(() => proc.kill(), timeoutMs);
 	try {
@@ -142,10 +154,20 @@ async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{
 			new Response(proc.stderr).text(),
 			proc.exited,
 		]);
-		return { code, output: `${stdout}${stderr}`.trim() };
+		return { code, output: `${stdout}${stderr}`.trim(), sandboxed: plan.sandboxed };
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * Durably record the land's post-merge acceptance gate as a proof of the merged main, so a landed
+ * main is always backed by an inspectable proof — not just an in-the-moment pass that vanishes.
+ * Keyed to the main checkout (worktree === repo), so it is an audit record, never a land gate.
+ * Best-effort: a proof-write failure must never fail an otherwise-successful land.
+ */
+async function recordMainProof(repo: string, command: string, ok: boolean, detail: string, sandboxed: boolean): Promise<void> {
+	await recordProof({ repo, worktree: repo, command, ok, detail, sandboxed }).catch(() => {});
 }
 
 /** Cap a string to `n` chars so a gate's failure dump doesn't bloat the land detail. */
@@ -257,7 +279,26 @@ export function landAgent(opts: LandOpts): Promise<LandResult> {
 	return withRepoLandLock(opts.repo, () => landAgentLocked(opts));
 }
 
+/**
+ * Force-land audit seam: a FORCED land (requireProof === false, a deliberate human override — NOT the
+ * legacy `requireProof` undefined) that proceeds without a passing proof gate is unproven trust. We do
+ * NOT block it (force is intentional), but we make it LEGIBLE: evaluate the proof gate once WITHOUT
+ * blocking, and if it would have failed AND the land actually merged/committed, stamp the result so the
+ * caller records the audit fact (actor + timestamp) and the detail says so. A forced land that happened
+ * to carry a fresh proof is not flagged — no crying wolf.
+ */
 async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
+	const forced = opts.requireProof === false;
+	const unproven = forced ? (await proofGate(opts.repo, opts.worktree, opts.branch, opts.verify)) !== undefined : false;
+	const result = await landAgentImpl(opts);
+	if (forced && unproven && result.ok && (result.merged || result.committed)) {
+		result.forcedWithoutProof = true;
+		result.detail = result.detail ? `${result.detail}; landed WITHOUT a passing proof gate (FORCED)` : "landed WITHOUT a passing proof gate (FORCED)";
+	}
+	return result;
+}
+
+async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	const { repo, worktree, branch, message, commitWip } = opts;
 
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe
@@ -333,6 +374,8 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			// No acceptance gate — still run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
 			if (rg) return rg;
+			// Record the landed main even without a gate: an inspectable "landed, no acceptance gate ran" proof.
+			await recordMainProof(repo, "(no acceptance gate)", true, detail, false);
 			return { ok: true, committed, merged: true, message, detail };
 		}
 		const v = await runGate(gate, repo);
@@ -340,6 +383,8 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			// Acceptance gate green — additionally run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
 			if (rg) return rg;
+			// The merged main passed the gate — record it as a durable, inspectable post-merge proof.
+			await recordMainProof(repo, gate, true, `${detail}; verified (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
 			return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
 		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
@@ -363,6 +408,9 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 		if (rm.code !== 0) {
 			return { ok: false, committed, merged: false, message, detail: `base already red (${gate}); re-merging ${branch} failed: ${rm.stderr || rm.stdout}` };
 		}
+		// Landed onto a red baseline — record it honestly: ok:false so the post-merge proof reflects that
+		// main was not green (the branch introduced no NEW failure, but main is still red).
+		await recordMainProof(repo, gate, false, `landed onto a red baseline — main was not green at head0 (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
 		return { ok: true, committed, merged: true, message, detail: `${detail}; landed onto a red baseline — main was not green at head0 (${gate})` };
 	};
 
@@ -506,8 +554,10 @@ async function attemptAutoResolve(a: {
 	};
 
 	// (c) The resolution is unproven until the FULL gate passes on the merged main.
+	let gateSandboxed = false;
 	if (gate) {
 		const v = await runGate(gate, repo);
+		gateSandboxed = v.sandboxed;
 		if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${truncate(v.output, 800)}`);
 	}
 
@@ -519,7 +569,8 @@ async function attemptAutoResolve(a: {
 	const approved = await reviewer({ repo, worktree, branch }).catch(() => false);
 	if (!approved) return rollback(`auto-resolved ${branch} but reviewer rejected the resolution — rolled main back`);
 
-	// (e) Proven ⇒ keep it.
+	// (e) Proven ⇒ keep it, and record the landed main as a durable post-merge proof.
+	await recordMainProof(repo, gate || "(no acceptance gate)", true, `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved`, gateSandboxed);
 	return { ok: true, committed, merged: true, message, detail: `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved` };
 }
 

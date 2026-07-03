@@ -47,6 +47,12 @@ export interface Proof {
 	detail: string;
 	/** Screenshot paths collected from <worktree>/.omp/proof/ — vision evidence. */
 	artifacts: string[];
+	/**
+	 * Whether the acceptance command ran inside a hermetic docker sandbox. A proof that ran
+	 * UNSANDBOXED (`false`) saw the daemon's real filesystem/network and is a WEAKER proof — the
+	 * record says so rather than pretending every proof is equal. Undefined on pre-sandbox records.
+	 */
+	sandboxed?: boolean;
 }
 
 /** Manager/org state root owns proof storage; tests/standalone callers use the default. */
@@ -224,11 +230,14 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 	let out = "";
 	let err = "";
 	let code = 1;
+	let sandboxed = false;
 	try {
 		if (!existsSync(opts.worktree)) throw new Error(`worktree missing: ${opts.worktree}`);
 		if (before?.dirty) throw new Error("worktree has uncommitted changes (tracked edits or new files) — commit or discard them before Verify");
-		// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
-		const plan = gateExec(opts.command, opts.worktree, { mounts: [opts.repo] });
+		// gateExec: scrubbed env always; hermetic docker container by default when docker is usable
+		// (else a legible host fallback). plan.sandboxed records which — a host-run proof is weaker.
+		const plan = await gateExec(opts.command, opts.worktree, { mounts: [opts.repo] });
+		sandboxed = plan.sandboxed;
 		const proc = Bun.spawn(plan.argv, { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: plan.env });
 		const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 		out = o;
@@ -260,6 +269,7 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 		ttlMs: PROOF_TTL_MS,
 		detail: tail.slice(0, 4000),
 		artifacts: await collectArtifacts(opts.worktree),
+		sandboxed,
 	};
 	// Optional, evidence-only browser-vision pass. Never touches the gate fields above — it only
 	// merges its screenshots/notes into artifacts (deduped, since collectArtifacts may already
@@ -270,6 +280,39 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 		proof.artifacts = [...new Set([...proof.artifacts, ...shots])].sort();
 	}
 	const { dir, file } = fileFor(opts.repo, opts.worktree);
+	await fsp.mkdir(dir, { recursive: true });
+	await fsp.writeFile(file, JSON.stringify(proof));
+	return proof;
+}
+
+/**
+ * Record a proof for an ALREADY-RUN gate (no re-execution) — used to durably capture the land's
+ * post-merge acceptance gate against the merged main. The result was proven in-the-moment by the
+ * land; recording it means a landed main is always backed by an inspectable proof record, keyed to
+ * the merged commit/tree, not just an ephemeral pass. `worktree` is the main checkout for a
+ * post-merge proof, so proofGate (which no-ops when worktree === repo) never treats it as a land
+ * gate — it is purely an audit record. Best-effort by contract: callers should tolerate a throw.
+ */
+export async function recordProof(input: { repo: string; worktree: string; command: string; ok: boolean; detail: string; sandboxed?: boolean; ttlMs?: number }): Promise<Proof> {
+	const fp = existsSync(input.worktree) ? await proofFingerprint(input.repo, input.worktree, input.command) : undefined;
+	const proof: Proof = {
+		ok: input.ok,
+		commit: fp?.commit ?? "",
+		tree: fp?.tree ?? "",
+		branch: fp?.branch ?? "",
+		dirty: fp?.dirty ?? false,
+		baseCommit: fp?.baseCommit ?? "",
+		repo: path.resolve(input.repo),
+		worktree: path.resolve(input.worktree),
+		command: input.command,
+		commandHash: commandHash(input.command),
+		ranAt: Date.now(),
+		ttlMs: input.ttlMs ?? PROOF_TTL_MS,
+		detail: input.detail.slice(0, 4000),
+		artifacts: [],
+		sandboxed: input.sandboxed ?? false,
+	};
+	const { dir, file } = fileFor(input.repo, input.worktree);
 	await fsp.mkdir(dir, { recursive: true });
 	await fsp.writeFile(file, JSON.stringify(proof));
 	return proof;

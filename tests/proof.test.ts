@@ -8,7 +8,7 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { headCommit, isFresh, type Proof, proofFor, proofGate, runProof } from "../src/proof.ts";
+import { headCommit, isFresh, type Proof, proofFor, proofGate, recordProof, runProof } from "../src/proof.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -179,4 +179,48 @@ test("runProof on a failing acceptance command returns ok:false without throwing
 	const repo = await baseRepo();
 	const proof = await runProof({ repo, worktree: repo, command: "exit 3" });
 	expect(proof.ok).toBe(false);
+});
+
+test("runProof stamps sandboxed:false on the host-fallback path (explicit host opt-out)", async () => {
+	// Deterministic regardless of whether this box has docker: `host` forces the pre-sandbox host exec.
+	const prev = process.env.OMP_SQUAD_GATE_SANDBOX;
+	process.env.OMP_SQUAD_GATE_SANDBOX = "host";
+	try {
+		const repo = await baseRepo();
+		const proof = await runProof({ repo, worktree: repo, command: "true" });
+		expect(proof.ok).toBe(true);
+		expect(proof.sandboxed).toBe(false); // an unsandboxed proof is stamped as the weaker proof it is
+	} finally {
+		if (prev === undefined) delete process.env.OMP_SQUAD_GATE_SANDBOX;
+		else process.env.OMP_SQUAD_GATE_SANDBOX = prev;
+	}
+});
+
+test("runProof stamps sandboxed:true when an explicit sandbox image is set (docker-independent)", async () => {
+	// An explicit image always plans a `docker run`. We use a deliberately INVALID reference so the
+	// spawn fails fast in ~50ms whether or not docker is installed (no network pull) — the point is
+	// only that the record says sandboxed:true: the stamp reflects the PLAN, not the spawn outcome.
+	const prev = process.env.OMP_SQUAD_GATE_SANDBOX;
+	process.env.OMP_SQUAD_GATE_SANDBOX = "Invalid Image Ref";
+	try {
+		const repo = await baseRepo();
+		const proof = await runProof({ repo, worktree: repo, command: "true" });
+		expect(proof.sandboxed).toBe(true); // planned a container even though the run itself failed
+		expect(proof.ok).toBe(false);
+	} finally {
+		if (prev === undefined) delete process.env.OMP_SQUAD_GATE_SANDBOX;
+		else process.env.OMP_SQUAD_GATE_SANDBOX = prev;
+	}
+});
+
+test("recordProof persists an already-run gate result as an inspectable proof of the merged main", async () => {
+	const repo = await baseRepo();
+	const rec = await recordProof({ repo, worktree: repo, command: "bun test", ok: true, detail: "post-merge", sandboxed: false });
+	expect(rec.ok).toBe(true);
+	expect(rec.commit).toBe(await headCommit(repo));
+	expect(rec.sandboxed).toBe(false);
+	const got = await proofFor(repo, repo);
+	expect(got?.ok).toBe(true);
+	expect(got?.detail).toBe("post-merge");
+	expect(got?.command).toBe("bun test");
 });
