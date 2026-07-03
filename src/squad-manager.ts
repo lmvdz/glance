@@ -110,6 +110,7 @@ import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
+import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
@@ -2975,6 +2976,36 @@ export class SquadManager extends EventEmitter {
 	 */
 	automationActivity(query: AutomationQuery & { windowMs?: number } = {}): { events: AutomationEvent[]; rollup: ReturnType<AutomationLog["rollup"]> } {
 		return { events: this.automation.recent(query), rollup: this.automation.rollup(query.windowMs) };
+	}
+
+	/**
+	 * First-glance factory liveness (server reads this for GET /api/factory/status). Answers the trust
+	 * question the automation rollup couldn't: for every autonomous loop, is it flag-enabled, did it
+	 * actually ARM this run, and — if not — WHY (the authoritative `planeRepos().length === 0` gate
+	 * reason), plus its live heartbeat freshness and a derived status enum. `liveArmed` reads the manager's
+	 * real runtime fields, so "armed but not fueled" is provably distinct from "off" and from "dead".
+	 */
+	factoryStatus(now = Date.now()): FactoryStatus {
+		// Freshness window: the widest per-loop budget (3 cadences, floor 5m) so a recent heartbeat still
+		// shows up in the rollup regardless of loop cadence.
+		const windowMs = Math.max(...FACTORY_LOOPS.map((l) => Math.max(l.cadenceMs * 3, 300_000)));
+		const liveArmed: Record<string, boolean> = {
+			dispatch: !!this.dispatcher,
+			observer: this.observers.length > 0,
+			scout: this.scouts.size > 0,
+			opportunity: this.opportunities.length > 0,
+			// orchestrator is always built, but its control loop only arms the timer when AUTODRIVE is on.
+			autodrive: !!this.orchestrator && process.env.OMP_SQUAD_AUTODRIVE !== "0",
+			autoland: this.autoLand,
+		};
+		return buildFactoryStatus({
+			now,
+			env: process.env,
+			planeRepoCount: planeRepos().length,
+			rollup: this.automation.rollup(windowMs, now),
+			liveArmed,
+			activeAgents: occupyingAgents(this.list()),
+		});
 	}
 
 	private async commentPlaneTargets(repo: string, subject: string): Promise<string[]> {

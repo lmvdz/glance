@@ -1184,6 +1184,12 @@ export class SquadServer {
 				}),
 			);
 		}
+		if (url.pathname === "/api/factory/status") {
+			// First-glance liveness: per autonomous loop, whether it's flag-enabled, actually armed, the
+			// reason it didn't arm (the authoritative no-backlog gate), heartbeat freshness, and a status
+			// enum (moving|idle|not-armed|off). Makes an idle-but-alive fleet legibly different from a dead one.
+			return Response.json(manager.factoryStatus());
+		}
 		const mtrace = url.pathname.match(/^\/api\/trace\/([^/]+)$/);
 		if (mtrace && req.method === "GET") {
 			const trace = await manager.trace(decodeURIComponent(mtrace[1]));
