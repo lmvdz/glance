@@ -95,6 +95,44 @@ export interface RunContext {
 	vars: Record<string, string>;
 }
 
+export type WorkflowAutonomyMode = "manual" | "supervised" | "autonomous";
+
+export interface WorkflowProofState {
+	state: "none" | "failed" | "stale" | "fresh";
+	ranAt?: number;
+	artifacts: number;
+}
+
+export interface WorkflowJournalEvent {
+	type:
+		| "workflow.node.start"
+		| "workflow.node.end"
+		| "workflow.human_gate.start"
+		| "workflow.human_gate.end"
+		| "workflow.parallel.start"
+		| "workflow.parallel.end"
+		| "workflow.branch.start"
+		| "workflow.branch.end"
+		| "workflow.verification.start"
+		| "workflow.verification.end"
+		| "workflow.land.start"
+		| "workflow.land.end";
+	at: number;
+	workflow: string;
+	runId: string;
+	nodeId?: string;
+	label?: string;
+	kind?: NodeKind;
+	phase?: "start" | "end";
+	outcome?: Outcome;
+	text?: string;
+	options?: string[];
+	selected?: string;
+	proof?: WorkflowProofState;
+	detail?: string;
+}
+
+
 /** Lifecycle notification for one stage (a single node execution). */
 export interface StageEvent {
 	/** 0-based execution order within the run. */
@@ -131,11 +169,29 @@ export interface EngineCheckpoint {
 	preferredLabel?: string;
 	/** Monotonic stage index. */
 	index: number;
+	/**
+	 * How many times a cold (dead-thread) resume has re-entered this exact node without making
+	 * forward progress. Reset to 0 by the exit checkpoint (a node that advanced), incremented only on
+	 * a cold re-entry. Bounds a run that keeps crashing the daemon before it ever reaches idle — the
+	 * engine visit-cap deliberately does not re-count the resumed node, so this is its only ceiling.
+	 */
+	resumeAttempts?: number;
 }
 
 /** Persisted run state — an engine checkpoint plus the executor's stage rollup (for the progress view). */
 export interface WorkflowRunState extends EngineCheckpoint {
 	rollup: { label: string; status: "in_progress" | "completed" }[];
+	runId?: string;
+	autonomy?: WorkflowAutonomyMode;
+	sessionId?: string;
+	proof?: WorkflowProofState;
+	/**
+	 * Resume-time only (NOT persisted state): true when this run is resuming on a FRESH inner thread
+	 * after the prior host died (the adopt path), false/absent when reattaching a surviving host (the
+	 * reconnect path). A cold resume must re-execute its genuinely-in-flight node (re-prime the goal)
+	 * instead of waiting on a turn that no live thread is running. Set by the manager at resume time.
+	 */
+	cold?: boolean;
 }
 
 /**

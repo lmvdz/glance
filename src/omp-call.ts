@@ -6,19 +6,23 @@
 
 import { gitNoSignEnv } from "./git-harden.ts";
 
+const DEFAULT_TIMEOUT_MS = 1_000;
+
 /**
  * Run a one-shot `omp` invocation and capture stdout. Never throws: a spawn
  * error or `timeoutMs` abort degrades to `{ out: "", code: 1 }`, so callers can
  * treat any non-zero `code` (or empty `out`) as failure uniformly.
  */
 export async function ompOneShot(args: string[], opts: { bin?: string; timeoutMs?: number } = {}): Promise<{ out: string; code: number }> {
+	const bin = opts.bin ?? "omp";
+	if (!Bun.which(bin)) return { out: "", code: 1 };
 	try {
-		const proc = Bun.spawn([opts.bin ?? "omp", ...args], {
+		const proc = Bun.spawn([bin, ...args], {
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "ignore",
 			env: { ...process.env, ...gitNoSignEnv() },
-			...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+			signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 		});
 		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 		return { out, code };

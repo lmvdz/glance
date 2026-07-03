@@ -14,10 +14,10 @@ import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
-import { MIN_SCAN_CHARS, Scout, type ScoutDeps, jaccard, parseTickets, titleTokens, unscannedReasoning } from "../src/scout.ts";
+import { DEFAULT_SCOUT_MAX_CALLS_PER_HOUR, MIN_SCAN_CHARS, Scout, ScoutCallBudget, type ScoutDeps, jaccard, parseTickets, scoutMaxCallsPerHour, titleTokens, unscannedReasoning } from "../src/scout.ts";
 import type { IssueRef, TranscriptEntry } from "../src/types.ts";
 
-const ENV_KEYS = ["OMP_SQUAD_SCOUT", "OMP_SQUAD_SCOUT_MAX", "OMP_SQUAD_SCOUT_PER_RUN"] as const;
+const ENV_KEYS = ["OMP_SQUAD_SCOUT", "OMP_SQUAD_SCOUT_MAX", "OMP_SQUAD_SCOUT_PER_RUN", "OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -294,6 +294,69 @@ test("(i) concurrent scans of the same item file it once (serialized seen-safety
 	expect(h.filed.length).toBe(1); // second scan, serialized, sees the seen-set
 });
 
+// ── #16: global per-hour LLM-call budget ─────────────────────────────────────
+
+test("(#16) scoutMaxCallsPerHour: default + env override + invalid fallback", () => {
+	delete process.env.OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR;
+	expect(scoutMaxCallsPerHour()).toBe(DEFAULT_SCOUT_MAX_CALLS_PER_HOUR);
+	process.env.OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR = "5";
+	expect(scoutMaxCallsPerHour()).toBe(5);
+	process.env.OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR = "nonsense";
+	expect(scoutMaxCallsPerHour()).toBe(DEFAULT_SCOUT_MAX_CALLS_PER_HOUR);
+	process.env.OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR = "0"; // 0 ⇒ unlimited (handled in the budget)
+	expect(scoutMaxCallsPerHour()).toBe(0);
+});
+
+test("(#16) ScoutCallBudget admits up to N/hour, refuses past it, and the window slides", () => {
+	let clock = 1_000_000;
+	const b = new ScoutCallBudget(() => 2, () => clock);
+	expect(b.tryConsume()).toBe(true); // 1
+	expect(b.tryConsume()).toBe(true); // 2
+	expect(b.tryConsume()).toBe(false); // 3 — over budget
+	expect(b.used()).toBe(2);
+	clock += 3_600_001; // slide past the first two stamps' hour
+	expect(b.tryConsume()).toBe(true); // window cleared ⇒ admitted again
+	expect(b.used()).toBe(1);
+});
+
+test("(#16) ScoutCallBudget: max<=0 ⇒ unlimited", () => {
+	const b = new ScoutCallBudget(() => 0, () => 1);
+	for (let i = 0; i < 100; i++) expect(b.tryConsume()).toBe(true);
+});
+
+test("(#16) once the per-hour budget is hit, further scans skip the LLM call (record a structured skip)", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR = "2";
+	const events: AutomationReport[] = [];
+	let clock = 1_000_000;
+	// Distinct titles per scan so dedup/seen-set never masks a skip; the budget is the only gate under test.
+	let extractCalls = 0;
+	const h = makeDeps(tmpDir(), {
+		record: (r) => events.push(r),
+		now: () => clock,
+		extract: async () => {
+			extractCalls++;
+			return json([{ title: `Distinct latent item number ${extractCalls}` }]);
+		},
+	});
+	const s = new Scout(h.deps);
+	await s.scan(BIG, { agent: "ag1" }); // call 1 — admitted
+	await s.scan(BIG, { agent: "ag1" }); // call 2 — admitted
+	await s.scan(BIG, { agent: "ag1" }); // call 3 — OVER BUDGET ⇒ no LLM call
+	expect(extractCalls).toBe(2); // only two extractions ever ran
+	// Two cost events (llmCalls:1) + one structured skip event (llmCalls:0, info).
+	const skips = events.filter((e) => e.llmCalls === 0 && e.skipReason === "budget");
+	expect(skips.length).toBe(1);
+	expect(skips[0].level).toBe("info");
+	expect(skips[0].detail).toContain("budget reached");
+	expect(events.filter((e) => e.llmCalls === 1).length).toBe(2);
+
+	// Window slides ⇒ scanning resumes (a new distinct item is filed).
+	clock += 3_600_001;
+	await s.scan(BIG, { agent: "ag1" });
+	expect(extractCalls).toBe(3);
+});
+
 test("start() arms no timer when OMP_SQUAD_SCOUT=0 or without a liveReasoning dep; arms one otherwise", () => {
 	const real = globalThis.setInterval;
 	let armed = 0;
@@ -315,5 +378,22 @@ test("start() arms no timer when OMP_SQUAD_SCOUT=0 or without a liveReasoning de
 		expect(armed).toBe(1);
 	} finally {
 		globalThis.setInterval = real;
+	}
+});
+
+test("(record) a no-live-reasoning tick emits an idle skip heartbeat with a reason", async () => {
+	const prev = process.env.OMP_SQUAD_SCOUT;
+	process.env.OMP_SQUAD_SCOUT = "1";
+	try {
+		const events: AutomationReport[] = [];
+		const h = makeDeps(tmpDir(), { liveReasoning: () => [], record: (r) => events.push(r) });
+		await new Scout(h.deps).tick();
+		expect(events).toHaveLength(1);
+		expect(events[0].skipReason).toBe("idle");
+		expect(events[0].detail).toBe("no live agent reasoning to scan");
+		expect(events[0].llmCalls).toBeUndefined();
+	} finally {
+		if (prev === undefined) delete process.env.OMP_SQUAD_SCOUT;
+		else process.env.OMP_SQUAD_SCOUT = prev;
 	}
 });

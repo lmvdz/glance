@@ -85,7 +85,8 @@ The serializable per-agent snapshot sent to every surface (over `/api/agents` an
 		kind: { type: 'AgentKind', required: true, description: 'Which runtime backs this agent.' },
 		parentId: { type: 'string', description: 'Parent workflow agent id, when this is a spawned fan-out branch.' },
 		verified: { type: 'boolean', description: 'flue-service only: passed the acceptance gate at onboard time.' },
-		repo: { type: 'string', required: true, description: 'Repo root the worktree was cut from.' },
+		repo: { type: 'string', required: true, description: 'Repo root the worktree was cut from (host-local path; for display).' },
+		repoId: { type: 'string', description: 'Cross-host repo identity (normalized git origin). Optional: absent on agents that predate federation. When present, federation peers use it to match collisions without re-running git on the remote path.' },
 		worktree: { type: 'string', required: true, description: 'Absolute path of the git worktree (the agent cwd).' },
 		branch: { type: 'string' },
 		model: { type: 'string' },
@@ -138,6 +139,7 @@ A cross-cutting unit of work spanning a plan dir and/or a set of agents/worktree
 		divergent: { type: 'boolean', required: true, description: 'Any member worktree readiness is diverged.' },
 		blocked: { type: 'boolean', required: true, description: 'Any member agent is waiting on human input.' },
 		statusCounts: { type: 'Partial<Record<AgentStatus, number>>', required: true },
+		readiness: { type: 'FeatureReadiness', required: true, description: 'Computed promotion/land read model: ready, state, blockers, nextAction.' },
 		issueIdentifiers: { type: 'string[]', description: 'Plane issue identifiers referenced by the plan concerns.' },
 		persisted: { type: 'boolean', description: 'True for a real persisted Feature (vs a derived one).' },
 		stageOverride: { type: 'FeatureStage', description: 'Manual stage pin (persisted features only).' },
@@ -230,3 +232,71 @@ type ClientCommand =
 | `snapshot` | Request a full roster + recent transcript replay. |
 | `subscribe` | Ask for a transcript replay of one agent (unicast). |
 | `commission` | Run the commissioning loop for a `CommissionSpec`. |
+
+## AutomationEvent
+
+One unit of background-loop work. Scout emits one per reasoning scan (each = one LLM call); the other loops emit one per tick (a no-op tick is a heartbeat proving the loop is alive). Returned by `GET /api/automation` and broadcast as the `automation` `SquadEvent` variant. Defined in `src/types.ts`.
+
+<TypeTable
+	type={{
+		id: { type: 'number', required: true, description: 'Strictly-increasing id (epoch ms, bumped on collision). Stable sort + dedupe key.' },
+		at: { type: 'number', required: true, description: 'Epoch ms the unit of work finished.' },
+		loop: { type: 'AutomationLoop', required: true, description: '"scout" | "observer" | "opportunity" | "dispatch"' },
+		repo: { type: 'string', description: 'Repo the loop is scoped to (Scout/Observer/Opportunity are per-repo). Omitted for fleet-wide Dispatch.' },
+		agent: { type: 'string', description: 'Scout only: the agent whose reasoning was scanned.' },
+		durationMs: { type: 'number', description: 'Wall-clock the unit of work took.' },
+		llmCalls: { type: 'number', description: 'LLM one-shots this unit cost. Scout: 1 per scan; other loops: 0. The headline cost signal.' },
+		found: { type: 'number', description: 'Candidates/findings surfaced this unit (before dedup).' },
+		filed: { type: 'number', description: 'Issues/tickets actually filed this unit.' },
+		deduped: { type: 'number', description: 'Candidates skipped as already-seen or duplicate of open work.' },
+		spawned: { type: 'number', description: 'Dispatch only: agents spawned this tick.' },
+		skipReason: { type: 'AutomationSkipReason', description: 'Structured reason this unit intentionally skipped work: "budget" | "overlap" | "wip-cap" | "idle" | "already-handled" | "human-review" | "blocked". Skip events persist to automation.jsonl even with no work/cost, so the UI can prove a loop is alive-but-idle.' },
+		level: { type: '"info" | "warn" | "error"', description: 'Severity. warn/error events are persisted to automation.jsonl even when no work was done.' },
+		detail: { type: 'string', description: 'Optional human-readable detail (a filed issue title, an error message, or skip explanation).' },
+	}}
+/>
+
+`AutomationRollupRow` is the per-loop aggregate returned alongside events by `GET /api/automation`:
+
+<TypeTable
+	type={{
+		loop: { type: 'AutomationLoop', required: true },
+		events: { type: 'number', required: true, description: 'Units of work emitted in the window (Scout: scans; others: ticks).' },
+		llmCalls: { type: 'number', required: true },
+		found: { type: 'number', required: true },
+		filed: { type: 'number', required: true },
+		spawned: { type: 'number', required: true },
+		errors: { type: 'number', required: true },
+		lastAt: { type: 'number', required: true, description: 'Most-recent activity timestamp in the window. 0 if the loop was silent (lets the UI flag a stalled loop).' },
+		lastSkipReason: { type: 'string', description: 'Reason for the loop\'s most-recent intentional no-work tick, when present. Lets the digest tell healthy-idle (has a reason) from stuck (silent).' },
+	}}
+/>
+
+## Payment types
+
+Defined in `src/payments/types.ts`. Used by the Feedback Loop reward disbursement flow.
+
+### PayoutRequest
+
+<TypeTable
+	type={{
+		idempotencyKey: { type: 'string', required: true, description: 'Caller-owned dedupe key (the squad manager passes the reward id). Re-submitting the same key returns the original order — no double-pay.' },
+		amountCents: { type: 'number', required: true, description: 'Amount in minor units (cents). Must be greater than zero.' },
+		currency: { type: 'string', required: true, description: 'ISO-4217 currency code, e.g. "USD".' },
+		recipientEmail: { type: 'string', required: true, description: 'Email the reward is delivered to (gift card link, PayPal, etc.).' },
+		recipientName: { type: 'string', description: 'Optional display name for the recipient.' },
+		note: { type: 'string', description: 'Optional human note attached to the payout (shown in the provider dashboard and recipient email).' },
+	}}
+/>
+
+### PayoutResult
+
+<TypeTable
+	type={{
+		status: { type: '"paid" | "pending" | "failed"', required: true, description: 'paid: funds delivered/issued (terminal). pending: accepted but not yet settled. failed: not disbursed; error explains why.' },
+		externalRef: { type: 'string', required: true, description: 'Provider-side order/reward/transaction id. Empty string on failure.' },
+		provider: { type: 'string', required: true, description: 'Stable provider identifier persisted on the reward ("tremendous" or "manual").' },
+		raw: { type: 'unknown', description: 'Raw provider response for the audit trail and debugging. Never used for control flow.' },
+		error: { type: 'string', description: 'Human-readable failure reason when status === "failed".' },
+	}}
+/>

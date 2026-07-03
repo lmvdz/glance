@@ -1,5 +1,5 @@
 # Feature proof/provenance contract
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -23,9 +23,10 @@ Preserve feature source, worktree, land readiness, and proof summary data from t
 
 ## Acceptance Criteria
 
-- The web task model preserves each feature's canon source, candidate worktrees, land readiness, and proof summary.
-- The task detail UI can render proof/provenance from structured fields without parsing markdown descriptions.
-- Existing task lists, status labels, and manually edited criteria continue to behave as before.
+- A plan-backed feature carries its source of truth, linked Plane issues, candidate agents/worktrees, proof summary, and land readiness as structured fields from daemon to webapp.
+- A derived plan can be adopted into a durable feature without changing its visible identity or losing plan context.
+- Manually edited title, description, criteria, decisions, and relationships remain durable after the feature contract adds proof/provenance fields.
+- Existing task lists and status lanes keep their current behavior for manual features, plan-derived features, Plane-backed features, and live agent features.
 
 ## Cross-Repo Side Effects
 

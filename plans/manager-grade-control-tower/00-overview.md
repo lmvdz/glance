@@ -1,8 +1,14 @@
 # Overview — manager-grade Control Tower
 
-STATUS: done
+STATUS: partial
 PRIORITY: p0
 REPOS: omp-squad
+
+> 2026-07-01 reconcile (was blanket "done"; 2026-06-30 audit + re-verify): backend concerns 01/05
+> and the observability surfaces (04, now living as AutomationPanel/FleetHealthPanel/HeatPanel in
+> the replaced shell) are real. 02 is `diverged` (assistant-ui rejected; goal met by the custom
+> transcript instead) and 03 is `open` (shell-navigation/issue-workspace never built). See the
+> per-concern notes.
 
 > WIP gate: scanner showed 7 existing open plan dirs / 30 open concerns. Proceeded because the operator explicitly asked to parallelize `/plan` agents on this Control Tower overhaul.
 

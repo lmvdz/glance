@@ -1,0 +1,130 @@
+---
+title: Payments
+description: Disburse feedback rewards via Tremendous — real payouts or manual ledger entries, idempotent and safe to retry.
+---
+
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+omp-squad's feedback system lets operators approve rewards for contributors. The payments
+module (`src/payments/`) turns an approved reward into an **actual payout** — an email
+delivery via [Tremendous](https://www.tremendous.com), or a recorded-only ledger entry if
+no API key is configured.
+
+## Providers
+
+Two providers implement the `PaymentProvider` interface:
+
+| Provider | When active | Effect |
+|---|---|---|
+| `TremendousProvider` | `OMP_SQUAD_TREMENDOUS_API_KEY` is set | POSTs a real Tremendous order; recipient gets an email with redemption options (gift card, PayPal, ACH, Visa, etc.) |
+| `ManualProvider` | API key not set (default) | Records the operator-supplied `provider` + `externalRef` as a ledger entry; no network call, no funds moved |
+
+`paymentProviderFromEnv()` picks the right one at startup — the presence of the API key is the
+activation switch. There is no separate `PAYMENTS_ENABLED` flag.
+
+## Configuration
+
+<TypeTable
+  type={{
+    OMP_SQUAD_TREMENDOUS_API_KEY: {
+      type: 'string',
+      description: 'Tremendous API Bearer token. Presence activates the TremendousProvider. Get it from the Tremendous dashboard under API Keys.',
+    },
+    OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID: {
+      type: 'string',
+      description: 'Which balance or account funds the payout. Find it in the Tremendous dashboard under Funding Sources.',
+    },
+    OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID: {
+      type: 'string',
+      description: 'Determines which redemption options the recipient sees (gift cards, PayPal, ACH, …). Find it under Campaigns.',
+    },
+    OMP_SQUAD_TREMENDOUS_ENV: {
+      type: '"sandbox" | "production"',
+      default: '"sandbox"',
+      description: 'API base URL selector. "sandbox" uses testflight.tremendous.com. Switch to "production" to move real money.',
+    },
+  }}
+/>
+
+## Payout flow
+
+`markFeedbackRewardPaid` in `src/squad-manager.ts` is the single path for marking a reward paid:
+
+<Steps>
+<Step>
+**State-machine gate** — asserts the reward is in `approved` state before any mutation or
+network call. Calling it on a `pending` or already-`paid` reward throws immediately.
+</Step>
+<Step>
+**Recipient resolution** — the recipient email comes from the explicit `recipientEmail` option
+or falls back to `item.userEmail`. Required for real disbursement; optional for manual records.
+</Step>
+<Step>
+**Provider call** — `provider.payout({ idempotencyKey: reward.id, … })`. The reward's `id`
+is the `external_id` on the Tremendous order, so re-posting the same reward ID returns the
+existing order instead of creating a duplicate.
+</Step>
+<Step>
+**Success** — on `status: "paid"` or `"pending"` the result's `provider` + `externalRef`
+are persisted and the reward is marked `paid`. A Tremendous `"pending"` status (order accepted
+upstream) is stored as `paid` since the money/order is committed.
+</Step>
+<Step>
+**Failure** — on `status: "failed"` the reward is **not** marked paid; it stays `approved`.
+A clear error is thrown to the caller. The daemon does not crash.
+</Step>
+</Steps>
+
+## Idempotency
+
+The reward `id` is the Tremendous order's `external_id`. Tremendous treats the `external_id`
+as a deduplication key — POSTing twice with the same key returns the existing order (HTTP 200)
+instead of creating a second one. Retrying a failed API call for one reward can therefore never
+double-pay the recipient.
+
+## Going live
+
+<Steps>
+<Step>
+**Set all four env vars** with sandbox credentials first:
+
+```sh
+OMP_SQUAD_TREMENDOUS_API_KEY=test_xxxx
+OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID=FUND_xxxx
+OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID=CAMP_xxxx
+OMP_SQUAD_TREMENDOUS_ENV=sandbox
+```
+</Step>
+<Step>
+**Approve a reward** via the CLI or API, then call `markFeedbackRewardPaid` with a test
+recipient email. Confirm the order appears in the Tremendous sandbox dashboard and the recipient
+gets the redemption email.
+</Step>
+<Step>
+**Switch to production** by setting `OMP_SQUAD_TREMENDOUS_ENV=production` and swapping in
+production API credentials. All subsequent payouts hit the live API.
+</Step>
+</Steps>
+
+## Manual mode (no API key)
+
+Without `OMP_SQUAD_TREMENDOUS_API_KEY`, `ManualProvider` is active. When `markFeedbackRewardPaid`
+is called in manual mode the caller **must** supply:
+- `provider` — name of the payment service used out-of-band (e.g. `"paypal"`, `"wire"`).
+- `externalRef` — the provider's payment or transaction reference (proof of payment).
+
+Both are recorded on the reward as the ledger entry. No funds move through omp-squad. This is
+the original behavior and the correct default when real disbursement is not yet configured.
+
+## Source
+
+- `src/payments/index.ts` — `PaymentProvider`, `paymentProviderFromEnv()`
+- `src/payments/tremendous.ts` — `TremendousProvider`, Tremendous Orders API integration
+- `src/payments/manual.ts` — `ManualProvider`, records-only ledger
+- `src/payments/types.ts` — `PayoutRequest`, `PayoutResult`, `PayoutStatus`
+- `src/squad-manager.ts` — `markFeedbackRewardPaid`
+
+<Cards>
+  <Card title="Configuration" href="/docs/reference/configuration" description="All environment variables in one place." />
+</Cards>

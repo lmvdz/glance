@@ -96,6 +96,16 @@ export const TaskProperties = ({ task }: TaskPropertiesProps) => {
         </div>
       </div>
 
+      {task.proofProvenance?.readiness && (
+        <div className="mb-8">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-3">Promotion readiness</h3>
+          <div className="rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
+            <div className="font-semibold text-gray-900 dark:text-gray-100">{task.proofProvenance.readiness.state.replace(/-/g, ' ')}</div>
+            <div className="mt-1">{task.proofProvenance.readiness.nextAction}</div>
+          </div>
+        </div>
+      )}
+
       {/* Tags Section */}
       <div className="mb-8">
         <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">

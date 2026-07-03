@@ -1,9 +1,10 @@
 # Canonical autonomy mode contract
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/types.ts, src/squad-manager.ts, src/server.ts, src/index.ts, src/tui.ts, webapp/src/lib/dto.ts, webapp/src/components/*
+PLANE: OMPSQ-307 — https://app.plane.so/inkwell-finance/browse/OMPSQ-307/
 
 ## Goal
 

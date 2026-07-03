@@ -68,7 +68,7 @@ Any other unmatched path returns `404 not found`.
 | GET | `/api/features/:id/tickets` | Resolved Plane tickets. | [`PlaneTicket[]`](/docs/reference/types) |
 | POST | `/api/features/:id/module` | Create a Plane module for the feature. | module; `501` if Plane not configured |
 | POST | `/api/features/:id/verify` | Run the feature's verification. | verify result; `404` if missing |
-| GET | `/api/features/:id/pipeline?repo=` | Plan concerns + linked issues + agent ids. | `{ concerns, issues, agentIds }`; `404` if missing |
+| GET | `/api/features/:id/pipeline?repo=` | Feature, readiness, plan concerns, linked issues, comments, and agent ids. | `{ feature, readiness, concerns, documents, issues, comments, agentIds }`; `404` if missing |
 
 The spawn-and-link branch of `/api/features/:id/agents` creates the agent with `approvalMode: "yolo"` and `track: true` and links it to the feature.
 
@@ -77,8 +77,28 @@ The spawn-and-link branch of `/api/features/:id/agents` creates the agent with `
 | Method | Path | Purpose | Response |
 | --- | --- | --- | --- |
 | GET | `/api/presence?repo=` | Presence for one repo, or all active agents. | presence entries |
-| GET | `/api/leases?repo=` | File leases for a repo (defaults to the daemon cwd). | lease list |
+| GET | `/api/leases?repo=` | File leases for a repo (defaults to the daemon cwd). | `LeaseEntry[]` |
+| GET | `/api/fabric?repo=` | Agent fabric view for a repo including live leases. | fabric payload |
 | GET | `/api/federation` | Roster-of-rosters: self + peers + branch collisions. | `FederationSnapshot` |
+
+**`/api/leases`** returns `LeaseEntry[]` — soft advisory file-edit claims keyed by `(repo, file, session)`. Each entry carries `{ id, repo, file, operator, session, host, since, heartbeat }`. In file mode, the full machine-wide registry is returned for the requested repo (or `cwd`). In DB-registry mode the result is scoped to repos the calling org's fleet actually works on — another org's leases are never visible.
+
+**`/api/fabric`** returns the agent fabric view for the given repo, including live file leases. Like leases, the scope is always the calling org's agents — never cross-org.
+
+**`/api/federation`** returns a `FederationSnapshot`:
+
+```ts
+interface FederationSnapshot {
+  /** ws:// coordinator URL this daemon is connected to, or null when federation is off or in DB mode. */
+  coordinator: string | null;
+  /** self (pinned head) + live peers, deduped by operator id. */
+  operators: OperatorPresence[];
+  /** Repos where agents owned by DIFFERENT operators share a branch — a collision to resolve. */
+  collisions: Collision[];
+}
+```
+
+In file mode, `operators` includes the local daemon's roster plus any live peers gossiped from the coordinator. In DB-registry mode, `operators` contains only the calling org's own roster (no cross-host coordinator feed per org) and `coordinator` is always `null`. Previously this endpoint returned empty data in DB mode; it now always returns the org's own agents.
 
 ## Plane
 
@@ -97,6 +117,24 @@ The spawn-and-link branch of `/api/features/:id/agents` creates the agent with `
 <Callout type="warn">
 `POST /api/upgrade` stops the manager, frees the port, and re-execs the daemon ~300ms after responding. Agents' host processes survive and the relaunched daemon reconnects to them.
 </Callout>
+
+## Automation (background loops)
+
+| Method | Path | Purpose | Response |
+| --- | --- | --- | --- |
+| GET | `/api/automation` | Background-loop observability: recent events + per-loop rollups. | `{ events: AutomationEvent[], rollup: AutomationRollupRow[] }` |
+
+Query parameters:
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `loop` | `"scout" \| "observer" \| "opportunity" \| "dispatch"` | all loops | Filter to one named background loop. |
+| `windowMs` | number | `3600000` (1 h) | Size of the rollup window in milliseconds. |
+| `meaningful` | `"1"` | off | When `1`, drop heartbeat events (ticks with no work done) from the event feed. |
+| `limit` | number | `200` | Cap on the number of `events` returned (newest first). |
+| `sinceMs` | number | unset | Only return events newer than `now - sinceMs`. |
+
+`events` is a list of `AutomationEvent` (see [Types](/docs/reference/types)), newest first. `rollup` is a per-loop aggregate row over the requested window — it always covers all four loops (rows for silent loops have zero counts).
 
 ## Commands
 

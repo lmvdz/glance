@@ -1,5 +1,11 @@
 # assistant-ui Control Tower thread replacement
-STATUS: done
+STATUS: diverged
+
+> 2026-07-01 reconcile: marked done but the assistant-ui approach was never adopted —
+> `@assistant-ui/*` is not a webapp dependency and none of the TOUCHES files exist (2026-06-30
+> audit, re-verified today). The *goal* (a rich live thread) was later met differently: the custom
+> `TranscriptTimeline` in AssistantChat.tsx plus Claude-Code-style tool rendering (`0d4bc20`) and
+> the inline gate-answer widget (`192e7bf`). Treat the assistant-ui plan itself as rejected.
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

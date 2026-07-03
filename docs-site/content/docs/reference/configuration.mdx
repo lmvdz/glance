@@ -66,6 +66,7 @@ Cross-operator coordination. Read by `src/index.ts`, `src/server.ts`, `src/coord
 
 <TypeTable
 	type={{
+		'OMP_SQUAD_FEDERATION': { type: 'flag', default: 'on', description: 'Federation is ON by default (a LocalFederationBus that works locally with no coordinator and gossips to peers when one is configured). Set to 0 to opt out and use the inert NullFederationBus instead.' },
 		'OMP_SQUAD_COORDINATOR': { type: 'ws url', default: 'unset', description: 'Coordinator WebSocket URL (ws://host:port). Set ⇒ this daemon joins federation and opens a peer-presence feed; unset ⇒ the federation surface stays inert.' },
 		'OMP_SQUAD_OPERATOR': { type: 'string', default: 'OS username, else "local"', description: 'This host operator identity, used in presence, leases, and the federation roster.' },
 		'OMP_SQUAD_COORDINATOR_PORT': { type: 'number', default: '7900', description: 'Port the standalone coordinator (coordinator-main.ts) listens on, when no port arg is passed.' },
@@ -76,6 +77,75 @@ Cross-operator coordination. Read by `src/index.ts`, `src/server.ts`, `src/coord
 />
 
 See [Federation](/docs/integrations/federation) for the topology.
+
+## Auth tokens
+
+File-mode extra bearer tokens (not needed in DB/auth mode where sessions are managed by Better Auth). Read by `src/index.ts` and `src/auth.ts`.
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_OPERATOR_TOKEN': { type: 'string', default: 'unset', description: 'Additional bearer token mapped to the operator role in file mode. Useful for scripts or CI callers that need write access without exposing the auto-generated access-token.' },
+		'OMP_SQUAD_VIEWER_TOKEN': { type: 'string', default: 'unset', description: 'Additional bearer token mapped to the viewer (read-only) role in file mode. Grants access to GET endpoints and the WebSocket stream, but all mutations are rejected with 403.' },
+	}}
+/>
+
+## Multi-tenant (DB mode)
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_ORG_IDLE_MS': { type: 'number', default: '600000', description: 'Evict an idle (agent-less) org manager after this many milliseconds in DB-registry mode. Default is 10 minutes (600 000 ms). Read by src/manager-registry.ts.' },
+	}}
+/>
+
+## Resource limits & watchdog
+
+Tune admission backoff and the watchdog thresholds. Read by `src/resource.ts`, `src/watchdog.ts`, and `src/scheduler.ts`.
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_RESOURCE_GATE': { type: 'flag', default: 'off', description: 'Enable load-aware admission backoff. When set (any value), the scheduler probes the host before admitting each spawn and defers when the host is under pressure (load1/ncpu > OMP_SQUAD_MAX_LOAD_PER_CPU or free memory below OMP_SQUAD_MIN_FREE_RATIO). Off by default — the WIP cap alone is enough for most setups.' },
+		'OMP_SQUAD_MAX_LOAD_PER_CPU': { type: 'number', default: '1.5 (admission gate) / 2.0 (watchdog)', description: 'load1 / logical-CPU threshold. The admission gate (src/resource.ts) uses 1.5; the watchdog (src/watchdog.ts) uses 2.0. Env-tunable per call — no restart needed. Set to a higher value if your machine can sustain more parallel builds.' },
+		'OMP_SQUAD_MAX_RSS_MB': { type: 'number', default: '1024', description: 'Daemon RSS ceiling in MB for the watchdog. Crossing it emits a log warning and is surfaced in /api/health warnings. Not a hard kill limit.' },
+		'OMP_SQUAD_MIN_FREE_RATIO': { type: 'number', default: '0.1', description: 'Minimum free-memory fraction (0–1) before the host is considered pressured. Shared by the admission gate and the watchdog.' },
+	}}
+/>
+
+## Payments
+
+Reward disbursement for the Feedback Loop feature. Read by `src/payments/tremendous.ts` and `src/payments/index.ts`. If `OMP_SQUAD_TREMENDOUS_API_KEY` is unset, the daemon falls back to a Manual recorder (no network; the operator records out-of-band payouts).
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_TREMENDOUS_API_KEY': { type: 'string', default: 'unset', description: 'Tremendous API Bearer token. Its presence is the activation switch — set it to enable real reward disbursement via the Tremendous Orders API. Unset ⇒ ManualProvider (no network, operator records payouts by hand).' },
+		'OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID': { type: 'string', default: 'unset', description: 'Tremendous funding source (balance / account) that funds each payout. Required for any real disbursement; missing ⇒ every payout resolves as failed with a clear error.' },
+		'OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID': { type: 'string', default: 'unset', description: 'Tremendous campaign id that controls which redemption options (gift cards, PayPal, ACH, Visa, …) the reward recipient sees. Required for real disbursement.' },
+		'OMP_SQUAD_TREMENDOUS_ENV': { type: '"sandbox" | "production"', default: '"sandbox"', description: 'Selects the Tremendous API base URL. sandbox → testflight.tremendous.com (default, safe for testing); production → api.tremendous.com (live money). Any value other than "production" is treated as sandbox.' },
+	}}
+/>
+
+## Observability — Scout rate-limit
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR': { type: 'number', default: '30', description: 'Cap on Scout LLM calls per rolling hour across the entire fleet. Scout fires one call per agent reasoning scan; a busy multi-agent fleet can otherwise burn dozens of one-shots per hour. Default 30. Set to 0 or a negative number for unlimited. Read by src/scout.ts.' },
+	}}
+/>
+
+## Observability — Trace export
+
+Span export to OTLP, Langfuse, or Datadog. Read by `src/trace-exporter.ts`. The exporter is only active when at least one `*_URL` is set.
+
+<TypeTable
+	type={{
+		'OMP_SQUAD_TRACE_ALLOW_PRIVATE': { type: 'flag', default: 'off', description: 'Set to 1 to allow trace export to reach operator-configured private/loopback/RFC1918 collector endpoints (a local OTLP agent, a self-hosted Langfuse, a tailnet Datadog gateway). When off (default), the SSRF guard blocks any private-range host. When on, ONLY the exact origins of the three configured collector env vars (OMP_SQUAD_TRACE_EXPORT_OTLP_URL, OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL, OMP_SQUAD_TRACE_EXPORT_DATADOG_URL) are exempted — all other private hosts, redirects, and the cloud-metadata IP remain blocked.' },
+		'OMP_SQUAD_TRACE_EXPORT_OTLP_URL': { type: 'url', default: 'unset', description: 'OTLP/HTTP JSON endpoint for span export (SSRF-guarded; set OMP_SQUAD_TRACE_ALLOW_PRIVATE=1 to reach a loopback collector).' },
+		'OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL': { type: 'url', default: 'unset', description: 'Langfuse ingest endpoint for span export. Requires OMP_SQUAD_TRACE_EXPORT_LANGFUSE_PUBLIC_KEY and OMP_SQUAD_TRACE_EXPORT_LANGFUSE_SECRET_KEY.' },
+		'OMP_SQUAD_TRACE_EXPORT_LANGFUSE_PUBLIC_KEY': { type: 'string', default: 'unset', description: 'Langfuse project public key. Used as the HTTP Basic auth username when exporting to Langfuse.' },
+		'OMP_SQUAD_TRACE_EXPORT_LANGFUSE_SECRET_KEY': { type: 'string', default: 'unset', description: 'Langfuse project secret key. Used as the HTTP Basic auth password when exporting to Langfuse.' },
+		'OMP_SQUAD_TRACE_EXPORT_DATADOG_URL': { type: 'url', default: 'unset', description: 'Datadog trace ingest endpoint for span export. Requires OMP_SQUAD_TRACE_EXPORT_DATADOG_API_KEY.' },
+		'OMP_SQUAD_TRACE_EXPORT_DATADOG_API_KEY': { type: 'string', default: 'unset', description: 'Datadog API key sent as the DD-API-KEY header on every span batch.' },
+	}}
+/>
 
 ## Discovery & misc
 

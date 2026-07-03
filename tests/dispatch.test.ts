@@ -5,8 +5,12 @@
  */
 
 import { expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
 import { Dispatcher, dispatchOrder, type DispatchDeps } from "../src/dispatch.ts";
+import { openDispatchLedger } from "../src/dispatch-ledger.ts";
 import { noAutoDispatchName } from "../src/plane.ts";
 import { occupyingAgents } from "../src/scheduler.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
@@ -51,6 +55,35 @@ test("dispatcher: a tick emits one automation event with the spawned count + iss
 	expect(typeof events[0].durationMs).toBe("number");
 });
 
+test("dispatcher: a no-op tick (no open issues) emits an idle skip heartbeat with a reason", async () => {
+	const events: AutomationReport[] = [];
+	const { deps } = harness({ listIssues: async () => [], record: (r) => events.push(r) });
+	await new Dispatcher(deps).tick();
+	expect(events).toHaveLength(1);
+	expect(events[0].spawned).toBe(0);
+	expect(events[0].skipReason).toBe("idle");
+	expect(events[0].detail).toBe("no open issues to dispatch");
+});
+
+test("dispatcher: at the global WIP cap, a no-op tick names the cap as the skip reason", async () => {
+	const events: AutomationReport[] = [];
+	// maxWip 0 with a live agent → atGlobalCap true on the first repo check.
+	const { deps, spawned } = harness({ record: (r) => events.push(r), maxWip: 0, liveCount: () => 1 });
+	expect(await new Dispatcher(deps).tick()).toBe(0);
+	expect(spawned).toEqual([]);
+	expect(events).toHaveLength(1);
+	expect(events[0].skipReason).toBe("wip-cap");
+	expect(events[0].detail).toContain("WIP cap");
+});
+
+test("dispatcher: a productive tick is a plain heartbeat with no skip reason", async () => {
+	const events: AutomationReport[] = [];
+	const { deps } = harness({ record: (r) => events.push(r) });
+	await new Dispatcher(deps).tick();
+	expect(events[0].spawned).toBe(3);
+	expect(events[0].skipReason).toBeUndefined();
+});
+
 test("dispatcher: a paused tick still emits a heartbeat (warn) so the loop stays visible", async () => {
 	const events: AutomationReport[] = [];
 	const { deps, spawned } = harness({ record: (r) => events.push(r), paused: () => true });
@@ -68,6 +101,21 @@ test("dispatcher: never double-dispatches a claimed or already-dispatched issue"
 	expect(spawned.sort()).toEqual(["A", "C"]); // B is already in the roster
 	await d.tick(); // A,C already dispatched; B still claimed → nothing new
 	expect(spawned.sort()).toEqual(["A", "C"]);
+});
+
+test("dispatcher: persisted ledger prevents restart re-spawn churn", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+	try {
+		const first = harness({ ledger: openDispatchLedger(dir) });
+		expect(await new Dispatcher(first.deps).tick()).toBe(3);
+		expect(first.spawned.sort()).toEqual(["A", "B", "C"]);
+
+		const restarted = harness({ ledger: openDispatchLedger(dir) });
+		expect(await new Dispatcher(restarted.deps).tick()).toBe(0);
+		expect(restarted.spawned).toEqual([]);
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
 });
 
 test("dispatcher: caps per-tick spawns at maxActive (no spawn storm)", async () => {
@@ -198,4 +246,33 @@ test("dispatcher: dispatches higher-priority Plane issues first without bypassin
 
 test("dispatchOrder ranks known priorities before plain issues", () => {
 	expect([issue("B"), issue("A", "urgent"), issue("C", "high")].sort(dispatchOrder).map((i) => i.id)).toEqual(["A", "C", "B"]);
+});
+
+// #17: a transient (thrown) Plane poll is retried once and recovers; a persistent failure is surfaced
+// (log) and skipped for that repo instead of rejecting the whole tick.
+test("(#17) a transient listIssues throw is retried once and the poll recovers", async () => {
+	let attempts = 0;
+	const { deps, spawned } = harness({
+		listIssues: async () => {
+			attempts++;
+			if (attempts === 1) throw new Error("429 rate limited");
+			return [issue("A"), issue("B")];
+		},
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(2); // recovered ⇒ both spawned
+	expect(attempts).toBe(2);
+	expect(spawned.sort()).toEqual(["A", "B"]);
+});
+
+test("(#17) a persistent listIssues failure is logged and the repo is skipped (tick stays non-fatal)", async () => {
+	const logs: string[] = [];
+	const { deps, spawned } = harness({
+		log: (m) => logs.push(m),
+		listIssues: async () => {
+			throw new Error("plane down");
+		},
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(0); // no throw, nothing spawned
+	expect(spawned).toEqual([]);
+	expect(logs.some((m) => m.includes("listIssues failed for /r after retry"))).toBe(true);
 });

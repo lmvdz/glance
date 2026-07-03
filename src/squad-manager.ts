@@ -8,14 +8,14 @@
  */
 
 import { EventEmitter } from "node:events";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
+import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
 import { RpcAgent } from "./rpc-agent.ts";
-import type { AgentDriver } from "./agent-driver.ts";
+import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
 import { estimateEta } from "./eta.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
@@ -30,25 +30,37 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
+import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
+import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
+import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
+import { gateExec } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
-import { hardenedGitSync } from "./git-harden.ts";
+import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addPlaneIssueComment, closePlaneIssue, createPlaneIssue, ensureFeatureModule, featureTickets, listPlaneIssues, planeRepos, startPlaneIssue } from "./plane.ts";
-import { buildFeatures, featureLandStatus, listPlanDirs, type LandMember, landOrder } from "./features.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
+import { syncPlanStatuses } from "./plan-sync.ts";
+import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
+import { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
+import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
+export { capabilityWorkflowToDot, resolveWorkflowPath };
+import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
-import { ownershipConflict } from "./ownership.ts";
-import { proofGate, runProof, sweepProofs } from "./proof.ts";
+import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
+import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
+import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence } from "./presence.ts";
 import { chooseFallback } from "./supervisor.ts";
+import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
 	Actor,
 	AuditEntry,
@@ -62,6 +74,8 @@ import type {
 	FeatureCriterion,
 	FeatureDecision,
 	FeatureRelationship,
+	PlanRevisionCandidate,
+	PlanRevisionCandidateState,
 	AgentStatus,
 	AutomationEvent,
 	CommandInfo,
@@ -96,7 +110,7 @@ import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
-import { appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, nextCommentId } from "./comments.ts";
+import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
@@ -104,6 +118,7 @@ import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
+import { ManualProvider, type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
 import {
 	acceptFeedbackSubmission,
 	assertRewardTransition,
@@ -145,6 +160,42 @@ const POLL_MS = 2500;
 
 const PEER_MESSAGE_TOOL = "squad_message";
 const PEER_MESSAGE_MAX_CHARS = 2000;
+const KB_SEARCH_TOOL = "squad_kb_search";
+
+/**
+ * Reserved host tools advertised to every omp-backed agent via `set_host_tools` on ready (the
+ * registration that was missing — without it omp never surfaces these calls). Both are handled in
+ * onHostTool BEFORE the capability tool-grant gate, so they're always available and read/advisory-safe.
+ */
+const SQUAD_HOST_TOOLS: HostToolDef[] = [
+	{
+		name: KB_SEARCH_TOOL,
+		description:
+			"Search the squad's shared knowledge base — prior decisions, hot files, session digests, latent work, leases, and active agents across the fleet (scoped to what you may see). Use it BEFORE starting work to inherit prior context and avoid re-deciding settled questions.",
+		parameters: {
+			type: "object",
+			properties: {
+				query: { type: "string", description: "What to look up — natural language, a file path, a feature name, or a decision." },
+				type: { type: "string", enum: ["decision", "hot-area", "digest", "agent", "scout", "lease"], description: "Optional: restrict to one fact type." },
+				topK: { type: "number", description: "Optional: max results (default 10, max 50)." },
+			},
+			required: ["query"],
+		},
+	},
+	{
+		name: PEER_MESSAGE_TOOL,
+		description:
+			"Send a short ADVISORY message to another agent by id or name. Advisory only — it never interrupts or steers them; it appears in their transcript. Use sparingly to share a finding or a heads-up.",
+		parameters: {
+			type: "object",
+			properties: {
+				to: { type: "string", description: "Target agent id or name." },
+				text: { type: "string", description: "The message (plain text)." },
+			},
+			required: ["to", "text"],
+		},
+	},
+];
 
 function peerMessageBudget(): number {
 	return Number(process.env.OMP_SQUAD_PEERMSG_BUDGET) || 5;
@@ -153,6 +204,7 @@ function peerMessageBudget(): number {
 function commandTarget(cmd: ClientCommand): string | undefined {
 	return cmd.type === "message" ? cmd.to : "id" in cmd ? cmd.id : undefined;
 }
+
 function autoLandFailCap(): number {
 	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
 }
@@ -168,45 +220,11 @@ function autoresolveConfirm(): boolean {
 	return process.env.OMP_SQUAD_AUTORESOLVE_CONFIRM !== "0";
 }
 
-// liveAgents + the WIP cap live in ./scheduler.ts now; re-export keeps the public import path stable.
+// liveAgents + the WIP cap live in ./scheduler.ts; spawn identity/adoption policy in ./spawn-identity.ts;
+// profile/model parsing in ./agent-profiles.ts. Re-exports keep the public import paths stable.
 export { liveAgents };
-
-/** Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway fan-out can't
- *  melt the host. Default ≈ the host's CPU count (min 3) so a bare launch is bounded; override with OMP_SQUAD_MAX_AGENTS. */
-export function hardAgentCeiling(): number {
-	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3);
-}
-
-/** Persisted agents to take over on restart: not already reattached (live), not flue, and whose worktree
- *  still holds context on disk. Live hosts are reattached by reconnectLive; a gone worktree re-dispatches. */
-export function agentsToAdopt<T extends { id: string; kind?: string; worktree?: string }>(
-	persisted: T[],
-	rosterIds: ReadonlySet<string>,
-	worktreeExists: (worktree: string) => boolean,
-): T[] {
-	return persisted.filter((p) => p.kind !== "flue-service" && !rosterIds.has(p.id) && !!p.worktree && worktreeExists(p.worktree));
-}
-
-/**
- * From the adoptable set, resume only agents that still have UNLANDED work, capped at `cap`. A restart
- * otherwise re-spawned EVERY orphaned worktree at once (adoptOrphanedAgents uses bypassCap, so MAX_AGENTS
- * didn't hold) — N simultaneous omp hosts that OOM the box. Done/clean agents are skipped (their open
- * issue, if any, is re-dispatched gradually under the WIP cap); `cap<=0` ⇒ adopt none.
- */
-export function selectAdoptable<T extends { id: string }>(eligible: T[], hasWork: (a: T) => boolean, cap: number): T[] {
-	if (cap <= 0) return [];
-	return eligible.filter(hasWork).slice(0, cap);
-}
-
-/**
- * Unique agent id: name + time + random suffix. The branch and worktree derive from this id (NOT the
- * agent's display name), so two agents — even same name, even spawned in the same millisecond or across
- * a daemon restart — never share a branch or worktree. (The name alone collides: dispatched agents fall
- * back to `agent-N` whose counter resets every restart, so "agent-1" gets reused.)
- */
-export function newAgentId(name: string): string {
-	return `${name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-}
+export { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable } from "./spawn-identity.ts";
+export { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
@@ -227,69 +245,6 @@ const AUTO_ACTOR: Actor = { id: "auto-supervise", displayName: "auto-supervise",
  */
 const RISKY_RE =
 	/force[- ]?push|--force\b|reset --hard|\bdelete\b|\bdestroy\b|\bdrop\b|rm\s+-rf|\bpublish\b|\bdeploy\b|\brelease\b|\bproduction\b|\bprod\b|\bmainnet\b|\bsecret\b|\bcredential\b|\bpassword\b|\bwipe\b|\btruncate\b|\boverwrite\b|push.*\bmain\b|merge.*\bmain\b/i;
-
-export interface RuntimeModelOption {
-	label: string;
-	value: string;
-}
-
-export function modelOptionsFromRuntime(models: unknown): RuntimeModelOption[] {
-	if (!Array.isArray(models)) return [];
-	const seen = new Set<string>();
-	return models.flatMap((item): RuntimeModelOption[] => {
-		if (!item || typeof item !== "object") return [];
-		const rec = item as Record<string, unknown>;
-		const id = typeof rec.id === "string" ? rec.id.trim() : "";
-		if (!id) return [];
-		const provider = typeof rec.provider === "string" ? rec.provider.trim() : "";
-		const value = provider ? `${provider}/${id}` : id;
-		if (seen.has(value)) return [];
-		seen.add(value);
-		return [{ label: value, value }];
-	});
-}
-
-export function profileOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AgentProfile[] {
-	const configured = parseProfiles(env.OMP_SQUAD_PROFILES);
-	const fallback: AgentProfile = {
-		id: "default",
-		name: "Default OMP operator",
-		description: "Live omp --mode rpc session with the daemon's default model and write approvals.",
-		runtime: "omp-operator",
-		approvalMode: "write",
-		default: true,
-	};
-	return configured.length ? configured : [fallback];
-}
-
-function parseProfiles(raw: string | undefined): AgentProfile[] {
-	if (!raw?.trim()) return [];
-	try {
-		const parsed = JSON.parse(raw) as unknown;
-		if (!Array.isArray(parsed)) return [];
-		return parsed.flatMap((item): AgentProfile[] => {
-			if (!item || typeof item !== "object") return [];
-			const r = item as Record<string, unknown>;
-			const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : "";
-			const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : id;
-			const runtime = r.runtime === "flue-service" || r.runtime === "workflow" ? r.runtime : "omp-operator";
-			if (!id) return [];
-			return [{
-				id,
-				name,
-				description: typeof r.description === "string" ? r.description : undefined,
-				runtime,
-				model: typeof r.model === "string" ? r.model : undefined,
-				approvalMode: r.approvalMode === "always-ask" || r.approvalMode === "write" || r.approvalMode === "yolo" ? r.approvalMode : undefined,
-				capabilities: Array.isArray(r.capabilities) ? r.capabilities.filter((v): v is string => typeof v === "string") : undefined,
-				memory: typeof r.memory === "string" ? r.memory : undefined,
-				default: r.default === true,
-			}];
-		});
-	} catch {
-		return [];
-	}
-}
 
 function isAgentDisconnected(err: unknown): boolean {
 	return err instanceof Error && /agent (not connected|connection lost)/i.test(err.message);
@@ -318,6 +273,10 @@ interface AgentRecord {
 	run?: RunAccumulator;
 	/** In-flight rich tool transcript entries keyed by the runtime toolCallId. */
 	toolEntries: Map<string, TranscriptEntry>;
+	/** Capability tool-grant allow-list (from the spawning profile's `capabilities`). When present, the
+	 *  agent's declared allow-list is injected into its system prompt AND host tool calls outside the list
+	 *  are hard-denied at the onHostTool seam. Absent ⇒ full tool access (unscoped, the historical default). */
+	toolGrants?: string[];
 }
 
 export interface SquadManagerOptions {
@@ -335,6 +294,9 @@ export interface SquadManagerOptions {
 	/** When the registry owns machine-global janitors (reap orphan hosts / sockets / registries over
 	 *  the union of all orgs), the per-org manager skips them so it can't reap another org's hosts. */
 	skipGlobalJanitors?: boolean;
+	/** Reward disbursement seam. Default: paymentProviderFromEnv() — Tremendous when an API key is set,
+	 *  else a records-only ManualProvider. Inject a fake in tests to avoid the network. */
+	paymentProvider?: PaymentProvider;
 }
 
 export interface CommissionOptions {
@@ -354,6 +316,9 @@ export class SquadManager extends EventEmitter {
 	private readonly operator: Actor;
 	private availability: OperatorPresence["availability"] = "active";
 	private readonly stateDir: string;
+	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
+	 *  persistNow folds them back into the snapshot for a later restart to re-attempt (D1 loss fix). */
+	private deferred: PersistedAgent[] = [];
 	private readonly featureStore = new Map<string, PersistedFeature>();
 	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
 	private readonly bin?: string;
@@ -379,12 +344,16 @@ export class SquadManager extends EventEmitter {
 	private orchestrator?: Orchestrator;
 	/** Observers — one per configured Plane repo so every repo's backlog is audited (OMPSQ-137). */
 	private readonly observers: Observer[] = [];
+	/** Plan-sync tick timers (one per configured Plane repo); cleared in stop(). */
+	private readonly planSyncTimers: Timer[] = [];
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
-	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning. */
-	private readonly scoutCursor = new Map<string, number>();
+	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning.
+	 *  Persisted (scout-cursor.json) so a warm daemon restart doesn't re-scan whole transcripts —
+	 *  each re-scan was a redundant Scout LLM call per reattached agent. Loaded in the constructor. */
+	private readonly scoutCursor: Map<string, number>;
 	/** Observability spine for the background loops (scout/observer/opportunity/dispatch) — the surface
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
@@ -400,16 +369,21 @@ export class SquadManager extends EventEmitter {
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
 	private readonly traceExporter?: TraceExportQueue;
+	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
+	private readonly paymentProvider: PaymentProvider;
 	private idSeq = 0;
 	private transcriptSeq = 0;
 	/** Last observed `plans/` signature for repos the feature board scans. */
 	private planFeatureSignature = "";
+	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string }; tick: number }>();
 
 	constructor(opts: SquadManagerOptions = {}) {
 		super();
 		this.operator = opts.operator ?? LOCAL_ACTOR;
 		this.bus = opts.bus ?? new NullFederationBus();
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
+		setProofRoot(this.stateDir);
+		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -418,6 +392,48 @@ export class SquadManager extends EventEmitter {
 		this.skipGlobalJanitors = opts.skipGlobalJanitors ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m));
+		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
+	}
+
+	private blockedReason(dto: Pick<AgentDTO, "pending" | "error">): string | undefined {
+		if (dto.error) return dto.error;
+		return dto.pending.length ? "waiting for operator input" : undefined;
+	}
+
+	private syncAuthority(dto: AgentDTO): void {
+		const blockedReason = this.blockedReason(dto);
+		const requested = dto.autonomyMode ?? modeFromApproval(dto.approvalMode);
+		dto.autonomyMode = requested;
+		const verificationState = dto.verificationState ?? "unknown";
+		dto.verificationState = verificationState;
+		const effectiveMode = effectiveAutonomyMode({
+			requested,
+			approvalMode: dto.approvalMode,
+			autoLand: this.autoLand,
+			landConfirm: this.landConfirm,
+			blockedReason,
+		});
+		dto.effectiveMode = effectiveMode;
+		dto.blockedReason = blockedReason;
+		dto.availableActions = availableActions(effectiveMode, verificationState, blockedReason);
+	}
+
+	private async refreshProofState(rec: AgentRecord): Promise<void> {
+		const proof = await proofFor(rec.dto.repo, rec.dto.worktree);
+		const fp = await proofFingerprint(rec.dto.repo, rec.dto.worktree, proof?.command);
+		let verificationState: VerificationState = "none";
+		if (proof) verificationState = proof.ok ? (isFresh(proof, fp) ? "fresh" : "stale") : "failed";
+		rec.dto.verificationState = verificationState;
+		rec.dto.proof = proof ? { commit: proof.commit, command: proof.command, ranAt: proof.ranAt, fingerprint: `${proof.commit}:${proof.tree}:${proof.commandHash}` } : undefined;
+		this.syncAuthority(rec.dto);
+	}
+
+	private seedAuthority(dto: AgentDTO, requested?: AutonomyMode): void {
+		dto.autonomyMode = requested ?? modeFromApproval(dto.approvalMode);
+		dto.effectiveMode = dto.autonomyMode;
+		dto.verificationState = "unknown";
+		dto.availableActions = [];
+		this.syncAuthority(dto);
 	}
 
 	async start(): Promise<void> {
@@ -436,10 +452,28 @@ export class SquadManager extends EventEmitter {
 		this.bus.onRemoteCommand((remote: RemoteCommand) => {
 			// RBAC authorization happens inside applyCommand against remote.actor's tier (a role-less
 			// peer is read-only). NullFederationBus never fires this; a denied command is logged there,
-			// so swallow the rejection here rather than crash the bus listener.
-			void this.applyCommand(remote.cmd, remote.actor).catch((err) => {
-				if (!(err instanceof RbacDenied)) this.log("error", `remote command failed: ${err instanceof Error ? err.message : String(err)}`);
-			});
+			// so swallow the rejection here rather than crash the bus listener. When the frame carries
+			// a correlation id, the outcome is acked back to the CLAIMED sender — advisory only.
+			const ack = (outcome: "applied" | "denied" | "error", detail?: string): void => {
+				if (remote.cmdId && remote.replyTo) this.bus.sendAck({ cmdId: remote.cmdId, outcome, detail }, remote.replyTo);
+			};
+			void this.applyCommand(remote.cmd, remote.actor)
+				.then(() => ack("applied"))
+				.catch((err) => {
+					if (err instanceof RbacDenied) {
+						ack("denied", err.message);
+						return;
+					}
+					ack("error", err instanceof Error ? err.message : String(err));
+					this.log("error", `remote command failed: ${err instanceof Error ? err.message : String(err)}`);
+				});
+		});
+		this.bus.onAck((ack) => {
+			const waiter = this.ackWaiters.get(ack.cmdId);
+			if (waiter) {
+				this.ackWaiters.delete(ack.cmdId);
+				waiter(ack);
+			}
 		});
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
 		await this.refreshPlanFeatureSignature();
@@ -463,6 +497,7 @@ export class SquadManager extends EventEmitter {
 				maxWip: this.scheduler.cap(),
 				paused: () => this.rateLimit.paused(),
 				record: this.automation.for("dispatch"),
+				ledger: openDispatchLedger(this.stateDir),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
@@ -487,6 +522,7 @@ export class SquadManager extends EventEmitter {
 					listIssues: () => listPlaneIssues(repo),
 					fileIssue: (title) => createPlaneIssue(repo, title),
 					closeIssue: (ref) => closePlaneIssue(ref),
+					reopenIssue: (ref) => reopenPlaneIssue(ref),
 					removeAgent: (id) => this.remove(id, false),
 					runGate: () => this.runMainGate(repo),
 					gitAheadOfMain: (a) => this.aheadOfMain(a),
@@ -502,6 +538,28 @@ export class SquadManager extends EventEmitter {
 				this.observers.push(observer);
 			});
 			this.log("info", `observer on (auditing ${observeRepos.join(", ")})`);
+		}
+
+		// Plan-sync — keeps plans/<x>/NN-concern.md STATUS lines truthful against their PLANE:
+		// pointers (a landed issue's doc otherwise stays `open` and the WIP counters lie). One
+		// slow tick per configured Plane repo; conservative one-way transitions (see plan-sync.ts).
+		if (process.env.OMP_SQUAD_PLANSYNC !== "0" && observeRepos.length > 0) {
+			const intervalMs = Number(process.env.OMP_SQUAD_PLANSYNC_INTERVAL_MS) || 300_000;
+			for (const repo of observeRepos) {
+				const tick = (): void => {
+					void syncPlanStatuses({
+						repo,
+						listIssues: () => listPlaneIssuesAllStates(repo),
+						log: (m) => this.log("info", m),
+						record: this.automation.for("plan-sync", repo),
+					}).then((r) => {
+						if (r.updated.length) this.emitFeaturesChanged();
+					}).catch(() => {});
+				};
+				this.planSyncTimers.push(setInterval(tick, intervalMs));
+				setTimeout(tick, 15_000); // first pass shortly after boot, off the hot startup path
+			}
+			this.log("info", `plan-sync on (reconciling STATUS lines for ${observeRepos.join(", ")} every ${Math.round(intervalMs / 1000)}s)`);
 		}
 
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
@@ -582,7 +640,7 @@ export class SquadManager extends EventEmitter {
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
 	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
-		await this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true, approvalMode: "yolo" });
+		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo" });
 	}
 
 	/** Start (or return the existing) agent advancing a Plane issue — the web "Start task" action. */
@@ -590,7 +648,7 @@ export class SquadManager extends EventEmitter {
 		const existing = [...this.agents.values()].find((r) => r.dto.issue?.id === issue.id);
 		if (existing) return existing.dto;
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
-		return this.create({ repo, name: issue.identifier?.toLowerCase(), task, issue, autoRoute: true, approvalMode: "yolo" }, actor);
+		return this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo" }, actor);
 	}
 
 	async stop(): Promise<void> {
@@ -598,6 +656,7 @@ export class SquadManager extends EventEmitter {
 		this.dispatcher?.stop();
 		this.orchestrator?.stop();
 		for (const o of this.observers) o.stop();
+		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		await this.persist();
@@ -649,14 +708,24 @@ export class SquadManager extends EventEmitter {
 	 *  still holds built-up context — re-create them in place (idle; the orchestrator then verifies/lands).
 	 *  So a restart RESUMES the issue with its context instead of re-dispatching a fresh worktree. */
 	private async adoptOrphanedAgents(snapshot: StateSnapshot): Promise<number> {
-		const eligible = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt));
+		const halted = openOrchestratorState(this.stateDir);
+		const resumable = (p: PersistedAgent): boolean => p.kind === "workflow" && p.workflowState !== undefined;
+		// Eligible = adoptable (dead host, on-disk worktree, not a branch child) AND not a branch the
+		// orchestrator already halted (re-adopting a halted run burns a ceiling slot + a resume attempt
+		// before the orchestrator re-skips it).
+		const eligible = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt)).filter((p) => !(p.branch && halted.isHalted(p.branch)));
 		// Probe each for unlanded work, then cap re-adoption at the agent ceiling. Re-spawning EVERY
-		// orphaned worktree at once (bypassCap) is what OOM'd the host on restart. Resume only agents with
-		// work to continue; done/clean ones are dropped (a still-open issue re-dispatches gradually under
-		// the WIP cap), and at most (ceiling - already-live) are taken over this boot.
+		// orphaned worktree at once (bypassCap) is what OOM'd the host on restart. A resumable workflow
+		// CHECKPOINT counts as work even with a clean worktree (the run is mid-graph between commits) —
+		// otherwise a crashed graph run with no dirty files is dropped as "done". Done/clean plain agents
+		// re-dispatch gradually under the WIP cap; at most (ceiling - already-live) are taken over this boot.
 		const work = new Map<string, boolean>();
-		for (const p of eligible) work.set(p.id, await this.persistedHasWork(p));
+		for (const p of eligible) work.set(p.id, resumable(p) || (await this.persistedHasWork(p)));
 		const adopt = selectAdoptable(eligible, (p) => work.get(p.id) ?? false, hardAgentCeiling() - this.agents.size);
+		// D1 FIX: resumable runs the ceiling dropped are PRESERVED (not erased). persistNow folds them back
+		// into the snapshot so a later restart re-attempts them, instead of the full-snapshot persist silently
+		// overwriting a still-resumable checkpoint into oblivion.
+		this.deferred = deferredResumable(eligible, resumable, adopt);
 		const skipped = eligible.length - adopt.length;
 		let n = 0;
 		for (const p of adopt) {
@@ -668,11 +737,15 @@ export class SquadManager extends EventEmitter {
 				model: p.model,
 				profileId: p.profileId,
 				approvalMode: p.approvalMode,
+				autonomyMode: p.autonomyMode,
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
 				featureId: p.featureId,
 				owns: p.owns,
+				requires: p.requires,
+				produces: p.produces,
+				scopeSource: p.scopeSource,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				// Resume the graph from its checkpoint; without this the adopted workflow restarts from
@@ -681,7 +754,13 @@ export class SquadManager extends EventEmitter {
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
-				adopted: true, // OMPSQ-164: re-adopted with complete work ⇒ orchestrator auto-lands it directly
+				// OMPSQ-164: a re-adopted plain agent with complete work is auto-landed directly by the
+				// orchestrator. A workflow must NOT be direct-landed — a resuming/partial graph lands only via
+				// its own workflow_done → autoLandOnSuccess once the graph completes (RTC-F5).
+				adopted: p.kind !== "workflow",
+				// The prior inner host is gone (this is the orphan-adoption path, not warm reconnect), so a
+				// resumed workflow runs on a FRESH thread: cold resume re-executes the in-flight node soundly.
+				cold: true,
 			}).then(() => { n++; }).catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
 		if (n || skipped) this.log("info", `took over ${n} orphaned worktree(s) with work; skipped ${skipped} (done/clean or over the ${hardAgentCeiling()}-agent cap)`);
@@ -720,9 +799,13 @@ export class SquadManager extends EventEmitter {
 			parentId: p.parentId,
 			featureId: p.featureId,
 			owns: p.owns,
+			requires: p.requires,
+			produces: p.produces,
+			scopeSource: p.scopeSource,
 			workflow: p.workflow,
 			workflowState: p.workflowState,
 		};
+		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
 		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		dto.messageCount = transcript.length;
@@ -804,6 +887,14 @@ export class SquadManager extends EventEmitter {
 		if (!pack) throw new Error("capability pack not found");
 		const binding = bindingKey ? install.bindings.find((item) => item.enabled && item.key === bindingKey) : install.bindings.find((item) => item.enabled && (item.type === "profile" || item.type === "workflow" || item.type === "driver"));
 		if (!binding) throw new Error("capability binding not found");
+		// requiredEnv ENFORCEMENT (#5): packs declare env vars they need, but it was parsed and never checked
+		// — an agent would spawn blind and fail opaquely downstream. Refuse up front with a clear error naming
+		// the missing vars, before any worktree/host is created.
+		const missingEnv = pack.requiredEnv.filter((name) => !(process.env[name] && process.env[name]!.trim()));
+		if (missingEnv.length) {
+			void this.recordAudit(actor, "capability.run.blocked", binding.key, "error", `missing required env: ${missingEnv.join(", ")}`);
+			throw new Error(`capability "${pack.slug}" requires environment variable(s) not set: ${missingEnv.join(", ")}`);
+		}
 		const repo = opts.repo ?? process.cwd();
 		const prompt = opts.prompt ?? `Run capability ${binding.key}`;
 		const name = binding.key.replace(/^cap:/, "").replace(/[^a-z0-9-]+/gi, "-").slice(0, 24) || "capability";
@@ -821,8 +912,40 @@ export class SquadManager extends EventEmitter {
 			const target = binding.config.target === "cloudflare" ? "cloudflare" : "node";
 			return this.create({ repo, name, task: prompt, autoRoute: false, flue: { dir, workflow, target } }, actor);
 		}
-		if (binding.type === "workflow") return this.create({ repo, name, workflow: binding.sourcePath, task: prompt, autoRoute: false }, actor);
+		if (binding.type === "workflow") {
+			// WORKFLOW binding execution (#2): previously this passed `workflow: binding.sourcePath`, which is
+			// undefined for inline step-graph bindings → `create` classified the agent as a plain omp-operator
+			// and the step graph never ran. Resolve the workflow path to actually drive a WorkflowDriver:
+			//  - an authored file (binding.sourcePath) is used directly;
+			//  - an inline step-graph binding is materialized to a DOT graph file in the install dir, so the
+			//    same engine that runs authored workflows executes the capability's declared steps.
+			const workflowPath = await this.resolveCapabilityWorkflowPath(install, binding);
+			return this.create({ repo, name, workflow: workflowPath, task: prompt, autoRoute: false }, actor);
+		}
 		return this.create({ repo, name, profileId: binding.key, task: prompt, autoRoute: false }, actor);
+	}
+
+	/**
+	 * Resolve a workflow binding to a graph file path the WorkflowDriver can run. An authored `sourcePath`
+	 * is returned as-is. Otherwise the binding's WorkflowDefinition (resolved by binding key via
+	 * capabilityWorkflowDefinitions) is rendered to a DOT graph and written into the per-install dir, and
+	 * that path is returned — so an inline capability step graph actually executes instead of being dropped.
+	 */
+	private async resolveCapabilityWorkflowPath(install: CapabilitySnapshot["installs"][number], binding: CapabilitySnapshot["installs"][number]["bindings"][number]): Promise<string> {
+		if (binding.sourcePath) return binding.sourcePath;
+		const definition = capabilityWorkflowDefinitions(this.capabilityStore).find((def) => def.id === binding.key);
+		if (!definition || definition.steps.length === 0) {
+			throw new Error(`capability workflow "${binding.key}" has no resolvable steps to run`);
+		}
+		const dir = path.join(this.stateDir, "capabilities", install.id, "workflows");
+		await fs.mkdir(dir, { recursive: true });
+		const dot = capabilityWorkflowToDot(definition);
+		// Validate the synthesized graph round-trips through the same parser the driver uses (exactly one
+		// start/exit, well-formed edges) before persisting it — fail loudly here, not at spawn time.
+		parseWorkflow(dot);
+		const file = path.join(dir, `${slugifyForFile(binding.key)}.fabro`);
+		await fs.writeFile(file, dot);
+		return file;
 	}
 
 	private profileFor(id: string | undefined): AgentProfile | undefined {
@@ -984,19 +1107,88 @@ export class SquadManager extends EventEmitter {
 		return reward;
 	}
 
-	async markFeedbackRewardPaid(id: string, opts: { provider?: string; externalRef?: string } = {}, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
+	/**
+	 * Disburse an approved feedback reward through the configured payment provider, then persist the
+	 * result. This is the real money-movement entry point (replaces the old "manual ledger only"):
+	 *
+	 *  - State-machine gate FIRST, before any mutation or network call: only approved → paid is legal.
+	 *    assertRewardTransition rejects illegal sources (none/pending/void/paid → paid) so a reward can
+	 *    never jump to paid unapproved — and so we never call the provider for an ineligible reward.
+	 *  - Idempotency: the reward id is passed as the provider's idempotencyKey. Real providers thread it
+	 *    into the upstream idempotency handle (Tremendous `external_id`), so a retried payout for one
+	 *    reward can never disburse twice.
+	 *  - Manual provider (no creds, or name "manual"): preserves today's behavior — the operator must
+	 *    supply a non-empty `provider` label AND `externalRef` (the out-of-band proof-of-payment handle).
+	 *    No funds move; it's a recorded ledger entry.
+	 *  - Real provider (e.g. Tremendous): recipient email is taken from `opts.recipientEmail` or the
+	 *    linked feedback item's userEmail; provider + externalRef are read from the RESULT, not the
+	 *    operator. On status "paid"/"pending" we persist the result's externalRef and set the reward
+	 *    status (pending is recorded as paid since the model has no pending reward state). On "failed"
+	 *    we do NOT mark paid — the reward stays approved and we throw a clear error.
+	 *  - A provider error is a value (status:"failed"), never an exception across the provider boundary,
+	 *    so a payout failure cannot crash the daemon.
+	 */
+	async markFeedbackRewardPaid(
+		id: string,
+		opts: { provider?: string; externalRef?: string; recipientEmail?: string; recipientName?: string; note?: string } = {},
+		actor: Actor = LOCAL_ACTOR,
+	): Promise<FeedbackReward> {
+		const operatorProvider = typeof opts.provider === "string" ? opts.provider.trim() : "";
+		const operatorRef = typeof opts.externalRef === "string" ? opts.externalRef.trim() : "";
+		const isManual = this.paymentProvider.name === "manual";
+		// Manual path keeps the original required-fields contract: an out-of-band payout is only a
+		// trustworthy ledger entry if the operator names the provider AND the proof-of-payment handle.
+		if (isManual) {
+			if (!operatorProvider) throw new Error("provider is required to record a reward payout (e.g. the payment service used)");
+			if (!operatorRef) throw new Error("externalRef is required to record a reward payout (the provider's payment/transaction reference)");
+		}
+
 		const snap = await this.store.loadFeedback();
 		const { item, reward } = rewardRecordOrThrow(snap, id);
+		// State-machine gate FIRST, before any mutation or network call.
 		assertRewardTransition(reward.status, "paid");
+
+		// Recipient comes from the explicit opt or the linked feedback item. Real disbursement needs it.
+		const recipientEmail = (opts.recipientEmail ?? item.userEmail ?? "").trim();
+		const recipientName = opts.recipientName?.trim() || undefined;
+		const note = opts.note?.trim() || `omp-squad feedback reward for ${item.id}`;
+		if (!isManual && !recipientEmail) {
+			throw new Error("recipientEmail is required to disburse this reward (set it on the request or capture userEmail on the feedback item)");
+		}
+
+		// For the manual path, seed a per-call ManualProvider with the operator's externalRef so the
+		// recorded handle is exactly what the operator supplied; otherwise use the configured provider.
+		const provider = isManual ? new ManualProvider({ name: operatorProvider, externalRef: operatorRef }) : this.paymentProvider;
+		const result = await provider.payout({
+			idempotencyKey: reward.id, // reward id == idempotency key: retries never double-pay
+			amountCents: reward.amount,
+			currency: reward.currency,
+			recipientEmail,
+			recipientName,
+			note,
+		});
+
+		if (result.status === "failed") {
+			// Do NOT mark paid. Reward stays approved. Surface a clear error to the caller.
+			await this.recordFeedbackAudit(actor, "feedback.reward.payout_failed", id, `payout via ${result.provider} failed: ${result.error ?? "unknown error"}`);
+			throw new Error(`reward payout failed (${result.provider}): ${result.error ?? "unknown error"}`);
+		}
+
+		// status "paid" or "pending": persist the RESULT's provider + externalRef and mark the reward.
+		// The reward model has no "pending" state, so a pending disbursement is recorded as paid (the
+		// money/order has been accepted upstream) — the audit detail preserves the true provider status.
 		reward.status = "paid";
-		reward.provider = opts.provider ?? reward.provider;
-		reward.externalRef = opts.externalRef ?? reward.externalRef;
+		reward.provider = result.provider;
+		reward.externalRef = result.externalRef;
 		reward.reviewer = actor.id;
 		reward.updatedAt = Date.now();
 		item.rewardStatus = "paid";
 		item.updatedAt = reward.updatedAt;
 		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reward.paid", id);
+		const detail = isManual
+			? `manual record of externally-executed payment via ${result.provider} (ref ${result.externalRef}); no funds moved by omp-squad`
+			: `disbursed via ${result.provider} (ref ${result.externalRef}, status ${result.status}) to ${recipientEmail}`;
+		await this.recordFeedbackAudit(actor, "feedback.reward.paid", id, detail);
 		return reward;
 	}
 
@@ -1035,6 +1227,7 @@ export class SquadManager extends EventEmitter {
 		const repos = repo !== undefined ? [repo] : [...new Set([...list.map((a) => a.repo), ...persisted.map((f) => f.repo), ...planeRepos()])];
 		const out: FeatureDTO[] = [];
 		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r), persisted)));
+		for (const feature of out) feature.planRevisionCandidates = await this.listPlanRevisionCandidates({ repo: feature.repo, featureId: feature.id });
 		return out;
 	}
 
@@ -1061,6 +1254,7 @@ export class SquadManager extends EventEmitter {
 	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
 		const pf = this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, patch.repo);
 		if (!pf) return undefined;
+		const wasArchived = !!pf.archived;
 		if (patch.title !== undefined) pf.title = patch.title;
 		if (patch.stageOverride !== undefined) pf.stageOverride = patch.stageOverride ?? undefined;
 		if (patch.archived !== undefined) pf.archived = patch.archived;
@@ -1070,8 +1264,78 @@ export class SquadManager extends EventEmitter {
 		if (patch.relationships !== undefined) pf.relationships = patch.relationships;
 		if (patch.contextBundle !== undefined) pf.contextBundle = patch.contextBundle;
 		pf.updatedAt = Date.now();
+		// Archive is reversible AND cascades to the plan files: archiving moves
+		// plans/<x>/ → plans/.archive/<x>/, unarchiving moves it back. Non-fatal: a
+		// missing/already-moved dir just no-ops, and the flag flip still persists.
+		if (patch.archived !== undefined && patch.archived !== wasArchived && pf.origin?.planDir) {
+			try {
+				if (patch.archived) await archivePlanDir(pf.repo, pf.origin.planDir);
+				else await restorePlanDir(pf.repo, pf.origin.planDir);
+			} catch (err) {
+				this.log("warn", `plan dir ${patch.archived ? "archive" : "restore"} failed for ${pf.origin.planDir}: ${String(err)}`);
+			}
+		}
 		this.emitFeaturesChanged();
 		return pf;
+	}
+
+	/**
+	 * Edit one concern of a feature's plan from the flow diagram: rewrite its STATUS and/or the
+	 * concerns that block it, persisting to the concern doc + overview dependency table. Works for
+	 * stored AND derived (plan-dir-scanned) features — it resolves the feature via features().
+	 */
+	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }): Promise<PlanConcern | undefined> {
+		const f = (await this.features(opts.repo)).find((x) => x.id === id);
+		if (!f || !f.planDir) return undefined;
+		const concern = await updatePlanConcern(f.repo, f.planDir, opts.file, { status: opts.status, blockedBy: opts.blockedBy });
+		if (concern) this.emitFeaturesChanged();
+		return concern;
+	}
+
+	/** Persisted, archived features (the "garbage bin") — the soft-deleted set the board hides. */
+	archivedFeatures(repo?: string): { id: string; title: string; repo: string; planDir?: string; moduleUrl?: string; updatedAt: number }[] {
+		return [...this.featureStore.values()]
+			.filter((f) => f.archived && (!repo || f.repo === repo))
+			.map((f) => ({ id: f.id, title: f.title, repo: f.repo, planDir: f.origin?.planDir, moduleUrl: f.plane?.moduleUrl, updatedAt: f.updatedAt }))
+			.sort((a, b) => b.updatedAt - a.updatedAt);
+	}
+
+	/**
+	 * Hard-delete a feature: a destructive, NON-reversible cross-system op (vs. updateFeature's
+	 * reversible archive). Removes the persisted feature, permanently deletes its plan dir (live
+	 * OR archived), and detaches member agents (membership only — the agents keep running, they
+	 * just lose the feature link). When `plane: "detach"`, also removes the Plane MODULE grouping
+	 * (the issues themselves are never touched). Returns what actually happened.
+	 */
+	async deleteFeature(id: string, opts: { repo?: string; plane?: "keep" | "detach" } = {}): Promise<{ deleted: boolean; planDirRemoved: boolean; planeModuleRemoved: boolean; detachedAgents: number }> {
+		const pf = this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, opts.repo);
+		if (!pf) return { deleted: false, planDirRemoved: false, planeModuleRemoved: false, detachedAgents: 0 };
+
+		let detachedAgents = 0;
+		for (const rec of this.agents.values()) {
+			if (rec.dto.featureId === id) {
+				rec.dto.featureId = undefined;
+				rec.options.featureId = undefined;
+				this.emitAgent(rec);
+				detachedAgents += 1;
+			}
+		}
+
+		let planDirRemoved = false;
+		if (pf.origin?.planDir) {
+			try { planDirRemoved = await deletePlanDir(pf.repo, pf.origin.planDir); }
+			catch (err) { this.log("warn", `plan dir delete failed for ${pf.origin.planDir}: ${String(err)}`); }
+		}
+
+		let planeModuleRemoved = false;
+		if (opts.plane === "detach" && pf.plane?.moduleId) {
+			try { planeModuleRemoved = (await deletePlaneModule(pf.repo, pf.plane.moduleId)) === true; }
+			catch (err) { this.log("warn", `plane module detach failed for ${pf.plane.moduleId}: ${String(err)}`); }
+		}
+
+		this.featureStore.delete(id);
+		this.emitFeaturesChanged();
+		return { deleted: true, planDirRemoved, planeModuleRemoved, detachedAgents };
 	}
 
 	private async adoptDerivedFeature(id: string, repo?: string): Promise<PersistedFeature | undefined> {
@@ -1104,6 +1368,10 @@ export class SquadManager extends EventEmitter {
 		return pf;
 	}
 
+	private async persistedFeatureForAction(id: string, repo?: string): Promise<PersistedFeature | undefined> {
+		return this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, repo);
+	}
+
 	/** Attach (or detach) an agent to a feature; membership lives on the agent. */
 	linkAgent(featureId: string, agentId: string, unlink = false): boolean {
 		const pf = this.featureStore.get(featureId);
@@ -1123,28 +1391,110 @@ export class SquadManager extends EventEmitter {
 		const pf = this.featureStore.get(id);
 		let idents = pf?.plane?.issueIdentifiers ?? [];
 		let repo = pf?.repo;
+		let planDir = pf?.origin?.planDir;
 		if (!idents.length) {
 			// derived feature (identifiers live in plan docs) — fall back to the full build
 			const f = (await this.features()).find((x) => x.id === id);
 			idents = f?.issueIdentifiers ?? [];
 			repo = f?.repo ?? repo;
+			planDir = f?.planDir ?? planDir;
 		}
 		const tickets = idents.length && repo ? await featureTickets(repo, idents) : [];
-		return { tickets, moduleUrl: pf?.plane?.moduleUrl };
+		// Prefer the daemon's own module link; else the module URL /plan-to-plane backfilled into the plan dir
+		// (skill-filed modules are created via MCP, so the daemon never set pf.plane.moduleUrl itself).
+		let moduleUrl = pf?.plane?.moduleUrl;
+		if (!moduleUrl && repo && planDir) moduleUrl = await planeModuleUrlIn(path.join(repo, planDir));
+		return { tickets, moduleUrl };
 	}
 
 	/** Create a Plane module for a feature and group its issues under it; persists the link. */
-	async createFeatureModule(id: string): Promise<{ moduleUrl: string } | null> {
-		const pf = this.featureStore.get(id);
+	async createFeatureModule(id: string, opts: { repo?: string; createTickets?: boolean } = {}): Promise<{ moduleUrl: string; issueIdentifiers: string[]; createdIssues: IssueRef[] } | null> {
+		const pf = await this.persistedFeatureForAction(id, opts.repo);
 		if (!pf) return null;
 		const f = (await this.features(pf.repo)).find((x) => x.id === id);
-		const idents = f?.issueIdentifiers ?? pf.plane?.issueIdentifiers ?? [];
-		const mod = await ensureFeatureModule(pf.repo, pf.title, idents);
+		let idents = [...new Set([...(pf.plane?.issueIdentifiers ?? []), ...(f?.issueIdentifiers ?? [])])];
+		const createdIssues: IssueRef[] = [];
+		const createdIssueByConcern = new Map<number, IssueRef>();
+		if (opts.createTickets && !idents.length && pf.origin?.planDir) {
+			const concerns = (await parsePlanConcerns(pf.repo, pf.origin.planDir)).filter((concern) => concern.open);
+			for (const concern of concerns) {
+				const issue = await createPlaneIssue(pf.repo, concern.title, renderPlanConcernIssueHtml(pf, concern));
+				if (issue) {
+					createdIssues.push(issue);
+					const num = concernNumFromFile(concern.file);
+					if (num != null) createdIssueByConcern.set(num, issue);
+					if (issue.identifier) idents.push(issue.identifier);
+				}
+			}
+			idents = [...new Set(idents)];
+			if (createdIssueByConcern.size) {
+				const graph = await parsePlanDependencyGraph(pf.repo, pf.origin.planDir);
+				for (const [num, blockers] of graph) {
+					const issue = createdIssueByConcern.get(num);
+					if (!issue) continue;
+					for (const blocker of blockers) {
+						const blockerIssue = createdIssueByConcern.get(blocker);
+						if (!blockerIssue) continue;
+						const linked = await addPlaneBlockedByRelation(pf.repo, issue.id, blockerIssue.id);
+						if (linked === null || linked === false) return null;
+					}
+				}
+			}
+		}
+		const mod = pf.plane?.moduleId && pf.plane.moduleUrl
+			? { moduleId: pf.plane.moduleId, moduleUrl: pf.plane.moduleUrl }
+			: await ensureFeatureModule(pf.repo, pf.title, idents);
 		if (!mod) return null;
+		if (pf.plane?.moduleId) {
+			const createdGrouped = await addIssueIdsToFeatureModule(pf.repo, pf.plane.moduleId, createdIssues.map((issue) => issue.id));
+			if (createdGrouped === null || createdGrouped === false) return null;
+			if (idents.length && !createdIssues.length) {
+				const grouped = await addIssuesToFeatureModule(pf.repo, pf.plane.moduleId, idents);
+				if (grouped === null || grouped === false) return null;
+			}
+		}
 		pf.plane = { ...(pf.plane ?? {}), moduleId: mod.moduleId, moduleUrl: mod.moduleUrl, issueIdentifiers: idents };
 		pf.updatedAt = Date.now();
 		this.emitFeaturesChanged();
-		return { moduleUrl: mod.moduleUrl };
+		return { moduleUrl: mod.moduleUrl, issueIdentifiers: idents, createdIssues };
+	}
+
+	/** Repair a plan module after partial Plane writes: find generated concern tickets, link them, optionally close duplicate generated tickets. */
+	async repairFeatureModuleTickets(id: string, opts: { repo?: string; closeOrphans?: boolean } = {}): Promise<{ moduleUrl: string; issueIdentifiers: string[]; linkedIssues: IssueRef[]; closedIssues: IssueRef[] } | null> {
+		const pf = await this.persistedFeatureForAction(id, opts.repo);
+		if (!pf?.origin?.planDir) return null;
+		const concerns = (await parsePlanConcerns(pf.repo, pf.origin.planDir)).filter((concern) => concern.open);
+		const module = pf.plane?.moduleId && pf.plane.moduleUrl
+			? { moduleId: pf.plane.moduleId, moduleUrl: pf.plane.moduleUrl }
+			: await ensureFeatureModule(pf.repo, pf.title, pf.plane?.issueIdentifiers ?? []);
+		if (!module) return null;
+		const openIssues = await listPlaneIssues(pf.repo);
+		if (!openIssues) return null;
+		const byConcern = new Map<string, IssueRef[]>();
+		for (const issue of openIssues) {
+			for (const concern of concerns) {
+				if (issue.name.trim() !== concern.title.trim()) continue;
+				const detail = await fetchIssueDetail(pf.repo, issue.id).catch(() => null);
+				if (!detail || !planConcernTicketMatches(concern, issue, detail.body)) continue;
+				byConcern.set(concern.path, [...(byConcern.get(concern.path) ?? []), issue]);
+			}
+		}
+		const linkedIssues = [...byConcern.values()].flatMap((issues) => issues.slice(0, 1));
+		const linkedIds = linkedIssues.map((issue) => issue.id);
+		const linkedIdentifiers = linkedIssues.map((issue) => issue.identifier).filter((x): x is string => !!x);
+		const linked = await addIssueIdsToFeatureModule(pf.repo, module.moduleId, linkedIds);
+		if (linked === null || linked === false) return null;
+		const closedIssues: IssueRef[] = [];
+		if (opts.closeOrphans) {
+			for (const issue of [...byConcern.values()].flatMap((issues) => issues.slice(1))) {
+				if (await closePlaneIssue(issue)) closedIssues.push(issue);
+			}
+		}
+		const issueIdentifiers = [...new Set([...(pf.plane?.issueIdentifiers ?? []), ...linkedIdentifiers])];
+		pf.plane = { ...(pf.plane ?? {}), moduleId: module.moduleId, moduleUrl: module.moduleUrl, issueIdentifiers };
+		pf.updatedAt = Date.now();
+		this.emitFeaturesChanged();
+		return { moduleUrl: module.moduleUrl, issueIdentifiers, linkedIssues, closedIssues };
 	}
 
 	/** Cache the current member branches so land status survives an agent being killed. */
@@ -1155,9 +1505,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Land all member branches: fast-forward-safe first, stop on a diverged/failed branch (unless force). */
-	async landFeature(id: string, force = false): Promise<{ ok: boolean; stopped?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] }> {
+	async landFeature(id: string, force = false, actor: Actor = LOCAL_ACTOR, reason?: string): Promise<{ ok: boolean; stopped?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] }> {
 		const pf = this.featureStore.get(id);
 		if (!pf) return { ok: false, stopped: "no such feature", results: [] };
+		if (force && !reason?.trim()) return { ok: false, stopped: "force land requires a reason", results: [] };
 		this.snapshotBranches(id);
 		const members: LandMember[] = [...this.agents.values()].filter((r) => r.dto.featureId === id).map((r) => ({ agentId: r.dto.id, agentName: r.dto.name, branch: r.dto.branch, worktree: r.dto.worktree, repo: pf.repo }));
 		for (const b of pf.branches ?? []) if (!members.some((m) => m.agentId === b.agentId)) members.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo: pf.repo });
@@ -1165,18 +1516,22 @@ export class SquadManager extends EventEmitter {
 		if (!force && wts.some((w) => w.readiness === "diverged")) return { ok: false, stopped: "a branch is diverged — resolve it (or force)", results: [] };
 		if (!force) {
 			for (const m of members) {
-				const reason = await proofGate(pf.repo, m.worktree, m.branch);
+				const reason = await proofGate(pf.repo, m.worktree, m.branch, pf.acceptance ?? undefined);
 				if (reason) return { ok: false, stopped: `${m.agentName ?? m.branch ?? "member"}: ${reason}`, results: [] };
 			}
+		}
+		if (force) {
+			void this.recordAudit(actor, "land", id, "ok", `force land: ${reason}`);
+			void this.store.appendAudit({ actor: actor.id, action: "land.force", target: id, detail: { reason } }).catch(() => {});
 		}
 		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string }[] = [];
 		for (const w of landOrder(wts)) {
 			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
-			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy });
+			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, verify: pf.acceptance ?? undefined });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
-			void this.closeLandedIssue(rec?.dto.issue); // landed branch ⇒ close its tracking issue (idempotent)
+			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
 		}
 		this.emitFeaturesChanged();
 		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
@@ -1191,23 +1546,29 @@ export class SquadManager extends EventEmitter {
 	 * is guaranteed for the single-agent path too — not only the multi-branch `landFeature`. Close is
 	 * idempotent (`closedIssues`) and best-effort. Busy-aware `commitWip` mirrors the feature path.
 	 */
-	async land(id: string, message?: string, opts: { auto?: boolean } = {}): Promise<LandResult> {
+	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
 		const auto = opts.auto ?? true;
-		// Restart-safe auto-land cap: a branch whose merge keeps failing the gate is parked rather than
-		// re-merged + rolled-back forever. The streak is keyed by BRANCH (stable across re-adoption,
-		// unlike the agent id which create() re-mints) and persisted, so it holds across daemon restarts.
-		// Operator lands (server /api/agents/:id/land → landAgent directly) bypass this method, so a human
-		// is never blocked; the Observer files a dedup'd bug issue for a parked branch so the fleet re-does
-		// the work on a fresh branch.
+		await this.refreshProofState(rec);
+		if (opts.force && !opts.reason?.trim()) return { ok: false, committed: false, merged: false, message: "force land blocked", detail: "force land requires a reason" };
+		// Restart-safe auto-land cap: check before proofGate so a branch already over the cap parks
+		// without re-running any landing preconditions. Operator lands (auto:false) bypass this.
 		if (auto && dto.branch) {
 			const fails = landFailureCount(this.stateDir, dto.branch);
 			if (fails >= autoLandFailCap()) {
 				this.log("warn", `auto-land parked for ${dto.branch} — ${fails} consecutive failed lands; awaiting a fix (the observer files a bug issue)`);
 				return { ok: false, committed: false, merged: false, message: "auto-land parked", detail: `auto-land parked: ${fails} consecutive failed lands on ${dto.branch} — not re-merging until the branch is fixed` };
 			}
+		}
+		if (!opts.force) {
+			const reason = await proofGate(dto.repo, dto.worktree, dto.branch);
+			if (reason) return { ok: false, committed: false, merged: false, message: "land blocked", detail: reason };
+		} else {
+			const actor = opts.actor ?? LOCAL_ACTOR;
+			void this.recordAudit(actor, "land", id, "ok", `force land: ${opts.reason}`);
+			void this.store.appendAudit({ actor: actor.id, action: "land.force", target: id, detail: { reason: opts.reason } }).catch(() => {});
 		}
 		const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
 		const result = await this.landBranch({
@@ -1217,6 +1578,7 @@ export class SquadManager extends EventEmitter {
 			message: message ?? `squad(${dto.name}): land ${dto.branch ?? "changes"}`,
 			commitWip: !busy,
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
+			requireProof: !opts.force,
 		});
 		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
 		// (never bump the fail streak) and not landed — surface the ready-to-land flag and return.
@@ -1232,13 +1594,27 @@ export class SquadManager extends EventEmitter {
 		// never bump the streak for it, else transient dirty windows park a healthy branch.
 		if (!result.retryable && (auto || result.ok)) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 		if (result.ok) {
-			rec.dto.landReady = false; // merged ⇒ clear the confirm-mode staged flag
+			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
-			await this.closeLandedIssue(dto.issue); // landed ⇒ close its tracking issue (idempotent, best-effort)
+			if (result.merged) await this.closeLandedIssue(dto.issue); // real merge ⇒ close its tracking issue (idempotent, best-effort)
+			else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
 		return result;
+	}
+
+	private async autoLandWorkflow(rec: AgentRecord, outcome: string | undefined, proof?: { state?: string }): Promise<void> {
+		if (!this.autoLand || this.landConfirm || outcome !== "succeeded") return;
+		this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "workflow.land.start", target: rec.dto.id, detail: { proof: proof?.state ?? "unknown" } }).catch(() => {});
+		const reason = await proofGate(rec.dto.repo, rec.dto.worktree, rec.dto.branch);
+		if (reason) {
+			this.log("warn", `workflow auto-land blocked on ${rec.dto.name}: ${reason}`);
+			this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "workflow.land.end", target: rec.dto.id, detail: { outcome: "blocked", reason } }).catch(() => {});
+			return;
+		}
+		const res = await autoLandOnSuccess(true, outcome, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
+		this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "workflow.land.end", target: rec.dto.id, detail: { outcome: res?.ok ? "ok" : "error", detail: res?.detail ?? res?.message } }).catch(() => {});
 	}
 
 	/**
@@ -1272,7 +1648,6 @@ export class SquadManager extends EventEmitter {
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
 		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
 	}
-
 	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
 	protected landBranch(opts: LandOpts): Promise<LandResult> {
 		return landAgent(opts);
@@ -1297,12 +1672,19 @@ export class SquadManager extends EventEmitter {
 			model: opts.model,
 			profileId: opts.profileId,
 			approvalMode: opts.approvalMode ?? "write",
+			autonomyMode: opts.autonomyMode ?? modeFromApproval(opts.approvalMode ?? "write"),
+			effectiveMode: "observe",
+			verificationState: "unknown",
+			availableActions: ["set-mode"],
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
 			issue: opts.issue,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			requires: opts.requires,
+			produces: opts.produces ?? opts.owns,
+			scopeSource: opts.scopeSource,
 		};
 	}
 
@@ -1373,46 +1755,117 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Repo-relative files this agent ACTUALLY changed vs the main checkout's HEAD — the ground
+	 * truth for the produces audit. Sourced from git (committed branch diff, three-dot), NOT the
+	 * receipt's tool-frame filesTouched (which both under- and over-states the real change set).
+	 */
+	private changedFilesVsBase(a: AgentDTO): string[] {
+		if (!a.branch) return [];
+		const r = hardenedGitSync(["-C", a.repo, "diff", "--name-only", `HEAD...${a.branch}`]);
+		return r.code === 0 ? r.stdout.split("\n").filter((f) => f.length > 0) : [];
+	}
+
+	/**
+	 * Route a scope-contract finding through the automation observability channel (the "scope" loop):
+	 * a warn-level event that persists, surfaces in /api/automation + the automation panel, and is
+	 * advisory ONLY — it never blocks a spawn or a land. Best-effort; never throws.
+	 */
+	private fileScopeFinding(severity: "low" | "high", repo: string, message: string): void {
+		try {
+			this.log("warn", `scope finding (${severity}): ${message}`);
+			this.automation.for("scope", repo)({ durationMs: 0, level: "warn", detail: message });
+		} catch {
+			/* observability must never break the spawn/finalize path */
+		}
+	}
+	async verifyAgentWork(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
+		const rec = this.agents.get(id);
+		if (!rec) return false;
+		this.syncAuthority(rec.dto);
+		if (rec.dto.effectiveMode === "observe") throw new Error("verify blocked in observe mode");
+		const command = await detectVerify(rec.dto.repo);
+		if (!command) return false;
+		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command });
+		await this.refreshProofState(rec);
+		this.emitAgent(rec);
+		void this.recordAudit(actor, "verify", id, proof.ok ? "ok" : "error", proof.detail);
+		return proof.ok;
+	}
+
+	async transitionMode(id: string, mode: AutonomyMode, actor: Actor = LOCAL_ACTOR, reason?: string): Promise<AgentDTO | undefined> {
+		const rec = this.agents.get(id);
+		if (!rec) return undefined;
+		const oldMode = rec.dto.autonomyMode;
+		rec.dto.autonomyMode = mode;
+		rec.options.autonomyMode = mode;
+		this.syncAuthority(rec.dto);
+		this.emitAgent(rec);
+		await this.persist();
+		void this.recordAudit(actor, "set-mode", id, "ok", `${oldMode} → ${mode}; effective ${rec.dto.effectiveMode}${reason ? `; ${reason}` : ""}`);
+		await this.store.appendAudit({ actor: actor.id, action: "set-mode", target: id, detail: { oldMode, requestedMode: mode, effectiveMode: rec.dto.effectiveMode, reason } }).catch(() => {});
+		return rec.dto;
+	}
+	/**
 	 * Run the acceptance gate (the repo's own verify command, via detectVerify) on main → {ok, firstFailure?}.
 	 * Total by contract: any spawn failure yields ok:false, never a throw (the observer tick must not crash).
 	 * No detectable verify command ⇒ ok:true (nothing to regress against; don't file a false regression).
 	 * Serialized against lands via withRepoLandLock: the gate reads the same main tree a land mutates
 	 * (merge / reset --hard), so running it concurrently makes it `(fail)` against a half-merged main and
 	 * file a false `regression:` bug (OMPSQ-168). The lock makes the gate and lands mutually exclusive.
-	 * ponytail: runs the full gate per observer tick; the Observer's own overlap guard prevents pile-up,
-	 * but a long suite makes ticks costly — throttle (run every Nth tick) if it ever bites.
+	 * Change-driven: cache by live working-tree fingerprint (git status + bun.lock), force-run every
+	 * 10th tick, and fail open to running the real gate if the fingerprint cannot be sampled.
 	 */
-	protected runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+	protected runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }> {
 		return withRepoLandLock(repo, async () => {
 			try {
-				const command = await detectVerify(repo);
-				if (!command) return { ok: true };
-				const proc = Bun.spawn(["bash", "-lc", command], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-				const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-				if (code === 0) return { ok: true };
-				// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
-				const text = `${out}\n${err}`;
-				const failLine = text.split("\n").find((l) => l.includes("(fail)"));
-				const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
-				return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
+				const fp = await this.mainGateFingerprint(repo);
+				const cached = fp ? this.mainGateCache.get(repo) : undefined;
+				const tick = (cached?.tick ?? 0) + 1;
+				if (fp && cached?.fp === fp && tick % 10 !== 0) {
+					this.mainGateCache.set(repo, { ...cached, tick });
+					return { ...cached.result, skipped: true };
+				}
+
+				const result = await this.runMainGateUncached(repo);
+				if (fp) this.mainGateCache.set(repo, { fp, result, tick });
+				return result;
 			} catch (e) {
 				return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
 			}
 		});
 	}
 
-	/**
-	 * Acceptance gate for a single agent's worktree — the featureless mirror of verifyFeature. No
-	 * acceptance command in the repo ⇒ false, so the loop never auto-merges unverified work.
-	 */
-	async verifyAgentWork(id: string): Promise<boolean> {
-		const rec = this.agents.get(id);
-		if (!rec) return false;
-		const command = await detectVerify(rec.dto.repo);
-		if (!command) return false;
-		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command });
-		return proof.ok;
+	private async mainGateFingerprint(repo: string): Promise<string | undefined> {
+		const status = await hardenedGit(["status", "--porcelain", "--untracked-files=all"], { cwd: repo });
+		if (status.code !== 0) return undefined;
+		let lock = "";
+		try {
+			lock = await fs.readFile(path.join(repo, "bun.lock"), "utf8");
+		} catch (e) {
+			if ((e as { code?: string }).code !== "ENOENT") return undefined;
+		}
+		return createHash("sha256").update(status.stdout).update("\0").update(lock).digest("hex");
 	}
+
+	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+		try {
+			const command = await detectVerify(repo);
+			if (!command) return { ok: true };
+			// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
+			const plan = gateExec(command, repo);
+			const proc = Bun.spawn(plan.argv, { cwd: repo, stdout: "pipe", stderr: "pipe", env: plan.env });
+			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			if (code === 0) return { ok: true };
+			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
+			const text = `${out}\n${err}`;
+			const failLine = text.split("\n").find((l) => l.includes("(fail)"));
+			const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
+			return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
+		} catch (e) {
+			return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
+		}
+	}
+
 
 	private emitFeaturesChanged(): void {
 		void this.persist();
@@ -1423,17 +1876,55 @@ export class SquadManager extends EventEmitter {
 
 	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
 		const profile = this.profileFor(opts.profileId);
+		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
+		// what tools the spawned agent may use. They were parsed but NEVER applied — every agent got full tool
+		// access regardless. We now (a) inject the allow-list into the agent's system prompt (the path that
+		// actually reaches the omp child via --append-system-prompt) and (b) record it on the AgentRecord so
+		// host tool calls outside the list are hard-denied at the onHostTool seam (see toolGrants below).
+		// FLAG: hard enforcement of omp's *core* tools (read/edit/bash) requires an upstream
+		// `omp --allowed-tools` flag the RpcAgent/agent-host cannot pass today; the prompt constraint + host
+		// tool gate are the strongest enforcement reachable without that upstream change.
+		const toolGrants = profile?.capabilities?.length ? [...new Set(profile.capabilities)] : undefined;
 		if (profile) {
 			opts = {
 				...opts,
 				profileId: profile.id,
 				model: opts.model ?? profile.model,
 				approvalMode: opts.approvalMode ?? profile.approvalMode,
-				appendSystemPrompt: [profile.memory, opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
 		}
-		if (opts.owns?.length) {
-			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.owns);
+		// Cold-start KB primer (OMPSQ #8): a fresh agent on a feature inherits the most relevant prior
+		// decisions / hot files / peer context with ZERO turn cost, drawn from the context fabric and
+		// fenced as untrusted (same discipline as the resume digest). Best-effort — never blocks a spawn.
+		if (opts.featureId && (opts.task || opts.name)) {
+			try {
+				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
+				const primer = buildContextPrimer(snapshot, [opts.task, opts.name].filter(Boolean).join(" "));
+				if (primer) {
+					opts = {
+						...opts,
+						appendSystemPrompt: [opts.appendSystemPrompt, fenceUntrusted("context primer", primer)].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+					};
+				}
+			} catch (err) {
+				this.log("warn", `context primer failed: ${String(err)}`);
+			}
+		}
+		const produces = opts.produces ?? opts.owns;
+		if (opts.requires?.length) {
+			const conflict = requiresConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.requires);
+			if (conflict) {
+				// Operator-declared scope → hard block (the enforced path). LLM-inferred → advisory only:
+				// never refuse a spawn on a hallucinated read-dependency; surface it as a low-sev finding.
+				if (opts.scopeSource === "operator") {
+					throw new Error(`scope requires conflict: ${conflict.paths.join(", ")} produced by agent "${conflict.agent}" — wait for that output or narrow the dependency`);
+				}
+				this.fileScopeFinding("low", opts.repo, `inferred requires of "${opts.name ?? "agent"}" overlaps live agent ${conflict.agent}: ${conflict.paths.join(", ")}`);
+			}
+		}
+		if (produces?.length) {
+			const conflict = ownershipConflict([...this.agents.values()].map((r) => r.dto), opts.repo, produces);
 			if (conflict) throw new Error(`path ownership conflict: ${conflict.paths.join(", ")} held by agent "${conflict.agent}" — narrow the scope or stop that agent`);
 		}
 		// Global concurrency ceiling (see Scheduler). Restore / fan-out recreate already-counted agents → bypassCap.
@@ -1480,6 +1971,9 @@ export class SquadManager extends EventEmitter {
 		}
 		const profileId = opts.profileId;
 		const approvalMode = opts.approvalMode ?? "write";
+		const requestedMode = opts.autonomyMode ?? modeFromApproval(approvalMode);
+		const effectiveAtCreate = effectiveAutonomyMode({ requested: requestedMode, approvalMode, autoLand: this.autoLand, landConfirm: this.landConfirm });
+		if (opts.task && effectiveAtCreate === "observe") throw new Error("create with task is blocked in observe mode");
 		const thinking = opts.thinking ?? "low";
 		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
@@ -1495,7 +1989,7 @@ export class SquadManager extends EventEmitter {
 			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir);
 			cwd = wt.cwd;
 			repo = wt.repo;
-			resolvedBranch = wt.branch;
+			resolvedBranch = wt.inPlace ? undefined : wt.branch;
 			createdWorktree = !wt.inPlace;
 			if (wt.inPlace) {
 				// Non-git target dir: no isolation, but "spawn anywhere" still works. A real git checkout
@@ -1513,6 +2007,7 @@ export class SquadManager extends EventEmitter {
 			model: opts.model,
 			profileId,
 			approvalMode,
+			autonomyMode: requestedMode,
 			task: opts.task,
 			thinking,
 			appendSystemPrompt: opts.appendSystemPrompt,
@@ -1528,6 +2023,9 @@ export class SquadManager extends EventEmitter {
 			parentId: opts.parentId,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			requires: opts.requires,
+			produces,
+			scopeSource: opts.scopeSource,
 		};
 
 		const dto: AgentDTO = {
@@ -1549,13 +2047,17 @@ export class SquadManager extends EventEmitter {
 			parentId: opts.parentId,
 			featureId: opts.featureId,
 			owns: opts.owns,
+			requires: opts.requires,
+			produces,
+			scopeSource: opts.scopeSource,
 			workflow: persisted.workflow,
 			workflowState: persisted.workflowState,
 			adopted: opts.adopted,
 		};
+		this.seedAuthority(dto, requestedMode);
 
-		const agent = this.makeDriver(persisted);
-		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		const agent = this.makeDriver(persisted, opts.cold);
+		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
 		this.agents.set(id, rec);
 		this.wire(rec);
 		this.emitAgent(rec);
@@ -1593,7 +2095,7 @@ export class SquadManager extends EventEmitter {
 		return rec.dto;
 	}
 
-	private makeDriver(p: PersistedAgent): AgentDriver {
+	private makeDriver(p: PersistedAgent, cold = false): AgentDriver {
 		if (p.kind === "flue-service" && p.flue) {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
 		}
@@ -1609,7 +2111,7 @@ export class SquadManager extends EventEmitter {
 						return cs.length ? `--- Reviewer comments to address (from the plan review) ---\n${cs.map((c) => `- ${c.body}`).join("\n")}` : undefined;
 					}
 				: undefined;
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState, decoratePrompt });
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState, decoratePrompt, cold });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
@@ -1630,7 +2132,19 @@ export class SquadManager extends EventEmitter {
 		if (live >= hardAgentCeiling()) {
 			return { outcome: "failed", text: `agent ceiling reached (${live}/${hardAgentCeiling()}) — branch "${spec.name}" not spawned` };
 		}
-		const dto = await this.create({ repo, name: spec.name, model: spec.model, parentId, autoRoute: false, bypassCap: true });
+		// WIP cap for fan-out (#18): a workflow with a high max_parallel previously blew past the configured
+		// WIP cap because every branch spawned with bypassCap:true — only the hard ceiling stopped it. Respect
+		// the same admission decision interactive spawns use (scheduler.canAdmit on occupying agents) so fan-out
+		// is bounded by the configured cap too, with the hard ceiling above as the backstop. When the cap is
+		// reached we refuse this branch gracefully (a failed NodeResult the engine folds into its merge) rather
+		// than overrunning the cap. We still pass bypassCap:true to create() because the admission decision is
+		// made HERE — create's own cap check would otherwise double-gate and could throw.
+		const occupying = occupyingAgents(this.list());
+		if (!this.scheduler.canAdmit(occupying)) {
+			const reason = this.scheduler.pressured() ? "host under resource pressure" : `WIP cap reached (${occupying}/${this.scheduler.cap()})`;
+			return { outcome: "failed", text: `${reason} — branch "${spec.name}" not spawned` };
+		}
+		const dto = await this.create({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true });
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", text: "branch agent not created" };
 		return this.runAgentTask(rec, spec.task, spec.signal);
@@ -1731,6 +2245,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 		};
+		this.seedAuthority(dto, "autodrive");
 		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(id, rec);
 		this.wire(rec);
@@ -1840,6 +2355,10 @@ export class SquadManager extends EventEmitter {
 		}
 		if (cmd.type === "message") {
 			await this.deliverPeerMessage(actor, cmd.to, cmd.text);
+			return;
+		}
+		if (cmd.type === "set-mode") {
+			await this.transitionMode(cmd.id, cmd.mode, actor, cmd.reason);
 			return;
 		}
 
@@ -2021,7 +2540,7 @@ export class SquadManager extends EventEmitter {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});
 		}
 		this.agents.delete(id);
-		this.scoutCursor.delete(id);
+		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
 	}
@@ -2032,7 +2551,10 @@ export class SquadManager extends EventEmitter {
 		const a = rec.agent;
 		a.removeAllListeners();
 		a.on("event", (frame: { type?: string; [k: string]: unknown }) => this.onAgentEvent(rec, frame));
-		a.on("ready", () => this.refreshCommands(rec));
+		a.on("ready", () => {
+			this.refreshCommands(rec);
+			this.registerHostTools(rec);
+		});
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
 		a.on("stderr", (line: string) => this.log("warn", `[${rec.dto.name}] ${line}`));
@@ -2130,10 +2652,9 @@ export class SquadManager extends EventEmitter {
 				break;
 			}
 			case "workflow_done":
-				// Autonomous loop closer: a successful workflow auto-lands its own branch (no operator) —
-				// UNLESS the LAND_CONFIRM valve is on, where the orchestrator stages a one-tap Land instead.
-				// The valve gates EVERY autonomous land path, not just the orchestrator tick.
-				void autoLandOnSuccess(this.autoLand && !this.landConfirm, frame.outcome as string | undefined, { id: rec.dto.id, name: rec.dto.name }, { land: (id) => this.land(id), log: (m) => this.log("info", m) });
+				// Workflow auto-land must satisfy the same fresh-proof invariant surfaced by Land all.
+				// The final land still goes through land(), so merge verification/rollback and issue-close stay one seam.
+				void this.autoLandWorkflow(rec, frame.outcome as string | undefined, frame.proof as { state?: string } | undefined);
 				break;
 			case "auto_retry_start": {
 				// A usage-limit retry means the model subscription is rate-limited (5h/weekly cap). Note it so the
@@ -2230,10 +2751,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Close an agent/member's Plane issue once its branch successfully LANDS — the only close path now
-	 * (no premature close-on-gate-pass). Gated by OMP_SQUAD_AUTOCLOSE (closeOnDone). Idempotent via
-	 * `closedIssues` (a closed id is never re-closed) and best-effort (`closePlaneIssue` swallows
-	 * transport errors). A failed close leaves the id unmarked so a later land retries it.
+	 * Close an agent/member's Plane issue once its branch successfully MERGES — the only close path now
+	 * (no premature close-on-gate-pass, no close on no-op land). Gated by OMP_SQUAD_AUTOCLOSE
+	 * (closeOnDone). Idempotent via `closedIssues` (a closed id is never re-closed) and best-effort
+	 * (`closePlaneIssue` swallows transport errors). A failed close leaves the id unmarked so a later land retries it.
 	 */
 	async closeLandedIssue(issue: IssueRef | undefined): Promise<void> {
 		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;
@@ -2274,9 +2795,33 @@ export class SquadManager extends EventEmitter {
 					.scan(reasoning, { agent: rec.dto.id, runId: receipt.runId, task: rec.options.task, issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name })
 					.catch((err) => this.log("warn", `scout scan failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		}
+		// Produces audit: did the agent write outside its declared scope? Ground truth is the git
+		// branch diff (not the receipt). Advisory low-sev finding only — never blocks a land.
+		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
 		rec.run = undefined;
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * Compare an agent's REAL changed files (git branch diff) against its declared `produces`
+	 * (falling back to `owns`). Files outside the declared scope — minus a shared-file allowlist —
+	 * raise one low-sev scope finding. No declared scope ⇒ nothing to audit. Best-effort.
+	 */
+	private auditProduces(rec: AgentRecord): void {
+		const declared = rec.dto.produces ?? rec.dto.owns ?? [];
+		if (!declared.length) return;
+		try {
+			const actual = this.changedFilesVsBase(rec.dto);
+			if (!actual.length) return;
+			const outOfScope = outOfScopeWrites(actual, declared, producesAllowlist(process.env.OMP_SQUAD_PRODUCES_ALLOW));
+			if (outOfScope.length) {
+				const shown = outOfScope.slice(0, 10).join(", ");
+				this.fileScopeFinding("low", rec.dto.repo, `agent "${rec.dto.name}" wrote outside declared produces: ${shown}${outOfScope.length > 10 ? ` (+${outOfScope.length - 10} more)` : ""}`);
+			}
+		} catch {
+			/* audit is advisory — a git edge must never break run completion */
+		}
 	}
 
 	/**
@@ -2286,8 +2831,48 @@ export class SquadManager extends EventEmitter {
 	 */
 	private takeScoutReasoning(rec: AgentRecord): string {
 		const { text, cursor } = unscannedReasoning(rec.transcript, this.scoutCursor.get(rec.dto.id) ?? 0);
-		if (text) this.scoutCursor.set(rec.dto.id, cursor);
+		if (text) {
+			this.scoutCursor.set(rec.dto.id, cursor);
+			writeScoutCursors(this.stateDir, this.scoutCursor);
+		}
 		return text;
+	}
+
+	/** Pending ack waiters keyed by cmdId (resolved by the bus onAck listener; timed out by the caller). */
+	private readonly ackWaiters = new Map<string, (ack: CommandAck) => void>();
+
+	/**
+	 * Steer a federation PEER's agent — the outbound half of the remote-command path.
+	 * Only a local operator/admin may send (a viewer or remote actor is refused before the
+	 * frame leaves this host); the RECEIVING manager still authorizes independently via its
+	 * whois-verified actor + RBAC, so sending grants nothing. `to` is required: an
+	 * unaddressed broadcast command would execute on every peer that ran it as viewer-plus.
+	 * Returns the correlation id; pair with `waitForAck` for the peer's outcome.
+	 */
+	sendFederationCommand(to: string, cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): string {
+		if (!to.trim()) throw new Error("sendFederationCommand: target operator id required");
+		if (!roleAtLeast(effectiveRole(actor), "operator")) throw new RbacDenied("operator", effectiveRole(actor), "federation command send");
+		const cmdId = this.bus.sendCommand(cmd, to);
+		void this.recordAudit(actor, "federation.command", to, "ok", `${cmd.type} → ${to}`);
+		return cmdId;
+	}
+
+	/**
+	 * Wait briefly for the peer's ack to a sent command. `null` after `timeoutMs` — the send
+	 * is fire-and-forget underneath; an absent ack means "peer offline / older version", not failure.
+	 */
+	waitForAck(cmdId: string, timeoutMs = 4000): Promise<CommandAck | null> {
+		if (!cmdId) return Promise.resolve(null);
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				this.ackWaiters.delete(cmdId);
+				resolve(null);
+			}, timeoutMs);
+			this.ackWaiters.set(cmdId, (ack) => {
+				clearTimeout(timer);
+				resolve(ack);
+			});
+		});
 	}
 
 	/** Durable receipt history for one agent (server reads this; keeps stateDir private). */
@@ -2312,6 +2897,7 @@ export class SquadManager extends EventEmitter {
 			repos: opts.repos,
 			includeLeases: opts.includeLeases,
 			listIssues: (repo) => listPlaneIssues(repo),
+			features: [...this.featureStore.values()],
 		});
 	}
 
@@ -2365,7 +2951,9 @@ export class SquadManager extends EventEmitter {
 		await appendCommentEvent(this.stateDir, { type: "add", id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, at, kind: input.kind, annotation: input.annotation });
 		const comment: ArtifactComment = { id, repo: input.repo, subject: input.subject, body: input.body, author, urgent: input.urgent, createdAt: at, kind: input.kind, annotation: input.annotation };
 		this.emit("event", { type: "comment", comment } satisfies SquadEvent);
-		for (const issue of await this.commentPlaneTargets(input.repo, input.subject)) void addPlaneIssueComment(input.repo, issue, input.body).catch((err) => this.log("warn", `plane comment sync failed: ${err instanceof Error ? err.message : String(err)}`));
+		// Only regular comments fan out to Plane; plan-annotations are plan-doc-local review chatter
+		// anchored to a rendered block/line and arrive in Plane stripped of that context (noise), so suppress them.
+		if (input.kind !== "plan-annotation") for (const issue of await this.commentPlaneTargets(input.repo, input.subject)) void addPlaneIssueComment(input.repo, issue, input.body).catch((err) => this.log("warn", `plane comment sync failed: ${err instanceof Error ? err.message : String(err)}`));
 		void this.recordAudit(actor, input.kind === "plan-annotation" ? "plan-annotate" : "comment", input.subject, "ok", truncate(input.body, 80));
 		return comment;
 	}
@@ -2384,6 +2972,25 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Unresolved comments on a subject — consumed by the Slice-2 RPI feed-forward. */
+	async addPlanRevisionCandidate(input: Omit<PlanRevisionCandidate, "id" | "state" | "createdAt" | "updatedAt"> & { id?: string; state?: PlanRevisionCandidateState; createdAt?: number; updatedAt?: number }, actor: Actor | string = LOCAL_ACTOR): Promise<PlanRevisionCandidate> {
+		const candidate = await addPlanRevisionCandidate(this.stateDir, input);
+		this.emitFeaturesChanged();
+		void this.recordAudit(actor, "plan-candidate-add", candidate.featureId, "ok", candidate.summary);
+		return candidate;
+	}
+
+	async listPlanRevisionCandidates(q: { repo?: string; featureId?: string; state?: PlanRevisionCandidateState } = {}): Promise<PlanRevisionCandidate[]> {
+		return readPlanRevisionCandidates(this.stateDir, q);
+	}
+
+	async transitionPlanRevisionCandidate(id: string, state: PlanRevisionCandidateState, reviewer: Actor | string = LOCAL_ACTOR, reason?: string): Promise<PlanRevisionCandidate | undefined> {
+		const name = typeof reviewer === "string" ? reviewer : reviewer.id;
+		const candidate = await transitionPlanRevisionCandidate(this.stateDir, id, state, name, reason);
+		if (candidate) this.emitFeaturesChanged();
+		void this.recordAudit(reviewer, `plan-candidate-${state}`, id, candidate ? "ok" : "error", reason);
+		return candidate;
+	}
+
 	async getUnresolvedComments(repo: string, subject: string): Promise<ArtifactComment[]> {
 		return readComments(this.stateDir, { repo, subject, unresolved: true });
 	}
@@ -2421,9 +3028,34 @@ export class SquadManager extends EventEmitter {
 		if (added) this.maybeAutoSupervise(rec, added); // opt-in bounded auto-answer (registers the request first, above)
 	}
 
+	/** Advertise the reserved squad host tools to an omp-backed agent once it's ready (and on each
+	 *  reconnect/respawn, since omp loses them). Best-effort — never throws into the ready path. */
+	private registerHostTools(rec: AgentRecord): void {
+		if (rec.options.runtime === "acp") return; // non-omp runtime: no host-tool channel
+		try {
+			rec.agent.setHostTools?.(SQUAD_HOST_TOOLS);
+		} catch (err) {
+			this.log("warn", `set_host_tools failed for ${rec.dto.name}: ${String(err)}`);
+		}
+	}
+
 	private onHostTool(rec: AgentRecord, call: { id: string; toolName: string; arguments: unknown }): void {
+		if (call.toolName === KB_SEARCH_TOOL) {
+			void this.handleKbSearchTool(rec, call);
+			return;
+		}
 		if (call.toolName === PEER_MESSAGE_TOOL) {
 			void this.handlePeerMessageTool(rec, call);
+			return;
+		}
+		// Capability tool-grant enforcement (#3): if this agent was spawned from a capability profile that
+		// declared a tool allow-list, hard-deny any host tool call outside it instead of surfacing it for
+		// approval. The built-in peer-message tool above is exempt (it's not a capability tool).
+		if (rec.toolGrants && !rec.toolGrants.includes(call.toolName)) {
+			this.append(rec, "system", `⛔ tool "${call.toolName}" denied — not in this capability's tool grant [${rec.toolGrants.join(", ")}]`, { status: "error", tool: { callId: call.id, name: call.toolName, args: call.arguments, argsText: safeJson(call.arguments) } });
+			rec.agent.respondHostTool(call.id, `tool "${call.toolName}" is not granted to this capability (allowed: ${rec.toolGrants.join(", ") || "none"})`, true);
+			void this.recordAudit(agentActor(rec.dto.id), "tool.denied", rec.dto.id, "error", `${call.toolName} not in grant`);
+			this.emitAgent(rec);
 			return;
 		}
 		const pending: PendingRequest = {
@@ -2438,6 +3070,34 @@ export class SquadManager extends EventEmitter {
 		this.append(rec, "system", `⛔ tool call needs host: ${call.toolName}`, { pending: { requestId: pending.id, action: "created" }, status: "running", tool: { callId: call.id, name: call.toolName, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.dto.status = this.derive(rec);
 		this.emitAgent(rec);
+	}
+
+	/** squad_kb_search: rank the context fabric (scoped to what this agent may see) and return the
+	 *  hits to the calling agent. Read-only; surfaces a one-line note in the transcript for the operator. */
+	private async handleKbSearchTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+		const query = (typeof args.query === "string" ? args.query : typeof args.q === "string" ? args.q : "").trim();
+		if (!query) {
+			rec.agent.respondHostTool(call.id, `usage: ${KB_SEARCH_TOOL}({ query: string, type?: "decision"|"hot-area"|"digest"|"agent"|"scout"|"lease", topK?: number })`, true);
+			return;
+		}
+		const topK = Math.min(50, Math.max(1, typeof args.topK === "number" && Number.isFinite(args.topK) ? Math.floor(args.topK) : 10));
+		const type = typeof args.type === "string" ? (args.type as KbDocType) : undefined;
+		try {
+			const snapshot = await this.fabric(agentActor(rec.dto.id), { repos: [rec.dto.repo], includeLeases: true });
+			const results = searchFabric(snapshot, query, { topK, type });
+			const body = results.length
+				? results.map((r) => `- [${r.type}] ${r.title}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
+				: "No matching context in the knowledge base.";
+			rec.agent.respondHostTool(call.id, body);
+			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncate(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
+				status: "ok",
+				tool: { callId: call.id, name: KB_SEARCH_TOOL, args: call.arguments, argsText: safeJson(call.arguments), resultText: body },
+			});
+			void this.recordAudit(agentActor(rec.dto.id), "kb.search", rec.dto.id, "ok", `${results.length} hits for "${truncate(query, 60)}"`);
+		} catch (err) {
+			rec.agent.respondHostTool(call.id, err instanceof Error ? err.message : String(err), true);
+		}
 	}
 
 	private async handlePeerMessageTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
@@ -2625,6 +3285,7 @@ export class SquadManager extends EventEmitter {
 		rec.dto.session = summarizeSession(state);
 		// Rough completion estimate from progress rate (tasks done/total over elapsed). A hint, not a deadline.
 		const elapsed = rec.dto.startedAt ? Date.now() - rec.dto.startedAt : 0;
+		this.syncAuthority(rec.dto);
 		const remaining = next ? estimateEta(next.done, next.total, elapsed) : undefined;
 		rec.dto.etaAt = remaining !== undefined ? Date.now() + remaining : undefined;
 		// RpcSessionState.contextUsage.percent is a 0..100 percentage; AgentDTO.contextPct is a 0..1 fraction.
@@ -2658,6 +3319,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private emitAgent(rec: AgentRecord): void {
+		this.syncAuthority(rec.dto);
 		this.emit("event", { type: "agent", agent: rec.dto } satisfies SquadEvent);
 		this.publishPresence();
 	}
@@ -2729,7 +3391,12 @@ export class SquadManager extends EventEmitter {
 
 	/** Atomic write through the store: file mode → state.json temp+rename; DB mode → roster/feature tables + on-disk transcripts. */
 	private async persistNow(): Promise<void> {
-		const agents = [...this.agents.values()].map((r) => r.options);
+		const live = [...this.agents.values()].map((r) => r.options);
+		// D1 FIX: fold in resumable checkpoints the adoption ceiling dropped this boot so the full-snapshot
+		// replace doesn't erase them — a later restart re-attempts them. Live records win on id collision
+		// (a deferred run that has since been adopted is now in the live roster).
+		const liveIds = new Set(live.map((a) => a.id));
+		const agents = this.deferred.length ? [...live, ...this.deferred.filter((d) => !liveIds.has(d.id))] : live;
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
@@ -2760,6 +3427,9 @@ export class SquadManager extends EventEmitter {
 				parentId: p.parentId,
 				featureId: p.featureId,
 				owns: p.owns,
+				requires: p.requires,
+				produces: p.produces,
+				scopeSource: p.scopeSource,
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				workflowState: p.workflowState, // resume the graph from its checkpoint, never restart from scratch (OMPSQ-165)
@@ -2842,27 +3512,5 @@ function normalizeCommands(raw: unknown): CommandInfo[] {
 	return out;
 }
 
-/**
- * Resolve a `--workflow` spec to a graph file: an existing path is used as-is;
- * otherwise a bare name resolves to a bundled graph (`<pkg>/workflows/<name>/workflow.fabro`),
- * making `--workflow research-plan-implement` (and plan-implement / fan-out) first-class.
- */
-export function resolveWorkflowPath(spec: string): string {
-	if (existsSync(spec)) return spec;
-	const bundledDir = path.join(import.meta.dir, "..", "workflows", spec, "workflow.fabro");
-	if (existsSync(bundledDir)) return bundledDir;
-	const bundledFile = path.join(import.meta.dir, "..", "workflows", spec.endsWith(".fabro") ? spec : `${spec}.fabro`);
-	if (existsSync(bundledFile)) return bundledFile;
-	return spec;
-}
-
-let commissionWorkflow: Workflow | undefined;
-
-/** Parse (once) the bundled commission graph that drives author → validate → onboard. */
-async function loadCommissionWorkflow(): Promise<Workflow> {
-	if (!commissionWorkflow) {
-		const file = path.join(import.meta.dir, "..", "workflows", "commission", "workflow.fabro");
-		commissionWorkflow = parseWorkflow(await fs.readFile(file, "utf8"));
-	}
-	return commissionWorkflow;
-}
+// Workflow graph sources (resolveWorkflowPath / capabilityWorkflowToDot / loadCommissionWorkflow)
+// live in ./workflow-source.ts; the re-export keeps the public import path stable.

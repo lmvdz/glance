@@ -1,5 +1,7 @@
 export type AgentStatus = "starting" | "working" | "idle" | "input" | "error" | "stopped";
 export type FeatureStage = "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
+export type WorktreeProofState = "none" | "failed" | "stale" | "fresh";
+
 
 export interface PendingRequest {
   id: string;
@@ -64,11 +66,22 @@ export interface FeatureContextBundleDTO {
   downstream: string;
 }
 
+export type LandReadinessDTO = "clean" | "uncommitted" | "ahead" | "diverged" | "merged" | "no-branch";
+export interface WorktreeProofSummaryDTO { state: "none" | "failed" | "stale" | "fresh"; ranAt?: number; artifacts: number }
+export interface FeatureWorktreeStatusDTO { agentId?: string; agentName?: string; branch?: string; worktree: string; changedFiles: number; ahead: number; behind: number; readiness: LandReadinessDTO; proof?: WorktreeProofSummaryDTO }
+export interface FeatureProofAggregateDTO { fresh: number; failed: number; stale: number; none: number; latestRanAt?: number; artifacts: number }
+export type FeatureReadinessStateDTO = "no-candidate" | "needs-proof" | "proof-failed" | "proof-stale" | "blocked-input" | "diverged" | "uncommitted" | "ready" | "landed" | "done";
+export interface FeatureReadinessDTO { ready: boolean; state: FeatureReadinessStateDTO; blockers: string[]; nextAction: string }
+export type PlanRevisionCandidateStateDTO = "candidate" | "accepted" | "rejected" | "superseded";
+export interface PlanRevisionCandidateDTO { id: string; featureId: string; repo: string; planPath: string; producerAgentId?: string; runId?: string; traceId?: string; summary: string; diffRef?: string; state: PlanRevisionCandidateStateDTO; reason?: string; reviewer?: string; createdAt: number; updatedAt: number }
+
 export interface PlanAnnotationTargetDTO {
   planPath: string;
   lineStart?: number;
   lineEnd?: number;
   quote?: string;
+  /** Anchors the annotation to a specific rendered plan block (data-block-id). Additive/optional. */
+  blockId?: string;
 }
 
 export interface ArtifactCommentDTO {
@@ -94,18 +107,24 @@ export interface FeatureDTO {
   stage: FeatureStage;
   planDir?: string;
   agentIds: string[];
+  worktrees: FeatureWorktreeStatusDTO[];
   unlandedFiles: number;
   divergent: boolean;
   blocked: boolean;
   statusCounts: Partial<Record<AgentStatus, number>>;
   issueIdentifiers?: string[];
+  persisted?: boolean;
   workflowStage?: string;
   workflowProgress?: { done: number; total: number };
+  workflowProof?: WorktreeProofSummaryDTO;
   description?: string;
   acceptanceCriteria?: FeatureCriterionDTO[];
   decisions?: FeatureDecisionDTO[];
   relationships?: FeatureRelationshipDTO[];
+  readiness: FeatureReadinessDTO;
   contextBundle?: FeatureContextBundleDTO;
+  proof?: FeatureProofAggregateDTO;
+  planRevisionCandidates?: PlanRevisionCandidateDTO[];
 }
 
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -139,6 +158,10 @@ export interface AgentSessionSummaryDTO {
   autoCompactionEnabled?: boolean;
 }
 
+export type AutonomyMode = "observe" | "assist" | "autodrive";
+export type VerificationState = "unknown" | "none" | "failed" | "stale" | "fresh";
+export type AgentAction = "prompt" | "answer" | "interrupt" | "verify" | "land" | "set-mode";
+
 export interface AgentDTO {
   id: string;
   name: string;
@@ -163,6 +186,12 @@ export interface AgentDTO {
   error?: string;
   issue?: IssueRef;
   featureId?: string;
+  autonomyMode: AutonomyMode;
+  effectiveMode: AutonomyMode;
+  verificationState: VerificationState;
+  proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+  blockedReason?: string;
+  availableActions: AgentAction[];
   landReady?: boolean;
 }
 
@@ -276,6 +305,22 @@ export interface CapabilitySnapshotDTO {
   sources: CapabilitySourceDTO[];
   packs: CapabilityPackDTO[];
   installs: CapabilityInstallDTO[];
+}
+
+/** One operator-/loop-initiated fleet mutation from the append-only audit log (GET /api/audit). */
+export interface AuditEntry {
+  /** strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */
+  id: number;
+  /** epoch millis the action resolved. */
+  at: number;
+  /** who did it — "local" (the auto-loops), "web:admin", etc. */
+  actor: string;
+  /** land | create | answer | remove | kill | interrupt | set-model | catastrophe | prompt | plan-answer | … */
+  action: string;
+  /** the work unit acted on (an agent id, usually slug+hash); null for fleet-wide actions. */
+  target?: string | null;
+  outcome?: "ok" | "error";
+  detail?: string;
 }
 
 export type SquadEvent =

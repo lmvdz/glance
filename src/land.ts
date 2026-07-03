@@ -11,6 +11,8 @@
  */
 
 import { detectVerify } from "./intake.ts";
+import { gateExec } from "./gate-runner.ts";
+import { proofGate } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
 export interface LandResult {
@@ -78,6 +80,8 @@ export interface LandOpts {
 	 * ⇒ skip verification.
 	 */
 	verify?: string;
+	/** Require a fresh pre-merge land proof before any non-forced branch merge. */
+	requireProof?: boolean;
 	/** Conflict-resolver override (#12). undefined ⇒ default one-shot `omp -p` agent. */
 	resolver?: ConflictResolver;
 	/** Resolution reviewer override (#12). undefined ⇒ default one-shot `omp -p` reviewer. */
@@ -122,7 +126,9 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 
 /** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output. */
 async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
-	const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe" });
+	// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
+	const plan = gateExec(cmd, cwd);
+	const proc = Bun.spawn(plan.argv, { cwd, stdout: "pipe", stderr: "pipe", env: plan.env });
 	const timer = setTimeout(() => proc.kill(), timeoutMs);
 	try {
 		const [stdout, stderr, code] = await Promise.all([
@@ -139,6 +145,94 @@ async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{
 /** Cap a string to `n` chars so a gate's failure dump doesn't bloat the land detail. */
 function truncate(s: string, n: number): string {
 	return s.length <= n ? s : `${s.slice(0, n)}…`;
+}
+
+const FAILURE_DURATION_SUFFIX = /\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/;
+
+function normalizeFailureIdentity(failure: string): string {
+	return failure.replace(FAILURE_DURATION_SUFFIX, "").trim();
+}
+
+function uniqueSortedFailures(failures: Iterable<string>): string[] {
+	return [...new Set([...failures].map(normalizeFailureIdentity).filter((f) => f.length > 0))].sort();
+}
+
+export function extractGateFailures(output: string, fallback = "gate"): string[] {
+	const parsed = uniqueSortedFailures(output.split("\n").flatMap((line) => {
+		const match = line.match(/\(fail\)\s*(.+)$/);
+		return match ? [match[1] ?? ""] : [];
+	}));
+	if (parsed.length > 0) return parsed;
+	const firstLine = output.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
+	return uniqueSortedFailures([firstLine ?? fallback]);
+}
+
+export function decideRegressionGate(baseFailures: Iterable<string>, mergedFailures: Iterable<string>): { allow: boolean; newRegressions: string[] } {
+	const base = new Set(uniqueSortedFailures(baseFailures));
+	const newRegressions = uniqueSortedFailures(mergedFailures).filter((failure) => !base.has(failure));
+	return { allow: newRegressions.length === 0, newRegressions };
+}
+
+/** On by default when OMP_SQUAD_REGRESSION_GATE=1. */
+function regressionGateEnabled(): boolean {
+	return process.env.OMP_SQUAD_REGRESSION_GATE === "1";
+}
+
+/**
+ * Post-merge full-suite regression gate (OMP_SQUAD_REGRESSION_GATE=1).
+ *
+ * Called after the acceptance gate passes, with main already at the merged state. Runs the full
+ * suite via detectVerify() — deliberately separate from opts.verify, which can be narrower.
+ * Returns null to allow the land, or a blocking LandResult to reject it. Leaves main at the
+ * correct state: merged HEAD (allow) or head0 (block). Red-baseline handling: if the full suite
+ * also fails on base, decideRegressionGate() compares the extracted failure sets — only strictly
+ * new failures block; pre-existing red baseline failures allow a re-merge.
+ */
+async function applyRegressionGate(p: {
+	repo: string;
+	head0: string;
+	committed: boolean;
+	message: string;
+	branch: string;
+	reMerge: () => Promise<GitRun>;
+}): Promise<LandResult | null> {
+	if (!regressionGateEnabled()) return null;
+	const fullSuite = await detectVerify(p.repo);
+	if (!fullSuite) return null;
+
+	const mergedRun = await runGate(fullSuite, p.repo);
+	if (mergedRun.code === 0) return null; // full suite clean on merged main
+
+	// Full suite failed on merged main — determine whether branch introduced new failures.
+	await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
+	const baseRun = await runGate(fullSuite, p.repo);
+	const baseFailures = baseRun.code !== 0 ? extractGateFailures(baseRun.output) : [];
+	const mergedFailures = extractGateFailures(mergedRun.output);
+	const { allow, newRegressions } = decideRegressionGate(baseFailures, mergedFailures);
+
+	if (!allow) {
+		// New failures introduced — keep main reset to head0, block the land.
+		return {
+			ok: false,
+			committed: p.committed,
+			merged: false,
+			message: p.message,
+			detail: `regression gate (${fullSuite}) blocked ${p.branch}: ${newRegressions.length} new failure(s):\n  ${newRegressions.join("\n  ")}\n${truncate(mergedRun.output, 600)}`,
+		};
+	}
+
+	// No new regressions — base already had these failures. Re-merge so main advances.
+	const rm = await p.reMerge();
+	if (rm.code !== 0) {
+		return {
+			ok: false,
+			committed: p.committed,
+			merged: false,
+			message: p.message,
+			detail: `regression gate: no new regressions in ${p.branch} but re-merge failed: ${rm.stderr || rm.stdout}`,
+		};
+	}
+	return null; // allowed — pre-existing red baseline, no new failures introduced
 }
 
 /**
@@ -163,11 +257,14 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe
 	// (agent idle/stopped). For a LIVE agent (working/starting/input) commitWip is false: we merge
 	// only its committed history and never touch its in-progress edits.
+	// `.omp/` is excluded from the sweep on both sides: it's the daemon's own evidence dir
+	// (vision screenshots, proof artifacts) — sweeping it committed screenshots into main AND,
+	// because the proof fingerprint also ignores `.omp/`, would land content the gate never saw.
 	let committed = false;
 	if (commitWip) {
-		const status = await git(["status", "--porcelain"], worktree);
+		const status = await git(["status", "--porcelain", "--", ".", ":(exclude).omp"], worktree);
 		if (status.code === 0 && status.stdout.length > 0) {
-			const add = await git(["add", "-A"], worktree);
+			const add = await git(["add", "-A", "--", ".", ":(exclude).omp"], worktree);
 			if (add.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git add failed: ${add.stderr}` };
 			const commit = await git(["commit", "-m", message], worktree);
 			if (commit.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git commit failed: ${commit.stderr || commit.stdout}` };
@@ -184,6 +281,11 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			message,
 			detail: committed ? "committed in place (no branch to merge)" : "no changes to commit",
 		};
+	}
+
+	if (opts.requireProof) {
+		const reason = await proofGate(repo, worktree, branch, opts.verify);
+		if (reason) return { ok: false, committed, merged: false, message, detail: reason };
 	}
 
 	// Nothing committed and the branch has no commits ahead → nothing to land.
@@ -210,9 +312,19 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 	// Verify the merged main; if the gate fails, reset main to head0 so it stays green. The
 	// worktree branch keeps its commit (only main is reset), so it can be re-landed after a fix.
 	const verifyMerged = async (detail: string, reMerge: () => Promise<GitRun>): Promise<LandResult> => {
-		if (!gate) return { ok: true, committed, merged: true, message, detail };
+		if (!gate) {
+			// No acceptance gate — still run the full-suite regression gate if armed.
+			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
+			if (rg) return rg;
+			return { ok: true, committed, merged: true, message, detail };
+		}
 		const v = await runGate(gate, repo);
-		if (v.code === 0) return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
+		if (v.code === 0) {
+			// Acceptance gate green — additionally run the full-suite regression gate if armed.
+			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
+			if (rg) return rg;
+			return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
+		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
 		await git(["reset", "--hard", head0], repo).catch(() => {});
 		const base = await runGate(gate, repo); // main == head0 now
@@ -336,6 +448,10 @@ async function attemptAutoResolve(a: {
 		const v = await runGate(gate, repo);
 		if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${truncate(v.output, 800)}`);
 	}
+
+	// (c2) Full-suite regression gate — auto-resolved lands must not bypass it.
+	const rgr = await applyRegressionGate({ repo, head0, committed, message, branch, reMerge: () => git(["merge", "--ff-only", branch], repo) });
+	if (rgr) return rgr;
 
 	// (d) Independent second opinion before keeping an LLM-merged result.
 	const approved = await reviewer({ repo, worktree, branch }).catch(() => false);

@@ -22,5 +22,7 @@ export default defineConfig({
     watch: process.env.DISABLE_HMR === "true" ? null : {},
   },
   preview: { proxy },
-  build: { outDir: "dist" },
+  // The app ships as one ~1.3MB bundle; the 500kB default warning is just noise
+  // for a dev-tool SPA (and kept nerd-sniping fleet agents into off-task chunking).
+  build: { outDir: "dist", chunkSizeWarningLimit: 1500 },
 });

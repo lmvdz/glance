@@ -1,12 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Plus, Mic, Paperclip, ArrowUp, X, ChevronRight, Copy, Check, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare, Clock3, TerminalSquare, FileText } from 'lucide-react';
+import { Sparkles, Plus, Mic, Paperclip, ArrowUp, X, ChevronRight, Copy, Check, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare, Clock3, TerminalSquare, FileText, Send } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import remarkBreaks from 'remark-breaks';
+import { CodeHighlight } from './CodeHighlight';
 import { useTaskContext } from '../context/TaskContext';
-import { apiJson, jsonInit } from '../lib/api';
-import type { AgentDTO, TodoPhaseDTO, TodoStatus, TranscriptEntry } from '../lib/dto';
+import { apiFetch, apiJson, jsonInit } from '../lib/api';
+import { answerCommand, canLand, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../lib/agent-control';
+import { activeWork, activeWorkDigest } from '../lib/insights';
+import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../lib/fleetActivity';
+import type { AgentDTO, PendingRequest, TodoPhaseDTO, TodoStatus, TranscriptEntry } from '../lib/dto';
 import type { Task } from '../types';
 
 export interface Message {
@@ -131,13 +134,12 @@ const CodeBlock = ({ inline, className, children, ...props }: any) => {
         </button>
       </div>
       <div className="p-4 overflow-x-auto text-sm text-gray-700 dark:text-gray-300">
-        <SyntaxHighlighter
+        <CodeHighlight
           language={match[1]}
-          style={vscDarkPlus}
           customStyle={{ margin: 0, padding: 0, background: 'transparent' }}
         >
           {String(children).replace(/\n$/, '')}
-        </SyntaxHighlighter>
+        </CodeHighlight>
       </div>
     </div>
   );
@@ -270,6 +272,63 @@ export const RunStatusHeader = ({
   </button>
 );
 
+const GateWidget = ({
+  request,
+  onAnswer,
+}: {
+  request: PendingRequest;
+  onAnswer: (value: string) => void;
+}) => {
+  const [text, setText] = useState('');
+  if (request.options && request.options.length > 0) {
+    return (
+      <div className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
+        <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
+        <div className="flex flex-wrap gap-2">
+          {request.options.map((opt) => (
+            <button
+              key={opt}
+              onClick={() => onAnswer(opt)}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
+      <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
+      {request.message && <div className="mb-2 text-[11px] text-gray-600 dark:text-gray-400">{request.message}</div>}
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            if (text.trim()) { onAnswer(text.trim()); setText(''); }
+          }
+        }}
+        rows={2}
+        placeholder={request.placeholder ?? 'Type your reply…'}
+        className="w-full resize-y rounded-md border border-amber-200 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-700 dark:bg-gray-950 dark:text-gray-100"
+      />
+      <div className="mt-2 flex justify-end">
+        <button
+          onClick={() => { if (text.trim()) { onAnswer(text.trim()); setText(''); } }}
+          disabled={!text.trim()}
+          className="flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Send className="h-3 w-3" aria-hidden />
+          Send
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const DiffReviewPanel = ({ diffs }: { diffs: AgentFileDiff[] }) => {
   if (!diffs.length) return null;
   return (
@@ -303,6 +362,7 @@ export const TranscriptTimeline = ({
   diffs = EMPTY_DIFFS,
   expanded,
   onToggle,
+  onAnswer,
 }: {
   entries: TranscriptEntry[];
   messages: Message[];
@@ -311,6 +371,7 @@ export const TranscriptTimeline = ({
   diffs?: AgentFileDiff[];
   expanded: boolean;
   onToggle: () => void;
+  onAnswer?: (requestId: string, value: string) => void;
 }) => {
   const { promptEntries, workEntries, finalEntry } = splitTranscriptEntries(entries);
   const running = agentIsRunning(agent) || transcriptIsRunning(entries);
@@ -318,14 +379,37 @@ export const TranscriptTimeline = ({
   const latestWork = [...workEntries].reverse().find((entry) => entry.kind !== 'assistant' || entry.status === 'running') ?? workEntries.at(-1);
   const hiddenWorkEntries = !running && finalEntry ? workEntries.filter((entry) => entry !== finalEntry) : workEntries;
 
+  const renderEntry = (entry: TranscriptEntry) => {
+    const gateRequest =
+      entry.kind === 'system' && entry.pending?.action === 'created' && agent && onAnswer
+        ? agent.pending.find((p) => p.id === entry.pending!.requestId)
+        : undefined;
+    return (
+      <>
+        <TranscriptEntryView entry={entry} />
+        {gateRequest && onAnswer && (
+          <GateWidget request={gateRequest} onAnswer={(value) => onAnswer(gateRequest.id, value)} />
+        )}
+      </>
+    );
+  };
+
   return (
     <>
-      {promptEntries.map((entry) => <TranscriptEntryView key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`} entry={entry} />)}
+      {promptEntries.map((entry) => (
+        <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
+          {renderEntry(entry)}
+        </React.Fragment>
+      ))}
       <RunStatusHeader running={running} elapsedMs={elapsedMs} action={entryAction(latestWork)} expanded={expanded} onToggle={onToggle} />
-      {expanded && hiddenWorkEntries.map((entry) => <TranscriptEntryView key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`} entry={entry} />)}
+      {expanded && hiddenWorkEntries.map((entry) => (
+        <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
+          {renderEntry(entry)}
+        </React.Fragment>
+      ))}
       {!running && finalEntry && (
         <div className="space-y-3">
-          <TranscriptEntryView entry={finalEntry} />
+          {renderEntry(finalEntry)}
           <DiffReviewPanel diffs={diffs} />
         </div>
       )}
@@ -351,42 +435,73 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
   }
 
   if (entry.kind === 'tool') {
+    // Workflow stage markers are progress dividers, not real tool calls.
+    if (entry.format === 'stage') {
+      const label = entry.text.replace(/^[▸►]\s*stage:\s*/i, '');
+      return (
+        <div className="flex items-center gap-2 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+          <span className="font-medium uppercase tracking-wider">{label}</span>
+          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+        </div>
+      );
+    }
     const view = toolView(entry);
     const running = entry.status === 'running';
+    const toolLabel = (entry.tool?.name ?? 'Tool').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    const hasBody = view.command || view.output || view.stderr || view.raw.length > 0;
     return (
       <details open={running} className="group rounded-md">
-        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-gray-500 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-900">
-          <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 transition-transform group-open:rotate-90" aria-hidden />
-          <TerminalSquare className="h-3.5 w-3.5 flex-shrink-0" aria-hidden />
-          <span className="uppercase tracking-wide">Tool</span>
-          <span className={`min-w-0 flex-1 truncate font-medium text-gray-800 dark:text-gray-200 ${running ? 'shimmer' : ''}`}>{view.title}</span>
-          <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(entry.status)}`} aria-label={entry.status ?? 'ok'} />
+        <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900/60">
+          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotClass(entry.status)} ${running ? 'animate-pulse' : ''}`} aria-label={entry.status ?? 'ok'} />
+          <span className="font-semibold text-gray-900 dark:text-gray-100">{toolLabel}</span>
+          <span className={`min-w-0 flex-1 truncate text-gray-500 dark:text-gray-400 ${running ? 'shimmer' : ''}`}>{view.title !== toolLabel ? view.title : ''}</span>
+          {hasBody && <ChevronRight className="ml-auto h-3 w-3 flex-shrink-0 text-gray-300 transition-transform group-open:rotate-90 dark:text-gray-600" aria-hidden />}
         </summary>
-        <div className="ml-6 mt-1 space-y-2 border-l border-gray-200 pl-3 dark:border-gray-800">
-          {view.command && <code className="block rounded-md bg-gray-100 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap">{view.command}</code>}
-          {view.output ? <pre className="max-h-56 overflow-auto rounded-md bg-gray-100 p-2.5 text-[11px] leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap scrollbar-custom">{view.output}</pre> : null}
-          {view.stderr && <pre className="max-h-40 overflow-auto rounded-md bg-red-50 p-2.5 text-[11px] leading-relaxed text-red-800 dark:bg-red-950/30 dark:text-red-200 whitespace-pre-wrap scrollbar-custom">{view.stderr}</pre>}
-          <div className="flex items-center gap-2 text-[11px] text-gray-500 dark:text-gray-400">
-            {view.exitCode !== undefined && <span>Exit {view.exitCode}</span>}
-            {entry.tool?.durationMs !== undefined && <span>{fmtDuration(entry.tool.durationMs)}</span>}
-          </div>
-          {view.raw.length > 0 && (
-            <details className="group/raw">
-              <summary className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md px-2 text-[11px] text-gray-500 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-900">
-                <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
-                Raw payload
-              </summary>
-              <div className="mt-1 space-y-2">
-              {view.raw.map(([name, value]) => (
-                <div key={name as string}>
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">{name as string}</div>
-                  <pre className="max-h-44 overflow-auto rounded-md bg-gray-950 p-2.5 text-[11px] leading-relaxed text-gray-100 whitespace-pre-wrap scrollbar-custom">{prettyJson(value)}</pre>
-                </div>
-              ))}
+        {hasBody && (
+          <div className="mt-1 ml-4 space-y-1.5 text-[11px]">
+            {view.command && (
+              <div className="flex gap-2">
+                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">IN</span>
+                <code className="flex-1 rounded bg-gray-100 px-2 py-1.5 font-mono leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap">{view.command}</code>
               </div>
-            </details>
-          )}
-        </div>
+            )}
+            {view.output && (
+              <div className="flex gap-2">
+                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">OUT</span>
+                <pre className="max-h-48 flex-1 overflow-auto rounded bg-gray-100 px-2 py-1.5 leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap scrollbar-custom">{view.output}</pre>
+              </div>
+            )}
+            {view.stderr && (
+              <div className="flex gap-2">
+                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-red-400">ERR</span>
+                <pre className="max-h-32 flex-1 overflow-auto rounded bg-red-50 px-2 py-1.5 leading-relaxed text-red-800 dark:bg-red-950/30 dark:text-red-200 whitespace-pre-wrap scrollbar-custom">{view.stderr}</pre>
+              </div>
+            )}
+            {(view.exitCode !== undefined || entry.tool?.durationMs !== undefined) && (
+              <div className="flex items-center gap-2 pl-8 text-[10px] text-gray-400 dark:text-gray-500">
+                {view.exitCode !== undefined && <span>exit {view.exitCode}</span>}
+                {entry.tool?.durationMs !== undefined && <span>{fmtDuration(entry.tool.durationMs)}</span>}
+              </div>
+            )}
+            {view.raw.length > 0 && (
+              <details className="group/raw ml-8">
+                <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[10px] text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-500 dark:hover:bg-gray-900">
+                  <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
+                  Raw payload
+                </summary>
+                <div className="mt-1 space-y-2">
+                  {view.raw.map(([name, value]) => (
+                    <div key={name as string}>
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">{name as string}</div>
+                      <pre className="max-h-44 overflow-auto rounded-md bg-gray-950 p-2.5 leading-relaxed text-gray-100 whitespace-pre-wrap scrollbar-custom">{prettyJson(value)}</pre>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
       </details>
     );
   }
@@ -410,7 +525,7 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
 
   if (entry.kind === 'system') {
     return (
-      <div className="rounded-md px-1.5 py-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400 whitespace-pre-wrap">
+      <div className="rounded-md bg-gray-100 px-2 py-1.5 text-[11px] font-mono leading-relaxed text-gray-600 dark:bg-gray-900 dark:text-gray-400 whitespace-pre-wrap">
         {entry.text}
       </div>
     );
@@ -422,8 +537,8 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
         {entry.kind === 'assistant' ? 'glance' : entry.kind} <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         {entry.status === 'running' && <span className="shimmer text-[10px]">streaming</span>}
       </div>
-      <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
-        <Markdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>{entry.text}</Markdown>
+      <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300 prose-headings:text-sm prose-headings:font-semibold prose-headings:mb-1 prose-headings:mt-2">
+        <Markdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ code: CodeBlock }}>{entry.text}</Markdown>
       </div>
     </div>
   );
@@ -493,12 +608,93 @@ const gitSummary = (agent?: AgentDTO, changedFiles?: number | null) => {
   return agent.branch ? `${agent.branch} · ${changes}` : changes;
 };
 
-export const AgentMetaBar = ({ agent, changedFiles }: { agent?: AgentDTO; changedFiles?: number | null }) => {
+export const AgentMetaBar = ({ agent, changedFiles, children }: { agent?: AgentDTO; changedFiles?: number | null; children?: React.ReactNode }) => {
   if (!agent) return null;
   return (
-    <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-1.5 text-[11px] text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400" aria-label="Git status">
+    <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-1.5 text-[11px] text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400" aria-label="Agent mode and git status">
+      <span className="rounded-full border border-gray-200 px-1.5 py-0.5 uppercase text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.blockedReason ? `Blocked: ${agent.blockedReason}` : `Requested ${agent.autonomyMode ?? 'assist'}; effective ${agent.effectiveMode ?? 'assist'}`}>{agent.effectiveMode ?? 'assist'}</span>
+      <span className="rounded-full border border-gray-200 px-1.5 py-0.5 text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.proof?.fingerprint ?? 'No proof fingerprint'}>proof: {agent.verificationState ?? 'unknown'}</span>
       <span className="truncate font-mono" title={`${agent.repo}${agent.branch ? ` · ${agent.branch}` : ''}`}>{gitSummary(agent, changedFiles)}</span>
+      {children ? <div className="ml-auto flex flex-shrink-0 items-center gap-1">{children}</div> : null}
     </div>
+  );
+};
+
+/**
+ * Verify + Land for the focused agent. Restores the land path the webapp shell replacement
+ * dropped — and unlike the legacy feature-card buttons it works for ANY branch agent,
+ * ad-hoc `omp-squad add` ones included. The daemon's proofGate stays authoritative: a land
+ * without a fresh proof answers 409 with the reason; we surface it and arm a one-shot
+ * Force land for the operator who insists.
+ */
+export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; showToast: (message: string, type?: ToastTone) => void }) => {
+  const [busy, setBusy] = React.useState<null | 'verify' | 'land'>(null);
+  const [forceArmed, setForceArmed] = React.useState(false);
+  const [lastBlock, setLastBlock] = React.useState('');
+  const agentKey = agent?.id;
+  React.useEffect(() => { setForceArmed(false); setLastBlock(''); }, [agentKey]);
+  if (!agent || !canLand(agent)) return null;
+  const id = agent.id;
+
+  const runVerify = async () => {
+    setBusy('verify');
+    try {
+      const res = await apiFetch(`/api/agents/${encodeURIComponent(id)}/verify`, jsonInit('POST', {}));
+      if (!res.ok) { showToast(`Verify failed: ${await res.text().catch(() => res.status)}`, 'error'); return; }
+      const toast = verifyToast(await res.json() as ProofResultDTO);
+      showToast(toast.text, toast.tone);
+    } catch (error) {
+      showToast(`Verify failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runLand = async (force: boolean) => {
+    setBusy('land');
+    try {
+      // A force land must carry an operator reason (the manager refuses without one) — the
+      // prior block detail IS the reason the operator saw and chose to override.
+      const payload = force ? { force: true, reason: `web operator override — prior block: ${lastBlock || 'unknown'}` } : {};
+      const res = await apiFetch(`/api/agents/${encodeURIComponent(id)}/land`, jsonInit('POST', payload));
+      const body = await res.json().catch(() => null) as LandResultDTO | null;
+      if (!body) { showToast(`Land failed: HTTP ${res.status}`, 'error'); return; }
+      const toast = landToast(body);
+      showToast(toast.text, toast.tone);
+      // A blocked land (usually the proof gate) arms a one-shot, visibly-distinct Force.
+      setForceArmed(!body.ok && !body.staged);
+      setLastBlock(!body.ok && !body.staged ? (body.detail ?? body.message ?? 'blocked') : '');
+    } catch (error) {
+      showToast(`Land failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const pill = 'flex min-h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50';
+  return (
+    <>
+      <button
+        type="button"
+        disabled={busy != null}
+        onClick={() => void runVerify()}
+        title="Run the repo's acceptance command in this worktree and record a land proof"
+        className={`${pill} border-gray-200 text-gray-600 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800`}
+      >
+        {busy === 'verify' ? 'Verifying…' : 'Verify'}
+      </button>
+      <button
+        type="button"
+        disabled={busy != null}
+        onClick={() => void runLand(forceArmed)}
+        title={forceArmed ? 'Land was blocked — force skips the proof gate' : `Merge ${agent.branch} into main (proof-gated)`}
+        className={`${pill} ${forceArmed
+          ? 'border-red-300 bg-red-50 text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-900/40'
+          : 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40'}`}
+      >
+        {busy === 'land' ? 'Landing…' : forceArmed ? 'Force land ⚠' : agent.landReady ? 'Land ✓' : 'Land'}
+      </button>
+    </>
   );
 };
 
@@ -567,6 +763,7 @@ export function deriveSuggestionChips(input: { messages: Message[]; transcriptEn
 
   return uniqueSuggestions([
     ...out,
+    { label: "What's being worked on?", prompt: "What's being worked on right now across the fleet, and what needs me?" },
     { label: "Summarize progress", prompt: "Summarize progress" },
     { label: "Prioritize my work", prompt: "Prioritize my work" },
     { label: "List blockers", prompt: "List blocked tasks" },
@@ -588,7 +785,7 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
 
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
-  const { agents, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole } = useTaskContext();
+  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, showToast } = useTaskContext();
   const [initialChatState] = useState(readInitialChatState);
   const [sessions, setSessions] = useState<Session[]>(initialChatState.sessions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialChatState.activeSessionId);
@@ -634,6 +831,24 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   useEffect(() => {
     if (agentId) subscribeConsole(agentId);
   }, [agentId, subscribeConsole]);
+
+  // When an external "Open console" targets a specific agent, find or create a session for it.
+  useEffect(() => {
+    if (!openedConsoleAgentId) return;
+    const agent = agents.find((a) => a.id === openedConsoleAgentId);
+    setSessions((prev) => {
+      if (prev.some((s) => s.id === openedConsoleAgentId)) return prev;
+      const newSession: Session = {
+        id: openedConsoleAgentId,
+        title: agent?.name ?? 'Agent console',
+        messages: [],
+        updatedAt: Date.now(),
+        metadata: { agentId: openedConsoleAgentId, status: 'active', stage: 'Console' },
+      };
+      return [newSession, ...prev];
+    });
+    setActiveSessionId(openedConsoleAgentId);
+  }, [openedConsoleAgentId, agents]);
 
   useEffect(() => {
     void apiJson<{ models?: ModelOption[] }>('/api/models')
@@ -776,7 +991,14 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
           metadata: { ...session.metadata, agentId: nextAgentId, status: 'active', stage: 'Chat' },
         } : session));
       }
-      const message = selectedTask ? `${textToSend}\n\nCurrent feature context:\n${selectedTask.id} — ${selectedTask.title}\n${selectedTask.description}` : textToSend;
+      // Always hand the assistant the same live join the Active Work pane renders, so it can
+      // answer "what's being worked on?" (present) AND "what happened while I was away?" (recent
+      // past, from the audit log) from one source of truth — plus the selected feature's detail
+      // when one is open. Reference context, not an instruction to act.
+      const fleetSnapshot = activeWorkDigest(activeWork(agents, features));
+      const activitySnapshot = fleetActivityDigest(fleetActivityRollup(audit), fleetActivityLines(audit, agents));
+      const taskContext = selectedTask ? `\n\nCurrent feature context:\n${selectedTask.id} — ${selectedTask.title}\n${selectedTask.description}` : '';
+      const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}\n\n${activitySnapshot}${taskContext}`;
       sendConsoleCommand({ type: 'prompt', id: nextAgentId, message, clientTurnId });
     } catch (error: any) {
       updateSessionMessages(activeSessionId, [...newMessages, { role: 'model', text: `Error: ${error.message || 'Could not reach glance chat'}`, timestamp: Date.now() }]);
@@ -1005,7 +1227,9 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
         </div>
       </div>
 
-      <AgentMetaBar agent={selectedAgent} changedFiles={changedFiles} />
+      <AgentMetaBar agent={selectedAgent} changedFiles={changedFiles}>
+        <AgentLandControls agent={selectedAgent} showToast={showToast} />
+      </AgentMetaBar>
 
       <TodoPanel phases={todoPhases} collapsed={todoCollapsed} onToggle={() => setTodoCollapsed((value) => !value)} />
 
@@ -1020,6 +1244,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             diffs={agentDiffs ?? EMPTY_DIFFS}
             expanded={workExpanded}
             onToggle={() => setWorkExpanded((value) => !value)}
+            onAnswer={selectedAgent ? (requestId, value) => {
+              sendConsoleCommand(answerCommand(selectedAgent.id, requestId, value));
+              showToast(`Answer sent to ${selectedAgent.name}`, 'success');
+            } : undefined}
           />
         ) : visibleMessages.map((msg, idx) => (
           <div key={idx} className={`flex flex-col w-full ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
@@ -1038,7 +1266,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
                   glance <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </div>
                 <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
-                  <Markdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>{msg.text}</Markdown>
+                  <Markdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ code: CodeBlock }}>{msg.text}</Markdown>
                 </div>
                 <div className="flex items-center gap-2 mt-3 text-gray-400 dark:text-gray-500">
                   <button
