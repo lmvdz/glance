@@ -170,7 +170,11 @@ interface RawDetailProps {
 
 const RawDetail: React.FC<RawDetailProps> = ({ gov }) => {
   const [open, setOpen] = useState(false);
-  const s = gov.health.sample;
+  // A degenerate /api/governance body (empty org, version skew) can omit `health`/`sample`;
+  // it parses fine and reaches here, so guard rather than dereference straight through.
+  const h = gov.health;
+  if (!h?.sample) return null;
+  const s = h.sample;
   const rows: [string, string][] = [
     ['rssMb', `${s.rssMb.toFixed(1)} MB`],
     ['load1', s.load1.toFixed(2)],
@@ -180,7 +184,7 @@ const RawDetail: React.FC<RawDetailProps> = ({ gov }) => {
     ['hosts', String(s.hosts)],
     ['wipCap', String(gov.wipCap)],
     ['maxAgents', String(gov.maxAgents)],
-    ['sample age', relativeAge(gov.health.at)],
+    ['sample age', relativeAge(h.at)],
   ];
   if (gov.federation) {
     rows.push(['federation.coordinator', String(gov.federation.coordinator)]);

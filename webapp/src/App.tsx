@@ -25,6 +25,7 @@ import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
 import { ActiveWorkPane } from './components/ActiveWorkPane';
 import { OrgSettings } from './components/OrgSettings';
+import { FirstRunSetup } from './components/FirstRunSetup';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
 import { PendingApproval } from './components/PendingApproval';
@@ -37,7 +38,13 @@ const readStoredBoolean = (key: string, fallback: boolean) => {
 };
 
 const MainContent = () => {
-  const { view, selectedTaskId } = useTaskContext();
+  const { view, selectedTaskId, currentProject } = useTaskContext();
+  const { status } = useAuth();
+
+  // db-mode dead-end: a freshly-provisioned org has no project, so every view is empty and there's
+  // no way to add the first repo. Route to onboarding until a project exists. (File mode always has
+  // the cwd project, so status==='file' never trips this; 'org' is the settings escape hatch.)
+  if (status === 'authed' && !currentProject && view !== 'org') return <FirstRunSetup />;
 
   if (view === 'attention') return <AttentionPanel />;
   if (view === 'active') return <ActiveWorkPane />;
