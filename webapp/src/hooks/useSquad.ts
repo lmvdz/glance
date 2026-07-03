@@ -25,6 +25,23 @@ export function normalizeCapabilities(value: Partial<CapabilitySnapshotDTO> | nu
   };
 }
 
+/**
+ * Coerce the `/api/capability-catalog` body into the array the UI expects.
+ *
+ * The endpoint returns `{ catalog: [...] }`, and the workbench nav reads
+ * `publicCatalog.length` directly. A version-skewed daemon that returns a bare
+ * array, an error body, or any shape without a `catalog` array would otherwise
+ * leave `publicCatalog` as `undefined` (a missing field is not a thrown error,
+ * so the `.catch` fallback never fires) and crash the app the moment the
+ * Capability-registry card mounts. Normalize at the boundary so the state is
+ * always an array, whatever the server sent.
+ */
+export function normalizeCatalog(value: unknown): PublicCapabilityCatalogDTO[] {
+  if (Array.isArray(value)) return value as PublicCapabilityCatalogDTO[];
+  const catalog = (value as { catalog?: unknown } | null | undefined)?.catalog;
+  return Array.isArray(catalog) ? (catalog as PublicCapabilityCatalogDTO[]) : [];
+}
+
 export interface SquadState {
   agents: AgentDTO[];
   features: FeatureDTO[];
@@ -72,12 +89,12 @@ export function useSquad(): SquadState {
       apiJson<FeatureDTO[]>("/api/features").catch(() => []),
       apiJson<AgentDTO[]>("/api/agents").catch(() => []),
       apiJson<CapabilitySnapshotDTO>("/api/capabilities").catch(() => EMPTY_CAPABILITIES),
-      apiJson<{ catalog: PublicCapabilityCatalogDTO[] }>("/api/capability-catalog").then((res) => res.catalog).catch(() => []),
+      apiJson<{ catalog: PublicCapabilityCatalogDTO[] }>("/api/capability-catalog").then(normalizeCatalog).catch(() => []),
     ]);
     setProjects(nextProjects);
     setFeatures(nextFeatures);
     setCapabilities(normalizeCapabilities(nextCapabilities));
-    setPublicCatalog(nextCatalog);
+    setPublicCatalog(nextCatalog ?? []);
     if (nextAgents.length) setAgents(new Map(nextAgents.map((agent) => [agent.id, agent])));
   }, []);
 
