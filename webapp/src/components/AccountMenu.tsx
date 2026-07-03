@@ -4,14 +4,16 @@
  */
 
 import React from 'react';
-import { LogOut } from 'lucide-react';
+import { LogOut, Building2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useTaskContext } from '../context/TaskContext';
 import { JoinRequests } from './JoinRequests';
 
 // Compact signed-in identity + sign-out, shown in the workbench header. Renders nothing in file mode
 // (no session concept there), so it's inert unless the daemon runs in db mode with a logged-in user.
 export const AccountMenu = () => {
   const { me, signOut } = useAuth();
+  const { setView } = useTaskContext();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef<HTMLDivElement | null>(null);
 
@@ -60,6 +62,16 @@ export const AccountMenu = () => {
           </div>
           {role === 'admin' && <JoinRequests />}
           <div className="my-1 h-px bg-gray-100 dark:bg-gray-800" />
+          <button
+            onClick={() => {
+              setOpen(false);
+              setView('org');
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800"
+          >
+            <Building2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Organization settings
+          </button>
           <button
             onClick={() => {
               setOpen(false);

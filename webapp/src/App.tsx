@@ -13,6 +13,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { NotificationManager } from './components/NotificationManager';
 import { AssistantChat } from './components/AssistantChat';
 import { CapabilityPanel } from './components/CapabilityPanel';
+import { OrgSettings } from './components/OrgSettings';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
 import { PendingApproval } from './components/PendingApproval';
@@ -30,7 +31,10 @@ const MainContent = () => {
   if (view === 'capabilities') {
     return <CapabilityPanel />;
   }
-  
+  if (view === 'org') {
+    return <OrgSettings />;
+  }
+
   return (
     <>
       <TaskDetail />

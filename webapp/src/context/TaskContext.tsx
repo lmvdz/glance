@@ -11,7 +11,7 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'tasks' | 'capabilities';
+export type AppView = 'tasks' | 'capabilities' | 'org';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 interface ApiComment {
