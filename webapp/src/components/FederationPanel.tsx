@@ -172,7 +172,7 @@ const PeerAgentSteer: React.FC<{
     return (
       <button
         onClick={() => setOpen(true)}
-        className="ml-auto flex-shrink-0 text-[11px] text-blue-600 dark:text-blue-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="ml-auto flex-shrink-0 text-[11px] text-amber-600 dark:text-amber-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         aria-label={`Steer ${agent.name}`}
       >
         steer
@@ -190,13 +190,13 @@ const PeerAgentSteer: React.FC<{
           if (e.key === 'Escape') setOpen(false);
         }}
         placeholder={`Instruction for ${agent.name}…`}
-        className="min-w-0 flex-1 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200"
+        className="min-w-0 flex-1 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200"
         aria-label={`Instruction for ${agent.name}`}
       />
       <button
         onClick={() => void send()}
         disabled={sending || !text.trim()}
-        className="flex-shrink-0 rounded p-0.5 text-blue-600 disabled:opacity-40 dark:text-blue-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="flex-shrink-0 rounded p-0.5 text-amber-600 disabled:opacity-40 dark:text-amber-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         title="Send"
         aria-label="Send steering instruction"
       >
@@ -292,7 +292,7 @@ export const FederationPanel: React.FC = () => {
   const refresh = (
     <button
       onClick={() => void load()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
       title="Refresh"
       aria-label="Refresh"
     >
@@ -442,7 +442,7 @@ export const FederationPanel: React.FC = () => {
                   </span>
                   <button
                     onClick={() => { const id = c.agents[0]?.id; if (id) openConsole(id); }}
-                    className="ml-auto text-[11px] text-blue-600 dark:text-blue-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    className="ml-auto text-[11px] text-amber-600 dark:text-amber-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                     aria-label={`View agent for ${c.file}`}
                   >
                     view
@@ -489,7 +489,7 @@ export const FederationPanel: React.FC = () => {
                       )}
                       <button
                         onClick={() => openConsole(firstAgentId)}
-                        className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:text-amber-500 dark:hover:text-amber-400 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                         title="View agent"
                         aria-label={`View agent for ${file}`}
                       >

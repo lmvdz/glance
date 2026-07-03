@@ -159,7 +159,7 @@ const COLUMNS: TaskColumn[] = [
       return (
         <div className="flex items-center gap-2" title={`${done}/${total} acceptance criteria`}>
           <span className="h-1.5 w-14 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-            <span className={`block h-1.5 rounded-full ${pct === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
+            <span className={`block h-1.5 rounded-full ${pct === 100 ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${pct}%` }} />
           </span>
           <span className="font-mono text-[10px] text-gray-400">{pct}%</span>
         </div>

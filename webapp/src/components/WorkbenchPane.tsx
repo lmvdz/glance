@@ -129,9 +129,9 @@ export const TaskRailRow: React.FC<{
       onDragOver={onDragOver}
       onDragEnd={onDragEnd}
       onDrop={onDrop}
-      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-blue-500 bg-blue-50 dark:bg-blue-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'} ${dragging ? 'opacity-50' : 'opacity-100'}`}
+      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-amber-500 bg-amber-50 dark:bg-amber-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'} ${dragging ? 'opacity-50' : 'opacity-100'}`}
     >
-      <button onClick={onSelect} className="flex min-w-0 flex-1 items-center py-1 pl-2 text-left focus-visible:ring-2 focus-visible:ring-blue-500">
+      <button onClick={onSelect} className="flex min-w-0 flex-1 items-center py-1 pl-2 text-left focus-visible:ring-2 focus-visible:ring-amber-500">
         <span className={`flex w-3 justify-center ${isDraggable ? 'cursor-grab text-gray-300 opacity-0 group-hover:opacity-100 group-active:cursor-grabbing' : 'opacity-0'}`}>
           <GripVertical className="h-3 w-3" aria-hidden="true" />
         </span>
@@ -143,7 +143,7 @@ export const TaskRailRow: React.FC<{
           ) : isWorking ? (
             <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
           ) : (
-            <Circle className={`h-3.5 w-3.5 ${isActive ? 'text-blue-400' : 'text-gray-300 dark:text-gray-600'}`} aria-hidden="true" />
+            <Circle className={`h-3.5 w-3.5 ${isActive ? 'text-amber-400' : 'text-gray-300 dark:text-gray-600'}`} aria-hidden="true" />
           )}
         </span>
         <span className="min-w-0 flex-1 px-2">
@@ -152,7 +152,7 @@ export const TaskRailRow: React.FC<{
           </span>
           <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
             {ref && (
-              <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-gray-400 dark:text-gray-600' : isActive ? 'text-blue-700 dark:text-blue-400' : 'text-blue-600 dark:text-blue-500'}`} title={task.planDir ?? task.id}>
+              <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-gray-400 dark:text-gray-600' : isActive ? 'text-amber-700 dark:text-amber-400' : 'text-amber-600 dark:text-amber-500'}`} title={task.planDir ?? task.id}>
                 {ref}
               </span>
             )}
@@ -178,7 +178,7 @@ export const TaskRailRow: React.FC<{
         <span className={`ml-1 w-8 flex-shrink-0 text-right ${isActive ? 'font-medium text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'}`}>{task.duration}</span>
       </button>
       <button
-        className="mr-1 flex min-h-10 w-8 flex-shrink-0 items-center justify-center self-center rounded text-gray-400 opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-blue-500 group-hover:opacity-100 dark:hover:bg-red-900/30"
+        className="mr-1 flex min-h-10 w-8 flex-shrink-0 items-center justify-center self-center rounded text-gray-400 opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-amber-500 group-hover:opacity-100 dark:hover:bg-red-900/30"
         onClick={onDelete}
         aria-label={`Archive ${task.title}`}
         title="Archive task"
@@ -388,42 +388,42 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   if (collapsed) {
     return (
       <aside className="flex h-full w-12 flex-shrink-0 flex-col items-center border-r border-gray-200 bg-gray-50 py-1.5 dark:border-gray-800 dark:bg-[#18191b]">
-        <button onClick={onToggleCollapsed} className="mb-1 flex min-h-10 w-10 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" aria-label="Expand workbench pane" title="Expand workbench pane">
+        <button onClick={onToggleCollapsed} className="mb-1 flex min-h-10 w-10 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" aria-label="Expand workbench pane" title="Expand workbench pane">
           <Menu className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('attention')} className={`relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'attention' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Needs you${needsYouCount ? ` (${needsYouCount})` : ''}`} title="Needs you">
+        <button onClick={() => setView('attention')} className={`relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'attention' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Needs you${needsYouCount ? ` (${needsYouCount})` : ''}`} title="Needs you">
           <Bell className="h-4 w-4" aria-hidden="true" />
           {needsYouCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-red-500" aria-hidden="true" />}
         </button>
-        <button onClick={() => setView('active')} className={`mt-1 relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'active' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Active work${activeWorkCount ? ` (${activeWorkCount})` : ''}`} title="Active work">
+        <button onClick={() => setView('active')} className={`mt-1 relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'active' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Active work${activeWorkCount ? ` (${activeWorkCount})` : ''}`} title="Active work">
           <Radar className="h-4 w-4" aria-hidden="true" />
           {activeWorkCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />}
         </button>
-        <button onClick={() => setView('tasks')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'tasks' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Tasks" title="Tasks">
+        <button onClick={() => setView('tasks')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'tasks' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Tasks" title="Tasks">
           <Inbox className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('capabilities')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'capabilities' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Capabilities" title="Capabilities">
+        <button onClick={() => setView('capabilities')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'capabilities' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Capabilities" title="Capabilities">
           <Boxes className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('automation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'automation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Automation" title="Automation">
+        <button onClick={() => setView('automation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'automation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Automation" title="Automation">
           <Zap className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('fleet-health')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'fleet-health' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Fleet Health" title="Fleet Health">
+        <button onClick={() => setView('fleet-health')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'fleet-health' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Fleet Health" title="Fleet Health">
           <Activity className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('heat')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'heat' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Heat Map" title="Heat Map">
+        <button onClick={() => setView('heat')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'heat' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Heat Map" title="Heat Map">
           <Thermometer className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('activity-heatmap')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'activity-heatmap' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Activity Rhythm" title="Activity rhythm — day × hour">
+        <button onClick={() => setView('activity-heatmap')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'activity-heatmap' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Activity Rhythm" title="Activity rhythm — day × hour">
           <CalendarClock className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('omp-graph')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'omp-graph' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Graph" title="Graph — the living temporal dashboard">
+        <button onClick={() => setView('omp-graph')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'omp-graph' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Graph" title="Graph — the living temporal dashboard">
           <Waypoints className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('federation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'federation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Federation" title="Federation">
+        <button onClick={() => setView('federation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'federation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Federation" title="Federation">
           <Network className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('knowledge')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${view === 'knowledge' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Knowledge base" title="Knowledge base">
+        <button onClick={() => setView('knowledge')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'knowledge' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Knowledge base" title="Knowledge base">
           <Library className="h-4 w-4" aria-hidden="true" />
         </button>
         <div className="mt-3 flex h-full items-center">
@@ -452,7 +452,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </div>
           <div className="flex flex-shrink-0 items-center gap-1.5">
             <AccountMenu />
-            <button onClick={onToggleCollapsed} className="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Collapse workbench pane" title="Collapse workbench pane">
+            <button onClick={onToggleCollapsed} className="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Collapse workbench pane" title="Collapse workbench pane">
               <Menu className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
@@ -461,7 +461,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         {showTaskDrill ? (
           <button
             onClick={() => setDrilled(false)}
-            className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold text-gray-900 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-100 dark:hover:bg-gray-800/70"
+            className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold text-gray-900 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-100 dark:hover:bg-gray-800/70"
             title="Back to navigation"
           >
             <ChevronLeft className="h-4 w-4 flex-shrink-0 text-gray-400" aria-hidden="true" />
@@ -484,12 +484,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                       key={item.view}
                       onClick={() => { setView(item.view); setDrilled(item.view === 'tasks'); }}
                       aria-current={active ? 'page' : undefined}
-                      className={`group flex min-h-7 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${active ? 'bg-blue-50 font-medium text-blue-700 dark:bg-blue-950/50 dark:text-blue-300' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/70 dark:hover:text-gray-200'}`}
+                      className={`group flex min-h-7 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active ? 'bg-amber-50 font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/70 dark:hover:text-gray-200'}`}
                     >
                       <Icon className={`h-4 w-4 flex-shrink-0 ${active ? '' : 'text-gray-400 group-hover:text-gray-500 dark:group-hover:text-gray-300'}`} aria-hidden="true" />
                       <span className="flex-1 truncate text-left">{item.label}</span>
                       {badge > 0 && (
-                        <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${active ? 'bg-blue-600 text-white' : item.view === 'attention' ? 'bg-red-500 text-white' : item.view === 'active' ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
+                        <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${active ? 'bg-amber-500 text-white' : item.view === 'attention' ? 'bg-red-500 text-white' : item.view === 'active' ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
                           {badge}
                         </span>
                       )}
@@ -509,7 +509,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <input
               id="workbench-search"
               type="search"
-              className="w-full rounded-md border border-gray-200 bg-white py-1.5 pl-8 pr-20 text-xs text-gray-900 transition-colors duration-150 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+              className="w-full rounded-md border border-gray-200 bg-white py-1.5 pl-8 pr-20 text-xs text-gray-900 transition-colors duration-150 placeholder:text-gray-400 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
               placeholder={view === 'tasks' ? 'Search tasks by title or ID' : 'Search or jump'}
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
@@ -526,7 +526,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         <div className="border-b border-gray-200 p-3 dark:border-gray-800">
           <div className="grid grid-cols-4 gap-1">
             {taskFilters.map((filter) => (
-              <button key={filter.key} onClick={() => setTaskFilter(filter.key)} className={`min-h-9 rounded-md px-2 text-left text-[11px] transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${taskFilter === filter.key ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <button key={filter.key} onClick={() => setTaskFilter(filter.key)} className={`min-h-9 rounded-md px-2 text-left text-[11px] transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${taskFilter === filter.key ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
                 <span className="block font-medium">{filter.label}</span>
                 <span className="font-mono text-[10px] text-gray-400">{taskCount(filter.key)}</span>
               </button>
@@ -538,7 +538,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               <span className="font-mono">{progressPercentage}%</span>
             </div>
             <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-800">
-              <div className="h-1.5 rounded-full bg-blue-500 transition-[width] duration-300 ease-out" style={{ width: `${progressPercentage}%` }} />
+              <div className="h-1.5 rounded-full bg-amber-500 transition-[width] duration-300 ease-out" style={{ width: `${progressPercentage}%` }} />
             </div>
             <div className="mt-1.5 text-[11px] text-gray-500 dark:text-gray-400">
               {completedTasks} of {totalTasks} features completed · {connected ? 'live' : 'offline'}
@@ -548,7 +548,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
 
         {!showTaskDrill && (
         <section className="border-b border-gray-200 dark:border-gray-800">
-          <button onClick={() => setWorkspaceOpen((open) => !open)} className="flex min-h-9 w-full items-center gap-1 px-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-gray-300">
+          <button onClick={() => setWorkspaceOpen((open) => !open)} className="flex min-h-9 w-full items-center gap-1 px-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-gray-300">
             {workspaceOpen ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
             Workspace
           </button>
@@ -562,7 +562,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                 const agentCount = projectTasks.filter((task) => /active agent/.test(task.contextBundle.downstream)).length;
                 return (
                   <div key={project.id}>
-                    <button onClick={() => setOpenProjects((state) => ({ ...state, [project.id]: !open }))} className={`flex min-h-9 w-full items-center justify-between px-3 text-left transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/70'}`}>
+                    <button onClick={() => setOpenProjects((state) => ({ ...state, [project.id]: !open }))} className={`flex min-h-9 w-full items-center justify-between px-3 text-left transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/70'}`}>
                       <span className="flex min-w-0 items-center gap-2">
                         {open ? <ChevronDown className="h-3 w-3 flex-shrink-0" aria-hidden="true" /> : <ChevronRight className="h-3 w-3 flex-shrink-0" aria-hidden="true" />}
                         <span className={`h-2 w-2 flex-shrink-0 rounded-full ${project.colorClass}`} aria-hidden="true" />
@@ -588,7 +588,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         {showTaskDrill ? (
           <>
             <section className="border-b border-gray-200 dark:border-gray-800">
-              <button onClick={() => setFiltersOpen((open) => !open)} className="flex min-h-9 w-full items-center justify-between px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-900/70">
+              <button onClick={() => setFiltersOpen((open) => !open)} className="flex min-h-9 w-full items-center justify-between px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900/70">
                 <span className="flex items-center gap-1.5">
                   {filtersOpen ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
                   <Filter className="h-3.5 w-3.5" aria-hidden="true" />
@@ -601,7 +601,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                   <div className="grid grid-cols-2 gap-2">
                     <label className="space-y-1">
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Category</span>
-                      <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value as 'all' | Task['category'])} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                      <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value as 'all' | Task['category'])} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
                         {categories.map((category) => (
                           <option key={category} value={category}>{category === 'all' ? 'All categories' : category}</option>
                         ))}
@@ -609,7 +609,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                     </label>
                     <label className="space-y-1">
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Sort</span>
-                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation' | 'dueDate')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation' | 'dueDate')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
                         <option value="attention">Attention</option>
                         <option value="creation">Creation</option>
                         <option value="dueDate">Due date</option>
@@ -620,7 +620,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                     <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
                       <Tag className="h-3 w-3 flex-shrink-0 text-gray-400" aria-hidden="true" />
                       {allAvailableTags.map((tag) => (
-                        <button key={tag} onClick={() => toggleTagFilter(tag)} className={`min-h-8 flex-shrink-0 rounded border px-2 text-[10px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${selectedTags.includes(tag) ? 'border-indigo-200 bg-indigo-100 text-indigo-700 dark:border-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300' : 'border-gray-200 bg-gray-50 text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700'}`}>
+                        <button key={tag} onClick={() => toggleTagFilter(tag)} className={`min-h-8 flex-shrink-0 rounded border px-2 text-[10px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${selectedTags.includes(tag) ? 'border-amber-200 bg-amber-100 text-amber-700 dark:border-amber-700 dark:bg-amber-900/50 dark:text-amber-300' : 'border-gray-200 bg-gray-50 text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700'}`}>
                           {tag}
                         </button>
                       ))}
@@ -633,7 +633,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <button
               type="button"
               onClick={() => setShowArchived((value) => !value)}
-              className="flex min-h-9 w-full items-center justify-between border-b border-gray-200 px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-900/70"
+              className="flex min-h-9 w-full items-center justify-between border-b border-gray-200 px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-900/70"
               aria-expanded={showArchived}
             >
               <span className="flex items-center gap-1.5">
@@ -701,10 +701,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                   <span className="font-mono text-[10px] text-gray-400">{filteredTasks.length}</span>
                 </div>
                 <div className="flex items-center gap-1">
-                  <button onClick={handleVoiceToTask} className={`flex min-h-8 min-w-8 items-center justify-center rounded transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${isListening ? 'bg-red-100 text-red-500 dark:bg-red-900/30' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`} aria-label="Create task from voice" title="Create task from voice">
+                  <button onClick={handleVoiceToTask} className={`flex min-h-8 min-w-8 items-center justify-center rounded transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isListening ? 'bg-red-100 text-red-500 dark:bg-red-900/30' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`} aria-label="Create task from voice" title="Create task from voice">
                     <Mic className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
-                  <button onClick={handleCreateTask} className="flex min-h-8 min-w-8 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Create task" title="Create task">
+                  <button onClick={handleCreateTask} className="flex min-h-8 min-w-8 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Create task" title="Create task">
                     <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
                 </div>
@@ -769,7 +769,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
       </div>
 
       <div className="border-t border-gray-200 dark:border-gray-800">
-        <button onClick={exportTasks} className="flex min-h-10 w-full items-center gap-2 border-b border-gray-200 px-3 text-xs text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
+        <button onClick={exportTasks} className="flex min-h-10 w-full items-center gap-2 border-b border-gray-200 px-3 text-xs text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
           <Download className="h-4 w-4" aria-hidden="true" />
           Export Snapshot
         </button>

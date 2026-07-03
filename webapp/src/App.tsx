@@ -78,7 +78,7 @@ const AppContent = () => {
         // where agent controls (answer, verify, land) live.
         <button
           onClick={() => setIsChatOpen(true)}
-          className="fixed bottom-4 right-4 z-40 flex min-h-10 items-center gap-1.5 rounded-full bg-gray-900 px-3.5 py-2 text-xs font-semibold text-white shadow-lg transition-colors hover:bg-black focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:focus-visible:ring-offset-gray-950"
+          className="fixed bottom-4 right-4 z-40 flex min-h-10 items-center gap-1.5 rounded-full bg-gray-900 px-3.5 py-2 text-xs font-semibold text-white shadow-lg transition-colors hover:bg-black focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:focus-visible:ring-offset-gray-950"
           aria-label="Open agent chat"
         >
           <Bot className="h-4 w-4" aria-hidden="true" /> Agent

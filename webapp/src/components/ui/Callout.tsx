@@ -36,7 +36,7 @@ export const Callout: React.FC<CalloutProps> = ({ tone, title, children, action 
       {action && (
         <button
           onClick={action.onClick}
-          className={`flex-shrink-0 rounded-md border ${t.border} bg-white/70 dark:bg-gray-900/50 px-2.5 py-1 text-xs font-medium ${t.text} transition-colors hover:bg-white dark:hover:bg-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}
+          className={`flex-shrink-0 rounded-md border ${t.border} bg-white/70 dark:bg-gray-900/50 px-2.5 py-1 text-xs font-medium ${t.text} transition-colors hover:bg-white dark:hover:bg-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500`}
         >
           {action.label}
         </button>

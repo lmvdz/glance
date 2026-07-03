@@ -250,7 +250,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
                 type="button"
                 onClick={() => onSelect?.(n.id)}
                 title={`${n.title} — ${n.status}${n.touches.length ? ` · touches ${n.touches.length}` : ''}${inCycle ? ' · in a dependency cycle' : ''}`}
-                className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-white dark:bg-gray-900 ${onEdit ? 'pl-2.5 pr-7' : 'px-2.5'} py-1.5 text-left shadow-sm transition-colors hover:border-gray-300 dark:hover:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${active || editing ? 'ring-2 ring-blue-500' : inCycle ? 'ring-2 ring-red-400 dark:ring-red-500' : ''}`}
+                className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-white dark:bg-gray-900 ${onEdit ? 'pl-2.5 pr-7' : 'px-2.5'} py-1.5 text-left shadow-sm transition-colors hover:border-gray-300 dark:hover:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active || editing ? 'ring-2 ring-amber-500' : inCycle ? 'ring-2 ring-red-400 dark:ring-red-500' : ''}`}
                 style={{ left: p.x, top: p.y, width: COL_W, height: NODE_H }}
               >
                 <div className="flex items-center gap-1.5">
@@ -278,7 +278,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
                 title="Edit status & dependencies"
                 aria-label={`Edit ${n.title}`}
                 aria-pressed={editing}
-                className={`absolute z-10 flex h-5 w-5 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${editing ? 'bg-blue-100 text-blue-600 dark:bg-blue-950 dark:text-blue-300' : ''}`}
+                className={`absolute z-10 flex h-5 w-5 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${editing ? 'bg-amber-100 text-amber-600 dark:bg-amber-950 dark:text-amber-300' : ''}`}
                 style={{ left: p.x + COL_W - 23, top: p.y + 5 }}
               >
                 <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -293,7 +293,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
 
       {/* inline editor for the selected node */}
       {onEdit && editNode && (
-        <div className="mt-2 rounded-lg border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900 dark:bg-blue-950/30">
+        <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-900 dark:bg-amber-950/30">
           <div className="mb-2 flex items-center gap-2">
             {editNode.num != null && <span className="rounded bg-white dark:bg-gray-900 px-1.5 text-[10px] font-semibold tabular-nums text-gray-500 dark:text-gray-400">{String(editNode.num).padStart(2, '0')}</span>}
             <span className="truncate text-sm font-medium text-gray-800 dark:text-gray-100">{editNode.title}</span>
@@ -305,7 +305,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
               <select
                 value={statusValue}
                 onChange={(ev) => setStatusValue(ev.target.value)}
-                className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-800 focus:border-blue-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+                className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-800 focus:border-amber-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
               >
                 {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
@@ -325,7 +325,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
                         onClick={() => toggleBlocker(c.num)}
                         aria-pressed={on}
                         title={c.title}
-                        className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${on ? 'border-blue-400 bg-blue-100 text-blue-700 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'border-gray-300 text-gray-600 hover:border-gray-400 dark:border-gray-700 dark:text-gray-300'}`}
+                        className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${on ? 'border-amber-400 bg-amber-100 text-amber-700 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'border-gray-300 text-gray-600 hover:border-gray-400 dark:border-gray-700 dark:text-gray-300'}`}
                       >
                         <span className="tabular-nums">#{c.num}</span> <span className="opacity-70">{c.title.length > 22 ? `${c.title.slice(0, 22)}…` : c.title}</span>
                       </button>
@@ -340,11 +340,11 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
               type="button"
               onClick={() => void handleSave()}
               disabled={saving}
-              className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="rounded bg-amber-500 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-600 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             >
               {saving ? 'Saving…' : 'Save'}
             </button>
-            <button type="button" onClick={() => setEditId(null)} disabled={saving} className="rounded px-3 py-1 text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-60 dark:text-gray-300 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">Cancel</button>
+            <button type="button" onClick={() => setEditId(null)} disabled={saving} className="rounded px-3 py-1 text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-60 dark:text-gray-300 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Cancel</button>
             <span className="text-[11px] text-gray-400">Writes the concern doc + overview dependency table.</span>
           </div>
         </div>

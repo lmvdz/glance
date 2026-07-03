@@ -93,11 +93,11 @@ interface PlaneLinks {
 
 const EmptyStateIllustration = () => (
   <svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" className="mb-6">
-    <rect x="25" y="40" width="150" height="120" rx="12" fill="#E0E7FF" className="dark:fill-gray-800" />
-    <path d="M50 70H150" stroke="#818CF8" strokeWidth="6" strokeLinecap="round" className="dark:stroke-indigo-500" />
-    <path d="M50 100H120" stroke="#818CF8" strokeWidth="6" strokeLinecap="round" className="dark:stroke-indigo-500" />
-    <path d="M50 130H90" stroke="#818CF8" strokeWidth="6" strokeLinecap="round" className="dark:stroke-indigo-500" />
-    <circle cx="150" cy="130" r="16" fill="#4F46E5" />
+    <rect x="25" y="40" width="150" height="120" rx="12" fill="#FDE4D0" className="dark:fill-gray-800" />
+    <path d="M50 70H150" stroke="#F0A35A" strokeWidth="6" strokeLinecap="round" className="dark:stroke-amber-500" />
+    <path d="M50 100H120" stroke="#F0A35A" strokeWidth="6" strokeLinecap="round" className="dark:stroke-amber-500" />
+    <path d="M50 130H90" stroke="#F0A35A" strokeWidth="6" strokeLinecap="round" className="dark:stroke-amber-500" />
+    <circle cx="150" cy="130" r="16" fill="#F0A35A" />
     <path d="M144 130L148 134L156 126" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
@@ -108,9 +108,9 @@ function commentFromApi(comment: ArtifactCommentDTO): TaskComment {
 
 
 const PLAN_MARKDOWN_CLASS = "prose prose-sm max-w-none dark:prose-invert prose-headings:scroll-mt-4 prose-headings:text-gray-900 dark:prose-headings:text-gray-100 prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-900 dark:prose-strong:text-gray-100 prose-code:rounded prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:text-gray-900 dark:prose-code:bg-gray-900 dark:prose-code:text-gray-100 prose-pre:border prose-pre:border-gray-200 prose-pre:bg-gray-50 prose-pre:text-gray-900 dark:prose-pre:border-gray-800 dark:prose-pre:bg-gray-950 dark:prose-pre:text-gray-100 prose-table:text-sm prose-th:border prose-th:border-gray-200 prose-th:bg-gray-50 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-gray-200 prose-td:px-3 prose-td:py-2 dark:prose-th:border-gray-800 dark:prose-th:bg-gray-900 dark:prose-td:border-gray-800";
-const PLAN_NAV_BUTTON_CLASS = "inline-flex min-h-8 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900 dark:focus-visible:ring-offset-gray-950";
-const PLAN_DOC_TAB_BASE_CLASS = "group min-h-9 max-w-56 flex-shrink-0 rounded-lg border px-2.5 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950";
-const PLAN_DOC_TAB_ACTIVE_CLASS = "border-blue-300 bg-blue-50 text-blue-800 shadow-sm dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-200";
+const PLAN_NAV_BUTTON_CLASS = "inline-flex min-h-8 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900 dark:focus-visible:ring-offset-gray-950";
+const PLAN_DOC_TAB_BASE_CLASS = "group min-h-9 max-w-56 flex-shrink-0 rounded-lg border px-2.5 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950";
+const PLAN_DOC_TAB_ACTIVE_CLASS = "border-amber-300 bg-amber-50 text-amber-800 shadow-sm dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200";
 const PLAN_DOC_TAB_IDLE_CLASS = "border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300 dark:hover:border-gray-700 dark:hover:bg-gray-900";
 
 
@@ -125,7 +125,7 @@ export function PlanMarkdownLoading() {
   return (
     <div className="flex h-full min-h-[22rem] flex-col p-6" aria-busy="true" aria-live="polite" role="status">
       <div className="mb-5 flex items-center gap-3">
-        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-blue-100 bg-blue-50 text-blue-600 dark:border-blue-900 dark:bg-blue-950/60 dark:text-blue-300">
+        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-amber-100 bg-amber-50 text-amber-600 dark:border-amber-900 dark:bg-amber-950/60 dark:text-amber-300">
           <FileText className="h-4 w-4" aria-hidden="true" />
         </div>
         <div className="min-w-0">
@@ -870,14 +870,14 @@ export const TaskDetail = () => {
           </div>
           <div className="space-y-1 max-h-72 overflow-auto pr-1 scrollbar-custom">
             {!pipeline ? (
-              <div className="flex min-h-10 items-center gap-2 rounded border border-dashed border-blue-200 bg-blue-50/60 p-3 text-sm text-blue-700 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300" aria-busy="true" role="status">
+              <div className="flex min-h-10 items-center gap-2 rounded border border-dashed border-amber-200 bg-amber-50/60 p-3 text-sm text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300" aria-busy="true" role="status">
                 <FileText className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
                 Loading plan documents
               </div>
             ) : docs.length === 0 ? (
               <div className="rounded border border-dashed border-gray-200 dark:border-gray-800 p-3 text-sm text-gray-500 dark:text-gray-400">No plan documents found.</div>
             ) : docs.map((item) => (
-              <button key={item.path} onClick={() => selectPlanDoc(item.path)} className={`flex min-h-10 w-full items-center gap-2 rounded px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950 ${selectedPlanDoc?.path === item.path ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-900'}`}>
+              <button key={item.path} onClick={() => selectPlanDoc(item.path)} className={`flex min-h-10 w-full items-center gap-2 rounded px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950 ${selectedPlanDoc?.path === item.path ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-900'}`}>
                 <FileText className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
                 <span className="truncate">{item.path}</span>
               </button>
@@ -958,7 +958,7 @@ export const TaskDetail = () => {
                     type="button"
                     disabled={planAction !== null}
                     onClick={() => void startImplementation()}
-                    className="inline-flex min-h-8 items-center gap-1 rounded-md bg-gray-900 px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200 dark:focus-visible:ring-offset-gray-950"
+                    className="inline-flex min-h-8 items-center gap-1 rounded-md bg-gray-900 px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200 dark:focus-visible:ring-offset-gray-950"
                   >
                     <Bot className="h-4 w-4" aria-hidden="true" />
                     {planAction === 'implement' ? 'Starting...' : 'Implement'}
@@ -1009,7 +1009,7 @@ export const TaskDetail = () => {
                   Plane
                 </span>
                 {planeLinks.moduleUrl && (
-                  <a href={planeLinks.moduleUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-200 bg-white px-2 py-1 font-medium text-blue-700 transition-colors hover:bg-blue-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-blue-300 dark:hover:bg-blue-950/40">
+                  <a href={planeLinks.moduleUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-200 bg-white px-2 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-amber-300 dark:hover:bg-amber-950/40">
                     Module linked
                   </a>
                 )}
@@ -1019,7 +1019,7 @@ export const TaskDetail = () => {
                   <span className="rounded bg-gray-100 px-2 py-1 font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">{planeLinks.tickets.length} ticket{planeLinks.tickets.length === 1 ? '' : 's'}</span>
                 )}
                 {planeLinks.tickets?.slice(0, 4).map((ticket) => (
-                  <a key={ticket.identifier} href={ticket.url} target="_blank" rel="noreferrer" className="max-w-44 truncate rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300 dark:hover:bg-gray-900" title={`${ticket.identifier}: ${ticket.name}`}>
+                  <a key={ticket.identifier} href={ticket.url} target="_blank" rel="noreferrer" className="max-w-44 truncate rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300 dark:hover:bg-gray-900" title={`${ticket.identifier}: ${ticket.name}`}>
                     {ticket.identifier}
                   </a>
                 ))}
@@ -1045,7 +1045,7 @@ export const TaskDetail = () => {
                       title={doc.path}
                     >
                       <span className="flex items-center gap-2">
-                        <span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold ${active ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-200' : 'bg-gray-100 text-gray-500 group-hover:text-gray-700 dark:bg-gray-900 dark:text-gray-400 dark:group-hover:text-gray-200'}`}>{index + 1}</span>
+                        <span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold ${active ? 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200' : 'bg-gray-100 text-gray-500 group-hover:text-gray-700 dark:bg-gray-900 dark:text-gray-400 dark:group-hover:text-gray-200'}`}>{index + 1}</span>
                         <span className="min-w-0">
                           <span className="block truncate text-xs font-semibold">{doc.title || doc.file}</span>
                           <span className="mt-0.5 block text-[10px] uppercase tracking-wider text-gray-400 dark:text-gray-500">{kind}</span>
@@ -1075,12 +1075,12 @@ export const TaskDetail = () => {
                     {annotationDraft.blockId ? 'Anchored to this rendered block' : annotationDraft.lineStart ? `Line ${annotationDraft.lineStart}${annotationDraft.lineEnd && annotationDraft.lineEnd !== annotationDraft.lineStart ? `-${annotationDraft.lineEnd}` : ''}` : 'Selected markdown text'}
                   </div>
                 </div>
-                <button type="button" onClick={() => setAnnotationDraft(null)} className="flex min-h-10 w-10 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900 dark:hover:text-gray-200" aria-label="Close annotation popover">
+                <button type="button" onClick={() => setAnnotationDraft(null)} className="flex min-h-10 w-10 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900 dark:hover:text-gray-200" aria-label="Close annotation popover">
                   <X className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
               {annotationDraft.quote && (
-                <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-blue-400 bg-blue-50 p-2 text-xs text-gray-700 dark:bg-blue-950/30 dark:text-gray-300">{annotationDraft.quote}</blockquote>
+                <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-amber-400 bg-amber-50 p-2 text-xs text-gray-700 dark:bg-amber-950/30 dark:text-gray-300">{annotationDraft.quote}</blockquote>
               )}
               <label htmlFor="plan-annotation-body" className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">What should change?</label>
               <textarea
@@ -1089,11 +1089,11 @@ export const TaskDetail = () => {
                 value={annotationText}
                 onChange={(event) => setAnnotationText(event.target.value)}
                 placeholder="Leave a note for collaborators or a planner agent."
-                className="min-h-24 w-full resize-none rounded-md border border-gray-200 bg-white p-2 text-sm text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                className="min-h-24 w-full resize-none rounded-md border border-gray-200 bg-white p-2 text-sm text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
               />
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <button type="submit" disabled={!annotationText.trim()} className="min-h-10 rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus-visible:ring-offset-gray-950">Save</button>
-                <button type="button" disabled={!annotationText.trim()} onClick={() => void saveAnnotation(true)} className="min-h-10 rounded-md border border-blue-300 px-3 py-2 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-50 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950 dark:focus-visible:ring-offset-gray-950">Save + planner</button>
+                <button type="submit" disabled={!annotationText.trim()} className="min-h-10 rounded-md bg-amber-500 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-amber-600 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus-visible:ring-offset-gray-950">Save</button>
+                <button type="button" disabled={!annotationText.trim()} onClick={() => void saveAnnotation(true)} className="min-h-10 rounded-md border border-amber-300 px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-800 dark:text-amber-300 dark:hover:bg-amber-950 dark:focus-visible:ring-offset-gray-950">Save + planner</button>
               </div>
             </form>
           )}
@@ -1116,26 +1116,26 @@ export const TaskDetail = () => {
             ) : selectedDocAnnotations.map((annotation) => {
               const colors = annotationColors(annotation.author);
               return (
-                <div id={`annotation-${annotation.id}`} key={annotation.id} className={`rounded-lg border p-3 transition-colors ${annotation.resolvedAt ? 'border-gray-200 bg-gray-50 opacity-70 dark:border-gray-800 dark:bg-gray-900/40' : activeAnnotationId === annotation.id ? 'ring-2 ring-blue-500' : ''}`} style={!annotation.resolvedAt ? { borderColor: colors.border, backgroundColor: colors.card } : undefined}>
+                <div id={`annotation-${annotation.id}`} key={annotation.id} className={`rounded-lg border p-3 transition-colors ${annotation.resolvedAt ? 'border-gray-200 bg-gray-50 opacity-70 dark:border-gray-800 dark:bg-gray-900/40' : activeAnnotationId === annotation.id ? 'ring-2 ring-amber-500' : ''}`} style={!annotation.resolvedAt ? { borderColor: colors.border, backgroundColor: colors.card } : undefined}>
                   <div className="mb-2 flex items-start justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                       <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: colors.border }} />
                       <span className="truncate">{annotation.author ?? 'User'} · {new Date(annotation.timestamp).toLocaleString()}{annotation.annotation?.lineStart ? ` · line ${annotation.annotation.lineStart}${annotation.annotation.lineEnd && annotation.annotation.lineEnd !== annotation.annotation.lineStart ? `-${annotation.annotation.lineEnd}` : ''}` : ''}</span>
-                      {(annotation.annotation as PlanAnnotationTargetDTO | undefined)?.blockId && <span className="flex-shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">block</span>}
+                      {(annotation.annotation as PlanAnnotationTargetDTO | undefined)?.blockId && <span className="flex-shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">block</span>}
                     </div>
-                    {annotation.resolvedAt ? <span className="text-xs text-gray-400">Resolved</span> : <button onClick={() => void resolveAnnotation(annotation)} className="min-h-10 rounded px-2 text-xs text-gray-500 hover:bg-white focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900">Resolve</button>}
+                    {annotation.resolvedAt ? <span className="text-xs text-gray-400">Resolved</span> : <button onClick={() => void resolveAnnotation(annotation)} className="min-h-10 rounded px-2 text-xs text-gray-500 hover:bg-white focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900">Resolve</button>}
                   </div>
                   {annotation.annotation?.quote && <blockquote className="mb-2 rounded border-l-4 bg-white/70 p-2 text-xs text-gray-700 dark:bg-gray-950/60 dark:text-gray-300" style={{ borderColor: colors.border }}>{annotation.annotation.quote}</blockquote>}
                   <p className="whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-200">{annotation.text}</p>
                   {!annotation.resolvedAt && <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'planner')} className="min-h-10 rounded-md bg-gray-900 px-3 py-2 text-xs font-medium text-white focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Send to planner</button>
+                    <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'planner')} className="min-h-10 rounded-md bg-gray-900 px-3 py-2 text-xs font-medium text-white focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Send to planner</button>
                     {activeAgents.length > 0 && (
                       <>
-                        <select value={targetAgentByAnnotation[annotation.id] ?? ''} onChange={(event) => setTargetAgentByAnnotation((prev) => ({ ...prev, [annotation.id]: event.target.value }))} className="min-h-10 rounded-md border border-gray-200 bg-white px-2 text-xs focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                        <select value={targetAgentByAnnotation[annotation.id] ?? ''} onChange={(event) => setTargetAgentByAnnotation((prev) => ({ ...prev, [annotation.id]: event.target.value }))} className="min-h-10 rounded-md border border-gray-200 bg-white px-2 text-xs focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
                           <option value="">Pick agent</option>
                           {activeAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
                         </select>
-                        <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'agent')} className="min-h-10 rounded-md border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50 dark:border-gray-800 dark:text-gray-300">Send to agent</button>
+                        <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'agent')} className="min-h-10 rounded-md border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 dark:border-gray-800 dark:text-gray-300">Send to agent</button>
                       </>
                     )}
                   </div>}
@@ -1198,13 +1198,13 @@ export const TaskDetail = () => {
               placeholder="or type model id…"
               className="w-36 text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 placeholder:text-gray-400"
             />
-            <button type="button" onClick={() => handleSetModel(modelPickerAgentId, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium text-blue-600 dark:text-blue-400 disabled:opacity-40 hover:text-blue-800 focus-visible:ring-2 focus-visible:ring-blue-500">Set</button>
+            <button type="button" onClick={() => handleSetModel(modelPickerAgentId, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium text-amber-600 dark:text-amber-400 disabled:opacity-40 hover:text-amber-800 focus-visible:ring-2 focus-visible:ring-amber-500">Set</button>
             <button type="button" onClick={() => { setModelPickerAgentId(null); setModelPickerValue(''); }} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
           </div>
         )}
-        <button onClick={() => focusTaskSearch()} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-blue-500" title="Focus task search (⌘K)" aria-label="Jump to search"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
-        <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
-        <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${isChatOpen ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
+        <button onClick={() => focusTaskSearch()} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-amber-500" title="Focus task search (⌘K)" aria-label="Jump to search"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
+        <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
+        <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isChatOpen ? 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
       </div>
 
       {!task ? (
@@ -1228,7 +1228,7 @@ export const TaskDetail = () => {
                   <button
                     key={item.id}
                     onClick={() => selectTask(item.id)}
-                    className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 dark:hover:bg-gray-900/60"
+                    className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-gray-900/60"
                   >
                     <span className={`h-2 w-2 flex-shrink-0 rounded-full ${item.status === 'done' ? 'bg-emerald-500' : item.status === 'active' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`} aria-label={item.status} />
                     <span className="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{item.title}</span>
@@ -1249,14 +1249,14 @@ export const TaskDetail = () => {
           <section className="min-w-0 flex-1 overflow-y-auto scrollbar-custom lg:flex-none lg:[flex-basis:var(--detail-pane-width)]">
             <div className="mx-auto max-w-5xl px-4 py-5 lg:px-5">
               <div className="flex items-start justify-between mb-4">
-                <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400 text-xs mb-2"><button onClick={() => selectTask(null)} className="flex items-center gap-1 rounded px-1.5 py-0.5 font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" title="Back to all work items"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />Tasks</button><ChevronRight className="w-3 h-3" /><span className="font-medium text-gray-700 dark:text-gray-300">{taskRef(task) ?? task.properties.project.shortCode}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
+                <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400 text-xs mb-2"><button onClick={() => selectTask(null)} className="flex items-center gap-1 rounded px-1.5 py-0.5 font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" title="Back to all work items"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />Tasks</button><ChevronRight className="w-3 h-3" /><span className="font-medium text-gray-700 dark:text-gray-300">{taskRef(task) ?? task.properties.project.shortCode}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
                 <div className="flex items-center gap-2">
                   <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties" aria-label="Toggle properties panel" aria-expanded={showProperties}><PanelRight className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => { navigator.clipboard.writeText(`${taskRef(task) ?? task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => { navigator.clipboard.writeText(`${taskRef(task) ?? task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
 
-              <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-gray-900 dark:text-gray-100 mb-5 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
+              <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-gray-900 dark:text-gray-100 mb-5 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
 
               <AgentStatusStrip
                 status={taskStatus}
@@ -1269,7 +1269,7 @@ export const TaskDetail = () => {
 
               {planFlowConcerns.length >= 2 && (
                 <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
-                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 list-none">
+                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
                     <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
                     <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
                     <span className="mr-auto">Plan flow</span>
@@ -1278,7 +1278,7 @@ export const TaskDetail = () => {
                       type="button"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); setFlowFocus(true); }}
                       title="Open full-pane flow view"
-                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-blue-500"
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
                     >
                       <Maximize2 className="h-3 w-3" aria-hidden="true" /> Expand
                     </button>
@@ -1306,13 +1306,13 @@ export const TaskDetail = () => {
               {!overviewDoc && (
                 <div className="mb-10">
                   <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">Description</div>
-                  <textarea key={`${task.id}:description`} className="w-full min-h-32 text-gray-700 dark:text-gray-300 leading-relaxed text-[15px] whitespace-pre-wrap bg-transparent border border-transparent hover:border-gray-200 dark:hover:border-gray-800 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20 rounded p-2 outline-none" defaultValue={task.description} onBlur={(e) => e.currentTarget.value !== task.description && updateTask(task.id, { description: e.currentTarget.value })} placeholder="Describe what the agent needs to do and why." />
+                  <textarea key={`${task.id}:description`} className="w-full min-h-32 text-gray-700 dark:text-gray-300 leading-relaxed text-[15px] whitespace-pre-wrap bg-transparent border border-transparent hover:border-gray-200 dark:hover:border-gray-800 focus:border-amber-400 focus:ring-2 focus:ring-amber-500/20 rounded p-2 outline-none" defaultValue={task.description} onBlur={(e) => e.currentTarget.value !== task.description && updateTask(task.id, { description: e.currentTarget.value })} placeholder="Describe what the agent needs to do and why." />
                 </div>
               )}
 
               <div className="mb-7">
                 <div className="flex items-center justify-between mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-                  <button type="button" onClick={() => setCriteriaFolded((value) => !value)} className="flex min-h-8 items-center gap-2 rounded text-left text-[11px] font-semibold uppercase tracking-widest text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-gray-300" aria-expanded={!criteriaFolded} aria-controls="acceptance-criteria-list">
+                  <button type="button" onClick={() => setCriteriaFolded((value) => !value)} className="flex min-h-8 items-center gap-2 rounded text-left text-[11px] font-semibold uppercase tracking-widest text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-gray-300" aria-expanded={!criteriaFolded} aria-controls="acceptance-criteria-list">
                     <ChevronRight className={`h-3.5 w-3.5 transition-transform ${criteriaFolded ? '' : 'rotate-90'}`} aria-hidden="true" />
                     Acceptance Criteria <span className="text-gray-500 font-medium">{task.acceptanceCriteria.filter(c => c.completed).length} / {task.acceptanceCriteria.length}</span>
                   </button>
@@ -1321,30 +1321,30 @@ export const TaskDetail = () => {
                 {!criteriaFolded && <div id="acceptance-criteria-list" className="space-y-1.5">
                   {task.acceptanceCriteria.length === 0 && !isAddingCriteria ? <div className="text-gray-400 dark:text-gray-500 italic text-sm py-2">No acceptance criteria defined.</div> : task.acceptanceCriteria.map(criteria => (
                     <div key={criteria.id} className="group flex items-start gap-3 p-3 border border-gray-200 dark:border-gray-800 rounded-lg hover:border-gray-300 dark:hover:border-gray-700 bg-white dark:bg-gray-900 transition-colors">
-                      <input type="checkbox" checked={criteria.completed} onChange={() => handleToggleCriteria(criteria.id)} className="mt-1 w-4 h-4 text-blue-600 rounded border-gray-300 dark:border-gray-700 focus:ring-blue-500 bg-transparent cursor-pointer" />
+                      <input type="checkbox" checked={criteria.completed} onChange={() => handleToggleCriteria(criteria.id)} className="mt-1 w-4 h-4 text-amber-600 rounded border-gray-300 dark:border-gray-700 focus:ring-amber-500 bg-transparent cursor-pointer" />
                       <div className={`flex-1 text-sm leading-snug ${criteria.completed ? 'text-gray-400 line-through' : 'text-gray-700 dark:text-gray-300'}`}>{criteria.text}</div>
                       <button onClick={() => handleDeleteCriteria(criteria.id)} className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-all rounded hover:bg-red-50 dark:hover:bg-red-900/30"><X className="w-3.5 h-3.5" /></button>
                     </div>
                   ))}
-                  {isAddingCriteria && <div className="flex items-start gap-3 p-3 border border-blue-300 dark:border-blue-700 rounded-lg bg-blue-50/30 dark:bg-blue-900/10"><input type="checkbox" disabled className="mt-1 w-4 h-4 text-gray-300 rounded border-gray-200 bg-transparent" /><input autoFocus type="text" value={newCriteriaText} onChange={(e) => setNewCriteriaText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddCriteria(); if (e.key === 'Escape') setIsAddingCriteria(false); }} placeholder="Add acceptance criteria..." className="flex-1 bg-transparent border-none outline-none text-sm w-full dark:text-gray-200" /><button onClick={handleAddCriteria} className="text-xs px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded font-medium transition-colors">Save</button></div>}
+                  {isAddingCriteria && <div className="flex items-start gap-3 p-3 border border-amber-300 dark:border-amber-700 rounded-lg bg-amber-50/30 dark:bg-amber-900/10"><input type="checkbox" disabled className="mt-1 w-4 h-4 text-gray-300 rounded border-gray-200 bg-transparent" /><input autoFocus type="text" value={newCriteriaText} onChange={(e) => setNewCriteriaText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddCriteria(); if (e.key === 'Escape') setIsAddingCriteria(false); }} placeholder="Add acceptance criteria..." className="flex-1 bg-transparent border-none outline-none text-sm w-full dark:text-gray-200" /><button onClick={handleAddCriteria} className="text-xs px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded font-medium transition-colors">Save</button></div>}
                 </div>}
               </div>
 
               <details className="group mb-7 rounded-lg border border-gray-200 dark:border-gray-800">
-              <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 list-none">
+              <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
                 <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
                 <span className="mr-auto">Plan context, decisions &amp; relationships</span>
                 <span className="font-normal normal-case text-gray-400">{task.decisions.length} decision{task.decisions.length === 1 ? '' : 's'} · {task.relationships.length} link{task.relationships.length === 1 ? '' : 's'}</span>
               </summary>
               <div className="space-y-6 border-t border-gray-100 dark:border-gray-800 px-3 py-4">
               <div className="mb-1">
-                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 border-b border-gray-100 dark:border-gray-800 pb-2 flex items-center gap-2">Context Bundle From Plan <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 lowercase font-normal">agent input</span></div>
+                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 border-b border-gray-100 dark:border-gray-800 pb-2 flex items-center gap-2">Context Bundle From Plan <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 lowercase font-normal">agent input</span></div>
                 <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden bg-white dark:bg-gray-900 transition-colors">
-                  <div className="px-3 py-2 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between"><div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300"><Box className="w-4 h-4 text-blue-500" /> planning bundle</div><span className="text-[10px] font-mono bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">MD</span></div>
-                  <div className="h-0.5 bg-blue-600 w-full"></div>
+                  <div className="px-3 py-2 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between"><div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300"><Box className="w-4 h-4 text-amber-500" /> planning bundle</div><span className="text-[10px] font-mono bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">MD</span></div>
+                  <div className="h-0.5 bg-amber-500 w-full"></div>
                   {(['spec', 'criteria', 'prerequisites', 'decisions', 'downstream'] as const).map((key) => (
-                    <button key={key} onClick={() => setExpandedContext(expandedContext === key ? null : key)} className="w-full flex min-h-10 items-center justify-between px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors border-b border-gray-100 dark:border-gray-800 last:border-b-0 focus-visible:ring-2 focus-visible:ring-blue-500">
-                      <div className="grid min-w-0 flex-1 grid-cols-[0.25rem_6.5rem_minmax(0,1fr)] items-center gap-3 text-left"><div className="h-4 w-1 bg-blue-400 rounded-full"></div><span className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase">{key}</span><span className="truncate text-sm text-gray-800 dark:text-gray-200">{task.contextBundle[key]}</span></div><ChevronRight className={`w-4 h-4 flex-shrink-0 text-gray-400 transition-transform ${expandedContext === key ? 'rotate-90' : ''}`} />
+                    <button key={key} onClick={() => setExpandedContext(expandedContext === key ? null : key)} className="w-full flex min-h-10 items-center justify-between px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors border-b border-gray-100 dark:border-gray-800 last:border-b-0 focus-visible:ring-2 focus-visible:ring-amber-500">
+                      <div className="grid min-w-0 flex-1 grid-cols-[0.25rem_6.5rem_minmax(0,1fr)] items-center gap-3 text-left"><div className="h-4 w-1 bg-amber-400 rounded-full"></div><span className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase">{key}</span><span className="truncate text-sm text-gray-800 dark:text-gray-200">{task.contextBundle[key]}</span></div><ChevronRight className={`w-4 h-4 flex-shrink-0 text-gray-400 transition-transform ${expandedContext === key ? 'rotate-90' : ''}`} />
                     </button>
                   ))}
                   {renderContextDetail()}
@@ -1400,7 +1400,7 @@ export const TaskDetail = () => {
                                   ↺ Restart
                                 </button>
                               )}
-                              <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${modelPickerAgentId === agent.id ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
+                              <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${modelPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
                                 Model
                               </button>
                               <button type="button" onClick={() => setRemoveTarget(removeTarget === agent.id ? null : agent.id)} title="Remove agent" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${removeTarget === agent.id ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' : 'text-gray-400 hover:bg-gray-100 hover:text-red-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-red-400'}`}>
@@ -1411,12 +1411,12 @@ export const TaskDetail = () => {
                           {/* Inline model picker for this agent */}
                           {modelPickerAgentId === agent.id && (
                             <div className="border-t border-gray-100 dark:border-gray-800 px-3 py-2 flex items-center gap-2">
-                              <select value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} className="text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                              <select value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} className="text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">
                                 <option value="">pick model…</option>
                                 {KNOWN_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
                               </select>
-                              <input type="text" value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(agent.id, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }} placeholder="or type model id…" className="flex-1 text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 placeholder:text-gray-400" />
-                              <button type="button" onClick={() => handleSetModel(agent.id, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-blue-500">Set</button>
+                              <input type="text" value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(agent.id, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }} placeholder="or type model id…" className="flex-1 text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-gray-400" />
+                              <button type="button" onClick={() => handleSetModel(agent.id, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium px-2 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-amber-500">Set</button>
                             </div>
                           )}
                           {/* Pending input / Answer section */}
@@ -1460,7 +1460,7 @@ export const TaskDetail = () => {
                                 <button
                                   type="button"
                                   onClick={() => toggleTranscript(agent.id)}
-                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/50 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500"
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/50 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500"
                                 >
                                   <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
                                   {isWorking && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500 animate-pulse" aria-hidden />}
@@ -1493,7 +1493,7 @@ export const TaskDetail = () => {
               <div className="mb-6 pb-6">
                 <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-4 border-b border-gray-100 dark:border-gray-800 pb-2">Comments <span className="text-gray-500 font-medium">{regularComments.length}</span></div>
                 <div className="space-y-4">{regularComments.map(comment => <div key={comment.id} className="bg-gray-50 dark:bg-gray-800/50 p-4 rounded-lg border border-gray-100 dark:border-gray-800 transition-colors"><div className="flex items-center justify-between mb-2"><span className="text-xs font-medium text-gray-700 dark:text-gray-300">{comment.author ?? 'User'}</span><span className="text-xs text-gray-400">{new Date(comment.timestamp).toLocaleString()}</span></div><p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{comment.text}</p></div>)}</div>
-                <div className="mt-4 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-400 transition-all"><textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} placeholder="Add an instruction/comment for agents working this task..." className="w-full p-3 bg-white dark:bg-gray-900 text-sm text-gray-700 dark:text-gray-200 focus:outline-none min-h-[80px] resize-none" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submitComment(); }} /><div className="px-3 py-2 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 flex justify-between items-center text-xs"><span className="text-gray-400">Saved comments are included in feature workflow prompts.</span><button onClick={() => void submitComment()} className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded font-medium transition-colors">Comment</button></div></div>
+                <div className="mt-4 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-amber-500/20 focus-within:border-amber-400 transition-all"><textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} placeholder="Add an instruction/comment for agents working this task..." className="w-full p-3 bg-white dark:bg-gray-900 text-sm text-gray-700 dark:text-gray-200 focus:outline-none min-h-[80px] resize-none" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submitComment(); }} /><div className="px-3 py-2 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 flex justify-between items-center text-xs"><span className="text-gray-400">Saved comments are included in feature workflow prompts.</span><button onClick={() => void submitComment()} className="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded font-medium transition-colors">Comment</button></div></div>
               </div>
             </div>
           </section>
@@ -1505,10 +1505,10 @@ export const TaskDetail = () => {
             onPointerDown={startMainResize}
             onKeyDown={nudgeMainSplit}
             onDoubleClick={() => setMainPanePercent(48)}
-            className="group hidden w-2 flex-shrink-0 cursor-col-resize items-center justify-center bg-transparent transition-colors hover:bg-blue-500/15 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-blue-400/15 lg:flex"
+            className="group hidden w-2 flex-shrink-0 cursor-col-resize items-center justify-center bg-transparent transition-colors hover:bg-amber-500/15 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-amber-400/15 lg:flex"
             title="Drag to resize panes. Double-click to reset."
           >
-            <span className="h-10 w-px rounded-full bg-gray-300 transition-colors group-hover:bg-blue-500 dark:bg-gray-700 dark:group-hover:bg-blue-400" aria-hidden="true" />
+            <span className="h-10 w-px rounded-full bg-gray-300 transition-colors group-hover:bg-amber-500 dark:bg-gray-700 dark:group-hover:bg-amber-400" aria-hidden="true" />
           </div>
           <aside className="flex min-h-[22rem] min-w-0 flex-1 flex-col border-t border-gray-200 bg-gray-50/60 dark:border-gray-800 dark:bg-gray-950/60 lg:min-h-0 lg:border-l lg:border-t-0">
             {renderPlanDocPane()}
@@ -1528,7 +1528,7 @@ export const TaskDetail = () => {
                   type="button"
                   onClick={() => setFlowFocus(false)}
                   title="Close (Esc)"
-                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-blue-500"
+                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
                 >
                   <X className="h-3.5 w-3.5" aria-hidden="true" /> Close
                 </button>

@@ -47,9 +47,9 @@ export const CapabilityPackCard: React.FC<{
       </div>
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          {!install && <button onClick={() => onInstall(pack.id)} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500">Install</button>}
-          {install && <button onClick={() => onToggle(install.id, !enabled)} className="px-3 py-1.5 rounded-lg bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs hover:opacity-90 focus-visible:ring-2 focus-visible:ring-blue-500">{enabled ? 'Disable' : 'Enable'}</button>}
-          {install && runnable && <button onClick={() => onRun(install.id, runnable.key)} className="px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 text-xs flex items-center gap-1 hover:bg-gray-100 dark:hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500"><Play className="w-3 h-3" /> Run</button>}
+          {!install && <button onClick={() => onInstall(pack.id)} className="px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs hover:bg-amber-600 focus-visible:ring-2 focus-visible:ring-amber-500">Install</button>}
+          {install && <button onClick={() => onToggle(install.id, !enabled)} className="px-3 py-1.5 rounded-lg bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs hover:opacity-90 focus-visible:ring-2 focus-visible:ring-amber-500">{enabled ? 'Disable' : 'Enable'}</button>}
+          {install && runnable && <button onClick={() => onRun(install.id, runnable.key)} className="px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 text-xs flex items-center gap-1 hover:bg-gray-100 dark:hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-amber-500"><Play className="w-3 h-3" /> Run</button>}
           {health === 'active' && <span className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> live</span>}
         </div>
         <span className="text-[11px] text-gray-400 dark:text-gray-500">{counts}</span>
@@ -78,7 +78,7 @@ export const CapabilityPanel = () => {
       <div className="max-w-6xl mx-auto">
         {/* ── verdict-first header ── */}
         <div className="mb-6">
-          <div className="text-[11px] uppercase tracking-[0.2em] text-blue-500 font-semibold mb-2">Capability registry</div>
+          <div className="text-[11px] uppercase tracking-[0.2em] text-amber-500 font-semibold mb-2">Capability registry</div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Installed agent recipes</h1>
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <VerdictBadge verdict={summary.verdict}>{summary.headline}</VerdictBadge>
@@ -144,7 +144,7 @@ export const CapabilityPanel = () => {
               {publicCatalog.map((entry) => {
                 const imported = importedSlugs.has(`${entry.slug}@${entry.version}`);
                 return (
-                  <article key={entry.id} className="rounded-2xl border border-blue-100 dark:border-blue-950 bg-blue-50/40 dark:bg-blue-950/20 p-5">
+                  <article key={entry.id} className="rounded-2xl border border-amber-100 dark:border-amber-950 bg-amber-50/40 dark:bg-amber-950/20 p-5">
                     <div className="flex items-start justify-between gap-4">
                       <div>
                         <div className="flex items-center gap-2 mb-2">
@@ -154,7 +154,7 @@ export const CapabilityPanel = () => {
                         <h3 className="font-semibold text-gray-900 dark:text-gray-100">{entry.title}</h3>
                         <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 line-clamp-2">{entry.description}</p>
                       </div>
-                      <button disabled={imported} onClick={() => importCatalogCapability(entry.id)} className={`px-3 py-1.5 rounded-lg text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-blue-500 ${imported ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                      <button disabled={imported} onClick={() => importCatalogCapability(entry.id)} className={`px-3 py-1.5 rounded-lg text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-amber-500 ${imported ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-amber-500 text-white hover:bg-amber-600'}`}>
                         {imported ? <CheckCircle2 className="w-3 h-3" /> : <DownloadCloud className="w-3 h-3" />}{imported ? 'Imported' : 'Import'}
                       </button>
                     </div>
