@@ -6,7 +6,7 @@
  * the nav (which renders a `packs.length` badge) mounts.
  */
 import { describe, expect, test } from "bun:test";
-import { normalizeCapabilities } from "./useSquad";
+import { normalizeCapabilities, normalizeCatalog } from "./useSquad";
 
 describe("normalizeCapabilities", () => {
   test("fills missing arrays for a partial/empty payload", () => {
@@ -33,5 +33,35 @@ describe("normalizeCapabilities", () => {
     const out = normalizeCapabilities(good);
     expect(out.packs.length).toBe(2);
     expect(out.sources).toBe(good.sources);
+  });
+});
+
+/**
+ * normalizeCatalog: the workbench nav renders `publicCatalog.length`, and the
+ * `/api/capability-catalog` handler wraps its rows in `{ catalog: [...] }`. A
+ * body without a `catalog` array — a bare array from an older daemon, an error
+ * body, `{}` — must not reach the state as `undefined`, or expanding the pane
+ * throws "can't access property length, publicCatalog is undefined".
+ */
+describe("normalizeCatalog", () => {
+  test("unwraps the { catalog } envelope", () => {
+    const rows = [{ id: "c1" }, { id: "c2" }];
+    expect(normalizeCatalog({ catalog: rows })).toBe(rows);
+  });
+
+  test("falls back to [] for a missing/empty/partial body", () => {
+    expect(normalizeCatalog({})).toEqual([]);
+    expect(normalizeCatalog(null)).toEqual([]);
+    expect(normalizeCatalog(undefined)).toEqual([]);
+  });
+
+  test("tolerates a bare array (drifted shape) by passing it through", () => {
+    const rows = [{ id: "c1" }];
+    expect(normalizeCatalog(rows)).toBe(rows);
+  });
+
+  test("coerces a non-array catalog field to []", () => {
+    expect(normalizeCatalog({ catalog: "oops" } as never)).toEqual([]);
+    expect(normalizeCatalog(42 as never)).toEqual([]);
   });
 });
