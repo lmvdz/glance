@@ -93,6 +93,12 @@ export interface LandOpts {
 	 * (non-conflicting) land still merges. Off (operator land) ⇒ resolve + merge as before.
 	 */
 	confirmResolved?: boolean;
+	/**
+	 * Stale-branch gate (default ON): refuse to CLEANLY merge a branch whose fork point is behind
+	 * main when both sides edit the same file(s) — the silent-clobber case. Pass false on a force-land
+	 * (mirrors how force skips the proof gate). OMP_SQUAD_STALE_GATE=0 disables it globally.
+	 */
+	staleGate?: boolean;
 }
 
 /**
@@ -304,6 +310,17 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 		return { ok: false, retryable: true, committed, merged: false, message, detail: `main checkout ${repo} has uncommitted tracked changes — refusing to land ${branch} (a failed-gate rollback would discard them); commit or stash them first` };
 	}
 
+	// Stale-branch probe (visual-plan-blocks incident): a branch whose fork point is behind main AND
+	// whose diff touches files main has since changed is a stale snapshot. Computed here, ENFORCED
+	// only on the textually-clean --no-ff path below: a clean merge of such a branch silently reverts
+	// newer main work (the branch rewrites a region main evolved elsewhere in the same file) and the
+	// acceptance gate proves only "tests pass", not "nothing regressed semantically". A CONFLICTING
+	// stale branch keeps flowing to attemptAutoResolve — rebasing replays its commits so the same-file
+	// drift surfaces as conflicts the resolver must consciously resolve, then gate + reviewer prove it.
+	// A fast-forward can't be stale (main hasn't moved). Force-land (staleGate:false) skips this
+	// like the proof gate; OMP_SQUAD_STALE_GATE=0 disables it.
+	const staleReason = opts.staleGate !== false && staleGateEnabled() ? await staleBranchReason(repo, branch) : undefined;
+
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the
 	// gate to run after merge (caller override wins; undefined ⇒ auto-detect; empty ⇒ skip).
 	const head0 = (await git(["rev-parse", "HEAD"], repo)).stdout;
@@ -354,7 +371,15 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 
 	// Diverged → real merge commit.
 	const merge = await git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo);
-	if (merge.code === 0) return verifyMerged(`merged ${branch}`, () => git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo));
+	if (merge.code === 0) {
+		// Clean merge of a stale branch — the silent-clobber case the probe above exists for. Undo the
+		// merge (main was clean; this mirrors the failed-verify rollback) and refuse with the specifics.
+		if (staleReason) {
+			await git(["reset", "--hard", head0], repo).catch(() => {});
+			return { ok: false, committed, merged: false, message, detail: staleReason };
+		}
+		return verifyMerged(`merged ${branch}`, () => git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo));
+	}
 
 	// Conflict — abort to leave main clean at head0, then try automated resolution (#12) if armed.
 	await git(["merge", "--abort"], repo).catch(() => undefined);
@@ -376,6 +401,43 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 /** On by default; set OMP_SQUAD_AUTORESOLVE=0 to disable automated conflict resolution during a land. */
 function autoresolve(): boolean {
 	return process.env.OMP_SQUAD_AUTORESOLVE !== "0";
+}
+
+/** On by default; set OMP_SQUAD_STALE_GATE=0 to allow stale branches to merge unchecked (old behavior). */
+function staleGateEnabled(): boolean {
+	return process.env.OMP_SQUAD_STALE_GATE !== "0";
+}
+
+/** Cap the file list in a stale-gate refusal so the land detail stays readable. */
+const STALE_OVERLAP_LIST_CAP = 8;
+
+/**
+ * Why `branch` is too stale to merge into `repo`'s HEAD, or undefined when it's safe.
+ * Stale ⇐ main gained commits since the branch's fork point (merge-base) AND at least one file is
+ * edited on BOTH sides. Non-overlapping parallel work merges as before; a branch forked from the
+ * current tip can never be stale. Probe failures (unborn HEAD, unrelated histories) return
+ * undefined — the merge path itself surfaces those, and this gate must never block on its own bugs.
+ */
+export async function staleBranchReason(repo: string, branch: string): Promise<string | undefined> {
+	const mb = await git(["merge-base", "HEAD", branch], repo);
+	if (mb.code !== 0 || !mb.stdout) return undefined;
+	const head = await git(["rev-parse", "HEAD"], repo);
+	if (head.code !== 0 || mb.stdout === head.stdout) return undefined; // fork point IS the tip — fresh
+	const mainDiff = await git(["diff", "--name-only", `${mb.stdout}..HEAD`], repo);
+	const branchDiff = await git(["diff", "--name-only", `${mb.stdout}..${branch}`], repo);
+	if (mainDiff.code !== 0 || branchDiff.code !== 0) return undefined;
+	const mainFiles = new Set(mainDiff.stdout.split("\n").filter(Boolean));
+	const overlap = branchDiff.stdout.split("\n").filter((f) => f && mainFiles.has(f));
+	if (overlap.length === 0) return undefined;
+	const behind = await git(["rev-list", "--count", `${mb.stdout}..HEAD`], repo);
+	const shown = overlap.slice(0, STALE_OVERLAP_LIST_CAP).join(", ");
+	const more = overlap.length > STALE_OVERLAP_LIST_CAP ? ` (+${overlap.length - STALE_OVERLAP_LIST_CAP} more)` : "";
+	return (
+		`stale-branch gate blocked ${branch}: main advanced ${behind.stdout || "?"} commit(s) past this branch's fork point ` +
+		`and both sides edit ${overlap.length} of the same file(s): ${shown}${more}. ` +
+		`Merging a stale snapshot can silently revert newer main work — rebase the branch onto current main and re-verify, ` +
+		`or force-land with a reason. (OMP_SQUAD_STALE_GATE=0 disables this gate.)`
+	);
 }
 
 /** Bound the rebase resolve loop so a pathological branch can't spin forever. */
