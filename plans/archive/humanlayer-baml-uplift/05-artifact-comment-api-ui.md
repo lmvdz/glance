@@ -1,6 +1,6 @@
 # Artifact comment API + SPA panel
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

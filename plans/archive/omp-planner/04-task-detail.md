@@ -1,6 +1,6 @@
 # Task detail — description + acceptance criteria + context preview + properties
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

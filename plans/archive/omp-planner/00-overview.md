@@ -1,6 +1,6 @@
 # Overview — omp-planner: piyaz-style project view + plannable task list
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 

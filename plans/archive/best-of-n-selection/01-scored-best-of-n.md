@@ -1,6 +1,6 @@
 # Scored best-of-N selection for workflow fan-out
 
-STATUS: open
+STATUS: cancelled
 
 > 2026-07-01 reconcile: no scoring/tournament code exists anywhere in src/workflow/ (verified;
 > the 2026-06-30 audit found the same). The dispatched fleet agent named in the overview never

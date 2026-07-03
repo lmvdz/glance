@@ -1,6 +1,6 @@
 # RPI feed-forward: reviewer comments steer the next phase
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

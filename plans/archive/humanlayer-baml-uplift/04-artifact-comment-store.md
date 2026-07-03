@@ -1,6 +1,6 @@
 # Artifact comment store (append-only event log)
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

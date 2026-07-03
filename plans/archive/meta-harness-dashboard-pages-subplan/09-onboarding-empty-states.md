@@ -1,5 +1,5 @@
 # Onboarding and Empty States
-STATUS: open
+STATUS: cancelled
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical

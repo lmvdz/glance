@@ -1,6 +1,6 @@
 # Off-dashboard, agent-initiated human escalation
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

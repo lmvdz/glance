@@ -1,5 +1,5 @@
 # assistant-ui Control Tower thread replacement
-STATUS: diverged
+STATUS: cancelled
 
 > 2026-07-01 reconcile: marked done but the assistant-ui approach was never adopted —
 > `@assistant-ui/*` is not a webapp dependency and none of the TOUCHES files exist (2026-06-30

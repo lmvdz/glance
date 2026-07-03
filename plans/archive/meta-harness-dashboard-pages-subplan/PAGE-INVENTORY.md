@@ -1,6 +1,6 @@
 # Meta-Harness Dashboard Page Inventory
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p0
 REPOS: omp-squad
 SOURCE: `plans/meta-harness/images/` (26 references) + live `webapp/src` surfaces
