@@ -23,6 +23,14 @@ sets this `commitWip` flag from the agent's status.)
 </Step>
 
 <Step>
+### Refuse a stale clean merge
+A branch cut from an old main can merge **without conflict** yet silently clobber code that
+evolved since. The stale-branch gate refuses such merges with a named reason; rebase (or run
+the resolve-conflict workflow) and re-land, or force-land with a reason.
+(`GLANCE_STALE_GATE=0` disables the gate globally; force skips it per-land.)
+</Step>
+
+<Step>
 ### Merge into main
 A **fast-forward** when the branch is a clean descendant of main (`git merge --ff-only`); a
 **merge commit** when main has diverged (`git merge --no-ff`). Nothing to merge (in-place agent,
@@ -34,9 +42,29 @@ or zero commits ahead) returns cleanly with no-op detail.
 After the merge, a gate runs against main — your `verify` override, else the repo's auto-detected
 acceptance command (empty string skips it). If it **exits non-zero, main is reset to its
 pre-merge HEAD** so it stays green; the branch keeps its commit so you can fix and re-land.
+The gate is **base-aware**: if the gate also fails at the pre-merge HEAD, the repo was already
+red at its base, so the merge is re-applied and the branch lands with a note — refusing would
+wedge every land on a brownfield repo. A branch that regresses a *green* base is still rolled
+back.
 </Step>
 
 </Steps>
+
+### How gates execute
+
+Gates run agent-authored test code, so they get a **secret-scrubbed env** by default
+(`GLANCE_*`/`OMP_SQUAD_*`, secret-shaped names like `*_API_KEY` / `*_TOKEN` / `*_SECRET`, and
+`DATABASE_URL` are removed; toolchain vars pass through). Name legitimately-needed vars in
+`GLANCE_GATE_ENV`. Set `GLANCE_GATE_SANDBOX=<image>` to run every verify/proof/regression gate
+inside `docker run --rm --network none` with only the worktree bind-mounted
+(`GLANCE_GATE_SANDBOX_NETWORK=bridge` for suites that need network).
+
+### The full-suite regression gate (opt-in)
+
+`GLANCE_REGRESSION_GATE=1` makes every land also prove the repo's **full detected suite** on
+the exact merged result — stricter than a per-feature acceptance gate, which can be narrower.
+Failure semantics stay base-aware: the failure sets at merged-HEAD and base are compared, and
+only **new** failures block the land; pre-existing ones allow a re-merge with a logged note.
 
 Lands are **serialized per repo** (an in-process promise chain keyed by repo path): two lands
 racing the same main checkout would interleave `git merge` and corrupt the index, so they queue —
@@ -59,7 +87,7 @@ member branch of a feature, fast-forward-first.
 
 <Callout type="info">
 A proof's gate fields (`ok`, `commit`) come solely from the deterministic acceptance command and
-HEAD. An optional browser-vision pass (only when a URL or `OMP_SQUAD_APP_URL` is set) just
+HEAD. An optional browser-vision pass (only when a URL or `GLANCE_APP_URL` is set) just
 appends screenshots as evidence — it can never flip the gate.
 </Callout>
 
@@ -75,7 +103,7 @@ The bundled **`resolve-conflict`** workflow resolves the conflict as a diffable 
 a black box:
 
 ```bash
-omp-squad add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
+glance add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
   --task "Make this branch land-able on main."
 ```
 
@@ -85,24 +113,46 @@ left with an intent-aware agent told to **combine both sides**, and a `goal_gate
 lives **on the branch**, so the eventual land stays a plain fast-forward and the resolved diff is
 reviewable in the Changes panel before main moves. See [Workflows](/docs/workflows).
 
-### `OMP_SQUAD_AUTORESOLVE` (in-process)
+### `GLANCE_AUTORESOLVE` (in-process, on by default)
 
 <Callout type="warn">
-**Off by default — opt in with `OMP_SQUAD_AUTORESOLVE=1`.** When set, a conflicting `landAgent`
-rebases the branch onto main, hands each conflicted file to a resolver (default: a one-shot
-`omp -p` agent), then **proves** the result — the full verify gate **and** an independent
-reviewer pass must both approve — before completing the land. **Any failing step rolls `main`
-back** to where it was; an unproven resolution is never kept. It runs only when the worktree is
-clean, so a live agent's uncommitted edits are never clobbered.
+**On by default — set `GLANCE_AUTORESOLVE=0` to disable.** A conflicting `landAgent` rebases
+the branch onto main, hands each conflicted file to a resolver (default: a one-shot `omp -p`
+agent), then **proves** the result — the full verify gate **and** an independent reviewer pass
+must both approve — before completing the land. **Any failing step rolls `main` back** to where
+it was; an unproven resolution is never kept. It runs only when the worktree is clean, so a
+live agent's uncommitted edits are never clobbered.
 </Callout>
 
-This carries a real ceiling: a verify gate plus reviewer can still miss a *semantic* conflict
-that is textually clean and compiles — which is why it's opt-in.
+Because a verify gate plus reviewer can still miss a *semantic* conflict that is textually
+clean and compiles, a land that had to auto-resolve is **staged, not merged**, by default
+(`GLANCE_AUTORESOLVE_CONFIRM`): the branch is rebased + resolved, and the agent is flagged
+**✓ ready to land** for a one-tap human Land. Set `GLANCE_AUTORESOLVE_CONFIRM=0` to auto-merge
+resolved conflicts too.
 
-| Env var | Effect |
-|---|---|
-| `OMP_SQUAD_AUTORESOLVE` | Enable `landAgent`'s automated conflict resolver (off by default) |
-| `OMP_SQUAD_REPAIR_BUDGET` | Red-gate retry budget before escalating (default `3`) — see [Autonomy](/docs/architecture/autonomy) |
+## Landing automatically
+
+`GLANCE_AUTOLAND` (on by default) lets a successful workflow run land its own branch the moment
+it goes green — intake → build → verify → **land** → resolve-on-conflict, end to end. Two
+safety valves shape it:
+
+- **`GLANCE_LAND_CONFIRM`** (on by default) — a green verify **stages** the branch for a
+  one-tap Land instead of blind-merging into the shared checkout. Set `=0` for fully unattended
+  merges.
+- **`GLANCE_AUTOLAND_FAIL_CAP`** (default 3) — a branch whose auto-land keeps failing the gate
+  is parked (branch-keyed, restart-safe ledger) instead of churning main forever; the Observer
+  files a bug for it.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `GLANCE_AUTOLAND` | on | A successful workflow run auto-lands its own branch |
+| `GLANCE_LAND_CONFIRM` | on | Green verify stages a one-tap Land instead of auto-merging |
+| `GLANCE_AUTORESOLVE` | on | `landAgent`'s automated conflict resolver |
+| `GLANCE_AUTORESOLVE_CONFIRM` | on | An auto-resolved land is staged, never merged unattended |
+| `GLANCE_STALE_GATE` | on | Refuse clean merges from branches stale against evolved main |
+| `GLANCE_REGRESSION_GATE` | off | Full-suite gate on the merged result; new failures block |
+| `GLANCE_AUTOLAND_FAIL_CAP` | `3` | Consecutive failed auto-lands before the branch is parked |
+| `GLANCE_REPAIR_BUDGET` | `3` | Red-gate retry budget before escalating — see [Autonomy](/docs/architecture/autonomy) |
 
 ---
 

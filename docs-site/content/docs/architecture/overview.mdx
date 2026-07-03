@@ -5,7 +5,7 @@ description: One core, two thin clients — how SquadManager, SquadServer, and S
 
 import { File, Folder, Files } from 'fumadocs-ui/components/files';
 
-omp-squad runs as **one process**. A single `SquadManager` owns the fleet — the
+glance runs as **one process**. A single `SquadManager` owns the fleet — the
 roster, every agent's derived status, and the transcript — and spawns each agent as
 a driver child. Two surfaces render that state: a terminal **TUI** (`src/tui.ts`)
 that consumes the manager in-process, and a web **dashboard** (`src/web/index.html`)
@@ -13,7 +13,7 @@ that is a WebSocket client of the same stream, bridged by `SquadServer`
 (`src/server.ts`). Both are thin clients of one core.
 
 ```text title="How it works"
-        omp-squad (one process)
+        glance (one process)
         ┌─────────────────────────────────────────────┐
         │  SquadManager  ── roster, status, transcript │
         │     │                                        │
@@ -54,7 +54,7 @@ There is exactly one event vocabulary, and both surfaces speak it.
 
 **TUI** — `SquadTui` subscribes to the manager's events directly (no socket, no
 serialization). It renders a two-level board (`buildBoard`) and feeds keystrokes back
-as commands. It is optional: `omp-squad up --no-tui` runs headless (web only).
+as commands. It is optional: `glance up --no-tui` runs headless (web only).
 
 **Web** — `SquadServer` wraps the same manager with `Bun.serve`. On the manager's
 `event`, `broadcast()` JSON-stringifies the `SquadEvent` to every connected WebSocket

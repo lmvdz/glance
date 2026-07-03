@@ -5,11 +5,20 @@ description: The browser command center — projects, agent sessions, the Featur
 
 import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 
-The web dashboard (`src/web/index.html`) is a **zero-dependency vanilla SPA** served by
-`SquadServer` (`src/server.ts`) and driven entirely by the `SquadEvent` WebSocket stream — the
-same stream the [TUI](/docs/guides/tui) consumes. It is an **organizational command center**,
-not a flat list: agents are grouped into projects, and three fleet-wide views let you supervise
-a whole squad by exception. `omp-squad open` prints its URL.
+glance ships **two web dashboards**, both served by `SquadServer` (`src/server.ts`) and driven
+entirely by the `SquadEvent` WebSocket stream — the same stream the [TUI](/docs/guides/tui)
+consumes. `glance open` prints the URL.
+
+- **The React dashboard** (`webapp/` — Vite + React 19 + Tailwind) is the full-featured UI.
+  It is served at `/` when it's been built (`cd webapp && bun install && bun run build`) **and**
+  the daemon runs with `GLANCE_WEBAPP=1`. See [the React dashboard](#the-react-dashboard) below
+  for what it adds.
+- **The fallback SPA** (`src/web/index.html`) is a **zero-dependency vanilla single file** —
+  no build step, always available, and the default when the flag or the build is absent. Most
+  of this page documents it; the concepts (projects, queue, race, landing) carry over.
+
+Either way the dashboard is an **organizational command center**, not a flat list: agents are
+grouped into projects, and fleet-wide views let you supervise a whole squad by exception.
 
 Everything is reactive: a `roster` snapshot on connect, then `agent` / `transcript` /
 `removed` / `commands` / `log` / `features-changed` deltas. Your commands ride the same socket
@@ -25,7 +34,7 @@ header and the WebSocket as a `?token=` query param. Without one you get a sign-
 ## Layout
 
 ```text
-┌─ header ── ☰  omp-squad command center   live   N projects · N agents   🔔 ⌘K ⤴Upgrade +New ─┐
+┌─ header ── ☰  glance command center   live   N projects · N agents   🔔 ⌘K ⤴Upgrade +New ─┐
 ├─ sidebar ─────────────────┬─ content ──────────────────────────────────────────────────────┤
 │ ⌂ Overview                │ Projects / <project> / <agent>          ← breadcrumb            │
 │ ▦ Features                │                                                                  │
@@ -143,6 +152,35 @@ the changes live in the agent's isolated worktree, not your main checkout, until
 
 </Tab>
 </Tabs>
+
+## The React dashboard
+
+With `GLANCE_WEBAPP=1` and a built `webapp/dist`, the React app replaces the fallback shell and
+adds the newer surfaces on top of everything above:
+
+- **Factory status strip** — the per-loop `off / not-armed / idle / moving` readout from
+  `GET /api/factory/status`, so an idle-but-alive fleet visibly breathes and a dead
+  prerequisite is named.
+- **Synthesis dashboard** — *Needs you*, capacity, hotspots, autonomy, and coordination
+  insights folded from the roster and receipts.
+- **Task detail as a context surface** — feature descriptions, acceptance criteria, decisions,
+  and relationships persist through `PATCH /api/features/:id`; plan docs render as GitHub-flavored
+  markdown in a split reading pane; the plan's dependency DAG is editable in the **Plan flow**
+  view; selection-anchored **annotations** (`/api/features/:id/annotations`) broadcast live and
+  can be sent to an agent.
+- **Knowledge** — BM25 search over the context fabric (`GET /api/fabric/search`).
+- **Fleet Pulse / Graph** — the temporal commit-graph view with attribution and provenance
+  (`/api/graph*`).
+- **Heat & activity** — code-activity heat maps (`/api/heat`, `/api/activity/heatmap`).
+- **Capabilities** — browse the catalog, import sources, install packs (see
+  [Capabilities](/docs/integrations/capabilities)).
+- **Assistant console** — a chat-first console agent (`POST /api/console`); durable work starts
+  only when you explicitly ask.
+- **Settings** — feature-flag toggles persisted to `<stateDir>/settings.json`, plus
+  Account / Organization / Members panels in DB mode (GitHub login, WorkOS SSO + SCIM).
+
+For live-reload development, `cd webapp && bun run dev` serves the app with HMR and proxies
+`/api` + `/ws` to a daemon on `127.0.0.1:7878`.
 
 ## The global views
 

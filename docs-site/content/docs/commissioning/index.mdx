@@ -5,7 +5,7 @@ description: Instead of hiring a human, the OS authors its own scoped Flue worke
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 
-In a human org a job opens, someone is hired, and they're onboarded. omp-squad
+In a human org a job opens, someone is hired, and they're onboarded. glance
 replaces the hire with **the OS authoring its own specialized worker**. A fuzzy job
 spec goes in; a builder agent writes a small, scoped, deployable [Flue](https://flueframework.com)
 worker; and — only if the worker passes an **acceptance gate** — it's onboarded into the
@@ -65,7 +65,7 @@ absent → the candidate was rejected and `member` is omitted.
 ## The CLI
 
 ```bash title="Deterministic worker (no model)"
-omp-squad commission extract-emails \
+glance commission extract-emails \
   --purpose "Extract email addresses from payload.text; return { emails, count }." \
   --accept-payload '{"text":"a@x.io b@y.org"}' --accept-expect '{"count":2}'
 ```

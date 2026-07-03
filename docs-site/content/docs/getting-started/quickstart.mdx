@@ -1,29 +1,29 @@
 ---
 title: Quickstart
-description: Start the omp-squad daemon, spawn an agent in a worktree, steer it, open the dashboard, and run the end-to-end model-driven smoke test.
+description: Start the glance daemon, spawn an agent in a worktree, steer it, open the dashboard, and run the end-to-end model-driven smoke test.
 ---
 
 import { Step, Steps } from 'fumadocs-ui/components/steps';
 
 This walks the full loop: start the daemon, spawn an agent, watch it, steer it,
-and tear it down. It assumes `omp-squad` is on your `PATH` (otherwise read every
+and tear it down. It assumes `glance` is on your `PATH` (otherwise read every
 command as `bun src/index.ts <cmd>` — see [Installation](/docs/getting-started/installation)).
 
 <Steps>
 <Step>
 ### Start the daemon
 
-`omp-squad up` starts one long-running process that opens the TUI and serves the
+`glance up` starts one long-running process that opens the TUI and serves the
 web dashboard (default port `7878`).
 
 ```bash
-omp-squad up
+glance up
 ```
 
 On a server (or any time you only want the web UI), run it headless:
 
 ```bash
-omp-squad up --no-tui
+glance up --no-tui
 ```
 
 <Callout type="info">
@@ -40,7 +40,7 @@ From another shell, `add` cuts a fresh worktree of a repo and launches an agent 
 it. `--task` is the instruction sent once the agent is ready.
 
 ```bash
-omp-squad add ~/code/myproject --name auth-refactor \
+glance add ~/code/myproject --name auth-refactor \
   --task "Refactor the auth module to use the new session API."
 ```
 
@@ -54,11 +54,11 @@ see [Spawning agents](/docs/guides/spawning).
 ### See the roster
 
 ```bash
-omp-squad list
+glance list
 ```
 
 One row per agent: status, name, branch, a `⛔N` badge when it's blocked on input,
-and its current activity. (`omp-squad ls` is an alias.)
+and its current activity. (`glance ls` is an alias.)
 </Step>
 
 <Step>
@@ -68,17 +68,17 @@ and its current activity. (`omp-squad ls` is an alias.)
 pending request. Use the `id` printed by `add` (or shown in `list`).
 
 ```bash
-omp-squad prompt auth-refactor-<id> "Also update the tests."
+glance prompt auth-refactor-<id> "Also update the tests."
 ```
 
-(`omp-squad say` is an alias.)
+(`glance say` is an alias.)
 </Step>
 
 <Step>
 ### Open the dashboard
 
 ```bash
-omp-squad open
+glance open
 ```
 
 This prints the dashboard URL (default `http://127.0.0.1:7878`). The **+ Add
@@ -90,11 +90,11 @@ does — see the [web dashboard guide](/docs/guides/web-dashboard).
 ### Remove an agent
 
 ```bash
-omp-squad rm auth-refactor-<id> --delete-worktree
+glance rm auth-refactor-<id> --delete-worktree
 ```
 
 Without `--delete-worktree` the agent is removed from the roster but its worktree
-is left on disk. (`omp-squad remove` is an alias.)
+is left on disk. (`glance remove` is an alias.)
 </Step>
 </Steps>
 
@@ -105,10 +105,10 @@ works, not just that the suite passes. It spawns a `yolo`-approval agent with a
 one-shot task and checks the file it was told to write.
 
 ```bash
-omp-squad up --no-tui &
-omp-squad add /path/to/git/repo --name demo --approval yolo \
+glance up --no-tui &
+glance add /path/to/git/repo --name demo --approval yolo \
   --task 'Create a file proof.txt containing OK via a shell command, then stop.'
-omp-squad list           # watch demo go working → idle
+glance list           # watch demo go working → idle
 cat ~/.omp/squad/worktrees/<repo>-squad-demo/proof.txt   # → OK
 ```
 

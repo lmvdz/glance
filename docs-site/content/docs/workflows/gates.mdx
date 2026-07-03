@@ -111,12 +111,12 @@ because the fix-up cap is exhausted — fails the whole run, which is the point:
 not be reported as a green run.
 </Callout>
 
-This goal-gate loop is exactly what `omp-squad add --verify "<cmd>"` synthesizes around an
+This goal-gate loop is exactly what `glance add --verify "<cmd>"` synthesizes around an
 ordinary task. See the [bundled workflows](/docs/workflows/bundled) for the full graph.
 
 ## The codefix pre-pass
 
-The verify workflow synthesized by `omp-squad add --verify` includes a zero-token **codefix
+The verify workflow synthesized by `glance add --verify` includes a zero-token **codefix
 pre-pass** that runs before the AI fixup tier. `codefix` is a deterministic script
 (`src/workflow/codefix.ts`) that applies mechanical, zero-LLM fixes (e.g. unused-import removal,
 straightforward lint violations) to the working directory. It runs as a `command` node with
@@ -135,8 +135,8 @@ verify ─(fail)→ codefix → fixup → escalate → verify
 - Each tier overflows to the next when its visit budget exhausts.
 
 **Previously**, the codefix script was resolved relative to the calling process's working
-directory, which is the **target repo**, not the omp-squad install directory. Since
+directory, which is the **target repo**, not the glance install directory. Since
 `src/workflow/codefix.ts` does not exist in a target repo, the script silently failed to
 launch on every gate failure — every failure went straight to the paid AI fixup tier. The path
-is now resolved via `import.meta.dir` (the `src/workflow/` directory of the omp-squad install)
-so it is found correctly when omp-squad is run against any external repo.
+is now resolved via `import.meta.dir` (the `src/workflow/` directory of the glance install)
+so it is found correctly when glance is run against any external repo.

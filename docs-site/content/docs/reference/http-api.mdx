@@ -7,14 +7,37 @@ description: Every route and the WebSocket protocol served by SquadServer, the d
 
 ## Authentication
 
-When the daemon was started with a token (always, in normal operation — it auto-generates one), every `/api/*` request and the `/ws` handshake must present it, either as `Authorization: Bearer <token>` or a `?token=<token>` query parameter. Missing or wrong ⇒ `401 unauthorized`.
+**File mode** (no `DATABASE_URL`): every `/api/*` request and the `/ws` handshake must present the daemon's bearer token, either as `Authorization: Bearer <token>` or a `?token=<token>` query parameter. Missing or wrong ⇒ `401 unauthorized`. **DB mode**: httpOnly cookie sessions issued by BetterAuth replace the token (`/api/auth/*` is delegated to the BetterAuth handler), and all non-GET requests also pass an Origin check.
 
-The bootstrap surface loads **without** a token so the PWA can install before sign-in:
+Either way, the resolved identity maps to a **role tier** — `viewer ⊂ operator ⊂ admin` (`src/authz.ts`). The default rule is *GET → viewer, non-GET → operator*; exceptions are flagged per-route below (`/api/upgrade`, feature-flag writes, capability mutations, land/vision are **admin**).
 
-- `GET /` and `GET /index.html` — the SPA shell.
-- `GET /manifest.webmanifest`, `/sw.js`, `/icon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png` — the public PWA assets.
+The bootstrap surface loads **without** auth so the PWA can install before sign-in:
+
+- `GET /` and `GET /index.html` — the SPA shell (the built React `webapp/dist` when `GLANCE_WEBAPP=1`, else the zero-build fallback), plus `/assets/*` for the built bundle.
+- `GET /manifest.webmanifest`, `/sw.js`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png` — the public PWA assets.
+- `GET /api/auth/mode` — pre-login probe: file vs DB mode, `allowSignup`, configured social providers, SSO.
+- `GET /llms.txt` and `GET /openapi.json` — machine-readable capability-API discovery.
+- `GET /feedback/widget.js` and `POST /api/feedback/items` — the public feedback intake (only when `GLANCE_FEEDBACK=1`; rate-limited per campaign + IP).
+- `POST /api/workos/webhook` — the WorkOS Directory Sync (SCIM) webhook, HMAC-verified with `WORKOS_WEBHOOK_SECRET` instead of a session.
 
 Any other unmatched path returns `404 not found`.
+
+## Identity, orgs & SSO
+
+File mode returns `{ mode: "file" }` from `/api/me`; the rest of this section is DB mode.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/me` | Current user + active org + bridged role. |
+| GET / PATCH | `/api/org` | Read / rename the active org (PATCH is admin). |
+| GET | `/api/org/members` | List members. **Admin.** |
+| POST | `/api/org/members/invite` | Invite a member by email. **Admin.** |
+| POST | `/api/org/members/role` | Change a member's role. **Admin.** |
+| POST | `/api/org/members/remove` | Remove a member. **Admin.** |
+| GET / POST | `/api/org/join-policy` | Read / set the WorkOS domain-join policy. **Admin.** |
+| GET | `/api/workos/join-requests` | Pending domain-match join requests. **Admin.** |
+| POST | `/api/workos/join-requests/decide` | Approve / deny a join request. **Admin.** |
+| POST | `/api/workos/sync` | SSO onboarding: map memberships, set the active org. |
 
 ## Auth & push
 
@@ -33,6 +56,44 @@ Any other unmatched path returns `404 not found`.
 | GET | `/api/info` | Daemon working directory. | `{ cwd }` |
 | GET | `/api/version` | Served-UI fingerprint (drives stale-tab self-refresh). | `{ version }` |
 | GET | `/api/health` | Liveness + counts. | `{ ok: true, agents, projects, uptimeSec }` |
+| GET | `/api/models` | Available model options (live omp discovery + configured fallbacks). | model list |
+| GET | `/api/profiles` | Agent profiles. | profile list |
+| GET | `/api/workflows` | Workflow definitions + live runs snapshot. | workflow snapshot |
+| GET | `/api/settings` | Runtime feature-flag states (env vs saved). | settings payload |
+| POST | `/api/settings/feature-flags` | Persist a feature-flag toggle to `<stateDir>/settings.json`. **Admin.** | `{ ok }` |
+| GET | `/api/usage` | Fleet usage / cost rollup. | usage payload |
+
+## Fleet insight & provenance
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/factory/status` | Per-loop factory status: `off` / `not-armed` / `idle` / `moving` — is the autonomy layer armed, fueled, and doing work? |
+| GET | `/api/automation` | Background-loop observability (see below). |
+| GET | `/api/audit` | Append-only fleet-action audit trail (`?limit=&actor=&action=&target=`). |
+| GET | `/api/trace/:id` | Audit/diagnostics tree for a feature (`feat:<id>`) or run (`run:<agentId>:<runId>`) — receipts keep lossless rollups, fine spans are tail-sampled. |
+| GET | `/api/heat` | Code-activity heat across active worktrees. |
+| GET | `/api/activity/heatmap` | Fleet activity heatmap. |
+| GET | `/api/graph` | Commit graph for an allowed repo (`403` otherwise). |
+| GET | `/api/graph/commit` · `/api/graph/attribution` · `/api/graph/provenance` | Commit detail, attribution, and provenance payloads for the graph view. |
+| GET | `/api/opportunities` | Open `[opportunity]` pattern-cluster issues. |
+| GET | `/api/action-items` | Action items. |
+| GET | `/api/governance` | Governance snapshot. |
+| GET | `/api/fabric/search` | BM25 search over the context fabric / knowledge base (`?q=`). |
+
+## Capabilities
+
+Checksum-pinned packs of profiles/workflows/recipes. GET routes are viewer-tier; every mutation is **admin**.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/capabilities` | Current capability snapshot. |
+| GET | `/api/capability-catalog` | The built-in public catalog. |
+| GET / POST | `/api/capability-sources` | List / import a trusted source manifest (or `{ catalogId }` from the catalog). |
+| GET / POST | `/api/capability-packs` | List / mutate packs (`/api/capability-packs/:id` for one). |
+| GET / POST | `/api/capability-installs` | List / install a pack (`/api/capability-installs/:id` for one). |
+| GET | `/api/capability-audit` · `/api/capability-verifications` | Audit log and verification results. |
+| GET | `/api/capability-discovery` | Machine-readable discovery descriptor (also `/llms.txt`, `/openapi.json`). |
+| GET | `/api/federation/capabilities` | Capability metadata advertised to federation peers. |
 
 ## Per-agent
 
@@ -52,7 +113,7 @@ Any other unmatched path returns `404 not found`.
 
 **`/land`** accepts an optional JSON body `{ message?, force? }`. Unless `force` is `true`, a proof gate runs first; if it fails the route returns `409` with `{ ok: false, committed: false, merged: false, message, detail }`. Work-in-progress is committed only when the agent is not busy (`working`/`starting`/`input`). On a successful land the agent's tracking Plane issue is closed (best-effort, idempotent).
 
-**`/vision`** takes `{ url? }`; absent that it falls back to `$OMP_SQUAD_APP_URL`. With neither it returns `422`. It is **admin-tier** — it drives the daemon's headless browser, which reaches the daemon's network position. To stop that becoming an SSRF vector, the target is validated: only `http(s)` is allowed, and the host is DNS-resolved and **rejected with `400`** if it lands on a private / loopback / link-local / reserved range (RFC1918, `127.0.0.0/8`, `169.254.0.0/16` incl. the cloud-metadata IP, `::1`, `fc00::/7`, `fe80::/10`, …). The one exception is the origin of `$OMP_SQUAD_APP_URL`, which is allowlisted — set it to screenshot a trusted local app (e.g. `http://localhost:3000`).
+**`/vision`** takes `{ url? }`; absent that it falls back to `$GLANCE_APP_URL`. With neither it returns `422`. It is **admin-tier** — it drives the daemon's headless browser, which reaches the daemon's network position. To stop that becoming an SSRF vector, the target is validated: only `http(s)` is allowed, and the host is DNS-resolved and **rejected with `400`** if it lands on a private / loopback / link-local / reserved range (RFC1918, `127.0.0.0/8`, `169.254.0.0/16` incl. the cloud-metadata IP, `::1`, `fc00::/7`, `fe80::/10`, …). The one exception is the origin of `$GLANCE_APP_URL`, which is allowlisted — set it to screenshot a trusted local app (e.g. `http://localhost:3000`).
 
 ## Features
 
@@ -69,8 +130,32 @@ Any other unmatched path returns `404 not found`.
 | POST | `/api/features/:id/module` | Create a Plane module for the feature. | module; `501` if Plane not configured |
 | POST | `/api/features/:id/verify` | Run the feature's verification. | verify result; `404` if missing |
 | GET | `/api/features/:id/pipeline?repo=` | Feature, readiness, plan concerns, linked issues, comments, and agent ids. | `{ feature, readiness, concerns, documents, issues, comments, agentIds }`; `404` if missing |
+| GET | `/api/features/archived` | Archived features. | `FeatureDTO[]` |
+| GET / POST | `/api/features/:id/annotations` | Anchored plan-doc annotations (selection-anchored review comments). | annotation list / created annotation |
+| POST | `/api/features/:id/annotations/:aid/resolve` | Resolve an annotation. | `{ ok }` |
+| POST | `/api/features/:id/annotations/:aid/send` | Send an annotation to an existing agent or a new planner agent. | `{ ok }` |
 
 The spawn-and-link branch of `/api/features/:id/agents` creates the agent with `approvalMode: "yolo"` and `track: true` and links it to the feature.
+
+## Comments, console & tasks
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET / POST | `/api/comments` | Task comments (fed into feature workflow prompts; best-effort mirrored to linked Plane issues). `/api/comments/:id` addresses one. |
+| POST | `/api/console` | The dashboard's Assistant chat — a chat-first console agent; durable work starts only on explicit ask. **Operator.** |
+| * | `/api/tasks/*` | Task sub-resources for the dashboard task model (GET viewer / mutate operator). |
+
+## Feedback intake
+
+Public intake (no auth, only when `GLANCE_FEEDBACK=1`): `POST /api/feedback/items` (rate-limited per campaign + IP, `201` on success) and `GET /feedback/widget.js`. Authenticated review:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET / POST | `/api/feedback/campaigns` | List / create campaigns (`name`, `repo`, `token`, `allowedOrigins?`, `rewardCents?`). Only the token hash is stored. |
+| GET | `/api/feedback/items` · `/api/feedback/items/:id` | Review submitted items. |
+| POST | `/api/feedback/items/:id/validate` | Add a validation vote / triage decision. |
+| POST | `/api/feedback/items/:id/promote` | Promote an accepted item to Plane. |
+| POST | `/api/feedback/items/:id/reward/approve` · `…/void` · `…/mark-paid` | Reward lifecycle (paid via Tremendous when configured, else the manual ledger). |
 
 ## Presence, leases & federation
 
@@ -80,6 +165,7 @@ The spawn-and-link branch of `/api/features/:id/agents` creates the agent with `
 | GET | `/api/leases?repo=` | File leases for a repo (defaults to the daemon cwd). | `LeaseEntry[]` |
 | GET | `/api/fabric?repo=` | Agent fabric view for a repo including live leases. | fabric payload |
 | GET | `/api/federation` | Roster-of-rosters: self + peers + branch collisions. | `FederationSnapshot` |
+| POST | `/api/federation/command` | Send an addressed remote command to a peer operator's daemon (`{ to, cmd }`); the receiver re-authorizes via whois-verified actor + RBAC. Audited as `federation.command`. | `{ ok }`; `403` on RBAC denial |
 
 **`/api/leases`** returns `LeaseEntry[]` — soft advisory file-edit claims keyed by `(repo, file, session)`. Each entry carries `{ id, repo, file, operator, session, host, since, heartbeat }`. In file mode, the full machine-wide registry is returned for the requested repo (or `cwd`). In DB-registry mode the result is scoped to repos the calling org's fleet actually works on — another org's leases are never visible.
 
@@ -175,7 +261,11 @@ type SquadEvent =
 	| { type: "transcript"; id: string; entry: TranscriptEntry }
 	| { type: "log"; level: "info" | "warn" | "error"; text: string }
 	| { type: "commands"; id: string; commands: CommandInfo[] }
-	| { type: "features-changed" };
+	| { type: "features-changed" }
+	| { type: "comment"; comment: ArtifactCommentDTO }
+	| { type: "comment-resolved"; id: string; resolvedAt: number }
+	| { type: "audit"; entry: AuditEntry }
+	| { type: "automation"; event: AutomationEvent };
 ```
 
 ### Client → server

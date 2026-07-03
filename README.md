@@ -1,13 +1,12 @@
 # glance
 
-**Manage a fleet of [Oh My Pi](https://omp.sh) agents running in parallel — one per git worktree — from a terminal TUI *and* a web dashboard.**
+**Oversight for a fleet of [Oh My Pi](https://omp.sh) coding agents running in parallel — one per git worktree — from a terminal TUI and a web dashboard. You glance, and you know.**
 
-Like `claude agents`, but for the omp harness, and built to go further. The end goal is a
-single **control plane you run wherever development happens** — a web UI where you coordinate
-your own agents *and* any linked agents across your organization. Every agent is an isolated
-worktree process; you see at a glance **what each is doing and which need input**, and you can
-dive into any one and steer it. Cross-org coordination is the [Phase 2](#phase-2--cross-operator-federation)
-federation layer — the same UI, with teammates' agents in the roster.
+The end goal is a single **control plane you run wherever development happens**: agents build,
+verify, and land work autonomously; you supervise by exception. Every agent is an isolated
+worktree process; you see at a glance what each is doing and which need input, and you can
+dive into any one and steer it. Cross-operator federation puts your teammates' agents in the
+same roster.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -23,23 +22,26 @@ federation layer — the same UI, with teammates' agents in the roster.
 └───────────────────────────────┴──────────────────────────────────────────┘
 ```
 
----
+> Formerly **omp-squad**. Both binaries are installed (`glance` and `omp-squad`), the canonical
+> env prefix is `GLANCE_*`, and every legacy `OMP_SQUAD_*` variable keeps working unchanged.
 
 ## Why
 
-You're running several coding agents at once (a refactor here, a bug hunt there, a
-spike in a third repo). Without a control plane you lose track of which is busy, which
-finished, and **which is blocked waiting for you**. glance is that control plane:
+You're running several coding agents at once (a refactor here, a bug hunt there, a spike in a
+third repo). Without a control plane you lose track of which is busy, which finished, and
+**which is blocked waiting for you**. glance is that control plane:
 
-- **Isolation by default** — each agent works in its own `git worktree`, so parallel
-  agents never clobber each other's files.
+- **Isolation by default** — each agent works in its own `git worktree`, so parallel agents
+  never clobber each other's files.
 - **One glance** — a live status board: `working / idle / needs-input / error`, current
   activity, todo progress, context-window usage.
-- **Never miss a blocked agent** — approval prompts, the `ask` tool, and host-tool calls
-  surface as **needs-input** with inline answer controls.
-- **Steer from anywhere** — send instructions, answer prompts, interrupt, restart, or
-  kill any agent from the TUI or the browser. Both surfaces are thin clients of the same
-  core, so they stay in sync.
+- **Never miss a blocked agent** — approval prompts, questions, and host-tool calls surface as
+  **needs-input** with inline answer controls, and push a notification to your phone.
+- **Steer from anywhere** — prompt, answer, interrupt, restart, or kill any agent from the TUI
+  or the browser; both are thin clients of the same core and stay in sync.
+- **Work lands itself** — a finished branch is verified by deterministic gates and staged (or
+  merged) to main with no one typing; a human is summoned only when the system can't prove its
+  own work.
 
 ## How it works
 
@@ -57,29 +59,24 @@ finished, and **which is blocked waiting for you**. glance is that control plane
         └─────────────────────────────────────────────┘
 ```
 
-- Each agent is a real `omp --mode rpc` child. We speak omp's documented newline-JSON
-  RPC protocol: send `prompt` / `steer` / `abort` / `get_state`, receive the
-  `agent_start … message_update … agent_end` event stream.
-- **Status** is derived from that stream: `agent_start`→working, `agent_end`→idle, a
-  blocking `extension_ui_request` or `host_tool_call`→**needs-input**, crash→error.
-- The **TUI** consumes the manager in-process; the **web dashboard** is a WebSocket
-  client of the same `SquadEvent` stream. Anything you do in one shows up in the other.
-- Roster config persists to `~/.omp/squad/state.json`; worktrees live under
-  `~/.omp/squad/worktrees/`.
+Each agent is a real `omp --mode rpc` child speaking omp's newline-JSON RPC protocol. Status is
+derived from its event stream; the TUI consumes the manager in-process and the web dashboard is
+a WebSocket client of the same event stream. Roster state persists under `~/.omp/squad`
+(override with `GLANCE_STATE_DIR`). Agents survive daemon restarts: each runs under a detached
+host process the daemon reconnects to.
 
 ## Install
 
 Requires [Bun](https://bun.sh) ≥ 1.3.14 and `omp` on your `PATH`.
 
 ```bash
-cd glance
 bun install
-bun link            # optional: makes `glance` global
+bun link            # optional: makes `glance` (and `omp-squad`) global
 ```
 
 Run without linking via `bun src/index.ts <cmd>`.
 
-## Usage
+## Quickstart
 
 ```bash
 # Start the daemon — opens the TUI and serves the web dashboard (default :7878)
@@ -89,16 +86,6 @@ glance up
 glance up --no-tui
 ```
 
-> One daemon per state dir. `up` takes a single-writer lock (`daemon.lock` in the state dir,
-> default `~/.omp/squad`) before touching disk; a second `up` against the same dir refuses to
-> start (exit 1) rather than race on `state.json`, receipts, and agent sockets. A self-upgrade
-> hands the lock off cleanly, and a crashed daemon's stale lock is reclaimed automatically. To
-> run a second, isolated daemon, point it at another dir with `OMP_SQUAD_STATE_DIR`.
-
-> Running it on a server / leaving it up? See [`docs/operations.md`](docs/operations.md) — how to
-> run the daemon so it survives (don't `&` it from an ephemeral shell), and why intermittent
-> health-check timeouts under heavy fan-out are transient event-loop stalls, not crashes.
-
 From another shell (talks to the running daemon):
 
 ```bash
@@ -106,51 +93,136 @@ From another shell (talks to the running daemon):
 glance add ~/code/myproject --name auth-refactor \
   --task "Refactor the auth module to use the new session API."
 
-# See the roster
-glance list
-
-# Send a follow-up instruction
+glance list                                  # the roster
 glance prompt auth-refactor-<id> "Also update the tests."
-
-# Emergency-stop an agent but keep its worktree/roster entry
-glance kill auth-refactor-<id>
-
-# Remove it (and delete its worktree)
+glance logs auth-refactor-<id>               # recent transcript
+glance kill auth-refactor-<id>               # emergency stop (keeps the entry)
 glance rm auth-refactor-<id> --delete-worktree
+glance open                                  # print the dashboard URL
 ```
 
-Open the dashboard in a browser: `glance open` prints the URL (default
-`http://127.0.0.1:7878`). The **+ Add agent** button and per-agent composer/answer
-controls do everything the CLI does, including interrupt/restart/kill/remove controls. Task detail keeps lifecycle status as a dedicated status card (not buried in the description), renders a linked plan's `00-overview.md` as the description, and shows created/updated timestamps for both the plan and the selected markdown doc. The Assistant chat is backed by the same live transcript stream as the TUI: assistant and thinking text update while streaming, thinking is shown in a foldable **Thinking** row, agent todos render as a persistent collapsible plan panel above the transcript, and tool rows show human-first command/output/status views with the raw args/partial/result payload tucked under **Raw payload** for debugging. When chat-created tool output references `plans/<name>/...`, the dashboard promotes that plan into the plannable list immediately so its markdown and linked work can be reviewed without waiting for another refresh. The Settings gear persists daemon feature flags to `<stateDir>/settings.json`; restart-tagged flags are saved immediately and fully apply on the next daemon boot. The Control Tower model selector is populated from live `omp` model discovery when an agent is connected, plus any configured `OMP_SQUAD_MODELS="anthropic/claude-opus,openai/gpt-5.2"` fallback values.
+`add` accepts `--model`, `--approval`, `--thinking`, `--branch`, `--workflow`, `--verify`,
+`--sandbox`, `--acp`, and `--plain` — see the
+[CLI reference](docs-site/content/docs/reference/cli.mdx). With a plain `--task`, an **intake
+router** picks the process for you (verify loop, plan gate, fan-out, or plain agent); `--plain`
+opts out.
 
-### `add` flags
+> One daemon per state dir: `up` takes a single-writer lock and a second `up` against the same
+> dir refuses to start. Leaving it running on a server? See
+> [`docs/operations.md`](docs/operations.md).
 
-| Flag | Meaning | Default |
-|---|---|---|
-| `--name` | Agent name | `agent-N` |
-| `--branch` | Worktree branch | `squad/<name>` |
-| `--model` | Model (fuzzy: `opus`, `gpt-5.2`) | omp default |
-| `--approval` | `always-ask` \| `write` \| `yolo` | `write` |
-| `--thinking` | `minimal` \| `low` \| `medium` \| `high` \| `xhigh` | `low` |
-| `--task` | Instruction sent once ready | — |
-| `--workflow` | Run a workflow graph (`.fabro`) as the process; `--task` is the goal | — |
-| `--verify` | Wrap `--task` in an implement → verify → fixup loop (gate = `<cmd>` exit 0) | — |
-| `--sandbox` | Run the agent inside a container from `<image>` (mounts the worktree) | — |
-| `--acp` | Run an ACP runtime (`auggie --acp`) instead of `omp --mode rpc` | — |
+## The dashboards
 
-> **Thinking defaults to `low`** so fleet agents stay responsive; bump it per-agent for
-> hard work. (Inheriting a global `high` default makes every agent grind — opt in
-> deliberately.)
+- **TUI** — a two-level, arrow-driven board (list → agent session) with a live stat header
+  (branch · model · context % · cost · tokens), transcript scrollback, and slash commands
+  (`/stop`, `/restart`, `/kill`). Type a task on the dashboard to spawn an agent.
+- **Web** — an organizational command center: projects, a needs-input **Queue** you answer in
+  place, per-agent transcript/diff/subagent views, a **Features** board with land-readiness and
+  deterministic proof, workflow race boards, automation and audit trails, fleet health, and a
+  settings surface for the daemon's feature flags. It installs as a PWA and **pushes a
+  notification when an agent needs you** — supervise from your phone.
 
-### TUI navigation
+The full-featured web UI is the React app in [`webapp/`](webapp/), served when it's built and
+`GLANCE_WEBAPP=1` is set; [`src/web/index.html`](src/web/index.html) is the zero-build fallback
+dashboard. See the [web dashboard guide](docs-site/content/docs/guides/web-dashboard.mdx).
 
-Two levels, arrow-driven (like `claude agents`):
+## Autonomy — the factory loop
 
-- **Dashboard (list):** `↑/↓` move between agents · `→` (or `Enter`) open the selected agent · **type a task + `Enter` to spawn a new agent** in the launch directory.
-- **Agent (session):** a rich stat header tops the view — branch · model · context% · cost · tokens · tool-calls · duration (matching the omp TUI, live for an in-flight run) — then type + `Enter` to steer it (or answer a pending request) · `←` on an empty prompt returns to the dashboard · `↑/↓` scroll the transcript · `/stop` `/restart` `/kill` as slash-commands.
-- `Ctrl-C` quits anywhere; `Esc` backs out (agent → list → quit).
+With a [Plane](https://plane.so) workspace configured, the daemon closes the whole loop —
+issue → routed agent → verify → land → close — with bounded background loops, **all on by
+default** (each opts out with `GLANCE_<NAME>=0`; `GET /api/factory/status` shows which are
+armed, fueled, and moving):
 
-New agents spawn in a git worktree when the directory is a repo, otherwise they run in place.
+| Loop | What it does |
+|---|---|
+| **Auto-dispatch** | Polls open Plane issues, spawns one routed agent per issue — priority-ordered, WIP-capped, restart-safe ledger |
+| **Orchestrator** | Verifies and lands idle agents, self-heals red gates within a repair budget, parks repeat failers, summons a human on `CATASTROPHE:` |
+| **Observer** | Audits fleet vs. intended state (red gate on main, unreaped survivors, blocked lands) and files fix-issues |
+| **Scout** | Harvests latent work from agent *reasoning* — bugs noticed in passing, deferred follow-ups — into triage-gated issues |
+| **Opportunity** | Clusters recurring Scout items across agents into one pattern issue |
+| **Auto-supervisor** | Answers routine low-risk approvals so agents don't idle; destructive requests always wait for a human |
+| **Plan sync** | Reconciles `plans/` doc STATUS lines with tracker state |
+| **Janitors** | Reap landed agents, orphan hosts, and dead worktrees — losslessly, bounded |
+
+Safety posture: every land passes a deterministic verify gate (optionally inside a network-less
+container sandbox, optionally a full-suite regression gate); by default a green verify **stages
+a one-tap Land** rather than blind-merging (`GLANCE_LAND_CONFIRM=0` for full auto-merge);
+destructive approvals are never auto-answered; provider rate-limit signals pause dispatch; and
+failure caps live in branch-keyed ledgers that survive restarts. Details:
+[Autonomy](docs-site/content/docs/architecture/autonomy.mdx) ·
+[Landing](docs-site/content/docs/guides/landing.mdx) ·
+[Plane integration](docs-site/content/docs/integrations/plane.mdx).
+
+## Landing — getting work back to main
+
+`landAgent` commits an agent's branch and merges it into the main checkout — serialized
+per-repo, gated on the repo's own verify command, rolled back on red, refused when the branch
+is stale against evolved main. Conflicts are resolved by a rebase-based auto-resolver whose
+result must **prove** itself (verify gate + independent reviewer pass) or the land is
+abandoned; a resolved conflict is always staged for a human one-tap Land by default. See
+[Landing](docs-site/content/docs/guides/landing.mdx) for the full gate stack and its env knobs.
+
+## Beyond a single agent
+
+- **Workflows** — author an agent's *process* as a reviewable graph (fabro's Graphviz/DOT
+  dialect): plan gates, verify loops, parallel fan-out where each branch is a real steerable
+  roster agent, and per-node model routing via a CSS-like `model_stylesheet`. Bundled:
+  `plan-implement`, `research-plan-implement`, `fan-out`, `resolve-conflict`, `commission`.
+  Runs are durable — two-phase checkpoints resume across a full daemon crash.
+  → [Workflows](docs-site/content/docs/workflows/index.mdx)
+- **Commissioning** — the fleet authors its own specialized workers: an architect agent writes
+  a small scoped [Flue](https://flueframework.com) worker, an acceptance gate validates it in a
+  secret-scrubbed env, and only a passing worker joins the roster.
+  → [Commissioning](docs-site/content/docs/commissioning/index.mdx)
+- **Sandboxed agents** — `--sandbox <image>` runs an agent's omp inside a container (worktree
+  bind-mounted, network optional). **ACP runtimes** — `--acp` drives a non-omp agent
+  (`auggie --acp`, Claude Code, Codex) behind the same seam.
+  → [Sandboxing](docs-site/content/docs/guides/sandboxing.mdx)
+- **Federation** — presence, file leases, and shared-branch collision warnings across
+  operators; on by default locally, cross-host via a WebSocket coordinator on your tailnet,
+  including addressed remote commands (`POST /api/federation/command`).
+  → [Federation](docs-site/content/docs/integrations/federation.mdx)
+- **Capabilities** — checksum-pinned packs of profiles/workflows/recipes, imported from trusted
+  manifests or the built-in public catalog; machine-readable discovery at `/llms.txt` and
+  `/openapi.json`. → [Capabilities](docs-site/content/docs/integrations/capabilities.mdx)
+- **Feedback intake** — an opt-in public widget for user bug reports with validation voting,
+  Plane promotion, and optional reward payouts via Tremendous.
+  → [Intake](docs-site/content/docs/integrations/intake.mdx) ·
+  [Payments](docs-site/content/docs/integrations/payments.mdx)
+
+## Remote access & multi-tenant
+
+The dashboard is token-gated (bearer token generated on first boot, printed with one-tap
+sign-in links) and installs as a PWA over HTTPS — front it with `tailscale serve` for a real
+cert in one command. Setting `DATABASE_URL` switches the daemon to **DB mode**: BetterAuth
+accounts and orgs (email + password, GitHub social login, WorkOS SSO + SCIM provisioning)
+replace the bearer token. File mode remains the default — and the autonomous factory's native
+habitat. → [Remote access](docs-site/content/docs/guides/remote-access.mdx)
+
+## Configuration
+
+Everything is env-driven and defaulted; see [`.env.example`](.env.example) and the
+[configuration reference](docs-site/content/docs/reference/configuration.mdx). The canonical
+prefix is `GLANCE_*`; the legacy `OMP_SQUAD_*` spelling of every prefixed variable is honored
+indefinitely (`GLANCE_*` wins when both are set). Plane (`PLANE_*`), database/auth
+(`DATABASE_URL`, `BETTER_AUTH_*`, `GITHUB_*`, `WORKOS_*`), and a few tool-specific vars are
+unprefixed.
+
+## Documentation
+
+Full docs live in a self-contained [Fumadocs](https://fumadocs.dev) site under
+[`docs-site/`](docs-site/) — MDX pages, ⌘K search, an Ask-AI chat, and machine-readable
+`llms.txt` / `llms-full.txt` endpoints. It's a separate Next.js app with its own
+`node_modules`, so the core package stays dependency-light.
+
+```bash
+cd docs-site
+bun install        # first run only
+bun run dev        # http://localhost:3000/docs
+```
+
+Content is authored in `docs-site/content/docs/*`. Set `OPENROUTER_API_KEY` in
+`docs-site/.env.local` to enable the Ask-AI chat.
 
 ## Verify
 
@@ -159,1024 +231,32 @@ bun test            # deterministic suite — no model tokens spent
 bun run check       # typecheck
 ```
 
-The suite covers worktree ops, the pure board renderer, the RPC transport
-(`get_state` + `bash`), and the manager lifecycle. A full model-driven check:
-
-```bash
-glance up --no-tui &
-glance add /path/to/git/repo --name demo --approval yolo \
-  --task 'Create a file proof.txt containing OK via a shell command, then stop.'
-glance list           # watch demo go working → idle
-cat ~/.omp/squad/worktrees/<repo>-squad-demo/proof.txt   # → OK
-```
-
-## Command center
-
-The web UI is an **organizational command center**, not a flat list:
-
-- **Projects** (sidebar) — agents grouped by repo, each with a live status rollup and a needs-input badge.
-- **Global views** (sidebar) — fleet-wide surfaces, each deep-linkable and reachable via the ⌘K command palette:
-  - **Features** — a kanban of in-flight features by lifecycle stage (planned → review → landed → done); each feature carries structured canon source, candidate worktrees/plan revisions, proof freshness, and promotion readiness from the daemon instead of relying on agent prose.
-  - **Queue** — an attention inbox of every agent blocked on input (and errored) across the whole fleet, answerable in place, oldest-first, so you supervise by exception.
-  - **Workflows** — definitions for workflows and meta-workflows (assigned owners, allowed/disallowed capabilities, ordered steps) plus live workflow runs with checkpoint progress.
-  - **Race** — a race-board: one lane per agent with the workflow's phases as a segmented track, filled by stage progress and labelled with the current phase, so you see who's where in the pipeline and who's stalled at a glance. Fan-out branches nest under their parent.
-  - **Audit** — an append-only trail of every actor-initiated fleet action (create / prompt / answer / interrupt / kill / restart / remove / commission / land) with actor, target, and outcome, newest-first, filterable by action and live-updated. Backed by `GET /api/audit` (`?limit=&actor=&action=&target=`); persisted as JSONL under the state dir.
-  - **Trace API** — `GET /api/trace/:id` pulls the North Star audit/diagnostics tree for a feature (`:id` or `feat:<id>`) or run (`run:<agentId>:<runId>`). Receipts keep lossless rollups (tokens/cost/tool counts) for every run; fine spans are tail-sampled, with errors always kept. `land` / comment-resolve lifecycle spans are derived from the audit log at read time, not written as a second store.
-- **Proof and provenance** — feature detail distinguishes canon (`plans/<name>/` markdown, persisted feature metadata, or linked Plane issues) from candidate work (agent branches/worktrees and planner-authored plan revisions). Deterministic proof is the land gate: fresh/failed/stale/none comes from recorded proof at the candidate HEAD; screenshots, traces, receipts, tokens, costs, and tool counts are evidence only. Readiness explains the current blocker (`needs-proof`, `proof-failed`, `proof-stale`, `blocked-input`, `diverged`, `uncommitted`, or `ready`) and the next operator action. Candidate plan revisions stay reviewable as `candidate`, `accepted`, `rejected`, or `superseded`; rejecting preserves provenance and never mutates canon.
-- **Project view** — the agents advancing that project, a *spawn-in-this-project* composer (type a task → agent), and a **Plane issues** panel (open issues; click to spawn an agent on one).
-- **Agent view** — transcript + composer + pending-answer controls, plus side panels:
-  - **Subagents** — the live tree of `task`-spawned children (via omp's RPC subagent stream).
-  - **Changes** — the agent's worktree git diff, so you can review before merging.
-  - **Agent controls** — interrupt (pause mid-run), restart (re-run from current state), remove (drop the agent; optionally delete its worktree), set model (change the LLM for the next run), and answer a blocked agent inline.
-- **Automation** — what the daemon's background loops (Scout, Observer, orchestrator, Plane poller) have been doing and any failures; driven by `GET /api/automation`.
-- **Fleet Health** — aggregate fleet state: WIP usage, error counts, needs-input counts, and resource pressure indicators.
-- **Heat** — code activity heat map across the fleet's active worktrees.
-- **Federation / Leases** — peer operators, their live agents, shared-branch collision warnings, and cross-host file leases in flight. Backed by `GET /api/federation`, `GET /api/leases`, and `GET /api/fabric`; hidden when no coordinator is configured.
-
-### Plane integration
-
-Set on the daemon to pull real work items into the command center:
-
-| Env | Meaning |
-|---|---|
-| `PLANE_API_KEY` | Plane API token (required to enable) |
-| `PLANE_WORKSPACE` | Workspace slug (required) |
-| `PLANE_BASE_URL` | API base (default `https://api.plane.so`) |
-| `PLANE_PROJECT_ID` | Fallback Plane project id for every repo |
-| `PLANE_PROJECT_MAP` | JSON `{ "<repo path or basename>": "<plane project id>" }` |
-
-Unset → the issues panel shows "Plane not connected" and everything else works.
-
-Run the issue curator when the backlog starts repeating itself:
-
-```bash
-glance curate-plane [repo]        # print recurring clusters
-glance curate-plane [repo] --file # also file one [curator] do-not-auto-land issue per cluster
-```
-
-It groups open Plane issues that point at the same root cause (for example dirty auto-land,
-Plane throttle/json failures, or test-env leaks) so the fleet fixes one unified issue instead of
-dispatching duplicates.
-
-### Feedback Loop (opt-in)
-
-Feedback Loop is a public intake module for user bugs, feature requests, and friction reports.
-Enable it on the daemon, create a campaign, then embed the widget on the product page:
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_FEEDBACK` | `=1` enables the public widget and public submission endpoint |
-| `OMP_SQUAD_FEEDBACK_RATE_LIMIT_PER_MIN` | Public submissions per campaign/IP/minute (default `30`; `0` disables) |
-| `OMP_SQUAD_FEEDBACK_MAX_IMAGE_BYTES` | Max screenshot upload size (default `2000000`) |
-
-Campaigns are operator-created with `POST /api/feedback/campaigns` (`name`, `repo`, `token`,
-optional `allowedOrigins`, `rewardCents`, `rewardCurrency`). The daemon stores only the token hash;
-the widget must send the raw token, so use a long random token, bind `allowedOrigins` to exact HTTPS
-origins (avoid `*` outside local testing), and rotate by replacing the campaign if it leaks.
-
-```html
-<script
-  src="https://squad.example.com/feedback/widget.js"
-  data-campaign="fc_..."
-  data-token="long-random-token">
-</script>
-<script>
-  window.FeedbackLoop?.identify({ userId: "u_123", userEmail: "user@example.com" });
-</script>
-```
-
-Operators use the authenticated feedback API to review `GET /api/feedback/items`, add validation
-votes, accept or reject, then promote accepted / needs-validation items to Plane with
-`POST /api/feedback/items/:id/promote`. Rewards are a ledger by default; with the **Tremendous**
-integration configured they can pay out automatically.
-
-**Reward disbursement (opt-in via Tremendous).** Set `OMP_SQUAD_TREMENDOUS_API_KEY` to activate
-real payouts — the daemon delivers rewards via email through [Tremendous](https://www.tremendous.com)
-(gift card / PayPal / ACH / Visa, operator's choice). Idempotent: the reward id is used as the
-Tremendous order `external_id`, so a retried payout for the same reward never creates a second order.
-`markFeedbackRewardPaid` pays out then marks the reward paid; a failed payout leaves the reward
-`approved` (retry manually). Without the API key a manual recorder is used — the existing ledger
-workflow stays unchanged.
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_TREMENDOUS_API_KEY` | Bearer token — presence activates Tremendous payouts |
-| `OMP_SQUAD_TREMENDOUS_FUNDING_SOURCE_ID` | Which Tremendous balance/account funds the payout |
-| `OMP_SQUAD_TREMENDOUS_CAMPAIGN_ID` | Redemption-options campaign the recipient sees |
-| `OMP_SQUAD_TREMENDOUS_ENV` | `sandbox` (default) or `production` — use sandbox first |
-
-Go-live checklist: set the four vars (sandbox first), trigger one sandbox order to confirm the
-integration, then switch `OMP_SQUAD_TREMENDOUS_ENV=production`. See `src/payments/` for details.
-
-Safety notes: serve the widget over HTTPS; screenshots may contain PII; text/metadata/screenshot sizes
-are capped, feedback records persist to file/DB storage, and screenshot files live under the state dir —
-prune/monitor disk growth for high-volume campaigns.
-
-**Auto-dispatch (on by default when Plane is configured)** — the daemon polls the mapped repos
-and spawns a routed agent per new open issue (issue → routed run → verify → land → close), so work
-starts with nobody typing. Dispatch is ordered by Plane priority (`urgent` → `high` → `medium` →
-`low` → `none`), while `blocked_by`, `do-not-auto-land`, WIP caps, and rate-limit pauses still win.
-Spawned issue ids persist in `<stateDir>/dispatch-ledger.json`, so a daemon restart does not re-spawn
-finished/failed agents for still-open issues. Set `OMP_SQUAD_AUTODISPATCH=0` to disable. Bounded so
-a backlog can't storm:
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_AUTODISPATCH` | Issue → agent loop — **on** when Plane is configured (`=0` to disable) |
-| `OMP_SQUAD_DISPATCH_INTERVAL_MS` | Poll interval (default `60000`) |
-| `OMP_SQUAD_DISPATCH_MAX` | Max concurrent dispatched agents (default `3`) |
-| `OMP_SQUAD_AUTOCLOSE` | Mark an issue done once its agent passes a verification gate (on by default; `=0` to disable) |
-| Web Settings | The Settings screen can persist boolean feature flags (`OMP_SQUAD_AUTODISPATCH`, `OMP_SQUAD_AUTOCLOSE`, `OMP_SQUAD_AUTOLAND`, `OMP_SQUAD_AUTODRIVE`, supervisor, Observer, Scout, feedback, webapp) to `<stateDir>/settings.json`; explicit env vars still show as `env` until saved. |
-
-**Rate-limit pause** — when an agent's model subscription hits a usage cap (the 5-hour / weekly
-limit, a `429`, "too many requests"), the daemon sees omp's `auto_retry_start` and **pauses
-auto-dispatch** rather than spawning agents that would immediately stall on the same cap. The pause
-lifts on its own once the provider's retry hint elapses (you'll see `paused …`/`resumed …` log
-lines). No knob — it tracks the live cap signal.
-
-### Concurrency & autonomy
-
-The daemon caps concurrent **live** agents (everything not `stopped`/`error`) at a global WIP
-ceiling, and can optionally queue spawns past it and auto-answer routine prompts so a fleet keeps
-moving without a human. All bounded and **on by default** — set the matching `OMP_SQUAD_*=0` to opt out of any one.
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_MAX_WIP` | Global live-agent WIP ceiling (default `6`); a spawn past it is refused |
-| `OMP_SQUAD_MAX_AGENTS` | Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway/looping fan-out can't over-spawn the host (default `2×` the WIP cap, floor `12`) |
-| `OMP_SQUAD_QUEUE_ON_FULL` | At the cap, **park** the spawn (FIFO) and return a `queued` signal instead of erroring; the orchestrator spawns it when a slot frees. Off ⇒ the historical hard-cap error |
-| `OMP_SQUAD_AUTOSUPERVISE` | Auto-answer **low-risk** pending requests (routine approve/continue gates) so blocked agents advance without you — **on by default** (`=0` to disable). Skips anything matching a destructive pattern (force-push, delete, deploy, prod, …) and every host-tool call; each auto-answer is logged for audit |
-| `OMP_SQUAD_AUTOSUPERVISE_BUDGET` | Per-agent cap on auto-answers (default `5`); past it, that agent's requests fall back to the human queue |
-| `OMP_SQUAD_RESOURCE_GATE` | Set (any value) to enable host-pressure admission gating. When set, a spawn is refused if `load1/ncpu > OMP_SQUAD_MAX_LOAD_PER_CPU` or free-memory ratio drops below `OMP_SQUAD_MIN_FREE_RATIO`. Off by default (use `up.sh` which sets it). |
-| `OMP_SQUAD_MAX_LOAD_PER_CPU` | Block spawns when 1-minute load average / CPU count exceeds this value (default `1.5`). Read per-call, so adjustable without a restart. |
-| `OMP_SQUAD_MAX_RSS_MB` | Watchdog RSS ceiling per agent process (default `1024` MB); the agent is killed and set to error if exceeded. |
-| `OMP_SQUAD_MIN_FREE_RATIO` | Block spawns when host free-memory fraction drops below this value (default `0.1`). Read per-call. |
-| `OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR` | Per-hour LLM-call budget for the Scout backlog harvester (default `30`; `<=0` for unlimited). Bounds spend in verbose multi-agent fleets. |
-| `OMP_SQUAD_AUTO_SUPERVISE` | Start the external file-mode supervisor that answers routine agent prompts hands-free (default on; `=0` or `--no-supervise` to disable). File mode only. |
-| `OMP_SQUAD_SUPERVISE_MODEL` | Model override for the auto-supervisor's LLM calls. |
-
-**Background loop visibility.** The Scout, Observer, and orchestrator loops surface their activity
-and failures through the automation log. Use `omp-squad automation` (or `GET /api/automation`) to
-see what each loop has been doing, how many LLM calls the Scout has spent this hour, and any
-transient failures (Plane poll errors get one automatic retry before they are logged; no silent
-swallowing). The dashboard's **Automation** panel shows the same feed live.
-
-### Trace export
-
-Tracing is receipt-native: every receipt keeps its cost/token/tool rollup, while `spans[]` detail is tail-sampled (`OMP_SQUAD_TRACE_SAMPLE`, default `0.1`). Error runs and error spans are always kept. Export is best-effort through a bounded in-memory queue; exporter failures drop spans and never block run finalization.
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_TRACE` | `=0` disables fine spans/export; receipt rollups still persist |
-| `OMP_SQUAD_TRACE_SAMPLE` | OK-run span sample ratio (default `0.1`); errors ignore this and are kept |
-| `OMP_SQUAD_TRACE_MAX_SPANS` | Per-run span cap (default `500`); oldest OK tool spans shed first |
-| `OMP_SQUAD_TRACE_EXPORT_QUEUE` | Bounded export queue length (default `1000`, drop-oldest) |
-| `OMP_SQUAD_TRACE_EXPORT_TIMEOUT_MS` | Per-export HTTP timeout (default `5000`) |
-| `OMP_SQUAD_TRACE_EXPORT_OTLP_URL` | OTLP/HTTP JSON endpoint, fetched through the SSRF guard |
-| `OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL` | Langfuse ingest endpoint, fetched through the SSRF guard |
-| `OMP_SQUAD_TRACE_EXPORT_DATADOG_URL` | Datadog ingest endpoint, fetched through the SSRF guard |
-| `OMP_SQUAD_TRACE_ALLOW_PRIVATE` | `=1` allows trace export to private/loopback collector URLs (OTLP agent, private Langfuse, tailnet Datadog gateway). Default off — the SSRF guard blocks private-range IPs. When set, only the exact origins you configured in the three `OMP_SQUAD_TRACE_EXPORT_*_URL` vars above are exempted; any other private host (redirects, metadata IPs, unconfigured URLs) is still blocked. Set this when your collector runs on `localhost` or an RFC1918 address. |
-
-With auto-land on, work merges without a human in the loop, so the safety net is the **verify gate**
-(build + tests) plus the resolver's reviewer pass — and the risk gate that leaves every destructive
-request (force-push, delete, deploy, prod, …) and host-tool call for a human. The worktree is still the blast radius.
-
-**Self-healing control loop (on by default)** — the orchestrator's periodic tick is armed unless
-`OMP_SQUAD_AUTODRIVE=0`. Each pass it auto-lands idle agents whose work verifies green (closing the
-tracking Plane issue), self-heals red gates through the failure router (retry / hold /
-escalate by repair budget), trips a single human-summoning `CATASTROPHE:` on budget
-exhaustion or a catastrophe tripwire (infra failure, safety violation, regression
-oscillation), and drains cap-parked spawns back in under the WIP ceiling. A summon is never
-just a log line: the agent is driven into a sticky `error` state, so it surfaces in the
-attention **Queue** and fires the same background **web push** as any other agent that needs a
-human (the notification body carries the `CATASTROPHE:` reason). On by default; set
-`OMP_SQUAD_AUTODRIVE=0` to disable — then the daemon arms no timer and the tick is fully inert.
-
-**Terminal decisions survive restart.** The loop's per-agent terminal state — *halted* (a human-summoned
-catastrophe or a parked verify/land), *landed*, and *staged* (held for one-tap Land) — is mirrored to a
-**branch-keyed** ledger (`<stateDir>/orchestrator-state.json`), so a daemon restart no longer re-drives a
-parked agent: re-running the acceptance suite, re-spending the repair budget, and re-tripping `CATASTROPHE`
-every cycle. Like `land-failures.json`, it keys on the branch (stable even when a re-adopted worktree gets a
-fresh agent id) and clears nothing automatically — a parked branch stays parked until an operator acts.
-
-**Auto-land failure cap (restart-safe).** A branch whose merge keeps failing the gate is *parked*
-after `OMP_SQUAD_AUTOLAND_FAIL_CAP` (default `3`) consecutive failed auto-lands instead of being
-merged + rolled-back forever. The streak lives in a persisted, **branch-keyed** ledger
-(`<stateDir>/land-failures.json`), so it holds across daemon restarts and keys on the branch — stable
-even when a re-adopted worktree gets a fresh agent id. Without it, the in-memory cap reset on every
-restart and a bad branch churned main indefinitely. Operator one-tap Land is never blocked; the
-Observer files a bug for the parked branch.
-
-**Re-adopted work lands itself (relaunch recovery).** After a relaunch, surviving worktrees whose
-work was already complete (commits ahead, clean worktree) are re-adopted as idle agents that never
-re-run — so the event-driven auto-land (which fires when a run finishes) never fires for them. The
-control loop now lands such a re-adopted agent **directly** on its next tick: it skips the isolated
-worktree pre-verify (which gives a false negative on a stale-but-mergeable branch that lacks newer
-main code) and uses the land path's own merge → gate → rollback-on-red as the gate. In confirm mode
-(`OMP_SQUAD_LAND_CONFIRM`) it is staged for a one-tap Land instead. The auto-land failure cap above
-still applies, so a branch whose *merged* gate genuinely fails parks rather than retrying forever.
-
-**Dedicated land checkout (don't author in the land target).** Auto-land merges a branch *into the
-main checkout* (`PLANE_PROJECT_MAP`'s repo path), runs the gate there, and `git reset --hard` on a red
-gate. So it **refuses to land while that checkout has uncommitted tracked changes** — a rollback would
-discard them. If you edit code (or run `/plan`) *in the daemon's own checkout*, every land defers until
-you commit or stash. To **guarantee** lands always progress, give the daemon a **dedicated checkout no
-human edits**: point `PLANE_PROJECT_MAP` at a clone reserved for the fleet, do your own work in a
-separate clone, and sync via the git remote (the standard CI/CD separation). The daemon logs a loud
-`land target … has N uncommitted tracked file(s)` warning at boot when its target is hand-dirtied, and
-a dirty target no longer *bricks* a branch — the land is marked retryable and re-attempted once the
-checkout is clean (it never counts against the auto-land failure cap). Note a related hazard for
-*untracked* files: a `plans/<name>/` dir (or any untracked file) created directly in the land target
-collides with a branch that adds the same path — the merge can't overwrite it. The Observer flags this
-as `commit/remove <files> — blocks auto-land`; commit the plan (the Features board tracks `plans/<x>/`)
-or remove it.
-
-**Plane API throttle (shared rate limiter + read cache).** Plane cloud rate-limits per workspace
-token, and many in-process callers share it (dispatcher poll, observer poll + filing, worktree
-reaper, scout). They route through one chokepoint — `src/plane-throttle.ts` — so the daemon never
-bursts past the limit (which also frees the shared token for the Plane MCP and other agent sessions).
-`throttledFetch` serializes every Plane request with a min interval + central 429/Retry-After backoff;
-`listPlaneIssues` is wrapped in a short-TTL single-flight cache so concurrent polls of the same repo
-collapse to one call, and any write (create/close/transition) invalidates it.
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_PLANE_MIN_INTERVAL_MS` | Min spacing between Plane API requests (default `500`); the global limiter never bursts faster |
-| `OMP_SQUAD_PLANE_BACKOFF_BASE_MS` | Base for the exponential 429 backoff (default `500`); doubles per retry, capped at 5s, overridden by a `Retry-After` header |
-| `OMP_SQUAD_PLANE_CACHE_MS` | TTL for the `listPlaneIssues` read cache (default `15000`); higher = fewer API calls, staler open-issue view |
-
-A cross-process **Plane gateway** (one service all processes call) is designed in `docs/plane-gateway.md` as the follow-up.
-
-**Self-audit loop (Observer, on by default)** — a sibling to the orchestrator that runs the
-other direction: instead of driving work, it periodically *confirms* the fleet/project is in the
-intended state and, on a detected gap, **files a fix-issue** the auto-dispatcher then picks up —
-closing observe → fix → confirm. v1 audit checks: a red acceptance gate on main (`regression: <test>`),
-a finished (idle **or stopped**) agent landed-and-Done but never reaped (`reap landed survivor <id>`), untracked files in the
-main checkout that collide with an open agent branch (`commit/remove <files> — blocks auto-land`), and
-a Plane issue marked Done whose branch is still ahead (`reconcile Done-but-unlanded <issue>`), and a
-branch whose **auto-land keeps failing the gate** — from the branch-keyed land-failure ledger — so the
-work is re-done on a fresh branch (`auto-land failing for <branch>`). Findings
-are deduped by fingerprint (persisted to `<stateDir>/observer-seen.json`, never re-filed across
-ticks/restarts); a finding that stops reproducing is confirmed resolved and its fingerprint cleared.
-**One Observer runs per configured Plane repo** (OMPSQ-137), so every repo in `PLANE_PROJECT_MAP` is
-audited, not just the first; each gets its own dedup map (the first keeps `observer-seen.json` for
-upgrade continuity, the rest are suffixed `observer-seen.<repo>.json`).
-The acceptance-gate check runs the repo's own verify command (`detectVerify`) against main *serialized behind any
-in-flight land* (`withRepoLandLock`): the gate reads the same checkout a land mutates (merge / rollback),
-so running them concurrently used to `(fail)` against a half-merged tree and file a false `regression:`
-bug (OMPSQ-168). A single red gate is also **double-confirmed before filing**: the gate runs on a busy
-host while the fleet spawns real-`omp` agents, so a transient flake (an integration test that exits
-before ready under load, a residual gate-vs-land race) can turn one tick red even though the named test
-is green. On a red run the observer re-runs the gate once and files `regression:` only if it reproduces;
-a red-then-green pair is logged as flaky and nothing is filed (OMPSQ-184).
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_OBSERVE` | Self-audit loop — **on** when Plane is configured (`=0` to disable; then no timer is armed) |
-| `OMP_SQUAD_PLANSYNC` | Plan STATUS reconciler — **on** when Plane is configured (`=0` to disable). Every tick, each `plans/<x>/NN-concern.md` carrying a `PLANE: <ID>` pointer is checked against the tracker: a completed/cancelled issue closes the doc's STATUS, a started issue moves an open doc to `in_progress`. It NEVER reopens a done doc — that drift is logged + surfaced on the Automation feed as a conflict instead |
-| `OMP_SQUAD_PLANSYNC_INTERVAL_MS` | Plan-sync tick interval (default `300000` = 5 min) |
-| `OMP_SQUAD_OBSERVE_MAX` | Hard cap on observer-filed *open* issues (default `10`); past it, log + skip |
-| `OMP_SQUAD_OBSERVE_AUTODISPATCH` | `=1` files plain findings *without* the do-not-auto-land marker so the dispatcher fixes them; structural findings stay needs-triage regardless |
-| `OMP_SQUAD_OBSERVE_AUTOFIX` | `=1` lets the loop action autofixable findings directly (reap a landed survivor); never touches main/code; default off |
-
-Findings default to **needs-triage**: filed with a do-not-auto-land marker so the dispatcher's
-`noAutoDispatch` gate skips them — the observer never auto-dispatches its own findings to the yolo
-fleet unsupervised unless you opt in.
-
-**Reasoning harvester (Scout, on by default)** — the Observer's semantic sibling. Where the Observer
-audits *operational* state with pure checks, the Scout reads the *reasoning* of the fleet and files
-the latent, file-worthy items an agent surfaced but didn't do: bugs noticed in passing, deferred
-follow-ups, tech debt called out, design risks, "out of scope" notes. It's the system thinking about
-what it's thinking about — nothing an agent flags mid-task gets lost. Two triggers, both fire-and-forget
-so they never block an agent: a **mid-run** periodic sweep scans each working agent's new reasoning
-(per-agent transcript cursor, so a ticket can appear *while* it's still thinking), and **run-end** from
-`finalizeRun` scans the final delta. Each candidate is deduped against a persisted seen-set
-(`<stateDir>/scout-seen.json`, never re-filed even after it's closed) **and** the current open issues
-(title-token Jaccard ≥ 0.6, so it won't duplicate human/observer work), then filed as a
-`[scout] do-not-auto-land: …` Plane issue with a provenance body (which agent, which run-issue, the
-detail). scan() is serialized so the two triggers can't race-file the same item. Scout tickets are
-**always** needs-triage — LLM-extracted work is unvetted, so the dispatcher never auto-spawns the fleet on it.
-**One Scout runs per configured Plane repo** (OMPSQ-137); each only harvests agents whose repo it owns
-(exact key, else basename, else the first repo as catch-all), so a latent item lands in the right
-tracker. Each repo gets its own seen-set (`scout-seen.json` for the first, `scout-seen.<repo>.json` for the rest).
-
-
-**Context fabric + peer messages** — `GET /api/fabric` returns scoped, read-only context facts:
-agent state, cold-start digests, receipt-derived hot files, Scout items, and live file leases. Agent-origin
-actors use the hierarchy scope spine (self + same feature peers + parent chain + children); they are not
-operators and cannot call normal commands. The only agent-origin write is the reserved host tool
-`squad_message({to,text})`, routed through `applyCommand` as `{type:"message"}`. Delivery is advisory:
-the target transcript gets a redacted, fenced system note on its next natural turn; no prompt, wake,
-interrupt, kill, queue, broker, or broad RBAC system is involved.
-
-**Pattern opportunities** — the Opportunity loop clusters open `[scout]` issues across distinct
-runs/agents with the same zero-token title Jaccard style Scout uses, enriches the cluster with
-receipt-derived hot files, and files one `[opportunity] do-not-auto-land: …` Plane issue per stable
-cluster fingerprint (`<stateDir>/opportunity-seen.json`). `GET /api/opportunities` lists those issues.
-This is intentionally a query + one seen-map, not a new store.
-
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_PEERMSG_BUDGET` | Per-sender advisory peer-message cap for agent-origin `squad_message` calls (default `5`, process-lifetime like autosupervise) |
-| `OMP_SQUAD_OPPORTUNITY` | Opportunity clustering loop — **on** when Plane is configured (`=0` to disable; then no timer is armed) |
-| `OMP_SQUAD_OPPORTUNITY_MIN` | Minimum recurring Scout items across distinct runs/agents before filing one opportunity (default `3`) |
-| `OMP_SQUAD_OPPORTUNITY_MAX` | Hard cap on opportunity-filed *open* issues (default `5`); past it, log + skip |
-| `OMP_SQUAD_OPPORTUNITY_WINDOW` | Most-recent open Scout items considered per tick (default `50`) |
-| Env | Meaning |
-|---|---|
-| `OMP_SQUAD_SCOUT` | Reasoning harvester — **on** when Plane is configured (`=0` to disable; then no sweep timer is armed) |
-| `OMP_SQUAD_SCOUT_MAX` | Hard cap on scout-filed *open* issues (default `20`); past it, log + skip |
-| `OMP_SQUAD_SCOUT_PER_RUN` | Cap on tickets filed from a single scan (default `3`) so a verbose run can't flood |
-
-**Auto-removing done agents (freeing room for the next ticket).** A completed agent lands its branch,
-`OMP_SQUAD_AUTOCLOSE` closes its Plane issue, and its host exits → it lingers in the roster as a
-landed survivor (`ahead=0`, issue Done, status idle **or** stopped). Set `OMP_SQUAD_OBSERVE_AUTOFIX=1`
-and the observer reaps it on the next tick — removing the roster record (and letting the worktree
-janitor free its worktree), so the dispatcher has headroom for the next issue. Reaping is lossless:
-only `ahead=0` + Done agents are removed (the digest + receipts persist); an agent with unlanded work,
-a still-open issue, or an `error` state is left alone for a human.
-
-**Orphan-host reaping.** Each agent runs in a detached `agent-host` process that outlives the daemon
-(so a restart/upgrade reconnects to live agents with full context). A host left behind by a crash,
-re-exec, or a re-spawn under a fresh id — one the roster no longer owns — is shut down (over the host
-protocol) on daemon startup and on a periodic poll tick, so phantom `omp` processes can't accumulate.
-Together with `OMP_SQUAD_MAX_AGENTS`, the fleet's process count stays bounded across daemon lifetimes.
-
-**Dead-worktree pruning.** Each agent works in its own git worktree; repeated re-dispatch would
-otherwise leak one orphan worktree per attempt. On a periodic tick the daemon removes a worktree only
-when it is both unowned (no live roster agent) and provably dead — either fully merged into the base
-branch **and** clean, or its tracking Plane issue is closed (abandoned WIP is committed to the branch
-first; a branch is deleted only when merged + clean, so nothing recoverable is lost). An **active
-worktree with uncommitted changes on a still-open issue is never reaped**, even before its first
-commit, so the prune can't delete a worktree out from under a running agent. Disable with
-`OMP_SQUAD_WORKTREE_REAP=0`; tune the freshness window with `OMP_SQUAD_WORKTREE_GRACE_MS` (default
-120000).
-
-### Federation
-
-Federation is **on by default**. The daemon uses `LocalFederationBus` — a real bus that works
-locally with no config (loopback pub/sub: your own roster and leases are live and observable in
-the command center without any peer). `OMP_SQUAD_FEDERATION=0` is the explicit opt-out back to
-the inert `NullFederationBus` (hides the Federation panel entirely).
-
-**Single-host (default, zero config).** The local bus keeps your roster, presence, and leases
-in-process. `/api/federation`, `/api/leases`, and `/api/fabric` return real data (per-org scoped
-in DB mode). No coordinator needed.
-
-**Cross-host.** Set `OMP_SQUAD_COORDINATOR=ws://<coordinator-host>:<port>` to join a team
-coordinator. The daemon starts a `TailnetFederationBus` that gossips presence and file leases
-to peers and receives theirs. The coordinator relay (`bun src/coordinator-main.ts`) binds
-`127.0.0.1` by default; to expose it (`OMP_SQUAD_COORDINATOR_HOST=0.0.0.0`), set a shared
-`OMP_SQUAD_COORDINATOR_TOKEN` on the coordinator and every client — a non-loopback bind without
-a token is refused (override with `OMP_SQUAD_INSECURE=1`).
-
-When a coordinator is configured, the command center **Federation** panel lists peer operators,
-their live agents, and any **shared-branch collisions** — repos where agents owned by different
-operators sit on the same branch. Collisions are keyed on the repo's **normalized git origin URL**
-(via `src/repo-identity.ts`), not a host-local path: two operators on different machines checking
-out the same GitHub repo now collide correctly, and unrelated repos that share a basename don't
-false-collide. Each `AgentDTO` carries a `repoId` field for this cross-host identity.
-
-`GET /api/federation` (`{ coordinator, operators, collisions }`, bearer-gated) returns real data.
-With no coordinator the panel stays hidden and the endpoint returns just your own roster (no peers,
-no collisions).
-
-**What remains for full cross-host federation:** a deployed coordinator URL plus a second physical
-host. Remote-command identity uses `tailscale whois <peer-ip>` — this resolves only on a real
-tailnet. Without a verifiable tailnet IP, inbound command actors stay `origin:"remote"` and resolve
-to the read-only `viewer` tier.
-
-## Remote access & mobile
-
-The dashboard is a PWA you can install on your phone and drive from anywhere — and it
-**pushes you a notification the moment an agent needs a human**, so you supervise by
-exception instead of watching a screen.
-
-**Access is token-gated.** The daemon generates a bearer token on first run
-(`~/.omp/squad/access-token`, mode 0600) and prints it on boot with one-tap sign-in links.
-Every `/api` request and the WebSocket carry it; the static shell is the only public
-surface. The token is required even on loopback (the control plane can spawn agents, land
-code, and re-exec the daemon — it must not be open).
-
-```
-glance daemon running
-  dashboard: http://0.0.0.0:7878
-  access token: Bdnw7…IHo
-  open from any device on this network (tap to sign in):
-    http://192.168.1.20:7878/?token=Bdnw7…IHo
-```
-
-### Multi-tenant mode (`DATABASE_URL`) — opt-in
-
-By default the daemon runs in **file mode**: the token-gated, single-operator tool described
-above (state under `~/.omp/squad`, no accounts). Set **`DATABASE_URL`** and it boots in **DB
-mode** — a multi-tenant identity layer backed by [BetterAuth](https://better-auth.com):
-
-- **Accounts + sessions** replace the bearer token. The dashboard shows a sign-in / sign-up
-  screen; auth is email + password with httpOnly, `SameSite=Lax` cookie sessions (`/api/auth/*`),
-  rate-limited against brute force. **Sign-up is closed by default** — set `OMP_SQUAD_ALLOW_SIGNUP=1`
-  to open self-service registration; otherwise users are provisioned by the bootstrap admin.
-- **Least privilege by default.** A signed-in user with **no active org is `viewer`** (read-only).
-  Operator/admin tiers come only from an org membership — the active-org role bridges to the
-  fleet's RBAC tiers (owner/admin → `admin`, member → `operator`). Self-minting an org is
-  disabled (`allowUserToCreateOrganization: false`), so a remote user can't escalate to admin.
-- **Bootstrap (break-glass).** Provisioning the first org/members needs an admin, so a request
-  **from loopback carrying the daemon's bearer token** (the access token printed at boot, used by
-  the `glance` CLI on the same box) resolves to `admin` even in DB mode. Off-box requests get
-  no token shortcut — they must use sessions. The operator on the machine bootstraps; attackers
-  off-box cannot.
-- **Organizations, members, roles.** The bootstrap admin creates orgs, invites members by email,
-  and assigns roles (`owner` > `admin` > `member`).
-- **Settings surface** (gear in the nav): Account, Organization, Members, Roles & Permissions —
-  plus Appearance / Notifications / Daemon. The Daemon panel includes persisted feature-flag toggles backed by `/api/settings`.
-- **Storage.** `postgres(ql)://…` ⇒ Postgres (with row-level-security backstops); anything else
-  (`sqlite:<path>` or a bare path) ⇒ SQLite. Auth + app tables migrate on boot.
-- **Auto-supervisor is file mode only.** The external auto-supervisor (answers blocked agents
-  hands-free) is a single global WS client that authenticates with the file-mode bearer token, so
-  it does not start in DB mode (whose WS requires a per-org session). DB-mode auto-supervision is
-  the per-org, in-process answerer inside each org's manager.
-
-| Env | Meaning | Default |
-|---|---|---|
-| `DATABASE_URL` | Unset ⇒ file mode. `postgres://…` ⇒ Postgres; `sqlite:<path>`/path ⇒ SQLite. Enables DB mode. | _(unset)_ |
-| `BETTER_AUTH_SECRET` | Session-signing secret. **Required** in DB mode on a non-loopback bind — the daemon **refuses to boot** without a strong value (a missing/default secret lets anyone forge sessions); on loopback it warns and falls back to a dev default. Generate with `openssl rand -hex 32`. | _(none; dev default on loopback only)_ |
-| `BETTER_AUTH_URL` | Public base URL for origin checks + cookie `Secure`. **Behind a TLS tunnel you MUST set this** to the external `https://…` origin, so logins pass the origin check and the session cookie is marked `Secure`. | the daemon's bind URL |
-| `OMP_SQUAD_ALLOW_SIGNUP` | `1` opens self-service sign-up; otherwise sign-up is closed (bootstrap/invite only). | _(unset ⇒ closed)_ |
-
-> **Maturity** (tracked in Plane → module *Multi-tenant SaaS*). Landed + verified: the DB
-> foundation (P0), the BetterAuth identity layer + security hardening (P1: secret boot guard,
-> closed sign-up, viewer-by-default, no self-minted admin, rate limiting, cross-site Origin
-> defense, loopback bootstrap admin), and the web settings/org/member UI. **Not yet landed:**
-> per-org runtime isolation (P2) and full RBAC enforcement on every mutation (P3) — so today all
-> **org members** of a DB-mode daemon still share one fleet/state. DB mode previews the SaaS
-> surface; it is **not** a tenant-isolated production deployment yet. File mode is the default and
-> unaffected.
-
-**Bind beyond loopback** to reach it from your phone:
-
-| Env / flag | Meaning | Default |
-|---|---|---|
-| `$OMP_SQUAD_PORT` | HTTP/WS listen port | `7878` |
-| `--host` / `$OMP_SQUAD_HOST` | Bind address; `0.0.0.0` exposes on the LAN/tailnet | `127.0.0.1` |
-| `$OMP_SQUAD_TLS_CERT` + `$OMP_SQUAD_TLS_KEY` | Terminate TLS in-process (PEM paths) | plain HTTP |
-| `$OMP_SQUAD_PUSH_SUBJECT` | VAPID `sub` contact (`mailto:`/`https:`) | `mailto:squad@localhost` |
-| `$OMP_SQUAD_OPERATOR_TOKEN` | Pre-shared bearer token granting operator-tier access (alternative to the generated access token, e.g. for scripts). | _(unset)_ |
-| `$OMP_SQUAD_VIEWER_TOKEN` | Pre-shared bearer token granting read-only viewer-tier access. | _(unset)_ |
-| `$OMP_SQUAD_ORG_IDLE_MS` | TTL before an agent-less org manager is evicted from the registry in DB mode (default `600000` ms = 10 min). | `600000` |
-| `$OMP_SQUAD_REPO_ROOTS` | Comma-separated paths smart-spawn searches for repos (default: `<cwd>/..`, `~/sui`, `~/src`, `~/code`). | _(auto)_ |
-
-**HTTPS is required** to install the PWA and receive background push — browsers only allow
-service workers + Web Push in a secure context (`http://localhost` is exempt, a LAN IP is
-not). Two ways to get it:
-
-- **Tailscale (recommended)** — front the daemon with a real cert, no in-process TLS:
-  ```bash
-  glance up --no-tui            # bound to localhost is fine
-  tailscale serve --bg 7878        # → https://<machine>.<tailnet>.ts.net
-  ```
-  Open that URL on your phone (same tailnet), append `?token=…` once, **Add to Home
-  Screen**, allow notifications. Tailnet ACLs gate who can reach it; the token gates the rest.
-- **In-process TLS** — point `OMP_SQUAD_TLS_CERT`/`KEY` at a cert and bind `--host 0.0.0.0`.
-  Self-signed works but browsers warn (and some refuse a service worker on an untrusted
-  cert), so a real cert / tailnet is smoother.
-
-**On the phone:** the unified nav collapses to a drawer; the **attention queue is the
-landing view** when something's waiting; one tap answers an approval or question. When an
-agent transitions to *needs-input* or *error*, a Web Push notification fires (even with the
-app closed) and tapping it deep-links to that agent. Push is RFC 8291 (`aes128gcm`) + RFC
-8292 VAPID, implemented dependency-free in `src/push.ts`.
-
-**Live-reload on upgrade.** The daemon stamps a `uiVersion` (a hash of the served
-`index.html`, via `computeUiVersion`) onto every WS `roster` snapshot and `GET /api/version`.
-The dashboard pins the first version it sees; after an `⤴ Upgrade` (or any daemon restart
-with changed assets) the socket drops, the client auto-reconnects, sees a new version, and
-**refreshes itself** ("Updated — reloading…") — so an open tab or installed PWA never runs
-stale UI without anyone touching it.
-
-**Web framework rewrite (in progress).** [`webapp/`](webapp/) is now the active
-Vite + React 19 + TS + Tailwind v4 starter UI for the future dashboard. The
-previous React dashboard has been kept under [`webapp-legacy/`](webapp-legacy/)
-for historical reference so useful pieces can be ripped forward before that old
-implementation is deleted.
-
-The starter's look stays canonical. Live glance data is adapted underneath it:
-the new webapp captures `?token=...`, adds Bearer auth for `/api/*`, connects to
-`/ws` with the `ompsq-token` subprotocol, and maps projects/features/agents into
-the starter task model. Legacy React code is a protocol reference only, not a UI
-source.
-Assistant chat is backed by `/api/console`, not task auto-creation. Console
-agents receive a chat-first appended system prompt so ordinary messages stay
-interactive; durable work starts only when the operator explicitly asks.
-
-Capabilities are first-class now. Admins can import trusted agentcn-style source
-manifests with `POST /api/capability-sources`, or browse the built-in public
-catalog with `GET /api/capability-catalog` and import one by posting
-`{ "catalogId": "..." }` to the same source route. Packs are not installed just
-because they appear in the catalog: install/enable still goes through
-`POST /api/capability-installs` and the **Capabilities** view. Installed packs are
-checksum-pinned and materialize into runtime profiles/workflows through existing
-`RpcAgent`, `WorkflowDriver`, and `FlueServiceDriver` seams; federation exposes
-only metadata at `GET /api/federation/capabilities` until explicit context policy
-allows more. Machine-readable discovery lives at `/llms.txt`, `/openapi.json`,
-and `GET /api/capability-discovery`.
-
-The public catalog now includes the recurring glance recipes we keep reusing:
-`verified-feature-delivery`, `parallel-solution-race`,
-`conflict-resolution-doctor`, `agent-factory-architect`, and
-`fleet-autonomy-steward`, alongside the planning/context recipes. Catalog
-metadata includes each recipe's profiles, workflow, tools, skills, and required
-environment so an operator can decide what to trust before importing.
-The React task detail view is a context assembly surface. Feature descriptions,
-acceptance criteria, decisions, and relationships persist through
-`PATCH /api/features/:id`; derived plan/agent tasks are adopted on first edit so
-changes survive reloads. The context bundle preview is derived from the linked
-plan docs: concern titles/statuses, acceptance or verification bullets,
-prerequisites/`BLOCKED_BY`, decisions, and `TOUCHES` files are distilled into
-the rows agents see first, with manual fallback only when no plan is linked.
-`GET /api/features/:id/pipeline` returns the linked plan tree, concern docs,
-Plane issues, comments, and agent ids so operators can drill from the context
-bundle into the actual documents an implementation agent will see; selecting a
-plan document renders its GitHub-flavored markdown in a draggable split reading
-pane beside the editable task context. The left pane no longer duplicates
-`00-overview.md`; the right pane opens that overview by default when present and
-adds previous/next plus a document strip for moving between plan markdown files.
-The workspace pane and task list pane can collapse to rails when the plan needs
-more room. Anchored plan annotations are created inline by selecting markdown text,
-written through
-`/api/features/:id/annotations`, highlighted in the document with stable
-per-author colors, broadcast live over the dashboard WebSocket (`comment` /
-`comment-resolved` events), and can be sent to an existing agent or to a new
-planner agent. Task comments are stored through `/api/comments`, fed into
-feature workflow prompts, and best-effort mirrored to linked Plane issues when
-Plane is configured. The public capability catalog includes a
-`collaborative-plan-reviser` planning loop for annotation → plan-revision →
-context-refresh workflows, plus verified delivery, fan-out race, conflict
-resolution, worker commissioning, and fleet stewardship recipes distilled from
-the built-in workflows.
-
-The Vite UI is still **inert by default**: the live single-file dashboard at
-`src/web/index.html` remains the default. To preview the new shell manually,
-build it (`cd webapp && bun install && bun run build`) and start the daemon with
-`OMP_SQUAD_WEBAPP=1` — the server then serves `webapp/dist` at `/` and
-`/assets/*`. `scripts/squadctl.sh start|restart` rebuilds `webapp/dist` first
-when the launcher exports `OMP_SQUAD_WEBAPP=1` (set
-`OMP_SQUAD_SKIP_WEBAPP_BUILD=1` to skip). The flag is OFF unless **both** set
-**and** a build exists; unset it (or skip the build) to get the current
-single-file dashboard exactly as before.
-
-For live-reload development, `cd webapp && bun run dev` serves the starter with
-HMR and proxies `/api` + `/ws` to a daemon on `127.0.0.1:7878` (override with
-`OMP_SQUAD_PROXY`).
-
-## Commissioning — agents that author agents
-
-A second fleet class lives beside the interactive omp operators: **`flue-service`
-workers**. Instead of hiring a human when a job opens, the OS **authors its own
-specialized worker** — a small, scoped [Flue](https://flueframework.com) agent — and
-onboards it only if it passes an acceptance gate. The hire-replacement loop:
-
-```bash
-# Deterministic worker (no model): author → validate → onboard if the gate passes
-glance commission extract-emails \
-  --purpose "Extract email addresses from payload.text; return { emails, count }." \
-  --accept-payload '{"text":"a@x.io b@y.org"}' --accept-expect '{"count":2}'
-```
-
-- **Author** — an `Architect` writes the worker. The running daemon always uses
-  `OmpArchitect`, which drives a real `omp --mode rpc` agent to write the workflow.
-  `TemplateArchitect` (deterministic, no model) renders it straight from the spec, but it is
-  wired only in the test suite — there is **no offline-architect fallback in the live daemon**.
-  (`--model <spec>` makes the worker itself model-backed.)
-- **Acceptance gate** (`src/validate.ts`) — tiered + degrading: **lint** (always) →
-  **typecheck** → **`flue run` acceptance** (when the worker's toolchain is installed),
-  deep-matching the result against `--accept-expect`. The acceptance tier runs model-authored
-  code with a **deny-by-default scrubbed env** (`acceptanceEnv`): only a non-secret baseline,
-  the worker's own `<PROVIDER>_API_KEY`, and each `env:NAME` it declares in `--capabilities`
-  reach it — the daemon's other secrets are denied, which makes the capability allowlist
-  enforced. A failed gate **re-authors** (bounded), feeding the failure forward; still
-  failing → onboards nothing.
-- **Onboard** — a passing worker becomes a `flue-service` member via `FlueServiceDriver`,
-  which adapts `flue run` into the same omp event frames the manager already derives
-  status from. It shows in the roster (and federates) like any other agent.
-
-The loop is itself a [workflow](#workflows--process-as-a-reviewable-graph) now
-(`workflows/commission/workflow.fabro`, driven by `CommissionExecutor`) — not a hand-coded
-sequence — so `author → gate → onboard` runs on the same engine as plan-implement.
-
-Both classes implement one `AgentDriver` seam, so `kind` is the only thing surfaces
-need to tell an interactive operator from a commissioned worker. Design + rationale:
-[the Commissioning docs](docs-site/content/docs/commissioning/index.mdx) (rendered in the docs site).
-
-## Autonomous intake — describe intent, the OS picks the process
-
-The goal: a human **never has to do anything** but say what they want; the OS chooses
-*how*. Spawning takes one natural-language line (the per-project composer, a Plane issue,
-or `glance add … --task`) — no forms, no flags. An **intake router** (`src/intake.ts`)
-reads the task + repo and routes it:
-
-- ordinary code change → an **autonomous verify loop** (implement → verify → fixup), using
-  the repo's own detected test/typecheck command;
-- genuinely high-risk change (migrations, deletions, deploys) → **plan + approval** — the
-  *only* routine human-in-the-loop gate, reserved for the extreme cases;
-- several approaches wanted → **parallel fan-out**;
-- nothing to verify → a plain agent.
-
-The choice is logged (`routed "<name>": <reason>`) so the operator sees the OS's reasoning;
-`--plain` (or an explicit `--workflow` / `--verify` / `--sandbox`) overrides it. Routing is
-heuristic by default; set `OMP_SQUAD_LLM_ROUTER=1` to classify intent with a one-shot call on
-the fast/`smol` model instead (it falls back to heuristics on any failure) — same `routeIntake`
-seam, no caller changes.
-
-The same router powers **[auto-dispatch](#plane-integration)**: with `OMP_SQUAD_AUTODISPATCH`,
-open Plane issues are pulled in and routed to agents on a timer — the human stops typing the
-line at all, and supervises by exception.
-
-## Workflows — process as a reviewable graph
-
-A third fleet class runs a **workflow**: a process authored as a graph (the same
-Graphviz/DOT dialect [fabro](https://github.com/fabro-sh/fabro) uses) — plan, a
-human-approval gate, implement, a verification gate, and a bounded fix-up loop —
-driven over one persistent omp thread. The agent's *process* becomes a diffable,
-version-controlled artifact instead of being implicit in a free-text task.
-
-```bash
-glance add ~/code/myproject --name feature \
-  --workflow workflows/plan-implement/workflow.fabro \
-  --task "Add rate limiting to the public API."
-```
-
-- **One seam, again.** `WorkflowDriver implements AgentDriver`, so a graph-driven run
-  joins the same roster / TUI / web / federation as an omp operator — `kind` is the
-  only difference. (The move that added `flue-service`.)
-- **Pure engine, injected execution.** `src/workflow/engine.ts` walks the graph
-  (routing, edge conditions, `goal_gate`, `retry_target`, visit caps, human gates); a
-  `NodeExecutor` decides what a node *does*. `SingleAgentExecutor` binds sequential agent
-  nodes to one omp thread (a run is one steerable roster entry).
-- **Parallel fan-out = real fleet agents.** A `component` fork spawns one **real, steerable
-  roster agent per branch** (each in its own worktree), runs them concurrently (`max_parallel`),
-  and a `tripleoctagon` merge joins them (`join_policy: wait_all | first_success`). This is
-  glance's headline — parallel agents you can watch and steer — expressed as graph nodes.
-  Branch agents **nest under their workflow** in the roster (TUI + web), and a kind glyph
-  (`⚙` workflow · `⚒` service) tags each row.
-- **Gates reuse needs-input.** A `hexagon` human node surfaces as the manager's ordinary
-  `input` request (a `select` of the edge labels), answerable in the TUI and web; the
-  inner agent's own approval prompts ride the same channel. Stages drive the dashboard's
-  todo rollup, so you see "stage 3/6" with no new UI.
-- **The commission loop is itself a workflow** (`JOB → AUTH → GATE{fail→AUTH}`); this
-  generalizes that one hard-coded pipeline into authorable graphs.
-- **Multi-model routing.** A graph-level `model_stylesheet` (CSS-like) routes each node to
-  a model + reasoning effort by `*` / `.class` / `#id` — `*  { model: haiku; reasoning_effort: low; }`
-  with `.coding { model: opus; reasoning_effort: high; }` — so the thread switches model before
-  the hard nodes. Cheap by default, frontier where it counts.
-
-**Just want a verify gate on a normal task?** `--verify "<cmd>"` synthesizes the
-implement → verify → fixup loop for you — no `.fabro` file needed — turning "the agent
-says it's done" into "done **and** the gate is green":
-
-```bash
-glance add ~/code/myproject --task "Add rate limiting to the public API." \
-  --verify "bun run check && bun test"
-```
-
-Shapes: `Mdiamond` start · `Msquare` exit · `box` agent · `tab` prompt · `parallelogram`
-command · `hexagon` human gate · `diamond` conditional · `component` fork · `tripleoctagon`
-merge. Design + rationale:
-[the Workflows docs](docs-site/content/docs/workflows/index.mdx) (rendered in the docs site).
-
-## Documentation
-
-Full docs live in a self-contained [Fumadocs](https://fumadocs.dev) site under [`docs-site/`](docs-site/)
-— MDX pages, ⌘K search, an **Ask-AI** chat, and machine-readable `llms.txt` / `llms-full.txt` endpoints
-for LLMs. It's a separate Next.js app with its own `node_modules`, so the core package stays
-dependency-free.
-
-```bash
-cd docs-site
-bun install        # first run only
-bun run dev        # http://localhost:3000/docs
-```
-
-Content is authored in `docs-site/content/docs/*`. Set `OPENROUTER_API_KEY` in `docs-site/.env.local`
-to enable the Ask-AI chat.
-
-## Landing — getting work back to main
-
-A fleet only pays off when its branches **land**. `landAgent` (`src/land.ts`) commits an
-idle agent's worktree on its `squad/<name>` branch and merges it into the main checkout —
-fast-forward when it can, a merge commit when it diverged — serialized per-repo so two
-lands never corrupt the index. The web **Land** button and `landFeature` (multi-branch)
-drive the same path.
-
-A successful land **closes the agent's tracking Plane issue** (idempotent, best-effort) — on both
-the single-agent `land(id)` path and the multi-branch `landFeature` path — so a shipped branch
-leaves no stale open issue behind.
-
-When `main` has moved under a long-running branch, the merge **conflicts** — the point most
-fleet tools give up at. The bundled **`resolve-conflict`** workflow is glance's answer,
-expressed as a reviewable graph rather than a black box:
-
-```bash
-glance add <repo> --branch <conflicted-branch> --workflow resolve-conflict \
-  --task "Make this branch land-able on main."
-```
-
-- **Merge main into the branch**, with `git rerere` replaying any resolution it has seen
-  before — so the same hot file conflicting twice resolves itself the second time.
-- **Resolve what's left with an intent-aware agent**, told to *combine both sides* (keep the
-  branch's feature **and** main's change, dedupe identical fixes) rather than pick one.
-- **A `goal_gate` verify step authorizes the commit** — `check && test`, not the absence of
-  conflict markers, because a textually-clean merge can still be semantically wrong. A
-  bounded fix-up loop retries; if it can't go green the run fails (escalate to a human)
-  instead of landing red.
-- Resolution lives **on the branch**, so the actual land stays a plain fast-forward and the
-  resolved diff is reviewable in the Changes panel before `main` ever moves.
-
-It runs on the same `WorkflowEngine` as plan-implement, so it joins the roster / TUI / web like
-any other run.
-
-**The workflow above is run manually** — the land flow never auto-invokes it; you launch it
-with `--workflow resolve-conflict` as shown. Automatic resolution *at land time* is a
-**separate path**: `landAgent` carries its OWN rebase-based resolver (`src/land.ts`, #12),
-gated behind **`OMP_SQUAD_AUTORESOLVE`**. It rebases the branch onto main, hands each conflicted
-file to a resolver (default: a one-shot `omp -p` agent), then **proves** the result — the full
-verify gate must pass **and** an independent reviewer pass must approve — before completing the
-land. Any failing step rolls `main` back to where it was; an unproven resolution is never kept.
-It only runs when the worktree is clean, so a live agent's uncommitted edits are never clobbered.
-The resolver/reviewer are injectable seams (tests use them; the defaults shell out to `omp`).
-Ceiling: a verify gate + reviewer can still miss a *semantic* conflict that is textually clean
-and compiles — see the `ponytail:` note on `attemptAutoResolve`.
-
-**Base-aware land gate.** After a clean merge, `landAgent` runs the repo's verify gate on merged
-`main` and rolls the merge back if it fails — but only when the *base was green*. If the gate also
-fails at the pre-merge HEAD (`head0`), the repo was **already red at its base**, so refusing would
-wedge every land on a brownfield repo. In that case the merge is re-applied and the branch lands,
-with the detail noting it *landed onto a red baseline*. Green-base behavior is unchanged: a branch
-that regresses a green base is still rolled back to keep `main` green. The base gate runs **only when
-the merged gate fails**, so the common green land still runs the gate exactly once.
-
-**Pre-land regression gate (opt-in).** Set `OMP_SQUAD_REGRESSION_GATE=1` to make every land
-prove the full test suite on the *exact merged result* before `main` advances. This is stricter
-than the per-feature acceptance gate (`verify:` / `opts.verify`), which can be narrower than the
-full suite. The gate runs `detectVerify(repo)` — the same Bun/Cargo/Go suite command the daemon
-uses for baseline checks — *after* the acceptance gate passes, so it is an additional layer, not
-a replacement. Failure semantics match the base-aware gate: if the full suite fails on merged
-`main`, `landAgent` resets to `head0`, runs the full suite on the base, and compares extracted
-failure sets (`decideRegressionGate`). Only **new** failures block the land (and leave `main` at
-`head0`); pre-existing failures that the branch didn't introduce allow a re-merge with a logged
-note. Auto-resolved conflict lands inherit the same gate before the reviewer call. Off by default
-to preserve existing behavior; enable on repos where a suite-wide regression cannot slip through a
-narrower per-feature acceptance gate.
-
-**Landing it automatically, too.** `OMP_SQUAD_AUTORESOLVE` decides what happens *when* a land
-conflicts; **`OMP_SQUAD_AUTOLAND=1`** decides *that a land happens at all* with no operator: a
-workflow run that finishes successfully (`--verify`, plan-implement, an auto-dispatched issue)
-lands its own branch the moment it goes green. With both on, the loop closes end to end — intake →
-build → verify → **land** → resolve-on-conflict — and a human is needed only when a resolution
-can't be proven.
-
-**Confirm hold for auto-resolved conflicts.** A *clean* auto-land merges as soon as it goes green,
-but a land that had to **auto-resolve a conflict** is held by default (`OMP_SQUAD_AUTORESOLVE_CONFIRM`):
-the branch is rebased + resolved, the merge is **not** kept, and the agent is flagged **✓ ready to
-land** for a human one-tap Land. The blast radius of a semantically-wrong LLM merge is `main`, so a
-resolved conflict earns a human ack while a clean land stays fully autonomous. The orchestrator treats
-this *staged* outcome as a hold — never a blocked land — so it neither re-merges nor parks it
-(OMPSQ-138 / OMPSQ-175). Set `OMP_SQUAD_AUTORESOLVE_CONFIRM=0` to auto-merge resolved conflicts too.
-
-| Env var | Effect |
-|---|---|
-| `OMP_SQUAD_REGRESSION_GATE` | `=1` makes every land run the full suite (`detectVerify`) on the merged result; blocks if new failures introduced vs base (off by default) |
-| `OMP_SQUAD_AUTORESOLVE` | `landAgent`'s in-process rebase conflict resolver, distinct from the manual `resolve-conflict` workflow (on by default; `=0` to disable) |
-| `OMP_SQUAD_AUTOLAND` | A successful workflow run auto-lands its own branch (on by default; `=0` to disable) |
-| `OMP_SQUAD_LAND_CONFIRM` | Safety valve: the auto-land loop still verifies idle agents, but a GREEN verify only marks them **✓ ready to land** (no merge) — the operator merges via the existing one-tap Land (off by default) |
-| `OMP_SQUAD_AUTORESOLVE_CONFIRM` | An AUTO land that had to auto-resolve a conflict is **staged** for a one-tap Land instead of merged with no human (on by default; `=0` to auto-merge resolved conflicts). A clean auto land still merges; operator lands always merge |
-| `OMP_SQUAD_REPAIR_BUDGET` | `routeFailure` red-gate retry budget before escalating (default `3`) |
-| `OMP_SQUAD_AUTOLAND_FAIL_CAP` | Consecutive failed auto-lands before a branch is parked instead of re-merged (default `3`); restart-safe via a persisted, branch-keyed ledger (`<stateDir>/land-failures.json`). Operator land bypasses it; the Observer files a bug for the parked branch |
-| `OMP_SQUAD_GATE_ENV` | Comma-separated env var names re-admitted into verify/proof/regression gate runs. Gates execute agent-authored test code, so they get a **secret-scrubbed** env by default (`OMP_SQUAD_*`, secret-shaped names like `*_API_KEY`/`*_TOKEN`/`*_SECRET`, `DATABASE_URL` removed; toolchain vars pass through). Name a var here if a suite legitimately needs it |
-| `OMP_SQUAD_GATE_SANDBOX` | Container image for gate runs. When set, every verify/proof/regression gate executes inside `docker run --rm --network none` with only the worktree (+ its main repo, for the worktree gitdir pointer) bind-mounted at their host paths and the scrubbed env passed explicitly — agent-authored tests can no longer read the daemon's filesystem or call out. The image must provide `bash` + the repo's toolchain (e.g. an `oven/bun` derivative). Unset ⇒ host execution as before |
-| `OMP_SQUAD_GATE_SANDBOX_NETWORK` | Docker network mode for sandboxed gates (default `none`; set `bridge` for suites that legitimately need network) |
-
-## Sandboxed execution — agents off your laptop
-
-`--sandbox <image>` runs an agent's omp **inside a container** instead of locally — fabro's
-"keep untrusted code off your laptop" isolation. Same `AgentDriver` seam, so a sandboxed
-agent joins the roster / TUI / web / workflows like any other; only the transport (omp's
-JSONL RPC over `docker exec -i`) and execution location change.
-
-```bash
-glance add ~/code/myproject --sandbox my-omp-image --approval yolo \
-  --task "Try the risky migration."
-```
-
-- **`SandboxAgentDriver`** launches a fresh `--name` container (`docker run`), bind-mounts the
-  worktree at `/work` (process + network isolation, files still reviewable on the host —
-  the Changes panel works), `docker exec -i`s `omp --mode rpc` inside it, and removes the
-  container on `stop()`. Add `runArgs: ["--network=none"]` for full network isolation.
-- The image must provide `omp`; point `--sandbox` at an omp-provisioned image. (The driver's
-  container transport + lifecycle are verified against a real `oven/bun` container in the test
-  suite using a fake-omp RPC server — no tokens; the real-omp path was proven live on the host.)
-
-## ACP runtimes — a non-omp agent in the roster
-
-`--acp` runs an **ACP-speaking runtime** (`auggie --acp`, and Claude Code / Codex via ACP)
-behind the same `AgentDriver` seam that `RpcAgent` uses for `omp --mode rpc`. Same seam, so
-an ACP runtime joins the roster / TUI / web / status / receipts **identically** — only the
-transport (hand-rolled ACP JSON-RPC 2.0 over the child's stdio) and the agent runtime change.
-
-```bash
-glance add ~/code/myproject --acp --task "Add rate limiting to the public API."
-```
-
-- **`AcpAgentDriver`** spawns the runtime as a child, handshakes (`initialize` → `session/new`),
-  maps `session/update` (message chunks, tool calls, plan, usage) and the turn lifecycle to the
-  same normalized frames the manager already derives, and bridges `session/request_permission`
-  to the squad's confirm-UI (the human answer routes back as the ACP `{outcome}` reply).
-- The child command is injectable; the default is `auggie --acp`. The driver's ACP transport +
-  mappings are verified in the test suite against a fake in-process ACP agent — no auggie, no
-  account, no tokens.
-
-## Cross-operator federation — what's live
-
-Federation is no longer a stub. The manager programs against a `FederationBus` seam, and
-`LocalFederationBus` is the daemon default — it works on a single host with zero config and
-extends to cross-host gossip once a coordinator URL is set.
-
-**What is live today:**
-
-- **`LocalFederationBus` as the default** — single-host loopback pub/sub; presence, leases,
-  and collision detection work in-process. `OMP_SQUAD_FEDERATION=0` to opt out entirely.
-- **Coordinator relay** (`bun src/coordinator-main.ts`) — dumb WebSocket fan-out; built,
-  tested, token-gated for non-loopback binds.
-- **Cross-host presence gossip + collision detection** — `TailnetFederationBus` publishes this
-  host's roster to the coordinator and receives peers'; `mergeRosters` + `detectCollisions`
-  (in `src/federation.ts`) fold them into a roster-of-rosters. Collisions key on the repo's
-  **normalized git origin URL** (`src/repo-identity.ts`), not a host-local path, so same-GitHub-
-  repo / different-machine checkouts collide and same-basename unrelated repos don't.
-  Each `AgentDTO` carries a `repoId` field stamped before it leaves the local host.
-- **Cross-host file leasing** — `federation-sync` publishes this host's leases (by repo
-  identity) and mirrors peers'; the lease-hook warns before you edit a file a remote teammate
-  holds. In file mode, the daemon auto-starts the sync when a coordinator is configured.
-- **Live API surfaces** — `/api/federation`, `/api/leases`, and `/api/fabric` return real data
-  (per-org scoped in DB mode); the command center Federation/Leases panel is not a placeholder.
-- **Transport security** — remote command actors are verified via `tailscale whois <peer-ip>`;
-  wire-asserted `role`/`origin` are NEVER trusted; an unverified peer stays at the read-only
-  `viewer` tier.
-
-**What still requires setup for true cross-host use:**
-
-- A deployed coordinator URL (`OMP_SQUAD_COORDINATOR=ws://…`) plus a second physical host.
-- `tailscale whois` for peer identity — resolves only on a real tailnet; without it, inbound
-  command actors are unverified and fall back to `viewer`.
-
-**Remote steering** (driving a teammate's live agent from your command center) — both halves
-exist now. The receive side (`onRemoteCommand` + `applyCommand(cmd, actor)`) authorizes via
-whois-verified actor + RBAC; the send side is `bus.sendCommand(cmd, to)` behind
-`POST /api/federation/command` (`{to: "<operator id>", cmd: {type, …}}`, operator-tier,
-audited as `federation.command`). Frames are addressed — peers drop commands not meant for
-them — and the coordinator stamps the sender's real socket address as `ip` (any client-sent
-`ip` is overwritten), so the receiver's `tailscale whois` verifies the true sender, never a
-claimed identity. Sending grants nothing: an unverified sender lands as read-only `viewer`
-on the receiving daemon. Still missing for a full remote-steering UX: a command-center UI
-affordance on the Federation panel (the API is the seam) and a reply/ack channel (effects
-surface through the peer's gossiped presence).
-
-See [`docs/federation.md`](docs/federation.md) for the full architecture and runbook.
+A full model-driven smoke test (spawn → work → artifact) is in the
+[quickstart](docs-site/content/docs/getting-started/quickstart.mdx).
 
 ## Layout
 
-### Core
-
-| File | Role |
-|---|---|
-| `src/types.ts` | Shared domain + wire types — `AgentRecord`/`AgentDTO`, `SquadEvent`, `ClientCommand` |
-| `src/squad-manager.ts` | Roster, status derivation, transcript, persistence, `applyCommand` |
-| `src/server.ts` | HTTP + WebSocket bridge (web dashboard + REST) |
-| `src/capabilities/` | Capability pack schema, manifest import, install bindings, upgrade/diff, federation metadata, and context policy helpers |
-| `src/auth.ts` | Bearer-token gate for the HTTP + WS surface (constant-time, persisted mode 0600) |
-| `src/audit.ts` | Append-only fleet-action audit log (JSONL) — actor/action/target/outcome, behind `GET /api/audit` |
-
-### Web & CLI
-
-| File | Role |
-|---|---|
-| `src/web/index.html` | Single-page web dashboard |
-| `webapp/` | Vite + React + Tailwind v4 starter UI (rewrite-in-progress; inert behind `OMP_SQUAD_WEBAPP=1`) |
-| `webapp-legacy/` | Previous React dashboard kept as reference during the cutover |
-| `src/tui.ts` | Terminal dashboard — `buildBoard` chrome + pi-tui `Editor` input, two-level nav |
-| `src/index.ts` | CLI |
-
-### Drivers & transport
-
-| File | Role |
-|---|---|
-| `src/agent-driver.ts` | `AgentDriver` seam shared by `RpcAgent`, `FlueServiceDriver`, `WorkflowDriver` |
-| `src/rpc-agent.ts` | Spawns + drives one `omp --mode rpc` child (JSONL transport) |
-| `src/agent-host.ts` | Detached per-agent supervisor over a UDS — owns the omp child, survives a daemon restart |
-| `src/agent-host-main.ts` | Thin entry for a detached `agent-host` process |
-| `src/acp-agent-driver.ts` | Runs an ACP runtime (`auggie --acp`, Claude Code / Codex) behind `AgentDriver` |
-| `src/sandbox-agent-driver.ts` | Runs an agent inside a container (`docker exec` + omp RPC) behind `AgentDriver` |
-| `src/flue-service-driver.ts` | Adapts a commissioned Flue worker (`flue run`) to `AgentDriver` |
-| `src/workflow-driver.ts` | Runs a workflow graph behind `AgentDriver` (one omp thread per run) |
-| `src/subagents.ts` | `SubagentTracker` — RPC subagent stream → live hierarchy tree |
-| `src/worktree.ts` | `git worktree` add / remove / status |
-
-### Workflow engine
-
-| File | Role |
-|---|---|
-| `src/workflow/types.ts` | Workflow graph domain model — nodes, stages, run state |
-| `src/workflow/dot.ts` | DOT-subset parser → typed `Workflow` graph |
-| `src/workflow/engine.ts` | Pure graph walker — routing, conditions, gates, fix-up loops |
-| `src/workflow/executor.ts` | `SingleAgentExecutor` — binds nodes to an omp thread + shell |
-| `src/workflow/commission-executor.ts` | `CommissionExecutor` — runs the commission graph's action nodes |
-| `src/workflow/verify-workflow.ts` | `buildVerifyWorkflow` — synthesizes the `--verify` implement → verify → fixup loop |
-| `src/workflow/stylesheet.ts` | CSS-like `model_stylesheet` parser + per-node model/effort resolver |
-
-**Durable resume (survives a full daemon crash).** A workflow run resumes from its persisted checkpoint even
-after the inner thread *and* the daemon are gone — not only when the inner host survived. The engine writes a
-**two-phase checkpoint** per node: one at entry (warm reattach) and one after the node finishes with
-`currentNode` advanced to its successor. So a *completed* node is never re-run; the only re-runnable node is one
-interrupted between its own entry and exit checkpoints = genuinely in-flight. On a **cold** resume (fresh inner
-thread, the orphan-adoption path) that in-flight node re-executes and re-primes the goal, rather than waiting on
-a turn no live thread is running. Because a mid-execution node re-runs, **`.fabro` command and agent nodes must
-be idempotent / HEAD-keyed** — the two-phase checkpoint already prevents re-running a *finished* one. A node
-that keeps crashing the daemon before reaching idle is bounded by a **resume poison cap** (3 cold re-entries),
-after which the run escalates to a human instead of looping forever. The persisted checkpoint is **authoritative
-for restart adoption** (a resumable run counts as work even with a clean worktree) and is **preserved across a
-ceiling-constrained restart** (kept and re-attempted on a later boot instead of being erased by the
-full-snapshot persist); a resuming workflow is never direct-landed without completing its graph.
-
-### Autonomy & orchestration
-
-| File | Role |
-|---|---|
-| `src/intake.ts` | Intake router — turns a plain task into a process (verify / plan / fan-out) |
-| `src/smart-spawn.ts` | Turns one free-text line into a ready-to-run spawn plan (fast model + heuristic fallback) |
-| `src/dispatch.ts` | Auto-dispatch — polls Plane, routes new issues to agents (bounded; on by default when Plane is set) |
-| `src/orchestrator.ts` | Self-healing control loop — auto-land → self-heal → catastrophe → admission drain (on by default) |
-| `src/scheduler.ts` | Admission + global WIP ceiling, with a FIFO park queue for spawns past the cap |
-| `src/resolver.ts` | Failure-routing policy — retry / hold / escalate by a bounded repair budget |
-| `src/land-ledger.ts` | Branch-keyed auto-land failure ledger — the restart-safe retry cap that parks a gate-failing branch |
-| `src/orchestrator-state.ts` | Branch-keyed, restart-safe ledger of the loop's terminal decisions — halted / landed / staged survive a daemon restart |
-| `src/supervisor.ts` | Auto-supervisor — answers low-risk pending requests via a one-shot omp agent |
-| `src/autoland.ts` | Auto-land policy — a successful workflow run lands its own branch (pure decision) |
-
-### Landing & git
-
-| File | Role |
-|---|---|
-| `src/land.ts` | Landing — commit a branch + merge into main (ff / merge commit), serialized per-repo; opt-in rebase auto-resolve |
-| `src/proof.ts` | Land proof — deterministic acceptance command keyed to HEAD; the gate refuses a stale proof |
-| `src/vision.ts` | Optional browser-vision evidence pass (screenshots + notes) — evidence only, never gates |
-| `src/ssrf.ts` | SSRF guard for the vision target URL — http(s) only, blocks private/loopback/link-local/metadata ranges (admin-tier route; `OMP_SQUAD_APP_URL` origin allowlisted) |
-| `src/explore.ts` | Worktree file tree + git diff (the Changes panel) |
-| `src/git-harden.ts` | Hardening args/env for read-only git on untrusted repos (no hooks / pager / prompt) |
-
-### Commissioning
-
-| File | Role |
-|---|---|
-| `src/architect.ts` | `OmpArchitect` (omp-authored — the daemon default) + `TemplateArchitect` (deterministic, test-only) |
-| `src/worker-template.ts` | `CommissionSpec` → runnable Flue worker project files |
-| `src/validate.ts` | Acceptance gate — lint · typecheck · `flue run` |
-
-### Federation & presence
-
-| File | Role |
-|---|---|
-| `src/federation.ts` | Federation seam + `NullFederationBus` / `TailnetFederationBus`, `mergeRosters`, `detectCollisions` |
-| `src/coordinator.ts` | Protocol-agnostic WebSocket relay/hub every `TailnetFederationBus` connects to |
-| `src/coordinator-main.ts` | CLI entry for the federation coordinator |
-| `src/federation-sync.ts` | Cross-host file leasing over the tailnet — publishes/mirrors local leases by repo identity |
-| `src/federation-sync-main.ts` | CLI entry for the cross-host lease-sync process |
-| `src/repo-identity.ts` | Cross-host repo identity — normalize a git origin URL to `host/owner/repo` |
-| `src/ttl-registry.ts` | Generic file-per-record heartbeat-TTL registry — the shared spine behind `presence.ts` + `leases.ts` |
-| `src/presence.ts` | Presence/claim registry — who or what is working a repo now (heartbeat-TTL, file-per-claim) |
-| `src/presence-hook.ts` | omp hook — a raw `omp` session announces its repo to the squad |
-| `src/sessions.ts` | Discovers raw (non-squad) omp sessions from the OS process table into presence |
-| `src/leases.ts` | Soft advisory file leases — "I'm editing this file" claims (heartbeat-TTL, file-per-lease) |
-| `src/lease-hook.ts` | omp edit hook — soft-block-with-override when another session holds the file |
-| `src/ownership.ts` | Path-ownership partition — refuse a spawn whose paths overlap a live agent's |
-| `src/install-hooks.ts` | Installs the presence + lease hooks as an omp-discovered extension |
-
-### Supporting services
-
-| File | Role |
-|---|---|
-| `src/plane.ts` | Plane issue client (env-configured) |
-| `src/features.ts` | Feature derivation (plans + roster agents) with live land status |
-| `src/receipts.ts` | Per-run receipt ledger (tokens / cost / files) — accumulator + JSONL persistence |
-| `src/digest.ts` | Zero-token transcript digests for cold-start resume |
-| `src/summarizer.ts` | Local extractive TF-IDF + TextRank summarizer (vendored, zero-token) |
-| `src/redact.ts` | Best-effort secret-shape redaction before anything is persisted or displayed |
-| `src/push.ts` | Dependency-free Web Push (RFC 8291 / 8188 / 8292) for escalation alerts |
-| `src/upgrade.ts` | Self-upgrade — git state · fast-forward pull · re-exec the daemon |
-| `src/omp-oneshot.ts` | Shared one-shot `omp` call — spawn + JSON-extraction for smart-spawn / intake / supervisor |
-
-### Bundled workflows
-
 | Path | Role |
 |---|---|
-| `workflows/plan-implement/` | Bundled plan → approve → implement → verify → fixup graph |
-| `workflows/commission/` | Bundled author → validate → onboard graph (the commission loop) |
-| `workflows/fan-out/` | Bundled parallel fan-out → merge graph (one fleet agent per branch) |
-| `workflows/resolve-conflict/` | Bundled merge → resolve → verify → fixup graph (run manually via `--workflow resolve-conflict`) |
+| `src/index.ts` | CLI + daemon entry (`glance` / `omp-squad`) |
+| `src/squad-manager.ts` | Roster, status derivation, transcript, `applyCommand` |
+| `src/server.ts` | HTTP + WebSocket bridge (REST API + dashboards) |
+| `src/tui.ts` | Terminal dashboard |
+| `webapp/` | React 19 + Vite + Tailwind web dashboard (`GLANCE_WEBAPP=1`) |
+| `src/web/index.html` | Zero-build fallback dashboard |
+| `src/rpc-agent.ts` · `src/agent-host*.ts` | omp RPC child + detached restart-surviving host |
+| `src/acp-agent-driver.ts` · `src/sandbox-agent-driver.ts` · `src/flue-service-driver.ts` · `src/workflow-driver.ts` | The other `AgentDriver` implementations |
+| `src/workflow/` | Graph engine — DOT parser, walker, executors, model stylesheets |
+| `src/intake.ts` · `src/dispatch.ts` · `src/orchestrator.ts` · `src/scheduler.ts` · `src/supervisor.ts` | Autonomy: routing, dispatch, control loop, admission, auto-answer |
+| `src/land.ts` · `src/proof.ts` · `src/land-ledger.ts` · `src/orchestrator-state.ts` | Landing, deterministic proof, restart-safe ledgers |
+| `src/federation*.ts` · `src/coordinator*.ts` · `src/presence.ts` · `src/leases.ts` | Federation, presence, file leases |
+| `src/architect.ts` · `src/worker-template.ts` · `src/validate.ts` | Commissioning |
+| `src/capabilities/` | Capability packs — schema, import, install, catalog |
+| `src/plane.ts` · `src/plane-throttle.ts` | Plane client + shared rate limiter |
+| `workflows/` | Bundled workflow graphs (`.fabro`) |
+| `docs-site/` | The documentation site |
+| `tests/` | Deterministic test suite |
+
+Every fleet class implements one `AgentDriver` seam, so the roster, TUI, web, and federation
+treat an omp operator, a workflow run, a sandboxed agent, an ACP runtime, and a commissioned
+worker identically — `kind` is the only difference.

@@ -1,12 +1,12 @@
 ---
 title: Plane
-description: Wire omp-squad to a Plane workspace to pull real issues into the command center, spawn agents on them, and close them on land.
+description: Wire glance to a Plane workspace to pull real issues into the command center, spawn agents on them, and close them on land.
 ---
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import { Steps, Step } from 'fumadocs-ui/components/steps';
 
-omp-squad reads work items straight from [Plane](https://plane.so). When configured, the
+glance reads work items straight from [Plane](https://plane.so). When configured, the
 **Plane issues** panel in each project view lists the project's open issues; clicking one
 spawns a [routed](/docs/integrations/intake) agent on it. A successful
 [land](/docs/guides/landing) closes the agent's tracking issue. The whole client lives in
@@ -15,7 +15,7 @@ new dependency.
 
 ## Configuration
 
-Set these on the **daemon** (the `omp-squad up` process). The client is enabled the moment
+Set these on the **daemon** (the `glance up` process). The client is enabled the moment
 both an API key and a workspace are present — `readConfig()` returns `null` (Plane disabled)
 otherwise.
 
@@ -118,6 +118,36 @@ Transitions are best-effort (`true` on success, never throwing) and move an issu
 Landing closes the issue on both paths — the single-agent `land(id)` and the multi-branch
 `landFeature` — so a shipped branch leaves no stale open issue behind.
 </Callout>
+
+## Guarding against tracker drift
+
+A tracker and a repo can disagree, and the daemon refuses to let drift multiply work:
+
+- **Dispatch ledger** — every dispatched issue id is persisted to
+  `<stateDir>/dispatch-ledger.json`, so a daemon restart never re-spawns an agent for an
+  issue it already worked (finished *or* failed).
+- **Stale-issue guard + auto-close** — before dispatching, an open issue whose plan concern
+  is already closed in the repo (the plan doc its `PLANE: <ID>` pointer names has a done
+  STATUS) is skipped, ledgered, and best-effort **closed** — healing the drift instead of
+  re-implementing finished work.
+- **Stale-branch land gate** — a *clean* merge can still be wrong: a branch cut from an old
+  main can merge without conflict yet silently clobber code that evolved since. The land
+  path refuses such stale branches (see [Landing](/docs/guides/landing)), so "Done in Plane,
+  regressed on main" can't happen through a quiet auto-land.
+- **Plan-sync** — the `GLANCE_PLANSYNC` loop reconciles the other direction: a completed
+  Plane issue closes its plan doc's STATUS line (never reopening a done doc — that conflict
+  is surfaced on the Automation feed instead).
+
+## Sharing the API budget
+
+Plane cloud rate-limits per workspace token, and many in-process callers share it (the
+dispatcher poll, the Observer, the worktree reaper, the Scout). They all route through one
+chokepoint — `src/plane-throttle.ts` — which serializes requests with a minimum interval
+(`GLANCE_PLANE_MIN_INTERVAL_MS`, default 500ms), backs off centrally on 429/Retry-After
+(`GLANCE_PLANE_BACKOFF_BASE_MS`), and wraps `listPlaneIssues` in a short-TTL single-flight
+cache (`GLANCE_PLANE_CACHE_MS`, default 15s) that any write invalidates — so concurrent polls
+of the same repo collapse to one call, and the shared token stays free for the Plane MCP and
+other sessions.
 
 ## Per-feature modules & tickets
 

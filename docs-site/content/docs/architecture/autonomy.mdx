@@ -1,135 +1,176 @@
 ---
 title: Autonomy
-description: The opt-in self-driving layer — orchestrator, scheduler, supervisors, and escalation — every switch and its default, grounded in source.
+description: The on-by-default self-driving layer — orchestrator, scheduler, supervisors, restart-safe ledgers, and escalation — every switch and its default, grounded in source.
 ---
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 
 <Callout type="warn">
-  **The self-driving control loop is off by default.** The orchestrator arms no timer,
-  cap-parking is disabled, in-manager auto-answering is disabled, and the repair-budget
-  escalation only runs once you set the flags below. The one exception is the
-  **standing supervisor loop**, which runs by default (and is disabled with
-  `--no-supervise`); it is called out explicitly under *Supervision*. Everything stays
-  safe because each agent works in an isolated, reviewed-before-merge git worktree —
-  the worktree is the blast radius.
+  **The self-driving layer is on by default.** The orchestrator tick, auto-land,
+  auto-dispatch, both supervisors, and the audit loops all arm themselves unless you set
+  the matching `GLANCE_<NAME>=0`. Two safety valves temper it: a green verify **stages a
+  one-tap Land** instead of blind-merging (`GLANCE_LAND_CONFIRM`, on by default), and
+  every destructive approval is always left for a human. Each agent works in an isolated
+  git worktree — the worktree is the blast radius until a land, and every land is gated.
 </Callout>
 
-Four cooperating pieces let a fleet keep moving without a human. Each is independent,
-bounded, and gated by an environment variable.
+Cooperating pieces let a fleet keep moving without a human. Each is independent,
+bounded, and gated by an environment variable (legacy `OMP_SQUAD_*` spellings still
+work):
 
 <TypeTable
   type={{
-    OMP_SQUAD_AUTODRIVE: { type: 'flag', default: 'off', description: 'Arm the orchestrator tick (auto-land → self-heal → catastrophe → admission-drain).' },
-    OMP_SQUAD_MAX_WIP: { type: 'number', default: '6', description: 'Global live-agent WIP ceiling; a spawn past it is refused.' },
-    OMP_SQUAD_QUEUE_ON_FULL: { type: 'flag', default: 'off', description: 'At the cap, park the spawn (FIFO) and return a queued signal instead of erroring.' },
-    OMP_SQUAD_AUTO_SUPERVISE: { type: 'flag', default: 'on', description: 'Standing model-backed supervisor loop. Set to 0 (or pass --no-supervise) to disable.' },
-    OMP_SQUAD_SUPERVISE_MODEL: { type: 'string', default: '--smol', description: 'Model the supervisor answerer uses; falls back to the fast/smol model.' },
-    OMP_SQUAD_AUTOSUPERVISE: { type: 'flag', default: 'off', description: 'In-manager deterministic auto-answer of low-risk routine prompts.' },
-    OMP_SQUAD_AUTOSUPERVISE_BUDGET: { type: 'number', default: '5', description: 'Per-agent cap on in-manager auto-answers before requests fall back to a human.' },
-    OMP_SQUAD_REPAIR_BUDGET: { type: 'number', default: '3', description: 'Red-gate retry budget before the failure router escalates.' },
-    OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR: { type: 'number', default: '30', description: 'Per-hour LLM-call budget for the Scout loop. When the trailing-hour call count reaches this limit, Scout skips the LLM extraction and re-harvests later. Set to 0 or a negative value for unlimited.' },
+    GLANCE_AUTODRIVE: { type: 'flag', default: 'on', description: 'The orchestrator tick (auto-land → self-heal → catastrophe → admission-drain). Set 0 to disable — then no timer is armed and the loop is fully inert.' },
+    GLANCE_LAND_CONFIRM: { type: 'flag', default: 'on', description: 'A GREEN verify stages the branch for a one-tap Land instead of auto-merging. Set 0 to let green work merge with no human.' },
+    GLANCE_MAX_WIP: { type: 'number', default: '~half host CPUs (min 2)', description: 'Global live-agent WIP ceiling; a spawn past it is refused (or parked).' },
+    GLANCE_MAX_AGENTS: { type: 'number', default: 'max(CPUs, 3)', description: 'Absolute host-process ceiling that even bypass-cap (fan-out) spawns respect.' },
+    GLANCE_QUEUE_ON_FULL: { type: 'flag', default: 'off', description: 'At the cap, park the spawn (FIFO) and return a queued signal instead of erroring.' },
+    GLANCE_AUTO_SUPERVISE: { type: 'flag', default: 'on', description: 'Standing model-backed supervisor loop (file mode). Set 0 (or pass --no-supervise) to disable.' },
+    GLANCE_SUPERVISE_MODEL: { type: 'string', default: '--smol', description: 'Model the supervisor answerer uses; falls back to the fast/smol model.' },
+    GLANCE_AUTOSUPERVISE: { type: 'flag', default: 'on', description: 'In-manager deterministic auto-answer of low-risk routine prompts. Set 0 to disable.' },
+    GLANCE_AUTOSUPERVISE_BUDGET: { type: 'number', default: '5', description: 'Per-agent cap on in-manager auto-answers before requests fall back to a human.' },
+    GLANCE_REPAIR_BUDGET: { type: 'number', default: '3', description: 'Red-gate retry budget before the failure router escalates.' },
+    GLANCE_AUTOLAND_FAIL_CAP: { type: 'number', default: '3', description: 'Consecutive failed auto-lands before a branch is parked instead of re-merged (branch-keyed, restart-safe).' },
+    GLANCE_SCOUT_MAX_CALLS_PER_HOUR: { type: 'number', default: '30', description: 'Per-hour LLM-call budget for the Scout loop. At the limit Scout skips extraction and re-harvests later. 0 or negative = unlimited.' },
   }}
 />
 
+## Is the factory alive? — `GET /api/factory/status`
+
+Because everything defaults on, the interesting question is no longer "did I arm it?"
+but "is it armed, fueled, and moving?" `src/factory-status.ts` answers it: the endpoint
+(and the dashboard's factory status strip) reports each loop as one of
+
+- **`off`** — explicitly disabled (`GLANCE_<NAME>=0`);
+- **`not-armed`** — enabled but missing a prerequisite (no Plane repos configured, no
+  coordinator, …);
+- **`idle`** — armed with nothing to do (an empty backlog is healthy, not dead);
+- **`moving`** — did real work in the recent window.
+
+An idle-but-alive fleet is visibly breathing; a dead prerequisite is named instead of
+silently doing nothing.
+
 ## Orchestrator — the self-healing loop
 
-`Orchestrator` (`src/orchestrator.ts`) is a periodic control loop. It is strictly
-opt-in: `start()` arms no timer and `tick()` returns immediately unless
-`OMP_SQUAD_AUTODRIVE` is set, so the daemon leaks no timer and the loop is fully inert
-when off. When armed, it runs every 30s (default `intervalMs`), driving the fleet
-through **injected dependencies** (`spawn` / `verify` / `land` / `route`), so the
-policy is testable headless with no live daemon.
+`Orchestrator` (`src/orchestrator.ts`) is a periodic control loop, **armed by default**:
+`start()` arms a 30s timer unless `GLANCE_AUTODRIVE=0`, in which case no timer exists
+and `tick()` is fully inert.
 
-Each tick applies one policy in order:
+```ts title="src/orchestrator.ts — on unless explicitly disabled"
+const autodrive = () => process.env.OMP_SQUAD_AUTODRIVE !== "0";
 
-1. **Auto-land** — for every idle agent with unlanded work (`featureId`), run the
-   acceptance gate; a green gate lands the branches (and the land path closes the
-   tracking Plane issue). A land blocked by divergence/conflict is left for the
-   conflict path and retried next tick.
-2. **Self-heal** — a red gate routes through `routeFailure`: `retry` re-verifies next
-   tick under a higher attempt count, `hold` parks it, `escalate` summons a human.
-   Attempts are tracked per agent.
-3. **Catastrophe** — the *only* place a human is summoned. A clear `CATASTROPHE:` log
-   fires on repair-budget exhaustion or an `isCatastrophic` tripwire (infra failure,
-   safety violation, regression oscillation), and the loop stops acting on that agent
-   until restart. Never a silent drop.
-4. **Admission drain** — parked spawn requests are admitted while the WIP cap has
-   headroom, re-counting live agents each pass so freshly spawned ones tighten the
-   ceiling.
-
-```ts title="src/orchestrator.ts — opt-in arming"
 start(intervalMs = 30_000): void {
-  if (this.timer || !autodrive()) return;   // autodrive() === !!process.env.OMP_SQUAD_AUTODRIVE
+  if (this.timer || !autodrive()) return;
   this.timer = setInterval(() => void this.tick(), intervalMs);
   this.timer.unref?.();
 }
 ```
 
-The orchestrator has two additional guards that prevent runaway or overlapping ticks:
+When armed, it drives the fleet through **injected dependencies**
+(`spawn` / `verify` / `land` / `route`), so the policy is testable headless with no
+live daemon. Each tick applies one policy in order:
 
-- **Re-entrancy guard** — a `ticking` flag is set at the top of `tick()` and cleared in a
-  `finally` block. If the previous tick is still in-flight when the next interval fires, the
-  new tick returns immediately rather than overlapping.
-- **Bounded ledger purge** — at the end of each tick, the attempt/state ledger is pruned to
-  drop entries for branches that no longer appear in the roster, keeping memory bounded.
+1. **Auto-land** — for every idle agent with unlanded work, run the acceptance gate. A
+   green gate lands the branch (closing the tracking Plane issue) — or, in confirm mode
+   (`GLANCE_LAND_CONFIRM`, the default), **stages** it as ✓ ready-to-land for a one-tap
+   human Land. A land blocked by divergence/conflict is retried, but only
+   `LAND_RETRY_CAP` (3) consecutive times — then the branch is **parked** and the
+   Observer files a bug for it. Re-adopted agents (worktrees that survived a daemon
+   restart with finished work) are landed directly through the land path's own
+   merge → gate → rollback, skipping the isolated pre-verify that would false-negative
+   on a stale-but-mergeable branch.
+2. **Self-heal** — a red gate routes through `routeFailure`: `retry` re-verifies next
+   tick under a higher attempt count, `hold` parks it, `escalate` summons a human.
+   Attempts are tracked per agent.
+3. **Catastrophe** — the *only* place a human is summoned. On repair-budget exhaustion
+   or an `isCatastrophic` tripwire (infra failure, safety violation, regression
+   oscillation), the agent is driven into a sticky `error` state — so it surfaces in
+   the attention **Queue** and fires the same web push as any blocked agent, with the
+   `CATASTROPHE:` reason in the notification body. Never a silent drop.
+4. **Admission drain** — parked spawn requests are admitted while the WIP cap has
+   headroom, re-counting live agents each pass so freshly spawned ones tighten the
+   ceiling.
+
+Two guards prevent runaway or overlapping ticks:
+
+- **Re-entrancy guard** — a `ticking` flag set at the top of `tick()` and cleared in a
+  `finally` block; if the previous tick is still in-flight, the new one returns
+  immediately.
+- **Bounded ledger purge** — entries for branches that no longer appear in the roster
+  are pruned each tick, keeping memory bounded.
+
+### Restart-safe ledgers — terminal decisions survive the daemon
+
+Two branch-keyed ledgers under the state dir make the loop's decisions durable, so a
+daemon restart never re-drives work that already reached a terminal outcome:
+
+- **`orchestrator-state.json`** (`src/orchestrator-state.ts`) mirrors per-branch
+  terminal decisions — *halted* (catastrophe or parked), *landed*, and *staged* (held
+  for one-tap Land). Without it, a restart would re-run the acceptance suite, re-spend
+  the repair budget, and re-trip `CATASTROPHE:` every boot. A parked branch stays
+  parked until an operator acts.
+- **`land-failures.json`** (`src/land-ledger.ts`) holds the consecutive
+  failed-auto-land streak per branch. At `GLANCE_AUTOLAND_FAIL_CAP` (default 3) the
+  branch is parked instead of endlessly merged + rolled back. Operator one-tap Land is
+  never blocked by the cap; the Observer files a bug for the parked branch.
+
+Both key on the **branch** — stable even when a re-adopted worktree gets a fresh agent
+id — and clear nothing automatically.
 
 ## Scheduler — WIP cap and FIFO park
 
 `Scheduler` (`src/scheduler.ts`) owns the global concurrency ceiling. The cap counts
 **live** agents — everything not `stopped` or `error` (`liveAgents`) — against
-`OMP_SQUAD_MAX_WIP` (default 6), read per call so an ops/test change takes effect
-without a restart.
+`GLANCE_MAX_WIP`, read per call so an ops change takes effect without a restart. Unset,
+the default is `max(2, floor(cpus / 2))`, so a bare launch is bounded even without a
+configured env. A separate, narrower count (`occupyingAgents`: only
+starting/working/input) gates the auto-dispatcher, so finished-but-idle agents don't
+starve the backlog. `GLANCE_MAX_AGENTS` is the absolute host-process ceiling that even
+bypass-cap fan-out spawns respect.
 
 When a spawn would exceed the cap, behavior depends on one flag:
 
 - **default** — the historical hard-cap error: the spawn is rejected.
-- **`OMP_SQUAD_QUEUE_ON_FULL`** — the spawn is **parked** in a FIFO queue and `create()`
-  returns a synthetic DTO with `queued: true` (the signal to the caller) instead of
-  erroring. That DTO is never added to the roster; the orchestrator's admission-drain
-  step dequeues and spawns the real agent once a slot frees.
+- **`GLANCE_QUEUE_ON_FULL`** — the spawn is **parked** in a FIFO queue and `create()`
+  returns a synthetic DTO with `queued: true` instead of erroring. That DTO is never
+  added to the roster; the orchestrator's admission-drain step dequeues and spawns the
+  real agent once a slot frees.
 
-```ts title="src/scheduler.ts"
-cap(): number { return Number(process.env.OMP_SQUAD_MAX_WIP) || 6; }
-canAdmit(liveCount: number): boolean { return liveCount < this.cap(); }
-```
+Host-pressure gating is the one **opt-in** here: with `GLANCE_RESOURCE_GATE` set (the
+`up.sh` launcher sets it), admission also refuses spawns while
+`load1/ncpu > GLANCE_MAX_LOAD_PER_CPU` or the free-memory ratio is under
+`GLANCE_MIN_FREE_RATIO`.
 
 ## Supervision — answering prompts without a human
 
-There are **two distinct supervisors** with opposite defaults. Knowing which is which
-matters.
+There are **two supervisors**, both on by default. Knowing which is which matters.
 
-### Standing supervisor loop — default on
+### Standing supervisor loop
 
-`startSupervisor` (`src/supervisor.ts`) is a standing loop the daemon starts on boot.
-It is gated by `OMP_SQUAD_AUTO_SUPERVISE` and runs **unless** you set that to `0` or
-pass `--no-supervise`:
+`startSupervisor` (`src/supervisor.ts`) is a standing loop the daemon starts on boot
+(file mode only — in DB mode, supervision is per-org inside each manager). It is gated
+by `GLANCE_AUTO_SUPERVISE` and runs **unless** you set that to `0` or pass
+`--no-supervise`. It opens the daemon WebSocket and, for every agent reporting status
+`input`, consults a **one-shot model** for a decision: `decide()` spawns
+`omp -p --mode json --smol` (or `--model GLANCE_SUPERVISE_MODEL`) with the
+`SUPERVISOR_SYSTEM` prompt, then submits the answer as an `answer` `ClientCommand`. The
+system prompt biases toward **approve / advance** but denies anything destructive or
+blast-radius-escaping. It is robust by construction: a non-zero exit, timeout, empty
+output, or parse failure all degrade to `chooseFallback(req)` (a deterministic
+approve/continue).
 
-```ts title="src/index.ts"
-const supervise = process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
-const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
-```
+### In-manager auto-supervise
 
-It opens the daemon WebSocket and, for every agent reporting status `input`, consults a
-**one-shot model** for a decision: `decide()` spawns `omp -p --mode json --smol`
-(or `--model OMP_SQUAD_SUPERVISE_MODEL`) with the `SUPERVISOR_SYSTEM` prompt, then
-submits the answer as an `answer` `ClientCommand`. The system prompt biases toward
-**approve / advance** but denies anything destructive or blast-radius-escaping. It is
-robust by construction: a non-zero exit, timeout, empty output, or parse failure all
-degrade to `chooseFallback(req)` (a deterministic approve/continue).
-
-### In-manager auto-supervise — default off
-
-`maybeAutoSupervise` (`src/squad-manager.ts`) is a separate, **off-by-default**,
-deterministic layer gated by `OMP_SQUAD_AUTOSUPERVISE` (note: no underscore). It runs
-inside the manager when a request is first registered and answers only what
-`chooseFallback` can decide with no model. It is bounded three ways:
+`maybeAutoSupervise` (`src/squad-manager.ts`) is a separate deterministic layer gated
+by `GLANCE_AUTOSUPERVISE` (note: no underscore) — also **on by default** (`=0` to
+disable). It runs inside the manager when a request is first registered and answers
+only what `chooseFallback` can decide with no model. It is bounded three ways:
 
 - a **risk filter** — `isRiskyRequest` leaves anything matching a destructive pattern
   (`force-push`, `delete`, `deploy`, `prod`, `mainnet`, `secret`, `push…main`, …) for
   a human, and **every host-tool call** is always left for a human (it runs real side
   effects);
-- a **per-agent budget** — `OMP_SQUAD_AUTOSUPERVISE_BUDGET` (default 5); past it, that
+- a **per-agent budget** — `GLANCE_AUTOSUPERVISE_BUDGET` (default 5); past it, that
   agent's requests fall back to the human queue;
 - an **audit trail** — every auto-answer (and every skip, with a reason) is logged, and
   the answer is stamped with an `auto-supervise` actor so the transcript shows it
@@ -148,7 +189,7 @@ inside the manager when a request is first registered and answers only what
 reads when a run fails. It maps a failure kind to `retry` / `hold` / `escalate`:
 
 - **`red`** (a gate failed) — retry while attempts are under the repair budget
-  (`OMP_SQUAD_REPAIR_BUDGET`, default 3), then escalate;
+  (`GLANCE_REPAIR_BUDGET`, default 3), then escalate;
 - **`conflict`** (a land conflicted) — retry exactly once (the automated
   conflict-resolver's single shot), then escalate.
 
@@ -162,43 +203,47 @@ export function routeFailure(kind: FailureKind, ctx?: FailureContext): FailureRo
 ```
 
 It is only the decision — the orchestrator drives the actual re-attempt, and an
-`escalate` becomes the human-summoning `CATASTROPHE:` log. The budget is re-read per
-call, so ops can retune it live.
+`escalate` becomes the human-summoning `CATASTROPHE:`. The budget is re-read per call,
+so ops can retune it live.
 
 ## Scout — per-hour LLM-call budget
 
 The Scout loop extracts opportunities from agent transcripts by calling the LLM on each
-new segment. On a large fleet this can be expensive; `OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR`
-(default 30) caps how many LLM calls the Scout loop may make in any trailing 60-minute window.
+new segment. On a large fleet this can be expensive; `GLANCE_SCOUT_MAX_CALLS_PER_HOUR`
+(default 30) caps how many LLM calls the Scout loop may make in any trailing 60-minute
+window.
 
 When the budget is exhausted for the hour:
 - Scout **skips the LLM extraction** for that agent/segment.
 - A `warn`-level automation event is emitted: `"scout LLM budget reached (N/h) — skipping extraction for <agent>"`.
 - The segment is **not discarded** — Scout will re-harvest it once the trailing-hour window slides and budget is available again.
 
-Set `OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR=0` (or any non-positive value) for unlimited calls.
+Set `GLANCE_SCOUT_MAX_CALLS_PER_HOUR=0` (or any non-positive value) for unlimited calls.
 
 ## Background loop observability
 
-All four background loops — **scout**, **observer**, **opportunity**, and **dispatch** — now
+All the background loops — **scout**, **observer**, **opportunity**, and **dispatch** —
 surface failures rather than swallowing them silently:
 
 - **Failures are logged** at the `error` or `warn` level and emitted as automation events
-  (visible in the **Automation** panel and via `omp-squad automation`).
+  (visible in the **Automation** panel and via `glance automation`).
 - **Transient external calls** (Plane API polls) use a **single-retry** pattern: a transient
   failure retries once immediately; if the retry also fails, the error is surfaced as a warning
   rather than silently swallowed.
+- **No-op ticks name why** they did nothing (no repos, empty backlog, cap reached), so an
+  idle loop is distinguishable from a broken one.
 
 ### Inspecting loop activity
 
 ```sh title="CLI"
-omp-squad automation            # recent events, all loops
-omp-squad automation --loop scout --window 2h
+glance automation            # recent events, all loops
+glance automation --loop scout --window 6h
 ```
 
 ```sh title="API"
 GET /api/automation
-GET /api/automation?loop=scout&windowMs=7200000&meaningful=1
+GET /api/automation?loop=scout&windowMs=7200000
+GET /api/factory/status
 ```
 
 The response includes:
