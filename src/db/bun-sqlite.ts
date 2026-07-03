@@ -10,10 +10,19 @@
  */
 
 import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { SqliteDatabase, SqliteStatement } from "kysely";
 
 /** Wrap a `bun:sqlite` Database in the subset of better-sqlite3's API Kysely needs. */
 export function bunSqliteDatabase(filename: string): SqliteDatabase {
+	// SQLite won't create a db file inside a missing directory — it fails with the
+	// opaque "unable to open database file". A DATABASE_URL like `sqlite:$HOME/.glance/glance.db`
+	// on a fresh box (or after a state-dir rename) has no parent dir yet, which would wedge
+	// the daemon at boot. Create the parent for real file paths so first-run just works.
+	if (filename && filename !== ":memory:" && !filename.startsWith("file::memory:")) {
+		mkdirSync(dirname(filename), { recursive: true });
+	}
 	const db = new Database(filename);
 	// FK constraints (org_id → organization.id) are off by default in SQLite.
 	db.run("PRAGMA foreign_keys = ON");
