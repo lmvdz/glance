@@ -534,7 +534,7 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
   return (
     <div className="w-full text-gray-800 dark:text-gray-300">
       <div className="mb-1.5 flex items-center gap-2 text-[11px] text-gray-500">
-        {entry.kind === 'assistant' ? 'omp-squad' : entry.kind} <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        {entry.kind === 'assistant' ? 'glance' : entry.kind} <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         {entry.status === 'running' && <span className="shimmer text-[10px]">streaming</span>}
       </div>
       <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300 prose-headings:text-sm prose-headings:font-semibold prose-headings:mb-1 prose-headings:mt-2">
@@ -1001,7 +1001,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}\n\n${activitySnapshot}${taskContext}`;
       sendConsoleCommand({ type: 'prompt', id: nextAgentId, message, clientTurnId });
     } catch (error: any) {
-      updateSessionMessages(activeSessionId, [...newMessages, { role: 'model', text: `Error: ${error.message || 'Could not reach omp-squad chat'}`, timestamp: Date.now() }]);
+      updateSessionMessages(activeSessionId, [...newMessages, { role: 'model', text: `Error: ${error.message || 'Could not reach glance chat'}`, timestamp: Date.now() }]);
     } finally {
       setIsLoading(false);
     }
@@ -1208,7 +1208,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             <ArrowLeft className="w-4 h-4" />
           </button>
           <Sparkles className="w-4 h-4 text-blue-500 dark:text-blue-400" />
-          <h3 className="text-sm font-medium truncate max-w-[150px]" title={activeSession?.title}>{activeSession?.title || 'omp-squad'}</h3>
+          <h3 className="text-sm font-medium truncate max-w-[150px]" title={activeSession?.title}>{activeSession?.title || 'glance'}</h3>
         </div>
         <div className="flex items-center gap-1">
           <button onClick={downloadHistory} className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title="Export Chat">
@@ -1263,7 +1263,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             ) : (
               <div className="w-full text-gray-800 dark:text-gray-300">
                 <div className="text-[11px] text-gray-500 mb-2 flex items-center gap-2">
-                  omp-squad <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  glance <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </div>
                 <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
                   <Markdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ code: CodeBlock }}>{msg.text}</Markdown>
@@ -1291,7 +1291,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
         {isLoading && (
           <div className="flex flex-col w-full items-start text-gray-800 dark:text-gray-300">
             <div className="text-[11px] text-gray-500 dark:text-gray-500 mb-2 flex items-center gap-2">
-              omp-squad workflow <span className="w-1 h-1 rounded-full bg-gray-400 dark:bg-gray-600"></span> Starting...
+              glance workflow <span className="w-1 h-1 rounded-full bg-gray-400 dark:bg-gray-600"></span> Starting...
             </div>
             <div className="flex gap-1 items-center h-6">
               <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></span>
