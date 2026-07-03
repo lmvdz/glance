@@ -41,7 +41,7 @@ import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOr
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
-import { type FederationSnapshot, federationView, PeerPresenceTracker } from "./federation.ts";
+import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
 import { featureFlagStates, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
@@ -234,9 +234,11 @@ export interface SquadServerOptions {
 	/** Optional lower-tier tokens. `operator` grants every mutation except daemon upgrade; `viewer`
 	 *  grants reads + transcript subscription only. Unset tiers are simply unavailable. */
 	roleTokens?: { operator?: string; viewer?: string };
-	/** Coordinator URL to listen on for peer presence. Defaults to OMP_SQUAD_COORDINATOR; unset ⇒ federation surface stays inert. */
+	/** Coordinator URL, reported on `/api/federation` (panel-gating). Defaults to OMP_SQUAD_COORDINATOR;
+	 *  unset ⇒ federation surface stays inert. Peer presence itself now comes from the manager's bus (SEAM 2). */
 	coordinator?: string;
-	/** Pre-shared token presented to the coordinator's auth gate. Defaults to OMP_SQUAD_COORDINATOR_TOKEN. */
+	/** Pre-shared coordinator token. Accepted for back-compat; the server no longer dials the coordinator
+	 *  (the manager's bus owns the single connection, SEAM 2), so this is unused by the server itself. */
 	coordinatorToken?: string;
 	/** DB-mode identity layer (better-auth). Set ⇒ DB mode: cookie sessions + orgs replace the bearer gate. Unset ⇒ FILE mode (today's bearer gate). */
 	auth?: AuthInstance;
@@ -313,12 +315,9 @@ export class SquadServer {
 	private uiVersion = "";
 	/** This host's operator identity (labels the local roster in the federation view). */
 	private readonly operator: Actor;
-	/** Coordinator URL backing the peer-presence feed; null ⇒ federation surface inert. */
+	/** Coordinator URL, reported on the `/api/federation` surface; null ⇒ federation surface inert.
+	 *  Peer presence itself now comes from the manager's own bus (SEAM 2), not a second socket here. */
 	private readonly coordinator: string | null;
-	/** Pre-shared token presented to the coordinator; undefined ⇒ no auth. */
-	private readonly coordinatorToken?: string;
-	/** Listener-only peer-presence feed; created on start() only when a coordinator is configured. */
-	private peerPresence?: PeerPresenceTracker;
 	/** Token → tier map gating every /api request + WS command. Empty ⇒ auth off (loopback test mode). */
 	private readonly authPolicy: AuthPolicy;
 	/** DB-mode identity layer; when set the bearer gate is replaced by better-auth cookie sessions. Undefined ⇒ FILE mode. */
@@ -338,7 +337,6 @@ export class SquadServer {
 		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
 		this.operator = opts.operator ?? { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 		this.coordinator = opts.coordinator ?? process.env.OMP_SQUAD_COORDINATOR ?? null;
-		this.coordinatorToken = opts.coordinatorToken ?? process.env.OMP_SQUAD_COORDINATOR_TOKEN ?? undefined;
 		this.authPolicy = { admin: opts.token, operator: opts.roleTokens?.operator, viewer: opts.roleTokens?.viewer };
 		this.auth = opts.auth;
 		this.db = opts.db;
@@ -518,11 +516,8 @@ export class SquadServer {
 			void this.syncPresence();
 			this.presenceTimer = setInterval(() => void this.syncPresence(), 25_000);
 			this.presenceTimer.unref?.();
-			// Best-effort: only when a coordinator is configured do we open a read-only feed for peer presence.
-			if (this.coordinator) {
-				this.peerPresence = new PeerPresenceTracker({ coordinatorUrl: this.coordinator, operator: this.operator, token: this.coordinatorToken });
-				void this.peerPresence.start();
-			}
+			// SEAM 2: peer presence is read straight off the manager's federation bus (see
+			// federationSnapshot → manager.peerPresence). No second coordinator socket is opened here.
 		}
 		return this.url;
 	}
@@ -1472,7 +1467,8 @@ export class SquadServer {
 			updatedAt: Date.now(),
 		};
 		// DB-registry mode has no per-org coordinator feed; only single-manager mode gossips peers.
-		const peers = this.registry ? [] : (this.peerPresence?.live() ?? []);
+		// Peers come from the manager's OWN bus roster (SEAM 2) — no separate socket in the server.
+		const peers = this.registry ? [] : manager.peerPresence();
 		const coordinator = this.registry ? null : this.coordinator;
 		return { coordinator, ...federationView(self, peers) };
 	}
@@ -1507,7 +1503,6 @@ export class SquadServer {
 		clearTimeout(this.presenceDebounce);
 		for (const [id, repo] of this.claimed) void release(id, repo);
 		this.claimed.clear();
-		void this.peerPresence?.stop();
 		this.server?.stop(true);
 	}
 }
