@@ -458,6 +458,33 @@ const C_STATUS_LINE = /^(STATUS:[ \t]*)([\w-]+)(.*)$/im;
 const C_STATUS_BOLD_LINE = /^(\*\*Status:\*\*[ \t]*)([\w-]+)(.*)$/im;
 const C_STATUS_H2_LINE = /^(##[ \t]*Status:[ \t]*(?:[^\w\s]+[ \t]*)?)([\w-]+)(.*)$/im;
 
+/** True when a concern STATUS value means the work is finished (closed/done/…). */
+export function isClosedConcernStatus(status: string): boolean {
+	return CLOSED_STATUS.has(status.toLowerCase().replace(/_/g, "-"));
+}
+
+const PLAN_DOC_REF = /\bplans\/[\w.-]+(?:\/[\w.-]+)*\.md\b/g;
+
+/** Plan-doc paths referenced in free text (issue names/bodies): `plans/<dir>/…/<file>.md`. */
+export function planDocRefs(text: string): string[] {
+	return [...new Set(text.match(PLAN_DOC_REF) ?? [])];
+}
+
+/**
+ * STATUS value of one concern doc (any of the three notations), or null when the file
+ * doesn't exist / carries no STATUS line. Reads the CHECKED-OUT tree — the same source
+ * parsePlanConcerns uses — so it reflects what a land actually shipped.
+ */
+export async function concernDocStatus(repo: string, docPath: string): Promise<string | null> {
+	// Never let a crafted path escape the repo (docPath comes from external issue text).
+	const abs = path.resolve(repo, docPath);
+	if (!abs.startsWith(path.resolve(repo) + path.sep)) return null;
+	const text = await fs.readFile(abs, "utf8").catch(() => null);
+	if (!text) return null;
+	const sm = C_STATUS.exec(text) ?? C_STATUS_BOLD.exec(text) ?? C_STATUS_H2.exec(text);
+	return sm ? sm[1].toLowerCase().replace(/_/g, "-") : null;
+}
+
 /** Leading concern number from a file like "03-runtime.md" → 3 (null if none). Mirrors webapp concernNum. */
 export function concernNumFromFile(file: string): number | null {
 	const m = /(?:^|\/)(\d{1,3})[-_.]/.exec(file) ?? /^(\d{1,3})\b/.exec(file);

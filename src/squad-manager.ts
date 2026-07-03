@@ -49,7 +49,7 @@ import { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type 
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
-import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
+import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
@@ -498,6 +498,7 @@ export class SquadManager extends EventEmitter {
 				paused: () => this.rateLimit.paused(),
 				record: this.automation.for("dispatch"),
 				ledger: openDispatchLedger(this.stateDir),
+				alreadyDone: (repo, issue) => this.issueAlreadyDone(repo, issue),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
@@ -641,6 +642,44 @@ export class SquadManager extends EventEmitter {
 	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
 		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo" });
+	}
+
+	/**
+	 * Stale-issue guard for the Dispatcher (visual-plan-blocks incident): true when the issue's plan
+	 * concern is already closed in the repo's checked-out tree, so the open Plane issue is drift, not
+	 * work. Two probes, cheapest first:
+	 *   1. plan-doc paths embedded in the issue name (plan-to-plane issue names carry them verbatim) —
+	 *      this catches issues filed WITHOUT a PLANE: backlink in the doc;
+	 *   2. a concern whose PLANE: pointer names this issue's identifier.
+	 * On a hit, also close the Plane issue (best-effort, closeOnDone-gated like closeLandedIssue) so
+	 * the drift heals instead of being re-skipped forever.
+	 */
+	async issueAlreadyDone(repo: string, issue: IssueRef): Promise<boolean> {
+		let closedRef: string | undefined;
+		for (const ref of planDocRefs(issue.name)) {
+			const status = await concernDocStatus(repo, ref);
+			if (status && isClosedConcernStatus(status)) {
+				closedRef = `${ref} (STATUS: ${status})`;
+				break;
+			}
+		}
+		if (!closedRef && issue.identifier) {
+			outer: for (const planDir of await listPlanDirs(repo).catch(() => [])) {
+				for (const concern of await parsePlanConcerns(repo, planDir.dir).catch(() => [])) {
+					if (concern.planeId === issue.identifier && !concern.open) {
+						closedRef = `${concern.path} (STATUS: ${concern.status})`;
+						break outer;
+					}
+				}
+			}
+		}
+		if (!closedRef) return false;
+		this.log("warn", `stale issue ${issue.identifier ?? issue.id}: ${closedRef} is already closed — skipping dispatch${this.closeOnDone ? ", closing the issue" : ""}`);
+		if (this.closeOnDone && !this.closedIssues.has(issue.id)) {
+			if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
+			else this.log("warn", `could not close stale issue ${issue.identifier ?? issue.id}`);
+		}
+		return true;
 	}
 
 	/** Start (or return the existing) agent advancing a Plane issue — the web "Start task" action. */
@@ -1528,7 +1567,7 @@ export class SquadManager extends EventEmitter {
 		for (const w of landOrder(wts)) {
 			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
-			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, verify: pf.acceptance ?? undefined });
+			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, staleGate: !force, verify: pf.acceptance ?? undefined });
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
 			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
@@ -1579,6 +1618,7 @@ export class SquadManager extends EventEmitter {
 			commitWip: !busy,
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
 			requireProof: !opts.force,
+			staleGate: !opts.force,
 		});
 		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
 		// (never bump the fail streak) and not landed — surface the ready-to-land flag and return.
