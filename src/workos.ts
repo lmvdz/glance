@@ -287,6 +287,39 @@ export async function createWorkosMembership(workosUserId: string, orgId: string
 	}
 }
 
+/** Read a WorkOS org's domain-join policy from its metadata (default "approval"). */
+export async function getWorkosOrgPolicy(orgId: string): Promise<JoinPolicy> {
+	const cfg = workosConfig();
+	if (!cfg) return "approval";
+	try {
+		const r = await fetch(`https://api.workos.com/organizations/${orgId}`, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+		if (!r.ok) return "approval";
+		const o = (await r.json()) as { metadata?: Record<string, unknown> };
+		return o.metadata?.join_policy === "auto" ? "auto" : "approval";
+	} catch {
+		return "approval";
+	}
+}
+
+/** Set a WorkOS org's domain-join policy in its metadata. Sends ONLY `metadata` (merged with current) —
+ *  WorkOS's org update treats omitted fields as unchanged, so name/domains are preserved. */
+export async function setWorkosOrgPolicy(orgId: string, policy: JoinPolicy): Promise<boolean> {
+	const cfg = workosConfig();
+	if (!cfg) return false;
+	try {
+		const g = await fetch(`https://api.workos.com/organizations/${orgId}`, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+		const cur = g.ok ? (((await g.json()) as { metadata?: Record<string, unknown> }).metadata ?? {}) : {};
+		const r = await fetch(`https://api.workos.com/organizations/${orgId}`, {
+			method: "PUT",
+			headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ metadata: { ...cur, join_policy: policy === "auto" ? "auto" : "approval" } }),
+		});
+		return r.ok;
+	} catch {
+		return false;
+	}
+}
+
 /** The WorkOS event envelope. `data` is the Directory User/Group (or User Management user) object. */
 export interface WorkosEvent {
 	event: string;

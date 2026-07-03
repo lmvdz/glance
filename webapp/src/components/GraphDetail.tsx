@@ -70,7 +70,7 @@ const DiffFile: React.FC<{ file: CommitFile }> = ({ file }) => (
   </div>
 );
 
-const CommitView: React.FC<{ sha: string }> = ({ sha }) => {
+export const CommitView: React.FC<{ sha: string }> = ({ sha }) => {
   const [detail, setDetail] = useState<CommitDetail | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);

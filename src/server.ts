@@ -19,6 +19,9 @@ import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
+import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
+import { buildProvenance, type ProvenanceDoc } from "./omp-graph/provenance.ts";
+import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
@@ -31,9 +34,9 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
-import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser } from "./workos-provision.ts";
-import { getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
+import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
+import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -606,10 +609,16 @@ export class SquadServer {
 			const verdict = verifyWorkosSignature({ rawBody: raw, sigHeader: req.headers.get("workos-signature"), secret, now: Date.now() });
 			if (!verdict.ok) return new Response(`invalid signature: ${verdict.reason}`, { status: 400 });
 			const evt = parseWorkosEvent(raw);
-			// SECURELY RECEIVED. Provisioning (create org / add-remove membership on dsync.*) is the documented
-			// follow-up in docs/workos-sso.md — it needs a live WorkOS directory to finalize the org mapping,
-			// so we log the verified event here rather than ship untested identity-mutating DB writes.
-			if (evt) console.log(`[workos] dsync event received: ${evt.event} (${evt.id})`);
+			// SECURELY RECEIVED → provision. dsync.user.created/updated/group.user_added add the member to the
+			// mapped org (creating the user by email if needed); dsync.user.deleted/group.user_removed remove them.
+			if (evt && this.db) {
+				try {
+					const result = await provisionScimEvent(this.db.db, evt);
+					if (result.handled) console.log(`[workos] dsync ${evt.event} → ${result.action}`);
+				} catch (err) {
+					console.error(`[workos] dsync provisioning failed for ${evt.event}:`, err);
+				}
+			}
 			return new Response("ok");
 		}
 		if (url.pathname === "/llms.txt") return new Response("# omp-squad capability API\n\n- GET /api/capability-discovery\n- GET /api/capability-catalog\n- GET /api/capability-packs\n- POST /api/capability-sources\n- POST /api/capability-installs\n- GET /api/federation/capabilities\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -712,6 +721,36 @@ export class SquadServer {
 					? await setMemberRole(this.db.db, orgId, userId, body && typeof body.role === "string" ? body.role : "")
 					: await removeMember(this.db.db, orgId, userId);
 			return Response.json(result);
+		}
+		if (url.pathname === "/api/org/members/invite" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const body = (await req.json().catch(() => null)) as { email?: unknown; role?: unknown } | null;
+			const email = body && typeof body.email === "string" ? body.email : "";
+			if (!email) return new Response("missing email", { status: 400 });
+			return Response.json(await addMemberByEmail(this.db.db, orgId, email, body && typeof body.role === "string" ? body.role : "member"));
+		}
+		// Domain-join policy (WorkOS orgs only) — read/set the org's auto|approval policy in WorkOS metadata.
+		if (url.pathname === "/api/org/join-policy" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json({ policy: null });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return Response.json({ policy: null });
+			const profile = await getOrgProfile(this.db.db, orgId);
+			if (!profile?.workosOrgId) return Response.json({ policy: null }); // not a WorkOS org
+			return Response.json({ policy: await getWorkosOrgPolicy(profile.workosOrgId) });
+		}
+		if (url.pathname === "/api/org/join-policy" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const profile = await getOrgProfile(this.db.db, orgId);
+			if (!profile?.workosOrgId) return Response.json({ ok: false, error: "not a WorkOS-backed organization" });
+			const body = (await req.json().catch(() => null)) as { policy?: unknown } | null;
+			const policy = body?.policy === "auto" ? "auto" : "approval";
+			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
@@ -1040,10 +1079,13 @@ export class SquadServer {
 		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
 		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
-		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit") {
+		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit" || url.pathname === "/api/graph/attribution" || url.pathname === "/api/graph/provenance") {
 			const repo = resolveGraphRepo(url, manager);
 			if (!repo) return new Response("repo not allowed", { status: 403 });
-			return Response.json(url.pathname === "/api/graph" ? await graphPayload(url, repo) : await commitDetailPayload(url, repo));
+			if (url.pathname === "/api/graph") return Response.json(await graphPayload(url, repo));
+			if (url.pathname === "/api/graph/commit") return Response.json(await commitDetailPayload(url, repo));
+			if (url.pathname === "/api/graph/attribution") return Response.json(await attributionPayload(url, repo));
+			return Response.json(await provenancePayload(url, repo, manager));
 		}
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
@@ -1638,18 +1680,54 @@ function resolveGraphRepo(url: URL, manager: SquadManager): string | null {
 	return allowed.has(resolved) ? resolved : null;
 }
 
-async function graphPayload(url: URL, repo: string): Promise<GraphDoc> {
+async function graphPayload(url: URL, repo: string): Promise<GraphDoc & { plan: { name: string; monthly: number } | null }> {
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
 	const future = boundedNumber(url.searchParams.get("future"), 0, 0, 14);
+	// explicit window (epoch ms) for history views — the DEPTH massif fetches one
+	// window per week row. Bounded to 32 days so a bad param can't walk all of git.
+	const range = explicitRange(url);
 	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
-	const key = `${days}:${future}:${repo}`;
+	const key = range ? `r${range.start}:${range.end}:${repo}` : `${days}:${future}:${repo}`;
 	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
 	const fresh = url.searchParams.get("fresh"); // reload icon bypasses the cache
+	const plan = planFromEnv() ?? null;
 	const hit = graphCache.get(key);
-	if (hit && !fresh && Date.now() - hit.at < ttl) return hit.doc;
-	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, { days, futureDays: future });
+	if (hit && !fresh && Date.now() - hit.at < ttl) return { ...hit.doc, plan };
+	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, range ? { range } : { days, futureDays: future });
 	graphCache.set(key, { at: Date.now(), doc });
-	return doc;
+	return { ...doc, plan };
+}
+
+/** Parse ?start=&end= (epoch ms) into a bounded TimeRange, or null when absent/invalid. */
+function explicitRange(url: URL): { start: number; end: number } | null {
+	const start = Number(url.searchParams.get("start"));
+	const end = Number(url.searchParams.get("end"));
+	if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start) return null;
+	const MAX_SPAN = 32 * 24 * 3_600_000;
+	return end - start > MAX_SPAN ? { start: end - MAX_SPAN, end } : { start, end };
+}
+
+/** GET /api/graph/attribution — the harness→model spend matrix behind the pulse bands. */
+async function attributionPayload(url: URL, repo: string): Promise<ReturnType<typeof buildAttribution>> {
+	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
+	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
+	return buildAttribution(receipts, range, { plan: planFromEnv() });
+}
+
+/** GET /api/graph/provenance?id=OMPSQ-336 — the plan→agent→proof→land thread for one ticket. */
+async function provenancePayload(url: URL, repo: string, manager: SquadManager): Promise<ProvenanceDoc | { error: string }> {
+	const id = (url.searchParams.get("id") ?? "").trim().toUpperCase();
+	if (!/^[A-Z][A-Z0-9]*-\d+$/.test(id)) return { error: "invalid ticket id" };
+	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const features = (await manager.features(repo).catch(() => [])).map((f) => ({
+		id: f.id,
+		title: f.title,
+		planDir: f.planDir,
+		issueIdentifiers: f.issueIdentifiers,
+	}));
+	return buildProvenance({ repo, stateDir, ticket: id, features });
 }
 
 // ── commit detail (GET /api/graph/commit?sha=) — the "click a milestone → diff" drilldown ──

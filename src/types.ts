@@ -549,6 +549,8 @@ export interface RunReceipt {
 	/** Feature/parent ids copied onto receipts so trace trees survive agent removal. */
 	featureId?: string;
 	parentId?: string;
+	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
+	harness?: string;
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
