@@ -188,7 +188,7 @@ export const AutomationPanel: React.FC = () => {
       <select
         value={windowMs}
         onChange={(e) => setWindowMs(Number(e.target.value) || 3_600_000)}
-        className="text-xs rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="text-xs rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         aria-label="Rollup window"
       >
         {AUTO_WINDOWS.map(([lbl, ms]) => (
@@ -198,7 +198,7 @@ export const AutomationPanel: React.FC = () => {
       <select
         value={loopFilter}
         onChange={(e) => setLoopFilter(e.target.value)}
-        className="text-xs rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="text-xs rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         aria-label="Filter by loop"
       >
         <option value="">all loops</option>
@@ -208,7 +208,7 @@ export const AutomationPanel: React.FC = () => {
       </select>
       <button
         onClick={() => void load()}
-        className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         title="Refresh"
         aria-label="Refresh"
       >
@@ -398,7 +398,7 @@ export const AutomationPanel: React.FC = () => {
 
           {/* ── 4. EVENT LOG — collapsed by default ──────────────────── */}
           <details className="group">
-            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 select-none transition-colors">
+            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 select-none transition-colors">
               <span className="mr-auto">Show event log</span>
               <span className="rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:text-gray-400">
                 {data.events.length}

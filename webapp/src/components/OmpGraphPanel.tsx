@@ -173,7 +173,7 @@ export const OmpGraphPanel: React.FC = () => {
           <Stat label="spend" value={`$${Math.round(totals.cost)}`} />
           <Stat label="runs" value={fmtK(totals.sessions)} />
           <Stat label="milestones" value={fmtK(totals.milestones)} />
-          <button onClick={() => void load({ force: true })} className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800" title="Force refresh (bypass cache)" aria-label="Refresh graph data">
+          <button onClick={() => void load({ force: true })} className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800" title="Force refresh (bypass cache)" aria-label="Refresh graph data">
             <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
           </button>
         </div>

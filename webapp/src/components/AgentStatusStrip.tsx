@@ -167,7 +167,7 @@ export const AgentStatusStrip: React.FC<AgentStatusStripProps> = ({ status, hasP
             type="button"
             onClick={onImplement}
             disabled={implementing}
-            className="flex items-center gap-1.5 rounded-md bg-gray-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+            className="flex items-center gap-1.5 rounded-md bg-gray-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
           >
             <Bot className="h-3.5 w-3.5" aria-hidden="true" /> {implementing ? 'Starting…' : 'Implement this plan'}
           </button>

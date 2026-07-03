@@ -91,9 +91,9 @@ function RowAction({ action, busy, onClick }: { action: ActiveWorkAction; busy: 
     <button
       onClick={(e) => { e.stopPropagation(); onClick(); }}
       disabled={busy}
-      className={`flex flex-shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`flex flex-shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 ${
         primary
-          ? 'bg-blue-600 text-white hover:bg-blue-700'
+          ? 'bg-amber-500 text-white hover:bg-amber-600'
           : 'border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800'
       }`}
       title={action.label}
@@ -136,7 +136,7 @@ function AgentChip({ line, onOpen }: { line: ActiveWorkAgentLine; onOpen: (id: s
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onOpen(line.id); }}
-      className="group flex max-w-full items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-800 dark:bg-gray-900 dark:hover:bg-gray-800"
+      className="group flex max-w-full items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:hover:bg-gray-800"
       title={`Open ${line.name}'s console`}
     >
       <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${t.dot} ${live ? 'animate-pulse' : ''}`} aria-hidden="true" />
@@ -145,7 +145,7 @@ function AgentChip({ line, onOpen }: { line: ActiveWorkAgentLine; onOpen: (id: s
       {line.todo && line.todo.total > 0 && (
         <span className="flex-shrink-0 text-[11px] tabular-nums text-gray-400">· {line.todo.done}/{line.todo.total}</span>
       )}
-      <MessageSquare className="h-3 w-3 flex-shrink-0 text-gray-300 transition-colors group-hover:text-blue-500 dark:text-gray-600" aria-hidden="true" />
+      <MessageSquare className="h-3 w-3 flex-shrink-0 text-gray-300 transition-colors group-hover:text-amber-500 dark:text-gray-600" aria-hidden="true" />
     </button>
   );
 }
@@ -174,7 +174,7 @@ function ActiveRow({
       tabIndex={0}
       onClick={() => onOpenFeature(item)}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenFeature(item); } }}
-      className="cursor-pointer px-4 py-3 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 dark:hover:bg-gray-900/60"
+      className="cursor-pointer px-4 py-3 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-gray-900/60"
     >
       <div className="flex items-start gap-3">
         <span className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${t.dot} ${live ? 'animate-pulse' : ''}`} aria-hidden="true" />
@@ -250,7 +250,7 @@ function AnswerComposer({
         <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">Your answer{line ? ` · ${line.name}` : ''}</span>
         <button
           onClick={(e) => { e.stopPropagation(); onCancel(); }}
-          className="rounded p-0.5 text-gray-400 transition-colors hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-gray-200"
+          className="rounded p-0.5 text-gray-400 transition-colors hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-gray-200"
           aria-label="Cancel answer"
         >
           <X className="h-3.5 w-3.5" aria-hidden="true" />
@@ -262,7 +262,7 @@ function AnswerComposer({
             <button
               key={opt}
               onClick={(e) => { e.stopPropagation(); onSubmit(opt); }}
-              className="rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition-colors hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200 dark:hover:border-blue-700 dark:hover:bg-blue-950/40"
+              className="rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition-colors hover:border-amber-300 hover:bg-amber-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200 dark:hover:border-amber-700 dark:hover:bg-amber-950/40"
             >
               {opt}
             </button>
@@ -281,19 +281,19 @@ function AnswerComposer({
         }}
         rows={2}
         placeholder={line?.placeholder ?? 'Type your reply to unblock this agent…'}
-        className="w-full resize-y rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+        className="w-full resize-y rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
       />
       <div className="mt-2 flex items-center justify-between">
         <button
           onClick={(e) => { e.stopPropagation(); onOpenConsole(); }}
-          className="text-[11px] text-blue-600 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-400"
+          className="text-[11px] text-amber-600 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-400"
         >
           Open full console
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); onSubmit(value); }}
           disabled={!value.trim()}
-          className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-amber-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Send className="h-3 w-3" aria-hidden="true" />
           Send (⌘↵)
@@ -333,7 +333,7 @@ const FleetAgentRow: React.FC<{
     <div className="flex items-center gap-2 px-4 py-2">
       <button
         onClick={() => onOpen(agent.id)}
-        className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-md text-left hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900/60"
+        className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-md text-left hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900/60"
         aria-label={`Open agent ${agent.name}`}
       >
         <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${FLEET_DOT[agent.status] ?? 'bg-gray-400'}`} aria-label={agent.status} />
@@ -524,7 +524,7 @@ export const ActiveWorkPane: React.FC = () => {
   const refresh = (
     <button
       onClick={() => void reload()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+      className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
       title="Refresh"
       aria-label="Refresh"
     >
@@ -565,7 +565,7 @@ export const ActiveWorkPane: React.FC = () => {
           </div>
           <button
             onClick={() => setView('tasks')}
-            className="mt-1 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="mt-1 rounded-md bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
           >
             Go to Tasks
           </button>

@@ -35,7 +35,7 @@ export const AccountMenu = () => {
     <div ref={ref} className="relative flex-shrink-0">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-200 text-[11px] font-semibold text-gray-700 transition-colors hover:bg-gray-300 focus-visible:ring-2 focus-visible:ring-blue-500 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+        className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-200 text-[11px] font-semibold text-gray-700 transition-colors hover:bg-gray-300 focus-visible:ring-2 focus-visible:ring-amber-500 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
         aria-label="Account menu"
         title={`${label} · ${role}`}
       >

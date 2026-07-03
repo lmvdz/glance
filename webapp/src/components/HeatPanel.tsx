@@ -181,7 +181,7 @@ export const HeatPanel: React.FC = () => {
   const refresh = (
     <button
       onClick={() => void load()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
       title="Refresh"
       aria-label="Refresh heat data"
     >
@@ -248,7 +248,7 @@ export const HeatPanel: React.FC = () => {
                     </div>
                     <button
                       onClick={() => focusTaskSearch()}
-                      className="flex-shrink-0 rounded-md border border-red-200 dark:border-red-800 bg-white/70 dark:bg-gray-900/50 px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 transition-colors hover:bg-white dark:hover:bg-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                      className="flex-shrink-0 rounded-md border border-red-200 dark:border-red-800 bg-white/70 dark:bg-gray-900/50 px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 transition-colors hover:bg-white dark:hover:bg-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                       aria-label={`View agents editing ${shortPath(c.file)}`}
                     >
                       View agents
@@ -349,7 +349,7 @@ export const HeatPanel: React.FC = () => {
           {/* ── RAW HEAT DATA (collapsed) ────────────────────────────────── */}
           {heat && (
             <details className="group rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-xs">
-              <summary className="flex cursor-pointer select-none items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 list-none">
+              <summary className="flex cursor-pointer select-none items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
                 <span className="mr-auto">Raw heat data</span>
                 <span className="text-gray-300 dark:text-gray-600 group-open:rotate-180 transition-transform" aria-hidden="true">
                   ▾

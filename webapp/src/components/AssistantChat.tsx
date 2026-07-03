@@ -262,7 +262,7 @@ export const RunStatusHeader = ({
   <button
     type="button"
     onClick={onToggle}
-    className="flex min-h-9 w-full items-center gap-2 border-t border-gray-200 pt-3 text-left text-xs text-gray-500 transition-colors hover:text-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+    className="flex min-h-9 w-full items-center gap-2 border-t border-gray-200 pt-3 text-left text-xs text-gray-500 transition-colors hover:text-gray-800 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
     aria-expanded={expanded}
   >
     <ChevronRight className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden />
@@ -452,7 +452,7 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
     const hasBody = view.command || view.output || view.stderr || view.raw.length > 0;
     return (
       <details open={running} className="group rounded-md">
-        <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900/60">
+        <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900/60">
           <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotClass(entry.status)} ${running ? 'animate-pulse' : ''}`} aria-label={entry.status ?? 'ok'} />
           <span className="font-semibold text-gray-900 dark:text-gray-100">{toolLabel}</span>
           <span className={`min-w-0 flex-1 truncate text-gray-500 dark:text-gray-400 ${running ? 'shimmer' : ''}`}>{view.title !== toolLabel ? view.title : ''}</span>
@@ -486,7 +486,7 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
             )}
             {view.raw.length > 0 && (
               <details className="group/raw ml-8">
-                <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[10px] text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-500 dark:hover:bg-gray-900">
+                <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[10px] text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-500 dark:hover:bg-gray-900">
                   <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
                   Raw payload
                 </summary>
@@ -510,9 +510,9 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
     const running = entry.status === 'running';
     return (
       <details open={running} className="group rounded-md">
-        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-gray-500 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-900">
+        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-gray-500 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900">
           <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 transition-transform group-open:rotate-90" aria-hidden />
-          <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-blue-500 dark:text-blue-400" aria-hidden />
+          <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-amber-500 dark:text-amber-400" aria-hidden />
           <span className={`font-medium uppercase tracking-wide ${running ? 'shimmer' : 'text-gray-700 dark:text-gray-300'}`}>Thinking</span>
           <span className="text-gray-400 dark:text-gray-600">{running ? 'streaming' : 'folded'}</span>
         </summary>
@@ -562,7 +562,7 @@ export const TodoPanel = ({ phases, collapsed, onToggle }: { phases: TodoPhaseDT
       <button
         type="button"
         onClick={onToggle}
-        className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:hover:bg-gray-900 dark:focus-visible:ring-offset-gray-950"
+        className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-gray-900 dark:focus-visible:ring-offset-gray-950"
         aria-expanded={!collapsed}
       >
         <ChevronRight className={`h-3.5 w-3.5 flex-shrink-0 text-gray-500 transition-transform ${collapsed ? '' : 'rotate-90'}`} aria-hidden />
@@ -572,7 +572,7 @@ export const TodoPanel = ({ phases, collapsed, onToggle }: { phases: TodoPhaseDT
             {active && <span className="truncate text-xs font-medium text-gray-900 dark:text-gray-100">{active.content}</span>}
           </div>
           <div className="mt-1 h-1 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
-            <div className="h-full rounded-full bg-blue-500 transition-[width]" style={{ width: `${pct}%` }} />
+            <div className="h-full rounded-full bg-amber-500 transition-[width]" style={{ width: `${pct}%` }} />
           </div>
         </div>
         <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600 dark:bg-gray-900 dark:text-gray-300">{done}/{tasks.length}</span>
@@ -671,7 +671,7 @@ export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; show
     }
   };
 
-  const pill = 'flex min-h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50';
+  const pill = 'flex min-h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50';
   return (
     <>
       <button
@@ -1108,10 +1108,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       onPointerDown={startChatResize}
       onKeyDown={nudgeChatWidth}
       onDoubleClick={() => setChatWidth(CHAT_DEFAULT_WIDTH)}
-      className="group absolute inset-y-0 left-0 z-30 hidden w-1 cursor-col-resize items-center justify-center bg-transparent transition-colors hover:bg-blue-500/20 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-blue-400/20 lg:flex"
+      className="group absolute inset-y-0 left-0 z-30 hidden w-1 cursor-col-resize items-center justify-center bg-transparent transition-colors hover:bg-amber-500/20 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-amber-400/20 lg:flex"
       title="Drag to resize chat. Double-click to reset."
     >
-      <span className="h-10 w-px rounded-full bg-gray-300 transition-colors group-hover:bg-blue-500 dark:bg-gray-700 dark:group-hover:bg-blue-400" aria-hidden="true" />
+      <span className="h-10 w-px rounded-full bg-gray-300 transition-colors group-hover:bg-amber-500 dark:bg-gray-700 dark:group-hover:bg-amber-400" aria-hidden="true" />
     </div>
   );
 
@@ -1207,7 +1207,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
           <button onClick={() => setActiveSessionId(null)} className="p-1.5 -ml-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title="Back to Sessions">
             <ArrowLeft className="w-4 h-4" />
           </button>
-          <Sparkles className="w-4 h-4 text-blue-500 dark:text-blue-400" />
+          <Sparkles className="w-4 h-4 text-amber-500 dark:text-amber-400" />
           <h3 className="text-sm font-medium truncate max-w-[150px]" title={activeSession?.title}>{activeSession?.title || 'glance'}</h3>
         </div>
         <div className="flex items-center gap-1">
@@ -1271,14 +1271,14 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
                 <div className="flex items-center gap-2 mt-3 text-gray-400 dark:text-gray-500">
                   <button
                     onClick={() => toggleReaction(idx, 'like')}
-                    className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'like' ? 'text-green-500 dark:text-green-400 bg-green-50 dark:bg-green-900/20' : ''}`}
+                    className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'like' ? 'text-green-500 dark:text-green-400 bg-green-50 dark:bg-green-900/20' : ''}`}
                     title="Helpful"
                   >
                     <ThumbsUp className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => toggleReaction(idx, 'dislike')}
-                    className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'dislike' ? 'text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20' : ''}`}
+                    className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'dislike' ? 'text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20' : ''}`}
                     title="Not helpful"
                   >
                     <ThumbsDown className="w-3.5 h-3.5" />
@@ -1294,9 +1294,9 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
               glance workflow <span className="w-1 h-1 rounded-full bg-gray-400 dark:bg-gray-600"></span> Starting...
             </div>
             <div className="flex gap-1 items-center h-6">
-              <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></span>
-              <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
-              <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
+              <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce"></span>
+              <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
+              <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
             </div>
           </div>
         )}
@@ -1311,9 +1311,9 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
               key={suggestion.label}
               type="button"
               onClick={() => handleSend(suggestion.prompt)}
-              className="flex min-h-8 items-center gap-1.5 rounded-full border border-gray-200 bg-gray-100 px-2.5 py-1 text-[11px] font-medium text-gray-700 transition-colors whitespace-nowrap hover:bg-gray-200 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800 dark:focus-visible:ring-offset-gray-950"
+              className="flex min-h-8 items-center gap-1.5 rounded-full border border-gray-200 bg-gray-100 px-2.5 py-1 text-[11px] font-medium text-gray-700 transition-colors whitespace-nowrap hover:bg-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800 dark:focus-visible:ring-offset-gray-950"
             >
-              {index === 0 && <Sparkles className="h-3.5 w-3.5 text-blue-500 dark:text-blue-400" aria-hidden />}
+              {index === 0 && <Sparkles className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" aria-hidden />}
               {suggestion.label}
             </button>
           ))}
@@ -1359,17 +1359,17 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
               <select
                 value={selectedModel}
                 onChange={(event) => handleModelChange(event.target.value)}
-                className="h-8 max-w-36 rounded-full border border-gray-200 bg-white px-2 text-[11px] font-medium text-gray-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300"
+                className="h-8 max-w-36 rounded-full border border-gray-200 bg-white px-2 text-[11px] font-medium text-gray-700 outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300"
                 aria-label="Model"
               >
                 {currentModelOptions.map((option) => (
                   <option key={option.value || 'default'} value={option.value}>{option.label}</option>
                 ))}
               </select>
-              <button type="button" aria-label="Attach file" className="flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
+              <button type="button" aria-label="Attach file" className="flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
                 <Paperclip className="h-4 w-4" aria-hidden />
               </button>
-              <button type="button" aria-label="Voice input" className="flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
+              <button type="button" aria-label="Voice input" className="flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
                 <Mic className="h-4 w-4" aria-hidden />
               </button>
               <ComposerStats agent={selectedAgent} />

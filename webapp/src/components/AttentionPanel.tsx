@@ -180,7 +180,7 @@ export const AttentionPanel: React.FC = () => {
   const refresh = (
     <button
       onClick={() => void load()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
       title="Refresh"
       aria-label="Refresh"
     >
@@ -249,7 +249,7 @@ export const AttentionPanel: React.FC = () => {
                             <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">Your answer</span>
                             <button
                               onClick={() => { setAnswering(null); setAnswerText(''); }}
-                              className="rounded p-0.5 text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                              className="rounded p-0.5 text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                               aria-label="Cancel answer"
                             >
                               <X className="h-3.5 w-3.5" aria-hidden="true" />
@@ -265,19 +265,19 @@ export const AttentionPanel: React.FC = () => {
                             }}
                             rows={2}
                             placeholder="Type your reply to unblock this agent…"
-                            className="w-full resize-y rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-2.5 py-1.5 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            className="w-full resize-y rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-2.5 py-1.5 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                           />
                           <div className="mt-2 flex items-center justify-between">
                             <button
                               onClick={() => openConsole(item.agentId)}
-                              className="text-[11px] text-blue-600 dark:text-blue-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                              className="text-[11px] text-amber-600 dark:text-amber-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                             >
                               Open full console
                             </button>
                             <button
                               onClick={submitAnswer}
                               disabled={!answerText.trim()}
-                              className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                              className="flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-amber-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               <Send className="h-3 w-3" aria-hidden="true" />
                               Send (⌘↵)

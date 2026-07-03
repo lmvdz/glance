@@ -41,7 +41,7 @@ export const AttentionRow: React.FC<AttentionRowProps> = ({ item, onAction, busy
         <button
           onClick={() => onAction?.(item)}
           disabled={busy}
-          className={`flex-shrink-0 rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${t.border} ${t.softBg} ${t.text} hover:brightness-95`}
+          className={`flex-shrink-0 rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 ${t.border} ${t.softBg} ${t.text} hover:brightness-95`}
           aria-label={`${item.action.label}: ${item.title}`}
         >
           {busy ? '…' : item.action.label}
