@@ -119,7 +119,12 @@ export const AutomationPanel: React.FC = () => {
         apiJson<AutomationResponse>(`/api/automation?${params.toString()}`),
         apiJson<UsagePayload>('/api/usage').catch(() => null),
       ]);
-      setData(result);
+      // A 200 partial body (empty org / version skew) would overwrite the safe initial
+      // { events: [], rollup: [] } with undefined arrays and crash .some/.find/.map — coerce here.
+      setData({
+        events: Array.isArray(result?.events) ? result.events : [],
+        rollup: Array.isArray(result?.rollup) ? result.rollup : [],
+      });
       setUsage(u);
       setError('');
     } catch {

@@ -508,8 +508,11 @@ export const TaskDetail = () => {
     const payload = await apiJson<PipelinePayload>(`/api/features/${encodeURIComponent(featureId)}/pipeline?repo=${encodeURIComponent(repo)}`);
     if (requestId !== pipelineRequestRef.current) return;
     setPipeline(payload);
-    setSelectedDoc((current) => current && payload.documents.some((doc) => doc.path === current) ? current : preferredPlanDoc(payload.documents)?.path ?? null);
-    if (payload.comments.length) setComments(payload.comments.map(commentFromApi));
+    // A 200 partial body (empty org / version skew) can omit documents/comments; coerce before use.
+    const docs = Array.isArray(payload?.documents) ? payload.documents : [];
+    const cmts = Array.isArray(payload?.comments) ? payload.comments : [];
+    setSelectedDoc((current) => current && docs.some((doc) => doc.path === current) ? current : preferredPlanDoc(docs)?.path ?? null);
+    if (cmts.length) setComments(cmts.map(commentFromApi));
   }, [featureId, preferredPlanDoc, repo]);
 
   // Map a question's id → its prompt by scanning the doc's ```questions fences (the QuestionsBlock
@@ -584,7 +587,9 @@ export const TaskDetail = () => {
     const requestId = ++planeLinksRequestRef.current;
     const payload = await apiJson<PlaneLinks>(`/api/features/${encodeURIComponent(featureId)}/tickets`);
     if (requestId !== planeLinksRequestRef.current) return;
-    setPlaneLinks(payload);
+    // The render reads planeLinks.tickets.length in the non-null branch; a partial body with a
+    // moduleUrl but no tickets array would crash there. Coerce a missing tickets to null.
+    setPlaneLinks(payload ? { ...payload, tickets: Array.isArray(payload.tickets) ? payload.tickets : null } : payload);
   }, [featureId]);
 
   // Persist a flow-diagram concern edit (STATUS and/or blockers), then refresh the pipeline.

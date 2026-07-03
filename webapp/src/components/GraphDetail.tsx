@@ -11,6 +11,7 @@ import React, { useEffect, useState } from 'react';
 import { AlertCircle, ArrowUpRight, FileText, GitCommit, Loader2, X } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { kindColor, statusColor, type CommitDetail, type CommitFile, type GraphDatum } from '../omp-graph/types';
+import { normalizeCommitDetail } from '../omp-graph/normalize';
 
 /** Pull a task/issue identifier out of a datum, if any — the "open the plan" hook. */
 function issueId(d: GraphDatum): string | null {
@@ -83,8 +84,12 @@ export const CommitView: React.FC<{ sha: string }> = ({ sha }) => {
     apiJson<CommitDetail | { error: string }>(`/api/graph/commit?sha=${encodeURIComponent(sha)}`)
       .then((d) => {
         if (!live) return;
-        if ('error' in d) setErr(d.error);
-        else setDetail(d);
+        if (d && 'error' in d) return setErr(d.error);
+        // A 200 partial body has no `error` key but omits sha/files — normalize so it degrades
+        // to a message instead of crashing on detail.sha.slice.
+        const nd = normalizeCommitDetail(d);
+        if (nd) setDetail(nd);
+        else setErr('Could not load the commit diff.');
       })
       .catch(() => { if (live) setErr('Could not load the commit diff.'); })
       .finally(() => { if (live) setLoading(false); });

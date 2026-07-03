@@ -16,6 +16,7 @@ import { VerdictBadge } from './ui';
 import FleetPulseCanvas, { type DepthMetric, type DepthWeek } from '../omp-graph/FleetPulseCanvas';
 import Inspector from '../omp-graph/Inspector';
 import { buildPulseModel, hourBins } from '../omp-graph/pulse-model';
+import { normalizeAttribution, normalizeGraphDoc } from '../omp-graph/normalize';
 import type { InspectSel } from '../omp-graph/inspect';
 import type { AttributionDoc, GraphDocWire, ProvenanceDoc } from '../omp-graph/types';
 
@@ -28,6 +29,7 @@ export const OmpGraphPanel: React.FC = () => {
   const [doc, setDoc] = useState<GraphDocWire | null>(null);
   const [attribution, setAttribution] = useState<AttributionDoc | null>(null);
   const [error, setError] = useState('');
+  const [empty, setEmpty] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [sel, setSel] = useState<InspectSel | null>(null);
   const [trace, setTrace] = useState<ProvenanceDoc | null>(null);
@@ -47,8 +49,13 @@ export const OmpGraphPanel: React.FC = () => {
           apiJson<AttributionDoc>(`/api/graph/attribution?days=${days}`).catch(() => null),
         ]);
         if (id !== reqId.current) return;
-        setDoc(d);
-        setAttribution(a);
+        // /api/graph can answer 200 with a degenerate body (an empty org / no repo scoped),
+        // which parses fine but omits required fields. Coerce at the boundary so a partial
+        // doc becomes null (→ empty state) instead of crashing buildPulseModel on doc.range.
+        const nd = normalizeGraphDoc(d);
+        setDoc(nd);
+        setAttribution(normalizeAttribution(a));
+        setEmpty(nd ? '' : 'No graph data for this workspace yet — add a repo to your workspace to populate the pulse.');
         setError('');
       } catch {
         if (id === reqId.current && !doc) setError('Could not reach the daemon for graph data.');
@@ -162,7 +169,10 @@ export const OmpGraphPanel: React.FC = () => {
             {error}
           </div>
         )}
-        {!error && !model && <div className="flex flex-1 items-center justify-center text-sm text-gray-400">Loading…</div>}
+        {!error && !model && empty && (
+          <div className="flex flex-1 items-center justify-center p-4 text-center text-sm text-gray-500 dark:text-gray-400">{empty}</div>
+        )}
+        {!error && !model && !empty && <div className="flex flex-1 items-center justify-center text-sm text-gray-400">Loading…</div>}
         {model && (
           <FleetPulseCanvas
             model={model}

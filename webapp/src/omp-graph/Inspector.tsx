@@ -13,6 +13,7 @@ import { answerCommand, canLand, landToast, type LandResultDTO } from '../lib/ag
 import { useTaskContext } from '../context/TaskContext';
 import { CommitView } from '../components/GraphDetail';
 import type { AttributionDoc, ProvenanceDoc } from './types';
+import { normalizeProvenance } from './normalize';
 import type { PulseModel } from './pulse-model';
 import { HOUR_MS } from './pulse-model';
 import { SEL_COLOR, type InspectSel } from './inspect';
@@ -54,8 +55,12 @@ const TicketBody: React.FC<{ ticket: string; onTrace: (d: ProvenanceDoc) => void
     apiJson<ProvenanceDoc | { error: string }>(`/api/graph/provenance?id=${encodeURIComponent(ticket)}`)
       .then((d) => {
         if (!live) return;
-        if ('error' in d) setErr(d.error);
-        else setDoc(d);
+        if (d && 'error' in d) return setErr(d.error);
+        // A 200 partial body has no `error` key but also no `runs` — normalize so it degrades
+        // to a message instead of crashing on doc.runs.reduce.
+        const nd = normalizeProvenance(d);
+        if (nd) setDoc(nd);
+        else setErr('no provenance data for this ticket');
       })
       .catch(() => live && setErr('could not load provenance'));
     return () => {

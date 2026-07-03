@@ -108,8 +108,9 @@ export const KnowledgePanel: React.FC = () => {
     void apiJson<KbSearchResponse>(`/api/fabric/search?q=${encodeURIComponent(debounced)}&topK=30`)
       .then((r) => {
         if (id !== reqRef.current) return;
-        setResults(r.results);
-        setCounts(r.counts);
+        // A 200 partial body would store undefined and crash results.map on render.
+        setResults(Array.isArray(r?.results) ? r.results : []);
+        if (r?.counts) setCounts(r.counts);
       })
       .catch(() => {
         if (id === reqRef.current) setResults([]);
