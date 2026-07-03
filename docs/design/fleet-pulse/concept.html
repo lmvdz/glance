@@ -972,8 +972,10 @@
     for (let hh2 = 0; hh2 < hoursToday; hh2++) { sumT += today[hh2] ?? 0; sumA += prof[hh2] / n; }
     const delta = sumA > 0.01 ? Math.round(((sumT - sumA) / sumA) * 100) : 0;
     let peak = 0; for (let hh2 = 1; hh2 < 24; hh2++) if (prof[hh2] > prof[peak]) peak = hh2;
-    txt(A0.x, A0.y - 76, 'AVERAGE DAY vs TODAY', 'annot', { fill: 'var(--ink-mid)', 'font-weight': 700, 'letter-spacing': '0.14em' }, g);
-    txt(A0.x, A0.y - 64, `typical peak ${String(peak).padStart(2, '0')}:00 · today ${delta >= 0 ? '+' : ''}${delta}% vs typical`, 'hour-tick', { fill: delta >= 0 ? 'var(--good)' : 'var(--ink-low)' }, g);
+    // header lives BELOW the baseline's open lower-left corner — the bars rise
+    // up-right, so nothing can ever grow into it
+    txt(A0.x - 8, A0.y + 34, 'AVERAGE DAY vs TODAY', 'annot', { fill: 'var(--ink-mid)', 'font-weight': 700, 'letter-spacing': '0.14em' }, g);
+    txt(A0.x - 8, A0.y + 46, `typical peak ${String(peak).padStart(2, '0')}:00 · today ${delta >= 0 ? '+' : ''}${delta}% vs typical`, 'hour-tick', { fill: delta >= 0 ? 'var(--good)' : 'var(--ink-low)' }, g);
     el('line', { x1: A0.x - 10, y1: A0.y - 10 * (at2.y / at2.x), x2: A0.x + 24 * at2.x + 12, y2: A0.y + (24 * at2.x + 12) * (at2.y / at2.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 4' }, g);
     for (let hh2 = 0; hh2 < 24; hh2++) {
       const p = { x: A0.x + hh2 * at2.x, y: A0.y + hh2 * at2.y };
