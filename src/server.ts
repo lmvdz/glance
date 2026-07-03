@@ -33,6 +33,7 @@ import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
 import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser } from "./workos-provision.ts";
+import { getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -675,6 +676,42 @@ export class SquadServer {
 			if (!id) return new Response("missing id", { status: 400 });
 			const ok = body?.action === "deny" ? await denyJoinRequest(this.db.db, id, orgId) : await approveJoinRequest(this.db.db, id, orgId);
 			return Response.json({ ok });
+		}
+		// Org settings. Profile is visible to any member of the active org; member management is admin-only,
+		// scoped to the caller's own active org.
+		if (url.pathname === "/api/org" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			const orgId = session.session.activeOrganizationId;
+			return Response.json(orgId ? await getOrgProfile(this.db.db, orgId) : null);
+		}
+		if (url.pathname === "/api/org" && req.method === "PATCH") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const body = (await req.json().catch(() => null)) as { name?: unknown } | null;
+			const ok = await renameOrg(this.db.db, orgId, body && typeof body.name === "string" ? body.name : "");
+			return Response.json({ ok });
+		}
+		if (url.pathname === "/api/org/members" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json([]);
+			const orgId = session.session.activeOrganizationId;
+			return Response.json(orgId ? await listOrgMembers(this.db.db, orgId) : []);
+		}
+		if ((url.pathname === "/api/org/members/role" || url.pathname === "/api/org/members/remove") && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const body = (await req.json().catch(() => null)) as { userId?: unknown; role?: unknown } | null;
+			const userId = body && typeof body.userId === "string" ? body.userId : "";
+			if (!userId) return new Response("missing userId", { status: 400 });
+			if (userId === session.user.id) return Response.json({ ok: false, error: "you can't change your own membership here" });
+			const result =
+				url.pathname === "/api/org/members/role"
+					? await setMemberRole(this.db.db, orgId, userId, body && typeof body.role === "string" ? body.role : "")
+					: await removeMember(this.db.db, orgId, userId);
+			return Response.json(result);
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });

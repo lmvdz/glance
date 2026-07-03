@@ -24,6 +24,7 @@ import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
 import { ActiveWorkPane } from './components/ActiveWorkPane';
+import { OrgSettings } from './components/OrgSettings';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
 import { PendingApproval } from './components/PendingApproval';
@@ -48,6 +49,7 @@ const MainContent = () => {
   if (view === 'omp-graph') return <OmpGraphPanel />;
   if (view === 'knowledge') return <KnowledgePanel />;
   if (view === 'federation') return <FederationPanel />;
+  if (view === 'org') return <OrgSettings />;
   if (view === 'tasks' && !selectedTaskId) return <TaskListView />;
 
   return (
