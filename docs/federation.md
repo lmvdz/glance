@@ -1,6 +1,6 @@
 # Federation: cross-host coordination over the tailnet
 
-omp-squad coordinates agents on **one** machine through the shared registries
+glance coordinates agents on **one** machine through the shared registries
 under `~/.omp/squad` (presence + leases, one file per claim, heartbeat-TTL).
 Federation promotes that coordination **across machines** over a Tailscale
 tailnet, so two operators working the same repo from different hosts see each
@@ -9,7 +9,7 @@ other's agents and file leases.
 ```
  host A                         coordinator                    host B
  ┌───────────────┐    ws        ┌───────────┐      ws       ┌───────────────┐
- │ omp-squad up  │─presence────▶│  relay    │◀────presence──│ omp-squad up  │
+ │ glance up  │─presence────▶│  relay    │◀────presence──│ glance up  │
  │ federation-   │─leases──────▶│ (fan-out) │─────leases───▶│ federation-   │
  │   sync        │◀─leases──────│           │◀────leases────│   sync        │
  └───────────────┘              └───────────┘               └───────────────┘
@@ -23,7 +23,7 @@ the wire protocol stays owned by the buses. Run one anywhere on the tailnet:
 
 ```sh
 OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
-# → omp-squad coordinator listening on ws://127.0.0.1:7900
+# → glance coordinator listening on ws://127.0.0.1:7900
 ```
 
 The relay **binds `127.0.0.1` by default** and ships a **pre-shared-token auth gate**.
@@ -40,7 +40,7 @@ and can spoof/impersonate, so:
 OMP_SQUAD_COORDINATOR_HOST=0.0.0.0 \
 OMP_SQUAD_COORDINATOR_TOKEN=$(openssl rand -hex 32) \
 OMP_SQUAD_COORDINATOR_PORT=7900 bun src/coordinator-main.ts
-# → omp-squad coordinator listening on ws://127.0.0.1:7900 (token-gated)
+# → glance coordinator listening on ws://127.0.0.1:7900 (token-gated)
 ```
 
 Put it on a Tailscale node and point every operator at its tailnet address.

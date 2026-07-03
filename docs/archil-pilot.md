@@ -15,7 +15,7 @@ of access isolation**. Branches/checkpoints are git-like copy-on-write forks of 
 
 ## The decision (and the reframe)
 
-We first researched Archil as a *per-org storage backend* to harden omp-squad's multi-tenant isolation and
+We first researched Archil as a *per-org storage backend* to harden glance's multi-tenant isolation and
 add durability — with **latency** (agent worktrees over FUSE/S3) as the gating risk.
 
 The operator reframed the target: not a faster worktree backend on one machine, but a **cohesive collaborative
@@ -37,7 +37,7 @@ collaboration gate, and latency is demoted to a characterized constraint.
   in your own S3 bucket, no lock-in). **Non-synced branched disks** = ephemeral per-agent / per-exploration
   COW forks, promoted into the trunk on HITL merge. (Branches and S3-sync are *mutually exclusive on one disk*,
   which is why the model is layered rather than a single disk.)
-- **HITL co-access (operator-confirmed): both.** Humans steer through the omp-squad control-plane UI (which
+- **HITL co-access (operator-confirmed): both.** Humans steer through the glance control-plane UI (which
   mediates substrate reads/writes) and may also live-mount a disk to debug.
 - **Durability is no-regret** and survives in either framing: fsync the persistence layer (OMPSQ-75) and prove
   committed work survives an unclean stop (OMPSQ-76).

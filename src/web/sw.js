@@ -1,5 +1,5 @@
 /**
- * omp-squad service worker — installable shell + background Web Push.
+ * glance service worker — installable shell + background Web Push.
  *
  * The shell is cached network-first (updates land immediately, offline falls
  * back to cache). /api and /ws are NEVER cached — they carry live, authed state.
@@ -43,7 +43,7 @@ self.addEventListener("push", (e) => {
 	} catch {
 		d = { body: e.data ? e.data.text() : "" };
 	}
-	const title = d.title || "omp-squad";
+	const title = d.title || "glance";
 	e.waitUntil(
 		self.registration.showNotification(title, {
 			body: d.body || "",

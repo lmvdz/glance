@@ -1,6 +1,6 @@
 # Enterprise SSO via WorkOS
 
-omp-squad adds enterprise-grade multi-tenant SSO through **WorkOS AuthKit**, wired so that
+glance adds enterprise-grade multi-tenant SSO through **WorkOS AuthKit**, wired so that
 **better-auth stays the owner of users, sessions, and organizations** (and the Postgres RLS `org_id`).
 WorkOS is an upstream identity source only: AuthKit sits in front of every customer's IdP
 (Okta / Entra / Google Workspace / Ping / generic SAML+OIDC / social) behind a **single OIDC client**,
@@ -9,7 +9,7 @@ and better-auth mints the local session on return. Integrate once; keep your ten
 ## Architecture
 
 ```
-Browser ──► omp-squad Login ("Sign in with SSO")
+Browser ──► glance Login ("Sign in with SSO")
               │  authClient.signIn.oauth2({ providerId: "workos" })
               ▼
         better-auth genericOAuth (providerId "workos")
@@ -37,7 +37,7 @@ Browser ──► omp-squad Login ("Sign in with SSO")
 5. (Directory Sync) Create a **Webhook endpoint** pointing at `<BETTER_AUTH_URL>/api/workos/webhook`,
    subscribe to `dsync.*` events, and copy its **signing secret**.
 
-## Configure omp-squad
+## Configure glance
 
 Set in `.env` (db mode; requires `DATABASE_URL` + `BETTER_AUTH_SECRET`):
 

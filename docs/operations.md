@@ -2,7 +2,7 @@
 
 ## Daemon health under load
 
-`omp-squad up` is a single Bun process: one event loop serving HTTP + WebSocket, the
+`glance up` is a single Bun process: one event loop serving HTTP + WebSocket, the
 manager, and every agent's RPC stream. Under heavy fan-out it can stall transiently — which
 *looks* like the daemon is down but is not.
 
@@ -30,13 +30,13 @@ dashboard otherwise works, and it recovers on its own seconds later.
 
 ## Run the daemon so it survives
 
-`omp-squad up` installs `SIGINT`/`SIGTERM` handlers that shut down cleanly (`process.exit(0)`).
-**Do not background it inside a short-lived shell** (`omp-squad up &` from an ephemeral
+`glance up` installs `SIGINT`/`SIGTERM` handlers that shut down cleanly (`process.exit(0)`).
+**Do not background it inside a short-lived shell** (`glance up &` from an ephemeral
 session): it catches `SIGTERM` with the shell's process group and exits cleanly — which reads
 like a crash in the log (clean exit, no trace) but is just the signal. Run it detached:
 
 ```bash
-nohup omp-squad up --no-tui >~/.omp/squad/daemon.log 2>&1 &   # or: setsid, or a systemd unit
+nohup glance up --no-tui >~/.omp/squad/daemon.log 2>&1 &   # or: setsid, or a systemd unit
 ```
 
 Rule of thumb: a **clean exit with no trace ≈ a signal**, not a bug; a **stack trace** is a real
@@ -44,9 +44,9 @@ crash; a **changed pid with neither** is a restart (manual `⤴ Upgrade`, a re-e
 session respawn). One restart over a long session is normal — sustained rapid pid churn is what
 to investigate.
 
-## Canonical launch — use the launcher + supervisor, not bare `omp-squad up`
+## Canonical launch — use the launcher + supervisor, not bare `glance up`
 
-Bare `omp-squad up` boots on **defaults** (confirm-mode landing, no reap, default caps) — it does NOT
+Bare `glance up` boots on **defaults** (confirm-mode landing, no reap, default caps) — it does NOT
 read the autonomy/resource env. The configured launcher is **`~/.omp/squad/up.sh`** (sets Plane wiring,
 `OBSERVE_AUTOFIX`, `LAND_CONFIRM=0`, `MAX_WIP`/`MAX_AGENTS`, etc., then `exec`s the daemon). Run it under
 the crash-restart supervisor so it survives crashes/OOM and a clean exit:
@@ -83,7 +83,7 @@ orphaned worktree was re-spawned at once — N simultaneous `omp` hosts that cou
 take the box (WSL) down. Done/clean agents are dropped on boot; their still-open issues are picked up
 again gradually under the WIP cap.
 
-The daemon does **not** hot-reload its own source — after the fleet lands a change to omp-squad itself,
+The daemon does **not** hot-reload its own source — after the fleet lands a change to glance itself,
 relaunch (`scripts/squadctl.sh restart`, or re-run `up.sh`) to pick it up. (Auto-reload-on-self-landed-code
 is tracked in OMPSQ-130.)
 
@@ -130,7 +130,7 @@ state changes.
    Promotion creates and links one Plane issue; rejected items cannot be promoted.
 4. For reward campaigns, use the reward endpoints as an audit ledger: `pending` can become `approved`
    or `void`; `approved` can become `paid` or `void`. Call `mark-paid` only after the human payout
-   happens elsewhere. It can store `provider` and `externalRef`, but omp-squad never sends money.
+   happens elsewhere. It can store `provider` and `externalRef`, but glance never sends money.
    Reconcile `paid` entries against the external payout system periodically; the ledger is the audit
    trail, not the payment rail.
 
