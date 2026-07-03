@@ -25,6 +25,7 @@ import {
 	fetchWorkosMemberships,
 	findWorkosOrgByDomain,
 	mapWorkosRole,
+	type WorkosEvent,
 } from "./workos.ts";
 
 export interface ReconcileResult {
@@ -218,4 +219,84 @@ export async function approveJoinRequest(db: AnyKysely, requestId: string, orgId
 export async function denyJoinRequest(db: AnyKysely, requestId: string, orgId: string): Promise<boolean> {
 	const res = await sql`update "org_join_requests" set "status" = 'denied' where "id" = ${requestId} and "org_id" = ${orgId} and "status" = 'pending'`.execute(db);
 	return (res.numAffectedRows ?? 0n) > 0n;
+}
+
+// ── SCIM (Directory Sync) provisioning ──────────────────────────────────────────────────────────────
+//
+// Turn verified WorkOS `dsync.*` webhook events into better-auth org memberships. The directory's WorkOS
+// organization_id maps 1:1 to the better-auth org id (same as reconcileWorkosOrgs); users are keyed by
+// their primary email, so a SCIM-provisioned member and their later SSO login resolve to the same user row.
+// Group events are treated as org membership too (a user in a synced group belongs to the org). Only call
+// after verifyWorkosSignature has passed.
+
+/** Primary (or first) email from a WorkOS Directory User object: `emails: [{ primary, value }]`. */
+function directoryEmail(data: Record<string, unknown>): string | undefined {
+	const emails = Array.isArray(data.emails) ? data.emails : [];
+	const primary = emails.find((e) => (e as Record<string, unknown>)?.primary === true) as Record<string, unknown> | undefined;
+	const pick = primary ?? (emails[0] as Record<string, unknown> | undefined);
+	const v = pick && typeof pick.value === "string" ? pick.value : undefined;
+	return v ? v.toLowerCase() : undefined;
+}
+
+function directoryName(data: Record<string, unknown>, email: string): string {
+	const fn = typeof data.first_name === "string" ? data.first_name : "";
+	const ln = typeof data.last_name === "string" ? data.last_name : "";
+	return `${fn} ${ln}`.trim() || email;
+}
+
+/** Find or create a better-auth user by email. SCIM pre-provisions users so they can be members before
+ *  first login; when they later sign in via SSO, better-auth resolves the same row by email. */
+async function upsertUserByEmail(db: AnyKysely, email: string, name: string): Promise<string> {
+	const found = await sql<{ id: string }>`select "id" from "user" where lower("email") = ${email} limit 1`.execute(db);
+	if (found.rows[0]) return found.rows[0].id;
+	const id = randomUUID();
+	const now = new Date().toISOString();
+	await sql`insert into "user" ("id","name","email","emailVerified","createdAt","updatedAt") values (${id}, ${name}, ${email}, 0, ${now}, ${now})`.execute(db);
+	return id;
+}
+
+async function ensureMembership(db: AnyKysely, orgId: string, userId: string, role: string): Promise<void> {
+	const existing = await sql<{ id: string }>`select "id" from "member" where "organizationId" = ${orgId} and "userId" = ${userId} limit 1`.execute(db);
+	if (existing.rows[0]) return;
+	await sql`insert into "member" ("id","organizationId","userId","role","createdAt") values (${randomUUID()}, ${orgId}, ${userId}, ${role}, ${new Date().toISOString()})`.execute(db);
+}
+
+async function removeMembershipByEmail(db: AnyKysely, orgId: string, email: string): Promise<boolean> {
+	const u = await sql<{ id: string }>`select "id" from "user" where lower("email") = ${email} limit 1`.execute(db);
+	const uid = u.rows[0]?.id;
+	if (!uid) return false;
+	await sql`delete from "member" where "organizationId" = ${orgId} and "userId" = ${uid}`.execute(db);
+	await sql`update "session" set "activeOrganizationId" = null where "userId" = ${uid} and "activeOrganizationId" = ${orgId}`.execute(db);
+	return true;
+}
+
+export interface ScimResult {
+	handled: boolean;
+	action?: "provisioned" | "deprovisioned";
+}
+
+/** Apply a verified Directory Sync event. Returns { handled:false } for events we don't act on. */
+export async function provisionScimEvent(db: AnyKysely, event: WorkosEvent): Promise<ScimResult> {
+	const data = event.data;
+	const orgId = typeof data.organization_id === "string" ? data.organization_id : undefined;
+	const email = directoryEmail(data);
+	if (!orgId || !email) return { handled: false };
+	switch (event.event) {
+		case "dsync.user.created":
+		case "dsync.user.updated":
+		case "dsync.group.user_added": {
+			const name = typeof data.organization_name === "string" ? data.organization_name : orgId;
+			await ensureOrgMirror(db, orgId, name);
+			const userId = await upsertUserByEmail(db, email, directoryName(data, email));
+			await ensureMembership(db, orgId, userId, "member");
+			return { handled: true, action: "provisioned" };
+		}
+		case "dsync.user.deleted":
+		case "dsync.group.user_removed": {
+			await removeMembershipByEmail(db, orgId, email);
+			return { handled: true, action: "deprovisioned" };
+		}
+		default:
+			return { handled: false };
+	}
 }

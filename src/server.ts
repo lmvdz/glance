@@ -34,9 +34,9 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
-import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser } from "./workos-provision.ts";
-import { getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
+import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
+import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -609,10 +609,16 @@ export class SquadServer {
 			const verdict = verifyWorkosSignature({ rawBody: raw, sigHeader: req.headers.get("workos-signature"), secret, now: Date.now() });
 			if (!verdict.ok) return new Response(`invalid signature: ${verdict.reason}`, { status: 400 });
 			const evt = parseWorkosEvent(raw);
-			// SECURELY RECEIVED. Provisioning (create org / add-remove membership on dsync.*) is the documented
-			// follow-up in docs/workos-sso.md — it needs a live WorkOS directory to finalize the org mapping,
-			// so we log the verified event here rather than ship untested identity-mutating DB writes.
-			if (evt) console.log(`[workos] dsync event received: ${evt.event} (${evt.id})`);
+			// SECURELY RECEIVED → provision. dsync.user.created/updated/group.user_added add the member to the
+			// mapped org (creating the user by email if needed); dsync.user.deleted/group.user_removed remove them.
+			if (evt && this.db) {
+				try {
+					const result = await provisionScimEvent(this.db.db, evt);
+					if (result.handled) console.log(`[workos] dsync ${evt.event} → ${result.action}`);
+				} catch (err) {
+					console.error(`[workos] dsync provisioning failed for ${evt.event}:`, err);
+				}
+			}
 			return new Response("ok");
 		}
 		if (url.pathname === "/llms.txt") return new Response("# omp-squad capability API\n\n- GET /api/capability-discovery\n- GET /api/capability-catalog\n- GET /api/capability-packs\n- POST /api/capability-sources\n- POST /api/capability-installs\n- GET /api/federation/capabilities\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -715,6 +721,36 @@ export class SquadServer {
 					? await setMemberRole(this.db.db, orgId, userId, body && typeof body.role === "string" ? body.role : "")
 					: await removeMember(this.db.db, orgId, userId);
 			return Response.json(result);
+		}
+		if (url.pathname === "/api/org/members/invite" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const body = (await req.json().catch(() => null)) as { email?: unknown; role?: unknown } | null;
+			const email = body && typeof body.email === "string" ? body.email : "";
+			if (!email) return new Response("missing email", { status: 400 });
+			return Response.json(await addMemberByEmail(this.db.db, orgId, email, body && typeof body.role === "string" ? body.role : "member"));
+		}
+		// Domain-join policy (WorkOS orgs only) — read/set the org's auto|approval policy in WorkOS metadata.
+		if (url.pathname === "/api/org/join-policy" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json({ policy: null });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return Response.json({ policy: null });
+			const profile = await getOrgProfile(this.db.db, orgId);
+			if (!profile?.workosOrgId) return Response.json({ policy: null }); // not a WorkOS org
+			return Response.json({ policy: await getWorkosOrgPolicy(profile.workosOrgId) });
+		}
+		if (url.pathname === "/api/org/join-policy" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const profile = await getOrgProfile(this.db.db, orgId);
+			if (!profile?.workosOrgId) return Response.json({ ok: false, error: "not a WorkOS-backed organization" });
+			const body = (await req.json().catch(() => null)) as { policy?: unknown } | null;
+			const policy = body?.policy === "auto" ? "auto" : "approval";
+			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
