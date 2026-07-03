@@ -82,7 +82,8 @@ Each agent works in its own **git worktree** — a checkout of the repo on its o
 branch, so parallel agents never touch each other's files. The branch defaults to
 `squad/<name>` (override with `--branch`). The worktree path is the agent's `cwd`
 and the unit you review before merging; worktrees live under
-`~/.omp/squad/worktrees/`. When the launch directory isn't a git repo, the agent
+`~/.glance/worktrees/` (legacy `~/.omp/squad` installs keep their path). When
+the launch directory isn't a git repo, the agent
 runs in place instead of cutting a worktree.
 
 ## Project
@@ -157,7 +158,7 @@ pending request across every agent, oldest first.
 
 The architectural spine: a single `SquadManager` is the authoritative core. It
 owns every agent, derives status, buffers transcripts, persists roster config to
-`~/.omp/squad/state.json`, and exposes one `applyCommand(cmd, actor)` entry point.
+`<stateDir>/state.json` (default `~/.glance`), and exposes one `applyCommand(cmd, actor)` entry point.
 Both surfaces are thin clients of it:
 
 - the **TUI** (`src/tui.ts`) consumes the manager in-process;

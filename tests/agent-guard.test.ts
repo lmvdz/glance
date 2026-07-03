@@ -1,7 +1,8 @@
 /**
  * Agent guardrails — the deny policy that fences a yolo agent into its worktree. Three jobs:
  * block daemon/host control + process-killing shell commands, block any reference to a protected
- * tree (the main checkout / ~/.omp/squad) by absolute path — incl. bash writes the file-tool fence
+ * tree (the main checkout / the glance state dir — ~/.glance or legacy ~/.omp/squad) by absolute
+ * path — incl. bash writes the file-tool fence
  * can't see — and block file edits that escape the worktree. Ordinary build/test/git/read work and
  * /tmp scratch stay untouched (false positives would cripple the agent).
  */
@@ -43,6 +44,18 @@ test("blocks touching daemon control files (launcher, lock, admin token)", () =>
 	for (const c of ["cat ~/.omp/squad/access-token", "echo x > ~/.omp/squad/up.sh", "rm ~/.omp/squad/daemon.lock"]) {
 		expect(sh(c)?.block).toBe(true);
 	}
+});
+
+test("blocks the same control files under the new ~/.glance state dir", () => {
+	for (const c of ["cat ~/.glance/access-token", "echo x > ~/.glance/up.sh", "rm ~/.glance/daemon.lock", "bash $HOME/.glance/up.sh"]) {
+		expect(sh(c)?.block).toBe(true);
+	}
+});
+
+test("protected-tree fence covers a ~/.glance root too (protectedStateRoots wiring)", () => {
+	const ctx: GuardContext = { worktree: WT, protectedRoots: [`${HOME}/.glance`, `${HOME}/.omp/squad`, MAIN], home: HOME };
+	expect(screenToolCall("bash", { command: `cat ${HOME}/.glance/state.json` }, ctx)?.block).toBe(true);
+	expect(screenToolCall("bash", { command: "echo scratch > /tmp/out.txt" }, ctx)).toBeUndefined();
 });
 
 test("blocks bash that reaches into a protected tree by absolute path (the gap the file-tool fence misses)", () => {

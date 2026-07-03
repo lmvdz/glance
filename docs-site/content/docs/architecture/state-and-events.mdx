@@ -11,12 +11,14 @@ mutations back as **`ClientCommand`**s. This page is the wire reference for all 
 
 ## Persistence
 
-Roster config persists to `~/.omp/squad/state.json`. The directory is overridable with
-the `GLANCE_STATE_DIR` environment variable (it also holds the access token,
-per-agent run receipts, resume digests, and commissioned-worker dirs).
+Roster config persists to `<stateDir>/state.json`. The state dir defaults to `~/.glance`
+(an existing legacy `~/.omp/squad` keeps working; `GLANCE_STATE_DIR` overrides — see
+[Configuration](/docs/reference/configuration#state-directory) for the exact resolution
+order). It also holds the access token, per-agent run receipts, resume digests, and
+commissioned-worker dirs.
 
 ```text title="default state dir"
-~/.omp/squad/
+~/.glance/
   state.json            # roster config + transcripts + features
   access-token          # bearer token (mode 0600)
   sockets/<id>.sock      # one agent-host UDS per live agent

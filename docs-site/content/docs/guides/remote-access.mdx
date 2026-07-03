@@ -24,7 +24,7 @@ glance up --no-tui --host 0.0.0.0
     "--host / GLANCE_HOST": { description: "Bind address; 0.0.0.0 exposes on the LAN/tailnet. The env var wins over the flag.", type: "string", default: "127.0.0.1" },
     "--port / GLANCE_PORT": { description: "Daemon port.", type: "number", default: "7878" },
     "GLANCE_TLS_CERT + GLANCE_TLS_KEY": { description: "PEM paths — terminate TLS in-process (both required). Switches the scheme to https.", type: "path", default: "plain HTTP" },
-    "GLANCE_STATE_DIR": { description: "Where the token, VAPID keys, and subscriptions live.", type: "path", default: "~/.omp/squad" },
+    "GLANCE_STATE_DIR": { description: "Where the token, VAPID keys, and subscriptions live. Default: ~/.glance (an existing legacy ~/.omp/squad is kept).", type: "path", default: "~/.glance" },
   }}
 />
 

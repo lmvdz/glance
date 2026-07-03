@@ -60,8 +60,10 @@ Four ideas carry the whole system:
 ```
 
 `SquadManager` owns each `RpcAgent`, derives status from its stream, buffers a
-transcript, and persists roster config to `~/.omp/squad/state.json` (worktrees
-live under `~/.omp/squad/worktrees/`). `SquadServer` serves the dashboard over
+transcript, and persists roster config to `~/.glance/state.json` (worktrees
+live under `~/.glance/worktrees/`; a legacy `~/.omp/squad` state dir keeps
+working — see [Configuration](/docs/reference/configuration#state-directory)).
+`SquadServer` serves the dashboard over
 HTTP + WebSocket; `SquadTui` drives the terminal. Both are thin clients of the
 manager.
 

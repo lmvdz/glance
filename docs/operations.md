@@ -36,7 +36,7 @@ session): it catches `SIGTERM` with the shell's process group and exits cleanly 
 like a crash in the log (clean exit, no trace) but is just the signal. Run it detached:
 
 ```bash
-nohup glance up --no-tui >~/.omp/squad/daemon.log 2>&1 &   # or: setsid, or a systemd unit
+nohup glance up --no-tui >~/.glance/daemon.log 2>&1 &   # or: setsid, or a systemd unit  (legacy state dirs: ~/.omp/squad/daemon.log)
 ```
 
 Rule of thumb: a **clean exit with no trace ≈ a signal**, not a bug; a **stack trace** is a real
@@ -47,12 +47,12 @@ to investigate.
 ## Canonical launch — use the launcher + supervisor, not bare `glance up`
 
 Bare `glance up` boots on **defaults** (confirm-mode landing, no reap, default caps) — it does NOT
-read the autonomy/resource env. The configured launcher is **`~/.omp/squad/up.sh`** (sets Plane wiring,
+read the autonomy/resource env. The configured launcher is **`<stateDir>/up.sh`** (default `~/.glance/up.sh`, legacy `~/.omp/squad/up.sh`; sets Plane wiring,
 `OBSERVE_AUTOFIX`, `LAND_CONFIRM=0`, `MAX_WIP`/`MAX_AGENTS`, etc., then `exec`s the daemon). Run it under
 the crash-restart supervisor so it survives crashes/OOM and a clean exit:
 
 ```bash
-setsid bash scripts/squad-supervisor.sh >/dev/null 2>&1 &   # supervises ~/.omp/squad/up.sh
+setsid bash scripts/squad-supervisor.sh >/dev/null 2>&1 &   # supervises <stateDir>/up.sh
 ss -ltnp | grep :7878                                        # confirm one daemon, stable pid
 ```
 
@@ -69,9 +69,9 @@ scripts/squadctl.sh stop      # stop supervisor FIRST (so it can't relaunch), th
 
 `stop` kills the supervisor before the daemon so the watchdog can't immediately respawn it, then
 `SIGTERM`s the daemon (clean shutdown releases the state lock) and escalates to `SIGKILL` after 10s.
-`status`/`stop` resolve the daemon pid from `~/.omp/squad/daemon.lock`, so a stale lock (owner gone)
-reads as DOWN. Override `OMP_SQUAD_STATE_DIR` / `OMP_SQUAD_LAUNCHER` / `OMP_SQUAD_PORT` for a
-non-default daemon.
+`status`/`stop` resolve the daemon pid from `<stateDir>/daemon.lock` (default `~/.glance`, legacy
+`~/.omp/squad`), so a stale lock (owner gone) reads as DOWN. Override `GLANCE_STATE_DIR` /
+`GLANCE_LAUNCHER` / `GLANCE_PORT` (legacy `OMP_SQUAD_*` also honored) for a non-default daemon.
 
 For **planning** (vs. the agent/inbox monitor views), use the **project view**: the sidebar drills
 into each repo → its features → their tasks (description / acceptance criteria / context / properties),

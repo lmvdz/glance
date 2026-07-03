@@ -1,6 +1,6 @@
 /**
  * Generic TTL claim registry — "one JSON file per claim under
- * ~/.omp/squad/<subdir>/<repoKey>/<id>.json, with a heartbeat timestamp and a
+ * <stateDir>/<subdir>/<repoKey>/<id>.json, with a heartbeat timestamp and a
  * TTL". Backs both the presence registry (who's working on a repo) and the file
  * lease registry (who's editing a file). Storage layout is byte-compatible with
  * the two hand-rolled implementations it replaced, so other processes and the
@@ -9,8 +9,8 @@
 
 import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { resolveStateDir } from "./state-dir.ts";
 
 /** Minimum shape every stored record must have: a file id and a heartbeat ts. */
 export interface TtlRecord {
@@ -19,7 +19,7 @@ export interface TtlRecord {
 }
 
 export interface TtlRegistryOptions<T extends TtlRecord> {
-	/** Folder under ~/.omp/squad (e.g. "presence", "leases"). */
+	/** Folder under the state dir (e.g. "presence", "leases"). */
 	subdir: string;
 	/** Default freshness window in ms; entries older than this are stale. */
 	ttlMs: number;
@@ -28,7 +28,7 @@ export interface TtlRegistryOptions<T extends TtlRecord> {
 }
 
 export interface TtlRegistry<T extends TtlRecord> {
-	/** ~/.omp/squad/<subdir> — the per-repo folders live directly under it. */
+	/** <stateDir>/<subdir> — the per-repo folders live directly under it. */
 	root: string;
 	/** Absolute folder holding one repo's claim files. */
 	dirFor(repo: string): string;
@@ -52,10 +52,10 @@ export function repoKey(repo: string): string {
 }
 
 export function ttlRegistry<T extends TtlRecord>({ subdir, ttlMs, isRecord }: TtlRegistryOptions<T>): TtlRegistry<T> {
-	// Honor OMP_SQUAD_STATE_DIR (the daemon's stateDir already does) so presence/leases live UNDER the state
-	// dir instead of a hardcoded ~/.omp/squad — otherwise a custom state dir splits daemon state from
-	// presence/leases, and the test suite writes into the operator's real ~/.omp/squad (flaky isolation).
-	const root = path.join(process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad"), subdir);
+	// Derive from the SHARED state-dir resolution (env override → ~/.glance → legacy ~/.omp/squad) so
+	// presence/leases live UNDER the daemon's state dir — otherwise a custom/renamed state dir splits
+	// daemon state from presence/leases, and the test suite writes into the operator's real state dir.
+	const root = path.join(resolveStateDir(), subdir);
 	const dirFor = (repo: string): string => path.join(root, repoKey(repo));
 
 	async function write(repo: string, entry: T): Promise<void> {

@@ -36,7 +36,7 @@ that is a WebSocket client of the same stream, bridged by `SquadServer`
   of one `derive()` method, fed by each driver's event stream (see
   [RPC protocol](/docs/architecture/rpc-protocol));
 - **buffers a transcript** per agent and persists roster config to
-  `~/.omp/squad/state.json` (see [State & events](/docs/architecture/state-and-events));
+  `~/.glance/state.json` (see [State & events](/docs/architecture/state-and-events));
 - **accepts every mutation through one entry point** — `applyCommand(cmd, actor)`.
   The TUI, the web server, the auto-supervisor, and (in Phase 2) federation peers
   all call the same method, so there is no second code path that can drift.

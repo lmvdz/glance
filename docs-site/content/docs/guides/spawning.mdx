@@ -70,7 +70,7 @@ explicit process flag) skips this. See [Auto-dispatch & intake](/docs/integratio
 <Step>
 ### Worktree cut off HEAD
 `addWorktree` runs `git worktree add` in the repo, creating branch `squad/<name>` **off the
-repo's current HEAD** under `~/.omp/squad/worktrees/<repo>-<branch>/`. An existing branch is
+repo's current HEAD** under `~/.glance/worktrees/<repo>-<branch>/` (legacy state dirs: `~/.omp/squad/worktrees/…`). An existing branch is
 checked out instead of created; an existing worktree path is reused. If the target isn't a git
 repo, the agent **runs in place** in that directory (no isolation) so "spawn anywhere" still
 works.

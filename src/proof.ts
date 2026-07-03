@@ -6,19 +6,20 @@
  * <worktree>/.omp/proof/ are collected as vision evidence — they are attached, never gate.
  *
  * Collision-safe storage mirrors leases/presence: one JSON per worktree under the manager/org
- * state dir (`<stateDir>/proof/<repo-hash>/<worktree-hash>.json`), defaulting to ~/.omp/squad.
+ * state dir (`<stateDir>/proof/<repo-hash>/<worktree-hash>.json`), defaulting to the resolved
+ * glance state dir (see state-dir.ts).
  */
 
 import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import { existsSync } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { resolveStateDir } from "./state-dir.ts";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
 import { gateExec } from "./gate-runner.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
-let proofRoot = path.join(os.homedir(), ".omp", "squad", "proof");
+let proofRoot = path.join(resolveStateDir(), "proof");
 
 export interface Proof {
 	/** Acceptance command exited 0 and the worktree stayed clean. */

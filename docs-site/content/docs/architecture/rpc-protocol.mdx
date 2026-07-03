@@ -87,7 +87,7 @@ and `streaming` — but only when no request is pending, so a poll can never clo
 `RpcAgent` connects to that socket as a client.
 
 ```text title="transport"
- SquadManager ──RpcAgent──▶ UDS (~/.omp/squad/sockets/<id>.sock) ──agent-host──▶ omp --mode rpc
+ SquadManager ──RpcAgent──▶ UDS (<stateDir>/sockets/<id>.sock) ──agent-host──▶ omp --mode rpc
 ```
 
 This indirection is what lets agents survive a daemon restart/upgrade. The host is

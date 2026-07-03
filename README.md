@@ -61,8 +61,9 @@ third repo). Without a control plane you lose track of which is busy, which fini
 
 Each agent is a real `omp --mode rpc` child speaking omp's newline-JSON RPC protocol. Status is
 derived from its event stream; the TUI consumes the manager in-process and the web dashboard is
-a WebSocket client of the same event stream. Roster state persists under `~/.omp/squad`
-(override with `GLANCE_STATE_DIR`). Agents survive daemon restarts: each runs under a detached
+a WebSocket client of the same event stream. Roster state persists under `~/.glance`
+(override with `GLANCE_STATE_DIR`; a legacy `~/.omp/squad` dir keeps working untouched).
+Agents survive daemon restarts: each runs under a detached
 host process the daemon reconnects to.
 
 ## Install

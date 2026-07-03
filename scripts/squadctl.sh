@@ -10,15 +10,23 @@
 #   scripts/squadctl.sh restart   # stop, then start
 #   scripts/squadctl.sh status    # is it up? pid / supervisor / HTTP probe / launcher
 #
-# Env overrides (match up.sh / squad-supervisor.sh):
-#   OMP_SQUAD_STATE_DIR  state dir holding the lock + launcher (default ~/.omp/squad)
-#   OMP_SQUAD_LAUNCHER   launcher script           (default $STATE_DIR/up.sh)
-#   OMP_SQUAD_PORT       dashboard port            (default 7878)
+# Env overrides (match up.sh / squad-supervisor.sh; GLANCE_* or legacy OMP_SQUAD_* both work):
+#   GLANCE_STATE_DIR   state dir holding the lock + launcher
+#                      (default: ~/.glance if it exists, else legacy ~/.omp/squad if it exists, else ~/.glance)
+#   GLANCE_LAUNCHER    launcher script           (default $STATE_DIR/up.sh)
+#   GLANCE_PORT        dashboard port            (default 7878)
 set -uo pipefail
 
-STATE_DIR="${OMP_SQUAD_STATE_DIR:-$HOME/.omp/squad}"
-LAUNCHER="${OMP_SQUAD_LAUNCHER:-$STATE_DIR/up.sh}"
-PORT="${OMP_SQUAD_PORT:-7878}"
+# Mirror the daemon's state-dir resolution (src/state-dir.ts): env → ~/.glance → legacy ~/.omp/squad → ~/.glance.
+default_state_dir() {
+	if [ -d "$HOME/.glance" ]; then echo "$HOME/.glance"
+	elif [ -d "$HOME/.omp/squad" ]; then echo "$HOME/.omp/squad"
+	else echo "$HOME/.glance"; fi
+}
+
+STATE_DIR="${GLANCE_STATE_DIR:-${OMP_SQUAD_STATE_DIR:-$(default_state_dir)}}"
+LAUNCHER="${GLANCE_LAUNCHER:-${OMP_SQUAD_LAUNCHER:-$STATE_DIR/up.sh}}"
+PORT="${GLANCE_PORT:-${OMP_SQUAD_PORT:-7878}}"
 LOCK="$STATE_DIR/daemon.lock"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUPERVISOR="$SCRIPT_DIR/squad-supervisor.sh"

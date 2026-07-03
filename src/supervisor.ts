@@ -25,7 +25,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import * as os from "node:os";
+import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
 import type { AgentDTO, ClientCommand, PendingRequest, SquadEvent, TranscriptEntry } from "./types.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
@@ -214,8 +214,7 @@ export async function decide(req: PendingRequest, context: string, opts?: { mode
 /** The daemon auto-generates a bearer token on boot; read it the same way the CLI does (empty if absent). */
 function readToken(): string {
 	try {
-		const dir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
-		return readFileSync(path.join(dir, "access-token"), "utf8").trim();
+		return readFileSync(path.join(resolveStateDir(), "access-token"), "utf8").trim();
 	} catch {
 		return "";
 	}

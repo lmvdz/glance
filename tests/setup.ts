@@ -10,14 +10,14 @@
  * Tests that need these set their own per-test, so clearing them here just defines the baseline.
  *
  * Runs once, before any test module is imported (so module-level env snapshots capture the
- * cleared state). ponytail: a name-prefix sweep — the only two prefixes this repo reads.
+ * cleared state). ponytail: a name-prefix sweep — the only three prefixes this repo reads.
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 for (const k of Object.keys(process.env)) {
-	if (k.startsWith("PLANE_") || k.startsWith("OMP_SQUAD_")) delete process.env[k];
+	if (k.startsWith("PLANE_") || k.startsWith("OMP_SQUAD_") || k.startsWith("GLANCE_")) delete process.env[k];
 }
 
 // Pin gate execution to the HOST for the suite. The sandbox is now the default whenever docker is
@@ -28,6 +28,7 @@ for (const k of Object.keys(process.env)) {
 process.env.OMP_SQUAD_GATE_SANDBOX = "host";
 
 // Point the fleet state dir at a throwaway. presence/leases (ttl-registry) and any daemon a test spins up
-// now live here instead of the operator's real ~/.omp/squad — the source of the flaky "empty data"
-// failures where stale/live presence + lease files leaked into read-API assertions.
+// now live here instead of the operator's real state dir (~/.glance / legacy ~/.omp/squad) — the source
+// of the flaky "empty data" failures where stale/live presence + lease files leaked into read-API
+// assertions. state-dir.ts honors this env override on every call (the fs-probed default is never hit).
 process.env.OMP_SQUAD_STATE_DIR = mkdtempSync(join(tmpdir(), "glance-test-state-"));

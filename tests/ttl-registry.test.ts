@@ -1,7 +1,7 @@
 /**
  * Generic TTL registry — deterministic, no model tokens. Writes under a throwaway
- * subdir of ~/.omp/squad and removes it afterward, so it never touches the real
- * presence/leases registries.
+ * subdir of the resolved state dir (the preload's temp OMP_SQUAD_STATE_DIR) and
+ * removes it afterward, so it never touches the real presence/leases registries.
  */
 
 import { afterAll, expect, test } from "bun:test";
@@ -54,8 +54,9 @@ test("repoKey is stable, path-resolved, and byte-compatible with the legacy form
 	expect(repoKey(repo)).toBe(repoKey(repo)); // deterministic
 	expect(repoKey("/tmp/ttl-repo-c/")).toBe(expected); // trailing slash resolves to the same key
 	expect(repoKey("/tmp/other")).not.toBe(expected); // distinct repos → distinct keys
-	// dirFor now lives under OMP_SQUAD_STATE_DIR (falling back to ~/.omp/squad) so presence/leases share the
-	// daemon's state dir. The test preload sets OMP_SQUAD_STATE_DIR, so that's the base here.
+	// dirFor lives under the resolved state dir (state-dir.ts: env override → ~/.glance → legacy
+	// ~/.omp/squad) so presence/leases share the daemon's state dir. The test preload sets
+	// OMP_SQUAD_STATE_DIR, so that's the base here.
 	const base = process.env.OMP_SQUAD_STATE_DIR ?? path.join(os.homedir(), ".omp", "squad");
 	expect(reg.dirFor(repo)).toBe(path.join(base, subdir, expected));
 });

@@ -30,6 +30,7 @@ import { SquadTui } from "./tui.ts";
 import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
 import { acquireStateLock, StateLockError } from "./state-lock.ts";
+import { resolveStateDir } from "./state-dir.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
 import { openDatabase } from "./db/index.ts";
 import { DbStore } from "./dal/store.ts";
@@ -123,10 +124,9 @@ function base(flags: Record<string, string | boolean>): string {
 	return `http://127.0.0.1:${port}`;
 }
 function stateDirPath(): string {
-	// GLANCE_STATE_DIR is mirrored onto OMP_SQUAD_STATE_DIR by env-compat, so this honors either name.
-	// The physical dir stays ~/.omp/squad: it's referenced by absolute path in ttl-registry (presence/leases)
-	// and the agent-guard control-file regex, so moving it is a separate, careful migration — not a rename.
-	return process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	// Canonical resolution lives in state-dir.ts (shared with ttl-registry, worktrees, sockets, proof):
+	// env override → ~/.glance if present → legacy ~/.omp/squad if present → ~/.glance for fresh installs.
+	return resolveStateDir();
 }
 
 /** Enumerate org ids that have persisted state (the `<stateDir>/orgs/<id>` dir names). Tolerates a missing dir. */

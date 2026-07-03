@@ -16,8 +16,9 @@
  *   1. Forbidden shell commands  — daemon lifecycle, up.sh (re)launches, pkill/killall, kill by
  *                                  numeric pid or daemon name, and daemon control-file access.
  *   2. Protected-tree isolation  — no tool call (bash OR edit/write) may touch the main checkout or
- *                                  ~/.omp/squad by absolute path; the agent's own worktree is exempt,
- *                                  and unrelated paths (e.g. /tmp scratch, /etc, /usr) are left alone.
+ *                                  the glance state dir (~/.glance, legacy ~/.omp/squad) by absolute
+ *                                  path; the agent's own worktree is exempt, and unrelated paths
+ *                                  (e.g. /tmp scratch, /etc, /usr) are left alone.
  */
 
 import * as path from "node:path";
@@ -30,8 +31,9 @@ export interface GuardBlock {
 export interface GuardContext {
 	/** The agent's own worktree — its only writable tree. */
 	worktree: string;
-	/** Sensitive roots an agent must never touch by absolute path (the main checkout + ~/.omp/squad).
-	 *  Paths inside the agent's own worktree are always exempt even when nested under one of these. */
+	/** Sensitive roots an agent must never touch by absolute path (the main checkout + the glance
+	 *  state dir(s) — see state-dir.ts's protectedStateRoots). Paths inside the agent's own worktree
+	 *  are always exempt even when nested under one of these. */
 	protectedRoots: string[];
 	/** Home dir, for expanding ~ / $HOME in shell tokens (defaults to process env at call sites). */
 	home: string;
@@ -56,7 +58,8 @@ const FORBIDDEN_COMMANDS: { re: RegExp; reason: string }[] = [
 	// its own children with $! / %job (variables/job specs), never a literal pid — so block literals.
 	{ re: /\bkill\s+(?:-\w+\s+)*[0-9]/, reason: "an agent must not kill a process by numeric pid (use $! or %job for your own processes)" },
 	// Daemon control files: the launcher, the single-writer lock, and the admin token are off-limits.
-	{ re: /\.omp\/squad\/(?:up\.sh|daemon\.lock|access-token)\b/, reason: "an agent must not read or write the daemon control files under ~/.omp/squad (launcher, lock, admin token)" },
+	// Both state-dir spellings are fenced — ~/.glance (current default) and legacy ~/.omp/squad.
+	{ re: /(?:\.glance|\.omp\/squad)\/(?:up\.sh|daemon\.lock|access-token)\b/, reason: "an agent must not read or write the daemon control files in the glance state dir (launcher, lock, admin token)" },
 ];
 
 /** Pull candidate file paths out of an edit/write tool-call input (mirrors the path resolution agents use). */
@@ -124,7 +127,7 @@ export function screenToolCall(toolName: string, input: Record<string, unknown>,
 		for (const f of FORBIDDEN_COMMANDS) {
 			if (f.re.test(cmd)) return { block: true, reason: `squad guardrail: ${f.reason}` };
 		}
-		// Bash path-escape: any reference to the main checkout / ~/.omp/squad by absolute path (the
+		// Bash path-escape: any reference to the main checkout / the state dir by absolute path (the
 		// edit/write fence below only covers the file tools — this catches `echo > /main/x`, `sed -i
 		// /main/x`, `git -C /main …`, `cat /main/secret`, etc.). Own worktree + /tmp etc. are fine.
 		const abs = absPathTokens(cmd).map((t) => expandAbs(t, ctx.home)).filter((x): x is string => !!x);

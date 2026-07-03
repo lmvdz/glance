@@ -8,7 +8,8 @@
  * don't unknowingly work the same tree.
  *
  * Storage is machine-wide and collision-safe by construction: ONE JSON file per
- * claim under ~/.omp/squad/presence/<repo-hash>/<id>.json, so concurrent writers
+ * claim under <stateDir>/presence/<repo-hash>/<id>.json (state-dir.ts resolves
+ * the dir — ~/.glance, legacy ~/.omp/squad), so concurrent writers
  * never clobber a shared file. A claim is "live" only if heartbeated within TTL;
  * stale files are ignored and opportunistically pruned.
  *

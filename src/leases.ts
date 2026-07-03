@@ -6,7 +6,8 @@
  * NEVER a hard lock: the lease-hook records leases on edit and surfaces a ⚠ when
  * another holder already has the file; humans see contended files in the command
  * center. Collision-safe storage: one JSON file per lease under
- * ~/.omp/squad/leases/<repo-hash>/<lease-id>.json, heartbeat-TTL for staleness.
+ * <stateDir>/leases/<repo-hash>/<lease-id>.json (state-dir.ts resolves the
+ * dir), heartbeat-TTL for staleness.
  *
  * The on-disk repo bucket is keyed on the repo's CROSS-HOST identity (the
  * normalized git origin — see repo-identity.ts), NOT its host-local path. Two

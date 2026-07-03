@@ -12,6 +12,7 @@ import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
+import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
 import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, PeerRoster, type RemoteCommand } from "./federation.ts";
 import { attachLeaseGossip, LEASE_GOSSIP_INTERVAL_MS, type LeaseGossip } from "./federation-sync.ts";
@@ -400,7 +401,7 @@ export class SquadManager extends EventEmitter {
 		this.peerRoster = new PeerRoster(this.operator.id);
 		this.fedRepos = opts.fedRepos ?? [];
 		this.leaseGossipIntervalMs = opts.leaseGossipIntervalMs ?? (Number(process.env.OMP_SQUAD_LEASE_GOSSIP_MS) || LEASE_GOSSIP_INTERVAL_MS);
-		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
+		this.stateDir = opts.stateDir ?? resolveStateDir();
 		setProofRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });

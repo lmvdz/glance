@@ -3,7 +3,7 @@
  * parallel agents never fight over the same working tree.
  */
 
-import * as os from "node:os";
+import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { existsSync, symlinkSync } from "node:fs";
@@ -40,9 +40,9 @@ export async function repoRoot(cwd: string, run: GitRunner = runGit): Promise<st
 	return r.stdout;
 }
 
-/** Base directory for squad-managed worktrees. */
+/** Base directory for squad-managed worktrees: `<stateDir>/worktrees` (see state-dir.ts). */
 export function worktreeBase(): string {
-	return path.join(os.homedir(), ".omp", "squad", "worktrees");
+	return path.join(resolveStateDir(), "worktrees");
 }
 
 async function branchExists(repo: string, branch: string, run: GitRunner = runGit): Promise<boolean> {

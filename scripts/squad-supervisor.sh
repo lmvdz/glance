@@ -8,11 +8,19 @@
 #
 #   setsid bash scripts/squad-supervisor.sh >/dev/null 2>&1 &
 #
-# Override the launcher / log with OMP_SQUAD_LAUNCHER and OMP_SQUAD_DAEMON_LOG.
+# Override the launcher / log with GLANCE_LAUNCHER and GLANCE_DAEMON_LOG (legacy OMP_SQUAD_* honored).
 set -uo pipefail
 
-LAUNCHER="${OMP_SQUAD_LAUNCHER:-$HOME/.omp/squad/up.sh}"
-LOG="${OMP_SQUAD_DAEMON_LOG:-$HOME/.omp/squad/daemon.log}"
+# Mirror the daemon's state-dir resolution (src/state-dir.ts): env → ~/.glance → legacy ~/.omp/squad → ~/.glance.
+default_state_dir() {
+	if [ -d "$HOME/.glance" ]; then echo "$HOME/.glance"
+	elif [ -d "$HOME/.omp/squad" ]; then echo "$HOME/.omp/squad"
+	else echo "$HOME/.glance"; fi
+}
+STATE_DIR="${GLANCE_STATE_DIR:-${OMP_SQUAD_STATE_DIR:-$(default_state_dir)}}"
+
+LAUNCHER="${GLANCE_LAUNCHER:-${OMP_SQUAD_LAUNCHER:-$STATE_DIR/up.sh}}"
+LOG="${GLANCE_DAEMON_LOG:-${OMP_SQUAD_DAEMON_LOG:-$STATE_DIR/daemon.log}}"
 
 # Force git signing off for the launcher, daemon, and every child it spawns.
 GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-0}"

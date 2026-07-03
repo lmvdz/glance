@@ -1,7 +1,8 @@
 # Federation: cross-host coordination over the tailnet
 
 glance coordinates agents on **one** machine through the shared registries
-under `~/.omp/squad` (presence + leases, one file per claim, heartbeat-TTL).
+in the state dir — default `~/.glance`, legacy `~/.omp/squad` (presence +
+leases, one file per claim, heartbeat-TTL).
 Federation promotes that coordination **across machines** over a Tailscale
 tailnet, so two operators working the same repo from different hosts see each
 other's agents and file leases.
