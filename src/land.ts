@@ -349,6 +349,8 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			// No acceptance gate — still run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
 			if (rg) return rg;
+			// Record the landed main even without a gate: an inspectable "landed, no acceptance gate ran" proof.
+			await recordMainProof(repo, "(no acceptance gate)", true, detail, false);
 			return { ok: true, committed, merged: true, message, detail };
 		}
 		const v = await runGate(gate, repo);
@@ -356,6 +358,8 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			// Acceptance gate green — additionally run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
 			if (rg) return rg;
+			// The merged main passed the gate — record it as a durable, inspectable post-merge proof.
+			await recordMainProof(repo, gate, true, `${detail}; verified (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
 			return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
 		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
@@ -379,6 +383,9 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 		if (rm.code !== 0) {
 			return { ok: false, committed, merged: false, message, detail: `base already red (${gate}); re-merging ${branch} failed: ${rm.stderr || rm.stdout}` };
 		}
+		// Landed onto a red baseline — record it honestly: ok:false so the post-merge proof reflects that
+		// main was not green (the branch introduced no NEW failure, but main is still red).
+		await recordMainProof(repo, gate, false, `landed onto a red baseline — main was not green at head0 (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
 		return { ok: true, committed, merged: true, message, detail: `${detail}; landed onto a red baseline — main was not green at head0 (${gate})` };
 	};
 
@@ -522,8 +529,10 @@ async function attemptAutoResolve(a: {
 	};
 
 	// (c) The resolution is unproven until the FULL gate passes on the merged main.
+	let gateSandboxed = false;
 	if (gate) {
 		const v = await runGate(gate, repo);
+		gateSandboxed = v.sandboxed;
 		if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${truncate(v.output, 800)}`);
 	}
 
@@ -535,7 +544,8 @@ async function attemptAutoResolve(a: {
 	const approved = await reviewer({ repo, worktree, branch }).catch(() => false);
 	if (!approved) return rollback(`auto-resolved ${branch} but reviewer rejected the resolution — rolled main back`);
 
-	// (e) Proven ⇒ keep it.
+	// (e) Proven ⇒ keep it, and record the landed main as a durable post-merge proof.
+	await recordMainProof(repo, gate || "(no acceptance gate)", true, `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved`, gateSandboxed);
 	return { ok: true, committed, merged: true, message, detail: `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved` };
 }
 
