@@ -4,6 +4,7 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: `src/capabilities/*`, `src/squad-manager.ts`, `src/types.ts`, `tests/capabilities-install.test.ts`
+PLANE: OMPSQ-323 — https://app.plane.so/inkwell-finance/browse/OMPSQ-323/
 
 ## Goal
 

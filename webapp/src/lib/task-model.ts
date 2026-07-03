@@ -53,6 +53,13 @@ function stageLabel(stage: FeatureStage): string {
   return stage.replace(/-/g, " ").toUpperCase();
 }
 
+function sourceForFeature(feature: FeatureDTO) {
+  if (feature.planDir) return { type: "plan" as const, label: feature.planDir, path: feature.planDir, issueIdentifiers: feature.issueIdentifiers };
+  if (feature.issueIdentifiers?.length) return { type: "issue" as const, label: feature.issueIdentifiers.join(", "), issueIdentifiers: feature.issueIdentifiers };
+  if (feature.agentIds.length) return { type: "agent" as const, label: feature.agentIds.join(", ") };
+  return { type: feature.persisted ? "persisted" as const : "manual" as const, label: feature.persisted ? "persisted feature" : "manual feature" };
+}
+
 function fallbackDescription(feature: FeatureDTO, agents: AgentDTO[]): string {
   const lines = [`Repo: ${feature.repo}`];
   if (feature.planDir) lines.push(`Plan: ${feature.planDir}`);
@@ -69,8 +76,13 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
   const done = feature.workflowProgress?.done ?? 0;
   const total = feature.workflowProgress?.total ?? 0;
   return {
-    id: feature.issueIdentifiers?.[0] ?? feature.id,
+    // STABLE identity: always the feature id. The Plane identifier used to be preferred here,
+    // but it loads async — the id flipped between renders and reconcileSelectedTaskId cleared
+    // every click-selection (the "clicking a task does nothing" bug). Tracker id is display-only.
+    id: feature.id,
+    displayId: feature.issueIdentifiers?.[0],
     sourceId: feature.id,
+    planDir: feature.planDir,
     title: feature.title,
     category: taskCategory(feature),
     duration: duration(feature),
@@ -96,8 +108,26 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
       createdAt: feature.createdAt,
       updatedAt: feature.updatedAt,
     },
-    tags: [feature.stage, repoName(feature.repo), ...(feature.blocked ? ["blocked"] : []), ...(feature.divergent ? ["diverged"] : []), ...activeAgents.map((agent) => agent.status)],
+    tags: [feature.stage, repoName(feature.repo), ...(feature.blocked ? ["blocked"] : []), ...(feature.divergent ? ["diverged"] : []), ...(feature.readiness?.blockers ?? []), ...activeAgents.map((agent) => agent.status)],
+    proofProvenance: { source: sourceForFeature(feature), worktrees: feature.worktrees ?? [], proof: feature.proof, readiness: feature.readiness, candidates: feature.planRevisionCandidates ?? [] },
   };
+}
+
+/** A real tracker identifier, e.g. "OMPSQ-306" — worth showing as a handle. */
+const PLANE_ID_RE = /^[A-Z][A-Z0-9]+-\d+$/;
+
+/**
+ * The readable secondary handle for a task row. Prefer a real Plane ticket id
+ * (now carried as displayId — task.id is the stable feature id); otherwise the
+ * plan's directory slug (the thing the operator actually recognizes); otherwise
+ * null — a synthetic feature UUID like "plan:repo:plans/x" or a bare hash is
+ * noise, not a handle, so the row simply leads with its human title instead.
+ */
+export function taskRef(task: Pick<Task, "id" | "displayId" | "planDir">): string | null {
+  if (task.displayId && PLANE_ID_RE.test(task.displayId)) return task.displayId;
+  if (PLANE_ID_RE.test(task.id)) return task.id;
+  if (task.planDir) return task.planDir.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
+  return null;
 }
 
 export function tasksFromSquad(features: FeatureDTO[], agents: AgentDTO[], projects: ProjectDTO[]): Task[] {

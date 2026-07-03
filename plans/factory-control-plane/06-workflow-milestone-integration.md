@@ -4,6 +4,7 @@ PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
 TOUCHES: src/workflow/*, src/workflow-driver.ts, src/features.ts, src/server.ts, webapp/src/lib/dto.ts
+PLANE: OMPSQ-311 — https://app.plane.so/inkwell-finance/browse/OMPSQ-311/
 
 ## Goal
 

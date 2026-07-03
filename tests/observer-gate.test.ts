@@ -19,7 +19,7 @@ afterAll(async () => {
 
 /** Exposes the protected runMainGate seam for direct exercise. */
 class GateManager extends SquadManager {
-	gate(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+	gate(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }> {
 		return this.runMainGate(repo);
 	}
 }
@@ -29,6 +29,34 @@ async function repo(files: Record<string, string>): Promise<string> {
 	tmps.push(d);
 	for (const [f, c] of Object.entries(files)) await fs.writeFile(path.join(d, f), c);
 	return d;
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function git(args: string[], cwd: string): Promise<void> {
+	const proc = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "pipe" });
+	const err = await new Response(proc.stderr).text();
+	const code = await proc.exited;
+	if (code !== 0) throw new Error(`git ${args.join(" ")} failed: ${err}`);
+}
+
+async function gitRepo(files: Record<string, string>): Promise<string> {
+	const r = await repo(files);
+	await git(["init"], r);
+	await git(["add", "."], r);
+	await git(["-c", "user.email=agent@example.invalid", "-c", "user.name=Agent", "commit", "-m", "init"], r);
+	return r;
+}
+
+async function readCount(file: string): Promise<number> {
+	try {
+		return (await fs.readFile(file, "utf8")).length;
+	} catch (e) {
+		if ((e as { code?: string }).code === "ENOENT") return 0;
+		throw e;
+	}
 }
 
 async function manager(): Promise<GateManager> {
@@ -53,5 +81,50 @@ test("detected command failing ⇒ ok:false (it ran the repo's own gate)", async
 	const mgr = await manager();
 	const r = await repo({ "bun.lock": "", "package.json": JSON.stringify({ scripts: { check: "false", test: "true" } }) });
 	const g = await mgr.gate(r);
+	expect(g.ok).toBe(false);
+});
+test("unchanged working-tree fingerprint skips cached green gate until every tenth tick", async () => {
+	const mgr = await manager();
+	const countFile = path.join(os.tmpdir(), `obsgate-count-${Date.now()}-${Math.random()}`);
+	tmps.push(countFile);
+	const r = await gitRepo({
+		"bun.lock": "",
+		"package.json": JSON.stringify({ scripts: { check: `printf x >> ${shellQuote(countFile)}` } }),
+	});
+	expect(await mgr.gate(r)).toEqual({ ok: true });
+	expect(await mgr.gate(r)).toEqual({ ok: true, skipped: true });
+	expect(await readCount(countFile)).toBe(1);
+
+	for (let i = 0; i < 7; i++) expect((await mgr.gate(r)).skipped).toBe(true);
+	expect(await mgr.gate(r)).toEqual({ ok: true });
+	expect(await readCount(countFile)).toBe(2);
+});
+
+test("tracked working-tree edit invalidates the cached gate result", async () => {
+	const mgr = await manager();
+	const countFile = path.join(os.tmpdir(), `obsgate-count-${Date.now()}-${Math.random()}`);
+	tmps.push(countFile);
+	const r = await gitRepo({
+		"bun.lock": "",
+		"tracked.txt": "one\n",
+		"package.json": JSON.stringify({ scripts: { check: `printf x >> ${shellQuote(countFile)}` } }),
+	});
+	expect(await mgr.gate(r)).toEqual({ ok: true });
+	await fs.writeFile(path.join(r, "tracked.txt"), "two\n");
+	expect(await mgr.gate(r)).toEqual({ ok: true });
+	expect(await readCount(countFile)).toBe(2);
+});
+
+test("dirty uncommitted failing change still goes red instead of reusing HEAD-era cache", async () => {
+	const mgr = await manager();
+	const r = await gitRepo({
+		"bun.lock": "",
+		"verify.sh": "test ! -f FAIL\n",
+		"package.json": JSON.stringify({ scripts: { check: "sh verify.sh" } }),
+	});
+	expect(await mgr.gate(r)).toEqual({ ok: true });
+	await fs.writeFile(path.join(r, "FAIL"), "dirty\n");
+	const g = await mgr.gate(r);
+	expect(g.skipped).toBeUndefined();
 	expect(g.ok).toBe(false);
 });

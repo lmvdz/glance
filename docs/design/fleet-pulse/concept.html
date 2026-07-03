@@ -1,0 +1,1439 @@
+<title>Fleet Pulse — omp-graph redesign concept</title>
+<style>
+  :root {
+    --ground: #08090C;
+    --hairline: #171B23;
+    --hairline-2: #232936;
+    --ink-hi: #ECE7DC;
+    --ink-mid: #9BA0AB;
+    --ink-low: #565C68;
+    --ink-faint: #363B46;
+    --ember: #F2913D;
+    --ember-hot: #FFC96B;
+    --ember-white: #FFE9C4;
+    --ember-deep: #B25E1E;
+    --churn: #A03A6E;
+    --cool: #4E7FDB;
+    --good: #4CAF7A;
+    --alert: #E5484D;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: var(--ground); color: var(--ink-hi); font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow: hidden; }
+
+  /* no masthead — the graph is the page; context lives in one micro-line inside it.
+     The app is a split: canvas + a right pane that takes 30% when something is open. */
+  .app { display: flex; height: 100vh; width: 100%; overflow: hidden; }
+  .stage { position: relative; padding: 6px 14px 4px; flex: 1 1 auto; min-width: 0; }
+  .stage svg { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  .stage svg.dragging { cursor: grabbing; }
+  text { font-family: var(--mono); user-select: none; -webkit-user-select: none; }
+  .day-name { font-size: 11px; font-weight: 700; letter-spacing: 0.22em; fill: var(--ink-hi); }
+  .day-date { font-size: 9px; fill: var(--ink-low); letter-spacing: 0.1em; }
+  .zone-label { font-size: 9px; font-weight: 600; letter-spacing: 0.24em; fill: var(--ink-faint); }
+  .mark-label { font-size: 9.5px; fill: var(--ink-mid); }
+  .mark-time { font-size: 8.5px; fill: var(--ink-low); }
+  .hour-tick { font-size: 8px; fill: var(--ink-faint); }
+  .annot { font-size: 9px; fill: var(--ink-mid); letter-spacing: 0.06em; opacity: 0.9; }
+  .peak-call { font-size: 10px; font-weight: 600; fill: var(--ink-hi); }
+  .peak-sub { font-size: 8px; letter-spacing: 0.18em; fill: var(--ink-low); }
+  .footer-line { font-size: 9px; letter-spacing: 0.2em; fill: var(--ink-faint); }
+
+  .ruler-line { stroke: var(--ink-mid); stroke-width: 1; stroke-dasharray: 1 3; }
+  .readout {
+    position: absolute; top: 0; pointer-events: none; z-index: 6;
+    background: rgba(10, 11, 15, 0.96); border: 1px solid var(--hairline-2); border-radius: 5px;
+    padding: 8px 10px; min-width: 150px; max-width: 260px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-mid);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.55);
+  }
+  .readout .rt { color: var(--ink-hi); font-weight: 600; margin-bottom: 5px; letter-spacing: 0.04em; }
+  .readout .row { display: flex; justify-content: space-between; gap: 14px; padding: 1px 0; font-variant-numeric: tabular-nums; }
+  .readout .row .val { color: var(--ink-hi); }
+  .readout .row .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; }
+
+  /* the inspector — a true SPLIT PANE, not an overlay: the canvas yields the right
+     30% and reflows, so nothing is ever hidden behind the details you're reading */
+  .detail {
+    flex: 0 0 0px; width: 0; min-width: 0; overflow: hidden;
+    border-left: 1px solid var(--hairline-2); background: #0B0C10;
+    display: flex; flex-direction: column;
+    transition: flex-basis 200ms cubic-bezier(0,0,0.2,1), min-width 200ms cubic-bezier(0,0,0.2,1);
+  }
+  .detail.open { flex-basis: 30%; min-width: 380px; }
+  .detail .dhead { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--hairline); flex-shrink: 0; }
+  .detail .kind-chip { font: 600 9px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ember); border: 1px solid rgba(242,145,61,0.35); border-radius: 3px; padding: 2px 6px; flex-shrink: 0; }
+  .detail .dhead .when { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-low); font-variant-numeric: tabular-nums; }
+  .detail .dhead .xbtn { appearance: none; background: none; border: none; color: var(--ink-low); font: 600 14px var(--sans); cursor: pointer; padding: 4px 6px; border-radius: 4px; min-height: 28px; }
+  .detail .dhead .xbtn:hover { color: var(--ink-hi); background: var(--hairline); }
+  .detail .dhead .xbtn:focus-visible { outline: 2px solid var(--ember); }
+  .detail .dbody { overflow-y: auto; padding: 14px 16px 16px; }
+  .detail .title2 { font-size: 13px; font-weight: 600; line-height: 1.35; }
+  .detail .meta { font-family: var(--mono); font-size: 10.5px; color: var(--ink-low); margin-top: 5px; font-variant-numeric: tabular-nums; }
+  .detail .meta .plus { color: var(--good); } .detail .meta .minus { color: var(--alert); }
+  .detail .sect { margin-top: 14px; font-size: 9px; font-weight: 600; letter-spacing: 0.2em; color: var(--ink-faint); text-transform: uppercase; }
+  .dfile { margin-top: 8px; border: 1px solid var(--hairline); border-radius: 5px; overflow: hidden; }
+  .dfhead { display: flex; align-items: center; gap: 8px; padding: 5px 9px; background: #0D0F14; border-bottom: 1px solid var(--hairline); font-family: var(--mono); font-size: 10px; color: var(--ink-mid); }
+  .dfhead .stat { margin-left: auto; flex-shrink: 0; } .dfhead .stat b { font-weight: 600; }
+  .dlines { overflow-x: auto; }
+  .dln { font-family: var(--mono); font-size: 10.5px; line-height: 1.6; white-space: pre; padding: 1px 9px; color: var(--ink-low); min-width: max-content; }
+  .dln.add { color: #8ED0A8; background: rgba(76,175,122,0.07); }
+  .dln.del { color: #E08A8E; background: rgba(229,72,77,0.07); }
+  .dln.hunk { color: #5B8DEF; background: rgba(78,127,219,0.06); }
+  .step { display: flex; gap: 11px; padding: 9px 0; border-bottom: 1px solid var(--hairline); }
+  .step:last-child { border-bottom: none; }
+  .step .sdot { width: 8px; height: 8px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; }
+  .step .sk { font-family: var(--mono); font-size: 9px; font-weight: 600; letter-spacing: 0.14em; color: var(--ink-low); }
+  .step .sv { font-size: 12px; color: var(--ink-hi); margin-top: 2px; }
+  .step .ss { font-family: var(--mono); font-size: 10px; color: var(--ink-low); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .ctable { width: 100%; border-collapse: collapse; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .ctable th { font-size: 9px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-low); text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--hairline-2); }
+  .ctable th:first-child, .ctable td:first-child { text-align: left; }
+  .ctable td { padding: 4px 6px; text-align: right; color: var(--ink-mid); border-bottom: 1px solid var(--hairline); }
+  .ctable td.dim { color: var(--ink-faint); }
+  .ctable tr.tot td { color: var(--ink-hi); font-weight: 600; border-top: 1px solid var(--hairline-2); border-bottom: none; }
+  .ctable .sw { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+  .detail .actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .detail .actions button {
+    appearance: none; font: 600 11px var(--sans); color: var(--ink-hi);
+    background: transparent; border: 1px solid var(--hairline-2); border-radius: 5px;
+    padding: 7px 12px; cursor: pointer; min-height: 32px;
+    transition: border-color 120ms cubic-bezier(0,0,0.2,1), background-color 120ms cubic-bezier(0,0,0.2,1);
+  }
+  .detail .actions button:hover { border-color: var(--ember); background: rgba(242,145,61,0.12); }
+  .detail .actions button:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+
+  /* depth rows: hover isolates — everyone else fades, the hovered week lifts and grows */
+  .dr-c {
+    transition: opacity 180ms cubic-bezier(0,0,0.2,1), transform 220ms cubic-bezier(0,0,0.2,1);
+    transform-box: fill-box; transform-origin: 50% 100%;
+  }
+  .dr-c.dim { opacity: 0.12; }
+  .dr-c.lift { transform: translateY(-18px) scale(1.06); }
+
+  @keyframes nowpulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.3; } }
+  .now-dot { animation: nowpulse 2.4s cubic-bezier(0.4,0,0.2,1) infinite; }
+  @media (prefers-reduced-motion: reduce) { .now-dot { animation: none; } * { transition-duration: 0ms !important; } }
+</style>
+
+<div class="app" id="app">
+  <div class="stage" id="stage">
+    <svg id="chart" role="img" aria-label="One week of fleet activity: milestones and the cost-and-commits pulse above the day spine; agent runs, shipped tickets, failures, and automation below. Scroll to zoom, drag to pan."></svg>
+    <div class="readout" id="readout" hidden></div>
+  </div>
+  <aside class="detail" id="detail" role="complementary" aria-label="Inspector" aria-live="polite">
+    <div class="dhead">
+      <span class="kind-chip" id="d-kind">LAND</span>
+      <span class="when" id="d-when">—</span>
+      <button type="button" class="xbtn" id="d-close" aria-label="Close inspector">✕</button>
+    </div>
+    <div class="dbody" id="d-body"></div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  let seed = 1337;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+
+  const DAYS = [
+    { name: 'THURSDAY', date: '25 JUN', caption: '2 lands · fabric ships' },
+    { name: 'FRIDAY', date: '26 JUN', caption: 'quiet · planning' },
+    { name: 'SATURDAY', date: '27 JUN', caption: 'federation E2E lands' },
+    { name: 'SUNDAY', date: '28 JUN', caption: 'webapp redesign wave' },
+    { name: 'MONDAY', date: '29 JUN', caption: '15 closed · record day' },
+    { name: 'TUESDAY', date: '30 JUN', caption: 'quiet · 2 commits' },
+    { name: 'WEDNESDAY', date: '01 JUL', caption: 'graph renderer built' },
+    { name: 'THURSDAY', date: '02 JUL', caption: 'today · fixtures green' },
+  ];
+  const N_DAYS = DAYS.length, HOURS = N_DAYS * 24;
+  let NOW_H = 7 * 24 + 13.4; // advances live — every draw site gates on it at render time
+
+  const bursts = [
+    [14.5, 2.5, 6], [23, 2, 4], [35, 2, 3],
+    [50.5, 3, 5], [53.5, 2.5, 6],
+    [93, 3.5, 7], [99, 2, 4],
+    [112.5, 1.5, 5], [116.5, 3.5, 9], [121.5, 2.5, 6],
+    [138.5, 1, 2],
+    [153.5, 2, 4], [158.5, 2.5, 6], [168.2, 1.5, 5],
+    [178, 2.5, 5], [181, 1.5, 3], [184.5, 2, 5], [189, 2, 4],
+  ];
+  const at = (h, arr) => arr.reduce((s, [c, w, ht]) => s + ht * Math.exp(-((h - c) ** 2) / (2 * w * w)), 0);
+
+  // data exists for the FULL range; what's "happened" is decided at draw time by
+  // NOW_H, so the live edge can advance into precomputed territory
+  const commits = [], cost = [], churn = [], stateBand = [];
+  for (let h = 0; h < HOURS; h++) {
+    const base = at(h + 0.5, bursts);
+    commits.push(Math.round(Math.max(0, base * 0.8 + (rnd() - 0.75) * 1.2)));
+    cost.push(Math.max(0, base * 1.15 + rnd() * 0.5 - 0.2));
+    churn.push(Math.max(0, base * 0.9 + rnd() * 1.4 - 0.4));
+    stateBand.push(base > 0.9 ? 'active' : 'idle');
+  }
+
+  // ── cost attribution is a HIERARCHY, not two dimensions: every run is
+  //    harness → model, and the dollars bill to the MODEL (Anthropic per-token
+  //    pricing) no matter which harness drove it. spendMatrix[h][harness][model]
+  //    is the source of truth; the model and harness views are its marginals. ──
+  const MODEL_LIST = ['fable', 'sonnet', 'haiku'];
+  const MODEL_COL = { fable: '#E8B24A', sonnet: '#7B9FE0', haiku: '#8A8F9B' };
+  const HARNESS_LIST = ['omp', 'codex', 'claude-code', 'hermes'];
+  const HARNESS_COL = { omp: '#F2913D', codex: '#66C7B0', 'claude-code': '#B08BE8', hermes: '#E08A8E' };
+  // what each harness reaches for: omp = sonnet bulk + haiku scouts + fable judgment,
+  // claude-code = interactive fable-heavy, codex = sonnet grinder, hermes = fable specialist
+  const HARNESS_MIX = {
+    omp: { fable: 0.2, sonnet: 0.6, haiku: 0.2 },
+    codex: { fable: 0.05, sonnet: 0.85, haiku: 0.1 },
+    'claude-code': { fable: 0.55, sonnet: 0.45, haiku: 0 },
+    hermes: { fable: 0.8, sonnet: 0, haiku: 0.2 },
+  };
+  const spendMatrix = [], modelCost = [], harnessCost = [], cum = [];
+  {
+    let acc = 0;
+    for (let h = 0; h < HOURS; h++) {
+      const cdx = cost[h] * (0.1 + 0.25 * Math.sin(h / 14 + 2) ** 2);
+      const ccd = cost[h] * (0.08 + 0.2 * Math.sin(h / 23 + 5) ** 2);
+      const hrm = cost[h] * (rnd() < 0.08 ? 0.25 : 0.02);
+      const byHarness = { omp: Math.max(0, cost[h] - cdx - ccd - hrm), codex: cdx, 'claude-code': ccd, hermes: hrm };
+      const cell = {}, mSum = { fable: 0, sonnet: 0, haiku: 0 };
+      for (const hn of HARNESS_LIST) {
+        cell[hn] = {};
+        for (const mn of MODEL_LIST) {
+          const v = byHarness[hn] * HARNESS_MIX[hn][mn];
+          cell[hn][mn] = v;
+          mSum[mn] += v;
+        }
+      }
+      spendMatrix.push(cell);
+      harnessCost.push(byHarness);
+      modelCost.push(mSum);
+      acc += cost[h];
+      cum.push(acc);
+    }
+  }
+  // totals are refreshed per draw, gated to NOW — the live edge moves them
+  const PLAN = { name: 'claude max 20×', monthly: 200 };
+  const planWeekly = PLAN.monthly * 12 / 52;
+  let modelTotal, harnessTotal, cumTotal = 1, planWorth = 0;
+  function refreshTotals() {
+    modelTotal = { fable: 0, sonnet: 0, haiku: 0 };
+    harnessTotal = { omp: 0, codex: 0, 'claude-code': 0, hermes: 0 };
+    const upto = Math.min(HOURS, Math.ceil(NOW_H));
+    for (let h = 0; h < upto; h++) {
+      for (const k of MODEL_LIST) modelTotal[k] += modelCost[h][k];
+      for (const k of HARNESS_LIST) harnessTotal[k] += harnessCost[h][k];
+    }
+    cumTotal = cum[upto - 1] || 1;
+    planWorth = cumTotal / planWeekly;
+  }
+  refreshTotals();
+
+  const sessions = [];
+  for (const [c, w, ht] of bursts) {
+    const n = Math.round(ht * 1.1);
+    for (let i = 0; i < n; i++) {
+      const t0 = Math.max(0, c - w + rnd() * 2 * w);
+      const dur = 0.4 + rnd() * 3;
+      if (t0 >= NOW_H) continue;
+      const r = rnd();
+      sessions.push({ t0, t1: Math.min(t0 + dur, NOW_H), status: r > 0.93 ? 'error' : r > 0.8 ? 'stopped' : 'working' });
+    }
+  }
+  // one agent is blocked on a question RIGHT NOW — the imperative layer's test case
+  sessions.push({ t0: NOW_H - 2.1, t1: NOW_H, status: 'blocked' });
+  sessions.sort((a, b) => a.t0 - b.t0);
+  // pack runs into rows ONCE (row identity survives pan/zoom)
+  {
+    const ends = [];
+    for (const s of sessions) {
+      let r = ends.findIndex(e => e <= s.t0);
+      if (r === -1) { ends.push(s.t1 + 0.3); r = ends.length - 1; } else ends[r] = s.t1 + 0.3;
+      s.row = r;
+    }
+  }
+
+  const M = (h, kind, label, delta, big) => ({ h, kind, label, delta, big: !!big });
+  const above = [
+    M(14.4, 'LAND', 'squad(agent-context-fabric)', 'Δ865', true),
+    M(14.8, 'LAND', 'squad(fleet-observability)', 'Δ812'),
+    M(23.2, 'DOCS', 'docs: reorganize planning corpus', 'Δ7.8k'),
+    M(35.4, 'FEAT', 'feat: add control-plane APIs', 'Δ6.2k'),
+    M(50.6, 'OTHER', 'chore: plan housekeeping', 'Δ5.7k'),
+    M(53.1, 'FEAT', 'feat(payments): real federation', 'Δ721', true),
+    M(54.0, 'DOCS', 'docs(d2): update federation', 'Δ466'),
+    M(93.1, 'FEAT', 'feat(webapp): synthesis dashboard', 'Δ1.8k', true),
+    M(94.3, 'FEAT', 'feat: redesign HeatPanel', 'Δ599'),
+    M(95.2, 'FEAT', 'feat: redesign FederationPanel', 'Δ768'),
+    M(116.2, 'LAND', 'squad(vpb-01-authoring)', 'Δ383'),
+    M(117.6, 'LAND', 'squad(vpb-08-wireframe)', 'Δ552', true),
+    M(138.6, 'FEAT', 'feat(webapp): ActiveWork pane', 'Δ1.0k'),
+    M(158.6, 'FEAT', 'feat(omp-graph): caching', 'Δ861'),
+    M(168.3, 'FEAT', 'feat(webui): activity rhythm', 'Δ361'),
+    M(169.0, 'FEAT', 'feat(omp-graph): interaction', 'Δ733', true),
+    M(178.2, 'FEAT', 'feat(webui): slotted rows', 'Δ368'),
+    M(179.5, 'FEAT', 'feat(omp-graph): fixtures green', 'Δ383', true),
+  ];
+  const below = [
+    { h: 112.6, kind: 'DONE', label: 'OMPSQ-336 Link Plane-di…', big: true },
+    { h: 114.1, kind: 'DONE', label: 'OMPSQ-308 Serialized verify' },
+    { h: 115.0, kind: 'DONE', label: 'OMPSQ-311 Workflow milestones' },
+    { h: 118.4, kind: 'DONE', label: 'OMPSQ-321 Capability map' },
+    { h: 119.1, kind: 'DONE', label: 'OMPSQ-322 Tenant persist' },
+    { h: 153.4, kind: 'DONE', label: 'OMPSQ-396 REST request', big: true },
+    { h: 154.2, kind: 'DONE', label: 'OMPSQ-397 WebSocket org' },
+    { h: 16.5, kind: 'SCOUT', label: 'found 3 candidates' },
+    { h: 52.0, kind: 'DISPATCH', label: 'spawned 2 agents' },
+    { h: 96.8, kind: 'OBSERVER', label: 'filed OMPSQ-372', big: true },
+    { h: 140.2, kind: 'SCOUT', label: 'skip: fleet idle' },
+    { h: 170.6, kind: 'DISPATCH', label: 'spawned 1 agent' },
+    { h: 180.3, kind: 'OBSERVER', label: 'found 1 concern' },
+    // the needs-you items ride the same pipeline — they're outcomes-in-waiting
+    { h: 179.4, kind: 'BLOCKED', label: 'vpb-03 · needs answer: overwrite legacy shell?', big: true },
+    { h: 181.2, kind: 'READY', label: 'vpb-02-wireframe · proof green, awaiting land', big: true },
+    // scar tissue — the factory's failures are data, not shame
+    { h: 66.4, kind: 'GATEFAIL', label: 'payments · sandbox gate: network blocked' },
+    { h: 117.9, kind: 'GATEFAIL', label: 'vpb-08 · verify red ×2 → fixed in 40m' },
+    { h: 96.2, kind: 'CATA', label: 'agent died mid-run · daemon restarted' },
+    // scheduled work ghosts right of NOW — the future is not a void
+    { h: 186.2, kind: 'PLANNED', label: 'queued: vpb-05-tokens' },
+    { h: 189.5, kind: 'PLANNED', label: 'queued: federation send-side' },
+    { h: 187.6, kind: 'MEETING', label: 'standup · 19:30' },
+  ].sort((a, b) => a.h - b.h);
+  const autoTicks = [];
+  for (let h = 2; h < NOW_H; h += 2.6 + rnd() * 2.4) autoTicks.push(h);
+
+  const kindCol = {
+    LAND: '#F2913D', FEAT: '#E8B24A', DOCS: '#8A8F9B', OTHER: '#6B7280',
+    DONE: '#4CAF7A', SCOUT: '#4E7FDB', OBSERVER: '#5FA8D3', DISPATCH: '#7B9FE0',
+    COST: '#C9B79A', BLOCKED: '#E5484D', READY: '#F2913D', NEEDS: '#E5484D',
+    GATEFAIL: '#E5484D', CATA: '#B3283C', PLANNED: '#565C68', MEETING: '#2FB6D6',
+    RUN: '#4E7FDB', HOUR: '#F2913D', WEEK: '#C9B79A',
+  };
+  const sessCol = { working: '#4E7FDB', stopped: '#565C68', error: '#E5484D', blocked: '#E5484D' };
+
+  // ── layout: one composition around a central spine, on a zoomable canvas ──
+  const PAD_L = 40, PAD_R = 20; // left gutter: the rotated zone labels breathe at x≈12, plot starts at 40
+  const TOPLINE = 16;
+  const RAIL = 44;
+  const PULSE_TOP = 262, PULSE_BASE = 478;  // cost line + commit bars OVERLAID, one baseline
+  const SPINE = 500;
+  const SESS_TOP = 552;
+  const METRO_Y = 664;
+  const EVT_BASE = 686, EVT_ROW_H = 25;
+  const H = 852;
+  const BAR_MAX = 128;                       // commit bars rise from the shared baseline
+
+  // the viewport onto time — wheel zooms it, drag pans it
+  const view = { start: 0, end: HOURS };
+  const MIN_SPAN = 6;
+
+  // FLAT is the operator instrument; DEPTH is the comparison instrument —
+  // the same canvas, rows of weeks receding isometrically (the ridgeline idiom)
+  let viz = 'flat';
+  let depthHits = [], depthRowEls = [], hoveredWeek = null;
+  let depthMetric = 'commits';
+  const DEPTH_METRICS = [
+    { id: 'commits', label: 'COMMITS/HR' },
+    { id: 'cost', label: '$/HR' },
+    { id: 'cum', label: 'CUMULATIVE $' },
+    { id: 'churn', label: 'CHURN' },
+  ];
+  const WEEK_ROWS = [];
+  {
+    // seven weeks of history synthesized from the live week's shape (phase-shifted,
+    // scaled by a growth curve) + the live week itself as the front row.
+    // In the real build each row is one /api/graph window.
+    for (let w = 0; w < 8; w++) {
+      const grow = 0.45 + 0.075 * w + 0.16 * Math.sin(w * 1.9);
+      const c = [], d = [], ch = [];
+      for (let k = 0; k < 168; k++) {
+        if (w === 7) { c.push(0); d.push(0); ch.push(0); continue; } // live row reads the real arrays at draw time
+        const src = (k + w * 29) % 168;
+        c.push(Math.round(commits[src] * grow * (0.7 + rnd() * 0.6)));
+        d.push(cost[src] * grow * (0.7 + rnd() * 0.6));
+        ch.push(churn[src] * grow * (0.7 + rnd() * 0.6));
+      }
+      WEEK_ROWS.push({ label: w === 7 ? 'THIS WEEK' : `WK ${20 + w}`, dates: w === 7 ? '25 JUN – 02 JUL' : `${4 + w * 7} MAY –`, c, d, ch });
+    }
+  }
+  const weekAt = (w, k) => w === 7
+    ? { c: (24 + k) < NOW_H ? commits[24 + k] : 0, d: (24 + k) < NOW_H ? cost[24 + k] : 0, ch: (24 + k) < NOW_H ? churn[24 + k] : 0 }
+    : { c: WEEK_ROWS[w].c[k], d: WEEK_ROWS[w].d[k], ch: WEEK_ROWS[w].ch[k] };
+  const weekTotals = w => {
+    let c = 0, d = 0;
+    for (let k = 0; k < 168; k++) { const v = weekAt(w, k); c += v.c; d += v.d; }
+    return { c, d };
+  };
+
+  // 10-minute grain for the massif: history rows precompute their fine series;
+  // the live row samples the real arrays through a FIXED jitter field, so the
+  // terrain is richly noisy but never flickers across live rebuilds.
+  const J10 = { c: [], d: [], ch: [] };
+  for (let k = 0; k < 168 * 6; k++) { J10.c.push(0.55 + rnd() * 0.9); J10.d.push(0.55 + rnd() * 0.9); J10.ch.push(0.55 + rnd() * 0.9); }
+  for (const wr of WEEK_ROWS) {
+    wr.c10 = []; wr.d10 = []; wr.ch10 = [];
+    for (let k = 0; k < 168 * 6; k++) {
+      const hh = k / 6, i = Math.floor(hh), f = hh - i;
+      const lerp = a => (a[i] ?? 0) * (1 - f) + (a[Math.min(i + 1, 167)] ?? 0) * f;
+      wr.c10.push(lerp(wr.c) * (0.55 + rnd() * 0.9));
+      wr.d10.push(lerp(wr.d) * (0.55 + rnd() * 0.9));
+      wr.ch10.push(lerp(wr.ch) * (0.55 + rnd() * 0.9));
+    }
+  }
+  const weekAt10 = (w, k) => {
+    if (w < 7) return { c: WEEK_ROWS[w].c10[k], d: WEEK_ROWS[w].d10[k], ch: WEEK_ROWS[w].ch10[k] };
+    const hh = 24 + k / 6;
+    if (hh >= NOW_H) return { c: 0, d: 0, ch: 0 };
+    const i = Math.floor(hh), f = hh - i;
+    const lerp = a => (a[i] ?? 0) * (1 - f) + (a[Math.min(i + 1, HOURS - 1)] ?? 0) * f;
+    return { c: lerp(commits) * J10.c[k], d: lerp(cost) * J10.d[k], ch: lerp(churn) * J10.ch[k] };
+  };
+
+  const svg = document.getElementById('chart');
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (n, attrs, parent) => { const e = document.createElementNS(NS, n); for (const k in attrs) e.setAttribute(k, attrs[k]); (parent || svg).appendChild(e); return e; };
+  const txt = (x, y, s, cls, attrs, parent) => { const t = el('text', Object.assign({ x, y, class: cls }, attrs || {}), parent); t.textContent = s; return t; };
+  const trim = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+  const hhmm = (h) => `${String(Math.floor(h % 24)).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}`;
+
+  let W = 1400;
+  let railHits = [], aboveHits = [], belowHits = [];
+  let x = h => h; // rebuilt per draw
+
+  // client → viewBox coords through the SVG's REAL transform. The element and the
+  // viewBox rarely share an aspect ratio, so the content letterboxes — a linear
+  // width/height mapping lands the hit-test below the cursor. The CTM never lies.
+  const toUser = ev => {
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    const p = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(ctm.inverse());
+    return { x: p.x, y: p.y };
+  };
+
+  function build() {
+    const stage = document.getElementById('stage');
+    W = Math.max(900, stage.clientWidth - 28);
+    svg.innerHTML = '';
+    railHits = []; aboveHits = []; belowHits = []; depthHits = [];
+    ruler = null; hoverMark = null; // their nodes died with innerHTML — forget them
+    refreshTotals(); // the live edge moves the legends, the plan chip, the dossier line
+    const plotW = W - PAD_L - PAD_R;
+    const span = view.end - view.start;
+    x = h => PAD_L + ((h - view.start) / span) * plotW;
+    const hAt = px => view.start + ((px - PAD_L) / plotW) * span;
+    const vis = (h, m = 2) => h >= view.start - m && h <= view.end + m;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+    const defs = el('defs', {});
+    const grad = el('linearGradient', { id: 'breath', x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+    el('stop', { offset: '0%', 'stop-color': '#08090C' }, grad);
+    el('stop', { offset: '78%', 'stop-color': '#1C1109' }, grad);
+    el('stop', { offset: '100%', 'stop-color': '#241307' }, grad);
+    const pat = el('pattern', { id: 'stipple', width: 4, height: 4, patternUnits: 'userSpaceOnUse' }, defs);
+    el('circle', { cx: 1, cy: 1, r: 0.6, fill: '#F2913D', opacity: 0.5 }, pat);
+    el('circle', { cx: 3, cy: 3, r: 0.45, fill: '#F2913D', opacity: 0.28 }, pat);
+    const glow = el('filter', { id: 'heatglow', x: '-80%', y: '-80%', width: '260%', height: '260%' }, defs);
+    el('feGaussianBlur', { stdDeviation: 2.4, result: 'b' }, glow);
+    const mrg = el('feMerge', {}, glow);
+    el('feMergeNode', { in: 'b' }, mrg); el('feMergeNode', { in: 'SourceGraphic' }, mrg);
+
+    // the dossier line — all the context the deleted masthead used to carry,
+    // computed from the same data the graph draws so the numbers always agree
+    txt(PAD_L, TOPLINE, 'OMP-SQUAD · FLEET ACTIVITY · 25 JUN — 02 JUL 2026', 'footer-line', { fill: 'var(--ink-low)' });
+    // FLAT ⁄ DEPTH — one canvas, two instruments
+    let tgx = PAD_L + 410;
+    for (const mode of ['flat', 'depth']) {
+      const on = viz === mode;
+      const tb = txt(tgx, TOPLINE, mode.toUpperCase(), 'footer-line', {
+        fill: on ? 'var(--ember)' : 'var(--ink-low)', 'font-weight': on ? 700 : 400,
+        cursor: 'pointer', tabindex: 0, role: 'button', 'aria-pressed': String(on), 'aria-label': `${mode} view`,
+      });
+      tb.addEventListener('click', () => { hideReadout(); clearDepthHover(); viz = mode; build(); });
+      tb.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); clearDepthHover(); viz = mode; build(); } });
+      tgx += mode.length * 6.4 + 16;
+    }
+    const upto = Math.min(HOURS, Math.ceil(NOW_H));
+    const totCommits = commits.slice(0, upto).reduce((a, b) => a + b, 0);
+    const totChurn = Math.round(churn.slice(0, upto).reduce((a, b) => a + b, 0) * 400 / 1000);
+    txt(W - PAD_R, TOPLINE, `${totCommits} COMMITS · ${totChurn}K CHURNED · $${Math.round(cumTotal)} SPEND · ${sessions.length} RUNS · ${below.filter(e => e.kind === 'DONE').length + 13} SHIPPED`, 'footer-line', { 'text-anchor': 'end', fill: 'var(--ink-low)' });
+
+    if (viz === 'depth') { buildDepth(plotW); return; }
+    el('rect', { x: PAD_L, y: PULSE_TOP - 38, width: plotW, height: PULSE_BASE - PULSE_TOP + 38, fill: 'url(#breath)', opacity: 0.85 });
+
+    const zone = (y, s) => txt(12, y, s, 'zone-label', { transform: `rotate(-90 12 ${y})`, 'text-anchor': 'middle' });
+    zone(150, 'MILESTONES'); zone(370, 'FLEET PULSE'); zone(600, 'AGENT RUNS'); zone(765, 'SHIPPED · LOOPS');
+
+    // day separators — only the visible ones
+    const d0 = Math.max(0, Math.floor(view.start / 24)), d1 = Math.min(N_DAYS, Math.ceil(view.end / 24));
+    for (let d = d0; d <= d1; d++) {
+      el('line', { x1: x(d * 24), y1: RAIL - 10, x2: x(d * 24), y2: H - 28, stroke: 'var(--hairline)', 'stroke-width': 1, opacity: 0.9 });
+    }
+
+    drawMilestones(d0, d1);
+    drawPulse(plotW, vis);
+    drawSpine(d0, d1, span);
+    drawSessions(vis);
+    drawBelow(vis);
+
+    // NOW — the living edge
+    if (vis(NOW_H, 0)) {
+      const nx = x(NOW_H);
+      el('rect', { x: nx, y: RAIL - 10, width: Math.max(0, W - PAD_R - nx), height: H - RAIL - 18, fill: 'rgba(8,9,12,0.62)' });
+      el('line', { x1: nx, y1: RAIL - 10, x2: nx, y2: H - 28, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.5 });
+      el('circle', { cx: nx, cy: RAIL - 10, r: 3.5, fill: 'var(--ember)', class: 'now-dot' });
+      txt(nx + 8, RAIL - 7, 'NOW', 'day-date', { fill: 'var(--ember)', 'letter-spacing': '0.2em' });
+      // the imperative chip: decisions waiting at the living edge
+      const needs = below.filter(e => e.kind === 'BLOCKED' || e.kind === 'READY').length;
+      if (needs > 0) {
+        // the chip hangs just left of the living edge, above the rail — always on-canvas
+        const chipX = Math.max(PAD_L + 4, nx - 98);
+        const chip = el('g', { cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${needs} items need you — open the queue` });
+        el('rect', { x: chipX, y: 20, width: 92, height: 16, rx: 8, fill: 'rgba(229,72,77,0.16)', stroke: 'var(--alert)', 'stroke-width': 1, class: 'now-dot' }, chip);
+        txt(chipX + 10, 31, `${needs} NEED YOU`, 'day-date', { fill: 'var(--alert)', 'font-weight': 700, 'letter-spacing': '0.14em' }, chip);
+        chip.addEventListener('click', () => openDetail({ h: NOW_H, kind: 'NEEDS', label: 'Decision queue' }));
+        chip.addEventListener('keydown', e => { if (e.key === 'Enter') openDetail({ h: NOW_H, kind: 'NEEDS', label: 'Decision queue' }); });
+      }
+    }
+
+    applyTrace(); // an active thread survives zoom/pan — positions recompute from fresh registries
+  }
+
+  // ── milestones hang DOWN from the top rail — every one renders; the visible
+  //    window IS the virtual list (pan/zoom changes what's mounted, never a cap) ──
+  function drawMilestones(d0, d1) {
+    const g = el('g', {});
+    el('line', { x1: PAD_L, y1: RAIL, x2: W - PAD_R, y2: RAIL, stroke: 'var(--hairline-2)', 'stroke-width': 1 }, g);
+    for (let d = d0; d < d1; d++) {
+      const ms = above.filter(m => Math.floor(m.h / 24) === d).sort((a, b) => a.h - b.h);
+      if (!ms.length) continue;
+      for (const m of ms) {
+        const cx = x(m.h);
+        const mk = el('rect', {
+          x: cx - (m.big ? 3.5 : 2.5), y: RAIL - (m.big ? 3.5 : 2.5), width: m.big ? 7 : 5, height: m.big ? 7 : 5,
+          fill: kindCol[m.kind], cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${m.kind}: ${m.label}`,
+          ...(m.big ? { filter: 'url(#heatglow)' } : {}),
+        }, g);
+        mk.addEventListener('click', () => openDetail(m));
+        mk.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(m); } });
+        railHits.push({ m, cx });
+      }
+      const x0 = Math.max(x(d * 24), PAD_L);
+      let yy = RAIL + 22;
+      el('line', { x1: x(ms[0].h), y1: RAIL + 4, x2: x(ms[0].h), y2: yy - 9, stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
+      txt(x0 + 8, yy - 11, `${ms.length}× ${hhmm(ms[0].h)}–${hhmm(ms[ms.length - 1].h)}`, 'mark-time', {}, g);
+      // the label budget follows the day's rendered width — narrow days keep
+      // the marks + cluster header and drop the text before it can collide
+      const dayW = x(d * 24 + 24) - x(d * 24);
+      const chars = Math.floor((dayW - 20) / 5.7);
+      if (chars >= 12) {
+        for (const m of ms) {
+          const t = el('text', { x: x0 + 8, y: yy, class: 'mark-label', cursor: 'pointer' }, g);
+          const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[m.kind]; k.style.fontWeight = '600'; k.textContent = m.kind + ' ';
+          const b = document.createElementNS(NS, 'tspan'); b.textContent = trim(m.label, Math.max(6, chars - m.kind.length - 1));
+          t.appendChild(k); t.appendChild(b);
+          t.addEventListener('click', () => openDetail(m));
+          // hit-test against the RENDERED width, not a guess — hovering past the
+          // end of a short label must read as empty air
+          aboveHits.push({ m, lx: x0 + 8, y: yy, w: t.getComputedTextLength() });
+          yy += 13;
+        }
+      }
+    }
+  }
+
+  // ── FLEET PULSE: cost heartbeat + commit bars overlaid on ONE baseline ──
+  // the magma ramp is shared by the bars AND the tooltip swatch, so the legend
+  // always matches the exact bar under the cursor
+  const heatColor = t => (t > 0.85 ? '#FFE9C4' : t > 0.6 ? '#FFC96B' : t > 0.35 ? '#F2913D' : '#B25E1E');
+  // continuous ramps for the depth terrain — the quantized steps above band badly
+  // when they feed a gradient, so gradients interpolate through these instead
+  const RAMP_MAGMA = [[0, '#7A3B12'], [0.35, '#B25E1E'], [0.6, '#F2913D'], [0.8, '#FFC96B'], [1, '#FFE9C4']];
+  const RAMP_CHURN = [[0, '#3D1230'], [0.35, '#5A2140'], [0.6, '#A03A6E'], [0.8, '#E86BA8'], [1, '#FFD9EC']];
+  function rampColor(ramp, t) {
+    t = Math.max(0, Math.min(1, t));
+    for (let i = 1; i < ramp.length; i++) {
+      if (t <= ramp[i][0]) {
+        const [t0, c0] = ramp[i - 1], [t1, c1] = ramp[i];
+        const f = (t - t0) / ((t1 - t0) || 1);
+        const hx = (c, j) => parseInt(c.slice(1 + j * 2, 3 + j * 2), 16);
+        const mix = j => Math.round(hx(c0, j) + (hx(c1, j) - hx(c0, j)) * f);
+        return `rgb(${mix(0)},${mix(1)},${mix(2)})`;
+      }
+    }
+    return ramp[ramp.length - 1][1];
+  }
+  const maxCommits = Math.max(...commits, 1);
+  let pulseMax = 1; // exposed so the hover can put a dot on the cost line
+  function drawPulse(plotW, vis) {
+    const g = el('g', {});
+    const maxCost = Math.max(...cost, 1), maxC = Math.max(...commits, 1), maxCh = Math.max(...churn, 1);
+    pulseMax = maxCost;
+    const cy = v => PULSE_BASE - (v / maxCost) * (PULSE_BASE - PULSE_TOP);
+    const h0 = Math.max(0, Math.floor(view.start) - 1), h1 = Math.min(HOURS, Math.ceil(view.end) + 1);
+
+    // churn ridge, quietest layer
+    let dR = '';
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) dR += (dR ? ' L' : 'M') + ` ${x(h + 0.5).toFixed(1)} ${(PULSE_BASE - (churn[h] / maxCh) * BAR_MAX * 0.8).toFixed(1)}`;
+    if (dR) el('path', { d: dR + ` L ${x(Math.min(h1, NOW_H))} ${PULSE_BASE} L ${x(h0)} ${PULSE_BASE} Z`, fill: 'var(--churn)', opacity: 0.2 }, g);
+
+    // commit bars from the shared baseline (magma ramp + glow)
+    const bw = Math.max(1.6, plotW / (view.end - view.start) - 1.2);
+    for (let h = h0; h < h1; h++) {
+      if (h >= NOW_H || !commits[h] || !vis(h)) continue;
+      const t = commits[h] / maxC;
+      const bh = 4 + t * (BAR_MAX - 4);
+      el('rect', { x: x(h) + 0.5, y: PULSE_BASE - bh, width: bw, height: bh, fill: heatColor(t), opacity: 0.92, ...(t > 0.6 ? { filter: 'url(#heatglow)' } : {}) }, g);
+    }
+    // idle burn made visible: spend with zero output gets a red underline scar
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) {
+      if (cost[h] > 0.5 && commits[h] === 0) el('rect', { x: x(h), y: PULSE_BASE + 3, width: Math.max(1.6, plotW / (view.end - view.start)), height: 2.5, fill: 'var(--alert)', opacity: 0.5 }, g);
+    }
+
+    // cost line + stipple over the top — the heartbeat rides above the bars
+    let dArea = '', dLine = '';
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) {
+      const px = x(h + 0.5), py = cy(cost[h]);
+      dArea += (dArea ? ' L' : 'M') + ` ${px.toFixed(1)} ${py.toFixed(1)}`;
+      dLine += (dLine ? ' L' : 'M') + ` ${px.toFixed(1)} ${py.toFixed(1)}`;
+    }
+    if (dLine) {
+      const clip = el('clipPath', { id: 'costclip' }, g);
+      el('path', { d: dArea + ` L ${x(Math.min(h1, NOW_H))} ${PULSE_BASE} L ${x(h0)} ${PULSE_BASE} Z` }, clip);
+      el('rect', { x: PAD_L, y: PULSE_TOP, width: plotW, height: PULSE_BASE - PULSE_TOP, fill: 'url(#stipple)', 'clip-path': 'url(#costclip)', opacity: 0.5 }, g);
+      el('path', { d: dLine, fill: 'none', stroke: 'var(--ember)', 'stroke-width': 1.4 }, g);
+    }
+
+    // peak callout for the visible window
+    let pk = -1;
+    for (let h = Math.max(0, Math.ceil(view.start)); h < Math.min(NOW_H, view.end); h++) if (pk === -1 || cost[h] > cost[pk]) pk = h;
+    if (pk >= 0 && cost[pk] > 0.5) {
+      const px = x(pk + 0.5), py = cy(cost[pk]);
+      el('circle', { cx: px, cy: py, r: 3, fill: 'var(--ember-white)', filter: 'url(#heatglow)' }, g);
+      // callout flips below the dot when the peak crowds the band strips at the top
+      const above = py > PULSE_TOP + 34;
+      txt(px, above ? py - 16 : py + 26, `$${cost[pk].toFixed(1)}/hr`, 'peak-call', { 'text-anchor': 'middle' }, g);
+      txt(px, above ? py - 6 : py + 36, 'PEAK SPEND', 'peak-sub', { 'text-anchor': 'middle' }, g);
+    }
+    txt(W - PAD_R - 2, PULSE_TOP + 4, `$${Math.round(maxCost)}/hr · ${maxC} commits/hr peak`, 'annot', { 'text-anchor': 'end' }, g);
+
+    // ── cumulative spend: one thin monotonic line on its own scale — a different
+    //    channel from the spiky rate, so the two can share the zone without noise ──
+    const cumY = v => PULSE_BASE - (v / cumTotal) * (PULSE_BASE - PULSE_TOP - 34);
+    let dC = '';
+    for (let h = h0; h < Math.min(h1, Math.ceil(NOW_H)); h++) dC += (dC ? ' L' : 'M') + ` ${x(h + 0.5).toFixed(1)} ${cumY(cum[h]).toFixed(1)}`;
+    if (dC) {
+      el('path', { d: dC, fill: 'none', stroke: '#C9B79A', 'stroke-width': 1, opacity: 0.7 }, g);
+      const lastH = Math.min(Math.ceil(NOW_H), h1) - 1;
+      if (lastH >= h0 && vis(lastH, 0)) {
+        const ex = x(lastH + 0.5), ey = cumY(cum[lastH]);
+        el('circle', { cx: ex, cy: ey, r: 2.2, fill: '#C9B79A' }, g);
+        const fits = ex + 110 < W - PAD_R; // flip to the left of the dot at the edge
+        txt(fits ? ex + 6 : ex - 6, ey - 5, `$${Math.round(cum[lastH])} cumulative`, 'annot', { fill: '#C9B79A', ...(fits ? {} : { 'text-anchor': 'end' }) }, g);
+      }
+    }
+
+    // ── attribution bands: dominant MODEL and dominant HARNESS per hour as two slim
+    //    categorical strips (the state-band idiom) — WHO was burning WHEN; the exact
+    //    split lives in the hover, the week totals in the legend rows. ──
+    const drawBand = (perHour, list, colors, y) => {
+      const domAt = h => list.reduce((best, k) => (perHour[h][k] > perHour[h][best] ? k : best), list[0]);
+      let run = -1, dom = '';
+      const flush = end => {
+        if (run < 0) return;
+        const rx0 = Math.max(x(run), PAD_L), rx1 = Math.min(x(end), W - PAD_R);
+        if (rx1 > rx0) el('rect', { x: rx0, y, width: rx1 - rx0, height: 4, rx: 1, fill: colors[dom], opacity: 0.75 }, g);
+        run = -1;
+      };
+      for (let h = Math.max(0, Math.floor(view.start)); h <= Math.min(HOURS, Math.ceil(view.end)); h++) {
+        const active = h < NOW_H && h < HOURS && cost[h] > 0.15;
+        const d = active ? domAt(h) : '';
+        // dom resets on EVERY flush — else a burst whose dominant matches the
+        // previous burst's never restarts the run and the band silently vanishes
+        if (!active || d !== dom) { flush(h); dom = d; if (active) run = h; }
+      }
+      flush(Math.min(HOURS, Math.ceil(view.end)));
+    };
+    // legends are the marginals of ONE harness→model matrix: harness = who ran it,
+    // model = what Anthropic bills. Clicking anything here opens the full breakdown.
+    const legendG = el('g', { cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': 'Open the cost breakdown' }, g);
+    legendG.addEventListener('click', () => openDetail({ h: NOW_H, kind: 'COST', label: 'Spend attribution — harness → model' }));
+    legendG.addEventListener('keydown', e => { if (e.key === 'Enter') openDetail({ h: NOW_H, kind: 'COST', label: 'Spend attribution — harness → model' }); });
+    const legend = (title, list, colors, totals, y) => {
+      let lx = PAD_L + 6;
+      txt(lx, y, title, 'peak-sub', {}, legendG); lx += 100;
+      for (const k of list) {
+        el('rect', { x: lx, y: y - 6.5, width: 7, height: 7, rx: 2, fill: colors[k] }, legendG);
+        const label = `${k} $${Math.round(totals[k])}`;
+        txt(lx + 11, y, label, 'annot', {}, legendG);
+        lx += 11 + label.length * 5.6 + 16;
+      }
+    };
+    legend('BILLED · MODEL', MODEL_LIST, MODEL_COL, modelTotal, PULSE_TOP - 31);
+    legend('VIA · HARNESS', HARNESS_LIST, HARNESS_COL, harnessTotal, PULSE_TOP - 19);
+    // subscription-worth chip: API-equivalent spend vs the plan's pro-rated week
+    const worthTone = planWorth >= 1.5 ? '#4CAF7A' : planWorth >= 0.9 ? '#E8B24A' : '#E5484D';
+    const worthTxt = txt(W - PAD_R - 2, PULSE_TOP - 19, '', 'annot', { 'text-anchor': 'end' }, legendG);
+    const w1 = document.createElementNS(NS, 'tspan'); w1.textContent = `PLAN ${PLAN.name} · $${Math.round(planWeekly)}/wk → $${Math.round(cumTotal)} api-equiv · `;
+    const w2 = document.createElementNS(NS, 'tspan'); w2.style.fill = worthTone; w2.style.fontWeight = '600'; w2.textContent = `${planWorth.toFixed(1)}× worth`;
+    worthTxt.appendChild(w1); worthTxt.appendChild(w2);
+    drawBand(modelCost, MODEL_LIST, MODEL_COL, PULSE_TOP - 13);
+    drawBand(harnessCost, HARNESS_LIST, HARNESS_COL, PULSE_TOP - 7);
+  }
+
+  // ── the spine: state band + adaptive hour ruler + sun arcs + day names ──
+  function drawSpine(d0, d1, span) {
+    const g = el('g', {});
+    let run = 0;
+    for (let h = 1; h <= HOURS; h++) {
+      if (h === HOURS || stateBand[h] !== stateBand[run]) {
+        const s = stateBand[run];
+        if (run < NOW_H && h >= view.start && run <= view.end) {
+          const thick = s === 'active';
+          const rx0 = Math.max(x(run), PAD_L), rx1 = Math.min(x(Math.min(h, NOW_H)), W - PAD_R);
+          if (rx1 > rx0) el('rect', { x: rx0, y: SPINE - (thick ? 5 : 1.5), width: rx1 - rx0, height: thick ? 10 : 3, fill: thick ? 'var(--ember)' : 'var(--ember-deep)', opacity: thick ? 0.9 : 0.5, rx: 1.5 }, g);
+        }
+        run = h;
+      }
+    }
+    el('line', { x1: PAD_L, y1: SPINE + 9, x2: W - PAD_R, y2: SPINE + 9, stroke: 'var(--hairline-2)', 'stroke-width': 1 }, g);
+    // adaptive tick density: zoom in and the ruler grows resolution
+    const tickEvery = span > 96 ? 3 : span > 30 ? 1 : 1;
+    const labelEvery = span > 96 ? 6 : span > 30 ? 3 : 1;
+    for (let d = d0; d < d1; d++) {
+      const x0 = Math.max(x(d * 24), PAD_L);
+      const dn = el('text', { x: x0 + 8, y: SPINE + 25, class: 'day-name' }, g);
+      const n1 = document.createElementNS(NS, 'tspan'); n1.textContent = DAYS[d].name; dn.appendChild(n1);
+      if (x(d * 24 + 24) - x(d * 24) > 138) {
+        const n2 = document.createElementNS(NS, 'tspan'); n2.setAttribute('class', 'day-date'); n2.setAttribute('dx', 10); n2.textContent = DAYS[d].date; dn.appendChild(n2);
+      }
+      // the editorial caption rides the spine too — appended, MEASURED, and dropped
+      // if the full line would spill into the next day's name
+      const n3 = document.createElementNS(NS, 'tspan');
+      n3.setAttribute('class', 'day-date'); n3.setAttribute('dx', 10);
+      n3.style.fill = 'var(--ember)'; n3.style.opacity = '0.75';
+      n3.textContent = DAYS[d].caption;
+      dn.appendChild(n3);
+      if (8 + dn.getComputedTextLength() > (x(d * 24 + 24) - x(d * 24)) - 14) dn.removeChild(n3);
+      for (let hh = 0; hh < 24; hh += tickEvery) {
+        const th = d * 24 + hh;
+        if (th < view.start || th > view.end) continue;
+        const tx = x(th);
+        el('line', { x1: tx, y1: SPINE + 9, x2: tx, y2: SPINE + (hh % labelEvery === 0 ? 14 : 12), stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
+        if (hh % labelEvery === 0 && hh > 0) txt(tx, SPINE + 41, String(hh).padStart(2, '0'), 'hour-tick', { 'text-anchor': 'middle' }, g);
+      }
+      const sx0 = x(d * 24 + 6), sx1 = x(d * 24 + 18), sxm = x(d * 24 + 12);
+      el('path', { d: `M ${sx0} ${SPINE - 12} Q ${sxm} ${SPINE - 34} ${sx1} ${SPINE - 12}`, fill: 'none', stroke: 'var(--ink-low)', 'stroke-width': 0.75, 'stroke-dasharray': '1 3', opacity: 0.6 }, g);
+      el('circle', { cx: sxm, cy: SPINE - 23, r: 1.8, fill: 'var(--ember)', opacity: 0.7 }, g);
+    }
+  }
+
+  // ── agent runs hang below as duration pills in their packed rows ──
+  function drawSessions(vis) {
+    const g = el('g', {});
+    for (const s of sessions) {
+      if (s.row > 10 || s.t1 < view.start || s.t0 > view.end) continue;
+      const y = SESS_TOP + s.row * 9;
+      const rx0 = Math.max(x(s.t0), PAD_L), rx1 = Math.min(x(s.t1), W - PAD_R);
+      if (rx1 <= rx0) continue;
+      const pill = el('rect', {
+        x: rx0, y, width: Math.max(2, rx1 - rx0), height: 5, rx: 2.5,
+        fill: sessCol[s.status], opacity: s.status === 'working' ? 0.85 : 0.7,
+        cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `Agent run, ${s.status}, ${(s.t1 - s.t0).toFixed(1)} hours`,
+        ...(s.status === 'blocked' ? { class: 'now-dot', filter: 'url(#heatglow)' } : {}),
+      }, g);
+      pill.addEventListener('click', () => openDetail({ kind: 'RUN', h: s.t0, s }));
+      pill.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openDetail({ kind: 'RUN', h: s.t0, s }); } });
+    }
+    txt(PAD_L + 6, SESS_TOP - 8, `${sessions.length} runs · packed`, 'annot', {}, g);
+    for (const h of autoTicks) {
+      if (!vis(h, 0)) continue;
+      el('rect', { x: x(h), y: METRO_Y, width: 1.4, height: 7, fill: 'var(--cool)', opacity: 0.55 }, g);
+    }
+  }
+
+  // ── shipped tickets + loop notes: greedy row packing, collision-free by construction ──
+  function drawBelow(vis) {
+    const g = el('g', {});
+    const LABEL_W = 190;
+    // interval packing that knows which way each label extends: right-anchored
+    // labels occupy [cx, cx+W], edge labels flip and occupy [cx−W, cx].
+    // Imperative items pack FIRST so they always win the rows nearest the spine.
+    const packOrder = [...below.filter(e => e.kind === 'BLOCKED' || e.kind === 'READY'), ...below.filter(e => e.kind !== 'BLOCKED' && e.kind !== 'READY')];
+    const rowEnds = []; // per row, the x where that row's last label ends
+    for (const e of packOrder) {
+      if (!vis(e.h, 4)) continue;
+      // ghosts are only ghosts while they're still in the future
+      if ((e.kind === 'PLANNED' || e.kind === 'MEETING') && e.h <= NOW_H) continue;
+      const cx = x(e.h);
+      const anchorEnd = cx > W - 220;
+      const lx0 = anchorEnd ? cx - LABEL_W : cx, lx1 = anchorEnd ? cx : cx + LABEL_W;
+      let r = rowEnds.findIndex(end => end < lx0 - 8);
+      if (r === -1) { rowEnds.push(0); r = rowEnds.length - 1; }
+      rowEnds[r] = lx1;
+      const depth = EVT_BASE + r * EVT_ROW_H;
+      if (depth > H - 36) continue; // beyond the fold — the real build scrolls/virtualizes here
+      el('line', { x1: cx, y1: SPINE + 46, x2: cx, y2: depth - 14, stroke: kindCol[e.kind], 'stroke-width': 0.6, opacity: 0.35 }, g);
+      const mk = el('g', { cursor: 'pointer', tabindex: 0, role: 'button', 'aria-label': `${e.kind}: ${e.label}` }, g);
+      if (e.kind === 'DONE') el('rect', { x: cx - 3, y: depth - 17, width: 6, height: 6, transform: `rotate(45 ${cx} ${depth - 14})`, fill: kindCol[e.kind], ...(e.big ? { filter: 'url(#heatglow)' } : {}) }, mk);
+      else if (e.kind === 'READY') el('rect', { x: cx - 3.5, y: depth - 17.5, width: 7, height: 7, transform: `rotate(45 ${cx} ${depth - 14})`, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.5, class: 'now-dot', filter: 'url(#heatglow)' }, mk);
+      else if (e.kind === 'BLOCKED') el('circle', { cx, cy: depth - 14, r: 3.5, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.5, class: 'now-dot', filter: 'url(#heatglow)' }, mk);
+      else if (e.kind === 'GATEFAIL' || e.kind === 'CATA') {
+        // scar marks: an X you can't mistake for a success diamond
+        const r2 = e.kind === 'CATA' ? 4 : 3;
+        el('line', { x1: cx - r2, y1: depth - 14 - r2, x2: cx + r2, y2: depth - 14 + r2, stroke: kindCol[e.kind], 'stroke-width': 1.6 }, mk);
+        el('line', { x1: cx - r2, y1: depth - 14 + r2, x2: cx + r2, y2: depth - 14 - r2, stroke: kindCol[e.kind], 'stroke-width': 1.6 }, mk);
+      } else if (e.kind === 'PLANNED' || e.kind === 'MEETING') {
+        // ghosts: scheduled, not yet real — dashed and hollow in the future's dimness
+        el('circle', { cx, cy: depth - 14, r: 3.2, fill: 'none', stroke: kindCol[e.kind], 'stroke-width': 1.2, 'stroke-dasharray': '2 2' }, mk);
+      } else el('circle', { cx, cy: depth - 14, r: e.big ? 3.2 : 2.4, fill: kindCol[e.kind] }, mk);
+      const t = el('text', { x: anchorEnd ? cx - 7 : cx + 7, y: depth - 11, class: 'mark-label', ...(anchorEnd ? { 'text-anchor': 'end' } : {}) }, mk);
+      const k = document.createElementNS(NS, 'tspan'); k.style.fill = kindCol[e.kind]; k.style.fontWeight = '600'; k.textContent = e.kind + ' · ' + hhmm(e.h) + ' ';
+      t.appendChild(k);
+      const t2 = el('text', { x: anchorEnd ? cx - 7 : cx + 7, y: depth + 1, class: 'mark-time', ...(anchorEnd ? { 'text-anchor': 'end' } : {}) }, mk);
+      t2.textContent = trim(e.label, 30);
+      mk.addEventListener('click', () => openDetail({ h: e.h, kind: e.kind, label: e.label, big: e.big }));
+      mk.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openDetail({ h: e.h, kind: e.kind, label: e.label }); } });
+      const wpx = Math.max(t.getComputedTextLength(), t2.getComputedTextLength());
+      belowHits.push({ e, cx, y: depth - 14, x0: anchorEnd ? cx - 7 - wpx : cx - 4, x1: anchorEnd ? cx + 4 : cx + 7 + wpx });
+    }
+  }
+
+  // ── DEPTH: the isometric massif in the reference's orientation — each week's
+  //    TIME axis runs up-right (short), the WEEK axis recedes down-right (long),
+  //    newest week in front. 10-MINUTE grain, rendered as continuous gradient
+  //    silhouettes (terrain, not bars). Hover isolates; click flattens. ──
+  const SPH = 6, NBINS = 168 * SPH; // 10-minute bins
+  function buildDepth(plotW) {
+    const g = el('g', {});
+    const n = 8;
+    const hMax = 128;
+    const R = { x: 50, y: 33 };                                     // weeks: down-right
+    // adaptive layout: the massif sizes itself from the canvas. The time-axis rise
+    // is capped so the back row's peaks stay under the header, the front row's
+    // labels stay above the bottom edge, and the whole thing centers horizontally.
+    const riseMax = H - 100 - hMax - 7 * R.y - 34 - 6;
+    const rowLenX = Math.max(420, Math.min(W - 700, riseMax / 0.3));
+    const T = { x: rowLenX / NBINS, y: -(rowLenX / NBINS) * 0.30 }; // time: up-right
+    const OX = Math.max(180, (W - (7 * R.x + rowLenX)) / 2 + 30);
+    const OY = 100 + hMax + rowLenX * 0.3;                          // OLDEST row (back, top-left), k=0
+    const P = (w, k) => ({ x: OX + w * R.x + k * T.x, y: OY + w * R.y + k * T.y });
+    const angle = Math.atan2(T.y, T.x) * 180 / Math.PI;
+
+    // metric machinery at 10-minute grain
+    const Mdef = DEPTH_METRICS.find(m => m.id === depthMetric);
+    const series = [];
+    let vMax = 0.001, tMax = 0.001;
+    for (let w = 0; w < n; w++) {
+      const v = [], tt = [];
+      let acc = 0;
+      for (let k = 0; k < NBINS; k++) {
+        const s = weekAt10(w, k);
+        const raw = depthMetric === 'commits' ? s.c : depthMetric === 'cost' ? s.d : depthMetric === 'churn' ? s.ch : (acc += s.d / SPH);
+        const rate = depthMetric === 'commits' ? s.c : depthMetric === 'churn' ? s.ch : s.d;
+        v.push(raw); tt.push(rate);
+        vMax = Math.max(vMax, raw); tMax = Math.max(tMax, rate);
+      }
+      series.push({ v, t: tt });
+    }
+    const colorFor = t => rampColor(depthMetric === 'churn' ? RAMP_CHURN : RAMP_MAGMA, t);
+    const isCum = depthMetric === 'cum';
+
+    // label block, top-left
+    txt(PAD_L, 104, 'EIGHT WEEKS', 'day-name', { 'font-size': 21, 'letter-spacing': '0.3em' }, g);
+    txt(PAD_L, 122, '10-MINUTE GRAIN · NEWEST IN FRONT · HOVER ISOLATES · CLICK FLATTENS', 'annot', {}, g);
+    let mx = PAD_L;
+    for (const m of DEPTH_METRICS) {
+      const on = m.id === depthMetric;
+      const tb = txt(mx, 146, m.label, 'annot', { fill: on ? 'var(--ember)' : 'var(--ink-low)', 'font-weight': on ? 700 : 400, cursor: 'pointer', tabindex: 0, role: 'button', 'aria-pressed': String(on), 'aria-label': `terrain metric: ${m.label}` }, g);
+      tb.addEventListener('click', () => { hideReadout(); depthMetric = m.id; build(); });
+      tb.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); depthMetric = m.id; build(); } });
+      mx += m.label.length * 5.9 + 24;
+    }
+
+    // colour legend + the reference's little axes diagram, top-right
+    const grad2 = el('linearGradient', { id: 'depthbar', x1: 0, y1: 1, x2: 0, y2: 0 }, g);
+    const stops = depthMetric === 'churn' ? [[0, '#5A2140'], [0.45, '#A03A6E'], [0.75, '#E86BA8'], [1, '#FFD9EC']] : [[0, '#B25E1E'], [0.45, '#F2913D'], [0.75, '#FFC96B'], [1, '#FFE9C4']];
+    for (const [o, c2] of stops) el('stop', { offset: o, 'stop-color': c2 }, grad2);
+    txt(W - PAD_R, 44, `TERRAIN — ${Mdef.label}`, 'day-name', { 'text-anchor': 'end' }, g);
+    txt(W - PAD_R, 58, depthMetric === 'cum' ? 'strands: height cumulative $ · colour $/hr rate' : 'height = colour = intensity', 'annot', { 'text-anchor': 'end' }, g);
+    el('rect', { x: W - PAD_R - 8, y: 68, width: 8, height: 56, rx: 2, fill: 'url(#depthbar)' }, g);
+    txt(W - PAD_R - 14, 76, 'hot', 'hour-tick', { 'text-anchor': 'end' }, g);
+    txt(W - PAD_R - 14, 124, 'quiet', 'hour-tick', { 'text-anchor': 'end' }, g);
+    const ax = { x: W - PAD_R - 150, y: 176 };
+    el('line', { x1: ax.x, y1: ax.y, x2: ax.x + 74, y2: ax.y - 22, stroke: 'var(--ink-low)', 'stroke-width': 0.8 }, g);
+    txt(ax.x + 80, ax.y - 24, 'TIME', 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${ax.x + 80} ${ax.y - 24})` }, g);
+    el('line', { x1: ax.x, y1: ax.y, x2: ax.x + 52, y2: ax.y + 34, stroke: 'var(--ink-low)', 'stroke-width': 0.8 }, g);
+    txt(ax.x + 56, ax.y + 44, 'WEEKS', 'hour-tick', { transform: `rotate(33 ${ax.x + 56} ${ax.y + 44})` }, g);
+
+    // rows: back (oldest, top-left) first — painter's order toward the viewer
+    depthRowEls = [];
+    for (let w = 0; w < n; w++) {
+      const rowG = el('g', {}, g);
+      const content = el('g', { class: 'dr-c' }, rowG);
+      const live = w === 7;
+      const b0 = P(w, 0), b1 = P(w, NBINS);
+      // dotted ground-plane extension
+      el('line', { x1: b0.x - 40, y1: b0.y - 40 * (T.y / T.x), x2: b1.x + 44, y2: b1.y + 44 * (T.y / T.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 5', opacity: 0.85 }, content);
+      // per-x intensity gradient along the time axis — stops are WINDOW-AVERAGED
+      // through the continuous ramp, so no banding seams
+      const gid = `ridge${w}${depthMetric}`;
+      const rg = el('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: b0.x, y1: b0.y, x2: b1.x, y2: b1.y }, content);
+      const STEP = 8;
+      for (let k = 0; k < NBINS; k += STEP) {
+        let s2 = 0, cnt = 0;
+        for (let j = k; j < Math.min(k + STEP, NBINS); j++) { s2 += series[w].t[j]; cnt++; }
+        el('stop', { offset: (k / NBINS).toFixed(4), 'stop-color': colorFor((s2 / cnt) / tMax) }, rg);
+      }
+      // the profile itself
+      let dProfile = '';
+      for (let k = 0; k < NBINS; k++) {
+        const p = P(w, k + 0.5);
+        dProfile += (dProfile ? ' L' : 'M') + ` ${p.x.toFixed(1)} ${(p.y - (series[w].v[k] / vMax) * hMax).toFixed(1)}`;
+      }
+      if (isCum) {
+        // an ever-growing series makes a wall as filled terrain — render it as a
+        // STRAND instead: a thin rising curve, height = total, colour = burn rate
+        el('path', { d: `M ${b0.x.toFixed(1)} ${b0.y.toFixed(1)} ${dProfile.slice(1)} L ${b1.x.toFixed(1)} ${b1.y.toFixed(1)} Z`, fill: `url(#${gid})`, opacity: 0.07 }, content);
+        el('path', { d: dProfile, fill: 'none', stroke: `url(#${gid})`, 'stroke-width': live ? 2.4 : 1.8 }, content);
+        // end cap: where the week finished (or is now)
+        const endK = live ? Math.max(1, Math.floor((NOW_H - 24) * SPH) - 1) : NBINS - 1;
+        const ep = P(w, endK + 0.5);
+        const ey = ep.y - (series[w].v[endK] / vMax) * hMax;
+        el('circle', { cx: ep.x, cy: ey, r: 2.4, fill: '#FFE9C4' }, content);
+        txt(ep.x + 7, ey + 3, `$${Math.round(series[w].v[endK])}`, 'annot', { fill: '#FFE9C4' }, content);
+      } else {
+        const dPath = `M ${b0.x.toFixed(1)} ${b0.y.toFixed(1)} ${dProfile.slice(1)} L ${b1.x.toFixed(1)} ${b1.y.toFixed(1)} Z`;
+        el('path', { d: dPath, fill: `url(#${gid})` }, content);
+        // base shadow: terrain darkens toward its own baseline (the reference's depth cue)
+        const cid = `rclip${w}${depthMetric}`;
+        const cp = el('clipPath', { id: cid }, content);
+        el('path', { d: dPath }, cp);
+        const sg = el('linearGradient', { id: `rshade${w}`, gradientUnits: 'userSpaceOnUse', x1: 0, y1: b0.y - hMax, x2: 0, y2: b0.y + R.y * 0.2 }, content);
+        el('stop', { offset: 0, 'stop-color': 'rgba(8,9,12,0)' }, sg);
+        el('stop', { offset: 1, 'stop-color': 'rgba(8,9,12,0.6)' }, sg);
+        el('rect', { x: Math.min(b0.x, b1.x) - 4, y: b1.y - hMax - 8, width: Math.abs(b1.x - b0.x) + 8, height: hMax + (b0.y - b1.y) + 16, fill: `url(#rshade${w})`, 'clip-path': `url(#${cid})` }, content);
+      }
+      el('line', { x1: b0.x, y1: b0.y, x2: b1.x, y2: b1.y, stroke: live ? 'var(--ember)' : 'var(--hairline-2)', 'stroke-width': live ? 1.2 : 1, opacity: live ? 0.8 : 0.95 }, content);
+      // shoulder label at the row's near (down-left) end
+      const tot = weekTotals(w);
+      txt(b0.x - 12, b0.y + 4, WEEK_ROWS[w].label, live ? 'day-name' : 'annot', { 'text-anchor': 'end', ...(live ? { fill: 'var(--ember)' } : {}) }, content);
+      txt(b0.x - 12, b0.y + 16, `$${Math.round(tot.d)} · ${tot.c}c`, 'hour-tick', { 'text-anchor': 'end' }, content);
+      if (live && NOW_H < 192) {
+        // the live edge hugs the terrain instead of floating at full lane height
+        const np = P(w, (NOW_H - 24) * SPH);
+        el('line', { x1: np.x, y1: np.y - 34, x2: np.x, y2: np.y + 4, stroke: 'var(--ember)', 'stroke-width': 1, opacity: 0.6 }, content);
+        el('circle', { cx: np.x, cy: np.y - 34, r: 2.6, fill: 'var(--ember)', class: 'now-dot' }, content);
+      }
+      // hit surface outside the lifting group so hover can't jitter
+      const hit = el('polygon', {
+        points: `${b0.x - 70},${b0.y - hMax - 30} ${b1.x + 30},${b1.y - hMax - 30} ${b1.x + 30},${b1.y + 14} ${b0.x - 70},${b0.y + 20}`,
+        fill: 'transparent', cursor: 'pointer', tabindex: 0, role: 'button',
+        'aria-label': `${WEEK_ROWS[w].label}: hover isolates, click opens the flat view`, 'data-w': w,
+      }, rowG);
+      hit.addEventListener('click', () => { hideReadout(); clearDepthHover(); viz = 'flat'; build(); openDetail({ kind: 'WEEK', h: NOW_H, w }); });
+      hit.addEventListener('keydown', e => { if (e.key === 'Enter') { hideReadout(); clearDepthHover(); viz = 'flat'; build(); openDetail({ kind: 'WEEK', h: NOW_H, w }); } });
+      depthRowEls.push({ w, content });
+    }
+    applyDepthHover(); // hover state survives live rebuilds
+
+    // day labels along the FRONT row's time axis, rotated with it
+    for (let dd = 0; dd <= 7; dd++) {
+      const p = P(7, dd * 24 * SPH);
+      el('line', { x1: p.x, y1: p.y + 5, x2: p.x, y2: p.y + 10, stroke: 'var(--ink-faint)', 'stroke-width': 0.75 }, g);
+      if (dd < 7) {
+        const lx = p.x + 8, ly = p.y + 22;
+        txt(lx, ly, ['THU', 'FRI', 'SAT', 'SUN', 'MON', 'TUE', 'WED'][dd], 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${lx} ${ly})` }, g);
+      }
+    }
+
+    // AVERAGE DAY vs TODAY — the panel earns its place by answering a question:
+    // is today's rhythm normal? Heat bars = the mean day across all 8 weeks;
+    // pale dots = today so far; the caption is the verdict.
+    const A0 = {
+      x: Math.min(W - 400, OX + 7 * R.x + rowLenX - 300),
+      y: Math.min(H - 66, OY + 7 * R.y + 26),
+    };
+    const at2 = { x: 8.4, y: 8.4 * T.y / T.x };
+    const prof = new Array(24).fill(0);
+    for (let w = 0; w < n; w++) for (let k = 0; k < NBINS; k++) prof[Math.floor((k / SPH) % 24)] += series[w].t[k];
+    const pMax = Math.max(...prof, 0.001);
+    // today's actual rhythm from the live arrays (today = the current day, hour 168+)
+    const rateOf = h2 => (depthMetric === 'commits' ? commits[h2] : depthMetric === 'churn' ? churn[h2] : cost[h2]);
+    const hoursToday = Math.max(1, Math.floor(NOW_H - 168));
+    const today = new Array(24).fill(null);
+    for (let hh2 = 0; hh2 < 24 && 168 + hh2 < NOW_H; hh2++) today[hh2] = rateOf(168 + hh2);
+    const pMean = pMax / n; // the mean day's peak rate — today plots on the same scale
+    // verdict: today so far vs the same hours of a typical day
+    let sumT = 0, sumA = 0;
+    for (let hh2 = 0; hh2 < hoursToday; hh2++) { sumT += today[hh2] ?? 0; sumA += prof[hh2] / n; }
+    const delta = sumA > 0.01 ? Math.round(((sumT - sumA) / sumA) * 100) : 0;
+    let peak = 0; for (let hh2 = 1; hh2 < 24; hh2++) if (prof[hh2] > prof[peak]) peak = hh2;
+    // header lives BELOW the baseline's open lower-left corner — the bars rise
+    // up-right, so nothing can ever grow into it
+    txt(A0.x - 8, A0.y + 34, 'AVERAGE DAY vs TODAY', 'annot', { fill: 'var(--ink-mid)', 'font-weight': 700, 'letter-spacing': '0.14em' }, g);
+    txt(A0.x - 8, A0.y + 46, `typical peak ${String(peak).padStart(2, '0')}:00 · today ${delta >= 0 ? '+' : ''}${delta}% vs typical`, 'hour-tick', { fill: delta >= 0 ? 'var(--good)' : 'var(--ink-low)' }, g);
+    el('line', { x1: A0.x - 10, y1: A0.y - 10 * (at2.y / at2.x), x2: A0.x + 24 * at2.x + 12, y2: A0.y + (24 * at2.x + 12) * (at2.y / at2.x), stroke: 'var(--ink-faint)', 'stroke-width': 0.8, 'stroke-dasharray': '1 4' }, g);
+    for (let hh2 = 0; hh2 < 24; hh2++) {
+      const p = { x: A0.x + hh2 * at2.x, y: A0.y + hh2 * at2.y };
+      const t = prof[hh2] / pMax;
+      el('rect', { x: p.x, y: p.y - t * 52, width: at2.x * 0.72, height: t * 52, fill: colorFor(t), opacity: 0.75 }, g);
+      if (hh2 === peak) el('circle', { cx: p.x + at2.x * 0.36, cy: p.y - t * 52 - 5, r: 1.6, fill: 'var(--ember)' }, g);
+      if (today[hh2] !== null) {
+        const dotH = Math.min(62, (today[hh2] / Math.max(pMean, 0.001)) * 52);
+        el('circle', { cx: p.x + at2.x * 0.36, cy: p.y - dotH, r: 1.8, fill: '#FFE9C4', opacity: 0.95 }, g);
+      }
+    }
+    for (const [hh2, lab] of [[0, '00'], [12, '12'], [23, '24']]) {
+      const p = { x: A0.x + hh2 * at2.x + 3, y: A0.y + hh2 * at2.y + 16 };
+      txt(p.x, p.y, lab, 'hour-tick', { transform: `rotate(${angle.toFixed(1)} ${p.x} ${p.y})` }, g);
+    }
+  }
+
+  function applyDepthHover() {
+    for (const z of depthRowEls) {
+      z.content.classList.toggle('dim', hoveredWeek !== null && z.w !== hoveredWeek);
+      z.content.classList.toggle('lift', z.w === hoveredWeek);
+    }
+  }
+  function clearDepthHover() { hoveredWeek = null; applyDepthHover(); }
+
+  function weekBody(w) {
+    const tot = weekTotals(w);
+    let avgD = 0;
+    for (let i = 0; i < 8; i++) avgD += weekTotals(i).d / 8;
+    const dlt = ((tot.d - avgD) / avgD) * 100;
+    return `<div class="title2">${WEEK_ROWS[w].label} — week summary</div>
+      <div class="meta">${tot.c} commits · $${Math.round(tot.d)} api-equiv · ${dlt >= 0 ? '+' : ''}${Math.round(dlt)}% vs the 8-week average</div>
+      <div class="sect">Reading the massif</div>
+      <div class="meta" style="color:var(--ink-mid); line-height:1.7">${w === 7
+        ? 'This is the live row — the flat view behind this pane IS this week, ready to inspect.'
+        : 'A history row. In the real build, picking it loads that week into the flat instrument via /api/graph?start=…, with everything clickable exactly like the live week.'}</div>
+      <div class="actions"><button type="button">Compare to this week</button><button type="button">Open in flat view</button></div>`;
+  }
+
+  // ── canvas semantics: wheel zooms around the cursor, drag pans ──
+  let raf = 0;
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; build(); }); };
+
+  svg.addEventListener('wheel', ev => {
+    if (viz !== 'flat') return;
+    ev.preventDefault();
+    const px = toUser(ev).x;
+    const span = view.end - view.start;
+    const anchor = view.start + ((px - PAD_L) / (W - PAD_L - PAD_R)) * span;
+    const factor = ev.deltaY > 0 ? 1.14 : 1 / 1.14;
+    let ns = Math.min(HOURS, Math.max(MIN_SPAN, span * factor));
+    let start = anchor - ((anchor - view.start) / span) * ns;
+    start = Math.max(0, Math.min(start, HOURS - ns));
+    view.start = start; view.end = start + ns;
+    schedule();
+  }, { passive: false });
+
+  let drag = null;
+  svg.addEventListener('pointerdown', ev => {
+    if (viz !== 'flat') return;
+    drag = { ux0: toUser(ev).x, cx0: ev.clientX, start0: view.start, moved: false, pid: ev.pointerId };
+    // do NOT capture yet — a captured pointer retargets the click at the svg,
+    // which silently eats every click on a mark. Capture only once a real drag starts.
+  });
+  svg.addEventListener('pointermove', ev => {
+    if (!drag) return;
+    if (!drag.moved && Math.abs(ev.clientX - drag.cx0) > 4) {
+      drag.moved = true;
+      try { svg.setPointerCapture(drag.pid); } catch { /* pointer already gone */ }
+    }
+    if (!drag.moved) return;
+    svg.classList.add('dragging');
+    hideReadout();
+    const span = view.end - view.start;
+    const dux = toUser(ev).x - drag.ux0;
+    let start = drag.start0 - (dux / (W - PAD_L - PAD_R)) * span;
+    start = Math.max(0, Math.min(start, HOURS - span));
+    view.start = start; view.end = start + span;
+    schedule();
+  });
+  let suppressClick = false, wasPan = false;
+  const endDrag = ev => {
+    wasPan = !!(drag && drag.moved);
+    if (wasPan) suppressClick = true; // a pan is not a click
+    if (drag && ev && svg.hasPointerCapture && svg.hasPointerCapture(ev.pointerId)) svg.releasePointerCapture(ev.pointerId);
+    drag = null; svg.classList.remove('dragging');
+  };
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+  svg.addEventListener('click', ev => { if (suppressClick) { ev.stopPropagation(); suppressClick = false; } }, true);
+
+  // clicking the pulse itself inspects that HOUR — the fused instrument has detail too
+  svg.addEventListener('click', ev => {
+    if (viz !== 'flat') return;
+    if (wasPan) { wasPan = false; return; }
+    if (ev.target.closest && ev.target.closest('[role="button"]')) return;
+    const u = toUser(ev);
+    if (u.x < PAD_L || u.x > W - PAD_R) return;
+    if (u.y < PULSE_TOP - 24 || u.y > PULSE_BASE + 6) return;
+    const span = view.end - view.start;
+    const h = Math.floor(view.start + ((u.x - PAD_L) / (W - PAD_L - PAD_R)) * span);
+    if (h >= 0 && h < NOW_H && (cost[h] > 0.05 || commits[h] > 0)) openDetail({ kind: 'HOUR', h });
+  });
+
+  // ── zone-aware hover: x picks the instant, y picks the layer; empty air says
+  //    nothing. The ruler tracks the CURSOR exactly (never snaps to bins) and
+  //    every discrete hit gets a visible highlight so pointing feels anchored. ──
+  const readout = document.getElementById('readout');
+  let ruler = null, hoverMark = null;
+  const clearMark = () => { if (hoverMark) { hoverMark.remove(); hoverMark = null; } };
+  const hideReadout = () => { readout.hidden = true; clearMark(); if (ruler) { ruler.remove(); ruler = null; } };
+  const row = (k, v, c) => `<div class="row"><span>${c ? `<span class="swatch" style="background:${c}"></span>` : ''}${k}</span>${v !== '' ? `<span class="val">${v}</span>` : ''}</div>`;
+  const when = h => { const d = Math.floor(h / 24); return `${DAYS[d].name.slice(0, 3)} ${DAYS[d].date} · ${hhmm(h)}`; };
+  const ring = (cx, cy2, rr, color) => el('circle', { cx, cy: cy2, r: rr, fill: 'none', stroke: color, 'stroke-width': 1.2, opacity: 0.9, 'pointer-events': 'none' });
+
+  svg.addEventListener('pointermove', ev => {
+    if (drag && drag.moved) return;
+    const r = svg.getBoundingClientRect();
+    const u = toUser(ev);
+    const px = u.x, py = u.y;
+    if (viz === 'depth') {
+      // hover is target-driven: the front-most hit polygon under the cursor owns
+      // the row; everything else fades while the owned row lifts
+      const tg = ev.target;
+      if (tg && tg.tagName === 'polygon' && tg.getAttribute('data-w') !== null) {
+        const wv = +tg.getAttribute('data-w');
+        if (hoveredWeek !== wv) { hoveredWeek = wv; applyDepthHover(); }
+        const tot = weekTotals(wv);
+        readout.hidden = false;
+        readout.innerHTML = `<div class="rt">${WEEK_ROWS[wv].label}</div>` +
+          row('commits', tot.c, '#F2913D') + row('spend', `$${Math.round(tot.d)}`, '#C9B79A') + row('click to flatten', '', null);
+        readout.style.left = Math.min(ev.clientX - r.left + 18, r.width - 200) + 'px';
+        readout.style.top = Math.min(ev.clientY - r.top + 14, r.height - 90) + 'px';
+      } else {
+        if (hoveredWeek !== null) clearDepthHover();
+        hideReadout();
+      }
+      return;
+    }
+    if (px < PAD_L || px > W - PAD_R) { hideReadout(); return; }
+    const span = view.end - view.start;
+    const hf = view.start + ((px - PAD_L) / (W - PAD_L - PAD_R)) * span;
+    const h = Math.min(HOURS - 1, Math.max(0, Math.floor(hf)));
+    if (!ruler) ruler = el('line', { class: 'ruler-line' });
+    ruler.setAttribute('x1', px); ruler.setAttribute('x2', px); // the ruler IS the cursor
+    ruler.setAttribute('y1', RAIL - 6); ruler.setAttribute('y2', H - 30);
+    clearMark();
+
+    let html = null;
+    if (py < PULSE_TOP - 24) {
+      const nearMark = railHits.filter(z => Math.abs(z.cx - px) < 10 && py > RAIL - 14 && py < RAIL + 14).sort((a, b) => Math.abs(a.cx - px) - Math.abs(b.cx - px))[0];
+      const nearLabel = aboveHits.filter(z => px >= z.lx - 2 && px <= z.lx + z.w + 2 && Math.abs(z.y - 3 - py) < 7)[0];
+      const zHit = nearMark || nearLabel;
+      if (zHit) {
+        const m = zHit.m;
+        hoverMark = ring(nearMark ? zHit.cx : x(m.h), RAIL, 7, kindCol[m.kind]);
+        html = `<div class="rt" style="color:${kindCol[m.kind]}">${m.kind} · ${when(m.h)}</div>` + row(trim(m.label, 26), m.delta || '', null) + row('click to open the diff', '', null);
+      }
+    } else if (py <= PULSE_BASE + 4) {
+      // the pulse is one fused instrument — pointing at it reads both pulses at that instant
+      if (h < NOW_H && (cost[h] > 0.05 || commits[h] > 0)) {
+        const ly = PULSE_BASE - (cost[h] / pulseMax) * (PULSE_BASE - PULSE_TOP);
+        hoverMark = ring(x(h + 0.5), ly, 4, '#FFE9C4'); // the dot rides the heartbeat
+        html = `<div class="rt">${when(hf)}</div>` + row('cost', `$${cost[h].toFixed(1)}/hr`, '#F2913D');
+        if (commits[h] === 0 && cost[h] > 0.5) html += row('idle burn', 'zero output', '#E5484D');
+        // the hierarchy, not two flat lists: harness → model pairs, biggest first
+        const pairs = [];
+        for (const hn of HARNESS_LIST) for (const mn of MODEL_LIST) {
+          const v = spendMatrix[h][hn][mn];
+          if (v > 0.15) pairs.push({ hn, mn, v });
+        }
+        pairs.sort((a, b) => b.v - a.v);
+        for (const p of pairs.slice(0, 4)) html += row(`· ${p.hn} → ${p.mn}`, `$${p.v.toFixed(1)}`, MODEL_COL[p.mn]);
+        if (pairs.length > 4) html += row(`· +${pairs.length - 4} more pairs`, '', null);
+        html += row('cumulative', `$${Math.round(cum[h])} of $${Math.round(cumTotal)}`, '#C9B79A') + row('commits', commits[h], heatColor(commits[h] / maxCommits)) + row('churn', `~${Math.round(churn[h] * 400)} lines`, '#A03A6E');
+      }
+    } else if (py <= SPINE + 46) {
+      if (h < NOW_H) html = `<div class="rt">${when(hf)}</div>` + row('fleet', stateBand[h], stateBand[h] === 'active' ? '#F2913D' : '#565C68');
+    } else if (py < METRO_Y - 4) {
+      const rIdx = Math.round((py - SESS_TOP - 2.5) / 9);
+      const s = sessions.find(z => z.row === rIdx && hf >= z.t0 - 0.15 && hf <= z.t1 + 0.15);
+      if (s) {
+        const yq = SESS_TOP + s.row * 9;
+        hoverMark = el('rect', { x: x(s.t0) - 1.5, y: yq - 1.5, width: Math.max(2, x(s.t1) - x(s.t0)) + 3, height: 8, rx: 4, fill: 'none', stroke: sessCol[s.status], 'stroke-width': 1, 'pointer-events': 'none' });
+        html = `<div class="rt" style="color:${sessCol[s.status]}">AGENT RUN · ${s.status}</div>` + row('started', when(s.t0), null) + row('duration', `${(s.t1 - s.t0).toFixed(1)}h`, null);
+      }
+    } else if (py < EVT_BASE - 24) {
+      const tk = autoTicks.filter(t => Math.abs(x(t) - px) < 6).sort((a, b) => Math.abs(x(a) - px) - Math.abs(x(b) - px))[0];
+      if (tk !== undefined) {
+        hoverMark = ring(x(tk) + 0.7, METRO_Y + 3.5, 6, '#4E7FDB');
+        html = `<div class="rt" style="color:#4E7FDB">LOOP TICK · ${when(tk)}</div>` + row('automation heartbeat', '', null);
+      }
+    } else {
+      // marker proximity, or inside the label's REAL extent (both text lines)
+      const near = belowHits.filter(z => (Math.abs(z.cx - px) < 12 && Math.abs(z.y - py) < 14) || (px >= z.x0 && px <= z.x1 && py >= z.y - 8 && py <= z.y + 18))
+        .sort((a, b) => Math.abs(a.cx - px) - Math.abs(b.cx - px))[0];
+      if (near) {
+        hoverMark = ring(near.cx, near.y, 7, kindCol[near.e.kind]);
+        html = `<div class="rt" style="color:${kindCol[near.e.kind]}">${near.e.kind} · ${when(near.e.h)}</div>` + row(trim(near.e.label, 28), '', null) + row(near.e.kind === 'DONE' ? 'click to open the pipeline' : 'click to open the loop log', '', null);
+      }
+    }
+
+    if (!html) { readout.hidden = true; return; }
+    readout.hidden = false;
+    readout.innerHTML = html;
+    readout.style.left = Math.min(ev.clientX - r.left + 18, r.width - 210) + 'px';
+    readout.style.top = Math.min(ev.clientY - r.top + 14, r.height - 110) + 'px';
+  });
+  svg.addEventListener('pointerleave', hideReadout);
+
+  // ── thread tracing: one shipped ticket's story lit across every zone ──────────
+  // In the real build the provenance endpoint names the exact run/commits; the mock
+  // resolves them by proximity, which is what that endpoint computes anyway.
+  let activeThread = null, lastDetail = null;
+  function applyTrace() {
+    const old = svg.querySelector('#tracelayer');
+    if (old) old.remove();
+    if (!activeThread) return;
+    const t = activeThread;
+    const layer = el('g', { id: 'tracelayer', 'pointer-events': 'none' });
+    el('rect', { x: PAD_L, y: RAIL - 10, width: W - PAD_L - PAD_R, height: H - RAIL - 18, fill: 'var(--ground)', opacity: 0.78 }, layer);
+    const dashed = (x1, y1, x2, y2) => el('line', { x1, y1, x2, y2, stroke: '#FFE9C4', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.8 }, layer);
+    const ring2 = (cx, cy2, rr, color) => el('circle', { cx, cy: cy2, r: rr, fill: 'none', stroke: color, 'stroke-width': 1.5, filter: 'url(#heatglow)' }, layer);
+    // the ticket itself
+    const done = belowHits.find(z => z.e.h === t.h);
+    const dp = done ? { x: done.cx, y: done.y } : { x: x(t.h), y: EVT_BASE - 14 };
+    ring2(dp.x, dp.y, 8, kindCol.DONE);
+    // the run(s) that shipped it
+    const runs = sessions.filter(s => s.row <= 10 && s.t1 > t.h - 6 && s.t0 < t.h + 1)
+      .sort((a, b) => (b.t1 - b.t0) - (a.t1 - a.t0)).slice(0, 2);
+    for (const s of runs) {
+      const mx = (x(s.t0) + x(s.t1)) / 2, my = SESS_TOP + s.row * 9 + 2.5;
+      el('rect', { x: x(s.t0) - 2, y: my - 5.5, width: x(s.t1) - x(s.t0) + 4, height: 11, rx: 5, fill: 'none', stroke: '#4E7FDB', 'stroke-width': 1.5, filter: 'url(#heatglow)' }, layer);
+      dashed(mx, my + 6, dp.x, dp.y - 9);
+      // the commits that run produced
+      for (const z of railHits.filter(z => Math.abs(z.m.h - t.h) < 9).slice(0, 3)) {
+        ring2(z.cx, RAIL, 7, kindCol[z.m.kind]);
+        dashed(z.cx, RAIL + 8, mx, my - 6);
+      }
+    }
+    txt(dp.x + 12, dp.y + 4, 'provenance thread — plan → run → commits → shipped', 'annot', { fill: '#FFE9C4' }, layer);
+  }
+  function clearTrace() { activeThread = null; const l = svg.querySelector('#tracelayer'); if (l) l.remove(); }
+
+  // ── the drill drawer: commits open a diff, shipped tickets open their pipeline ──
+  const detail = document.getElementById('detail');
+  detail.addEventListener('click', ev => {
+    if (ev.target && ev.target.id === 'd-trace' && lastDetail) {
+      activeThread = { h: lastDetail.h };
+      applyTrace();
+    }
+  });
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const shaOf = s => { let a = 7; for (const c of s) a = (a * 31 + c.charCodeAt(0)) & 0xffffff; return a.toString(16).padStart(7, 'a'); };
+  const FILE_POOL = ['src/squad-manager.ts', 'src/proof.ts', 'src/land.ts', 'webapp/src/components/TaskDetail.tsx', 'src/federation.ts', 'src/plan-sync.ts', 'webapp/src/omp-graph/GraphCanvas.tsx', 'docs/federation.md', 'src/gate-runner.ts', 'tests/omp-graph.test.ts'];
+
+  function commitBody(m) {
+    const sha = shaOf(m.label);
+    const total = parseFloat((m.delta || 'Δ300').replace(/[^\d.]/g, '')) * ((m.delta || '').includes('k') ? 1000 : 1);
+    let s2 = 11; const prand = () => { s2 = (s2 * 1103515245 + 12345) & 0x7fffffff; return s2 / 0x7fffffff; };
+    const nf = 2 + Math.floor(prand() * 3);
+    let html = `<div class="title2">${esc(m.label)}</div>
+      <div class="meta">${sha} · fleet/agent-0${1 + Math.floor(prand() * 6)} · <span class="plus">+${Math.round(total * 0.8)}</span> <span class="minus">−${Math.round(total * 0.2)}</span> in ${nf} files · proof gate ✓ fresh fingerprint</div>
+      <div class="sect">Changed files</div>`;
+    for (let i = 0; i < nf; i++) {
+      const f = FILE_POOL[Math.floor(prand() * FILE_POOL.length)];
+      const add = Math.round(total * (0.2 + prand() * 0.3)), del = Math.round(add * 0.3);
+      html += `<div class="dfile"><div class="dfhead"><span>${f}</span><span class="stat"><b class="plus">+${add}</b> <b class="minus">−${del}</b></span></div>`;
+      if (i === 0) {
+        html += `<div class="dlines"><div class="dln hunk">@@ −41,6 +41,${6 + Math.floor(prand() * 8)} @@</div>
+          <div class="dln"> const gate = resolveGate(unit);</div>
+          <div class="dln del">− await runProof(unit, { skipSandbox: true });</div>
+          <div class="dln add">+ const env = gateEnv(process.env); // secrets scrubbed</div>
+          <div class="dln add">+ await runProof(unit, { env, sandbox: gateSandbox() });</div>
+          <div class="dln"> receipt.fingerprint = fingerprintOf(unit);</div></div>`;
+      }
+      html += `</div>`;
+    }
+    html += `<div class="actions"><button type="button">Open full diff</button><button type="button">Open in Tasks</button></div>
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">this drawer is GET /api/graph/commit?sha=${sha} — the same GitHub-style diff the current GraphDetail already renders.</div>`;
+    return html;
+  }
+
+  function ticketBody(m) {
+    const id = (m.label.match(/OMPSQ-\d+/) || ['OMPSQ-372'])[0];
+    const step = (color, k, v, s) => `<div class="step"><span class="sdot" style="background:${color}"></span><span style="min-width:0"><div class="sk">${k}</div><div class="sv">${v}</div>${s ? `<div class="ss">${s}</div>` : ''}</span></div>`;
+    return `<div class="title2">${esc(m.label)}</div>
+      <div class="meta">${id} · closed ${when(m.h)} · cycle time 1d 4h</div>
+      <div class="sect">How it shipped</div>
+      ${step('#9BA0AB', 'PLAN', 'plans/factory-control-plane/03-verify-gates.md', 'STATUS done · promoted with Tier-2 schema')}
+      ${step('#4E7FDB', 'AGENT', 'worktree squad/' + id.toLowerCase() + ' · 2.1h · $4.20', '31 tool calls · 2 fixup rounds')}
+      ${step('#F2913D', 'PROOF', 'bun test · exit 0', 'fingerprint fresh · tree clean · TTL ok')}
+      ${step('#4CAF7A', 'LAND', 'merged ' + shaOf(id) + ' → main', 'Δ' + (300 + (id.charCodeAt(6) * 7) % 600) + ' lines · no conflicts')}
+      <div class="actions"><button type="button" id="d-trace">✦ Trace on canvas</button><button type="button">Open ticket</button><button type="button">View land diff</button></div>
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">each step links: plan concern → agent transcript → proof receipt → land commit. The drill IS the navigation.</div>`;
+  }
+
+  function loopBody(m) {
+    return `<div class="title2">${esc(m.kind + ' · ' + m.label)}</div>
+      <div class="meta">automation.jsonl · 1 LLM call · 3.2s</div>
+      <div class="sect">Loop context</div>
+      <div class="meta" style="color:var(--ink-mid); line-height:1.7">Opens the automation log filtered to this loop — recent ticks, LLM spend, skip reasons. The old Automation panel lives here now, one click down and already scoped.</div>
+      <div class="actions"><button type="button">Open loop log</button></div>`;
+  }
+
+  function costBody() {
+    const fmt = v => (v < 0.5 ? '<td class="dim">—</td>' : `<td>$${Math.round(v)}</td>`);
+    let rows = '';
+    for (const hn of HARNESS_LIST) {
+      const cells = MODEL_LIST.map(mn => fmt(spendMatrix.reduce((a, c) => a + c[hn][mn], 0))).join('');
+      rows += `<tr><td><span class="sw" style="background:${HARNESS_COL[hn]}"></span>${hn}</td>${cells}<td>$${Math.round(harnessTotal[hn])}</td></tr>`;
+    }
+    const totCells = MODEL_LIST.map(mn => `<td>$${Math.round(modelTotal[mn])}</td>`).join('');
+    const worthTone = planWorth >= 1.5 ? 'var(--good)' : planWorth >= 0.9 ? '#E8B24A' : 'var(--alert)';
+    return `<div class="title2">Spend attribution — harness → model</div>
+      <div class="meta">every run is a harness driving a model; the dollars bill to the model’s per-token pricing</div>
+      <table class="ctable" aria-label="Cost by harness and model">
+        <tr><th>via ↓ · billed →</th>${MODEL_LIST.map(mn => `<th><span class="sw" style="background:${MODEL_COL[mn]}"></span>${mn}</th>`).join('')}<th>total</th></tr>
+        ${rows}
+        <tr class="tot"><td>anthropic bill</td>${totCells}<td>$${Math.round(cumTotal)}</td></tr>
+      </table>
+      <div class="sect">Is the plan worth it?</div>
+      <div class="step"><span class="sdot" style="background:#C9B79A"></span><span>
+        <div class="sk">SUBSCRIPTION</div>
+        <div class="sv">${PLAN.name} · $${PLAN.monthly}/mo → $${Math.round(planWeekly)}/wk pro-rated</div>
+        <div class="ss">this week at API pricing: $${Math.round(cumTotal)} · <b style="color:${worthTone}">${planWorth.toFixed(1)}× the plan cost</b></div>
+      </span></div>
+      <div class="meta" style="color:var(--ink-low); margin-top:8px">above ~1× the plan pays for itself; the week's break-even point was ${(() => { let i = 0; while (i < HOURS && cum[i] < planWeekly) i++; return i < HOURS ? when(i) : 'not reached'; })()}</div>
+      <div class="actions"><button type="button">Open usage log</button><button type="button">Export CSV</button></div>
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">receipts already carry model + cost per run; harness is one field on the receipt. API-equivalent pricing comes from the token counts × published rates.</div>`;
+  }
+
+  function needsBody() {
+    const step = (color, k, v, s, act) => `<div class="step"><span class="sdot now-dot" style="background:${color}"></span><span style="min-width:0; flex:1">
+      <div class="sk">${k}</div><div class="sv">${v}</div><div class="ss">${s}</div>
+      <div class="actions" style="margin-top:8px">${act}</div></span></div>`;
+    return `<div class="title2">Decision queue — the fleet is waiting on you</div>
+      <div class="meta">2 items · everything else is running clean</div>
+      ${step('#E5484D', 'BLOCKED · 2.1H', 'vpb-03-canvas · agent question', '“the legacy shell conflicts with the new canvas mount — overwrite it or keep both behind the flag?”',
+        '<button type="button">Answer: overwrite</button><button type="button">Answer: keep both</button><button type="button">Open transcript</button>')}
+      ${step('#F2913D', 'LAND READY · 12M', 'squad/vpb-02-wireframe', 'proof green · bun test exit 0 · fingerprint fresh · no conflicts vs main',
+        '<button type="button">Land it</button><button type="button">View diff first</button>')}
+      <div class="sect" style="margin-top:16px">In the real build</div>
+      <div class="meta" style="color:var(--ink-low)">this is the Attention queue rendered in place: answer and land actions POST to the daemon, and the marks leave the canvas the moment the fleet unblocks.</div>`;
+  }
+
+  function runBody(s) {
+    const hn = HARNESS_LIST.reduce((b, k) => harnessCost[Math.floor(s.t0)][k] > harnessCost[Math.floor(s.t0)][b] ? k : b, 'omp');
+    const mn = MODEL_LIST.reduce((b, k) => (HARNESS_MIX[hn][k] > HARNESS_MIX[hn][b] ? k : b), 'sonnet');
+    const dur = s.t1 - s.t0;
+    const blockedQ = s.status === 'blocked'
+      ? `<div class="sect">Waiting on you</div>
+         <div class="step"><span class="sdot now-dot" style="background:#E5484D"></span><span style="flex:1">
+           <div class="sv">“the legacy shell conflicts with the new canvas mount — overwrite it or keep both behind the flag?”</div>
+           <div class="actions" style="margin-top:8px"><button type="button">Answer: overwrite</button><button type="button">Answer: keep both</button></div>
+         </span></div>` : '';
+    return `<div class="title2">Agent run · ${s.status}</div>
+      <div class="meta">started ${when(s.t0)} · ${dur.toFixed(1)}h${s.status === 'blocked' ? ' and counting' : ''} · <span class="sw" style="background:${HARNESS_COL[hn]}"></span>${hn} → <span class="sw" style="background:${MODEL_COL[mn]}"></span>${mn} · ~$${(dur * 1.9).toFixed(2)}</div>
+      ${blockedQ}
+      <div class="sect">What it touched</div>
+      <div class="dfile"><div class="dfhead"><span>src/squad-manager.ts</span><span class="stat"><b class="plus">+118</b> <b class="minus">−34</b></span></div></div>
+      <div class="dfile"><div class="dfhead"><span>webapp/src/omp-graph/GraphCanvas.tsx</span><span class="stat"><b class="plus">+236</b> <b class="minus">−41</b></span></div></div>
+      <div class="sect">Timeline</div>
+      <div class="step"><span class="sdot" style="background:#4E7FDB"></span><span><div class="sk">SPAWN</div><div class="ss">worktree created · plan concern loaded · cold-start primer</div></span></div>
+      <div class="step"><span class="sdot" style="background:#F2913D"></span><span><div class="sk">WORK</div><div class="ss">${Math.round(dur * 14)} tool calls · 2 verify rounds</div></span></div>
+      <div class="step"><span class="sdot" style="background:${sessCol[s.status]}"></span><span><div class="sk">${s.status.toUpperCase()}</div><div class="ss">${s.status === 'working' ? 'still running' : s.status === 'blocked' ? 'awaiting your answer' : s.status === 'error' ? 'died — see catastrophe log' : 'stopped clean'}</div></span></div>
+      <div class="actions"><button type="button">Open transcript</button><button type="button">View worktree diff</button></div>`;
+  }
+
+  function hourBody(h) {
+    const pairs = [];
+    for (const hn of HARNESS_LIST) for (const mn of MODEL_LIST) {
+      const v = spendMatrix[h][hn][mn];
+      if (v > 0.05) pairs.push({ hn, mn, v });
+    }
+    pairs.sort((a, b) => b.v - a.v);
+    const live = sessions.filter(s => s.t0 <= h + 1 && s.t1 >= h).length;
+    const idle = commits[h] === 0 && cost[h] > 0.5;
+    return `<div class="title2">The fleet at ${when(h)}</div>
+      <div class="meta">$${cost[h].toFixed(2)}/hr · ${commits[h]} commits · ~${Math.round(churn[h] * 400)} lines churned · ${live} runs live · fleet ${stateBand[h]}</div>
+      ${idle ? '<div class="meta" style="color:var(--alert)">⚠ idle burn — spend with zero output this hour</div>' : ''}
+      <div class="sect">Who was burning</div>
+      <table class="ctable" aria-label="Spend pairs this hour">
+        <tr><th>harness → model</th><th>$/hr</th></tr>
+        ${pairs.map(p => `<tr><td><span class="sw" style="background:${HARNESS_COL[p.hn]}"></span>${p.hn} → <span class="sw" style="background:${MODEL_COL[p.mn]}"></span>${p.mn}</td><td>$${p.v.toFixed(2)}</td></tr>`).join('') || '<tr><td class="dim" colspan="2">fleet asleep</td></tr>'}
+      </table>
+      <div class="sect">Position in the week</div>
+      <div class="meta">cumulative $${Math.round(cum[h])} of $${Math.round(cumTotal)} · ${Math.round((cum[h] / cumTotal) * 100)}% of the spend so far</div>
+      <div class="actions"><button type="button">Zoom to this hour</button><button type="button">Open usage log</button></div>`;
+  }
+
+  function failBody(e) {
+    const cata = e.kind === 'CATA';
+    return `<div class="title2">${esc(e.label)}</div>
+      <div class="meta">${cata ? 'catastrophe · daemon-level' : 'gate failure · unit-level'} · ${when(e.h)}</div>
+      <div class="sect">What happened</div>
+      <div class="meta" style="color:var(--ink-mid); line-height:1.7">${cata
+        ? 'The agent process died mid-run. The daemon restarted, the worktree survived, and the unit re-queued — no work was lost, but the run’s cost was sunk.'
+        : 'The proof gate rejected the land: the verify command exited non-zero inside the sandbox. The unit stayed on its branch; nothing touched main.'}</div>
+      <div class="sect">The trail</div>
+      <div class="step"><span class="sdot" style="background:${kindCol[e.kind]}"></span><span><div class="sk">${e.kind}</div><div class="ss">${cata ? 'catastrophe logged · audit trail intact' : 'receipt kept · fingerprint marked stale'}</div></span></div>
+      <div class="actions"><button type="button">${cata ? 'Open catastrophe log' : 'Open gate log'}</button><button type="button">${cata ? 'Inspect worktree' : 'Retry verify'}</button></div>
+      <div class="sect" style="margin-top:16px">Why this is on the canvas</div>
+      <div class="meta" style="color:var(--ink-low)">a factory instrument that hides scar tissue overstates health — failures are data.</div>`;
+  }
+
+  function ghostBody(e) {
+    return `<div class="title2">${esc(e.label)}</div>
+      <div class="meta">scheduled · ${when(e.h)} · ${e.kind === 'MEETING' ? 'google calendar' : 'dispatch queue'}</div>
+      <div class="sect">Not yet real</div>
+      <div class="meta" style="color:var(--ink-mid); line-height:1.7">${e.kind === 'MEETING'
+        ? 'From the calendar adapter — the fleet quiets around meetings, so the ghost tells you when not to expect throughput.'
+        : 'Queued by the dispatch loop. It becomes a live run the moment a slot frees; the ghost mark becomes a pill.'}</div>
+      <div class="actions">${e.kind === 'MEETING' ? '<button type="button">Open event</button>' : '<button type="button">Bump priority</button><button type="button">Unqueue</button>'}</div>`;
+  }
+
+  function openDetail(m) {
+    const chip = document.getElementById('d-kind');
+    chip.textContent = m.kind;
+    chip.style.color = kindCol[m.kind];
+    chip.style.borderColor = (kindCol[m.kind] || '#F2913D') + '59';
+    document.getElementById('d-when').textContent = m.kind === 'COST' ? 'this week' : m.kind === 'NEEDS' ? 'right now' : when(m.h);
+    lastDetail = m;
+    document.getElementById('d-body').innerHTML =
+      m.kind === 'COST' ? costBody() :
+      m.kind === 'NEEDS' || m.kind === 'BLOCKED' || m.kind === 'READY' ? needsBody() :
+      m.kind === 'RUN' ? runBody(m.s) :
+      m.kind === 'HOUR' ? hourBody(m.h) :
+      m.kind === 'GATEFAIL' || m.kind === 'CATA' ? failBody(m) :
+      m.kind === 'WEEK' ? weekBody(m.w) :
+      m.kind === 'PLANNED' || m.kind === 'MEETING' ? ghostBody(m) :
+      m.kind === 'DONE' ? ticketBody(m) : (m.kind === 'SCOUT' || m.kind === 'OBSERVER' || m.kind === 'DISPATCH') ? loopBody(m) : commitBody(m);
+    detail.classList.add('open');
+    document.getElementById('d-close').focus();
+  }
+  document.getElementById('d-close').addEventListener('click', () => { detail.classList.remove('open'); clearTrace(); });
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') { detail.classList.remove('open'); clearTrace(); } });
+
+  let rT;
+  window.addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(build, 150); });
+  // the canvas reflows as the pane opens/closes — observe the stage, not the window
+  new ResizeObserver(() => schedule()).observe(document.getElementById('stage'));
+  detail.addEventListener('transitionend', () => schedule());
+
+  // ── liveness: the edge advances, the blocked run grows, loop ticks arrive.
+  //    In the real build this is the daemon's WebSocket; here it's a metronome. ──
+  const ongoing = sessions.find(s => s.status === 'blocked');
+  setInterval(() => {
+    if (NOW_H >= HOURS - 0.2) return;
+    NOW_H = Math.min(HOURS - 0.2, NOW_H + 0.16);
+    if (ongoing) ongoing.t1 = NOW_H;
+    if (rnd() < 0.35) autoTicks.push(NOW_H - 0.04);
+    schedule();
+  }, 2600);
+
+  build();
+})();
+</script>

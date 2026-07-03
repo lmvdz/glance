@@ -4,6 +4,7 @@ PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: `src/federation.ts`, `src/manager-registry.ts`, `src/server.ts`, `src/capabilities/*`, `tests/capabilities-federation.test.ts`
+PLANE: OMPSQ-327 — https://app.plane.so/inkwell-finance/browse/OMPSQ-327/
 
 ## Goal
 

@@ -86,6 +86,54 @@ interface PlaneIssue {
 	state?: string;
 	project_detail?: { identifier?: string };
 	priority?: string;
+	created_at?: string;
+	updated_at?: string;
+	completed_at?: string;
+}
+
+/** A Plane issue reduced to what a temporal view needs: state group + parsed epoch timestamps.
+ *  Unlike listPlaneIssues, this KEEPS timestamps and does NOT drop completed/cancelled issues
+ *  (those are exactly the "closed" milestones a timeline wants). */
+export interface PlaneIssueTemporal {
+	id: string;
+	/** human identifier like OMPSQ-35, when the project prefix is resolvable. */
+	identifier?: string;
+	name: string;
+	/** state group: backlog | unstarted | started | completed | cancelled. */
+	state?: string;
+	priority?: string;
+	createdAt?: number;
+	updatedAt?: number;
+	completedAt?: number;
+}
+
+/** Read all issues for a repo's project (INCLUDING finished ones) with timestamps, for omp-graph.
+ *  `null` ⇒ Plane not configured / unreachable (caller degrades to no tracks). */
+export async function listPlaneIssuesRaw(repo: string): Promise<PlaneIssueTemporal[] | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return [];
+	const res = await throttledFetch(`${base}/issues/?per_page=100`, { headers });
+	if (!res || !res.ok) return null;
+	const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
+	const items = Array.isArray(data) ? data : (data?.results ?? []);
+	const [groups, prefix] = await Promise.all([fetchStateGroups(base, headers), projectPrefix(base, headers)]);
+	const ms = (s?: string): number | undefined => {
+		if (!s) return undefined;
+		const t = Date.parse(s);
+		return Number.isNaN(t) ? undefined : t;
+	};
+	return items.map((raw) => ({
+		id: raw.id,
+		identifier: prefix && raw.sequence_id != null ? `${prefix}-${raw.sequence_id}` : undefined,
+		name: raw.name ?? raw.id,
+		state: raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined),
+		priority: raw.priority,
+		createdAt: ms(raw.created_at),
+		updatedAt: ms(raw.updated_at),
+		completedAt: ms(raw.completed_at),
+	}));
 }
 
 /** True when an issue's name flags it for human review / do-NOT-auto-land. The dispatcher skips these,
@@ -120,33 +168,57 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 }
 
 async function listPlaneIssuesUncached(repo: string): Promise<IssueRef[] | null> {
+	const all = await fetchIssueRefs(repo, 1);
+	if (all === null) return null;
+	const open = all.filter((i) => i.state !== "completed" && i.state !== "cancelled");
 	const ctx = planeContext(repo);
-	if (!ctx) return null;
-	const { cfg, headers, projectId, base } = ctx;
-	if (!projectId) return [];
-	const res = await throttledFetch(`${base}/issues/?per_page=50`, { headers });
-	if (!res || !res.ok) return null; // unreachable ⇒ null (uncached) so the next poll retries, not a stale []
-	const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
-	const items = Array.isArray(data) ? data : (data?.results ?? []);
-	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so the
-	// completed/cancelled filter actually works (else finished issues get auto-dispatched).
-	// The list endpoint omits project_detail, so fetch the project's identifier prefix to build human ids
-	// (e.g. OMPSQ-35) — without it dispatched agents fall back to agent-N and collide on names.
-	const [groups, prefix] = await Promise.all([fetchStateGroups(base, headers), projectPrefix(base, headers)]);
-	const open = items
-		.map((raw) => {
-			const ref = toIssueRef(raw, cfg, projectId, prefix);
-			const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
-			if (group) ref.state = group;
-			return ref;
-		})
-		.filter((i) => i.state !== "completed" && i.state !== "cancelled");
+	if (!ctx) return open;
 	// Populate blocked_by relations so the dispatcher can defer an issue while a blocker is still open.
 	// Sequential (not concurrent): Plane rate-limits, and a burst of N /relations/ calls trips 429 —
 	// which would silently empty blockedBy and let a blocked issue dispatch. Ceiling: O(open) serial
 	// requests per poll; fine for a normal backlog, add bounded concurrency if one ever runs large.
-	for (const ref of open) ref.blockedBy = await fetchBlockedBy(base, headers, ref.id);
+	for (const ref of open) ref.blockedBy = await fetchBlockedBy(ctx.base, ctx.headers, ref.id);
 	return open;
+}
+
+/** Fetch up to `maxPages`×50 issues in EVERY state (terminal included), state resolved to its group. */
+async function fetchIssueRefs(repo: string, maxPages: number): Promise<IssueRef[] | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { cfg, headers, projectId, base } = ctx;
+	if (!projectId) return [];
+	// The list endpoint returns `state` as an id, not a group — resolve ids → groups so
+	// completed/cancelled are recognizable. It also omits project_detail, so fetch the project's
+	// identifier prefix to build human ids (e.g. OMPSQ-35) — without it dispatched agents fall
+	// back to agent-N and collide on names.
+	const [groups, prefix] = await Promise.all([fetchStateGroups(base, headers), projectPrefix(base, headers)]);
+	const out: IssueRef[] = [];
+	for (let page = 1; page <= maxPages; page++) {
+		const res = await throttledFetch(`${base}/issues/?per_page=50&page=${page}`, { headers });
+		if (!res || !res.ok) return page === 1 ? null : out; // first-page failure ⇒ unreachable; later ⇒ partial is fine
+		const data = (await res.json().catch(() => null)) as { results?: PlaneIssue[] } | PlaneIssue[] | null;
+		const items = Array.isArray(data) ? data : (data?.results ?? []);
+		for (const raw of items) {
+			const ref = toIssueRef(raw, cfg, projectId, prefix);
+			const group = raw.state_detail?.group ?? (raw.state ? groups.get(raw.state) : undefined);
+			if (group) ref.state = group;
+			out.push(ref);
+		}
+		if (items.length < 50) break;
+	}
+	return out;
+}
+
+const allStatesCache = makeCache<IssueRef[] | null>();
+
+/**
+ * Issues in EVERY state (Done/Cancelled included) — what a reconciler needs; the open-only
+ * `listPlaneIssues` never sees a closure. Bounded to 4 pages (200 newest issues) and cached
+ * longer than the open list (reconciliation is a slow loop). No blockedBy enrichment.
+ */
+export async function listPlaneIssuesAllStates(repo: string): Promise<IssueRef[] | null> {
+	const ttl = Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000;
+	return allStatesCache.get(repo, Math.max(ttl, 60_000), () => fetchIssueRefs(repo, 4), (v) => v !== null);
 }
 
 interface PlaneIssueDetail {
@@ -263,6 +335,7 @@ export function planeRepos(): string[] {
 
 interface PlaneState {
 	id: string;
+	name?: string;
 	group?: string;
 }
 
@@ -284,6 +357,20 @@ export async function closePlaneIssue(issue: IssueRef): Promise<boolean> {
 	return transitionTo(issue, "completed");
 }
 
+/** Reopen a false-done issue to Todo when present, else the first open group state. Best-effort; true on success. */
+export async function reopenPlaneIssue(issue: IssueRef): Promise<boolean> {
+	const ctx = planeContext();
+	if (!ctx || !issue.projectId) return false;
+	const { cfg, headers } = ctx;
+	const base = projectBase(cfg, issue.projectId);
+	const states = await fetchStates(base, headers);
+	const target = states.find((s) => s.name === "Todo") ?? states.find((s) => s.group === "unstarted") ?? states.find((s) => s.group === "backlog");
+	if (!target) return false;
+	const res = await throttledFetch(`${base}/issues/${issue.id}/`, { method: "PATCH", headers, body: JSON.stringify({ state: target.id }) });
+	if (res && res.ok) issueListCache.clear();
+	return !!res && res.ok;
+}
+
 /** Transition an issue to a started-group state (backlog → started when a spawn picks it up). Best-effort; true on success. */
 export async function startPlaneIssue(issue: IssueRef): Promise<boolean> {
 	return transitionTo(issue, "started");
@@ -301,7 +388,21 @@ export async function createPlaneIssue(repo: string, name: string, descriptionHt
 	if (!res || !res.ok) return null;
 	issueListCache.clear(); // a new issue changes the open set
 	const raw = (await res.json().catch(() => null)) as PlaneIssue | null;
-	return raw?.id ? toIssueRef(raw, cfg, projectId) : null;
+	if (!raw?.id) return null;
+	const prefix = raw.project_detail?.identifier || raw.sequence_id == null ? undefined : await projectPrefix(base, headers);
+	return toIssueRef(raw, cfg, projectId, prefix);
+}
+
+/** Write one Plane `blocked_by` relation (issue is blocked by blocker). Best-effort; false on failure. */
+export async function addPlaneBlockedByRelation(repo: string, issueId: string, blockerId: string): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	const body = JSON.stringify({ relation_type: "blocked_by", related_issue: blockerId });
+	const res = await throttledFetch(`${base}/issues/${encodeURIComponent(issueId)}/relations/`, { method: "POST", headers, body });
+	if (res?.ok) issueListCache.clear();
+	return !!res?.ok;
 }
 
 /** Add a comment to a Plane issue by UUID or human identifier (e.g. OMPSQ-42). Best-effort; false when Plane is not configured. */
@@ -386,6 +487,33 @@ export async function featureTickets(repo: string, identifiers: string[]): Promi
 	return tickets;
 }
 
+/** Group existing Plane issue identifiers under an existing module. `null` ⇒ not configured / failed. */
+export async function addIssuesToFeatureModule(repo: string, moduleId: string, identifiers: string[]): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	if (!identifiers.length) return true;
+	const [prefix, issues] = await Promise.all([projectPrefix(base, headers), allIssues(base, headers)]);
+	const want = new Set(identifiers.map((s) => s.toUpperCase()));
+	const ids = issues.filter((i) => prefix && i.sequence_id != null && want.has(`${prefix}-${i.sequence_id}`.toUpperCase())).map((i) => i.id);
+	if (!ids.length) return true;
+	const res = await throttledFetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) });
+	return !!res?.ok;
+}
+
+/** Group known Plane issue UUIDs under an existing module. `null` ⇒ not configured / failed. */
+export async function addIssueIdsToFeatureModule(repo: string, moduleId: string, issueIds: string[]): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	const ids = [...new Set(issueIds.filter(Boolean))];
+	if (!ids.length) return true;
+	const res = await throttledFetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) });
+	return !!res?.ok;
+}
+
 /** Create a Plane module for a feature and group its issues under it. `null` ⇒ not configured / failed. */
 export async function ensureFeatureModule(repo: string, name: string, identifiers: string[]): Promise<{ moduleId: string; moduleUrl: string } | null> {
 	const ctx = planeContext(repo);
@@ -397,11 +525,18 @@ export async function ensureFeatureModule(repo: string, name: string, identifier
 	const mod: unknown = await res.json().catch(() => null);
 	if (!mod || typeof mod !== "object" || !("id" in mod) || typeof mod.id !== "string") return null;
 	const moduleId = mod.id;
-	if (identifiers.length) {
-		const [prefix, issues] = await Promise.all([projectPrefix(base, headers), allIssues(base, headers)]);
-		const want = new Set(identifiers.map((s) => s.toUpperCase()));
-		const ids = issues.filter((i) => prefix && i.sequence_id != null && want.has(`${prefix}-${i.sequence_id}`.toUpperCase())).map((i) => i.id);
-		if (ids.length) await throttledFetch(`${base}/modules/${moduleId}/module-issues/`, { method: "POST", headers, body: JSON.stringify({ issues: ids }) });
-	}
+	await addIssuesToFeatureModule(repo, moduleId, identifiers);
 	return { moduleId, moduleUrl: `${webBase(cfg)}/${cfg.workspace}/projects/${projectId}/modules/${moduleId}` };
+}
+
+/** Delete a feature's Plane MODULE grouping (the issues themselves are NOT deleted — they just
+ *  lose this module). Best-effort: `null` when Plane is not configured, else the delete result.
+ *  Used by the feature hard-delete cascade only when the operator opts in. */
+export async function deletePlaneModule(repo: string, moduleId: string): Promise<boolean | null> {
+	const ctx = planeContext(repo);
+	if (!ctx) return null;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return null;
+	const res = await throttledFetch(`${base}/modules/${encodeURIComponent(moduleId)}/`, { method: "DELETE", headers });
+	return !!res?.ok;
 }

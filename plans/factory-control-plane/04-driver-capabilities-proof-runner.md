@@ -4,6 +4,7 @@ PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/agent-driver.ts, src/rpc-agent.ts, src/agent-host.ts, src/acp-agent-driver.ts, src/sandbox-agent-driver.ts, src/agent-guard.ts, src/lease-hook.ts, src/proof.ts
+PLANE: OMPSQ-309 — https://app.plane.so/inkwell-finance/browse/OMPSQ-309/
 
 ## Goal
 

@@ -1,22 +1,30 @@
 import React from 'react';
-import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Sun, Moon, Bot, PanelRight, FileText, GripVertical, MessageSquare } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Sun, Moon, Bot, PanelRight, FileText, GripVertical, MessageSquare, GitBranch, Maximize2 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { MarkdownComponents, PlanBlockContext } from './PlanBlocks';
 import { TaskProperties } from './TaskProperties';
+import { ProofProvenancePanel } from './ProofProvenancePanel';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
-import { stoppableAgents, stopCommand } from '../lib/agent-control';
+import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS } from '../lib/agent-control';
+import { taskRef } from '../lib/task-model';
+import { focusTaskSearch } from '../lib/jump';
+import { summarizeTask } from '../lib/taskStatus';
+import { AgentStatusStrip } from './AgentStatusStrip';
+import { TranscriptTimeline } from './AssistantChat';
+import { PlanFlowDiagram } from './PlanFlowDiagram';
+import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
-import type { ArtifactCommentDTO } from '../lib/dto';
+import type { ArtifactCommentDTO, PlanAnnotationTargetDTO } from '../lib/dto';
 
 interface PipelineConcern {
   file: string;
   path: string;
   title: string;
   status: string;
+  complexity?: string;
   open: boolean;
   planeId?: string;
   acceptanceCriteria: string[];
@@ -98,22 +106,6 @@ function commentFromApi(comment: ArtifactCommentDTO): TaskComment {
   return { id: comment.id, text: comment.body, timestamp: new Date(comment.createdAt).toISOString(), author: comment.author, urgent: comment.urgent, resolvedAt: comment.resolvedAt, kind: comment.kind, subject: comment.subject, annotation: comment.annotation };
 }
 
-const MarkdownCode = ({ inline, className, children, ...props }: any) => {
-  const match = /language-(\w+)/.exec(className || '');
-  if (!inline && match) {
-    return (
-      <SyntaxHighlighter
-        language={match[1]}
-        style={vscDarkPlus}
-        customStyle={{ margin: 0, borderRadius: '0.5rem', background: 'transparent' }}
-        PreTag="div"
-      >
-        {String(children).replace(/\n$/, '')}
-      </SyntaxHighlighter>
-    );
-  }
-  return <code className={className} {...props}>{children}</code>;
-};
 
 const PLAN_MARKDOWN_CLASS = "prose prose-sm max-w-none dark:prose-invert prose-headings:scroll-mt-4 prose-headings:text-gray-900 dark:prose-headings:text-gray-100 prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-900 dark:prose-strong:text-gray-100 prose-code:rounded prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:text-gray-900 dark:prose-code:bg-gray-900 dark:prose-code:text-gray-100 prose-pre:border prose-pre:border-gray-200 prose-pre:bg-gray-50 prose-pre:text-gray-900 dark:prose-pre:border-gray-800 dark:prose-pre:bg-gray-950 dark:prose-pre:text-gray-100 prose-table:text-sm prose-th:border prose-th:border-gray-200 prose-th:bg-gray-50 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-gray-200 prose-td:px-3 prose-td:py-2 dark:prose-th:border-gray-800 dark:prose-th:bg-gray-900 dark:prose-td:border-gray-800";
 const PLAN_NAV_BUTTON_CLASS = "inline-flex min-h-8 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900 dark:focus-visible:ring-offset-gray-950";
@@ -124,7 +116,7 @@ const PLAN_DOC_TAB_IDLE_CLASS = "border-gray-200 bg-white text-gray-700 hover:bo
 
 export const PlanMarkdown = React.forwardRef<HTMLElement, React.HTMLAttributes<HTMLElement> & { content: string }>(({ content, className = '', ...props }, ref) => (
   <article ref={ref} className={`${PLAN_MARKDOWN_CLASS} ${className}`.trim()} {...props}>
-    <Markdown remarkPlugins={[remarkGfm]} components={{ code: MarkdownCode }}>{content}</Markdown>
+    <Markdown remarkPlugins={[remarkGfm]} components={MarkdownComponents}>{content}</Markdown>
   </article>
 ));
 PlanMarkdown.displayName = 'PlanMarkdown';
@@ -178,6 +170,7 @@ interface AnnotationDraft {
   left: number;
   lineStart?: number;
   lineEnd?: number;
+  blockId?: string;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
@@ -308,8 +301,34 @@ function highlightQuote(root: HTMLElement, annotation: TaskComment) {
   }
 }
 
+// Recover question id → prompt from a plan doc's ```questions fences. Mirrors QuestionsBlock's
+// hand-rolled parser (a `- id: x` item, indented `prompt:` line) just enough to map the two fields,
+// so the answers POST can carry the prompt the 3-arg onAnswer contract doesn't include.
+function promptsFromContent(content: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const fence = /```+\s*questions[^\n]*\n([\s\S]*?)```/g;
+  const stripQuotes = (value: string) => {
+    const t = value.trim();
+    return t.length >= 2 && /^["'].*["']$/.test(t) && t[0] === t[t.length - 1] ? t.slice(1, -1) : t;
+  };
+  for (const block of content.matchAll(fence)) {
+    let id: string | null = null;
+    for (const rawLine of block[1].split(/\r?\n/)) {
+      const itemStart = rawLine.match(/^\s*-\s+(.*)$/);
+      const source = itemStart ? itemStart[1] : rawLine;
+      if (itemStart) id = null;
+      const kv = source.match(/^\s*([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+      if (!kv) continue;
+      const key = kv[1].toLowerCase();
+      if (key === 'id') id = stripQuotes(kv[2]);
+      else if ((key === 'prompt' || key === 'question' || key === 'q') && id) map.set(id, stripQuotes(kv[2]));
+    }
+  }
+  return map;
+}
+
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand } = useTaskContext();
+  const { tasks, selectedTaskId, selectTask, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
@@ -331,6 +350,12 @@ export const TaskDetail = () => {
   const [planAction, setPlanAction] = React.useState<'implement' | 'module' | 'module-tickets' | 'repair' | 'clear-orphans' | null>(null);
   const [targetAgentByAnnotation, setTargetAgentByAnnotation] = React.useState<Record<string, string>>({});
   const [mainPanePercent, setMainPanePercent] = React.useState(() => clamp(storedNumber('omp.taskDetail.mainPanePercent', 48), 30, 72));
+  // Plan flow "focus" mode: blow the dependency diagram out to a full-pane view (it's far wider
+  // than the reading column it previews in).
+  const [flowFocus, setFlowFocus] = React.useState(false);
+  const [transcriptOpenIds, setTranscriptOpenIds] = React.useState<Set<string>>(() => new Set());
+  const [transcriptDetailOpenIds, setTranscriptDetailOpenIds] = React.useState<Set<string>>(() => new Set());
+  const [now, setNow] = React.useState(Date.now);
   const splitContainerRef = React.useRef<HTMLDivElement | null>(null);
   const planArticleRef = React.useRef<HTMLElement | null>(null);
   const planScrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -343,6 +368,11 @@ export const TaskDetail = () => {
     const docs = pipeline?.documents ?? [];
     return docs.find((item) => item.path === selectedDoc) ?? docs[0] ?? null;
   }, [pipeline, selectedDoc]);
+
+  const selectedConcern = React.useMemo(() => {
+    if (!selectedPlanDoc) return undefined;
+    return (pipeline?.concerns ?? []).find((concern) => concern.path === selectedPlanDoc.path || concern.file === selectedPlanDoc.file);
+  }, [pipeline?.concerns, selectedPlanDoc]);
 
   const planDocuments = pipeline?.documents ?? [];
   const selectedPlanIndex = safePlanIndex(planDocuments, selectedPlanDoc?.path ?? selectedDoc);
@@ -365,9 +395,66 @@ export const TaskDetail = () => {
   // The webapp could never stop a running agent — the kill command + send path existed but no button
   // sent it. `kill` keeps the agent in the roster (restartable), so this is a safe two-click "Stop".
   const stopTargets = React.useMemo(() => stoppableAgents(activeAgents), [activeAgents]);
+  const interruptTargets = React.useMemo(() => interruptibleAgents(activeAgents), [activeAgents]);
+  const restartTargets = React.useMemo(() => restartableAgents(activeAgents), [activeAgents]);
+  const hasPlan = !!overviewDoc || planDocuments.length > 0;
+  const planFlowConcerns = React.useMemo<GraphConcernInput[]>(
+    () => (pipeline?.concerns ?? []).map((c) => ({ file: c.path, title: c.title, status: c.status, open: c.open, complexity: c.complexity, prerequisites: c.prerequisites, touches: c.touches })),
+    [pipeline?.concerns],
+  );
+  const taskStatus = React.useMemo(
+    () => summarizeTask(activeAgents, {
+      hasPlan,
+      criteria: task ? { done: task.acceptanceCriteria.filter((c) => c.completed).length, total: task.acceptanceCriteria.length } : undefined,
+    }),
+    [activeAgents, hasPlan, task],
+  );
   const [stopConfirm, setStopConfirm] = React.useState(false);
   const stopConfirmTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  React.useEffect(() => { setStopConfirm(false); }, [selectedTaskId]);
+  // Remove confirm state
+  const [removeTarget, setRemoveTarget] = React.useState<string | null>(null);
+  const [removeDeleteWorktree, setRemoveDeleteWorktree] = React.useState(false);
+  // Model picker state
+  const [modelPickerAgentId, setModelPickerAgentId] = React.useState<string | null>(null);
+  const [modelPickerValue, setModelPickerValue] = React.useState('');
+  // Answer (pending input) state
+  const [answerValues, setAnswerValues] = React.useState<Record<string, string>>({});
+
+  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setFlowFocus(false); setTranscriptOpenIds(new Set()); setTranscriptDetailOpenIds(new Set()); }, [selectedTaskId]);
+  // Esc leaves plan-flow focus mode.
+  React.useEffect(() => {
+    if (!flowFocus) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFlowFocus(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [flowFocus]);
+  // Tick the elapsed-time display every second while any agent is working.
+  React.useEffect(() => {
+    if (!activeAgents.some((a) => a.status === 'working' || a.status === 'starting')) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [activeAgents]);
+  // Auto-subscribe the first working agent so transcript entries arrive via WS.
+  React.useEffect(() => {
+    const working = activeAgents.find((a) => a.status === 'working' || a.status === 'starting');
+    if (working) subscribeConsole(working.id);
+  }, [activeAgents, subscribeConsole]);
+  const toggleTranscript = React.useCallback((agentId: string) => {
+    setTranscriptOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) { next.delete(agentId); return next; }
+      subscribeConsole(agentId);
+      next.add(agentId);
+      return next;
+    });
+  }, [subscribeConsole]);
+  const toggleTranscriptDetail = React.useCallback((agentId: string) => {
+    setTranscriptDetailOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) next.delete(agentId); else next.add(agentId);
+      return next;
+    });
+  }, []);
   const handleStopAgents = () => {
     if (!stopTargets.length) return;
     if (!stopConfirm) {
@@ -381,11 +468,39 @@ export const TaskDetail = () => {
     for (const agent of stopTargets) sendConsoleCommand(stopCommand(agent.id));
     showToast(stopTargets.length === 1 ? `Stopping ${stopTargets[0].name}…` : `Stopping ${stopTargets.length} agents…`, 'info');
   };
+  const handleInterruptAgents = () => {
+    for (const agent of interruptTargets) sendConsoleCommand(interruptCommand(agent.id));
+    if (interruptTargets.length) showToast(interruptTargets.length === 1 ? `Interrupting ${interruptTargets[0].name}…` : `Interrupting ${interruptTargets.length} agents…`, 'info');
+  };
+  const handleRestartAgents = () => {
+    for (const agent of restartTargets) sendConsoleCommand(restartCommand(agent.id));
+    if (restartTargets.length) showToast(restartTargets.length === 1 ? `Restarting ${restartTargets[0].name}…` : `Restarting ${restartTargets.length} agents…`, 'info');
+  };
+  const handleRemoveConfirm = () => {
+    if (!removeTarget) return;
+    sendConsoleCommand(removeCommand(removeTarget, removeDeleteWorktree));
+    showToast(`Removing agent${removeDeleteWorktree ? ' + worktree' : ''}…`, 'info');
+    setRemoveTarget(null);
+    setRemoveDeleteWorktree(false);
+  };
+  const handleSetModel = (agentId: string, model: string) => {
+    if (!model.trim()) return;
+    sendConsoleCommand(setModelCommand(agentId, model.trim()));
+    showToast(`Model set to ${model.trim()}`, 'info');
+    setModelPickerAgentId(null);
+    setModelPickerValue('');
+  };
+  const handleAnswer = (agentId: string, requestId: string) => {
+    const value = answerValues[requestId]?.trim();
+    if (!value) return;
+    sendConsoleCommand(answerCommand(agentId, requestId, value));
+    setAnswerValues((prev) => { const next = { ...prev }; delete next[requestId]; return next; });
+    showToast('Answer sent', 'info');
+  };
   const selectedDocAnnotations = React.useMemo(() => {
     if (!selectedPlanDoc) return [];
     return planAnnotations.filter((comment) => comment.annotation?.planPath === selectedPlanDoc.path);
   }, [planAnnotations, selectedPlanDoc]);
-
 
   const loadPipeline = React.useCallback(async () => {
     if (!featureId || !repo) return;
@@ -397,6 +512,73 @@ export const TaskDetail = () => {
     if (payload.comments.length) setComments(payload.comments.map(commentFromApi));
   }, [featureId, preferredPlanDoc, repo]);
 
+  // Map a question's id → its prompt by scanning the doc's ```questions fences (the QuestionsBlock
+  // sends only id+value through the 3-arg onAnswer contract; the server needs the prompt to write a
+  // `Q: <prompt> — A: <value>` decision bullet, so we recover it here from the same source markdown).
+  const questionPrompts = React.useMemo(() => promptsFromContent(selectedPlanDoc?.content ?? ''), [selectedPlanDoc?.content]);
+
+  // Persist an answered Open Question to the concern's Decisions log, then refresh the pipeline.
+  const answerQuestion = React.useCallback(async (blockId: string, questionId: string, value: string) => {
+    const file = selectedConcern?.file ?? selectedPlanDoc?.file;
+    if (!featureId || !repo || !file) return;
+    const prompt = questionPrompts.get(questionId) ?? questionId;
+    try {
+      await apiJson(`/api/features/${encodeURIComponent(featureId)}/answers`, jsonInit('POST', { repo, file, blockId, questionId, prompt, value }));
+      showToast('Answer recorded', 'success');
+      await loadPipeline();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not record answer', 'error');
+    }
+  }, [featureId, repo, selectedConcern?.file, selectedPlanDoc?.file, questionPrompts, loadPipeline, showToast]);
+
+  // Anchor a fresh annotation to a rendered plan block. Reuses the existing annotation composer
+  // (annotationDraft → saveAnnotation → POST /annotations) but seeds it with a blockId and leaves
+  // line/quote unset — a block anchor, not a text-range anchor. The composer pops near the block.
+  const anchorBlockComment = React.useCallback((blockId: string) => {
+    const scroll = planScrollRef.current;
+    const article = planArticleRef.current;
+    const el = article?.querySelector(`[data-block-id="${CSS.escape(blockId)}"]`) as HTMLElement | null;
+    let top = 16;
+    let left = 12;
+    if (scroll && el) {
+      const rect = el.getBoundingClientRect();
+      const scrollRect = scroll.getBoundingClientRect();
+      const popoverWidth = 336;
+      left = clamp(rect.left - scrollRect.left + scroll.scrollLeft, 12, Math.max(12, scroll.clientWidth - popoverWidth - 12));
+      top = rect.bottom - scrollRect.top + scroll.scrollTop + 10;
+    }
+    window.getSelection()?.removeAllRanges();
+    setActiveAnnotationId(null);
+    setAnnotationText('');
+    setAnnotationDraft({ quote: '', top, left, blockId });
+  }, []);
+
+  // Affordance for anchoring a comment to a rendered block: Alt/Option-click a block (blocks already
+  // carry data-block-id, concerns 05-08) opens the composer for that blockId. Event delegation keeps
+  // this in TaskDetail (the block components are out of scope) and leaves plain clicks/selection alone;
+  // interactive controls inside a block (inputs, buttons, links) are skipped.
+  const handleBlockAnchorClick = React.useCallback((event: React.MouseEvent<HTMLElement>) => {
+    if (!event.altKey) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('input, textarea, button, a, select, [contenteditable="true"]')) return;
+    const block = target.closest('[data-block-id]') as HTMLElement | null;
+    const blockId = block?.getAttribute('data-block-id');
+    if (!blockId) return;
+    event.preventDefault();
+    anchorBlockComment(blockId);
+  }, [anchorBlockComment]);
+
+  const planBlockContext = React.useMemo(() => ({
+    featureId,
+    repo,
+    planPath: selectedPlanDoc?.path,
+    touches: selectedConcern?.touches ?? [],
+    decisions: selectedConcern?.decisions ?? [],
+    comments: pipeline?.comments ?? [],
+    onAnswer: answerQuestion,
+    onAnchorComment: anchorBlockComment,
+  }), [anchorBlockComment, answerQuestion, featureId, pipeline?.comments, repo, selectedConcern?.decisions, selectedConcern?.touches, selectedPlanDoc?.path]);
+
   const loadPlaneLinks = React.useCallback(async () => {
     if (!featureId) return;
     const requestId = ++planeLinksRequestRef.current;
@@ -404,6 +586,18 @@ export const TaskDetail = () => {
     if (requestId !== planeLinksRequestRef.current) return;
     setPlaneLinks(payload);
   }, [featureId]);
+
+  // Persist a flow-diagram concern edit (STATUS and/or blockers), then refresh the pipeline.
+  const editConcern = React.useCallback(async (file: string, patch: { status?: string; blockedBy?: number[] }) => {
+    if (!featureId || !repo) return;
+    try {
+      await apiJson(`/api/features/${encodeURIComponent(featureId)}/concerns`, jsonInit('PATCH', { repo, file, ...patch }));
+      showToast('Concern updated', 'success');
+      await loadPipeline();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not update concern', 'error');
+    }
+  }, [featureId, repo, loadPipeline, showToast]);
 
   React.useEffect(() => {
     pipelineRequestRef.current += 1;
@@ -558,7 +752,8 @@ export const TaskDetail = () => {
     const saved = commentFromApi(await apiJson<ArtifactCommentDTO>(`/api/features/${encodeURIComponent(featureId)}/annotations?repo=${encodeURIComponent(repo)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ planPath: selectedPlanDoc.path, body: annotationText.trim(), quote, lineStart: annotationDraft.lineStart, lineEnd: annotationDraft.lineEnd }),
+      // blockId carries a rendered-block anchor (concern 10); omitted for plain text-range annotations.
+      body: JSON.stringify({ planPath: selectedPlanDoc.path, body: annotationText.trim(), quote, lineStart: annotationDraft.lineStart, lineEnd: annotationDraft.lineEnd, blockId: annotationDraft.blockId }),
     }));
     setComments((prev) => mergeComments(prev, saved));
     setAnnotationText('');
@@ -875,16 +1070,18 @@ export const TaskDetail = () => {
             >
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div>
-                  <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">Annotate selection</div>
+                  <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{annotationDraft.blockId ? 'Comment on block' : 'Annotate selection'}</div>
                   <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
-                    {annotationDraft.lineStart ? `Line ${annotationDraft.lineStart}${annotationDraft.lineEnd && annotationDraft.lineEnd !== annotationDraft.lineStart ? `-${annotationDraft.lineEnd}` : ''}` : 'Selected markdown text'}
+                    {annotationDraft.blockId ? 'Anchored to this rendered block' : annotationDraft.lineStart ? `Line ${annotationDraft.lineStart}${annotationDraft.lineEnd && annotationDraft.lineEnd !== annotationDraft.lineStart ? `-${annotationDraft.lineEnd}` : ''}` : 'Selected markdown text'}
                   </div>
                 </div>
                 <button type="button" onClick={() => setAnnotationDraft(null)} className="flex min-h-10 w-10 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900 dark:hover:text-gray-200" aria-label="Close annotation popover">
                   <X className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
-              <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-blue-400 bg-blue-50 p-2 text-xs text-gray-700 dark:bg-blue-950/30 dark:text-gray-300">{annotationDraft.quote}</blockquote>
+              {annotationDraft.quote && (
+                <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-blue-400 bg-blue-50 p-2 text-xs text-gray-700 dark:bg-blue-950/30 dark:text-gray-300">{annotationDraft.quote}</blockquote>
+              )}
               <label htmlFor="plan-annotation-body" className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">What should change?</label>
               <textarea
                 ref={annotationTextareaRef}
@@ -900,12 +1097,15 @@ export const TaskDetail = () => {
               </div>
             </form>
           )}
-          <PlanMarkdown
-            ref={planArticleRef}
-            content={selectedPlanDoc.content}
-            onMouseUp={() => window.setTimeout(captureSelection, 0)}
-            onKeyUp={captureSelection}
-          />
+          <PlanBlockContext.Provider value={planBlockContext}>
+            <PlanMarkdown
+              ref={planArticleRef}
+              content={selectedPlanDoc.content}
+              onMouseUp={() => window.setTimeout(captureSelection, 0)}
+              onKeyUp={captureSelection}
+              onClick={handleBlockAnchorClick}
+            />
+          </PlanBlockContext.Provider>
           <div className="mt-6 space-y-3 border-t border-gray-200 pt-4 dark:border-gray-800">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Live annotations</h3>
@@ -921,6 +1121,7 @@ export const TaskDetail = () => {
                     <div className="flex min-w-0 items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                       <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: colors.border }} />
                       <span className="truncate">{annotation.author ?? 'User'} · {new Date(annotation.timestamp).toLocaleString()}{annotation.annotation?.lineStart ? ` · line ${annotation.annotation.lineStart}${annotation.annotation.lineEnd && annotation.annotation.lineEnd !== annotation.annotation.lineStart ? `-${annotation.annotation.lineEnd}` : ''}` : ''}</span>
+                      {(annotation.annotation as PlanAnnotationTargetDTO | undefined)?.blockId && <span className="flex-shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">block</span>}
                     </div>
                     {annotation.resolvedAt ? <span className="text-xs text-gray-400">Resolved</span> : <button onClick={() => void resolveAnnotation(annotation)} className="min-h-10 rounded px-2 text-xs text-gray-500 hover:bg-white focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900">Resolve</button>}
                   </div>
@@ -950,45 +1151,157 @@ export const TaskDetail = () => {
   return (
     <main className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-gray-950 z-0 transition-colors duration-200">
       <div className="h-10 border-b border-gray-200 dark:border-gray-800 flex items-center justify-end px-3 gap-2 bg-white dark:bg-gray-950 z-10 flex-shrink-0 transition-colors duration-200">
+        {interruptTargets.length > 0 && (
+          <button type="button" onClick={handleInterruptAgents} title={`Interrupt current turn for ${interruptTargets.length} agent(s)`} aria-label="Interrupt agent" className="min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30">
+            <span className="inline-block h-2.5 w-2.5 rounded-full border-2 border-current" aria-hidden="true" /> Interrupt{interruptTargets.length > 1 ? ` (${interruptTargets.length})` : ''}
+          </button>
+        )}
         {stopTargets.length > 0 && (
           <button type="button" onClick={handleStopAgents} title={stopConfirm ? 'Click again to stop' : `Stop ${stopTargets.length} running agent(s)`} aria-label="Stop agent" className={`min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${stopConfirm ? 'bg-red-600 text-white hover:bg-red-700' : 'text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/30'}`}>
             <span className="inline-block h-2.5 w-2.5 rounded-[2px] bg-current" aria-hidden="true" /> {stopConfirm ? 'Confirm stop' : `Stop${stopTargets.length > 1 ? ` (${stopTargets.length})` : ''}`}
           </button>
         )}
-        <button className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-blue-500"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
+        {restartTargets.length > 0 && (
+          <button type="button" onClick={handleRestartAgents} title={`Restart ${restartTargets.length} stopped agent(s)`} aria-label="Restart agent" className="min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-emerald-500 text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/30">
+            ↺ Restart{restartTargets.length > 1 ? ` (${restartTargets.length})` : ''}
+          </button>
+        )}
+        {/* Remove confirm dialog */}
+        {removeTarget && (
+          <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1 dark:border-red-900 dark:bg-red-950/30">
+            <label className="flex items-center gap-1 text-xs text-red-700 dark:text-red-300 cursor-pointer">
+              <input type="checkbox" checked={removeDeleteWorktree} onChange={(e) => setRemoveDeleteWorktree(e.target.checked)} className="h-3 w-3 rounded border-red-300" />
+              del worktree
+            </label>
+            <button type="button" onClick={handleRemoveConfirm} className="text-xs font-medium text-red-700 dark:text-red-300 hover:text-red-900 focus-visible:ring-2 focus-visible:ring-red-500">Confirm remove</button>
+            <button type="button" onClick={() => { setRemoveTarget(null); setRemoveDeleteWorktree(false); }} className="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">✕</button>
+          </div>
+        )}
+        {/* Per-agent model picker — opens when the model button is clicked */}
+        {modelPickerAgentId && (
+          <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 dark:border-gray-700 dark:bg-gray-900">
+            <select
+              autoFocus
+              value={modelPickerValue}
+              onChange={(e) => setModelPickerValue(e.target.value)}
+              className="text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 cursor-pointer"
+              aria-label="Select model"
+            >
+              <option value="">pick model…</option>
+              {KNOWN_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <input
+              type="text"
+              value={modelPickerValue}
+              onChange={(e) => setModelPickerValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(modelPickerAgentId, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }}
+              placeholder="or type model id…"
+              className="w-36 text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 placeholder:text-gray-400"
+            />
+            <button type="button" onClick={() => handleSetModel(modelPickerAgentId, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium text-blue-600 dark:text-blue-400 disabled:opacity-40 hover:text-blue-800 focus-visible:ring-2 focus-visible:ring-blue-500">Set</button>
+            <button type="button" onClick={() => { setModelPickerAgentId(null); setModelPickerValue(''); }} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
+          </div>
+        )}
+        <button onClick={() => focusTaskSearch()} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-blue-500" title="Focus task search (⌘K)" aria-label="Jump to search"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
         <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
         <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${isChatOpen ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
       </div>
 
       {!task ? (
-        <div className="flex-1 flex flex-col items-center justify-center text-gray-400 p-8 text-center bg-gray-50/30 dark:bg-gray-900/30 transition-colors duration-200">
-          <EmptyStateIllustration />
-          <h2 className="text-xl font-semibold text-gray-700 dark:text-gray-300 mb-2">No task selected</h2>
-          <p className="text-sm max-w-sm">Select a task from the list on the left to view its details, properties, and criteria.</p>
+        // Master list in the MAIN pane — the viewport used to sit empty while the actual task
+        // list hid below the fold of the 300px rail. Click a row to open its detail here.
+        <div className="flex-1 overflow-y-auto scrollbar-custom bg-gray-50/30 p-6 transition-colors duration-200 dark:bg-gray-900/30">
+          {tasks.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
+              <EmptyStateIllustration />
+              <h2 className="mb-2 text-xl font-semibold text-gray-700 dark:text-gray-300">No tasks yet</h2>
+              <p className="max-w-sm text-sm">Create a task from the rail, run /plan, or dispatch a Plane issue — plans and features show up here.</p>
+            </div>
+          ) : (
+            <div className="mx-auto max-w-3xl">
+              <div className="mb-3 flex items-baseline justify-between">
+                <h2 className="text-sm font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Tasks</h2>
+                <span className="text-xs text-gray-400">{tasks.length} total — select one to open its plan, proof, and agents</span>
+              </div>
+              <div className="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white dark:divide-gray-800 dark:border-gray-800 dark:bg-gray-950">
+                {tasks.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => selectTask(item.id)}
+                    className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 dark:hover:bg-gray-900/60"
+                  >
+                    <span className={`h-2 w-2 flex-shrink-0 rounded-full ${item.status === 'done' ? 'bg-emerald-500' : item.status === 'active' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`} aria-label={item.status} />
+                    <span className="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{item.title}</span>
+                    {taskRef(item) && <span className="flex-shrink-0 font-mono text-[11px] text-gray-400 dark:text-gray-500">{taskRef(item)}</span>}
+                    <span className="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500 dark:bg-gray-900 dark:text-gray-400">{item.properties.status}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div
           ref={splitContainerRef}
-          className="flex-1 overflow-hidden flex flex-col lg:flex-row"
+          className="relative flex-1 overflow-hidden flex flex-col lg:flex-row"
           style={{ '--detail-pane-width': `${mainPanePercent}%` } as React.CSSProperties}
         >
           <section className="min-w-0 flex-1 overflow-y-auto scrollbar-custom lg:flex-none lg:[flex-basis:var(--detail-pane-width)]">
-            <div className="mx-auto max-w-3xl px-4 py-5 lg:px-5">
+            <div className="mx-auto max-w-5xl px-4 py-5 lg:px-5">
               <div className="flex items-start justify-between mb-4">
-                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-xs mb-2"><span className="font-medium text-gray-700 dark:text-gray-300">{task.id}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
+                <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400 text-xs mb-2"><button onClick={() => selectTask(null)} className="flex items-center gap-1 rounded px-1.5 py-0.5 font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" title="Back to all work items"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />Tasks</button><ChevronRight className="w-3 h-3" /><span className="font-medium text-gray-700 dark:text-gray-300">{taskRef(task) ?? task.properties.project.shortCode}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties"><PanelRight className="w-3.5 h-3.5" /></button>
-                  <button className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors"><Copy className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties" aria-label="Toggle properties panel" aria-expanded={showProperties}><PanelRight className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => { navigator.clipboard.writeText(`${taskRef(task) ?? task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-blue-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
 
               <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-gray-900 dark:text-gray-100 mb-5 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
+
+              <AgentStatusStrip
+                status={taskStatus}
+                hasPlan={hasPlan}
+                implementing={planAction === 'implement'}
+                onAnswer={(agentId, requestId, value) => { sendConsoleCommand(answerCommand(agentId, requestId, value)); showToast('Answer sent', 'info'); }}
+                onRestart={(agentId) => { sendConsoleCommand(restartCommand(agentId)); showToast('Restarting…', 'info'); }}
+                onImplement={() => void startImplementation()}
+              />
+
+              {planFlowConcerns.length >= 2 && (
+                <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
+                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 list-none">
+                    <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+                    <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span className="mr-auto">Plan flow</span>
+                    <span className="font-normal normal-case text-gray-400">{planFlowConcerns.length} concerns</span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); setFlowFocus(true); }}
+                      title="Open full-pane flow view"
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-blue-500"
+                    >
+                      <Maximize2 className="h-3 w-3" aria-hidden="true" /> Expand
+                    </button>
+                  </summary>
+                  <div className="border-t border-gray-100 dark:border-gray-800 p-3">
+                    <PlanFlowDiagram
+                      concerns={planFlowConcerns}
+                      overviewText={overviewDoc?.content ?? ''}
+                      selectedId={selectedPlanDoc?.path}
+                      onSelect={(id) => selectPlanDoc(id)}
+                      onEdit={editConcern}
+                    />
+                  </div>
+                </details>
+              )}
 
               <div className="mb-5 grid gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2.5 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400 sm:grid-cols-3">
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Status</div><div className="mt-1 font-medium text-gray-900 dark:text-gray-100">{task.properties.status}</div></div>
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan created</div><div className="mt-1">{formatWhen(task.properties.createdAt ?? pipeline?.feature?.createdAt)}</div></div>
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan updated</div><div className="mt-1">{formatWhen(task.properties.updatedAt ?? pipeline?.feature?.updatedAt)}</div></div>
               </div>
+
+              <div className="mb-7"><ProofProvenancePanel task={task} /></div>
 
               {!overviewDoc && (
                 <div className="mb-10">
@@ -1017,7 +1330,14 @@ export const TaskDetail = () => {
                 </div>}
               </div>
 
-              <div className="mb-7">
+              <details className="group mb-7 rounded-lg border border-gray-200 dark:border-gray-800">
+              <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 list-none">
+                <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+                <span className="mr-auto">Plan context, decisions &amp; relationships</span>
+                <span className="font-normal normal-case text-gray-400">{task.decisions.length} decision{task.decisions.length === 1 ? '' : 's'} · {task.relationships.length} link{task.relationships.length === 1 ? '' : 's'}</span>
+              </summary>
+              <div className="space-y-6 border-t border-gray-100 dark:border-gray-800 px-3 py-4">
+              <div className="mb-1">
                 <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 border-b border-gray-100 dark:border-gray-800 pb-2 flex items-center gap-2">Context Bundle From Plan <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 lowercase font-normal">agent input</span></div>
                 <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden bg-white dark:bg-gray-900 transition-colors">
                   <div className="px-3 py-2 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between"><div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300"><Box className="w-4 h-4 text-blue-500" /> planning bundle</div><span className="text-[10px] font-mono bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">MD</span></div>
@@ -1042,6 +1362,133 @@ export const TaskDetail = () => {
                 <div className="space-y-3 mb-3">{task.relationships.map(rel => <div key={rel.id} className="flex items-start gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5" /><div><span className="text-gray-500 font-medium mr-2">{rel.targetId}</span><span className="text-gray-800 dark:text-gray-200 font-medium">{rel.targetTitle}</span></div></div>)}</div>
                 <div className="flex gap-2"><input value={newRelationshipText} onChange={(e) => setNewRelationshipText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addRelationship()} placeholder="Link issue, feature, or doc id..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addRelationship} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
+              </div>
+              </details>
+
+              {activeAgents.length > 0 && (
+                <div className="mb-6">
+                  <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
+                    Agents <span className="text-gray-500 font-medium">{activeAgents.length}</span>
+                  </div>
+                  <div className="space-y-2">
+                    {activeAgents.map((agent) => {
+                      const isTerminal = agent.status === 'stopped' || agent.status === 'error';
+                      const isWorking = agent.status === 'working' || agent.status === 'starting';
+                      const isAwaiting = agent.status === 'input' || agent.pending.length > 0;
+                      const statusColor = agent.status === 'working' ? 'text-emerald-600 dark:text-emerald-400' : agent.status === 'error' ? 'text-red-500' : agent.status === 'input' ? 'text-amber-500' : agent.status === 'stopped' ? 'text-gray-400' : 'text-blue-500';
+                      return (
+                        <div key={agent.id} className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+                          <div className="flex items-center justify-between gap-2 px-3 py-2">
+                            <div className="min-w-0 flex items-center gap-2">
+                              <span className={`text-[11px] font-semibold uppercase rounded px-1.5 py-0.5 border ${agent.status === 'working' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400' : agent.status === 'error' ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400' : agent.status === 'input' ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-400' : agent.status === 'stopped' ? 'border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400' : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-400'}`}>{agent.status}</span>
+                              <span className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{agent.name}</span>
+                              {agent.model && <span className={`hidden sm:block text-[10px] ${statusColor}`}>{agent.model}</span>}
+                            </div>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              {!isTerminal && isWorking && (
+                                <button type="button" onClick={() => sendConsoleCommand(interruptCommand(agent.id))} title="Interrupt current turn" className="min-h-7 rounded px-2 text-[11px] font-medium text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
+                                  Interrupt
+                                </button>
+                              )}
+                              {!isTerminal && (
+                                <button type="button" onClick={() => sendConsoleCommand(stopCommand(agent.id))} title="Stop this agent" className="min-h-7 rounded px-2 text-[11px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-red-500">
+                                  Stop
+                                </button>
+                              )}
+                              {isTerminal && (
+                                <button type="button" onClick={() => sendConsoleCommand(restartCommand(agent.id))} title="Restart this agent" className="min-h-7 rounded px-2 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-emerald-500">
+                                  ↺ Restart
+                                </button>
+                              )}
+                              <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 ${modelPickerAgentId === agent.id ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
+                                Model
+                              </button>
+                              <button type="button" onClick={() => setRemoveTarget(removeTarget === agent.id ? null : agent.id)} title="Remove agent" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${removeTarget === agent.id ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' : 'text-gray-400 hover:bg-gray-100 hover:text-red-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-red-400'}`}>
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                          {/* Inline model picker for this agent */}
+                          {modelPickerAgentId === agent.id && (
+                            <div className="border-t border-gray-100 dark:border-gray-800 px-3 py-2 flex items-center gap-2">
+                              <select value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} className="text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                                <option value="">pick model…</option>
+                                {KNOWN_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+                              </select>
+                              <input type="text" value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(agent.id, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }} placeholder="or type model id…" className="flex-1 text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 placeholder:text-gray-400" />
+                              <button type="button" onClick={() => handleSetModel(agent.id, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-blue-500">Set</button>
+                            </div>
+                          )}
+                          {/* Pending input / Answer section */}
+                          {isAwaiting && agent.pending.map((req) => (
+                            <div key={req.id} className="border-t border-amber-100 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-950/20 px-3 py-2">
+                              <div className="mb-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">Awaiting input: {req.title}</div>
+                              {req.message && <p className="mb-2 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{req.message}</p>}
+                              {req.options && req.options.length > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {req.options.map((opt) => (
+                                    <button key={opt} type="button" onClick={() => { sendConsoleCommand(answerCommand(agent.id, req.id, opt)); showToast('Answer sent', 'info'); }} className="rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
+                                      {opt}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="flex gap-2">
+                                  <input
+                                    type="text"
+                                    value={answerValues[req.id] ?? ''}
+                                    onChange={(e) => setAnswerValues((prev) => ({ ...prev, [req.id]: e.target.value }))}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') handleAnswer(agent.id, req.id); }}
+                                    placeholder={req.placeholder ?? 'Type your answer…'}
+                                    className="flex-1 text-xs rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-900 px-2 py-1 text-gray-700 dark:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-gray-400"
+                                  />
+                                  <button type="button" onClick={() => handleAnswer(agent.id, req.id)} disabled={!answerValues[req.id]?.trim()} className="text-xs font-medium px-2 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-amber-500">
+                                    Send
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                          {/* Live transcript panel */}
+                          {(() => {
+                            const agentTranscript = transcripts.get(agent.id) ?? [];
+                            const isOpen = transcriptOpenIds.has(agent.id);
+                            const isDetailOpen = transcriptDetailOpenIds.has(agent.id);
+                            if (!isWorking && agentTranscript.length === 0) return null;
+                            return (
+                              <div className="border-t border-gray-100 dark:border-gray-800">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleTranscript(agent.id)}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/50 transition-colors focus-visible:ring-2 focus-visible:ring-blue-500"
+                                >
+                                  <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                                  {isWorking && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500 animate-pulse" aria-hidden />}
+                                  <span>Live transcript</span>
+                                  {agentTranscript.length > 0 && <span className="ml-auto rounded-full bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">{agentTranscript.length}</span>}
+                                </button>
+                                {isOpen && (
+                                  <div className="max-h-[28rem] overflow-y-auto border-t border-gray-100 px-3 pb-3 pt-2 dark:border-gray-800 scrollbar-custom">
+                                    <TranscriptTimeline
+                                      entries={agentTranscript}
+                                      messages={[]}
+                                      agent={agent}
+                                      now={now}
+                                      expanded={isDetailOpen}
+                                      onToggle={() => toggleTranscriptDetail(agent.id)}
+                                      onAnswer={(requestId, value) => { sendConsoleCommand(answerCommand(agent.id, requestId, value)); showToast('Answer sent', 'info'); }}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="mb-6 pb-6">
                 <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-4 border-b border-gray-100 dark:border-gray-800 pb-2">Comments <span className="text-gray-500 font-medium">{regularComments.length}</span></div>
@@ -1067,6 +1514,37 @@ export const TaskDetail = () => {
             {renderPlanDocPane()}
           </aside>
           {showProperties && <TaskProperties task={task} />}
+
+          {/* Plan flow focus mode — fills the DETAIL pane (full height, no reading-width cap) while the
+              plan-markdown pane stays visible on the right. Full-width below lg where the panes stack. */}
+          {flowFocus && planFlowConcerns.length >= 2 && (
+            <div className="absolute inset-0 z-30 flex flex-col bg-white dark:bg-gray-950 lg:right-auto lg:w-[var(--detail-pane-width)]" role="dialog" aria-modal="true" aria-label="Plan flow">
+              <div className="flex items-center gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-800">
+                <GitBranch className="h-4 w-4 text-gray-500" aria-hidden="true" />
+                <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">Plan flow</span>
+                <span className="text-xs text-gray-400">{task.title}</span>
+                <span className="ml-auto text-xs text-gray-400">{planFlowConcerns.length} concerns</span>
+                <button
+                  type="button"
+                  onClick={() => setFlowFocus(false)}
+                  title="Close (Esc)"
+                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" /> Close
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto p-4 scrollbar-custom">
+                <PlanFlowDiagram
+                  concerns={planFlowConcerns}
+                  overviewText={overviewDoc?.content ?? ''}
+                  selectedId={selectedPlanDoc?.path}
+                  onSelect={(id) => selectPlanDoc(id)}
+                  onEdit={editConcern}
+                  orientation="vertical"
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
     </main>

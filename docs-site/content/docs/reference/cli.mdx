@@ -27,10 +27,13 @@ Running `omp-squad` with no command is identical to `omp-squad up` — the daemo
 | `add <repo> [flags]` | | Spawn an agent in a new worktree. |
 | `list` | `ls` | Print the roster. |
 | `prompt <id> <message...>` | `say` | Send an instruction to an agent. |
-| `rm <id> [--delete-worktree]` | `remove` | Remove an agent. |
+| `kill <id>` | `stop` | Stop an agent process but keep it in the roster. |
+| `rm <id> [--delete-worktree]` | `remove` | Remove an agent from the roster. |
 | `who [repo]` | | Show who/what is working a repo (any omp agent). |
 | `logs <id> [--limit N]` | | Print an agent's recent transcript. |
+| `automation [--window <dur>] [--loop <name>]` | `auto` | Show what background loops are doing and Scout's LLM cost. |
 | `open` | | Print the dashboard base URL. |
+| `curate-plane [repo] [--file]` | `plane-curator` | Group recurring Plane issues into unified fix proposals. |
 | `commission <name> --purpose <s> [flags]` | `hire` | Author + validate a Flue worker; onboard it if it passes the gate. |
 | `help` | `-h`, `--help` | Print usage. |
 
@@ -99,6 +102,14 @@ omp-squad prompt <id> <message...>
 
 Sends a `prompt` command to agent `<id>`; all positionals after the id are joined with spaces into the message. Both `<id>` and a non-empty message are required (else it prints `usage:` and exits `1`). Prints `sent` on success.
 
+## `kill` (`stop`)
+
+```bash
+omp-squad kill <id>
+```
+
+Sends a `kill` command to terminate the agent's process without removing it from the roster. The agent entry remains visible with status `stopped`. Use `rm` to also drop it from the roster. Prints `killed` on success.
+
 ## `rm` (`remove`)
 
 ```bash
@@ -126,6 +137,35 @@ Fetches `GET /api/agents/<id>/transcript` and prints the last `N` entries (kind 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--limit N` | `40` | How many trailing transcript entries to print. |
+
+## `automation` (`auto`)
+
+```bash
+omp-squad automation [--window <dur>] [--loop <name>] [--limit N] [--json]
+```
+
+Fetches `GET /api/automation` and prints a summary of what the daemon's background loops (Scout, Observer, Opportunity, Dispatcher) have been doing — the terminal twin of the automation panel in the dashboard.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--window <dur>` | `1h` | Rollup window. Accepted values: `15m`, `1h`, `6h`, `24h`. |
+| `--loop <name>` | all loops | Filter output to one loop: `scout`, `observer`, `opportunity`, or `dispatch`. |
+| `--limit N` | `20` | Maximum events to show in the recent feed. |
+| `--json` | off | Emit raw JSON (`{ events, rollup }`) instead of the formatted table. |
+
+Output: a per-loop summary table (events, LLM calls, issues filed, candidates found, last activity) followed by a recent-events feed. An empty table means no background activity has been recorded yet — loops start once agents and Plane repos are configured.
+
+## `curate-plane` (`plane-curator`)
+
+```bash
+omp-squad curate-plane [repo] [--file]
+```
+
+Reads Plane issues for the given repo (defaults to `cwd`) and groups recurring or related issues into unified fix proposals. Requires Plane to be configured. Prints `Plane is not configured or unreachable` and exits 1 if Plane is unavailable.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--file` | off | Emit the cluster report as a file instead of printing to stdout. |
 
 ## `open`
 

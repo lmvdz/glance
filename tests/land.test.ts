@@ -10,6 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { dirtyLandTargetWarnings, landAgent } from "../src/land.ts";
+import { runProof } from "../src/proof.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -80,6 +81,21 @@ test("landAgent: nothing to land is reported, not failed", async () => {
 	expect(res.merged).toBe(false);
 });
 
+test("landAgent: requireProof refuses missing proof and allows fresh proof", async () => {
+	const repo = await baseRepo("land-proof-");
+	const wt = await branchWorktree(repo, "feat-proof", "proof.txt");
+
+	const blocked = await landAgent({ repo, worktree: wt, branch: "feat-proof", message: "land proof", commitWip: false, requireProof: true });
+	expect(blocked.ok).toBe(false);
+	expect(blocked.merged).toBe(false);
+	expect(blocked.detail).toContain("no proof");
+
+	await runProof({ repo, worktree: wt, command: "true" });
+	const landed = await landAgent({ repo, worktree: wt, branch: "feat-proof", message: "land proof", commitWip: false, requireProof: true });
+	expect(landed.ok).toBe(true);
+	expect(landed.merged).toBe(true);
+});
+
 test("dirtyLandTargetWarnings: flags only targets with uncommitted tracked changes", () => {
 	const counts: Record<string, number> = { "/clean": 0, "/dirty": 3 };
 	const warns = dirtyLandTargetWarnings(["/clean", "/dirty"], (r) => counts[r] ?? 0);
@@ -87,4 +103,34 @@ test("dirtyLandTargetWarnings: flags only targets with uncommitted tracked chang
 	expect(warns[0]).toContain("/dirty");
 	expect(warns[0]).toContain("3 uncommitted");
 	expect(warns[0]).toContain("DEDICATED checkout"); // points at the durable fix
+});
+
+test("landAgent: commitWip sweeps real work but never the .omp/ evidence dir", async () => {
+	const repo = await baseRepo("land-omp-");
+	const wt = await branchWorktree(repo, "feat-evidence", "work.txt");
+	// Uncommitted real work + daemon evidence, both present at land time.
+	await fs.writeFile(path.join(wt, "wip.txt"), "uncommitted work\n");
+	await fs.mkdir(path.join(wt, ".omp", "proof"), { recursive: true });
+	await fs.writeFile(path.join(wt, ".omp", "proof", "shot.png"), "png\n");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat-evidence", message: "land evidence test", commitWip: true });
+	expect(res.ok).toBe(true);
+	expect(res.committed).toBe(true);
+
+	// The WIP landed on main; the screenshot did not, and stayed untracked in the worktree.
+	expect(await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wip.txt");
+	expect(await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain(".omp/proof/shot.png");
+	expect(await out(wt, "status", "--porcelain")).toContain(".omp/");
+});
+
+test("landAgent: commitWip with ONLY .omp/ evidence dirty commits nothing and still lands cleanly", async () => {
+	const repo = await baseRepo("land-omp2-");
+	const wt = await branchWorktree(repo, "feat-evidence-only", "work2.txt");
+	await fs.mkdir(path.join(wt, ".omp", "proof"), { recursive: true });
+	await fs.writeFile(path.join(wt, ".omp", "proof", "shot.png"), "png\n");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat-evidence-only", message: "land evidence-only test", commitWip: true });
+	expect(res.ok).toBe(true);
+	expect(res.committed).toBe(false); // nothing landable was dirty — no empty-commit attempt
+	expect(res.merged).toBe(true); // the committed branch work still lands
 });

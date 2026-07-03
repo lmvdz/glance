@@ -11,7 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { agentsToAdopt, liveAgents, newAgentId, SquadManager } from "../src/squad-manager.ts";
+import { agentsToAdopt, liveAgents, newAgentId, planeIssueBranch, SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -182,10 +182,25 @@ test("closeLandedIssue retries after a failed close (id marked only on success)"
 	}
 });
 
-test("newAgentId never collides — unique branch/worktree per agent (same name, rapid spawns)", () => {
-	const ids = Array.from({ length: 200 }, () => newAgentId("agent-1")); // worst case: the reused fallback name
-	expect(new Set(ids).size).toBe(200); // every id unique
-	expect(new Set(ids.map((id) => `squad/${id}`)).size).toBe(200); // ⇒ unique branches ⇒ no shared worktree
+test("newAgentId stays unique when clock and Math.random both repeat", () => {
+	const realNow = Date.now;
+	const realRandom = Math.random;
+	try {
+		Date.now = () => 1234;
+		Math.random = () => 0;
+		const ids = Array.from({ length: 200 }, () => newAgentId("agent-1")); // worst case: reused fallback name in one tick
+		expect(new Set(ids).size).toBe(200);
+		expect(new Set(ids.map((id) => `squad/${id}`)).size).toBe(200); // ⇒ unique branches ⇒ no shared worktree
+
+	} finally {
+		Date.now = realNow;
+		Math.random = realRandom;
+	}
+});
+
+test("planeIssueBranch includes the Plane identifier and title slug", () => {
+	expect(planeIssueBranch({ id: "uuid", identifier: "OMPSQ-319", name: "Descriptive branch names for Plane-dispatched agents" })).toBe("squad/ompsq-319-descriptive-branch-names-for-plane-dispatched-agents");
+	expect(planeIssueBranch({ id: "Issue ID", name: "Fix: branch refs are noisy!!!" })).toBe("squad/issue-id-fix-branch-refs-are-noisy");
 });
 
 test("agentsToAdopt: take over dead-host agents with an on-disk worktree; skip reattached/flue/gone", () => {

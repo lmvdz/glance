@@ -43,6 +43,22 @@ class FailStartDriver extends EventEmitter implements AgentDriver {
 	respondHostTool(): void {}
 }
 
+class ReadyDriver extends EventEmitter implements AgentDriver {
+	readonly isReady = true;
+	readonly isAlive = true;
+	async start(): Promise<void> {}
+	async stop(): Promise<void> {}
+	async prompt(): Promise<void> {}
+	async abort(): Promise<unknown> {
+		return undefined;
+	}
+	async getState(): Promise<unknown> {
+		return {};
+	}
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
 // SquadManager.makeDriver is private; the test substitutes it at the instance level (shadows the
 // prototype method) to inject a driver that fails start(). Named-const cast with a documented reason
 // — there is no public injection seam and the runtime call (`this.makeDriver(...)`) honors the shadow.
@@ -87,6 +103,28 @@ test("create(): a driver whose start() throws is torn down (stop() called), agen
 	// The worktree created before start() failed must be reaped too, not orphaned in the base —
 	// the gate ran this test every cycle and each leak orphaned a "squad-leaky" worktree (500+).
 	expect(await fs.readdir(worktreeBase)).toEqual([]);
+
+	await mgr.stop();
+});
+
+test("create(): DTO carries scope contract and defaults produces to owns", async () => {
+	delete process.env.OMP_SQUAD_RESOURCE_GATE;
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "scope-state-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "scope-wt-"));
+	tmps.push(stateDir, worktreeBase);
+
+	const mgr = new SquadManager({ stateDir, worktreeBase });
+	await mgr.start();
+	const host: DriverFactoryHost = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => new ReadyDriver();
+
+	const dto = await mgr.create({ name: "scoped", repo, approvalMode: "yolo", requires: ["src/api"], owns: ["src/web"], scopeSource: "inferred" });
+
+	expect(dto.requires).toEqual(["src/api"]);
+	expect(dto.owns).toEqual(["src/web"]);
+	expect(dto.produces).toEqual(["src/web"]);
+	expect(dto.scopeSource).toBe("inferred");
 
 	await mgr.stop();
 });

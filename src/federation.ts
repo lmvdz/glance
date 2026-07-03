@@ -14,8 +14,9 @@
  *    zero-infra / cross-org rooms (E2E key-is-trust).
  */
 
-import type { Actor, ClientCommand, OperatorPresence } from "./types.ts";
+import type { Actor, AgentDTO, ClientCommand, OperatorPresence } from "./types.ts";
 import type { LeaseEntry } from "./leases.ts";
+import { repoIdentity } from "./repo-identity.ts";
 
 export const LOCAL_ACTOR: Actor = { id: "local", origin: "local" };
 
@@ -23,6 +24,19 @@ export const LOCAL_ACTOR: Actor = { id: "local", origin: "local" };
 export interface RemoteCommand {
 	cmd: ClientCommand;
 	actor: Actor;
+	/** Sender-minted correlation id — echo it in the ack so the sender can match the outcome. */
+	cmdId?: string;
+	/** CLAIMED sender operator id — used ONLY to address the ack frame, never for authority. */
+	replyTo?: string;
+}
+
+/** The outcome of a remote command, reported back to its sender. Advisory — never authority. */
+export interface CommandAck {
+	cmdId: string;
+	outcome: "applied" | "denied" | "error";
+	detail?: string;
+	/** Claimed responder operator id (display/audit only). */
+	from?: string;
 }
 
 export interface TeamMessage {
@@ -52,6 +66,22 @@ export interface FederationBus {
 	/** A peer wants to steer one of *our* agents. The manager authorizes via policy + actor before applying. */
 	onRemoteCommand(cb: (remote: RemoteCommand) => void): void;
 
+	/**
+	 * Steer a PEER operator's agent — the outbound half of `onRemoteCommand` (this was the
+	 * principal missing cross-operator capability: the receive side existed, nothing sent).
+	 * `to` addresses one operator id; receivers drop frames not addressed to them. The
+	 * receiving manager still authorizes via whois-verified actor + RBAC — sending grants
+	 * nothing. Returns the minted correlation id; the peer's outcome arrives on `onAck`
+	 * (best-effort — no delivery guarantee).
+	 */
+	sendCommand(cmd: ClientCommand, to?: string): string;
+
+	/** Report a remote command's outcome back to its sender (advisory; carries no authority). */
+	sendAck(ack: CommandAck, to: string): void;
+
+	/** An ack for a command THIS host sent arrived. */
+	onAck(cb: (ack: CommandAck) => void): void;
+
 	/** Team chat. */
 	sendMessage(text: string): void;
 	onMessage(cb: (msg: TeamMessage) => void): void;
@@ -70,6 +100,11 @@ export class NullFederationBus implements FederationBus {
 	publishPresence(_presence: OperatorPresence): void {}
 	onPresence(_cb: (presence: OperatorPresence) => void): void {}
 	onRemoteCommand(_cb: (remote: RemoteCommand) => void): void {}
+	sendCommand(_cmd: ClientCommand, _to?: string): string {
+		return "";
+	}
+	sendAck(_ack: CommandAck, _to: string): void {}
+	onAck(_cb: (ack: CommandAck) => void): void {}
 	sendMessage(_text: string): void {}
 	onMessage(_cb: (msg: TeamMessage) => void): void {}
 	publishLeases(_repoId: string, _leases: LeaseEntry[]): void {}
@@ -80,10 +115,45 @@ export class NullFederationBus implements FederationBus {
 
 /** Two or more agents owned by DIFFERENT operators sharing one repo + ref. */
 export interface Collision {
+	/** Cross-host repo identity the collision is keyed on (normalized git origin / `name:<dir>`). */
+	repoId: string;
+	/** A host-local path for ONE of the colliding agents — display only; peers have their own. */
 	repo: string;
 	ref: string;
 	operators: string[];
 	agents: string[];
+}
+
+/**
+ * Cross-host repo identity for an agent: its wire-carried `repoId` when a peer
+ * already computed it (we can't reach the peer's path to run git ourselves), else
+ * derived from the host-local `repo` path. Memoized per path so detection over a
+ * roster never shells out to git more than once per distinct checkout.
+ */
+export function agentRepoId(agent: Pick<AgentDTO, "repo" | "repoId">, cache?: Map<string, string>): string {
+	if (typeof agent.repoId === "string" && agent.repoId.length > 0) return agent.repoId;
+	const cached = cache?.get(agent.repo);
+	if (cached !== undefined) return cached;
+	const id = repoIdentity(agent.repo);
+	cache?.set(agent.repo, id);
+	return id;
+}
+
+/** Process-wide path→identity memo: a repo's origin is stable for the process lifetime. */
+const REPO_ID_MEMO = new Map<string, string>();
+
+/**
+ * Stamp every agent's cross-host `repoId` onto an OUTGOING presence frame, derived
+ * locally (only this host can run git on its own paths). A peer can't reach our
+ * paths to derive identity itself, so without this its `detectCollisions` would
+ * fall back to `name:<basename>` and miss / mis-key cross-host overlaps. Returns a
+ * shallow copy; the caller's roster is never mutated.
+ */
+export function stampRepoIds(presence: OperatorPresence): OperatorPresence {
+	return {
+		...presence,
+		agents: presence.agents.map((a) => (typeof a.repoId === "string" && a.repoId.length > 0 ? a : { ...a, repoId: agentRepoId(a, REPO_ID_MEMO) })),
+	};
 }
 
 /**
@@ -108,22 +178,30 @@ export function mergeRosters(self: OperatorPresence, peers: OperatorPresence[]):
  * (the `ref`) — so two people don't unknowingly run agents over the same
  * checkout. Same-operator overlaps never collide; agents with no branch are
  * skipped (no known ref to compare against).
+ *
+ * Keyed on the repo's CROSS-HOST identity (normalized git origin — see
+ * repo-identity.ts), NOT the host-local `agent.repo` path: two operators working
+ * the same GitHub repo at different absolute paths now collide, and two unrelated
+ * repos that merely share a basename no longer false-collide.
  */
 export function detectCollisions(presences: OperatorPresence[]): Collision[] {
 	interface CollisionGroup {
+		repoId: string;
 		repo: string;
 		ref: string;
 		operators: Set<string>;
 		agents: Set<string>;
 	}
+	const idCache = new Map<string, string>();
 	const groups = new Map<string, CollisionGroup>();
 	for (const presence of presences) {
 		for (const agent of presence.agents) {
 			if (agent.branch === undefined) continue;
-			const key = `${agent.repo}\u0000${agent.branch}`;
+			const repoId = agentRepoId(agent, idCache);
+			const key = `${repoId}\u0000${agent.branch}`;
 			let group = groups.get(key);
 			if (group === undefined) {
-				group = { repo: agent.repo, ref: agent.branch, operators: new Set(), agents: new Set() };
+				group = { repoId, repo: agent.repo, ref: agent.branch, operators: new Set(), agents: new Set() };
 				groups.set(key, group);
 			}
 			group.operators.add(presence.operator.id);
@@ -133,7 +211,7 @@ export function detectCollisions(presences: OperatorPresence[]): Collision[] {
 	const collisions: Collision[] = [];
 	for (const group of groups.values()) {
 		if (group.operators.size < 2) continue;
-		collisions.push({ repo: group.repo, ref: group.ref, operators: [...group.operators], agents: [...group.agents] });
+		collisions.push({ repoId: group.repoId, repo: group.repo, ref: group.ref, operators: [...group.operators], agents: [...group.agents] });
 	}
 	return collisions;
 }
@@ -157,9 +235,9 @@ export interface FederationSnapshot extends FederationView {
 /**
  * Compose the two cross-operator primitives into the surface the UI/API wants:
  * merge self + peer rosters, then flag the branches different operators share.
- * ponytail: collisions key on `agent.repo` (a host-local path) via detectCollisions,
- * so cross-host collisions only fire when two hosts use the same checkout path;
- * full cross-host detection waits on a normalized `repoId` on AgentDTO (see docs/federation.md).
+ * Collisions key on each agent's cross-host repo identity (via detectCollisions →
+ * agentRepoId), so two operators on the same GitHub repo at different checkout
+ * paths now collide and same-basename-but-unrelated repos don't false-collide.
  */
 export function federationView(self: OperatorPresence, peers: OperatorPresence[]): FederationView {
 	const operators = mergeRosters(self, peers);
@@ -209,9 +287,15 @@ const MAX_BACKOFF_MS = 30_000;
 /** Wire frames exchanged with the coordinator. */
 type FederationFrame =
 	| { kind: "presence"; presence: OperatorPresence }
-	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string }
+	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string; to?: string; cmdId?: string }
+	| { kind: "command-ack"; cmdId: string; to: string; from?: string; outcome: CommandAck["outcome"]; detail?: string }
 	| { kind: "message"; from: Actor; text: string; ts: number }
 	| { kind: "leases"; repoId: string; operator: Actor; leases: LeaseEntry[] };
+
+/** Correlation id for a command → ack round trip. */
+function mintCmdId(): string {
+	return `cmd-${crypto.randomUUID()}`;
+}
 
 /** Shape of `tailscale whois --json <ip>` output we care about. */
 interface TailscaleWhoisResult {
@@ -226,7 +310,10 @@ interface TailscaleWhoisResult {
 async function tailscaleWhois(ip: string): Promise<Actor | undefined> {
 	try {
 		const proc = Bun.spawn(["tailscale", "whois", "--json", ip], { stdout: "pipe", stderr: "ignore" });
-		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		// Bounded: a missing/hung tailscale binary must not stall inbound command processing
+		// (a failed PATH lookup alone costs ~14s on WSL). Timeout ⇒ unverified ⇒ viewer.
+		const timer = setTimeout(() => proc.kill(), 3000);
+		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]).finally(() => clearTimeout(timer));
 		if (code !== 0) return undefined;
 		const parsed = JSON.parse(out) as TailscaleWhoisResult;
 		const id = parsed.UserProfile?.LoginName;
@@ -276,6 +363,7 @@ export class TailnetFederationBus implements FederationBus {
 	private readonly whois: (ip: string) => Promise<Actor | undefined>;
 	private readonly presenceCbs: ((presence: OperatorPresence) => void)[] = [];
 	private readonly commandCbs: ((remote: RemoteCommand) => void)[] = [];
+	private readonly ackCbs: ((ack: CommandAck) => void)[] = [];
 	private readonly messageCbs: ((msg: TeamMessage) => void)[] = [];
 	private readonly leasesCbs: ((frame: RemoteLeases) => void)[] = [];
 	private ws?: WebSocket;
@@ -315,8 +403,11 @@ export class TailnetFederationBus implements FederationBus {
 	}
 
 	publishPresence(presence: OperatorPresence): void {
-		this.lastPresence = presence;
-		this.send({ kind: "presence", presence });
+		// Stamp cross-host repoId on each agent before it leaves this host — only we can
+		// derive identity from our own paths, and peers key collisions on it (#9).
+		const stamped = stampRepoIds(presence);
+		this.lastPresence = stamped;
+		this.send({ kind: "presence", presence: stamped });
 	}
 
 	onPresence(cb: (presence: OperatorPresence) => void): void {
@@ -325,6 +416,22 @@ export class TailnetFederationBus implements FederationBus {
 
 	onRemoteCommand(cb: (remote: RemoteCommand) => void): void {
 		this.commandCbs.push(cb);
+	}
+
+	sendCommand(cmd: ClientCommand, to?: string): string {
+		// `actor` here is only a CLAIM for the peer's audit trail — the receiver derives
+		// authority solely from the coordinator-stamped ip via whois (remoteCommandActor).
+		const cmdId = mintCmdId();
+		this.send({ kind: "command", cmd, actor: this.operator, to, cmdId });
+		return cmdId;
+	}
+
+	sendAck(ack: CommandAck, to: string): void {
+		this.send({ kind: "command-ack", cmdId: ack.cmdId, to, from: this.operator.id, outcome: ack.outcome, detail: ack.detail });
+	}
+
+	onAck(cb: (ack: CommandAck) => void): void {
+		this.ackCbs.push(cb);
 	}
 
 	sendMessage(text: string): void {
@@ -401,8 +508,16 @@ export class TailnetFederationBus implements FederationBus {
 					for (const cb of this.presenceCbs) cb(frame.presence);
 					break;
 				case "command": {
+					// Addressed to a specific operator ⇒ everyone else drops it (the coordinator broadcasts).
+					if (frame.to !== undefined && frame.to !== this.operator.id) break;
 					const actor = await this.resolveActor(frame);
-					for (const cb of this.commandCbs) cb({ cmd: frame.cmd, actor });
+					// The CLAIMED sender id addresses the ack only — never authority (that's `actor`).
+					for (const cb of this.commandCbs) cb({ cmd: frame.cmd, actor, cmdId: frame.cmdId, replyTo: frame.actor?.id });
+					break;
+				}
+				case "command-ack": {
+					if (frame.to !== this.operator.id) break;
+					for (const cb of this.ackCbs) cb({ cmdId: frame.cmdId, outcome: frame.outcome, detail: frame.detail, from: frame.from });
 					break;
 				}
 				case "message":
@@ -425,6 +540,189 @@ export class TailnetFederationBus implements FederationBus {
 	private async resolveActor(frame: { actor: Actor; ip?: string }): Promise<Actor> {
 		const verified = frame.ip !== undefined ? await this.whois(frame.ip).catch(() => undefined) : undefined;
 		return remoteCommandActor(frame.actor, verified);
+	}
+}
+
+/**
+ * The DEFAULT bus: a real, always-functioning federation bus.
+ *
+ * Single-host / no-coordinator is the COMMON case and must work with zero
+ * config: this bus then behaves as a local pub/sub — every `publish*` is
+ * delivered straight back to the local `on*` subscribers (loopback), so the
+ * manager's own roster/leases are live and observable in-process without any
+ * peer. It maintains its own {@link PeerRoster} for the merged view.
+ *
+ * When a `coordinatorUrl` IS configured it additionally opens a
+ * {@link TailnetFederationBus} to the coordinator: local publishes are forwarded
+ * to peers, and inbound peer frames fan out to the local subscribers AND update
+ * the roster — so collision detection runs over the merged local+peer roster.
+ *
+ * Resilient by construction: with no coordinator (or an unreachable one) it
+ * NEVER throws and NEVER blocks startup — `start()` resolves immediately and the
+ * inner Tailnet bus reconnects on its own capped backoff. This is what
+ * `NullFederationBus` is the explicit opt-out of (OMP_SQUAD_FEDERATION=0).
+ *
+ * Note on loopback vs. echo: the bus does NOT echo our OWN presence/leases back
+ * to us as if from a peer — loopback fires the same frame we published, tagged
+ * with our own operator id, and {@link PeerRoster.record} drops our own id. The
+ * inner Tailnet bus likewise never receives its own frames (the coordinator
+ * fans out to everyone BUT the sender), so a peer's frame arrives exactly once.
+ */
+export class LocalFederationBus implements FederationBus {
+	private readonly operator: Actor;
+	private readonly presenceCbs: ((presence: OperatorPresence) => void)[] = [];
+	private readonly commandCbs: ((remote: RemoteCommand) => void)[] = [];
+	private readonly ackCbs: ((ack: CommandAck) => void)[] = [];
+	private readonly messageCbs: ((msg: TeamMessage) => void)[] = [];
+	private readonly leasesCbs: ((frame: RemoteLeases) => void)[] = [];
+	/** Peer transport; created only when a coordinator URL is configured. */
+	private readonly peer?: TailnetFederationBus;
+	/** Merged peer roster (peers only — own echo dropped), surfaced to the federation view. */
+	readonly roster: PeerRoster;
+	private started = false;
+
+	constructor(opts: { operator: Actor; coordinatorUrl?: string | null; token?: string; ttlMs?: number; whois?: (ip: string) => Promise<Actor | undefined> }) {
+		this.operator = opts.operator;
+		this.roster = new PeerRoster(opts.operator.id, opts.ttlMs);
+		const url = opts.coordinatorUrl ?? undefined;
+		if (url !== undefined && url.length > 0) {
+			this.peer = new TailnetFederationBus({ coordinatorUrl: url, operator: opts.operator, token: opts.token, whois: opts.whois });
+			// Inbound peer frames update the roster AND fan out to local subscribers.
+			this.peer.onPresence((p) => {
+				this.roster.record(p);
+				this.fanoutPresence(p);
+			});
+			this.peer.onLeases((f) => this.fanoutLeases(f));
+			this.peer.onMessage((m) => this.fanoutMessage(m));
+			this.peer.onRemoteCommand((c) => this.fanoutCommand(c));
+			this.peer.onAck((a) => this.fanoutAck(a));
+		}
+	}
+
+	/** True when a coordinator is configured (peer gossip active); false ⇒ local-only loopback. */
+	get federated(): boolean {
+		return this.peer !== undefined;
+	}
+
+	async start(): Promise<void> {
+		this.started = true;
+		// Best-effort: a bad/unreachable coordinator must never throw or block — the
+		// inner bus connects in the background and reconnects on backoff.
+		await this.peer?.start().catch(() => {});
+	}
+
+	async stop(): Promise<void> {
+		this.started = false;
+		await this.peer?.stop().catch(() => {});
+	}
+
+	publishPresence(presence: OperatorPresence): void {
+		// Stamp cross-host repoId locally before it leaves this host (peers key collisions on it).
+		const stamped = stampRepoIds(presence);
+		// Loopback: local subscribers see our own roster immediately, coordinator or not.
+		this.fanoutPresence(stamped);
+		this.peer?.publishPresence(stamped);
+	}
+
+	onPresence(cb: (presence: OperatorPresence) => void): void {
+		this.presenceCbs.push(cb);
+	}
+
+	onRemoteCommand(cb: (remote: RemoteCommand) => void): void {
+		this.commandCbs.push(cb);
+	}
+
+	sendCommand(cmd: ClientCommand, to?: string): string {
+		// Self-addressed (or single-host, no peer): loopback through the same remote-command
+		// path a peer delivery would take — same code path, locally-verified identity.
+		if (to === undefined || to === this.operator.id) {
+			const cmdId = mintCmdId();
+			this.fanoutCommand({ cmd, actor: { id: this.operator.id, displayName: this.operator.displayName, origin: "remote" }, cmdId, replyTo: this.operator.id });
+			if (to === this.operator.id || this.peer === undefined) return cmdId;
+		}
+		return this.peer?.sendCommand(cmd, to) ?? "";
+	}
+
+	sendAck(ack: CommandAck, to: string): void {
+		// Self-addressed acks loop back (the solo/self-steer case); peer acks ride the coordinator.
+		if (to === this.operator.id) {
+			this.fanoutAck({ ...ack, from: this.operator.id });
+			return;
+		}
+		this.peer?.sendAck(ack, to);
+	}
+
+	onAck(cb: (ack: CommandAck) => void): void {
+		this.ackCbs.push(cb);
+	}
+
+	private fanoutAck(ack: CommandAck): void {
+		for (const cb of this.ackCbs) {
+			try {
+				cb(ack);
+			} catch {
+				// swallow
+			}
+		}
+	}
+
+	sendMessage(text: string): void {
+		const msg: TeamMessage = { from: this.operator, text, ts: Date.now() };
+		this.fanoutMessage(msg);
+		this.peer?.sendMessage(text);
+	}
+
+	onMessage(cb: (msg: TeamMessage) => void): void {
+		this.messageCbs.push(cb);
+	}
+
+	publishLeases(repoId: string, leases: LeaseEntry[]): void {
+		this.fanoutLeases({ repoId, operator: this.operator, leases });
+		this.peer?.publishLeases(repoId, leases);
+	}
+
+	onLeases(cb: (frame: RemoteLeases) => void): void {
+		this.leasesCbs.push(cb);
+	}
+
+	private fanoutPresence(presence: OperatorPresence): void {
+		for (const cb of this.presenceCbs) {
+			try {
+				cb(presence);
+			} catch {
+				// swallow: a throwing subscriber must not break the fan-out
+			}
+		}
+	}
+
+	private fanoutLeases(frame: RemoteLeases): void {
+		for (const cb of this.leasesCbs) {
+			try {
+				cb(frame);
+			} catch {
+				// swallow
+			}
+		}
+	}
+
+	private fanoutMessage(msg: TeamMessage): void {
+		for (const cb of this.messageCbs) {
+			try {
+				cb(msg);
+			} catch {
+				// swallow
+			}
+		}
+	}
+
+	private fanoutCommand(remote: RemoteCommand): void {
+		for (const cb of this.commandCbs) {
+			try {
+				cb(remote);
+			} catch {
+				// swallow
+			}
+		}
 	}
 }
 

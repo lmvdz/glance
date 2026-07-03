@@ -57,3 +57,20 @@ test("plan annotations broadcast live comment events", async () => {
   expect(events.some((event) => event.type === "comment" && event.comment.id === comment.id)).toBe(true);
   expect(events.some((event) => event.type === "comment-resolved" && event.id === comment.id)).toBe(true);
 });
+
+
+test("feature plan revision candidates list and transition through feature routes", async () => {
+  const { url, repo } = await fixture();
+  const feature = await fetch(`${url}/api/features/from-plan`, authed({ method: "POST", body: JSON.stringify({ repo, title: "Collaborative plan", planDir: "plans/ctx" }) })).then((res) => res.json());
+
+  const candidate = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-candidates?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: JSON.stringify({ planPath: "plans/ctx/01-spec.md", summary: "Change scope wording", producerAgentId: "a1" }) })).then((res) => res.json());
+  expect(candidate.state).toBe("candidate");
+
+  const accepted = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-candidates/${encodeURIComponent(candidate.id)}/accept?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: JSON.stringify({ reason: "matches operator request" }) })).then((res) => res.json());
+  expect(accepted.state).toBe("accepted");
+  expect(accepted.reviewer).toBe("web:admin");
+
+  const pipeline = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/pipeline?repo=${encodeURIComponent(repo)}`, authed()).then((res) => res.json());
+  expect(pipeline.candidates[0].state).toBe("accepted");
+  expect(pipeline.feature.planRevisionCandidates[0].summary).toBe("Change scope wording");
+});

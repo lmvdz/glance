@@ -44,11 +44,16 @@ test("asThinking is exact", () => {
 	expect(asThinking("high")).toBe("high");
 });
 
-test("parsePlanJson trims fields and drops empty owns entries; non-array owns → undefined", () => {
-	const plan = parsePlanJson('{"repo":" /x ","owns":[" src/web ","","\\t","a"]}');
+test("parsePlanJson trims scope arrays and drops non-array scope fields", () => {
+	const plan = parsePlanJson('{"repo":" /x ","requires":[" src/api ",""],"owns":[" src/web ","","\\t","a"],"produces":[" dist/app "],"scopeSource":"operator"}');
 	expect(plan?.repo).toBe("/x");
+	expect(plan?.requires).toEqual(["src/api"]);
 	expect(plan?.owns).toEqual(["src/web", "a"]);
-	expect(parsePlanJson('{"repo":"/x","owns":"src/web"}')?.owns).toBeUndefined();
+	expect(plan?.produces).toEqual(["dist/app"]);
+	expect(plan?.scopeSource).toBe("operator");
+	expect(parsePlanJson('{"repo":"/x","owns":"src/web","requires":"src","produces":"dist","scopeSource":"bad"}')).toMatchObject({ repo: "/x" });
+	expect(parsePlanJson('{"repo":"/x","owns":"src/web","requires":"src","produces":"dist","scopeSource":"bad"}')?.owns).toBeUndefined();
+	expect(parsePlanJson('{"repo":"/x","scopeSource":"bad"}')?.scopeSource).toBeUndefined();
 });
 
 test("parseApproval: APPROVE token wins, REJECT is a negative guard, JSON not required", () => {

@@ -14,8 +14,18 @@
  * grounded escalate tier — each tier overflowing to the next as its budget exhausts.
  */
 
+import * as path from "node:path";
 import type { VerifySpec } from "../types.ts";
 import type { Workflow, WorkflowNode } from "./types.ts";
+
+/**
+ * Absolute path to codefix.ts — resolved against THIS file's own directory so
+ * the script is found in omp-squad's install dir, NOT in the target repo's cwd
+ * (where `src/workflow/codefix.ts` does not exist). Shell-quoted to handle
+ * spaces in the install path.
+ */
+const CODEFIX_SCRIPT = `"${path.join(import.meta.dir, "codefix.ts").replace(/"/g, '\\"')}"`;
+const CODEFIX_CMD = `bun ${CODEFIX_SCRIPT} .`;
 
 const IMPLEMENT_PROMPT = "Complete the goal above. Implement it fully, then stop.";
 const FIXUP_PROMPT = "The verify command failed. Read the recent command output and fix every failure it reports. Change only what the failures require, then stop.";
@@ -29,7 +39,7 @@ export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
 		["start", { id: "start", kind: "start", label: "Start", attrs: {} }],
 		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
 		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "codefix", attrs: {} }],
-		["codefix", { id: "codefix", kind: "command", label: "Codefix", script: "bun src/workflow/codefix.ts .", maxVisits: 1, overflow: "fixup", attrs: {} }],
+		["codefix", { id: "codefix", kind: "command", label: "Codefix", script: CODEFIX_CMD, maxVisits: 1, overflow: "fixup", attrs: {} }],
 		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, overflow: "escalate", attrs: {} }],
 		["escalate", { id: "escalate", kind: "agent", label: "Escalate", prompt: ESCALATE_PROMPT, maxVisits: 2, attrs: {} }],
 		["exit", { id: "exit", kind: "exit", label: "Exit", attrs: {} }],
@@ -66,7 +76,7 @@ export function buildTddVerifyWorkflow(spec: VerifySpec): Workflow {
 		["write-test", { id: "write-test", kind: "agent", label: "Write test", prompt: WRITE_TEST_PROMPT, attrs: {} }],
 		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
 		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "codefix", attrs: {} }],
-		["codefix", { id: "codefix", kind: "command", label: "Codefix", script: "bun src/workflow/codefix.ts .", maxVisits: 1, overflow: "fixup", attrs: {} }],
+		["codefix", { id: "codefix", kind: "command", label: "Codefix", script: CODEFIX_CMD, maxVisits: 1, overflow: "fixup", attrs: {} }],
 		["fixup", { id: "fixup", kind: "agent", label: "Fixup", prompt: FIXUP_PROMPT, maxVisits: spec.maxFixups ?? 3, overflow: "escalate", attrs: {} }],
 		["escalate", { id: "escalate", kind: "agent", label: "Escalate", prompt: ESCALATE_PROMPT, maxVisits: 2, attrs: {} }],
 		["exit", { id: "exit", kind: "exit", label: "Exit", attrs: {} }],

@@ -4,6 +4,7 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: `src/capabilities/*`, `src/squad-manager.ts`, `src/workflow-catalog.ts`, `src/workflow-driver.ts`, `src/flue-service-driver.ts`, `src/rpc-agent.ts`, `src/agent-host.ts`, `tests/capabilities-runtime.test.ts`
+PLANE: OMPSQ-324 — https://app.plane.so/inkwell-finance/browse/OMPSQ-324/
 
 ## Goal
 

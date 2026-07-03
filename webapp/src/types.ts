@@ -41,9 +41,22 @@ export interface TaskComment {
 }
 
 
+export interface TaskProofProvenance {
+  source: { type: "plan" | "persisted" | "issue" | "agent" | "manual"; label: string; path?: string; issueIdentifiers?: string[] };
+  worktrees: import("./lib/dto").FeatureWorktreeStatusDTO[];
+  proof?: import("./lib/dto").FeatureProofAggregateDTO;
+  readiness?: import("./lib/dto").FeatureReadinessDTO;
+  candidates: import("./lib/dto").PlanRevisionCandidateDTO[];
+}
+
 export interface Task {
+  /** STABLE identity — always the feature id (selection depends on it never changing across renders). */
   id: string;
+  /** Human tracker handle (e.g. "OMPSQ-306") when a Plane ticket is linked — display only, loads async. */
+  displayId?: string;
   sourceId?: string;
+  /** plans/<name>/ directory when this task is a plan — the readable handle the list shows. */
+  planDir?: string;
   title: string;
   category: 'frontend' | 'devops' | 'backend' | 'mcp' | 'database';
   duration: string;
@@ -66,4 +79,5 @@ export interface Task {
   };
   tags: string[];
   comments?: TaskComment[];
+  proofProvenance?: TaskProofProvenance;
 }

@@ -563,13 +563,17 @@ test("holdForConfirm: a re-adopted idle agent is staged for a one-tap Land, not 
 	expect(landed).toEqual([]);
 });
 
-// ── OMPSQ-139: halted/landed/staged are persisted by branch so a restart doesn't re-drive ──
-// agents. A fresh Orchestrator sharing the same on-disk ledger must skip a previously-parked or
-// already-landed branch even though create() mints a new agent id on re-adoption.
+// ── OMPSQ-139/308: halted/landed/staged are persisted by repo+branch+HEAD so a restart doesn't
+// re-drive the same tree, but a branch name reused at a new HEAD is not skipped by stale state.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { openOrchestratorState } from "../src/orchestrator-state.ts";
+
+async function git(cwd: string, ...args: string[]): Promise<void> {
+	const code = await Bun.spawn(["git", "-C", cwd, ...args], { stdout: "ignore", stderr: "ignore" }).exited;
+	if (code !== 0) throw new Error(`git ${args.join(" ")} failed in ${cwd}`);
+}
 
 test("halted/landed decisions persist across a restart, keyed by branch (OMPSQ-139)", async () => {
 	process.env.OMP_SQUAD_AUTODRIVE = "1";
@@ -627,6 +631,159 @@ test("halted/landed decisions persist across a restart, keyed by branch (OMPSQ-1
 		});
 		await orch4.tick();
 		expect(verified4).toEqual([]); // landed branch skipped before verify
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("reused branch at a new HEAD is not skipped by stale landed state (OMPSQ-308)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const dir = mkdtempSync(path.join(tmpdir(), "orch-head-key-"));
+	const repo = dir;
+	try {
+		await git(repo, "init", "-q");
+		await git(repo, "config", "user.email", "t@t");
+		await git(repo, "config", "user.name", "t");
+		await Bun.write(path.join(repo, "f.txt"), "one\n");
+		await git(repo, "add", "f.txt");
+		await git(repo, "commit", "-qm", "one");
+		await git(repo, "checkout", "-qb", "feat/reuse");
+
+		const persist = openOrchestratorState(dir);
+		const first = { ...agent("first", "idle", "F8"), repo, worktree: repo, branch: "feat/reuse" };
+		const orch1 = new Orchestrator({
+			listAgents: () => [first],
+			spawn: async () => { throw new Error("no spawn"); },
+			verify: async () => true,
+			land: async () => true,
+			persist,
+		});
+		await orch1.tick();
+
+		await Bun.write(path.join(repo, "f.txt"), "two\n");
+		await git(repo, "add", "f.txt");
+		await git(repo, "commit", "-qm", "two");
+
+		const verified: string[] = [];
+		const second = { ...agent("second", "idle", "F8"), repo, worktree: repo, branch: "feat/reuse" };
+		const orch2 = new Orchestrator({
+			listAgents: () => [second],
+			spawn: async () => { throw new Error("no spawn"); },
+			verify: async (id) => { verified.push(id); return true; },
+			land: async () => true,
+			persist: openOrchestratorState(dir),
+		});
+		await orch2.tick();
+		expect(verified).toEqual(["F8"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── #15: re-entrancy guard ─────────────────────────────────────────────────────
+// A tick that takes longer than the interval must not be overlapped by the next one.
+// The guard must release in the `finally` block even when the tick throws.
+
+test("re-entrancy guard: a second tick that arrives while the first is in flight is skipped (#15)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	let verifyCalls = 0;
+	let resolveBlock!: () => void;
+	const blockFirst = new Promise<void>((res) => { resolveBlock = res; });
+
+	const orch = new Orchestrator({
+		listAgents: () => [agent("ag", "idle", "F5")],
+		spawn: async () => { throw new Error("no spawn"); },
+		verify: async () => {
+			verifyCalls++;
+			// First verify call blocks until we release it — simulates a slow tick.
+			if (verifyCalls === 1) await blockFirst;
+			return true;
+		},
+		land: async () => true,
+		log: () => {},
+	});
+
+	// Start first tick (long-running) and second tick concurrently.
+	const t1 = orch.tick();
+	// The second tick must be a no-op because ticking=true.
+	const t2 = orch.tick();
+	await t2; // resolves immediately (skipped)
+	expect(verifyCalls).toBe(1); // second tick was a no-op — guard fired
+
+	resolveBlock(); // let the first tick complete
+	await t1;
+	expect(verifyCalls).toBe(1); // still only one verify call from tick 1
+
+	// After tick 1 completes, the guard is released and a new tick may proceed.
+	await orch.tick();
+	// ag was already landed by tick1 — so no new verify call.
+	expect(verifyCalls).toBe(1);
+});
+
+test("re-entrancy guard releases after a throwing tick — subsequent ticks proceed normally (#15)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	let calls = 0;
+	const orch = new Orchestrator({
+		listAgents: () => [agent("ag", "idle", "F6")],
+		spawn: async () => { throw new Error("no spawn"); },
+		verify: async () => {
+			calls++;
+			if (calls === 1) throw new Error("simulated transient failure");
+			return true;
+		},
+		land: async () => true,
+		log: () => {},
+	});
+
+	// First tick throws — the guard must release in finally so the next tick runs.
+	// (The outer interval handler in start() catches and logs this — here we catch it directly.)
+	await orch.tick().catch(() => {});
+	expect(calls).toBe(1);
+
+	// Guard must be released; second tick must proceed.
+	await orch.tick();
+	expect(calls).toBe(2); // second tick verified the agent
+});
+
+// ── #19: ledger purge ─────────────────────────────────────────────────────────
+// Ledger entries for branches that no longer exist in the roster must be purged so
+// the on-disk state file doesn't grow unbounded.
+
+test("purgeStale: ledger entries for gone branches are purged; live branches are untouched (#19)", async () => {
+	process.env.OMP_SQUAD_AUTODRIVE = "1";
+	const dir = mkdtempSync(path.join(tmpdir(), "orch-purge-"));
+	try {
+		const persist = openOrchestratorState(dir);
+		const liveKey = JSON.stringify(["/r", "feat/live", "unknown"]);
+		const goneKey = JSON.stringify(["/r", "feat/gone", "unknown"]);
+		persist.markLanded(goneKey); // this branch will not appear in the roster
+		persist.markHalted(liveKey); // this one will stay
+
+		expect(persist.isLanded(goneKey)).toBe(true);
+		expect(persist.isHalted(liveKey)).toBe(true);
+
+		// Roster contains only feat/live.
+		const rosterAgent = { ...agent("a", "idle", "F7"), branch: "feat/live" };
+		const orch = new Orchestrator({
+			listAgents: () => [rosterAgent],
+			spawn: async () => { throw new Error("no spawn"); },
+			verify: async () => true,
+			land: async () => true,
+			persist,
+			log: () => {},
+		});
+
+		await orch.tick();
+
+		// feat/live is live — must NOT be purged.
+		expect(persist.isHalted(liveKey)).toBe(true);
+		// feat/gone is absent from the roster — must be purged.
+		expect(persist.isLanded(goneKey)).toBe(false);
+
+		// Purge must be durable: a new persistence instance over the same file must also show the purge.
+		const persist2 = openOrchestratorState(dir);
+		expect(persist2.isLanded(goneKey)).toBe(false);
+		expect(persist2.isHalted(liveKey)).toBe(true);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
