@@ -32,7 +32,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser } from "./workos-provision.ts";
+import { approveJoinRequest, denyJoinRequest, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
@@ -606,10 +606,16 @@ export class SquadServer {
 			const verdict = verifyWorkosSignature({ rawBody: raw, sigHeader: req.headers.get("workos-signature"), secret, now: Date.now() });
 			if (!verdict.ok) return new Response(`invalid signature: ${verdict.reason}`, { status: 400 });
 			const evt = parseWorkosEvent(raw);
-			// SECURELY RECEIVED. Provisioning (create org / add-remove membership on dsync.*) is the documented
-			// follow-up in docs/workos-sso.md — it needs a live WorkOS directory to finalize the org mapping,
-			// so we log the verified event here rather than ship untested identity-mutating DB writes.
-			if (evt) console.log(`[workos] dsync event received: ${evt.event} (${evt.id})`);
+			// SECURELY RECEIVED → provision. dsync.user.created/updated/group.user_added add the member to the
+			// mapped org (creating the user by email if needed); dsync.user.deleted/group.user_removed remove them.
+			if (evt && this.db) {
+				try {
+					const result = await provisionScimEvent(this.db.db, evt);
+					if (result.handled) console.log(`[workos] dsync ${evt.event} → ${result.action}`);
+				} catch (err) {
+					console.error(`[workos] dsync provisioning failed for ${evt.event}:`, err);
+				}
+			}
 			return new Response("ok");
 		}
 		if (url.pathname === "/llms.txt") return new Response("# omp-squad capability API\n\n- GET /api/capability-discovery\n- GET /api/capability-catalog\n- GET /api/capability-packs\n- POST /api/capability-sources\n- POST /api/capability-installs\n- GET /api/federation/capabilities\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
