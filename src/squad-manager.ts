@@ -13,7 +13,8 @@ import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
+import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, PeerRoster, type RemoteCommand } from "./federation.ts";
+import { attachLeaseGossip, LEASE_GOSSIP_INTERVAL_MS, type LeaseGossip } from "./federation-sync.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
@@ -297,6 +298,11 @@ export interface SquadManagerOptions {
 	/** Reward disbursement seam. Default: paymentProviderFromEnv() — Tremendous when an API key is set,
 	 *  else a records-only ManualProvider. Inject a fake in tests to avoid the network. */
 	paymentProvider?: PaymentProvider;
+	/** Extra repo paths to always gossip file leases for (OMP_SQUAD_FED_REPOS), on top of those the
+	 *  presence registry discovers. The daemon gossips owned leases in-process over `bus` (SEAM 1). */
+	fedRepos?: string[];
+	/** Owned-lease gossip cadence override (default {@link LEASE_GOSSIP_INTERVAL_MS}); tests use a fast tick. */
+	leaseGossipIntervalMs?: number;
 }
 
 export interface CommissionOptions {
@@ -314,6 +320,15 @@ export class SquadManager extends EventEmitter {
 	readonly agents = new Map<string, AgentRecord>();
 	private readonly bus: FederationBus;
 	private readonly operator: Actor;
+	/** Peer operator presence observed off the bus's existing presence stream (SEAM 2: collapses the
+	 *  server's former second, read-only coordinator socket). Own-echo dropped, stale peers pruned. */
+	private readonly peerRoster: PeerRoster;
+	/** In-process owned-lease gossip engine (SEAM 1), attached to `bus` on start when federation is live. */
+	private leaseGossip?: LeaseGossip;
+	private leaseGossipTimer?: Timer;
+	/** Extra repo paths to always gossip leases for (OMP_SQUAD_FED_REPOS). */
+	private readonly fedRepos: string[];
+	private readonly leaseGossipIntervalMs: number;
 	private availability: OperatorPresence["availability"] = "active";
 	private readonly stateDir: string;
 	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
@@ -381,6 +396,9 @@ export class SquadManager extends EventEmitter {
 		super();
 		this.operator = opts.operator ?? LOCAL_ACTOR;
 		this.bus = opts.bus ?? new NullFederationBus();
+		this.peerRoster = new PeerRoster(this.operator.id);
+		this.fedRepos = opts.fedRepos ?? [];
+		this.leaseGossipIntervalMs = opts.leaseGossipIntervalMs ?? (Number(process.env.OMP_SQUAD_LEASE_GOSSIP_MS) || LEASE_GOSSIP_INTERVAL_MS);
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
 		setProofRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
@@ -475,6 +493,24 @@ export class SquadManager extends EventEmitter {
 				waiter(ack);
 			}
 		});
+		// SEAM 2: observe peer operator presence off the bus's OWN presence stream (which already receives
+		// coordinator frames) instead of dialing a second read-only socket. Own loopback echoes are dropped
+		// by PeerRoster (self id). NullFederationBus never fires this, so the roster stays empty (inert).
+		this.bus.onPresence((presence) => this.peerRoster.record(presence));
+		// SEAM 1: gossip THIS operator's owned file leases in-process over the same bus, on a timer — so a
+		// normal daemon shares leases without the standalone federation-sync worker. Skipped for the inert
+		// NullFederationBus (OMP_SQUAD_FEDERATION=0 stays a pure no-op: no timer, no registry reads).
+		if (!(this.bus instanceof NullFederationBus)) {
+			this.leaseGossip = attachLeaseGossip({
+				bus: this.bus,
+				operator: this.operator,
+				repos: this.fedRepos,
+				onMirror: (frame) => this.log("info", `federation: mirrored ${frame.leases.length} lease(s) for ${frame.repoId} from ${frame.operator.id}`),
+			});
+			void this.leaseGossip.publishNow().catch(() => {});
+			this.leaseGossipTimer = setInterval(() => void this.leaseGossip?.publishNow().catch(() => {}), this.leaseGossipIntervalMs);
+			this.leaseGossipTimer.unref?.();
+		}
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
 		await this.refreshPlanFeatureSignature();
 		// Auto-dispatch + auto-land (Orchestrator) live in start(), so they are per-org for free in DB
@@ -698,6 +734,7 @@ export class SquadManager extends EventEmitter {
 		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
+		clearInterval(this.leaseGossipTimer);
 		await this.persist();
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
@@ -3409,6 +3446,24 @@ export class SquadManager extends EventEmitter {
 	setAvailability(a: OperatorPresence["availability"]): void {
 		this.availability = a;
 		this.publishPresence();
+	}
+
+	/**
+	 * Live peer operator presence observed off the federation bus (SEAM 2). The server's
+	 * `/api/federation` surface reads this instead of maintaining its own second coordinator
+	 * socket. Stale peers are pruned; empty when there's no coordinator (or federation is off).
+	 */
+	peerPresence(now?: number): OperatorPresence[] {
+		return this.peerRoster.live(now);
+	}
+
+	/**
+	 * Gossip this operator's own live file leases once, now (SEAM 1). Also driven by an internal
+	 * timer once started; exposed so a caller (or a test) can force an immediate publish. No-op
+	 * (returns []) when federation is off (NullFederationBus) — the engine is never attached.
+	 */
+	async gossipLeasesNow(): Promise<string[]> {
+		return (await this.leaseGossip?.publishNow().catch(() => [] as string[])) ?? [];
 	}
 
 	// ── Persistence ───────────────────────────────────────────────────────────

@@ -14,17 +14,26 @@ import type { FederationSyncHandle } from "../src/federation-sync.ts";
 import { LocalFederationBus, type RemoteLeases } from "../src/federation.ts";
 import { claimLease, holdersOf, type LeaseEntry, leasesFor, mirrorLease, releaseSession } from "../src/leases.ts";
 import { normalizeGitUrl, repoIdentity } from "../src/repo-identity.ts";
+import { SquadManager } from "../src/squad-manager.ts";
+
+// Keep the daemon's background loops out of these transport tests.
+process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
 let coordinator: CoordinatorHandle | undefined;
 let sync: FederationSyncHandle | undefined;
 let peer: WebSocket | undefined;
 const liveBuses: LocalFederationBus[] = [];
+const liveManagers: Array<{ manager: SquadManager; stateDir: string }> = [];
 const cleanupRepos: Array<{ repo: string; sessions: string[] }> = [];
 
 afterEach(async () => {
 	if (sync) await sync.stop();
 	if (peer) peer.close();
 	for (const b of liveBuses.splice(0)) await b.stop().catch(() => {});
+	for (const { manager, stateDir } of liveManagers.splice(0)) {
+		await manager.stop().catch(() => {});
+		await fs.rm(stateDir, { recursive: true, force: true }).catch(() => {});
+	}
 	if (coordinator) coordinator.stop();
 	sync = undefined;
 	peer = undefined;
@@ -176,4 +185,46 @@ test("a peer's lease gossiped through two LocalFederationBus instances mirrors u
 	// And the lease-hook's contention check (holdersOf) sees the cross-host holder on Bob's box.
 	const contenders = await holdersOf(bobRepo, "src/server.ts", "bob:1");
 	expect(contenders.map((l) => l.operator)).toContain("alice");
+});
+
+test("SEAM 1: a lone SquadManager gossips its owned leases in-process — no standalone federation-sync worker", async () => {
+	const origin = "git@github.com:acme/inproc.git";
+	const repo = await gitRepo(origin);
+	const repoId = repoIdentity(repo);
+	expect(repoId).toBe("github.com/acme/inproc");
+	cleanupRepos.push({ repo, sessions: ["carol:1"] });
+
+	coordinator = runCoordinator({ port: 0 });
+
+	// A raw peer on the hub collects the leases frame the DAEMON gossips (no startFederationSync here).
+	peer = await connect(coordinator.url);
+	const gotCarolFrame = Promise.withResolvers<RemoteLeases>();
+	peer.onmessage = (ev: MessageEvent) => {
+		const frame = JSON.parse(typeof ev.data === "string" ? ev.data : "") as { kind?: string } & RemoteLeases;
+		// The manager also publishes once (empty) at start, before the lease is claimed — ignore that;
+		// capture the frame that actually carries carol's owned lease.
+		if (frame.kind === "leases" && frame.operator.id === "carol" && frame.leases.some((l) => l.file === "src/manager.ts")) gotCarolFrame.resolve(frame);
+	};
+
+	// A real daemon: SquadManager over its OWN LocalFederationBus joined to the coordinator. The
+	// manager attaches the lease-gossip engine in start() — the standalone worker is never involved.
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "fed-inproc-state-"));
+	const operator = { id: "carol", origin: "local" as const };
+	const bus = new LocalFederationBus({ operator, coordinatorUrl: coordinator.url, whois: async () => undefined });
+	const manager = new SquadManager({ stateDir, operator, bus, fedRepos: [repo], leaseGossipIntervalMs: 10 * 60_000 });
+	await manager.start();
+	liveManagers.push({ manager, stateDir });
+
+	// Both the daemon's single bus and the raw peer are on the hub — exactly one socket for the daemon.
+	await waitFor(() => coordinator?.clients() === 2);
+
+	// Carol owns a lease locally; the daemon's in-process gossip publishes it to the peer.
+	await claimLease({ repo, file: "src/manager.ts", session: "carol:1", operator: "carol" });
+	const published = await manager.gossipLeasesNow();
+	expect(published).toContain(repoId);
+
+	const carolFrame = await gotCarolFrame.promise;
+	expect(carolFrame.repoId).toBe(repoId);
+	expect(carolFrame.leases.map((l) => l.file)).toContain("src/manager.ts");
+	expect(carolFrame.leases.every((l) => l.operator === "carol")).toBe(true);
 });
