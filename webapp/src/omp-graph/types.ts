@@ -184,3 +184,49 @@ export function kindColor(kind: string | undefined): string {
 export function statusColor(status: string | undefined): string {
   return (status && STATUS_COLOR[status]) || '#6d7480';
 }
+
+// ── attribution (GET /api/graph/attribution) — mirrors src/omp-graph/attribution.ts ──
+export interface PlanWorth {
+  name: string;
+  monthly: number;
+  prorated: number;
+  worth: number;
+}
+export interface AttributionDoc {
+  range: TimeRange;
+  binMs: number;
+  models: string[];
+  harnesses: string[];
+  byModel: Record<string, number[]>;
+  byHarness: Record<string, number[]>;
+  matrix: Record<string, Record<string, number>>;
+  totalCost: number;
+  plan?: PlanWorth;
+  generatedAt: number;
+}
+
+// ── provenance (GET /api/graph/provenance) — mirrors src/omp-graph/provenance.ts ──
+export interface ProvenanceRun {
+  agentId: string;
+  name: string;
+  startedAt: number;
+  endedAt?: number;
+  durationMs?: number;
+  costUsd?: number;
+  model?: string;
+  harness?: string;
+  status: string;
+  toolCalls: number;
+  branch?: string;
+}
+export interface ProvenanceDoc {
+  ticket: string;
+  concern?: { planDir: string; file: string; title: string; status: string };
+  feature?: { id: string; title: string };
+  runs: ProvenanceRun[];
+  land?: { sha: string; subject: string; dateMs: number; author: string };
+  generatedAt: number;
+}
+
+/** /api/graph now carries the subscription config alongside the doc. */
+export type GraphDocWire = GraphDoc & { plan?: { name: string; monthly: number } | null };
