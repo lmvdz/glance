@@ -310,3 +310,34 @@ test("appendConcernDecision returns null for a non-concern file", async () => {
 	await fs.writeFile(path.join(repo, "plans", "x", "00-overview.md"), "# Overview\n");
 	expect(await appendConcernDecision(repo, "plans/x/00-overview.md", "noop")).toBeNull();
 });
+
+// Stale-issue guard helpers (visual-plan-blocks incident): planDocRefs extracts the plan-doc
+// paths a plan-to-plane issue name carries verbatim; concernDocStatus reads one doc's STATUS.
+test("planDocRefs: extracts unique plan-doc paths from issue-name free text", async () => {
+	const { planDocRefs } = await import("../src/features.ts");
+	const name = "Implement plans/visual-plan-blocks/02-css-tokens.md EXACTLY. ONLY edit webapp/src/index.css per plans/visual-plan-blocks/02-css-tokens.md";
+	expect(planDocRefs(name)).toEqual(["plans/visual-plan-blocks/02-css-tokens.md"]);
+	expect(planDocRefs("no refs here")).toEqual([]);
+	expect(planDocRefs("see plans/a/01-x.md and plans/b/02-y.md")).toEqual(["plans/a/01-x.md", "plans/b/02-y.md"]);
+});
+
+test("concernDocStatus: reads STATUS from a concern doc; null for missing/status-less/escaping paths", async () => {
+	const { concernDocStatus, isClosedConcernStatus } = await import("../src/features.ts");
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "concern-status-"));
+	tmps.push(repo);
+	await fs.mkdir(path.join(repo, "plans/demo"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans/demo/01-a.md"), "# A\nSTATUS: closed\n");
+	await fs.writeFile(path.join(repo, "plans/demo/02-b.md"), "# B\n**Status:** open\n");
+	await fs.writeFile(path.join(repo, "plans/demo/notes.md"), "# just notes\n");
+
+	expect(await concernDocStatus(repo, "plans/demo/01-a.md")).toBe("closed");
+	expect(await concernDocStatus(repo, "plans/demo/02-b.md")).toBe("open");
+	expect(await concernDocStatus(repo, "plans/demo/notes.md")).toBeNull();
+	expect(await concernDocStatus(repo, "plans/demo/missing.md")).toBeNull();
+	expect(await concernDocStatus(repo, "../outside.md")).toBeNull(); // issue text is untrusted
+
+	expect(isClosedConcernStatus("closed")).toBe(true);
+	expect(isClosedConcernStatus("DONE")).toBe(true);
+	expect(isClosedConcernStatus("open")).toBe(false);
+	expect(isClosedConcernStatus("in-progress")).toBe(false);
+});

@@ -826,7 +826,8 @@ export type AutomationSkipReason =
 	| "idle" //            nothing to act on this tick (no candidates/findings)
 	| "already-handled" // all candidates already claimed / filed / deduped
 	| "human-review" //    work exists but is gated on human review / do-not-auto-land
-	| "blocked"; //        work exists but is blocked by open dependency issues
+	| "blocked" //         work exists but is blocked by open dependency issues
+	| "already-done"; //   open issue's work is already recorded done in the repo (closed plan concern)
 
 /**
  * One unit of background-loop work, the observability record the audit log never carried (it logs only

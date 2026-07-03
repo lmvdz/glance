@@ -66,6 +66,14 @@ export interface DispatchDeps {
 	record?: AutomationRecorder;
 	/** Restart-safe issue ids already dispatched by prior daemon boots. Omitted ⇒ in-memory only. */
 	ledger?: DispatchLedger;
+	/**
+	 * Stale-issue guard: true when the issue's work is already recorded done in the repo (its plan
+	 * concern doc is closed on the checked-out tree). A Plane issue that outlives its landed concern
+	 * would otherwise be re-dispatched, and the fresh unit's branch reverts evolved code back to the
+	 * spec's day-one state (the visual-plan-blocks incident). Detected ⇒ ledgered, never spawned.
+	 * The implementation may also close the issue to heal the drift. Errors ⇒ treated as not-done.
+	 */
+	alreadyDone?: (repo: string, issue: IssueRef) => Promise<boolean>;
 }
 
 export class Dispatcher {
@@ -180,6 +188,17 @@ export class Dispatcher {
 							this.deps.log(`defer ${issue.identifier ?? issue.id} — blocked by ${blockers.length} open issue(s)`);
 						}
 						noteSkip("blocked", `open issue blocked by ${blockers.length} dependency issue(s)`);
+						continue;
+					}
+					// Stale-issue guard: the repo already records this work done (closed plan concern) —
+					// spawning would re-implement a shipped spec against an evolved main. Ledgered so the
+					// (possibly failing-to-close) issue isn't re-examined every tick. Guard errors ⇒ dispatch
+					// normally (fail open): a broken guard must never wedge the autonomous loop.
+					if (this.deps.alreadyDone && (await this.deps.alreadyDone(repo, issue).catch(() => false))) {
+						this.dispatched.add(issue.id);
+						this.deps.ledger?.add(issue.id);
+						this.deps.log(`skip ${issue.identifier ?? issue.id} — its plan concern is already closed in ${repo} (stale issue, not dispatching)`);
+						noteSkip("already-done", "open issue's plan concern is already closed in the repo");
 						continue;
 					}
 					this.dispatched.add(issue.id);
