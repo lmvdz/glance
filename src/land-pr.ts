@@ -177,6 +177,10 @@ export interface EnsurePrResult {
 	ok: boolean;
 	prNumber?: number;
 	prUrl?: string;
+	/** The PR's actual draft/ready state at return time — never assume "draft"; an adopted PR may
+	 *  already be ready-for-review, and OMP_SQUAD_PR_DRAFT=0 creates non-draft PRs. Undefined only
+	 *  when gh didn't report it (adopt path on a `gh` that omitted `isDraft`). */
+	prState?: "draft" | "open";
 	detail?: string;
 }
 
@@ -192,14 +196,29 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 	// `gh pr list --head` with --state all in one call: OPEN ⇒ adopt (no push, no create); anything
 	// else present ⇒ the branch name was used by a prior (closed/merged) PR, so the next push must be
 	// force-with-lease, not a plain push (which would fail non-fast-forward against that stale ref).
-	const list = await ghJson<{ number: number; url: string; state: string }[]>(
-		["pr", "list", "--head", input.branch, "--repo", repoSlug, "--state", "all", "--json", "number,url,state"],
+	const list = await ghJson<{ number: number; url: string; state: string; headRefOid?: string; isDraft?: boolean }[]>(
+		["pr", "list", "--head", input.branch, "--repo", repoSlug, "--state", "all", "--json", "number,url,state,headRefOid,isDraft"],
 		input.repo,
 	);
 	if (list === undefined) return { ok: false, detail: `gh pr list --head ${input.branch} failed` };
 
 	const openPr = list.find((p) => p.state === "OPEN");
 	if (openPr) {
+		// CRITICAL: the downstream scratch gate always re-checks proof/merges against the LOCAL branch
+		// tip, but `gh pr merge` merges the PR's REMOTE head. If a prior attempt pushed tip-1 (gate
+		// FAILED) and the agent then committed a fix as tip-2 WITHOUT pushing, adopting this PR as-is
+		// would let `gh pr merge` land tip-1 — the exact code that failed the gate — un-gated. Sync the
+		// remote head to the local tip BEFORE returning ok, so the gate that runs next and the merge
+		// that runs after it always see the same ref.
+		const localTip = (await git(["rev-parse", input.branch], input.repo)).stdout.trim();
+		if (localTip && openPr.headRefOid && localTip !== openPr.headRefOid) {
+			await git(["fetch", "origin", input.branch], input.repo).catch(() => {});
+			const ff = await git(["merge-base", "--is-ancestor", openPr.headRefOid, input.branch], input.repo);
+			const sync = await git(ff.code === 0 ? ["push", "origin", input.branch] : ["push", "--force-with-lease", "origin", input.branch], input.repo);
+			if (sync.code !== 0) {
+				return { ok: false, detail: `git push failed to sync PR #${openPr.number}'s stale remote head (${openPr.headRefOid}) to local tip (${localTip}) for ${input.branch}: ${sync.stderr || sync.stdout}` };
+			}
+		}
 		if (!getPendingPr(input.stateDir, input.branch)) {
 			recordPendingPr(input.stateDir, {
 				branch: input.branch,
@@ -213,7 +232,7 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 				state: "open",
 			});
 		}
-		return { ok: true, prNumber: openPr.number, prUrl: openPr.url };
+		return { ok: true, prNumber: openPr.number, prUrl: openPr.url, prState: openPr.isDraft === undefined ? undefined : openPr.isDraft ? "draft" : "open" };
 	}
 
 	const priorClosed = list.some((p) => p.state !== "OPEN");
@@ -246,7 +265,7 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 		createdAt: Date.now(),
 		state: "open",
 	});
-	return { ok: true, prNumber, prUrl: url };
+	return { ok: true, prNumber, prUrl: url, prState: draftEnabled() ? "draft" : "open" };
 }
 
 // ── scratch worktree — disposable, never the primary checkout ──────────────────────────────────
@@ -345,7 +364,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// the branch must not authorize a merge of commits it never saw.
 	if (opts.requireProof) {
 		const reason = await proofGate(repo, worktree, branch, opts.verify);
-		if (reason) return { ok: false, committed: false, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: reason };
+		if (reason) return { ok: false, committed: false, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: ensure.prState ?? "draft", detail: reason };
 	}
 
 	await git(["fetch", "origin", opts.defaultBranch], repo);
@@ -390,10 +409,18 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		await removeScratchWorktree(repo, scratch);
 	}
 
-	// Green — merge via gh, not git.
+	// Green — merge via gh, not git. `--repo` is required on every gh invocation here (not just
+	// pr list/view/create): on a host-aliased origin gh can't infer the repo from cwd remotes, so
+	// without it these two calls would fail even though probe/list/view/create succeeded, making PR
+	// mode resolve as usable and then permanently fail every merge.
 	const method = mergeMethod();
-	await gh(["pr", "ready", String(ensure.prNumber)], repo); // best-effort draft→ready; harmless if already ready
-	const merged = await gh(["pr", "merge", String(ensure.prNumber), `--${method}`, "--delete-branch=false"], repo);
+	const repoSlug = slugOf(repo);
+	const wasDraft = ensure.prState === "draft";
+	const ready = await gh(["pr", "ready", String(ensure.prNumber), "--repo", repoSlug], repo); // draft→ready; harmless if already ready
+	if (ready.code !== 0 && wasDraft) {
+		return { ok: false, committed: false, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: `gh pr ready failed: ${ready.stderr || ready.stdout}` };
+	}
+	const merged = await gh(["pr", "merge", String(ensure.prNumber), `--${method}`, "--delete-branch=false", "--repo", repoSlug], repo);
 	if (merged.code !== 0) return { ok: false, committed: false, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed: ${merged.stderr || merged.stdout}` };
 
 	await git(["fetch", "origin", opts.defaultBranch], repo);

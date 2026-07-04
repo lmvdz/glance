@@ -56,7 +56,7 @@ import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, wit
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, recordDoneProof } from "./done-proof.ts";
-import { landAgentPr } from "./land-pr.ts";
+import { ensurePr, landAgentPr } from "./land-pr.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
@@ -1756,6 +1756,7 @@ export class SquadManager extends EventEmitter {
 			rec.dto.landReady = true;
 			this.emitAgent(rec);
 			this.log("info", `land-confirm: ${id} auto-resolved a conflict — ready to land`);
+			this.floatPrOnLandReady(rec);
 			return result;
 		}
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
@@ -1827,6 +1828,49 @@ export class SquadManager extends EventEmitter {
 		rec.dto.landReady = true;
 		this.emitAgent(rec);
 		this.log("info", `land-confirm: ${id} verified — ready to land`);
+		this.floatPrOnLandReady(rec);
+	}
+
+	/**
+	 * PR-mode landReady float (concern 06/DESIGN mode-dispatch ruling + the autoLand×PR matrix's
+	 * "landConfirm ON (default): landReady ⇒ push+draft" row): the moment an agent is flagged
+	 * ready-to-land — confirm-mode verified GREEN, or a staged auto-resolved conflict — PR mode should
+	 * already have pushed the branch and opened/adopted its PR, so the badge/URL exist at landReady
+	 * time instead of only appearing at merge-click. Concern 07's reconciler (`landReady && pr-mode &&
+	 * no ledger entry ⇒ retry ensurePr`) is a backstop for a FAILED float, not a substitute for one that
+	 * was never attempted — this is that attempt. Local mode (no `defaultBranch`) is a no-op.
+	 * Fire-and-forget: never blocks flagging the agent ready; a failure here is left for the
+	 * reconciler to retry from the PendingPr ledger.
+	 */
+	private floatPrOnLandReady(rec: AgentRecord): void {
+		const dto = rec.dto;
+		if (!dto.branch || dto.worktree === dto.repo) return; // nothing to land in PR mode
+		void (async () => {
+			try {
+				const mode = await this.resolveLandModeFor(dto.repo);
+				if (mode.mode !== "pr" || !mode.defaultBranch) return;
+				const ensure = await ensurePr({
+					repo: dto.repo,
+					branch: dto.branch as string,
+					defaultBranch: mode.defaultBranch,
+					title: `squad(${dto.name}): land ${dto.branch}`,
+					issueId: dto.issue?.id,
+					issueIdentifier: dto.issue?.identifier,
+					agentId: dto.id,
+					stateDir: this.stateDir,
+				});
+				if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
+					rec.dto.prUrl = ensure.prUrl;
+					rec.dto.prNumber = ensure.prNumber;
+					rec.dto.prState = ensure.prState ?? "draft";
+					this.emitAgent(rec);
+				} else {
+					this.log("warn", `land-confirm: PR float failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
+				}
+			} catch (e) {
+				this.log("warn", `land-confirm: PR float threw for ${dto.name} (${dto.branch}): ${e instanceof Error ? e.message : String(e)}`);
+			}
+		})();
 	}
 
 	/**

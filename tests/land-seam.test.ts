@@ -161,6 +161,15 @@ function mergeCallsAgainst(dir: string): SpawnCall[] {
 	return spawnLog.filter((c) => c.argv[0] === "git" && c.argv.includes("merge") && !c.argv.includes("merge-base") && c.cwd !== undefined && path.resolve(c.cwd) === resolved);
 }
 
+/** Poll a condition until true — for asserting on the OUTCOME of a fire-and-forget async float. */
+async function waitFor(fn: () => boolean, timeoutMs = 2000): Promise<void> {
+	const start = Date.now();
+	while (!fn()) {
+		if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for condition");
+		await new Promise((r) => setTimeout(r, 10));
+	}
+}
+
 function seedAgent(mgr: InstanceType<typeof SquadManager>, id: string, repo: string, worktree: string, branch: string, featureId?: string): void {
 	const dto: AgentDTO = {
 		id,
@@ -215,6 +224,41 @@ test("land(): CONTROL — local mode DOES run git merge against the primary chec
 	expect(result.mode).toBeUndefined(); // local mode sets no `mode` field
 	expect(result.merged).toBe(true);
 	expect(mergeCallsAgainst(repo).length).toBeGreaterThan(0);
+});
+
+// ── landReady float (DESIGN's mode-dispatch ruling + autoLand×PR matrix: "landConfirm ON (default):
+// landReady ⇒ push+draft") ─────────────────────────────────────────────────────────────────────────
+
+test("markLandReady(): PR mode floats a push + draft PR at landReady time, not only at merge-click", async () => {
+	const stateDir = await tmpDir("seam-ready-state-");
+	const { repo, origin } = await convergedRepo("seam-ready-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a1", repo, wt, "squad/a1");
+
+	(mgr as unknown as { markLandReady: (id: string) => void }).markLandReady("a1");
+
+	expect(mgr.agents.get("a1")?.dto.landReady).toBe(true);
+	await waitFor(() => mgr.agents.get("a1")?.dto.prUrl !== undefined);
+	expect(mgr.agents.get("a1")?.dto.prState).toBe("draft");
+	expect(mgr.agents.get("a1")?.dto.prNumber).toBeDefined();
+	expect(await gitOut(origin, "rev-parse", "refs/heads/squad/a1")).toBe(await gitOut(repo, "rev-parse", "squad/a1"));
+});
+
+test("markLandReady(): local mode is a no-op float (no prUrl set)", async () => {
+	const stateDir = await tmpDir("seam-ready-local-state-");
+	const { repo } = await convergedRepo("seam-ready-local-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const mgr = new TestManager({ stateDir });
+	mgr.forcedMode = "local";
+	seedAgent(mgr, "a1", repo, wt, "squad/a1");
+
+	(mgr as unknown as { markLandReady: (id: string) => void }).markLandReady("a1");
+	// Give any stray async work a chance to run before asserting the negative.
+	await new Promise((r) => setTimeout(r, 50));
+
+	expect(mgr.agents.get("a1")?.dto.landReady).toBe(true);
+	expect(mgr.agents.get("a1")?.dto.prUrl).toBeUndefined();
 });
 
 // ── landFeature() ────────────────────────────────────────────────────────────────────────────────

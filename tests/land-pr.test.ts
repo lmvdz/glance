@@ -25,10 +25,13 @@ interface GhPr {
 let prList: GhPr[] = [];
 let nextPrNumber = 100;
 let mergeShouldSucceed = true;
+let readyShouldSucceed = true;
 let mergeSimulator: ((cwd: string) => Promise<void>) | undefined;
 let prViewResponse: GhPr | undefined;
 const createCalls: string[][] = [];
 const pushCalls: string[][] = [];
+const readyCalls: string[][] = [];
+const mergeCalls: string[][] = [];
 let mergeCalled = false;
 
 async function mockGh(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -41,9 +44,12 @@ async function mockGh(args: string[], cwd: string): Promise<{ code: number; stdo
 		return { code: 0, stdout: `https://github.com/acme/app/pull/${num}\n`, stderr: "" };
 	}
 	if (args[0] === "pr" && args[1] === "ready") {
+		readyCalls.push(args);
+		if (!readyShouldSucceed) return { code: 1, stdout: "", stderr: "pr ready blocked (simulated)" };
 		return { code: 0, stdout: "", stderr: "" };
 	}
 	if (args[0] === "pr" && args[1] === "merge") {
+		mergeCalls.push(args);
 		mergeCalled = true;
 		if (!mergeShouldSucceed) return { code: 1, stdout: "", stderr: "merge blocked (simulated)" };
 		if (mergeSimulator) await mergeSimulator(cwd);
@@ -79,10 +85,13 @@ afterEach(() => {
 	prList = [];
 	nextPrNumber = 100;
 	mergeShouldSucceed = true;
+	readyShouldSucceed = true;
 	mergeSimulator = undefined;
 	prViewResponse = undefined;
 	createCalls.length = 0;
 	pushCalls.length = 0;
+	readyCalls.length = 0;
+	mergeCalls.length = 0;
 	mergeCalled = false;
 });
 
@@ -216,6 +225,63 @@ test("ensurePr with OMP_SQUAD_PR_DRAFT=0 creates a ready-for-review PR (no --dra
 	expect(createCalls[0]).not.toContain("--draft");
 });
 
+test("ensurePr adopting an OPEN PR whose remote head is stale (a prior attempt's gate-FAILED tip) syncs the local tip to origin before returning ok", async () => {
+	// Reproduces the exact critical flow: attempt 1 pushes tip-1 and opens a PR (gate FAILS); the agent
+	// commits a fix as tip-2 WITHOUT pushing; attempt 2 must NOT adopt the PR as-is (which would let
+	// `gh pr merge` merge remote tip-1 — the code that already failed the gate — un-gated).
+	const { repo, origin } = await baseline("ep-stale-ff-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "tip1\n" });
+	const tip1 = await gitOut(wt, "rev-parse", "HEAD");
+	await git(repo, "push", "-q", "origin", "squad/a1"); // attempt 1's push
+	await commit(wt, "feature.txt", "tip1\ntip2\n", "fix after gate failure"); // tip-2, never pushed
+	const tip2 = await gitOut(wt, "rev-parse", "HEAD");
+	const stateDir = await tmpDir("ep-stale-ff-state-");
+	prList = [{ number: 77, url: "https://github.com/acme/app/pull/77", state: "OPEN", headRefOid: tip1 }];
+
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir });
+
+	expect(r.ok).toBe(true);
+	expect(r.prNumber).toBe(77);
+	expect(createCalls.length).toBe(0); // still adopting #77, not creating a new PR
+	// The load-bearing assertion: origin's ref must now match the LOCAL tip (what the gate downstream
+	// actually checks), never left pinned at the stale, gate-failed tip1.
+	expect(await gitOut(origin, "rev-parse", "refs/heads/squad/a1")).toBe(tip2);
+	expect(await gitOut(origin, "rev-parse", "refs/heads/squad/a1")).not.toBe(tip1);
+});
+
+test("ensurePr adopting an OPEN PR whose remote head diverged (rewritten, not just advanced) force-with-lease syncs it", async () => {
+	const { repo, origin } = await baseline("ep-stale-diverge-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "tip1\n" });
+	const tip1 = await gitOut(wt, "rev-parse", "HEAD");
+	await git(repo, "push", "-q", "origin", "squad/a1");
+	// Rewrite (not merely advance) the tip — tip1 is NOT an ancestor of the new tip, the non-fast-forward case.
+	await fs.writeFile(path.join(wt, "feature.txt"), "tip1-rewritten\n");
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-q", "--amend", "-m", "rewritten fix");
+	const tip2 = await gitOut(wt, "rev-parse", "HEAD");
+	const stateDir = await tmpDir("ep-stale-diverge-state-");
+	prList = [{ number: 78, url: "https://github.com/acme/app/pull/78", state: "OPEN", headRefOid: tip1 }];
+
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir });
+
+	expect(r.ok).toBe(true);
+	expect(await gitOut(origin, "rev-parse", "refs/heads/squad/a1")).toBe(tip2);
+});
+
+test("ensurePr adopting an OPEN PR whose remote head already matches the local tip: no sync push needed", async () => {
+	const { repo, origin } = await baseline("ep-nostale-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "tip1\n" });
+	const tip1 = await gitOut(wt, "rev-parse", "HEAD");
+	await git(repo, "push", "-q", "origin", "squad/a1");
+	const stateDir = await tmpDir("ep-nostale-state-");
+	prList = [{ number: 79, url: "https://github.com/acme/app/pull/79", state: "OPEN", headRefOid: tip1 }];
+
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir });
+
+	expect(r.ok).toBe(true);
+	expect(await gitOut(origin, "rev-parse", "refs/heads/squad/a1")).toBe(tip1);
+});
+
 test("ensurePr force-with-lease pushes over a prior CLOSED PR's stale branch ref", async () => {
 	const { repo, origin } = await baseline("ep-reuse-");
 	// Simulate a prior (now-closed) PR: push an OLD commit to origin under the deterministic branch name.
@@ -271,6 +337,37 @@ test("landAgentPr: scratch gate green ⇒ merges, asserts reachability, records 
 	// origin (simulating GitHub) is what actually advanced.
 	expect(await gitOut(repo, "rev-parse", "main")).toBe(mainHead0);
 	expect(await gitOut(origin, "rev-parse", "main")).not.toBe(mainHead0);
+});
+
+test("landAgentPr: `gh pr ready` and `gh pr merge` are addressed with --repo <slug> (host-aliased-origin safe)", async () => {
+	const { repo } = await baseline("lp-repo-slug-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-repo-slug-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	expect(readyCalls.length).toBe(1);
+	expect(readyCalls[0]).toContain("--repo");
+	expect(mergeCalls.length).toBe(1);
+	expect(mergeCalls[0]).toContain("--repo");
+});
+
+test("landAgentPr: `gh pr ready` failing on a draft PR is refused (retryable) before attempting `gh pr merge`", async () => {
+	const { repo } = await baseline("lp-ready-fail-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-ready-fail-state-");
+	prList = []; // draftEnabled() defaults ON ⇒ the created PR is a draft
+	readyShouldSucceed = false;
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(false);
+	expect(res.retryable).toBe(true);
+	expect(res.detail).toContain("gh pr ready failed");
+	expect(mergeCalled).toBe(false); // never reached gh pr merge
 });
 
 test("landAgentPr: default merge method preserves ancestry (assertMerged ok via isAncestor)", async () => {
