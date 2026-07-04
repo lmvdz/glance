@@ -17,7 +17,7 @@ import type { RpcSessionState } from "../src/types.ts";
 import { type BranchSpec, WorkflowDriver } from "../src/workflow-driver.ts";
 import { parseWorkflow, WorkflowParseError } from "../src/workflow/dot.ts";
 import { evalCondition, WorkflowEngine } from "../src/workflow/engine.ts";
-import type { NodeExecutor, NodeResult, RunContext, WorkflowNode } from "../src/workflow/types.ts";
+import type { NodeExecutor, NodeResult, RunContext, WorkflowNode, WorkflowRunState } from "../src/workflow/types.ts";
 import { CommissionExecutor } from "../src/workflow/commission-executor.ts";
 import type { AgentDTO, GateReport } from "../src/types.ts";
 import { buildTddVerifyWorkflow, buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
@@ -676,6 +676,50 @@ test("WorkflowDriver: a fan-out spawns one fleet agent per branch and merges", a
 	expect(specA.parentNodeId).not.toBe(specB.parentNodeId); // siblings get distinct parentNodeIds, not one shared fork-node id
 	expect(specA.branchIndex).toBe(0);
 	expect(specB.branchIndex).toBe(0);
+	await driver.stop();
+});
+
+// Topology review finding 5: `branchIndexByNode` is per-DRIVER-INSTANCE, so it restarts at 0 on every
+// fresh driver — including one built for a cold resume. Without seeding it from the resumed run's own
+// in-progress fan-out, a re-spawned branch would duplicate a still-rostered sibling's persisted
+// branchIndex from an EARLIER visit of the same node (a fix-up loop re-entering one parallel node
+// across visits, exactly the case BranchSpec.branchIndex's doc says this field exists to distinguish).
+test("WorkflowDriver: a cold resume mid-fanout seeds branchIndex from the resumed visit instead of restarting at 0", async () => {
+	const file = await writeWorkflow(`digraph F {
+		start [shape=Mdiamond]
+		exit  [shape=Msquare]
+		fork  [shape=component, join_policy="wait_all"]
+		a [label="A", prompt="approach a"]
+		start -> fork
+		fork -> a
+		a -> exit
+	}`);
+	const fleetCalls: BranchSpec[] = [];
+	// As if the daemon crashed mid-fanout on fork's SECOND visit (visitIndex 1, 0-indexed) re-fanning out
+	// to "a" — a sibling from the FIRST visit is already rostered under parentNodeId "a", branchIndex 0.
+	const resumeState: WorkflowRunState = {
+		goal: "explore the change",
+		currentNode: "fork",
+		visits: { fork: 1 },
+		vars: {},
+		index: 2,
+		rollup: [],
+		branchOutcomes: { "fork#1:0": { disposition: "not_attempted", at: Date.now() } },
+	};
+	const driver = new WorkflowDriver({
+		id: "fan-resume",
+		workflowPath: file,
+		cwd: path.dirname(file),
+		createInnerDriver: () => new FakeInnerDriver(),
+		fleet: { runBranch: async (spec) => (fleetCalls.push(spec), { outcome: "succeeded", text: `${spec.name} done` }) },
+		resumeState,
+	});
+	const done = new Promise<void>((resolve) => driver.on("event", (f: Frame) => f.type === "agent_end" && resolve()));
+	await driver.start();
+	await done;
+	expect(fleetCalls).toHaveLength(1);
+	expect(fleetCalls[0]!.parentNodeId).toBe("a");
+	expect(fleetCalls[0]!.branchIndex).toBe(1); // NOT 0 — would collide with the first visit's already-rostered sibling
 	await driver.stop();
 });
 

@@ -160,8 +160,15 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	private gateSeq = 0;
 	private pendingGate?: PendingGate;
 	private runId = "";
-	/** Per-driver-instance branch counter keyed by node id — survives across a run's repeated visits to a
-	 *  parallel node (e.g. a fix-up loop that re-fans-out), so branchIndex stays monotonic per node. */
+	/**
+	 * Per-driver-instance branch counter keyed by TARGET node id — survives across a run's repeated
+	 * visits to a parallel node (e.g. a fix-up loop that re-fans-out to the same node), so branchIndex
+	 * stays monotonic per node. Topology review finding 5: this counter starts at 0 on every FRESH driver
+	 * instance, including one built for a cold resume/fork — so a re-spawned branch that resumes a
+	 * still-in-progress fan-out would otherwise duplicate a still-rostered sibling's persisted branchIndex
+	 * from an EARLIER visit of the same node (`seedFromResume` below closes that by replaying the resumed
+	 * fan-out's own visit count into this map before the engine ever calls `nextBranchIndex` again).
+	 */
 	private branchIndexByNode = new Map<string, number>();
 
 	constructor(opts: WorkflowDriverOptions) {
@@ -205,8 +212,46 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		this.alive = true;
 		this.emit("ready");
 		if (this.opts.resumeState) {
+			this.seedBranchIndexFromResume(this.opts.resumeState);
 			this.runActive = true;
 			void this.execRun(this.opts.resumeState.goal, this.opts.resumeState);
+		}
+	}
+
+	/**
+	 * Topology review finding 5: reconstruct this fresh driver's `branchIndexByNode` counts from a
+	 * resumed run's IN-PROGRESS fan-out, so a re-spawned branch picks up counting where the dead driver
+	 * left off instead of colliding with an already-rostered sibling's persisted branchIndex.
+	 *
+	 * `branchOutcomes` is populated ONLY while a parallel node is actively fanning out (self-clears on
+	 * join — see EngineCheckpoint.branchOutcomes), one entry per branch regardless of eventual disposition,
+	 * keyed `${forkId}#${visitIndex}:${i}` where `i` indexes the fork's branch target ids in the FIXED
+	 * order `this.wf.edges` gives them (the same list on every visit, since the graph is static). That
+	 * makes `visitIndex` double as "how many times has branchIds[i] already been fanned into BY THIS FORK"
+	 * — exactly what `nextBranchIndex` needs seeded so the next call for that target node returns
+	 * `visitIndex`, matching what the original (dead) driver would have assigned had it not crashed.
+	 * Every branch in the map is seeded, not just a `not_attempted` one that's about to be re-spawned now
+	 * — a LATER revisit of the same fork (another fix-up loop iteration) must keep counting from the true
+	 * history, not just from whatever this one resume happens to re-run.
+	 */
+	private seedBranchIndexFromResume(resume: WorkflowRunState): void {
+		const outcomes = resume.branchOutcomes;
+		if (!outcomes || !this.wf) return;
+		const branchIdsByFork = new Map<string, string[]>();
+		for (const key of Object.keys(outcomes)) {
+			const m = /^(.+)#(\d+):(\d+)$/.exec(key);
+			if (!m) continue;
+			const [, forkId, visitStr, iStr] = m as unknown as [string, string, string, string];
+			let branchIds = branchIdsByFork.get(forkId);
+			if (!branchIds) {
+				branchIds = this.wf.edges.filter((e) => e.from === forkId).map((e) => e.to);
+				branchIdsByFork.set(forkId, branchIds);
+			}
+			const targetId = branchIds[Number(iStr)];
+			if (targetId === undefined) continue;
+			const seeded = Number(visitStr) - 1; // nextBranchIndex's next call returns seeded+1 === visitIndex
+			const current = this.branchIndexByNode.get(targetId) ?? -1;
+			if (seeded > current) this.branchIndexByNode.set(targetId, seeded);
 		}
 	}
 
