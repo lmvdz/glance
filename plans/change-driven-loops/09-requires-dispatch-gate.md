@@ -1,6 +1,6 @@
 # Wire requires into the dispatch admission gate
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,6 +1,6 @@
 # Operator-declared requires/produces (UI + spawn path)
 
-STATUS: open
+STATUS: open — spawn API handler + legacy UI (src/web) shipped with concern 09; the React webapp spawn form and agent-card contract display are still missing
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
