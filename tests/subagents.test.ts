@@ -234,7 +234,12 @@ test("closeNonTerminal(): idempotent — a second call once everything is termin
 
 // ── mergeSubagents() ──────────────────────────────────────────────────────────
 
-test("mergeSubagents(): live wins per id, union includes persisted-only entries, stable sort by index/lastUpdate", () => {
+test("mergeSubagents(): a live id (still in progress, or reseeded on restore) wins over its persisted copy, and a persisted-only sibling from the SAME run survives the union", () => {
+	// "b" is persisted-only but NOT from an earlier run here — it's a sibling of "a" that got flushed to
+	// disk by an earlier dirty-flush THIS run, while "a" (still live) and "c" (freshly ingested) round out
+	// the same run's current tracker snapshot. This is the one shape where a persisted-only entry sits in
+	// the SAME run as `live`'s entries: nothing has been cleared yet, so `live` legitimately doesn't (yet)
+	// carry every id `persisted` does.
 	const persisted: SubagentNode[] = [
 		{ id: "a", agent: "explore", status: "running", lastUpdate: 100, index: 0 },
 		{ id: "b", agent: "reviewer", status: "completed", lastUpdate: 50, index: 1 },
@@ -244,9 +249,11 @@ test("mergeSubagents(): live wins per id, union includes persisted-only entries,
 		{ id: "c", agent: "worker", status: "running", lastUpdate: 300, index: 2 }, // live-only, tracker still has it
 	];
 	const merged = mergeSubagents(persisted, live);
-	expect(merged.map((n) => n.id)).toEqual(["a", "b", "c"]); // sorted by index
 	expect(merged.find((n) => n.id === "a")?.status).toBe("completed"); // live wins
 	expect(merged.find((n) => n.id === "b")).toBeDefined(); // persisted-only entry survives the union
+	// "a" and "c" (both currently live) sort together by index; "b" (persisted-only) keeps its given
+	// position in `persisted` rather than being re-interleaved by a raw index comparison against them.
+	expect(merged.map((n) => n.id)).toEqual(["b", "a", "c"]);
 });
 
 test("mergeSubagents(): treats undefined persisted as empty, still returns live", () => {
@@ -254,10 +261,47 @@ test("mergeSubagents(): treats undefined persisted as empty, still returns live"
 	expect(mergeSubagents(undefined, live)).toEqual(live);
 });
 
-test("mergeSubagents(): equal index falls back to lastUpdate for a stable order", () => {
-	const persisted: SubagentNode[] = [{ id: "old", agent: "x", status: "running", lastUpdate: 100, index: 0 }];
-	const live: SubagentNode[] = [{ id: "new", agent: "y", status: "running", lastUpdate: 200, index: 0 }];
-	expect(mergeSubagents(persisted, live).map((n) => n.id)).toEqual(["old", "new"]);
+test("mergeSubagents(): equal index within the SAME (live) run falls back to lastUpdate for a stable order", () => {
+	const live: SubagentNode[] = [
+		{ id: "old", agent: "x", status: "running", lastUpdate: 100, index: 0 },
+		{ id: "new", agent: "y", status: "running", lastUpdate: 200, index: 0 },
+	];
+	expect(mergeSubagents(undefined, live).map((n) => n.id)).toEqual(["old", "new"]);
+});
+
+// Topology review finding 6: `index` resets to 0 at the start of every run (the tracker is cleared at
+// every restart), so a bare "sort the union by index" interleaves two runs' children whenever their
+// indices tie. `persisted` here is run 1's history, already flushed and CLEARED from the tracker before
+// run 2 (fresh ids `c`/`d`) ever ingested a frame — the exact real-world shape the bug hits, since an id
+// only ever lands in `persisted`-but-not-`live` at a genuine run boundary.
+test("mergeSubagents(): two runs' children stay contiguous and chronological, never interleaved by index", () => {
+	const run1: SubagentNode[] = [
+		{ id: "a", agent: "explore", status: "completed", lastUpdate: 100, index: 0 },
+		{ id: "b", agent: "reviewer", status: "completed", lastUpdate: 150, index: 1 },
+	];
+	const run2Live: SubagentNode[] = [
+		{ id: "c", agent: "explore", status: "running", lastUpdate: 500, index: 0 },
+		{ id: "d", agent: "reviewer", status: "running", lastUpdate: 550, index: 1 },
+	];
+	const merged = mergeSubagents(run1, run2Live);
+	// Chronological and grouped by run — NOT ["a", "c", "b", "d"], the index-tie interleaving the bug produced.
+	expect(merged.map((n) => n.id)).toEqual(["a", "b", "c", "d"]);
+});
+
+test("mergeSubagents(): a full reseed of persisted history into live (restore/reattach) reproduces the same single-run order as before, no spurious run split", () => {
+	const persisted: SubagentNode[] = [
+		{ id: "a", agent: "explore", status: "completed", lastUpdate: 100, index: 0 },
+		{ id: "b", agent: "reviewer", status: "running", lastUpdate: 150, index: 1 },
+	];
+	// applySnapshot() reseeds the WHOLE persisted history into the live tracker on reattach/restore — every
+	// id `persisted` has is also in `live`, so nothing should be misclassified as "an earlier run".
+	const reseededLive: SubagentNode[] = [
+		{ id: "a", agent: "explore", status: "completed", lastUpdate: 100, index: 0 },
+		{ id: "b", agent: "reviewer", status: "aborted", lastUpdate: 999, index: 1 }, // closeNonTerminal closed it
+	];
+	const merged = mergeSubagents(persisted, reseededLive);
+	expect(merged.map((n) => n.id)).toEqual(["a", "b"]);
+	expect(merged.find((n) => n.id === "b")?.status).toBe("aborted"); // live (post-closure) wins
 });
 
 // ── the race this concern fixes ───────────────────────────────────────────────

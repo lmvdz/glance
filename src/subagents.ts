@@ -59,12 +59,30 @@ function toPersisted(n: SubagentNode): SubagentNode {
  * The single read/write contract for subagent lineage: persisted history ∪ live tracker, live wins per
  * id. Used both to compute what a flush writes AND what every reader (manager.subagents(), the
  * GET /api/agents/:id/subagents endpoint) returns — so the two surfaces can never drift, by construction.
+ *
+ * Topology review finding 6: `index` is spawn order WITHIN one run only (SubagentNode's own doc: "Spawn
+ * order within the parent run") — the tracker's node map is cleared at every restart (squad-manager.ts's
+ * `restart()`/close+clear sites), so a NEW run's first spawn is index 0 again. A single `sort by index`
+ * across the union therefore interleaves runs whenever their indices tie (run 2's children splicing
+ * between run 1's: s1(0), s3(0), s2(1), s4(1) instead of s1, s2, s3, s4).
+ *
+ * Fixed by grouping on RUN membership instead of comparing `index` across the whole union: any id the
+ * CURRENT tracker (`live`) itself carries belongs to the run in progress (or, on a reseed-from-persisted
+ * reattach, is being actively re-hosted by the live tracker — either way `live`'s copy is authoritative,
+ * matching the existing "live wins" rule). Everything left in `persisted` once those ids are excluded is
+ * strictly earlier history, and its relative order is PRESERVED AS GIVEN rather than re-derived: an
+ * earlier call to this same function already ordered it correctly (run-by-run, chronologically), and a
+ * fresh `index`-only sort over that blob would re-introduce the exact cross-run interleaving this fix
+ * removes, since `index` repeats in every run and was never meant to be globally comparable. `live` is
+ * still ordered internally by spawn order (ties broken by `lastUpdate`) — the same contract `list()`/
+ * `snapshot()` promise, reproduced here since this is an exported function any caller may feed an
+ * arbitrary `SubagentNode[]`, not only `SubagentTracker`'s own.
  */
 export function mergeSubagents(persisted: SubagentNode[] | undefined, live: SubagentNode[]): SubagentNode[] {
-	const byId = new Map<string, SubagentNode>();
-	for (const p of persisted ?? []) byId.set(p.id, p);
-	for (const l of live) byId.set(l.id, l); // live wins on id collision
-	return [...byId.values()].sort((a, b) => a.index - b.index || a.lastUpdate - b.lastUpdate);
+	const liveIds = new Set(live.map((l) => l.id));
+	const priorRuns = (persisted ?? []).filter((p) => !liveIds.has(p.id));
+	const currentRun = [...live].sort((a, b) => a.index - b.index || a.lastUpdate - b.lastUpdate);
+	return [...priorRuns, ...currentRun];
 }
 
 /**
