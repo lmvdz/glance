@@ -150,15 +150,25 @@ test("agentHasUnlandedWork: a dirty worktree short-circuits true WITHOUT ever ca
 
 test("agentHasUnlandedWork: a recorded DoneProof short-circuits false even though aheadOfBase reports ahead>0 (out-of-band squash-merge)", async () => {
 	canned = 5; // arithmetic alone would say "still ahead" — the squash-merge case DoneProof exists for
-	const stateDir = await tmpDir("ahw-proof-");
+	const repo = await tmpDir("ahw-proof-repo-");
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await fs.writeFile(path.join(repo, "a.txt"), "a\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	await git(repo, "branch", "squad/a1");
+	const tip = (await git(repo, "rev-parse", "squad/a1")).stdout;
+
+	const stateDir = await tmpDir("ahw-proof-state-");
 	const mgr = new TestManager({ stateDir });
-	seed(mgr, "a1", { repo: "/r", worktree: "/nonexistent-clean-dir-xyz", branch: "squad/a1" });
+	seed(mgr, "a1", { repo, worktree: "/nonexistent-clean-dir-xyz", branch: "squad/a1" });
 	recordDoneProof(stateDir, {
 		branch: "squad/a1",
 		repo: "name:r",
 		mode: "pr",
 		method: "squash",
-		commit: "deadbeef",
+		commit: tip, // matches the branch's CURRENT tip — proof covers it
 		baseRef: "origin/main",
 		verified: "green",
 		detail: "merged out-of-band via GitHub UI (squash)",
@@ -167,6 +177,46 @@ test("agentHasUnlandedWork: a recorded DoneProof short-circuits false even thoug
 
 	expect(await mgr.callAgentHasUnlandedWork("a1")).toBe(false);
 	expect(calls).toEqual([]); // proof short-circuits BEFORE the arithmetic ever runs
+});
+
+test("agentHasUnlandedWork regression: a proof recorded at T1 does NOT cover a later T2 commit on the same branch — falls back to arithmetic", async () => {
+	canned = 1; // T2's follow-up commit is genuinely unlanded
+	const repo = await tmpDir("ahw-proof-t2-repo-");
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await fs.writeFile(path.join(repo, "a.txt"), "a\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	await git(repo, "checkout", "-qb", "squad/a1");
+	await fs.writeFile(path.join(repo, "b.txt"), "b\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "T1");
+	const t1 = (await git(repo, "rev-parse", "squad/a1")).stdout;
+
+	const stateDir = await tmpDir("ahw-proof-t2-state-");
+	recordDoneProof(stateDir, {
+		branch: "squad/a1",
+		repo: "name:r",
+		mode: "pr",
+		commit: t1,
+		baseRef: "origin/main",
+		verified: "green",
+		detail: "landed at T1",
+		provenAt: Date.now(),
+	});
+
+	// T2: a follow-up commit pushed to the SAME branch AFTER the proof was recorded — the proof only
+	// ever speaks to T1, so it must not be treated as covering this too.
+	await fs.writeFile(path.join(repo, "c.txt"), "c\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "T2");
+
+	const mgr = new TestManager({ stateDir });
+	seed(mgr, "a1", { repo, worktree: "/nonexistent-clean-dir-xyz", branch: "squad/a1" });
+
+	expect(await mgr.callAgentHasUnlandedWork("a1")).toBe(true); // T1 proof doesn't cover T2 ⇒ falls back to arithmetic
+	expect(calls).toEqual([{ repo, branch: "squad/a1", cwd: "/nonexistent-clean-dir-xyz" }]);
 });
 
 // ── reapDeadWorktrees routes through the shared primitive ──────────────────────────────────────

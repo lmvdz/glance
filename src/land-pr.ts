@@ -26,7 +26,7 @@ import { proofGate } from "./proof.ts";
 import { gh, ghJson } from "./gh.ts";
 import { isAncestor, recordDoneProof } from "./done-proof.ts";
 import { repoIdentity } from "./repo-identity.ts";
-import { applyRegressionGate, withRepoLandLock, type LandOpts, type LandResult } from "./land.ts";
+import { applyRegressionGate, staleBranchReason, withRepoLandLock, type LandOpts, type LandResult } from "./land.ts";
 
 // ── git / gate helpers ───────────────────────────────────────────────────────────────────────────
 // Deliberately duplicated (trimmed) copies of land.ts's own private `git()`/`runGate()` rather than
@@ -86,6 +86,13 @@ export type MergeMethod = "merge" | "squash" | "rebase";
 export function mergeMethod(): MergeMethod {
 	const m = process.env.OMP_SQUAD_PR_MERGE_METHOD;
 	return m === "squash" || m === "rebase" ? m : "merge";
+}
+
+/** On by default; set OMP_SQUAD_STALE_GATE=0 to allow stale branches to merge unchecked (mirrors
+ *  land.ts's own private `staleGateEnabled` — small env-check helper, deliberately duplicated here
+ *  same as `git`/`runGate` above rather than exported from land.ts's private surface). */
+function staleGateEnabled(): boolean {
+	return process.env.OMP_SQUAD_STALE_GATE !== "0";
 }
 
 // ── PendingPr ledger — mirrors done-proof.ts's per-stateDir JSON pattern exactly ────────────────
@@ -244,7 +251,14 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 				return { ok: false, detail: `git push failed to sync PR #${openPr.number}'s stale remote head (${openPr.headRefOid}) to local tip (${localTip}) for ${input.branch}: ${sync.stderr || sync.stdout}` };
 			}
 		}
-		if (!getPendingPr(input.stateDir, input.branch)) {
+		// Record a fresh entry unless one ALREADY tracks this EXACT PR — never skip just because SOME
+		// entry exists for the branch: a stale entry left over from a prior (closed/merged) PR on this
+		// same branch name still carries that PR's OLD prNumber, and skipping the record here would let
+		// the eventual merge patch `state: "merged"` onto the WRONG PR number (and its stale issue-routing
+		// fields) forever. Overwrite with a clean entry — `recordPendingPr` replaces the whole record, so
+		// the old mergedAt/proofAt/issueClosedAt never leak forward onto this PR's lifecycle.
+		const existing = getPendingPr(input.stateDir, input.branch);
+		if (!existing || existing.prNumber !== openPr.number) {
 			recordPendingPr(input.stateDir, {
 				branch: input.branch,
 				repo: repoIdentity(input.repo),
@@ -362,7 +376,26 @@ const MAX_CLEAN_AUTOMERGE_RETRIES = 1;
  * choice.
  */
 export async function landAgentPr(opts: LandOpts & { defaultBranch: string }, stateDir: string): Promise<LandResult> {
-	return withRepoLandLock(opts.repo, () => landAgentPrOnce(opts, stateDir, 0));
+	return withRepoLandLock(opts.repo, () => landAgentPrLocked(opts, stateDir));
+}
+
+/**
+ * Force-land audit seam (mirrors land.ts's `landAgentLocked`, which PR mode used to bypass entirely):
+ * a FORCED land (requireProof === false) that ends up actually landing (merged, or — mirroring local
+ * mode's in-place-commit case — committed) without a passing proof gate is unproven trust. Not
+ * blocked (force is intentional), but made LEGIBLE: the gate is evaluated once, non-blockingly,
+ * BEFORE the real attempt, and only stamped onto the result if it actually landed something. A forced
+ * land that happened to carry a fresh proof anyway is not flagged — no crying wolf, same as local.
+ */
+async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, stateDir: string): Promise<LandResult> {
+	const forced = opts.requireProof === false;
+	const unproven = forced ? (await proofGate(opts.repo, opts.worktree, opts.branch, opts.verify)) !== undefined : false;
+	const result = await landAgentPrOnce(opts, stateDir, 0);
+	if (forced && unproven && result.ok && (result.merged || result.committed)) {
+		result.forcedWithoutProof = true;
+		result.detail = result.detail ? `${result.detail}; landed WITHOUT a passing proof gate (FORCED)` : "landed WITHOUT a passing proof gate (FORCED)";
+	}
+	return result;
 }
 
 async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number): Promise<LandResult> {
@@ -371,6 +404,41 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// In-place agent (no branch, or worktree === repo): nothing to merge, mirrors landAgentImpl.
 	if (!branch || worktree === repo) {
 		return { ok: true, committed: false, merged: false, message, mode: "pr", detail: "no changes to commit (no branch to land in PR mode)" };
+	}
+
+	// Sweep uncommitted edits into a commit BEFORE ensurePr/push — mirrors land.ts:332's local path
+	// exactly (same exclusion of `.omp/`, same message shape). Without this, an idle agent's last
+	// uncommitted edits were silently stranded in the worktree forever: PR mode pushed/merged only the
+	// committed history and recorded a green DoneProof over the incomplete result.
+	let committed = false;
+	if (opts.commitWip) {
+		const status = await git(["status", "--porcelain", "--", ".", ":(exclude).omp"], worktree);
+		if (status.code === 0 && status.stdout.length > 0) {
+			const add = await git(["add", "-A", "--", ".", ":(exclude).omp"], worktree);
+			if (add.code !== 0) return { ok: false, committed: false, merged: false, message, mode: "pr", detail: `git add failed: ${add.stderr}` };
+			const commit = await git(["commit", "-m", message], worktree);
+			if (commit.code !== 0) return { ok: false, committed: false, merged: false, message, mode: "pr", detail: `git commit failed: ${commit.stderr || commit.stdout}` };
+			committed = true;
+		}
+	}
+
+	// Confirm there is actually something to land BEFORE calling ensurePr: without this, a branch with
+	// nothing ahead of a freshly-fetched origin/<default> (even after the commitWip sweep above) surfaces
+	// deep inside ensurePr as a raw, confusing `gh pr create` error ("No commits between main and
+	// squad/x") instead of a clear land-level refusal.
+	await git(["fetch", "origin", opts.defaultBranch], repo).catch(() => undefined);
+	const aheadOfDefault = await git(["rev-list", "--count", `origin/${opts.defaultBranch}..${branch}`], repo);
+	if (aheadOfDefault.code === 0 && aheadOfDefault.stdout === "0") {
+		return {
+			ok: false,
+			committed,
+			merged: false,
+			message,
+			mode: "pr",
+			detail: committed
+				? `committed WIP but ${branch} still has no commits ahead of origin/${opts.defaultBranch} — nothing to land`
+				: `no changes to land (${branch} has no commits ahead of origin/${opts.defaultBranch}, and nothing to commit)`,
+		};
 	}
 
 	const ensure = await ensurePr({
@@ -385,14 +453,14 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		stateDir,
 	});
 	if (!ensure.ok || ensure.prNumber === undefined || ensure.prUrl === undefined) {
-		return { ok: false, committed: false, merged: false, message, mode: "pr", detail: ensure.detail ?? "ensurePr failed" };
+		return { ok: false, committed, merged: false, message, mode: "pr", detail: ensure.detail ?? "ensurePr failed" };
 	}
 
 	// Re-check proof against the CURRENT branch tip — a stale proof from before new commits landed on
 	// the branch must not authorize a merge of commits it never saw.
 	if (opts.requireProof) {
 		const reason = await proofGate(repo, worktree, branch, opts.verify);
-		if (reason) return { ok: false, committed: false, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: ensure.prState ?? "draft", detail: reason };
+		if (reason) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: ensure.prState ?? "draft", detail: reason };
 	}
 
 	await git(["fetch", "origin", opts.defaultBranch], repo);
@@ -401,7 +469,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	try {
 		scratch = await mkScratchWorktree(repo, opts.defaultBranch);
 	} catch (e) {
-		return { ok: false, committed: false, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `scratch worktree setup failed: ${e instanceof Error ? e.message : String(e)}` };
+		return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `scratch worktree setup failed: ${e instanceof Error ? e.message : String(e)}` };
 	}
 	try {
 		// Scratch-merge gate: disposable detached worktree of freshly-fetched origin/<default>, merge
@@ -412,15 +480,31 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			const files = (await git(["diff", "--name-only", "--diff-filter=U"], scratch)).stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 			await git(["merge", "--abort"], scratch).catch(() => {});
 			if (retry >= MAX_CLEAN_AUTOMERGE_RETRIES) {
-				return { ok: false, committed: false, merged: false, retryable: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `conflict in ${files.join(", ") || "unknown files"}` };
+				return { ok: false, committed, merged: false, retryable: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `conflict in ${files.join(", ") || "unknown files"}` };
 			}
 			return attemptCleanAutomergeAndRetry(opts, stateDir, retry, ensure);
+		}
+
+		// Stale-branch gate (visual-plan-blocks incident, ported to PR mode via the SAME
+		// `staleBranchReason` primitive land.ts's local path uses — now generalized with a `baseRef`
+		// param), ENFORCED HERE — only on this textually-clean merge — mirroring land.ts's own ordering
+		// exactly: a branch whose fork point is behind origin/<default> AND edits the same file(s) origin
+		// has since changed can silently revert newer origin work when it merges CLEANLY; a genuinely
+		// CONFLICTING overlap already surfaced above as a real conflict (refused or retried), which is a
+		// visible signal either way — re-flagging it as "stale" too would just recolor the same refusal.
+		// Force-land (staleGate:false) skips this, same as local mode; OMP_SQUAD_STALE_GATE=0 disables it
+		// globally.
+		if (opts.staleGate !== false && staleGateEnabled()) {
+			const staleReason = await staleBranchReason(repo, branch, `origin/${opts.defaultBranch}`);
+			if (staleReason) {
+				return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: staleReason };
+			}
 		}
 
 		const verify = opts.verify ?? (await detectVerify(repo));
 		if (verify) {
 			const gateResult = await runGate(verify, scratch);
-			if (gateResult.code !== 0) return { ok: false, committed: false, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${truncate(gateResult.output, 600)}` };
+			if (gateResult.code !== 0) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${truncate(gateResult.output, 600)}` };
 		}
 
 		const head0 = (await git(["rev-parse", `origin/${opts.defaultBranch}`], repo)).stdout;
@@ -446,15 +530,15 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	const wasDraft = ensure.prState === "draft";
 	const ready = await gh(["pr", "ready", String(ensure.prNumber), "--repo", repoSlug], repo); // draft→ready; harmless if already ready
 	if (ready.code !== 0 && wasDraft) {
-		return { ok: false, committed: false, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: `gh pr ready failed: ${ready.stderr || ready.stdout}` };
+		return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: `gh pr ready failed: ${ready.stderr || ready.stdout}` };
 	}
 	const merged = await gh(["pr", "merge", String(ensure.prNumber), `--${method}`, "--delete-branch=false", "--repo", repoSlug], repo);
-	if (merged.code !== 0) return { ok: false, committed: false, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed: ${merged.stderr || merged.stdout}` };
+	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed: ${merged.stderr || merged.stdout}` };
 
 	await git(["fetch", "origin", opts.defaultBranch], repo);
 	const branchTip = (await git(["rev-parse", branch], repo)).stdout;
 	const assertion = await assertMerged({ repo, defaultBranch: opts.defaultBranch, branchTipSha: branchTip, prNumber: ensure.prNumber }, method);
-	if (!assertion.ok) return { ok: false, committed: false, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: assertion.detail };
+	if (!assertion.ok) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: assertion.detail };
 
 	recordDoneProof(stateDir, {
 		branch,

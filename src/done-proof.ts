@@ -104,3 +104,37 @@ export async function isAncestor(ref: string, base: string, cwd: string): Promis
 	});
 	return (await proc.exited) === 0; // git merge-base --is-ancestor: exit 0 = yes, 1 = no, other = error (treat as false)
 }
+
+/**
+ * Whether a recorded `proof` still covers `branch`'s CURRENT tip — i.e. no commits have landed on the
+ * branch since the proof was taken. A DoneProof only ever speaks to the exact commit it was recorded
+ * against (`proof.commit`); a follow-up commit pushed to the SAME branch after a land must not be
+ * silently swallowed as "already landed" too — every "is this branch landed" consumer (auditStaleDone,
+ * auditLandedSurvivors, agentHasUnlandedWork, persistedHasWork, the worktree reaper) used to treat ANY
+ * recorded proof as proof-forever, so a T2 follow-up commit after a T1 land proof was permanently
+ * invisible to the whole pipeline.
+ *
+ * Resolves the branch's tip via `git rev-parse` in `cwd` — callers should pass the REPO path, not a
+ * specific worktree: branch refs are shared across worktrees of the same repo (mirrors `aheadOfBase`'s
+ * own reasoning in land-mode.ts), so resolving at the repo stays available even after the authoring
+ * worktree is gone. If the tip can't be resolved at all (branch deleted, repo path gone), the caller
+ * can't PROVE coverage — return false so it falls back to whatever arithmetic path it already had
+ * rather than trusting a proof we can't verify against anything.
+ */
+export async function proofCoversTip(proof: DoneProof | undefined, branch: string, cwd: string): Promise<boolean> {
+	if (!proof) return false;
+	try {
+		const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, "rev-parse", branch], {
+			cwd,
+			env: { ...process.env, ...GIT_HARDEN_ENV },
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const tip = (await new Response(proc.stdout).text()).trim();
+		const code = await proc.exited;
+		if (code !== 0 || !tip) return false; // can't resolve the tip ⇒ can't prove coverage ⇒ fall back to arithmetic
+		return proof.commit === tip;
+	} catch {
+		return false; // cwd gone entirely (e.g. a reaped worktree) ⇒ same fallback
+	}
+}

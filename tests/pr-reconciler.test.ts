@@ -151,6 +151,21 @@ async function mergeOutOfBand(repo: string, origin: string, branch: string): Pro
 	return { mergeCommit, headOid };
 }
 
+/** Same as `mergeOutOfBand`, but a real `git merge --squash` — the branch tip is NOT an ancestor of
+ *  the resulting commit (squash rewrites history), same as a human clicking GitHub's Squash button. */
+async function squashMergeOutOfBand(repo: string, origin: string, branch: string): Promise<{ mergeCommit: string; headOid: string }> {
+	await git(repo, "push", "-q", "origin", branch);
+	const headOid = await gitOut(repo, "rev-parse", branch);
+	const scratch = path.join(await tmpDir("oob-squash-"), "m");
+	await git(repo, "worktree", "add", "-q", "--detach", scratch, "origin/main");
+	await git(scratch, "merge", "-q", "--squash", branch);
+	await git(scratch, "commit", "-qm", "squash merge via GitHub UI (simulated)");
+	const mergeCommit = await gitOut(scratch, "rev-parse", "HEAD");
+	await git(scratch, "push", "-q", "origin", "HEAD:main");
+	await git(repo, "worktree", "remove", "--force", scratch);
+	return { mergeCommit, headOid };
+}
+
 function seedAgent(
 	mgr: InstanceType<typeof SquadManager>,
 	id: string,
@@ -258,6 +273,48 @@ test("prReconcileTick: out-of-band GitHub-UI merge writes DoneProof, clears land
 		expect(entry?.mergedAt).toBeDefined();
 		expect(entry?.proofAt).toBeDefined();
 		expect(entry?.issueClosedAt).toBeDefined(); // close succeeded synchronously within this tick
+	});
+});
+
+test("prReconcileTick: method-agnostic assertion — a UI SQUASH merge reconciles even though this repo's configured mergeMethod is the default \"merge\"", async () => {
+	await withPlane(async (patches) => {
+		const stateDir = await tmpDir("reconcile-squash-state-");
+		const { repo, origin } = await convergedRepo("reconcile-squash-");
+		const wt = await branchWorktree(repo, "squad/a2", { "feature.txt": "new\n" });
+		const issue: IssueRef = { id: "iss-squash", identifier: "PROJ-2", name: "do the squash thing", projectId: "proj-9" };
+		const mgr = new TestManager({ stateDir }); // mergeMethod() defaults to "merge" — never configured to squash
+		seedAgent(mgr, "a2", repo, wt, "squad/a2", { landReady: true, issue });
+
+		// A real `git merge --squash`: the branch tip is NOT an ancestor of the resulting commit, so the
+		// "merge"-method ancestry check (isAncestor(branchTip, origin/main)) fails — exactly the case that
+		// used to warn "merge reachability assertion failed" every tick forever.
+		const { mergeCommit, headOid } = await squashMergeOutOfBand(repo, origin, "squad/a2");
+		recordPendingPr(stateDir, {
+			branch: "squad/a2",
+			repo: repoIdentity(repo),
+			prNumber: 43,
+			prUrl: "https://github.com/acme/app/pull/43",
+			issueId: issue.id,
+			issueIdentifier: issue.identifier,
+			agentId: "a2",
+			createdAt: Date.now(),
+			state: "open",
+		});
+		prViewByNumber.set(43, { state: "MERGED", headRefOid: headOid, mergeCommit: { oid: mergeCommit } });
+
+		await mgr.tick();
+
+		const proof = getDoneProofByBranch(stateDir, "squad/a2");
+		expect(proof).toBeDefined();
+		expect(proof?.method).toBe("squash"); // reflects the check that actually held, not the configured default
+		expect(proof?.verified).toBe("unverified");
+		expect(proof?.detail).toContain("gh-view");
+		expect(mgr.agents.get("a2")?.dto.landReady).toBe(false);
+		expect(patches()).toBe(1);
+
+		const entry = getPendingPr(stateDir, "squad/a2");
+		expect(entry?.state).toBe("merged");
+		expect(entry?.mergedAt).toBeDefined();
 	});
 });
 

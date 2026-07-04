@@ -112,7 +112,30 @@ test("probe 3: push --dry-run fails (unreachable origin) ⇒ local", async () =>
 	await git(repo, "remote", "add", "origin", path.join(os.tmpdir(), "lm-does-not-exist-xyz"));
 	const resolved = await resolveLandMode(repo);
 	expect(resolved.mode).toBe("local");
-	expect(resolved.reason).toContain("git push --dry-run origin main failed");
+	expect(resolved.reason).toContain("git push --dry-run origin HEAD:refs/heads/squad/push-probe failed");
+});
+
+// ── regression: BEHIND origin is the NORMAL PR-mode state, not a push failure ───────────────────
+
+test("probe 3 regression: local behind origin (normal PR-mode state) still resolves pr, not local", async () => {
+	const repo = await convergedRepo("lm-behind-");
+	// Advance ORIGIN without the local checkout ever seeing it — simulates a PR merged on GitHub while
+	// this checkout hasn't been ff-healed yet. A naive `git push --dry-run origin main` from `repo`
+	// would reject this as non-fast-forward even though local is a clean ancestor of origin (probe 5
+	// already tolerates exactly this). The probe-ref write probe must not trip on it.
+	const originUrl = (await git(repo, "remote", "get-url", "origin")).stdout;
+	const clonesRoot = await tmpDir("lm-behind-clones-");
+	const clone = path.join(clonesRoot, "clone");
+	await git(clonesRoot, "clone", "-q", originUrl, clone);
+	await git(clone, "config", "user.email", "t@t");
+	await git(clone, "config", "user.name", "t");
+	await git(clone, "config", "commit.gpgsign", "false");
+	await commit(clone, "b.txt", "b\n", "merged on github, not yet pulled locally");
+	await git(clone, "push", "-q", "origin", "main");
+
+	const resolved = await resolveLandMode(repo);
+	expect(resolved.mode).toBe("pr");
+	expect(resolved.defaultBranch).toBe("main");
 });
 
 // ── probe 4: checked-out branch != remote default ───────────────────────────────────────────────
@@ -167,12 +190,34 @@ test("OMP_SQUAD_LAND_MODE=local bypasses the probe entirely", async () => {
 	expect(resolved).toEqual({ mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" });
 });
 
-test("OMP_SQUAD_LAND_MODE=pr bypasses the probe entirely (forced, no known default branch)", async () => {
+test("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effort resolves a default branch via gh", async () => {
+	process.env.OMP_SQUAD_LAND_MODE = "pr";
+	const repo = await gitRepo("lm-forced-gh-");
+	await commit(repo, "a.txt", "a\n", "base");
+	await git(repo, "remote", "add", "origin", "git@github.com:acme/repo-xyz.git");
+	ghResponse = { defaultBranchRef: { name: "main" } };
+	const resolved = await resolveLandMode(repo);
+	expect(resolved.mode).toBe("pr");
+	expect(resolved.defaultBranch).toBe("main");
+	expect(resolved.reason).toContain("forced");
+});
+
+test("OMP_SQUAD_LAND_MODE=pr forced: gh fails but origin/HEAD symref resolves the default branch", async () => {
+	process.env.OMP_SQUAD_LAND_MODE = "pr";
+	const repo = await convergedRepo("lm-forced-symref-");
+	await git(repo, "remote", "set-head", "origin", "main"); // records refs/remotes/origin/HEAD locally
+	ghResponse = undefined; // gh unreachable/unconfigured
+	const resolved = await resolveLandMode(repo);
+	expect(resolved.mode).toBe("pr");
+	expect(resolved.defaultBranch).toBe("main");
+});
+
+test("OMP_SQUAD_LAND_MODE=pr forced with truly nothing resolvable (no origin at all) ⇒ pr mode with NO default branch, never silently local", async () => {
 	process.env.OMP_SQUAD_LAND_MODE = "pr";
 	const resolved = await resolveLandMode("/nonexistent/never/probed");
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBeUndefined();
-	expect(resolved.reason).toContain("forced, probes skipped");
+	expect(resolved.reason).toContain("no default branch could be resolved");
 });
 
 // ── TTL cache ────────────────────────────────────────────────────────────────────────────────────

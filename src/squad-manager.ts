@@ -55,8 +55,8 @@ import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, wit
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
-import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, recordDoneProof } from "./done-proof.ts";
-import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
+import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof } from "./done-proof.ts";
+import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
@@ -900,14 +900,17 @@ export class SquadManager extends EventEmitter {
 	/** Does a persisted (pre-adoption) agent still have local work to resume — uncommitted edits or commits
 	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster.
 	 *  DoneProof is consulted before the arithmetic (same proof-first idiom as agentHasUnlandedWork /
-	 *  observer.ts's hasDoneProof): a squash/rebase merge landed out-of-band while the daemon was down
-	 *  would otherwise permanently re-adopt an already-landed branch as "has work" on every restart. */
+	 *  observer.ts's hasDoneProof), gated on `proofCoversTip` so a follow-up commit pushed after the
+	 *  proof was recorded falls back to the arithmetic instead of being permanently invisible: a
+	 *  squash/rebase merge landed out-of-band while the daemon was down would otherwise permanently
+	 *  re-adopt an already-landed branch as "has work" on every restart. */
 	private async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
 		if (!p.worktree) return false;
 		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		if (!p.branch) return false;
-		if (getDoneProofByBranch(this.stateDir, p.branch) !== undefined) return false;
+		const proof = getDoneProofByBranch(this.stateDir, p.branch);
+		if (proof && (await proofCoversTip(proof, p.branch, p.repo))) return false;
 		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
 		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
 		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
@@ -1947,7 +1950,15 @@ export class SquadManager extends EventEmitter {
 	 */
 	protected async landBranch(opts: LandOpts): Promise<LandResult> {
 		const mode = await this.resolveLandModeFor(opts.repo);
-		if (mode.mode === "pr" && mode.defaultBranch) {
+		if (mode.mode === "pr") {
+			if (!mode.defaultBranch) {
+				// Forced PR mode (OMP_SQUAD_LAND_MODE=pr) with no resolvable default branch — refuse the
+				// land LOUDLY rather than silently falling through to `landAgent` (a local merge). An
+				// operator who explicitly forced PR mode never wants a "quiet" local merge as the fallback;
+				// that is exactly the "wrong merge world" this env var exists to prevent.
+				this.log("warn", `land refused for ${opts.repo}: ${mode.reason}`);
+				return { ok: false, committed: false, merged: false, message: opts.message, detail: `forced-pr-mode-without-default-branch: ${mode.reason}` };
+			}
 			return landAgentPr({ ...opts, defaultBranch: mode.defaultBranch }, this.stateDir);
 		}
 		return landAgent(opts);
@@ -2014,16 +2025,19 @@ export class SquadManager extends EventEmitter {
 	 * DoneProof is consulted FIRST, before any ahead-count arithmetic, mirroring observer.ts's
 	 * `hasDoneProof` idiom: a squash/rebase (or out-of-band) merge makes rev-list arithmetic
 	 * permanently nonzero even though the work is safely in origin/default, so a recorded proof for
-	 * the branch means "no unlanded work" regardless of what the arithmetic says. Uncommitted dirty
-	 * edits are checked first regardless of proof — a proof only speaks to the committed branch tip
-	 * it was recorded against, never to edits made since.
+	 * the branch means "no unlanded work" regardless of what the arithmetic says — but only while the
+	 * proof still covers the branch's CURRENT tip (`proofCoversTip`): a follow-up commit pushed to the
+	 * branch after the proof was taken must fall back to the arithmetic, not be swallowed forever.
+	 * Uncommitted dirty edits are checked first regardless of proof — a proof only speaks to the
+	 * committed branch tip it was recorded against, never to edits made since.
 	 */
 	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
-		if (getDoneProofByBranch(this.stateDir, rec.dto.branch) !== undefined) return false;
+		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
+		if (proof && (await proofCoversTip(proof, rec.dto.branch, rec.dto.repo))) return false;
 		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
 	}
 
@@ -3241,10 +3255,27 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `pr-reconcile: could not resolve local tip of ${entry.branch} — deferring to next tick`);
 				return;
 			}
-			const method = mergeMethod();
-			const assertion = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, method);
+			// Method-AGNOSTIC assertion: an out-of-band GitHub-UI merge can use ANY method — not
+			// necessarily the one THIS repo's OMP_SQUAD_PR_MERGE_METHOD is configured to. Asserting only
+			// against the configured method meant a UI Squash on a "merge"-configured repo (GitHub's own
+			// common default button) failed the ancestry check FOREVER: the DoneProof was never written,
+			// the Plane issue never closed, and this tick warned every 2 minutes indefinitely. Try the
+			// ancestry check (the "merge" case) first, then the gh-view-based check (the squash/rebase
+			// case, method-string-agnostic between the two) — accept whichever holds, and record which
+			// one did so DoneProof.method reflects reality instead of the daemon's own configured guess.
+			let method: MergeMethod = "merge";
+			let assertion = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, method);
 			if (!assertion.ok) {
-				this.log("warn", `pr-reconcile: merge reachability assertion failed for ${entry.branch} (PR #${entry.prNumber}): ${assertion.detail}`);
+				const configured = mergeMethod();
+				const viaViewMethod: MergeMethod = configured === "merge" ? "squash" : configured;
+				const viaView = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, viaViewMethod);
+				if (viaView.ok) {
+					assertion = viaView;
+					method = viaViewMethod;
+				}
+			}
+			if (!assertion.ok) {
+				this.log("warn", `pr-reconcile: merge reachability assertion failed for ${entry.branch} (PR #${entry.prNumber}) via both the merge-ancestry and gh-view checks: ${assertion.detail}`);
 				return;
 			}
 			recordDoneProof(this.stateDir, {
@@ -3258,7 +3289,7 @@ export class SquadManager extends EventEmitter {
 				mergeCommit: assertion.mergeCommit,
 				baseRef: `origin/${defaultBranch}`,
 				verified: "unverified",
-				detail: "merged out-of-band via GitHub UI; gate not re-verified by the daemon",
+				detail: `merged out-of-band via GitHub UI (confirmed via ${method === "merge" ? "merge-ancestry" : "gh-view headRefOid/mergeCommit"} check); gate not re-verified by the daemon`,
 				provenAt: Date.now(),
 				prNumber: entry.prNumber,
 				prUrl: entry.prUrl,
@@ -3850,8 +3881,12 @@ export class SquadManager extends EventEmitter {
 					wts.map(async (w) => {
 						const stat = await fs.stat(w.worktree).catch(() => undefined);
 						// DoneProof consulted FIRST: a proven-landed branch is reap-eligible regardless of
-						// what the ahead-count reports (squash/rebase merges make it permanently nonzero).
-						const proven = !w.isPrimary && !!w.branch && getDoneProofByBranch(this.stateDir, w.branch) !== undefined;
+						// what the ahead-count reports (squash/rebase merges make it permanently nonzero) —
+						// but only while the proof still covers the branch's CURRENT tip (`proofCoversTip`),
+						// so a follow-up commit pushed after the proof was recorded is never reaped as if it
+						// were landed too.
+						const doneProof = !w.isPrimary && w.branch ? getDoneProofByBranch(this.stateDir, w.branch) : undefined;
+						const proven = !!doneProof && w.branch !== undefined && (await proofCoversTip(doneProof, w.branch, root));
 						return {
 							worktree: w.worktree,
 							branch: w.branch ?? "",

@@ -58,8 +58,14 @@ const { SquadManager } = await import("../src/squad-manager.ts");
  * regardless of load order relative to this one. The seam sidesteps that entirely.
  */
 class TestManager extends SquadManager {
-	forcedMode: "pr" | "local" = "pr";
+	forcedMode: "pr" | "local" | "pr-no-default" = "pr";
 	protected resolveLandModeFor(_repo: string): Promise<{ mode: "pr" | "local"; defaultBranch?: string; reason: string }> {
+		if (this.forcedMode === "pr-no-default") {
+			// Mirrors OMP_SQUAD_LAND_MODE=pr forced with NO resolvable default branch (gh repo view,
+			// origin/HEAD symref, AND git ls-remote all failed) — land-mode.ts's own resolveLandMode
+			// resolves exactly this shape in that case (concern 04's fix).
+			return Promise.resolve({ mode: "pr", reason: "OMP_SQUAD_LAND_MODE=pr (forced) but no default branch could be resolved" });
+		}
 		return Promise.resolve(
 			this.forcedMode === "pr"
 				? { mode: "pr", defaultBranch: "main", reason: "forced for seam test" }
@@ -224,6 +230,23 @@ test("land(): CONTROL — local mode DOES run git merge against the primary chec
 	expect(result.mode).toBeUndefined(); // local mode sets no `mode` field
 	expect(result.merged).toBe(true);
 	expect(mergeCallsAgainst(repo).length).toBeGreaterThan(0);
+});
+
+test("land(): forced pr mode with NO resolvable default branch refuses loudly — never silently falls through to a local merge", async () => {
+	const stateDir = await tmpDir("seam-nodefault-state-");
+	const { repo } = await convergedRepo("seam-nodefault-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const mgr = new TestManager({ stateDir });
+	mgr.forcedMode = "pr-no-default";
+	seedAgent(mgr, "a1", repo, wt, "squad/a1");
+	const mainHead0 = await gitOut(repo, "rev-parse", "main");
+
+	const result = await mgr.land("a1", undefined, { force: true, reason: "seam no-default test" });
+
+	expect(result.ok).toBe(false);
+	expect(result.detail).toContain("forced-pr-mode-without-default-branch");
+	expect(mergeCallsAgainst(repo)).toEqual([]); // no local merge attempt at all
+	expect(await gitOut(repo, "rev-parse", "main")).toBe(mainHead0); // primary checkout untouched
 });
 
 // ── landReady float (DESIGN's mode-dispatch ruling + autoLand×PR matrix: "landConfirm ON (default):

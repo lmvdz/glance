@@ -29,12 +29,12 @@ afterEach(() => {
 
 const tmpDir = (): string => mkdtempSync(path.join(os.tmpdir(), "observer-"));
 
-const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squad/x"): AgentDTO => ({
+const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squad/x", repo = "/r"): AgentDTO => ({
 	id,
 	name: id,
 	status,
 	kind: "omp-operator",
-	repo: "/r",
+	repo,
 	worktree: "/w",
 	branch,
 	approvalMode: "write",
@@ -43,6 +43,28 @@ const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squa
 	messageCount: 0,
 	issue,
 });
+
+async function git(cwd: string, ...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+	const p = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+/** A REAL tmp git repo with `branch` pointing at one commit — `hasDoneProof`'s tip-coverage check
+ *  (`proofCoversTip`) does a genuine `git rev-parse`, so the proof-first tests below need a resolvable
+ *  branch tip to prove coverage against, not the fixed fake "/r" the plain `agent()` helper uses. */
+async function gitRepoWithBranchTip(branch: string): Promise<{ repo: string; tip: string }> {
+	const repo = tmpDir();
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	writeFileSync(path.join(repo, "a.txt"), "a\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	await git(repo, "branch", branch);
+	const tip = (await git(repo, "rev-parse", branch)).stdout;
+	return { repo, tip };
+}
 
 interface Harness {
 	deps: ObserverDeps;
@@ -493,13 +515,14 @@ test("(proof-first) a recorded DoneProof stops the stale-done reopen AND makes t
 	process.env.OMP_SQUAD_OBSERVE_AUTOFIX = "1";
 	const dir = tmpDir();
 	const done = { id: "done-77", name: "shipped", identifier: "OMPSQ-77" } satisfies IssueRef;
+	const { repo, tip } = await gitRepoWithBranchTip("squad/sq77");
 	recordDoneProof(dir, {
 		branch: "squad/sq77",
 		repo: "r",
 		issueIdentifier: "OMPSQ-77",
 		mode: "pr",
 		method: "squash",
-		commit: "deadbeef",
+		commit: tip, // matches the branch's CURRENT tip — proof covers it
 		baseRef: "origin/main",
 		verified: "green",
 		detail: "squash-merged PR #9",
@@ -507,7 +530,7 @@ test("(proof-first) a recorded DoneProof stops the stale-done reopen AND makes t
 	});
 	const removed: string[] = [];
 	const { deps, filed, reopened } = makeDeps(dir, {
-		listAgents: () => [agent("sq77", "stopped", done, "squad/sq77")],
+		listAgents: () => [agent("sq77", "stopped", done, "squad/sq77", repo)],
 		listIssues: async () => [], // done issue absent from the open set ⇒ Done
 		gitAheadOfMain: async () => 5, // squash-merge inflated count — would normally read as unlanded
 		removeAgent: async (id) => {
@@ -524,15 +547,48 @@ test("(proof-first) without OBSERVE_AUTOFIX, the same proven survivor is logged 
 	process.env.OMP_SQUAD_OBSERVE = "1"; // autofix OFF by default
 	const dir = tmpDir();
 	const done = { id: "done-78", name: "shipped", identifier: "OMPSQ-78" } satisfies IssueRef;
-	recordDoneProof(dir, { branch: "squad/sq78", repo: "r", issueIdentifier: "OMPSQ-78", mode: "pr", commit: "c", baseRef: "origin/main", verified: "green", detail: "squash-merged", provenAt: Date.now() });
+	const { repo, tip } = await gitRepoWithBranchTip("squad/sq78");
+	recordDoneProof(dir, { branch: "squad/sq78", repo: "r", issueIdentifier: "OMPSQ-78", mode: "pr", commit: tip, baseRef: "origin/main", verified: "green", detail: "squash-merged", provenAt: Date.now() });
 	const { deps, filed, reopened } = makeDeps(dir, {
-		listAgents: () => [agent("sq78", "idle", done, "squad/sq78")],
+		listAgents: () => [agent("sq78", "idle", done, "squad/sq78", repo)],
 		listIssues: async () => [],
 		gitAheadOfMain: async () => 3,
 	});
 	await new Observer(deps).tick();
 	expect(reopened).toEqual([]);
 	expect(filed).toEqual([]); // autoFixable findings are never filed as backlog, proof or not
+});
+
+test("(regression) a DoneProof recorded at T1 does NOT cover the branch once it advances to T2 — falls back to the arithmetic and reopens again", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const dir = tmpDir();
+	const done = { id: "done-80", name: "shipped", identifier: "OMPSQ-80" } satisfies IssueRef;
+	const { repo, tip: t1 } = await gitRepoWithBranchTip("squad/sq80");
+	recordDoneProof(dir, {
+		branch: "squad/sq80",
+		repo: "r",
+		issueIdentifier: "OMPSQ-80",
+		mode: "pr",
+		commit: t1,
+		baseRef: "origin/main",
+		verified: "green",
+		detail: "landed at T1",
+		provenAt: Date.now(),
+	});
+	// T2: a follow-up commit lands on the SAME branch AFTER the proof was recorded — the proof only
+	// ever speaks to T1, so it must not silently swallow this too.
+	await git(repo, "checkout", "-q", "squad/sq80");
+	writeFileSync(path.join(repo, "b.txt"), "b\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "T2");
+
+	const { deps, reopened } = makeDeps(dir, {
+		listAgents: () => [agent("sq80", "stopped", done, "squad/sq80", repo)],
+		listIssues: async () => [],
+		gitAheadOfMain: async () => 2, // T2's follow-up commit is genuinely unlanded
+	});
+	await new Observer(deps).tick();
+	expect(reopened).toEqual(["done-80"]); // the stale T1 proof no longer shields it — the real arithmetic decides
 });
 
 test("(regression) without a DoneProof, ahead>0 still reopens as false-done — the non-proof case is unchanged", async () => {

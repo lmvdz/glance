@@ -70,8 +70,9 @@ mock.module("../src/gh.ts", () => ({
 	ghAvailable: async () => true,
 }));
 
-const { ensurePr, landAgentPr, getPendingPr, listPendingPrs, assertMerged, mergeMethod } = await import("../src/land-pr.ts");
+const { ensurePr, landAgentPr, getPendingPr, listPendingPrs, recordPendingPr, assertMerged, mergeMethod } = await import("../src/land-pr.ts");
 const { getDoneProofByBranch } = await import("../src/done-proof.ts");
+const { repoIdentity } = await import("../src/repo-identity.ts");
 
 const ENV_KEYS = ["OMP_SQUAD_PR_DRAFT", "OMP_SQUAD_PR_MERGE_METHOD", "OMP_SQUAD_REGRESSION_GATE"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -300,6 +301,160 @@ test("ensurePr force-with-lease pushes over a prior CLOSED PR's stale branch ref
 	expect(r.ok).toBe(true); // a plain push here would have failed non-fast-forward
 	expect(createCalls.length).toBe(1);
 	expect(await gitOut(origin, "rev-parse", "refs/heads/squad/a1")).toBe(await gitOut(wt, "rev-parse", "HEAD"));
+});
+
+test("ensurePr adopting a FRESH open PR overwrites a stale ledger entry left over from a prior (different, closed) PR number", async () => {
+	const { repo } = await baseline("ep-stale-ledger-");
+	await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("ep-stale-ledger-state-");
+	// A stale ledger entry from a PRIOR PR #5 that was closed unmerged on this same branch name.
+	recordPendingPr(stateDir, {
+		branch: "squad/a1",
+		repo: repoIdentity(repo),
+		prNumber: 5,
+		prUrl: "https://github.com/acme/app/pull/5",
+		createdAt: Date.now() - 1_000_000,
+		state: "closed",
+	});
+	// A human reopened/created a FRESH PR #9 on the same branch — the ledger must track #9, not #5.
+	prList = [{ number: 9, url: "https://github.com/acme/app/pull/9", state: "OPEN" }];
+
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir });
+
+	expect(r.ok).toBe(true);
+	expect(r.prNumber).toBe(9);
+	const entry = getPendingPr(stateDir, "squad/a1");
+	expect(entry?.prNumber).toBe(9);
+	expect(entry?.state).toBe("open");
+	expect(entry?.mergedAt).toBeUndefined(); // never carries the old #5 entry's lifecycle fields forward
+});
+
+// ── landAgentPr — commitWip ──────────────────────────────────────────────────────────────────────
+
+test("landAgentPr: commitWip sweeps uncommitted worktree edits into a commit BEFORE ensurePr/push, and they land", async () => {
+	const { repo, origin } = await baseline("lp-wip-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "committed\n" });
+	await fs.writeFile(path.join(wt, "wip.txt"), "uncommitted work\n"); // dirty — never committed by the agent
+	const stateDir = await tmpDir("lp-wip-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const res = await landAgentPr(
+		{ repo, worktree: wt, branch: "squad/a1", message: "land squad/a1 (wip)", commitWip: true, defaultBranch: "main" },
+		stateDir,
+	);
+
+	expect(res.ok).toBe(true);
+	expect(res.committed).toBe(true);
+	expect(res.merged).toBe(true);
+	// The WIP commit is what actually landed — its content reached origin's main via the push+merge.
+	expect(await gitOut(origin, "show", "main:wip.txt")).toBe("uncommitted work");
+	expect(await gitOut(wt, "status", "--porcelain")).toBe(""); // worktree is now clean
+});
+
+test("landAgentPr: nothing committed and nothing ahead of origin/<default> ⇒ ok:false with a clear detail, never a raw gh error", async () => {
+	const { repo } = await baseline("lp-nothing-");
+	const stateDir = await tmpDir("lp-nothing-state-");
+	prList = [];
+	const wtParent = await tmpDir("lp-nothing-wt-");
+	const wt = path.join(wtParent, "wt");
+	await git(repo, "worktree", "add", "-q", "-b", "squad/a1", wt, "main"); // branch has NO commits ahead of main
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: true, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(false);
+	expect(res.detail).toContain("no changes to land");
+	expect(createCalls.length).toBe(0); // refused BEFORE ever reaching ensurePr/gh pr create
+});
+
+// ── landAgentPr — stale-branch gate (concern 02) ────────────────────────────────────────────────
+
+test("landAgentPr: a stale branch that would merge CLEANLY (fork point behind origin, same-file overlap) is refused, never silently reverting newer origin work", async () => {
+	const { repo, origin } = await baseline("lp-stale-");
+	await commit(repo, "shared.txt", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n", "shared base");
+	await git(repo, "push", "-q", "origin", "main");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "unrelated new file\n" });
+	// The branch ALSO edits shared.txt — appending at the END, far from where main will edit it.
+	await fs.appendFile(path.join(wt, "shared.txt"), "branch-appended\n");
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-qm", "branch edits shared.txt too");
+	// Origin's main independently advances, editing the SAME file's first line — a disjoint region, so
+	// the eventual merge is textually clean: exactly the "silent revert" case the gate exists to catch.
+	await fs.writeFile(path.join(repo, "shared.txt"), "main-edited-l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "main advances shared.txt");
+	await git(repo, "push", "-q", "origin", "main");
+	const stateDir = await tmpDir("lp-stale-state-");
+	prList = [];
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(false);
+	expect(res.detail).toContain("stale-branch gate blocked");
+	expect(res.detail).toContain("shared.txt");
+	expect(mergeCalled).toBe(false); // refused before ever calling gh pr merge
+});
+
+test("landAgentPr: OMP_SQUAD_STALE_GATE=0 disables the stale-branch gate in PR mode, same as local mode", async () => {
+	process.env.OMP_SQUAD_STALE_GATE = "0";
+	try {
+		const { repo, origin } = await baseline("lp-stale-off-");
+		await commit(repo, "shared.txt", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n", "shared base");
+		await git(repo, "push", "-q", "origin", "main");
+		const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "unrelated new file\n" });
+		await fs.appendFile(path.join(wt, "shared.txt"), "branch-appended\n");
+		await git(wt, "add", "-A");
+		await git(wt, "commit", "-qm", "branch edits shared.txt too");
+		await fs.writeFile(path.join(repo, "shared.txt"), "main-edited-l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "main advances shared.txt");
+		await git(repo, "push", "-q", "origin", "main");
+		const stateDir = await tmpDir("lp-stale-off-state-");
+		prList = [];
+		mergeSimulator = githubMerge("squad/a1");
+
+		const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+		expect(res.ok).toBe(true);
+		expect(res.merged).toBe(true);
+	} finally {
+		delete process.env.OMP_SQUAD_STALE_GATE;
+	}
+});
+
+// ── landAgentPr — force-audit seam (concern 07) ─────────────────────────────────────────────────
+
+test("landAgentPr: a forced land (requireProof:false) that merges without a passing proof stamps forcedWithoutProof", async () => {
+	const { repo } = await baseline("lp-forced-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-forced-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	// No proof was ever recorded for this worktree — proofGate finds none, so the force-audit's
+	// non-blocking pre-check evaluates it as unproven.
+	const res = await landAgentPr(
+		{ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main", requireProof: false },
+		stateDir,
+	);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect(res.forcedWithoutProof).toBe(true);
+	expect(res.detail).toContain("landed WITHOUT a passing proof gate (FORCED)");
+});
+
+test("landAgentPr: requireProof left undefined (not forced) never evaluates or stamps forcedWithoutProof", async () => {
+	const { repo } = await baseline("lp-notforced-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-notforced-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	expect(res.forcedWithoutProof).toBeUndefined();
 });
 
 // ── landAgentPr — green path ─────────────────────────────────────────────────────────────────────

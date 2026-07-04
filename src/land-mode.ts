@@ -41,7 +41,17 @@ const cache = new Map<string, { resolved: ResolvedLandMode; at: number }>();
 export async function resolveLandMode(repo: string): Promise<ResolvedLandMode> {
 	const configured = (process.env.OMP_SQUAD_LAND_MODE ?? "auto") as LandMode;
 	if (configured === "local") return { mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" };
-	if (configured === "pr") return { mode: "pr", reason: "OMP_SQUAD_LAND_MODE=pr (forced, probes skipped)" };
+	if (configured === "pr") {
+		// Forcing pr mode still needs a defaultBranch — without one, landBranch/floatPrOnLandReady/
+		// retryPushFloat/the dispatch startPoint all require `mode.defaultBranch` to do anything in PR
+		// mode, so an unresolved default used to make EVERY one of them silently fall through to local
+		// behavior despite the operator explicitly forcing PR mode. The 5-point convergence probe is
+		// skipped (that's what "forced" means), but the branch NAME itself is still resolved best-effort.
+		const defaultBranch = await resolveDefaultBranchBestEffort(repo);
+		return defaultBranch
+			? { mode: "pr", defaultBranch, reason: `OMP_SQUAD_LAND_MODE=pr (forced, convergence probes skipped); default branch resolved: ${defaultBranch}` }
+			: { mode: "pr", reason: "OMP_SQUAD_LAND_MODE=pr (forced) but no default branch could be resolved (gh repo view, origin/HEAD symref, and git ls-remote all failed) — the caller must refuse to land rather than silently falling back to local" };
+	}
 
 	const cached = cache.get(repo);
 	if (cached && Date.now() - cached.at < ttlMs()) return cached.resolved;
@@ -49,6 +59,52 @@ export async function resolveLandMode(repo: string): Promise<ResolvedLandMode> {
 	const resolved = await probe(repo);
 	cache.set(repo, { resolved, at: Date.now() });
 	return resolved;
+}
+
+/** A ref that never legitimately exists on any remote — probe 3 pushes `HEAD:` to it so the write
+ *  probe is always a "create" (no fast-forward comparison possible), never a conflict with real work. */
+const PUSH_PROBE_REF = "refs/heads/squad/push-probe";
+
+/**
+ * Best-effort default-branch resolution for FORCED pr mode (the convergence probe is skipped, but a
+ * defaultBranch is still required by every PR-mode consumer). Three independent sources, cheapest/
+ * most-authoritative first; `OMP_SQUAD_PR_BASE` overrides all of them, same as the probed path.
+ * Never throws — an unexpected failure in any step just falls through to the next.
+ */
+async function resolveDefaultBranchBestEffort(repo: string): Promise<string | undefined> {
+	try {
+		const override = process.env.OMP_SQUAD_PR_BASE;
+		if (override) return override;
+
+		// 1. gh repo view <slug> --json defaultBranchRef — the same authoritative source the probed
+		//    path uses; slug-addressed so a host-aliased origin still resolves.
+		const identity = repoIdentity(repo);
+		const parts = identity.split("/");
+		if (parts.length >= 3) {
+			const slug = parts.slice(-2).join("/");
+			const view = await ghJson<{ defaultBranchRef: { name: string } }>(["repo", "view", slug, "--json", "defaultBranchRef"], repo);
+			if (view?.defaultBranchRef?.name) return view.defaultBranchRef.name;
+		}
+
+		// 2. git symbolic-ref refs/remotes/origin/HEAD — set by `git clone` (or `git remote set-head
+		//    origin -a`); no gh call or network round-trip needed when it's already recorded locally.
+		const symref = await hardenedGit(["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: repo });
+		const symrefName = symref.code === 0 ? symref.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "";
+		if (symrefName) return symrefName;
+
+		// 3. git ls-remote --symref origin HEAD — asks the remote directly; needs neither gh nor any
+		//    local remote-tracking state.
+		const lsRemote = await hardenedGit(["ls-remote", "--symref", "origin", "HEAD"], { cwd: repo });
+		const match = lsRemote.code === 0 ? /^ref:\s+refs\/heads\/(\S+)\s+HEAD/m.exec(lsRemote.stdout) : null;
+		if (match?.[1]) return match[1];
+
+		// 4. Every probe failed — "main" is the overwhelmingly common default, and a wrong guess still
+		//    fails LOUDLY downstream (a fetch/push/`gh pr create` against a nonexistent branch), never
+		//    silently local-merging — the one invariant this fallback chain exists to protect.
+		return "main";
+	} catch {
+		return undefined;
+	}
 }
 
 async function probe(repo: string): Promise<ResolvedLandMode> {
@@ -66,9 +122,16 @@ async function probe(repo: string): Promise<ResolvedLandMode> {
 	if (!view?.defaultBranchRef?.name) return { mode: "local", reason: `gh repo view ${slug} failed or has no default branch` };
 	const defaultBranch = process.env.OMP_SQUAD_PR_BASE || view.defaultBranchRef.name;
 
-	// 3. git push --dry-run origin <default> — catches per-repo transport failures (gh auth ≠ push works).
-	const dryRun = await hardenedGit(["push", "--dry-run", "origin", defaultBranch], { cwd: repo });
-	if (dryRun.code !== 0) return { mode: "local", reason: `git push --dry-run origin ${defaultBranch} failed: ${dryRun.stderr.trim()}` };
+	// 3. Write-capability probe — catches per-repo transport/auth failures (gh auth ≠ push works)
+	//    WITHOUT non-fast-forward semantics. Probing `git push --dry-run origin <default>` directly
+	//    rejects as non-fast-forward whenever the local default is merely BEHIND origin — the NORMAL
+	//    PR-mode state (merges happen on GitHub, not locally) — which would silently force local mode
+	//    on every healthy PR-mode repo the moment the checkout drifts behind (and since aheadOfBase's
+	//    mode !== "pr" then skips ff-heal too, it can never self-correct). `PUSH_PROBE_REF` doesn't
+	//    exist on the remote, so pushing HEAD to it is always a create — `--dry-run` never performs it,
+	//    but still exercises the exact same auth/transport path, with no fast-forward trap.
+	const dryRun = await hardenedGit(["push", "--dry-run", "origin", `HEAD:${PUSH_PROBE_REF}`], { cwd: repo });
+	if (dryRun.code !== 0) return { mode: "local", reason: `git push --dry-run origin HEAD:${PUSH_PROBE_REF} failed: ${dryRun.stderr.trim()}` };
 
 	// 4. current local branch == remote default — a deliberate non-default checkout always wins.
 	const current = await hardenedGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo });

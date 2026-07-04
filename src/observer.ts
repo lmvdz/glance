@@ -30,7 +30,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
-import { getDoneProofByBranch } from "./done-proof.ts";
+import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
@@ -174,13 +174,13 @@ export async function auditLandedSurvivors(
 	openIds: Set<string>,
 	aheadOf: (a: AgentDTO) => Promise<number>,
 	removeAgent: (id: string) => Promise<void>,
-	hasProof: (a: AgentDTO) => boolean,
+	hasProof: (a: AgentDTO) => Promise<boolean>,
 ): Promise<Finding[]> {
 	const out: Finding[] = [];
 	for (const a of agents) {
 		if ((a.status !== "idle" && a.status !== "stopped") || !a.issue) continue;
 		if (openIds.has(a.issue.id)) continue; // issue still open ⇒ not Done
-		const proven = hasProof(a);
+		const proven = await hasProof(a);
 		if (!proven && (await aheadOf(a)) !== 0) continue; // >0 ⇒ unlanded (stale-done); <0 ⇒ unknown — leave it
 		out.push({
 			fingerprint: `survivor:${a.issue.identifier ?? a.issue.id}`,
@@ -213,11 +213,11 @@ const STALE_DONE_SYSTEMIC = 3;
  * once the work is safely in origin/default, so trusting the rev-list count alone would reopen
  * already-landed work forever (a false-positive re-dispatch storm).
  */
-export async function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => Promise<number>, hasProof: (a: AgentDTO) => boolean): Promise<Finding[]> {
+export async function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => Promise<number>, hasProof: (a: AgentDTO) => Promise<boolean>): Promise<Finding[]> {
 	const stale: AgentDTO[] = [];
 	for (const a of agents) {
 		if (!a.issue || openIds.has(a.issue.id)) continue; // no issue, or issue still open ⇒ not a Done candidate
-		if (hasProof(a)) continue; // proven landed ⇒ never stale, regardless of the arithmetic
+		if (await hasProof(a)) continue; // proven landed ⇒ never stale, regardless of the arithmetic
 		if ((await aheadOf(a)) > 0) stale.push(a);
 	}
 	if (stale.length === 0) return [];
@@ -465,16 +465,22 @@ export class Observer {
 	}
 
 	/** Consulted FIRST — before any ahead-count arithmetic — everywhere checks 2/4 ask "is this branch
-	 *  landed". A recorded DoneProof survives squash/rebase merges that make rev-list arithmetic wrong. */
-	private hasDoneProof(a: AgentDTO): boolean {
-		return !!a.branch && getDoneProofByBranch(this.deps.stateDir, a.branch) !== undefined;
+	 *  landed". A recorded DoneProof survives squash/rebase merges that make rev-list arithmetic wrong —
+	 *  but only while it still covers the branch's CURRENT tip (`proofCoversTip`): a follow-up commit
+	 *  pushed to the same branch after the proof was taken must fall back to the ahead-count arithmetic,
+	 *  not be permanently treated as landed by a now-stale proof. */
+	private async hasDoneProof(a: AgentDTO): Promise<boolean> {
+		if (!a.branch) return false;
+		const proof = getDoneProofByBranch(this.deps.stateDir, a.branch);
+		if (!proof) return false;
+		return proofCoversTip(proof, a.branch, a.repo);
 	}
 
 	/** Run every audit check over the current injected state. */
 	private async collect(open: IssueRef[]): Promise<Finding[]> {
 		const agents = this.deps.listAgents();
 		const openIds = new Set(open.map((i) => i.id));
-		const hasProof = (a: AgentDTO): boolean => this.hasDoneProof(a);
+		const hasProof = (a: AgentDTO): Promise<boolean> => this.hasDoneProof(a);
 		const findings: Finding[] = [];
 		findings.push(...auditTestsGreen(await this.confirmedGate()));
 		findings.push(...(await auditLandedSurvivors(agents, openIds, this.deps.gitAheadOfMain, this.deps.removeAgent, hasProof)));

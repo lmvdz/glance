@@ -481,30 +481,31 @@ function staleGateEnabled(): boolean {
 const STALE_OVERLAP_LIST_CAP = 8;
 
 /**
- * Why `branch` is too stale to merge into `repo`'s HEAD, or undefined when it's safe.
- * Stale ⇐ main gained commits since the branch's fork point (merge-base) AND at least one file is
+ * Why `branch` is too stale to merge into `baseRef` (default `"HEAD"` — the local mode's main tip;
+ * PR mode passes a freshly-fetched `origin/<default>` instead), or undefined when it's safe.
+ * Stale ⇐ base gained commits since the branch's fork point (merge-base) AND at least one file is
  * edited on BOTH sides. Non-overlapping parallel work merges as before; a branch forked from the
  * current tip can never be stale. Probe failures (unborn HEAD, unrelated histories) return
  * undefined — the merge path itself surfaces those, and this gate must never block on its own bugs.
  */
-export async function staleBranchReason(repo: string, branch: string): Promise<string | undefined> {
-	const mb = await git(["merge-base", "HEAD", branch], repo);
+export async function staleBranchReason(repo: string, branch: string, baseRef = "HEAD"): Promise<string | undefined> {
+	const mb = await git(["merge-base", baseRef, branch], repo);
 	if (mb.code !== 0 || !mb.stdout) return undefined;
-	const head = await git(["rev-parse", "HEAD"], repo);
-	if (head.code !== 0 || mb.stdout === head.stdout) return undefined; // fork point IS the tip — fresh
-	const mainDiff = await git(["diff", "--name-only", `${mb.stdout}..HEAD`], repo);
+	const base = await git(["rev-parse", baseRef], repo);
+	if (base.code !== 0 || mb.stdout === base.stdout) return undefined; // fork point IS the tip — fresh
+	const baseDiff = await git(["diff", "--name-only", `${mb.stdout}..${baseRef}`], repo);
 	const branchDiff = await git(["diff", "--name-only", `${mb.stdout}..${branch}`], repo);
-	if (mainDiff.code !== 0 || branchDiff.code !== 0) return undefined;
-	const mainFiles = new Set(mainDiff.stdout.split("\n").filter(Boolean));
-	const overlap = branchDiff.stdout.split("\n").filter((f) => f && mainFiles.has(f));
+	if (baseDiff.code !== 0 || branchDiff.code !== 0) return undefined;
+	const baseFiles = new Set(baseDiff.stdout.split("\n").filter(Boolean));
+	const overlap = branchDiff.stdout.split("\n").filter((f) => f && baseFiles.has(f));
 	if (overlap.length === 0) return undefined;
-	const behind = await git(["rev-list", "--count", `${mb.stdout}..HEAD`], repo);
+	const behind = await git(["rev-list", "--count", `${mb.stdout}..${baseRef}`], repo);
 	const shown = overlap.slice(0, STALE_OVERLAP_LIST_CAP).join(", ");
 	const more = overlap.length > STALE_OVERLAP_LIST_CAP ? ` (+${overlap.length - STALE_OVERLAP_LIST_CAP} more)` : "";
 	return (
-		`stale-branch gate blocked ${branch}: main advanced ${behind.stdout || "?"} commit(s) past this branch's fork point ` +
+		`stale-branch gate blocked ${branch}: ${baseRef} advanced ${behind.stdout || "?"} commit(s) past this branch's fork point ` +
 		`and both sides edit ${overlap.length} of the same file(s): ${shown}${more}. ` +
-		`Merging a stale snapshot can silently revert newer main work — rebase the branch onto current main and re-verify, ` +
+		`Merging a stale snapshot can silently revert newer ${baseRef} work — rebase the branch onto current ${baseRef} and re-verify, ` +
 		`or force-land with a reason. (OMP_SQUAD_STALE_GATE=0 disables this gate.)`
 	);
 }
