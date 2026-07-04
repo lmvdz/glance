@@ -1,5 +1,5 @@
 # Engine terminal-escalation channel + deterministic branch keys + entry-snapshot branchOutcomes
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -34,3 +34,6 @@ None — single-repo plan.
 
 ## Verify
 PATH="$PWD/node_modules/.bin:$PATH" bun test src/workflow/engine.test.ts (create/extend this test file if it does not exist — verify via `find src/workflow -name '*.test.ts'` first). Required cases: (a) each of the 4 terminal-failure sites invokes `escalate` exactly once with a checkpoint whose `currentNode` matches the failing node; (b) a `maxVisits:1` parallel branch's outcome survives a simulated resume (feed `resume.branchOutcomes` with that branch marked `succeeded`, assert `runOne` is never called for it and the branch's `visits` counter is NOT incremented on the resumed pass); (c) `first_success` resume with one recorded `succeeded` disposition returns immediately with zero `runOne` invocations; (d) two `onBranchDone`-shaped checkpoint emissions during one fan-out carry identical `resumeAttempts`/`visits`/`currentNode` (the entry-snapshot-clone invariant) and are both flagged `transient: true`; (e) poison-cap counter (`resumeAttempts`) is unaffected by interleaved transient emissions — simulate 3 cold resumes of a fan-out node with branch-done checkpoints firing in between and assert the cap still trips at exactly 3.
+
+## Resolution
+Shipped in 4b30c08 (+ audit fix 40d00e6: dangling-edge dead-end now routes through terminalFail like the other four terminal returns). Deterministic branch keys `${nodeId}#${visitIndex}:${branchIndex}`, transient entry-snapshot branch checkpoints, resume-aware runParallel skip for wait_all and first_success.

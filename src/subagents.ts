@@ -15,11 +15,11 @@
  */
 
 import type {
-	RpcSubagentSnapshot,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentProgressFrame,
 	RpcSubagentEventFrame,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { redact } from "./redact.ts";
 
 type LifecyclePayload = RpcSubagentLifecycleFrame["payload"];
 type ProgressPayload = RpcSubagentProgressFrame["payload"];
@@ -33,11 +33,56 @@ export interface SubagentNode {
 	status: string;
 	task?: string;
 	lastUpdate: number;
+	/** Spawn order within the parent run. Exposed (unlike before) so a persisted snapshot round-trips
+	 *  ordering and a reseeded tracker (applySnapshot on reattach) sorts identically to the live tree. */
+	index: number;
 }
 
-/** Internal node: the public fields plus the spawn `index` we sort on but don't expose. */
-interface TrackedSubagent extends SubagentNode {
-	index: number;
+/** The tree is a flat Map keyed by subagent id — no parent pointer. A subagent that itself spawns
+ *  subagents would silently flatten into the same tree today; nesting is out of scope for this slice. */
+type TrackedSubagent = SubagentNode;
+
+/**
+ * Persisted-snapshot projection: truncates task/description to 240 chars + redacts, same discipline as
+ * span attrs (spans.ts:91). The live in-memory tracker (used by the polling endpoint) keeps full text —
+ * only what rides the roster snapshot / SSE agent DTO gets bounded.
+ */
+function toPersisted(n: SubagentNode): SubagentNode {
+	return {
+		...n,
+		description: n.description !== undefined ? redact(n.description).slice(0, 240) : undefined,
+		task: n.task !== undefined ? redact(n.task).slice(0, 240) : undefined,
+	};
+}
+
+/**
+ * The single read/write contract for subagent lineage: persisted history ∪ live tracker, live wins per
+ * id. Used both to compute what a flush writes AND what every reader (manager.subagents(), the
+ * GET /api/agents/:id/subagents endpoint) returns — so the two surfaces can never drift, by construction.
+ *
+ * Topology review finding 6: `index` is spawn order WITHIN one run only (SubagentNode's own doc: "Spawn
+ * order within the parent run") — the tracker's node map is cleared at every restart (squad-manager.ts's
+ * `restart()`/close+clear sites), so a NEW run's first spawn is index 0 again. A single `sort by index`
+ * across the union therefore interleaves runs whenever their indices tie (run 2's children splicing
+ * between run 1's: s1(0), s3(0), s2(1), s4(1) instead of s1, s2, s3, s4).
+ *
+ * Fixed by grouping on RUN membership instead of comparing `index` across the whole union: any id the
+ * CURRENT tracker (`live`) itself carries belongs to the run in progress (or, on a reseed-from-persisted
+ * reattach, is being actively re-hosted by the live tracker — either way `live`'s copy is authoritative,
+ * matching the existing "live wins" rule). Everything left in `persisted` once those ids are excluded is
+ * strictly earlier history, and its relative order is PRESERVED AS GIVEN rather than re-derived: an
+ * earlier call to this same function already ordered it correctly (run-by-run, chronologically), and a
+ * fresh `index`-only sort over that blob would re-introduce the exact cross-run interleaving this fix
+ * removes, since `index` repeats in every run and was never meant to be globally comparable. `live` is
+ * still ordered internally by spawn order (ties broken by `lastUpdate`) — the same contract `list()`/
+ * `snapshot()` promise, reproduced here since this is an exported function any caller may feed an
+ * arbitrary `SubagentNode[]`, not only `SubagentTracker`'s own.
+ */
+export function mergeSubagents(persisted: SubagentNode[] | undefined, live: SubagentNode[]): SubagentNode[] {
+	const liveIds = new Set(live.map((l) => l.id));
+	const priorRuns = (persisted ?? []).filter((p) => !liveIds.has(p.id));
+	const currentRun = [...live].sort((a, b) => a.index - b.index || a.lastUpdate - b.lastUpdate);
+	return [...priorRuns, ...currentRun];
 }
 
 /**
@@ -64,34 +109,85 @@ interface NodeFields {
 export class SubagentTracker {
 	private readonly nodes = new Map<string, TrackedSubagent>();
 
+	/** True iff a node was created or any tracked field transitioned since the last clearDirty(). Heartbeats
+	 *  (ingestEvent) and no-op re-ingests never set this — write volume stays proportional to real change. */
+	private dirty = false;
+
+	isDirty(): boolean {
+		return this.dirty;
+	}
+
+	clearDirty(): void {
+		this.dirty = false;
+	}
+
+	/** The persisted-projection snapshot (truncated/redacted), ordered like list(). */
+	snapshot(): SubagentNode[] {
+		return this.list().map(toPersisted);
+	}
+
 	/**
 	 * Fold one RPC frame into the tree. Handles `subagent_lifecycle`,
 	 * `subagent_progress`, and `subagent_event`; ignores everything else.
 	 * Returns `true` iff a node was created or any tracked field changed.
+	 *
+	 * Dirty tracking is transition-based, not frame-type-based: any real change from
+	 * `subagent_lifecycle`/`subagent_progress` marks dirty (using each ingestX's own diff-computed
+	 * return value), regardless of which frame kind carried it — this closes the race where a progress
+	 * frame carries a terminal status before the matching lifecycle frame arrives (a lifecycle-only dirty
+	 * gate would miss it since LIFECYCLE_STATUS mapping makes the later lifecycle ingest a no-change).
+	 * `subagent_event` is excluded from dirty even when it returns `true`: it only ever bumps `lastUpdate`
+	 * on an already-known node (a pure heartbeat), so counting it would flush on every heartbeat and
+	 * inflate write volume far beyond what the tracked content actually warrants.
 	 */
 	ingest(frame: { type: string; payload?: unknown }): boolean {
 		const payload = frame.payload;
 		if (payload === null || typeof payload !== "object") return false;
+		let changed = false;
 		switch (frame.type) {
 			case "subagent_lifecycle":
-				return this.ingestLifecycle(payload as LifecyclePayload);
+				changed = this.ingestLifecycle(payload as LifecyclePayload);
+				break;
 			case "subagent_progress":
-				return this.ingestProgress(payload as ProgressPayload);
+				changed = this.ingestProgress(payload as ProgressPayload);
+				break;
 			case "subagent_event":
-				return this.ingestEvent(payload as EventPayload);
+				changed = this.ingestEvent(payload as EventPayload);
+				break;
 			default:
 				return false;
+		}
+		if (changed && frame.type !== "subagent_event") this.dirty = true;
+		return changed;
+	}
+
+	/**
+	 * Stamp every non-terminal node aborted (run ended/agent stopped without a terminal frame for it), and
+	 * mark dirty so the caller's next flush persists the closure. Idempotent — a second call after all nodes
+	 * are already terminal is a no-op (dirty stays false from this call). Call at finalizeRun and at the
+	 * restart() clear site, BEFORE clearing, so a persisted entry can never claim "running" under a stopped
+	 * agent.
+	 */
+	closeNonTerminal(): void {
+		const TERMINAL = new Set(["completed", "failed", "aborted"]);
+		for (const n of this.nodes.values()) {
+			if (!TERMINAL.has(n.status)) {
+				n.status = "aborted";
+				n.lastUpdate = Date.now();
+				this.dirty = true;
+			}
 		}
 	}
 
 	/**
-	 * Reconcile from a `get_subagents` response. Each snapshot is authoritative
-	 * for the fields and `lastUpdate` it carries, so we upsert every entry. We do
-	 * not prune nodes absent from `snaps`: a `subagent_lifecycle`/`progress` frame
-	 * can legitimately arrive between two refreshes, and dropping it would flicker
-	 * the live tree.
+	 * Reconcile from a `get_subagents` response, OR reseed a fresh tracker from a persisted `SubagentNode[]`
+	 * snapshot on reattach/adopt (both shapes satisfy this signature — the RPC snapshot carries extra fields
+	 * this method never reads). Each entry is authoritative for the fields and `lastUpdate` it carries, so we
+	 * upsert every entry. We do not prune nodes absent from `snaps`: a `subagent_lifecycle`/`progress` frame
+	 * can legitimately arrive between two refreshes (or between reseed and the next live frame), and dropping
+	 * it would flicker the live tree.
 	 */
-	applySnapshot(snaps: RpcSubagentSnapshot[]): void {
+	applySnapshot(snaps: SubagentNode[]): void {
 		for (const s of snaps) {
 			if (typeof s.id !== "string") continue;
 			const existing = this.nodes.get(s.id);
@@ -128,6 +224,7 @@ export class SubagentTracker {
 			status: n.status,
 			task: n.task,
 			lastUpdate: n.lastUpdate,
+			index: n.index,
 		}));
 	}
 

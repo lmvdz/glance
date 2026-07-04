@@ -26,6 +26,7 @@ function baseInput(over: Partial<BuildFactoryStatusInput> = {}): BuildFactorySta
 		rollup: [],
 		liveArmed: { dispatch: true, observer: true, scout: true, opportunity: true, autodrive: true, autoland: true },
 		activeAgents: 0,
+		persistFailures: 0,
 		...over,
 	};
 }
@@ -167,6 +168,11 @@ describe("buildFactoryStatus — the whole snapshot", () => {
 		);
 		expect(s.overall).toBe("moving");
 		expect(s.activeAgents).toBe(2);
+	});
+
+	test("persistFailures passes straight through — the topology write-durability signal", () => {
+		expect(buildFactoryStatus(baseInput()).persistFailures).toBe(0);
+		expect(buildFactoryStatus(baseInput({ persistFailures: 3 })).persistFailures).toBe(3);
 	});
 
 	test("everything disabled reads off", () => {

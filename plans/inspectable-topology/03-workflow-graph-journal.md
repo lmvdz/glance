@@ -1,4 +1,4 @@
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -161,3 +161,6 @@ bunx tsc --noEmit
 | concern | blockedBy |
 |---|---|
 | 03-workflow-graph-journal | 01-boot-path-threading-and-durability |
+
+## Resolution
+Shipped in 58d179b (+ audit fixes f3209a4: journal frames keep the generic tail alive — lastActivity/emitAgent restored, closing a false-stall regression; e81d492: branchIndexByNode seeded from resumed branchOutcomes so cold-resume re-spawns don't duplicate sibling indices; fe30913 driver-side lineage assertions). Emitted at execRun after real runId assignment; onAgentEvent consumes only workflow.graph.

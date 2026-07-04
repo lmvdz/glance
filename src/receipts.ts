@@ -62,6 +62,12 @@ export class RunAccumulator {
 		this.spans = new SpanCollector(this.seed);
 	}
 
+	/** The live run's trace id (same id-space `RunReceipt.traceId`/`/api/trace/:id` use — `feat:<featureId>`
+	 *  or `run:<agentId>:<runId>` with THIS accumulator's own runId), or "" before `start()` first runs. */
+	get traceId(): string {
+		return this.spans.id;
+	}
+
 	/** Begin a run. Idempotent within a live run; refreshes model when given. */
 	start(model?: string): void {
 		if (model) this.seed.model = model;
