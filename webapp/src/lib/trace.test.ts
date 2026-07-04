@@ -44,6 +44,20 @@ describe('formatDurationMs', () => {
   test('hours → h + zero-padded m', () => {
     expect(formatDurationMs(3_720_000)).toBe('1h 02m');
   });
+
+  // Regression guard: seconds used to round independently of minutes, so a leftover remainder near
+  // a 60s boundary could round UP to "60" while the whole-minute count stayed put.
+  test('minute rollover boundary: 119_600ms rounds to 2m 00s, not 1m 60s', () => {
+    expect(formatDurationMs(119_600)).toBe('2m 00s');
+  });
+
+  test('hour rollover boundary: 3_599_600ms (3599.6s) rounds to 1h 00m, not 59m 60s', () => {
+    expect(formatDurationMs(3_599_600)).toBe('1h 00m');
+  });
+
+  test('sub-minute boundary: 59_960ms rounds to 1m 00s, not 60.0s', () => {
+    expect(formatDurationMs(59_960)).toBe('1m 00s');
+  });
 });
 
 describe('formatUsd', () => {

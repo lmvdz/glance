@@ -2,21 +2,48 @@
  * TopologyPanel — fleet-wide parent/child forest.
  *
  * A port + extension of the legacy `renderRace` root/child split (src/web/index.html:1319-1341):
- * every top-level agent, workflow branch fan-outs, and task subagents rendered as one collapsible
- * tree instead of a flat list. Workflow nodes get a compact rollup progress bar ported from the
- * legacy `renderWorkflowRun` (src/web/index.html:1275-1284, the "racebar" of segments). A dangling
- * `parentId` (parent removed from the roster) shows as a promoted root with an "orphaned" badge
- * rather than silently vanishing — see lib/lineage.ts's `orphaned` field.
+ * every top-level agent and workflow branch fan-out renders as one collapsible tree instead of a
+ * flat list. Each agent's task-spawned subagents (if any — `AgentDTO.subagents`, src/subagents.ts)
+ * render as a flat set of status-colored leaf rows beneath it: they don't themselves nest further
+ * (a subagent spawning its own subagents flattens into the same list — "nesting is out of scope for
+ * this slice", subagents.ts), so they're rows, not their own collapsible subtree. Workflow nodes get
+ * a compact rollup progress bar ported from the legacy `renderWorkflowRun` (src/web/index.html:1275-
+ * 1284, the "racebar" of segments). A dangling `parentId` (parent removed from the roster) shows as
+ * a promoted root with an "orphaned" badge rather than silently vanishing — see lib/lineage.ts's
+ * `orphaned` field.
  */
 
 import React from 'react';
 import { GitBranch, ChevronRight } from 'lucide-react';
 import { useTaskContext } from '../context/TaskContext';
 import { buildLineageTree, type LineageNode } from '../lib/lineage';
+import type { SubagentNodeDTO } from '../lib/dto';
 import { PanelShell } from './ui';
 import { STATUS_DOT } from './AgentStatusStrip';
 
 const KIND_LABEL: Record<string, string> = { 'omp-operator': 'operator', workflow: 'workflow', 'flue-service': 'flue' };
+
+/** Status colors for a subagent leaf row — mirrors STATUS_DOT's convention but keyed on the
+ *  `SubagentNode` status vocabulary (src/subagents.ts's LIFECYCLE_STATUS mapping + progress
+ *  snapshots): pending/running/completed/failed/aborted, not an `AgentStatus`. */
+const SUBAGENT_STATUS_DOT: Record<string, string> = {
+  running: 'bg-emerald-500',
+  pending: 'bg-sky-500',
+  completed: 'bg-gray-400',
+  failed: 'bg-red-500',
+  aborted: 'bg-red-500',
+};
+
+/** One task-spawned subagent, rendered as a leaf row under its parent's TopologyRow — no expand
+ *  toggle (subagents don't nest further), indented one level deeper than the parent. */
+const SubagentRow: React.FC<{ node: SubagentNodeDTO; depth: number }> = ({ node, depth }) => (
+  <div className="flex items-center gap-1.5 rounded px-1.5 py-1" style={{ paddingLeft: depth * 18 + 6 }}>
+    <span className="h-4 w-4 shrink-0" aria-hidden="true" />
+    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${SUBAGENT_STATUS_DOT[node.status] ?? 'bg-gray-400'}`} aria-hidden="true" />
+    <span className="truncate text-xs text-gray-500 dark:text-gray-400">{node.agent}</span>
+    <span className="ml-auto shrink-0 text-[10px] text-gray-400">{node.status}</span>
+  </div>
+);
 
 /** Segmented rollup bar — one segment per workflow stage, filled as it completes. Direct port of
  *  the legacy `.racebar`/`.seg` markup, in Tailwind. */
@@ -39,10 +66,11 @@ const RollupBar: React.FC<{ rollup: { label: string; status: 'in_progress' | 'co
   );
 };
 
-const TopologyRow: React.FC<{ node: LineageNode; depth: number }> = ({ node, depth }) => {
+export const TopologyRow: React.FC<{ node: LineageNode; depth: number }> = ({ node, depth }) => {
   const [open, setOpen] = React.useState(true);
   const { agent, children, orphaned } = node;
-  const hasChildren = children.length > 0;
+  const subagents = agent.subagents ?? [];
+  const hasChildren = children.length > 0 || subagents.length > 0;
   const rollup = agent.workflowState?.rollup;
 
   return (
@@ -80,6 +108,7 @@ const TopologyRow: React.FC<{ node: LineageNode; depth: number }> = ({ node, dep
         <span className="ml-auto shrink-0 text-[10px] text-gray-400">{agent.status}</span>
       </div>
       {rollup && rollup.length > 0 && <div style={{ paddingLeft: depth * 18 + 30 }}><RollupBar rollup={rollup} /></div>}
+      {open && subagents.map((s) => <SubagentRow key={s.id} node={s} depth={depth + 1} />)}
       {open && children.map((child) => <TopologyRow key={child.agent.id} node={child} depth={depth + 1} />)}
     </div>
   );

@@ -13,6 +13,7 @@ import { taskRef } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
 import { traceIdForAgent } from '../lib/trace';
+import { pickWorkflowGraphAgent } from '../lib/workflowGraph';
 import { AgentStatusStrip } from './AgentStatusStrip';
 import { TranscriptTimeline } from './AssistantChat';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
@@ -568,8 +569,10 @@ export const TaskDetail = () => {
   const forkTargets = React.useMemo(() => activeAgents.filter((agent) => agent.forkAvailable), [activeAgents]);
   // The workflow agent (if any) whose static topology the graph overlay renders — gated on
   // `workflowGraph` being present (journaled once per run, concern 03), not just `kind === 'workflow'`,
-  // so an old daemon or a run whose journal hasn't landed yet simply hides the overlay.
-  const workflowGraphAgent = React.useMemo(() => activeAgents.find((agent) => agent.workflowGraph), [activeAgents]);
+  // so an old daemon or a run whose journal hasn't landed yet simply hides the overlay. When a task
+  // carries more than one workflow-graph-bearing agent (a dead, terminal-marked run alongside its
+  // live fork/re-run), `pickWorkflowGraphAgent` prefers the live one instead of raw array order.
+  const workflowGraphAgent = React.useMemo(() => pickWorkflowGraphAgent(activeAgents), [activeAgents]);
   // Trace drill-in target for the graph overlay's node click — undefined (overlay stays
   // non-clickable) until the run has either a featureId or a server-minted traceId to key the trace on.
   const workflowGraphTraceId = React.useMemo(

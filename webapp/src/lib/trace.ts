@@ -18,14 +18,22 @@ export function traceIdForAgent(agent: { id: string; featureId?: string; traceId
   return agent.traceId;
 }
 
-/** Formats a millisecond duration as a short human string: `840ms`, `12.3s`, `4m 05s`, `1h 02m`. */
+/** Formats a millisecond duration as a short human string: `840ms`, `12.3s`, `4m 05s`, `1h 02m`.
+ *  Seconds/minutes/hours are derived from a SINGLE rounded total (not rounded independently per
+ *  unit), so a value like 119_600ms can't round its leftover 59.6s up to "60s" while its whole
+ *  minutes stay at 1 — the old per-unit rounding produced exactly that ("1m 60s", or "59m 60s" for
+ *  3599.6s). Rounding the whole-second total first, then splitting THAT integer into minutes/hours,
+ *  makes a 60-rollover carry into the next unit instead of ever being displayed. */
 export function formatDurationMs(ms: number | undefined): string {
   if (ms === undefined || !Number.isFinite(ms) || ms < 0) return '—';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const totalSec = ms / 1000;
-  if (totalSec < 60) return `${totalSec.toFixed(1)}s`;
-  const totalMin = Math.floor(totalSec / 60);
-  const sec = Math.round(totalSec - totalMin * 60);
+  // 59.95s..60s would itself round to "60.0s" on the fixed-decimal path below — promote it to the
+  // whole-second/minute path instead so it becomes "1m 00s".
+  if (totalSec < 59.95) return `${totalSec.toFixed(1)}s`;
+  const roundedSec = Math.round(totalSec);
+  const totalMin = Math.floor(roundedSec / 60);
+  const sec = roundedSec - totalMin * 60;
   if (totalMin < 60) return `${totalMin}m ${String(sec).padStart(2, '0')}s`;
   const hr = Math.floor(totalMin / 60);
   const min = totalMin - hr * 60;
