@@ -175,10 +175,87 @@ export type AutonomyMode = "observe" | "assist" | "autodrive";
 export type VerificationState = "unknown" | "none" | "failed" | "stale" | "fresh";
 export type AgentAction = "prompt" | "answer" | "interrupt" | "verify" | "land" | "set-mode";
 
+/** Mirrors src/types.ts's AgentKind — which runtime backs this agent. */
+export type AgentKind = "omp-operator" | "flue-service" | "workflow";
+
+/** One node in a journaled workflow graph snapshot (mirrors src/workflow/types.ts's WorkflowGraphNode). */
+export interface WorkflowGraphNodeDTO {
+  id: string;
+  kind: string;
+  label?: string;
+  maxVisits?: number;
+  overflow?: string;
+  goalGate?: boolean;
+  /** On failure with no matching edge, route here — rendered as a dashed failure edge. */
+  retryTarget?: string;
+}
+
+/** One edge in a journaled workflow graph snapshot (mirrors WorkflowGraphEdge). */
+export interface WorkflowGraphEdgeDTO {
+  from: string;
+  to: string;
+  label?: string;
+  condition?: string;
+}
+
+/** Static topology snapshot of a workflow's DOT graph, journaled once per run (concern 03) so the
+ *  UI can render intended structure with live progress overlaid. version:1 is additive/forward-compat. */
+export interface WorkflowGraphSnapshotDTO {
+  version: 1;
+  name: string;
+  nodes: WorkflowGraphNodeDTO[];
+  edges: WorkflowGraphEdgeDTO[];
+  start: string;
+  exit: string;
+  maxNodeVisits?: number;
+}
+
+/** Live progress over a workflowGraph — mirrors the fields of src/workflow/types.ts's WorkflowRunState
+ *  the webapp actually reads. Widened/partial on purpose, matching the existing workflowState doc
+ *  convention: the webapp never branches on exhaustive workflow-state cases. `runId`/`terminal` are
+ *  kept from the pre-existing narrower shape (still riding the same wire payload, still what the Fork
+ *  button's `forkAvailable` gate is documented against). */
+export interface WorkflowRunStateDTO {
+  currentNode: string;
+  visits: Record<string, number>;
+  vars: Record<string, string>;
+  outcome?: "succeeded" | "failed";
+  preferredLabel?: string;
+  rollup: { label: string; status: "in_progress" | "completed" }[];
+  runId?: string;
+  terminal?: { reason: string; at?: number; forkPoint?: { runId?: string; seq: number }; supersededBy?: string };
+}
+
+/** One node in an agent's subagent tree (task-spawned children) — mirrors src/subagents.ts's
+ *  SubagentNode. task/description are truncated + redacted server-side before they ever reach here. */
+export interface SubagentNodeDTO {
+  id: string;
+  agent: string;
+  description?: string;
+  status: string;
+  task?: string;
+  lastUpdate: number;
+  index: number;
+}
+
 export interface AgentDTO {
   id: string;
   name: string;
   status: AgentStatus;
+  /** Which runtime backs this agent. */
+  kind?: AgentKind;
+  /** Parent agent id, when this agent is a spawned fan-out branch (workflow) or task subagent. */
+  parentId?: string;
+  /** The node in the PARENT's workflow graph this branch executes — structural lineage, distinct
+   *  from `name` (mutable, identical across parallel siblings of one node). */
+  parentNodeId?: string;
+  /** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+  branchIndex?: number;
+  /** Persisted subagent tree snapshot (task-spawned children). */
+  subagents?: SubagentNodeDTO[];
+  /** Static workflow graph topology, captured once per run (concern 03's workflow.graph journal event). */
+  workflowGraph?: WorkflowGraphSnapshotDTO;
+  workflow?: { path?: string; verify?: { command: string } };
   repo: string;
   worktree: string;
   branch?: string;
@@ -217,13 +294,9 @@ export interface AgentDTO {
    *  that never sets the field, which is exactly the gate the Fork button uses: an old daemon never
    *  shows it instead of showing it disabled or 404ing. */
   forkAvailable?: boolean;
-  /** Mirrors the daemon's WorkflowRunState (src/workflow/types.ts) shape the webapp actually reads:
-   *  just enough to label a terminal run and correlate it to a fork point. Widened/partial on purpose
-   *  — the webapp never branches on exhaustive workflow-state cases. */
-  workflowState?: {
-    runId?: string;
-    terminal?: { reason: string; at?: number; forkPoint?: { runId?: string; seq: number }; supersededBy?: string };
-  };
+  /** Live progress (currentNode/rollup/etc.) over `workflowGraph`'s static topology, plus the
+   *  terminal/runId subset the Fork button's `forkAvailable` gate is documented against. */
+  workflowState?: WorkflowRunStateDTO;
 }
 
 export interface TranscriptTool {

@@ -3681,6 +3681,10 @@ export class SquadManager extends EventEmitter {
 	private async remove(id: string, deleteWorktree: boolean): Promise<void> {
 		const rec = this.agents.get(id);
 		if (!rec) return;
+		const liveChildren = [...this.agents.values()].filter((r) => r.dto.parentId === id && r.dto.id !== id);
+		if (liveChildren.length) {
+			this.log("warn", `removing agent "${rec.dto.name}" with ${liveChildren.length} live child(ren) — they become orphaned roots in the topology view`);
+		}
 		await rec.agent.stop();
 		if (deleteWorktree && !rec.options.repo.startsWith("(")) {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});

@@ -13,6 +13,7 @@ import {
   Circle,
   Download,
   Filter,
+  GitBranch,
   GripVertical,
   Inbox,
   Library,
@@ -76,6 +77,7 @@ const NAV_SECTIONS: { title: string; items: { view: AppView; label: string; icon
       { view: 'heat', label: 'Heat map', icon: Thermometer },
       { view: 'activity-heatmap', label: 'Activity rhythm', icon: CalendarClock },
       { view: 'omp-graph', label: 'Graph', icon: Waypoints },
+      { view: 'topology', label: 'Topology', icon: GitBranch },
     ],
   },
   {
@@ -381,6 +383,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     : view === 'heat' ? 'Heat Map'
     : view === 'activity-heatmap' ? 'Activity Rhythm'
     : view === 'omp-graph' ? 'Graph'
+    : view === 'topology' ? 'Topology'
     : view === 'federation' ? 'Federation'
     : view === 'knowledge' ? 'Knowledge'
     : '';
@@ -419,6 +422,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         </button>
         <button onClick={() => setView('omp-graph')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'omp-graph' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Graph" title="Graph — the living temporal dashboard">
           <Waypoints className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button onClick={() => setView('topology')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'topology' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Topology" title="Topology — the parent/child agent forest">
+          <GitBranch className="h-4 w-4" aria-hidden="true" />
         </button>
         <button onClick={() => setView('federation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'federation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Federation" title="Federation">
           <Network className="h-4 w-4" aria-hidden="true" />

@@ -41,6 +41,7 @@ import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOr
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
+import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
@@ -1238,7 +1239,7 @@ export class SquadServer {
 		}
 		const mtrace = url.pathname.match(/^\/api\/trace\/([^/]+)$/);
 		if (mtrace && req.method === "GET") {
-			const trace = await manager.trace(decodeURIComponent(mtrace[1]));
+			const trace = await tracePayload(manager, decodeURIComponent(mtrace[1]));
 			if (trace.receipts.length === 0 && trace.root.children.length === 0) return new Response("trace not found", { status: 404 });
 			return Response.json(trace);
 		}
@@ -1571,6 +1572,28 @@ export class SquadServer {
 		this.claimed.clear();
 		this.server?.stop(true);
 	}
+}
+
+/**
+ * Per-runId trace cache: `manager.trace()` scans EVERY receipt on disk (`readAllReceipts`), which is
+ * fine for an occasional click but not for one wired raw behind a fast poll. A finalized run's trace
+ * never changes, so once every receipt in its tree has `endedAt` set, the response is cached; a run
+ * still in flight (any receipt missing `endedAt`) is recomputed every call — that scan is cheap (one
+ * active run's worth of receipts), so correctness costs nothing there.
+ */
+export const traceCache = new Map<string, { receiptCount: number; at: number; response: TraceResponse }>();
+export const TRACE_CACHE_TTL_MS = 30_000;
+
+export async function tracePayload(manager: SquadManager, id: string): Promise<TraceResponse> {
+	const hit = traceCache.get(id);
+	if (hit && Date.now() - hit.at < TRACE_CACHE_TTL_MS) return hit.response;
+	const response = await manager.trace(id);
+	// Only cache once the trace looks finalized (no receipt still mid-run) — cheap heuristic: no receipt
+	// missing endedAt. A running trace is recomputed every call (small — receipts for one active run).
+	if (response.receipts.every((r) => r.endedAt !== undefined)) {
+		traceCache.set(id, { receiptCount: response.receipts.length, at: Date.now(), response });
+	}
+	return response;
 }
 
 async function usagePayload(manager: SquadManager, url: URL): Promise<{
