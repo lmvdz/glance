@@ -362,3 +362,65 @@ test("attach and mic buttons are gone from the composer's rendered subtree (no m
   expect(html).not.toContain('aria-label="Attach file"');
   expect(html).not.toContain('aria-label="Voice input"');
 });
+
+test("a running assistant entry with an unclosed table header holds it back until the separator arrives", () => {
+  const entry: TranscriptEntry = {
+    id: "a1",
+    kind: "assistant",
+    text: "First paragraph settled.\n\n| a | b |",
+    ts: 1,
+    status: "running",
+  };
+
+  const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+  expect(html).toContain("First paragraph settled");
+  // Lone table header without its separator row is held back — no raw `|` table markup leaks.
+  expect(html).not.toContain("<table>");
+  expect(html).not.toContain("| a | b |");
+});
+
+test("a running assistant entry with a trailing unclosed emphasis marker auto-closes rather than leaking raw asterisks", () => {
+  const entry: TranscriptEntry = {
+    id: "a1b",
+    kind: "assistant",
+    text: "First paragraph settled.\n\nThis is **unclosed",
+    ts: 1,
+    status: "running",
+  };
+
+  const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+  expect(html).toContain("First paragraph settled");
+  // The trailing unclosed ** is auto-closed rather than rendered as literal asterisks.
+  expect(html).not.toContain("**unclosed");
+  expect(html).toContain("<strong>unclosed</strong>");
+});
+
+test("a completed assistant entry renders full raw text in one pass, untrimmed", () => {
+  const entry: TranscriptEntry = {
+    id: "a2",
+    kind: "assistant",
+    text: "Done. Trailing unclosed **bold stays as authored.",
+    ts: 1,
+    status: "ok",
+  };
+
+  const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+  // Completed entries are never trimmed — remark renders the malformed markdown as-is.
+  expect(html).toContain("Trailing unclosed");
+});
+
+test("the settled markdown prefix is memoized: identical settled text renders identical markup across renders with a growing tail", () => {
+  const base = "Settled paragraph one.\n\nSettled paragraph two.\n\n";
+  const entryA: TranscriptEntry = { id: "a3", kind: "assistant", text: base + "gro", ts: 1, status: "running" };
+  const entryB: TranscriptEntry = { id: "a3", kind: "assistant", text: base + "growing tail", ts: 1, status: "running" };
+
+  const htmlA = renderToStaticMarkup(<TranscriptEntryView entry={entryA} />);
+  const htmlB = renderToStaticMarkup(<TranscriptEntryView entry={entryB} />);
+
+  // Both renders share the identical settled-prefix markup; only the tail differs.
+  expect(htmlA).toContain("Settled paragraph one");
+  expect(htmlA).toContain("Settled paragraph two");
+  expect(htmlB).toContain("Settled paragraph one");
+  expect(htmlB).toContain("Settled paragraph two");
+  expect(htmlB).toContain("growing tail");
+});

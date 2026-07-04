@@ -1,5 +1,5 @@
 # Wire settled/tail markdown rendering into the transcript
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -25,3 +25,6 @@ None.
 - Existing markdown-rendering assertions in `AssistantChat.test.tsx` pass (completed entries render byte-identical markup).
 - Add: running entry with a torn table/unclosed `**` renders suppressed tail (no raw `**` in output); settled prefix markup stable across a tail-only text growth (memo assertion via double render).
 - Manual: stream a long plan-style response; confirm no torn-syntax flashes and no visible seam at the settled boundary (check list/paragraph spacing across it).
+
+## Resolution
+Added `SettledMarkdown` in `AssistantChat.tsx` alongside `CodeBlock`, backed by a `React.memo` leaf (`MemoSettled`) whose sole prop is the settled string. While `status === 'running'` it splits via `splitSettled` (from concern 06's `streamingMarkdown.ts`), renders the settled prefix through the memoized leaf and the tail through `trimStreamingArtifacts`. Otherwise it renders the full raw text through a single `<Markdown>` pass, untrimmed. Extracted `MARKDOWN_REMARK_PLUGINS` / `MARKDOWN_COMPONENTS` once so both halves and both call sites (transcript `TranscriptEntryView` and the legacy `visibleMessages` path) share identical config — both `react-markdown` invocations were replaced with `<SettledMarkdown>`. Added three tests: unclosed table header held back, trailing unclosed `**` auto-closed rather than leaked raw, and settled-prefix stability across tail growth. `bun test` (384 pass) and `tsc --noEmit` both clean.
