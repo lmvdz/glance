@@ -128,3 +128,13 @@ export async function deleteCheckpointLog(stateDir: string, runId: string): Prom
 	chains.delete(runId);
 	await fs.rm(checkpointLogPath(stateDir, runId), { force: true }).catch(() => {});
 }
+
+/** Drop this runId's in-memory append-chain bookkeeping WITHOUT touching the on-disk log — call once a
+ *  run reaches a final state (workflow_done or workflow_terminal, after its last append has settled) so
+ *  a long-lived daemon's `chains` map doesn't grow by one entry for the rest of the process's life for
+ *  every run that finishes or escalates without ever being removed. Safe unconditionally: a stray
+ *  post-final appendCheckpoint call for this runId (there should be none) just re-inits its seq from the
+ *  file's existing line count, exactly like a fresh process boot would (see `chainFor`). */
+export function evictCheckpointChain(runId: string): void {
+	chains.delete(runId);
+}

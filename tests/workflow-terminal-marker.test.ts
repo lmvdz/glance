@@ -143,10 +143,11 @@ test("a transient checkpoint emission is never appended to the checkpoint log", 
 	await mgr.stop();
 });
 
-// (d) a terminal-marked persisted agent is excluded from resumable adoption on a simulated restart, while
-// a plain (non-terminal) resumable checkpoint on a sibling workflow IS re-adopted — proving the exclusion
-// is specific to `terminal`, not a general workflow-adoption regression.
-test("a terminal-marked workflow is not resumed by reconnectLive/adoption after a restart, unlike a plain resumable one", async () => {
+// (d) a terminal-marked persisted agent SURVIVES a restart as a visible, forkable roster entry (D1: never
+// overwrite a checkpointed workflow into oblivion) but is NEVER auto-resumed/re-adopted, while a plain
+// (non-terminal) resumable checkpoint on a sibling workflow IS re-adopted — proving the exclusion from
+// resumption is specific to `terminal`, not a general workflow-adoption regression.
+test("a terminal-marked workflow survives a restart as an inert forkable roster entry, unlike a plain resumable one which is re-adopted", async () => {
 	const { mgr: mgr1, repo, stateDir, worktreeBase } = await makeMgr("restart-exclude");
 	const host1 = mgr1 as unknown as InternalHost;
 
@@ -169,9 +170,58 @@ test("a terminal-marked workflow is not resumed by reconnectLive/adoption after 
 	await mgr2.start();
 
 	const roster2 = mgr2.list();
-	expect(roster2.find((a) => a.name === "wf-terminal")).toBeUndefined(); // never re-adopted
-	expect(roster2.find((a) => a.name === "wf-resumable")).toBeDefined(); // ordinary resumable adoption unaffected
+	const terminalAfterRestart = roster2.find((a) => a.name === "wf-terminal");
+	expect(terminalAfterRestart).toBeDefined(); // still visible — the marker survived the restart
+	expect(terminalAfterRestart?.id).toBe(terminalDto.id); // reattached under the SAME id (not a fresh re-adopt id)
+	expect(terminalAfterRestart?.status).toBe("error"); // sticky catastrophe error, re-derived from the marker
+	expect(terminalAfterRestart?.error).toContain("ran off the end of the graph");
+	expect(terminalAfterRestart?.forkAvailable).toBe(true);
 
+	const resumableAfterRestart = roster2.find((a) => a.name === "wf-resumable");
+	expect(resumableAfterRestart).toBeDefined(); // ordinary resumable adoption unaffected
+	expect(resumableAfterRestart?.status).not.toBe("error");
+
+	// mgr2.stop() persists (a full-snapshot replace) before shutting down — the reattached terminal
+	// record must survive THAT persist untouched too, proving it no longer depends on ever having been
+	// "adopted"/"deferred" to avoid being erased (D1's own "never overwrite into oblivion" intent).
+	await mgr2.stop();
+
+	const mgr3 = new SquadManager({ stateDir, worktreeBase });
+	(mgr3 as unknown as DriverFactoryHost).makeDriver = () => new FakeDriver();
+	await mgr3.start();
+	const roster3 = mgr3.list();
+	const terminalAfterSecondRestart = roster3.find((a) => a.name === "wf-terminal");
+	expect(terminalAfterSecondRestart?.status).toBe("error");
+	expect(terminalAfterSecondRestart?.forkAvailable).toBe(true);
+	await mgr3.stop();
+});
+
+// A "prompt" command against a terminal-marked workflow that survived a restart (reattachTerminal) must
+// be refused, not silently re-drive the graph from scratch: `ensureConnected` would otherwise start the
+// never-run driver and this prompt would land as ITS "first prompt" (WorkflowDriver.prompt's execRun
+// branch), re-entering the exact escalate condition the marker exists to stop.
+test("prompt is refused (not re-driven) against a terminal-marked workflow reattached after a restart", async () => {
+	const { mgr: mgr1, repo, stateDir, worktreeBase } = await makeMgr("prompt-refused");
+
+	const dto = await mgr1.create({ name: "wf-terminal-prompt", repo, approvalMode: "yolo", verify: "true" });
+	const host1 = mgr1 as unknown as InternalHost;
+	const rec1 = host1.agents.get(dto.id)!;
+	rec1.agent.emit("checkpoint", runState({ runId: "run-prompt-refused", currentNode: "n1" }));
+	await rec1.checkpointAppending;
+	rec1.agent.emit("event", { type: "workflow_terminal", reason: "poison cap", checkpoint: checkpoint() });
+	await waitFor(() => rec1.dto.status === "error");
+	await mgr1.stop();
+
+	const mgr2 = new SquadManager({ stateDir, worktreeBase });
+	(mgr2 as unknown as DriverFactoryHost).makeDriver = () => new FakeDriver();
+	await mgr2.start();
+	const host2 = mgr2 as unknown as InternalHost;
+	const rec2 = host2.agents.get(dto.id)!;
+	expect(rec2.dto.status).toBe("error");
+
+	await mgr2.applyCommand({ type: "prompt", id: dto.id, message: "try again" });
+
+	expect(mgr2.getAgent(dto.id)?.status).toBe("error"); // still sticky — never flipped to working/idle
 	await mgr2.stop();
 });
 
