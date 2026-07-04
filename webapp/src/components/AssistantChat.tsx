@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Sparkles, Plus, Paperclip, ArrowUp, Square, Loader2, X, ChevronRight, Copy, Check, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare, Clock3, TerminalSquare, FileText, Send } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -9,6 +9,7 @@ import { ScrollToLatestPill } from './chat/ScrollToLatestPill';
 import { ToolCallGroup, ToolCallRow, fmtDuration, groupToolRuns, toolView } from './chat/ToolCallGroup';
 import { useChatStreamScroll } from '../hooks/chat/useChatStreamScroll';
 import { useChatNewMessages } from '../hooks/chat/useChatNewMessages';
+import { useTriggerMenu, type TriggerSource } from '../hooks/chat/useTriggerMenu';
 import { useTaskContext } from '../context/TaskContext';
 import { apiFetch, apiJson, jsonInit } from '../lib/api';
 import { answerCommand, canLand, interruptCommand, interruptibleAgents, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../lib/agent-control';
@@ -949,8 +950,6 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const [sessions, setSessions] = useState<Session[]>(initialChatState.sessions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialChatState.activeSessionId);
   const [isMaximized, setIsMaximized] = useState(false);
-  const [showMentions, setShowMentions] = useState(false);
-  const [mentionQuery, setMentionQuery] = useState('');
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [stopPending, setStopPending] = useState(false);
@@ -963,6 +962,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const [chatWidth, setChatWidth] = useState(storedChatWidth);
   const promotedPlanDirs = useRef<Set<string>>(new Set());
   const chatPanelRef = useRef<HTMLDivElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const messages = activeSession?.messages || [];
@@ -981,6 +981,19 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const currentModelOptions = selectedModel && !modelOptions.some((option) => option.value === selectedModel)
     ? [...modelOptions, { label: selectedModel, value: selectedModel }]
     : modelOptions;
+
+  // `@`-mention combobox — caret-anchored via the composer textarea's real selection, not a
+  // split(' ') heuristic. Task filtering stays synchronous over `tasks` from context; the
+  // `triggers` array is extensible so a future `/` command menu slots in beside it.
+  const mentionTriggers = useMemo<TriggerSource<Task>[]>(() => [
+    {
+      trigger: '@',
+      search: (query) => tasks.filter((t) => t.title.toLowerCase().includes(query.toLowerCase())),
+      getId: (t) => t.id,
+      getLabel: (t) => t.title,
+    },
+  ], [tasks]);
+  const mentionMenu = useTriggerMenu(composerTextareaRef, mentionTriggers, setInput);
 
   useEffect(() => {
     if (activeSessionId && !sessions.some((session) => session.id === activeSessionId)) {
@@ -1203,41 +1216,12 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === '@') {
-      setShowMentions(true);
-      setMentionQuery('');
-    } else if (showMentions) {
-      if (e.key === 'Escape') {
-        setShowMentions(false);
-      } else if (e.key === 'Backspace' && input.endsWith('@')) {
-        setShowMentions(false);
-      } else if (e.key.length === 1 || e.key === 'Backspace') {
-        // Simple handling for mention query (in a real app this would use a proper cursor/range detection)
-        setTimeout(() => {
-          const words = (e.target as HTMLTextAreaElement).value.split(' ');
-          const lastWord = words[words.length - 1];
-          if (lastWord.startsWith('@')) {
-            setMentionQuery(lastWord.substring(1));
-          } else {
-            setShowMentions(false);
-          }
-        }, 0);
-      }
-    } else if (e.key === 'Enter' && !e.shiftKey) {
+    if (mentionMenu.handleKeyDown(e)) return; // menu consumed the key (nav/select/dismiss)
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
   };
-
-  const insertMention = (taskId: string, taskTitle: string) => {
-    const words = input.split(' ');
-    words.pop(); // remove the @ query
-    const newValue = [...words, `@${taskTitle}`].join(' ') + ' ';
-    setInput(newValue);
-    setShowMentions(false);
-  };
-
-  const filteredTasks = tasks.filter(t => t.title.toLowerCase().includes(mentionQuery.toLowerCase()));
 
   const startChatResize = (event: React.PointerEvent<HTMLDivElement>) => {
     const panel = chatPanelRef.current;
@@ -1437,17 +1421,23 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
 
         <div className="relative bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl flex flex-col focus-within:border-gray-400 dark:focus-within:border-gray-600 transition-colors">
           
-          {showMentions && (
-            <div className="absolute bottom-full left-0 mb-2 w-full max-h-48 overflow-y-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-lg z-50">
+          {mentionMenu.isOpen && (
+            <div
+              id={mentionMenu.listboxId}
+              role="listbox"
+              aria-label="Mention a task"
+              className="absolute bottom-full left-0 mb-2 w-full max-h-48 overflow-y-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-lg z-50"
+            >
               <div className="p-2 text-xs font-medium text-gray-500 border-b border-gray-200 dark:border-gray-800">
                 Mention a task
               </div>
-              {filteredTasks.length > 0 ? (
-                filteredTasks.map(task => (
+              {mentionMenu.items.length > 0 ? (
+                mentionMenu.items.map((task, index) => (
                   <button
                     key={task.id}
-                    onClick={() => insertMention(task.id, task.title)}
-                    className="w-full text-left px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center gap-2"
+                    type="button"
+                    {...mentionMenu.getOptionProps(index)}
+                    className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${index === mentionMenu.activeIndex ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
                   >
                     <span className="w-2 h-2 rounded-full" style={{ backgroundColor: task.status === 'done' ? '#10b981' : '#3b82f6' }}></span>
                     {task.title}
@@ -1461,7 +1451,8 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             </div>
           )}
 
-          <textarea 
+          <textarea
+            ref={composerTextareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -1469,6 +1460,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             className="w-full bg-transparent border-none outline-none text-[13px] text-gray-900 dark:text-gray-200 px-3 py-2.5 resize-none min-h-12 max-h-40"
             disabled={isLoading}
             rows={1}
+            {...mentionMenu.comboboxProps}
           />
           <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5">
             <div className="flex min-w-0 items-center gap-1">
