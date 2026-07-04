@@ -63,6 +63,10 @@ export interface PendingRequest {
 	/** True for a real workflow gate (raiseGate's gate_-id requests, or a GATE:-prefixed title) — never
 	 *  auto-answered by maybeAutoSupervise or the external supervisor, regardless of budget/risk text. */
 	gateClass?: boolean;
+	/** Set when this request was (re)created from an agent-host ring replay during the post-reattach
+	 *  settle window, not a fresh live request. Used ONLY by the two ghost-expiry rules below — never
+	 *  gates answerability (a replayed pending IS answerable; the waiter lives in the surviving host). */
+	replayed?: true;
 }
 
 export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";
@@ -641,6 +645,11 @@ export interface PersistedAgent {
 	produces?: string[];
 	/** Whether the scope contract came from an operator or planner inference. */
 	scopeSource?: ScopeSource;
+	/** Snapshot of in-flight human-input requests at persist time. Advisory only — see squad-manager.ts's
+	 *  cold-adopt path, which consumes this ONLY to record a pending-orphaned close, never to re-populate
+	 *  dto.pending. A cold-adopted agent's correlation id is dead (the RPC waiter died with the old process),
+	 *  so nothing restored here can ever be legitimately answered — do not build an "answerable restore" path. */
+	pending?: PendingRequest[];
 }
 
 /** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */

@@ -4,8 +4,17 @@
  * agents with unlanded work, capped at the agent ceiling; done/clean ones are dropped.
  */
 
-import { expect, test } from "bun:test";
-import { agentsToAdopt, deferredResumable, selectAdoptable } from "../src/squad-manager.ts";
+import { afterEach, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { agentsToAdopt, deferredResumable, selectAdoptable, SquadManager } from "../src/squad-manager.ts";
+import { FileStore } from "../src/dal/store.ts";
+import type { AgentDriver } from "../src/agent-driver.ts";
+import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
+
+process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
 const ag = (id: string) => ({ id });
 const withWork: Record<string, true> = { a: true, c: true, d: true, e: true }; // b is done/clean
@@ -61,4 +70,92 @@ test("deferredResumable: a resumable checkpoint counts as work even with no dirt
 	expect(deferredResumable([wf], resumable, []).map((p) => p.id)).toEqual(["wf"]);
 	// A workflow record with NO checkpoint is not resumable → not preserved.
 	expect(deferredResumable([{ id: "bare", kind: "workflow" }], resumable, [])).toEqual([]);
+});
+
+// ── C04: cold-adopt orphan-close (durable pending) ──────────────────────────
+
+const tmps: string[] = [];
+afterEach(async () => {
+	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
+});
+
+class NoopDriver extends EventEmitter implements AgentDriver {
+	readonly isReady = true;
+	readonly isAlive = true;
+	start(): Promise<void> {
+		return Promise.resolve();
+	}
+	stop(): Promise<void> {
+		return Promise.resolve();
+	}
+	prompt(): Promise<void> {
+		return Promise.resolve();
+	}
+	abort(): Promise<unknown> {
+		return Promise.resolve();
+	}
+	getState(): Promise<RpcSessionState> {
+		return Promise.resolve({ todoPhases: [], isStreaming: false } as RpcSessionState);
+	}
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
+interface DriverFactoryHost {
+	makeDriver: (p: PersistedAgent) => AgentDriver;
+}
+
+interface TransitionLogEntry {
+	agentId: string;
+	from: string;
+	to: string;
+	reason: string;
+	at: number;
+	cause?: Record<string, unknown>;
+	denied?: boolean;
+}
+
+interface AdoptHost {
+	transitionLog: { recent: () => TransitionLogEntry[] };
+}
+
+test("adoptOrphanedAgents on a persisted record with pending produces a fresh agent whose dto.pending starts EMPTY, and records an orphan-close transition", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "adopt-pending-state-"));
+	tmps.push(stateDir);
+	const worktree = await fs.mkdtemp(path.join(os.tmpdir(), "adopt-pending-wt-"));
+	tmps.push(worktree);
+
+	const persisted: PersistedAgent = {
+		id: "orphan-1",
+		name: "orphan",
+		repo: "(none)",
+		worktree,
+		approvalMode: "yolo",
+		// A resumable workflow checkpoint counts as "has work" even with a clean worktree (agentsToAdopt/
+		// selectAdoptable's own resumable() rule, mirrored above) — no real git repo needed for this test.
+		kind: "workflow",
+		workflowState: { goal: "g", currentNode: "n1", visits: {}, vars: {}, index: 0, rollup: [] },
+		pending: [{ id: "orphan-pending-1", source: "ui", kind: "confirm", title: "proceed?", message: "ok?", createdAt: Date.now() }],
+	};
+	await new FileStore(stateDir).save({ agents: [persisted], transcripts: {}, features: [] });
+
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => new NoopDriver();
+	await mgr.start(); // hasState() true -> reconnectLive (no live host) -> adoptOrphanedAgents
+
+	const roster = mgr.list();
+	expect(roster.length).toBe(1);
+	const dto = roster[0]!;
+	expect(dto.id).not.toBe("orphan-1"); // create() always mints a fresh id on adoption
+	expect(dto.pending).toEqual([]); // never restored — orphan-close consumes it, doesn't re-populate dto.pending
+
+	const log = (mgr as unknown as AdoptHost).transitionLog.recent().filter((e) => e.agentId === dto.id);
+	const orphanClose = log.find((e) => e.reason === "pending-cancel" && (e.cause as { priorId?: string } | undefined)?.priorId === "orphan-1");
+	expect(orphanClose).toBeDefined();
+	expect(orphanClose?.denied).toBeUndefined();
+
+	const transcript = mgr.getTranscript(dto.id);
+	expect(transcript.some((t) => JSON.stringify(t).includes("orphaned by adoption"))).toBe(true);
+
+	await mgr.stop();
 });
