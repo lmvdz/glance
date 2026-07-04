@@ -238,6 +238,70 @@ async function fetchContext(base: string, id: string, token: string): Promise<st
 	}
 }
 
+/** Injectable seam for {@link createSupervisorLoop} — the real `startSupervisor` wires the live
+ *  `decide`/`fetchContext`/WebSocket send; tests inject fakes to drive the loop without a socket,
+ *  a model call, or a spawned process. */
+export interface SupervisorLoopDeps {
+	decide: (req: PendingRequest, context: string, opts?: { model?: string }) => Promise<string>;
+	fetchContext: (agentId: string) => Promise<string>;
+	/** Submit an answer. Throw (or reject-equivalent) to signal "not sent" — resolveRequest treats
+	 *  that identically to the live socket being closed: retry on the next roster replay. */
+	send: (agentId: string, requestId: string, value: string) => void;
+	dryRun?: boolean;
+	log?: (line: string) => void;
+	model?: string;
+}
+
+/**
+ * Build the per-agent auto-resolve loop around injectable decide/fetchContext/send. This is the
+ * ONE place the gate-class short-circuit lives — both the live daemon loop (via `startSupervisor`)
+ * and the test suite exercise this exact code path, so a passing test is a guarantee about
+ * production behavior, not a parallel reimplementation.
+ *
+ * A `gateClass` request is skipped before `inflight` is ever touched: no context fetch, no decide()
+ * call, no LLM spend, no answer — it waits for a human, unconditionally.
+ */
+export function createSupervisorLoop(deps: SupervisorLoopDeps): { handleAgent: (agent: AgentDTO) => void; answered: Set<string>; inflight: Set<string> } {
+	// ponytail: `answered` grows by one entry per request handled (requestIds are
+	// unique and never reappear once answered). Low-volume for a control plane;
+	// ceiling = unbounded over a very long-lived process. Upgrade path: evict ids
+	// for agents that leave the roster (a `removed` event) if it ever matters.
+	const answered = new Set<string>();
+	const inflight = new Set<string>();
+	const log = deps.log ?? (() => {});
+
+	const resolveRequest = async (agent: AgentDTO, req: PendingRequest): Promise<void> => {
+		let value: string;
+		try {
+			const context = await deps.fetchContext(agent.id);
+			value = await deps.decide(req, context, deps.model ? { model: deps.model } : undefined);
+		} catch {
+			// decide() never throws, but fetchContext/await guards belt-and-suspenders.
+			value = chooseFallback(req);
+		}
+		answered.add(req.id); // mark before send so a roster re-broadcast can't double-handle
+		log(`supervised ${agent.name} [${req.kind}] "${req.title}" -> ${value}`);
+		if (deps.dryRun) return;
+		try {
+			deps.send(agent.id, req.id, value);
+		} catch {
+			answered.delete(req.id); // send failed (or socket not open) → retry on the next event
+		}
+	};
+
+	const handleAgent = (agent: AgentDTO): void => {
+		if (agent.status !== "input") return;
+		for (const req of agent.pending) {
+			if (req.gateClass) continue; // never auto-answered — no LLM call, no inflight mark
+			if (answered.has(req.id) || inflight.has(req.id)) continue;
+			inflight.add(req.id);
+			void resolveRequest(agent, req).finally(() => inflight.delete(req.id));
+		}
+	};
+
+	return { handleAgent, answered, inflight };
+}
+
 /**
  * Start the standing supervisor loop. Opens the daemon WebSocket, and for every
  * agent that reports status "input", decides + submits an answer for each pending
@@ -251,13 +315,6 @@ export function startSupervisor(opts: { port?: number; dryRun?: boolean; model?:
 	const base = `http://127.0.0.1:${port}`;
 	const wsUrl = `ws://127.0.0.1:${port}/ws`;
 
-	// ponytail: `answered` grows by one entry per request handled (requestIds are
-	// unique and never reappear once answered). Low-volume for a control plane;
-	// ceiling = unbounded over a very long-lived process. Upgrade path: evict ids
-	// for agents that leave the roster (a `removed` event) if it ever matters.
-	const answered = new Set<string>();
-	const inflight = new Set<string>();
-
 	let ws: WebSocket | undefined;
 	let stopped = false;
 	let backoff = 500;
@@ -265,37 +322,17 @@ export function startSupervisor(opts: { port?: number; dryRun?: boolean; model?:
 
 	const log = (line: string): void => void process.stdout.write(`${line}\n`);
 
-	const resolveRequest = async (agent: AgentDTO, req: PendingRequest): Promise<void> => {
-		let value: string;
-		try {
-			const context = await fetchContext(base, agent.id, token);
-			value = await decide(req, context, opts.model ? { model: opts.model } : undefined);
-		} catch {
-			// decide() never throws, but fetchContext/await guards belt-and-suspenders.
-			value = chooseFallback(req);
-		}
-		answered.add(req.id); // mark before send so a roster re-broadcast can't double-handle
-		log(`supervised ${agent.name} [${req.kind}] "${req.title}" -> ${value}`);
-		if (dryRun) return;
-		if (ws && ws.readyState === WebSocket.OPEN) {
-			try {
-				ws.send(JSON.stringify({ type: "answer", id: agent.id, requestId: req.id, value } satisfies ClientCommand));
-			} catch {
-				answered.delete(req.id); // send failed mid-flight → retry on the next event
-			}
-		} else {
-			answered.delete(req.id); // socket not open → retry when the roster replays on reconnect
-		}
-	};
-
-	const handleAgent = (agent: AgentDTO): void => {
-		if (agent.status !== "input") return;
-		for (const req of agent.pending) {
-			if (answered.has(req.id) || inflight.has(req.id)) continue;
-			inflight.add(req.id);
-			void resolveRequest(agent, req).finally(() => inflight.delete(req.id));
-		}
-	};
+	const { handleAgent } = createSupervisorLoop({
+		decide,
+		fetchContext: (agentId) => fetchContext(base, agentId, token),
+		send: (agentId, requestId, value) => {
+			if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("socket not open");
+			ws.send(JSON.stringify({ type: "answer", id: agentId, requestId, value } satisfies ClientCommand));
+		},
+		dryRun,
+		log,
+		model: opts.model,
+	});
 
 	const onMessage = (data: unknown): void => {
 		let evt: SquadEvent;

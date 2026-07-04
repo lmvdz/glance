@@ -43,6 +43,7 @@ test("syncPlanStatuses reconciles PLANE-linked concerns, surfaces terminal confl
 	const result = await syncPlanStatuses({
 		repo,
 		listIssues: async () => [issue("OMPSQ-100", "completed"), issue("OMPSQ-101", "started"), issue("OMPSQ-102", "started")],
+		hasProof: () => true, // proof-gating behavior is covered separately in tests/plan-sync-proof.test.ts
 		log: (m) => logs.push(m),
 	});
 
@@ -59,7 +60,7 @@ test("syncPlanStatuses reconciles PLANE-linked concerns, surfaces terminal confl
 
 test("syncPlanStatuses changes nothing when the tracker is unreachable", async () => {
 	const repo = await planRepo();
-	const result = await syncPlanStatuses({ repo, listIssues: async () => null });
+	const result = await syncPlanStatuses({ repo, listIssues: async () => null, hasProof: () => true });
 	expect(result.updated).toEqual([]);
 	expect(await fs.readFile(path.join(repo, "plans/demo/01-landed.md"), "utf8")).toContain("STATUS: open");
 });
@@ -67,7 +68,7 @@ test("syncPlanStatuses changes nothing when the tracker is unreachable", async (
 test("syncPlanStatuses is idempotent — a second pass is a no-op", async () => {
 	const repo = await planRepo();
 	const issues = async () => [issue("OMPSQ-100", "completed"), issue("OMPSQ-101", "started")];
-	await syncPlanStatuses({ repo, listIssues: issues });
-	const second = await syncPlanStatuses({ repo, listIssues: issues });
+	await syncPlanStatuses({ repo, listIssues: issues, hasProof: () => true });
+	const second = await syncPlanStatuses({ repo, listIssues: issues, hasProof: () => true });
 	expect(second.updated).toEqual([]);
 });

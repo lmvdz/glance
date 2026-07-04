@@ -88,6 +88,11 @@ export function webappEnabled(): boolean {
 export function feedbackEnabled(): boolean {
 	return process.env.OMP_SQUAD_FEEDBACK === "1";
 }
+
+/** Synthetic org id stamped on the on-box loopback bootstrap admin so managerFor routes it to the root
+ *  factory in DB mode. The leading space cannot appear in a better-auth org id (nanoid), so it can never
+ *  collide with a real tenant org. */
+export const ROOT_FACTORY_ORG = " root-factory";
 /** Files served without a token so the PWA can install + bootstrap before sign-in. */
 const PUBLIC_ASSETS: Record<string, string> = {
 	"/manifest.webmanifest": "application/manifest+json",
@@ -251,6 +256,10 @@ export interface SquadServerOptions {
 	/** DB-registry mode: a per-org SquadManager fleet. Set ⇒ route every request/WS to the caller's
 	 *  org manager (org from the session) and fan WS events out per org. Unset ⇒ single-manager / file mode. */
 	registry?: ManagerRegistry;
+	/** DB-registry mode + root factory: the org id the operator signs into to watch their OWN factory.
+	 *  When a session's active org equals this, requests/WS route to the root `manager` (the factory) instead
+	 *  of a lazy tenant manager. Unset ⇒ the factory is reachable only via the on-box loopback admin. */
+	rootOrgId?: string;
 	/** Runtime feature-flag settings persisted under the state dir and applied to process.env. */
 	runtimeSettings?: RuntimeSettingsStore;
 }
@@ -292,6 +301,8 @@ export class SquadServer {
 	private readonly singleManager?: SquadManager;
 	/** DB-registry mode fleet (per-org managers); undefined ⇒ single-manager (file mode / db-single). */
 	private readonly registry?: ManagerRegistry;
+	/** DB-registry mode + root factory: the operator's own org id, routed to `singleManager` (the factory). */
+	private readonly rootOrgId?: string;
 	/** Single-manager mode WS clients (one bucket). */
 	private readonly clients = new Set<ServerWebSocket<SocketData>>();
 	/** DB-registry mode WS clients bucketed by org so events fan out per tenant (risk #3). */
@@ -333,6 +344,7 @@ export class SquadServer {
 	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
 		this.singleManager = manager;
 		this.registry = opts.registry;
+		this.rootOrgId = opts.rootOrgId;
 		this.opts = opts;
 		this.onEvent = (e: SquadEvent) => this.broadcast(e);
 		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
@@ -402,12 +414,25 @@ export class SquadServer {
 		return rec.count <= limit;
 	}
 
-	/** Resolve the fleet a request/socket acts on. Single-manager mode: the root manager. DB-registry
-	 *  mode: the caller's org manager (org is session-derived, never request-supplied), or none when the
-	 *  actor has no active org. This is the ONLY way to reach a manager. */
-	private async managerFor(actor: Actor): Promise<SquadManager | undefined> {
+	/** True when this org id names the operator's root factory (DB mode): the on-box loopback admin's
+	 *  synthetic sentinel, or the configured OMP_SQUAD_ROOT_ORG. Only meaningful when a root factory exists. */
+	private isRootOrg(orgId: string | undefined): boolean {
+		if (!this.singleManager || !orgId) return false;
+		return orgId === ROOT_FACTORY_ORG || (!!this.rootOrgId && orgId === this.rootOrgId);
+	}
+
+	/** Resolve the fleet an org id acts on. Single-manager mode: the root manager. DB-registry mode: the
+	 *  operator's root factory (root org / loopback admin) when present, else the caller's per-org tenant
+	 *  manager, else none. Org is always session-derived, never request-supplied. */
+	private async fleetForOrg(orgId: string | undefined): Promise<SquadManager | undefined> {
 		if (!this.registry) return this.singleManager;
-		return actor.orgId ? await this.registry.get(actor.orgId) : undefined;
+		if (this.isRootOrg(orgId)) return this.singleManager;
+		return orgId ? await this.registry.get(orgId) : undefined;
+	}
+
+	/** Resolve the fleet a request/socket acts on. This is the ONLY way to reach a manager. */
+	private managerFor(actor: Actor): Promise<SquadManager | undefined> {
+		return this.fleetForOrg(actor.orgId);
 	}
 
 	/** Actor for an inbound WS command — the socket's tier plus, in DB-registry mode, its stamped org. */
@@ -428,7 +453,9 @@ export class SquadServer {
 			this.clientsByOrg.set(key, bucket);
 		}
 		bucket.add(ws);
-		return ws.data.orgId ? await this.registry.get(ws.data.orgId) : undefined;
+		// Root-org sockets bucket under their org key (so root-manager events fan out to them) but seed
+		// their roster from the root factory, not a lazy tenant manager.
+		return this.fleetForOrg(ws.data.orgId);
 	}
 
 	/** Drop a closing socket from its bucket (and prune the bucket when empty). */
@@ -512,6 +539,15 @@ export class SquadServer {
 		if (this.registry) {
 			// DB-registry mode: per-org fan-out via the registry's event sink. No global presence/federation (risk #6).
 			this.registry.onEvent = (orgId, e) => this.broadcastTo(orgId, e);
+			// Root factory (opt-in): fan its events out to the operator's own socket buckets, reusing the exact
+			// per-org WS path. Both the on-box loopback admin (bucketed under the ROOT_FACTORY_ORG sentinel) and
+			// a browser operator signed into OMP_SQUAD_ROOT_ORG watch the factory move over the same transport.
+			if (this.singleManager) {
+				const rootBuckets = [ROOT_FACTORY_ORG, ...(this.rootOrgId ? [this.rootOrgId] : [])];
+				this.singleManager.on("event", (e) => {
+					for (const b of rootBuckets) this.broadcastTo(b, e);
+				});
+			}
 		} else {
 			this.singleManager?.on("event", this.onEvent);
 			void this.syncPresence();
@@ -536,6 +572,8 @@ export class SquadServer {
 				// DB mode: loopback admin token bootstraps; otherwise the session cookie rides the upgrade headers.
 				if (this.loopbackBootstrapAdmin(req, server)) {
 					role = "admin";
+					// On-box operator: bucket this socket to the root factory (if one exists) so it sees the roster.
+					if (this.singleManager) orgId = ROOT_FACTORY_ORG;
 				} else {
 					const session = await this.auth.api.getSession({ headers: req.headers });
 					if (session) {
@@ -595,7 +633,7 @@ export class SquadServer {
 		// The SPA reads this pre-login to choose its auth style and render only affordances the server backs:
 		// file mode ⇒ bearer token (no login page); db mode ⇒ session login, with sign-up + social buttons
 		// gated by what's actually configured server-side.
-		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file", allowSignup: signupOpen(), socialProviders: this.dbMode ? configuredSocialProviders() : [], sso: this.dbMode && ssoEnabled() });
+		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file", allowSignup: this.dbMode && signupOpen(), socialProviders: this.dbMode ? configuredSocialProviders() : [], sso: this.dbMode && ssoEnabled() });
 		// WorkOS Directory Sync (SCIM) webhook. Unauthenticated by session — authenticated by the HMAC
 		// signature over the RAW body (verifyWorkosSignature). Placed OUTSIDE /api/auth/* so better-auth's
 		// catch-all doesn't intercept it. 404 when no secret is configured (feature off).
@@ -781,13 +819,26 @@ export class SquadServer {
 			const flags = await this.opts.runtimeSettings.setFeatureFlag(body.key, body.enabled);
 			return Response.json({ featureFlags: flags });
 		}
-		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: the
-		// org's manager (org from the session, never the request). No active org ⇒ empty reads / 403 mutations.
-		const orgId = this.registry ? (session?.session.activeOrganizationId ?? undefined) : undefined;
+		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: the org's
+		// manager (org from the session, never the request), the root factory for the operator's own org, or
+		// none. No active org ⇒ empty reads / 403 mutations.
+		//
+		// On-box loopback bootstrap admin (session === null but role === admin): the trusted operator holding
+		// the daemon token. When a root factory exists, stamp the sentinel org so they see + drive it (incl.
+		// /api/factory/status) without first provisioning an org. A regular org-less SESSION user never gets
+		// this (they carry a session).
+		const bootstrapAdmin = !!this.registry && session === null && role === "admin";
+		const orgId = this.registry
+			? bootstrapAdmin && this.singleManager
+				? ROOT_FACTORY_ORG
+				: (session?.session.activeOrganizationId ?? undefined)
+			: undefined;
 		const actor: Actor =
 			this.registry && session
 				? { id: `db:${session.user.id}`, displayName: session.user.name, origin: "local", role, orgId }
-				: actorForRole(role);
+				: bootstrapAdmin
+					? { ...actorForRole(role), orgId }
+					: actorForRole(role);
 		const manager = await this.managerFor(actor);
 		if (!manager) return this.noFleet(req, url);
 		// Authenticated feedback routes live in ./feedback-routes.ts (the pre-auth widget
@@ -938,7 +989,7 @@ export class SquadServer {
 			if ("status" in body && typeof body.status === "string" && body.status.trim()) opts.status = body.status.trim();
 			if ("blockedBy" in body && Array.isArray(body.blockedBy)) opts.blockedBy = body.blockedBy.map((n) => Number(n)).filter((n) => Number.isFinite(n));
 			if (opts.status === undefined && opts.blockedBy === undefined) return new Response("nothing to update", { status: 400 });
-			const concern = await manager.updateConcern(decodeURIComponent(mfconcern[1]), opts);
+			const concern = await manager.updateConcern(decodeURIComponent(mfconcern[1]), opts, actor);
 			return concern ? Response.json({ concern }) : new Response("no such concern", { status: 404 });
 		}
 		const mfanswer = url.pathname.match(/^\/api\/features\/([^/]+)\/answers$/);
@@ -1216,6 +1267,11 @@ export class SquadServer {
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
+		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
+		if (mtrans) {
+			const full = url.searchParams.get("full") === "1";
+			return Response.json(await manager.transitionHistory(decodeURIComponent(mtrans[1]), { full }));
+		}
 		const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
 		if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
 		const mrec = url.pathname.match(/^\/api\/agents\/([^/]+)\/receipts$/);

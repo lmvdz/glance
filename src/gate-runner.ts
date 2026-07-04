@@ -22,6 +22,8 @@
  *   - OMP_SQUAD_GATE_SANDBOX_DISABLE  truthy ⇒ force host exec (same as `=host`)
  *   - OMP_SQUAD_GATE_SANDBOX_STRICT   `1` ⇒ fail closed: refuse to run on the host if docker is absent
  *   - OMP_SQUAD_GATE_SANDBOX_NETWORK  container network (default `none`)
+ *   - OMP_SQUAD_GATE_SANDBOX_USER     `--user` for the container (default: the daemon's uid:gid;
+ *                                     set `root` to restore the old root-in-container behavior)
  *
  * Async planner: returns argv + env + whether it is sandboxed; the three gate spawn sites
  * await it and execute. Host mode is byte-identical to the pre-sandbox behavior. The image
@@ -108,6 +110,21 @@ function hostPlan(command: string, env: Record<string, string>): GateExec {
 	return { argv: ["bash", "-lc", command], env, sandboxed: false };
 }
 
+/**
+ * The `--user` for the gate container. Containers default to root, and with the repo
+ * bind-mounted that means every file the gate writes (build output, caches, lockfiles)
+ * lands root-owned on the host — later host-side builds then die on EACCES trying to
+ * clean them. Run as the daemon's own uid:gid so container writes are indistinguishable
+ * from host writes. OMP_SQUAD_GATE_SANDBOX_USER overrides (any docker --user syntax;
+ * `root` restores the old behavior).
+ */
+function sandboxUser(source: NodeJS.ProcessEnv): string | undefined {
+	const override = source.OMP_SQUAD_GATE_SANDBOX_USER?.trim();
+	if (override) return override;
+	if (typeof process.getuid !== "function" || typeof process.getgid !== "function") return undefined;
+	return `${process.getuid()}:${process.getgid()}`;
+}
+
 function sandboxPlan(command: string, cwd: string, image: string, source: NodeJS.ProcessEnv, env: Record<string, string>, mounts?: string[]): GateExec {
 	const network = source.OMP_SQUAD_GATE_SANDBOX_NETWORK?.trim() || "none";
 	const dirs = [...new Set([cwd, ...(mounts ?? [])])].filter(Boolean);
@@ -115,6 +132,7 @@ function sandboxPlan(command: string, cwd: string, image: string, source: NodeJS
 	for (const [key, value] of Object.entries(env)) {
 		if (!HOST_ONLY.has(key)) containerEnv[key] = value;
 	}
+	const user = sandboxUser(source);
 	const argv = [
 		"docker",
 		"run",
@@ -122,6 +140,9 @@ function sandboxPlan(command: string, cwd: string, image: string, source: NodeJS
 		"--init", // reap the bash -lc child tree so a killed gate doesn't leave zombies
 		"--network",
 		network,
+		// The mapped uid has no passwd entry in most images, which resolves HOME to `/`
+		// (unwritable as non-root); pin it to the container's always-writable /tmp.
+		...(user ? ["--user", user, "-e", "HOME=/tmp"] : []),
 		...dirs.flatMap((dir) => ["-v", `${dir}:${dir}`]),
 		"-w",
 		cwd,

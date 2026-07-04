@@ -71,6 +71,10 @@ export async function addWorktree(opts: {
 	dir?: string;
 	/** Worktree base dir override (org-scoped in DB mode). Default: worktreeBase(). */
 	base?: string;
+	/** Git start-point for a NEWLY-created branch (a real ref, e.g. `origin/main` — NOT a directory,
+	 *  unlike `base`). PR-mode agents fork from a freshly-fetched origin default branch instead of the
+	 *  (possibly stale) local HEAD. Ignored when the branch already exists (nothing to fork). */
+	startPoint?: string;
 }, run: GitRunner = runGit): Promise<CreatedWorktree> {
 	const repo = await repoRoot(opts.repo, run);
 	const safe = opts.branch.replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -85,7 +89,9 @@ export async function addWorktree(opts: {
 	const exists = await branchExists(repo, opts.branch, run);
 	const args = exists
 		? ["worktree", "add", dir, opts.branch]
-		: ["worktree", "add", "-b", opts.branch, dir];
+		: opts.startPoint
+			? ["worktree", "add", "-b", opts.branch, dir, opts.startPoint]
+			: ["worktree", "add", "-b", opts.branch, dir];
 	// Retry transient lock contention (index/ref locks under fleet load); fail fast on anything else.
 	let r = await run(args, repo);
 	for (let attempt = 0; r.code !== 0 && attempt < RETRY_DELAYS_MS.length && TRANSIENT_LOCK.test(`${r.stderr}\n${r.stdout}`); attempt++) {
@@ -135,9 +141,10 @@ export async function resolveWorktree(
 	add: typeof addWorktree = addWorktree,
 	gitProbe: typeof isGitRepo = isGitRepo,
 	base?: string,
+	startPoint?: string,
 ): Promise<ResolvedWorktree> {
 	try {
-		const wt = await add({ repo, branch, base });
+		const wt = await add({ repo, branch, base, startPoint });
 		return { cwd: wt.worktree, repo: wt.repo, branch: wt.branch, inPlace: false };
 	} catch (err) {
 		if (await gitProbe(repo)) throw err;

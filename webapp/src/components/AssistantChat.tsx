@@ -9,6 +9,7 @@ import { apiFetch, apiJson, jsonInit } from '../lib/api';
 import { answerCommand, canLand, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../lib/agent-control';
 import { activeWork, activeWorkDigest } from '../lib/insights';
 import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../lib/fleetActivity';
+import { landButtonLabel } from '../lib/agent-badges';
 import type { AgentDTO, PendingRequest, TodoPhaseDTO, TodoStatus, TranscriptEntry } from '../lib/dto';
 import type { Task } from '../types';
 
@@ -692,7 +693,7 @@ export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; show
           ? 'border-red-300 bg-red-50 text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-900/40'
           : 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40'}`}
       >
-        {busy === 'land' ? 'Landing…' : forceArmed ? 'Force land ⚠' : agent.landReady ? 'Land ✓' : 'Land'}
+        {busy === 'land' ? 'Landing…' : forceArmed ? 'Force land ⚠' : landButtonLabel(agent)}
       </button>
     </>
   );
