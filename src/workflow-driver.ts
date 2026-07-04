@@ -39,8 +39,32 @@ export interface BranchSpec {
 	autonomy?: WorkflowAutonomyMode;
 	proof?: WorkflowProofState;
 	sessionId?: string;
+	/** The engine's deterministic `${nodeId}#${visitIndex}:${branchIndex}` identity for this branch — runId-free
+	 *  so recorded outcomes survive a fork. Consumed by spawnFleetBranch to derive a collision-free agent id. */
+	branchKey?: string;
+	/** This workflow run's id, salted into the branch agent id hash so ids stay collision-free across runs/forks. */
+	runId?: string;
 	/** Aborts when the join short-circuits or a sibling branch threw; the fleet stops the agent so it isn't leaked. */
 	signal?: AbortSignal;
+}
+
+/**
+ * FNV-1a 32-bit hash, hex-encoded (8 chars) — used (with `slug`) to derive short, deterministic branch
+ * agent ids from `runId + ":" + branchKey` so they stay well under socketPathFor's ~108-byte sun_path
+ * limit regardless of workflow/nodeId length, and never carry `:`/`#` into socket filenames or branch names.
+ */
+export function hash8(s: string): string {
+	let h = 0x811c9dc5;
+	for (let i = 0; i < s.length; i++) {
+		h ^= s.charCodeAt(i);
+		h = Math.imul(h, 0x01000193);
+	}
+	return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/** Slugify a node id into a short, filesystem/socket-safe suffix for a branch agent id. */
+export function slug(s: string, maxLen: number): string {
+	return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, maxLen);
 }
 
 /** The fleet capability a workflow uses to fan out parallel branches into real, steerable roster agents. */
@@ -125,7 +149,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			execCommand: this.opts.execCommand,
 			readPromptRef: (ref) => fs.readFile(path.join(wfDir, ref.slice(1)), "utf8"),
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
-			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, approvalMode: this.opts.approvalMode, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), signal }) : undefined,
+			spawnBranch: this.opts.fleet ? (node, task, signal, branchKey) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, approvalMode: this.opts.approvalMode, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), branchKey, runId: this.runId, signal }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
 			cold: this.opts.cold,
@@ -225,9 +249,13 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			const result = await this.engine!.run(goal, {
 				resume: resumeRun,
 				checkpoint: (c) => this.onCheckpoint(c),
-				escalate: (reason) => {
+				escalate: (reason, checkpoint) => {
 					this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `⚠ ${reason}` } });
 					this.emit("event", { type: "message_end" });
+					// Lets the manager (concern 03) persist a workflowState.terminal marker and route it
+					// through the existing catastrophe channel, regardless of which of the engine's four
+					// terminal-failure sites fired.
+					this.emit("event", { type: "workflow_terminal", reason, checkpoint });
 				},
 			});
 			outcome = result.outcome;

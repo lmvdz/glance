@@ -46,8 +46,9 @@ export interface SingleAgentExecutorOptions {
 	/** Resolve a node's effective model + reasoning effort (model stylesheet). */
 	resolveStyle?: (node: WorkflowNode) => { model?: string; reasoningEffort?: string };
 	/** Spawn an independent fleet agent for a parallel-branch node. Absent → branches run sequentially on the shared thread.
-	 * `signal` aborts when the join short-circuits or a sibling threw — the spawner stops the agent so it isn't leaked. */
-	spawnBranch?: (node: WorkflowNode, task: string, signal?: AbortSignal) => Promise<NodeResult>;
+	 * `signal` aborts when the join short-circuits or a sibling threw — the spawner stops the agent so it isn't leaked.
+	 * `branchKey` is the engine's deterministic per-branch identity, forwarded so the spawner can derive a stable agent id. */
+	spawnBranch?: (node: WorkflowNode, task: string, signal?: AbortSignal, branchKey?: string) => Promise<NodeResult>;
 	/** Schedule the idle turn-end check (default: setInterval). Injected in tests to drive it deterministically. */
 	scheduleIdleCheck?: IdleScheduler;
 	/** Seed the stage rollup when resuming a run, so the progress view survives a restart. */
@@ -205,12 +206,12 @@ export class SingleAgentExecutor implements NodeExecutor {
 	}
 
 	/** A parallel branch: a fresh fleet agent (if `spawnBranch`) or, without a fleet, a sequential turn. */
-	async runBranch(node: WorkflowNode, ctx: RunContext, signal?: AbortSignal): Promise<NodeResult> {
+	async runBranch(node: WorkflowNode, ctx: RunContext, signal?: AbortSignal, branchKey?: string): Promise<NodeResult> {
 		if (!this.opts.spawnBranch) return this.runAgent(node, ctx);
 		let body = node.prompt ?? node.label ?? "";
 		if (body.startsWith("@")) body = await this.resolvePromptRef(body);
 		const task = body ? `Goal: ${ctx.goal}\n\n${body}` : ctx.goal;
-		return this.opts.spawnBranch(node, task, signal);
+		return this.opts.spawnBranch(node, task, signal, branchKey);
 	}
 
 	private async resolvePromptRef(ref: string): Promise<string> {

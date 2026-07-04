@@ -82,6 +82,12 @@ export interface NodeResult {
 	outcome: Outcome;
 	/** Human-readable output, fed forward as context. */
 	text?: string;
+	/**
+	 * Set by a branch executor to mean "this branch never genuinely ran" — a ceiling/WIP refusal, an
+	 * abort teardown, or a spawn crash. Distinguishes a transient resource condition (re-spawnable on
+	 * resume) from a real executed outcome (succeeded/failed) that should stick. Ignored outside runParallel.
+	 */
+	notAttempted?: boolean;
 }
 
 /** Mutable run state threaded through condition evaluation. */
@@ -176,6 +182,33 @@ export interface EngineCheckpoint {
 	 * engine visit-cap deliberately does not re-count the resumed node, so this is its only ceiling.
 	 */
 	resumeAttempts?: number;
+	/**
+	 * Set only on the transient per-branch checkpoints `runParallel` emits during a fan-out (see
+	 * `branchOutcomes`); absent/false on every ordinary node-boundary checkpoint `run()` emits. Lets a
+	 * listener persist branchOutcomes for the live-progress view without mistaking a mid-fan-out emission
+	 * for the run's resumable position.
+	 */
+	transient?: boolean;
+	/**
+	 * Deterministic `${nodeId}#${visitIndex}:${branchIndex}` → outcome map for the parallel node currently
+	 * fanning out. Emitted as a verbatim clone of that node's ENTRY checkpoint (same resumeAttempts/visits/
+	 * currentNode every time) plus the full accumulated map, so a mid-fan-out emission can never reset the
+	 * poison counter or leak a branch's visit increment into persisted state. Present only on `transient`
+	 * emissions — the merge node's ordinary exit checkpoint carries none, self-clearing the map on join.
+	 */
+	branchOutcomes?: Record<string, BranchOutcome>;
+}
+
+/**
+ * One parallel branch's fate for the run currently in progress. `succeeded`/`failed` are genuinely-
+ * executed terminal results (including a turn that ran out its timeout budget); `not_attempted` covers
+ * ceiling/WIP refusals, abort teardowns, and spawn crashes — none of which ever really ran, so a resume
+ * re-spawns them under the same deterministic branch key.
+ */
+export interface BranchOutcome {
+	disposition: "succeeded" | "failed" | "not_attempted";
+	text?: string;
+	at: number;
 }
 
 /** Persisted run state — an engine checkpoint plus the executor's stage rollup (for the progress view). */
@@ -209,8 +242,10 @@ export interface NodeExecutor {
 	/** Run a node carrying an `action="<name>"` attribute — a host-registered domain step. */
 	runAction?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
 	/** Run a parallel-branch node as an independent unit (e.g. a spawned fleet agent). Falls back to runAgent.
-	 * `signal` aborts when the join short-circuits (first_success win) or a sibling threw — honor it to stop the agent. */
-	runBranch?(node: WorkflowNode, ctx: RunContext, signal?: AbortSignal): Promise<NodeResult>;
+	 * `signal` aborts when the join short-circuits (first_success win) or a sibling threw — honor it to stop the agent.
+	 * `branchKey` is the engine's deterministic `${nodeId}#${visitIndex}:${branchIndex}` identity for this branch,
+	 * threaded down so the spawner can derive a collision-free, resume-stable agent id. */
+	runBranch?(node: WorkflowNode, ctx: RunContext, signal?: AbortSignal, branchKey?: string): Promise<NodeResult>;
 	/** Resume an agent / prompt node whose turn may still be in flight from a prior daemon — MUST NOT re-prompt. */
 	resumeAgent?(node: WorkflowNode, ctx: RunContext): Promise<NodeResult>;
 	/** Optional: observe each stage as it starts / ends. */
