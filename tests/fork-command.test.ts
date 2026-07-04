@@ -106,8 +106,11 @@ const runState = (over: Partial<WorkflowRunState> = {}): WorkflowRunState => ({ 
 
 /** Spin up a real verify-loop workflow agent (buildVerifyWorkflow: start→implement→verify→[codefix→
  *  fixup→escalate]→exit), drive it terminal via the concern-03 path, and return the live record. */
-async function terminalVerifyAgent(prefix: string, visits: Record<string, number>): Promise<{ mgr: SquadManager; repo: string; dto: AgentDTO; rec: AgentRecordLike; runId: string }> {
-	const { mgr, repo } = await makeMgr(prefix);
+async function terminalVerifyAgent(
+	prefix: string,
+	visits: Record<string, number>,
+): Promise<{ mgr: SquadManager; repo: string; worktreeBase: string; dto: AgentDTO; rec: AgentRecordLike; runId: string }> {
+	const { mgr, repo, worktreeBase } = await makeMgr(prefix);
 	const dto = await mgr.create({ name: prefix, repo, approvalMode: "yolo", verify: "true" });
 	const host = mgr as unknown as InternalHost;
 	const rec = host.agents.get(dto.id)!;
@@ -116,7 +119,7 @@ async function terminalVerifyAgent(prefix: string, visits: Record<string, number
 	await rec.checkpointAppending;
 	rec.agent.emit("event", { type: "workflow_terminal", reason: "resume poison cap: escalated to a human", checkpoint: checkpoint({ currentNode: "verify", resumeAttempts: 3 }) });
 	await waitFor(() => rec.dto.status === "error");
-	return { mgr, repo, dto, rec, runId };
+	return { mgr, repo, worktreeBase, dto, rec, runId };
 }
 
 // (a) forking a terminal (escalate-exhausted) run resets every fix-up-tier visit count to 0 while
@@ -149,6 +152,110 @@ test("fork derives agent id, branch, and worktree from the same new id (spawn-id
 	const safeBranch = forked.branch!.replace(/[^a-zA-Z0-9._-]/g, "-");
 	expect(forked.worktree.includes(safeBranch)).toBe(true);
 	expect(forked.name.endsWith("-fork")).toBe(true);
+
+	await mgr.stop();
+});
+
+// Review finding 1 (TOCTOU double-fork race): the fork slot is claimed synchronously, before the first
+// `await` in fork() — two concurrent fork() calls for the SAME source runId must resolve to exactly one
+// winner, never two live forks of the same source.
+test("fork claims the slot synchronously — two concurrent fork() calls for the same source resolve to exactly one winner", async () => {
+	const { mgr, dto } = await terminalVerifyAgent("fork-race", { verify: 1, codefix: 1 });
+
+	const results = await Promise.allSettled([mgr.fork(dto.id, {}, LOCAL_ACTOR), mgr.fork(dto.id, {}, LOCAL_ACTOR)]);
+	const fulfilled = results.filter((r): r is PromiseFulfilledResult<AgentDTO> => r.status === "fulfilled");
+	const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+	expect(fulfilled).toHaveLength(1);
+	expect(rejected).toHaveLength(1);
+	expect((rejected[0]!.reason as Error).message).toMatch(/a fork of this run already exists/);
+
+	// A THIRD attempt after the race settles still correctly refuses — the winner's roster entry now
+	// durably occupies the slot, so the source's own `forkAvailable` guard catches it even earlier than
+	// the (now-released) in-flight set would.
+	await expect(mgr.fork(dto.id, {}, LOCAL_ACTOR)).rejects.toThrow(/this agent has no fork point available/);
+
+	await mgr.stop();
+});
+
+// Review finding 2 (orphaned branch on partial failure): `git branch squad/<newId>` runs before
+// createInternal; if createInternal throws afterwards (e.g. `git worktree add` failing), the branch must
+// be deleted rather than leaked permanently.
+test("fork deletes its just-created branch when createInternal fails after branch creation", async () => {
+	const { mgr, repo, worktreeBase, dto } = await terminalVerifyAgent("fork-h", { verify: 1, codefix: 1 });
+
+	const branchesOf = async (): Promise<string> => {
+		const proc = Bun.spawn(["git", "branch", "--list"], { cwd: repo, stdout: "pipe", stderr: "ignore" });
+		const out = await new Response(proc.stdout).text();
+		await proc.exited;
+		return out;
+	};
+	const before = await branchesOf(); // the original agent's own `squad/<id>` branch is already present here
+
+	// Force `git worktree add` to fail deterministically for the new fork (without touching the original
+	// agent's already-created worktree): strip write permission from worktreeBase so no new entry can be
+	// created under it, regardless of the fork's randomly-suffixed id.
+	await fs.chmod(worktreeBase, 0o555);
+	try {
+		await expect(mgr.fork(dto.id, {}, LOCAL_ACTOR)).rejects.toThrow(/git worktree add failed/);
+	} finally {
+		await fs.chmod(worktreeBase, 0o755);
+	}
+
+	const after = await branchesOf();
+	expect(after).toBe(before); // fork()'s own `squad/<newId>` branch was cleaned up, not leaked
+
+	await mgr.stop();
+});
+
+// Review finding 3: a crash between createInternal's persist of a new fork (forkedFrom recorded) and
+// fork()'s own later persist of the source's terminal.supersededBy marker must not leave the source stuck
+// forever advertising `forkAvailable: true` for an offer that can never be accepted (every subsequent
+// fork attempt would hit the liveFork guard and error "a fork of this run already exists" forever). On
+// restart, reconcileForkLineage self-heals the marker from the fork's own persisted `forkedFrom` lineage.
+test("restart self-heals a source's supersededBy marker from a fork's persisted forkedFrom lineage", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "fork-heal-state-"));
+	const sourceWt = await fs.mkdtemp(path.join(os.tmpdir(), "fork-heal-source-wt-"));
+	const forkWt = await fs.mkdtemp(path.join(os.tmpdir(), "fork-heal-fork-wt-"));
+	tmps.push(stateDir, sourceWt, forkWt);
+
+	const runId = "run-heal-source";
+	const sourceAgent: PersistedAgent = {
+		id: "wf-heal-source",
+		name: "wf",
+		repo: "(none)",
+		worktree: sourceWt,
+		approvalMode: "yolo",
+		kind: "workflow",
+		workflow: { verify: { command: "true" } },
+		// Terminal-marked, NOT yet superseded — the exact state a crash right after createInternal's own
+		// persist (but before fork()'s persist) would leave behind.
+		workflowState: { goal: "g", currentNode: "verify", visits: {}, vars: {}, index: 0, rollup: [], runId, terminal: { reason: "x", at: Date.now(), forkPoint: { runId, seq: 0 } } },
+	};
+	const forkAgent: PersistedAgent = {
+		id: "wf-heal-fork",
+		name: "wf-fork",
+		repo: "(none)",
+		worktree: forkWt,
+		approvalMode: "yolo",
+		kind: "workflow",
+		workflow: { verify: { command: "true" } },
+		workflowState: { goal: "g", currentNode: "verify", visits: {}, vars: {}, index: 0, rollup: [], runId: "run-heal-fork", forkedFrom: { runId, seq: 0 } },
+	};
+	const { FileStore } = await import("../src/dal/store.ts");
+	await new FileStore(stateDir).save({ agents: [sourceAgent, forkAgent], transcripts: {}, features: [] });
+
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => new FakeDriver();
+	await mgr.start(); // reconnectLive (reattachTerminal + orphan-adopt the fork) -> reconcileForkLineage
+
+	const roster = mgr.list();
+	const source = roster.find((a) => a.id === "wf-heal-source")!;
+	expect(source).toBeDefined();
+	expect(source.forkAvailable).toBe(false); // no longer advertises an unclaimable offer
+	expect(source.workflowState?.terminal?.supersededBy).toBeDefined(); // self-healed from the fork's lineage
+	// The healed marker actually names a live fork descended from this source's runId.
+	const supersededById = source.workflowState!.terminal!.supersededBy!;
+	expect(roster.some((a) => a.id === supersededById)).toBe(true);
 
 	await mgr.stop();
 });

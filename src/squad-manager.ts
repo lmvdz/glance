@@ -406,6 +406,12 @@ export class SquadManager extends EventEmitter {
 	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
 	 *  persistNow folds them back into the snapshot for a later restart to re-attempt (D1 loss fix). */
 	private deferred: PersistedAgent[] = [];
+	/** Source runIds with a fork() call currently past the guards and not yet resolved — claimed
+	 *  synchronously before the first `await` in fork() (readCheckpoints) and released in a `finally`, so
+	 *  two concurrent fork() calls for the same source (double-click, webapp+TUI, a federated peer) can't
+	 *  both pass the one-live-fork guard during the hundreds-of-ms-to-seconds window before createInternal
+	 *  durably claims the slot itself (#never-lose-work concern 04 review finding 1). */
+	private readonly forkInFlight = new Set<string>();
 	private readonly featureStore = new Map<string, PersistedFeature>();
 	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
 	private readonly bin?: string;
@@ -561,6 +567,7 @@ export class SquadManager extends EventEmitter {
 			await this.reconnectLive(snapshot);
 			if (!this.skipGlobalJanitors) await this.reapOrphans();
 			await this.adoptOrphanedAgents(snapshot);
+			this.reconcileForkLineage();
 		}
 		// DB mode: the registry runs pruneStaleSockets once over all orgs (a per-org manager must not).
 		if (!this.skipGlobalJanitors) await pruneStaleSockets().catch(() => []);
@@ -2245,6 +2252,29 @@ export class SquadManager extends EventEmitter {
 		return !!state?.terminal && !state.terminal.supersededBy;
 	}
 
+	/** Self-heal the crash window between createInternal's persist of a new fork (which durably records
+	 *  `workflowState.forkedFrom`) and fork()'s OWN later persist of the source's `terminal.supersededBy`
+	 *  marker: a daemon death in that gap otherwise leaves the source stuck forever advertising
+	 *  `forkAvailable: true` for an offer that can never be accepted (the `liveFork` guard in fork() sees
+	 *  the already-persisted fork and refuses every subsequent attempt with "a fork of this run already
+	 *  exists", while the source's own marker never gets cleared to reflect it). Called once at the end of
+	 *  `start()`'s recovery sequence, after every reattach/adopt path has had a chance to put both the fork
+	 *  and its source back in `this.agents` (review finding 3). */
+	private reconcileForkLineage(): void {
+		for (const rec of this.agents.values()) {
+			const forkedFrom = rec.options.workflowState?.forkedFrom;
+			if (!forkedFrom) continue;
+			const source = [...this.agents.values()].find((r) => r.options.workflowState?.runId === forkedFrom.runId);
+			if (!source) continue;
+			const terminal = source.options.workflowState?.terminal;
+			if (!terminal || terminal.supersededBy) continue;
+			terminal.supersededBy = rec.dto.id;
+			source.dto.forkAvailable = false;
+			source.dto.workflowState = source.options.workflowState;
+			this.emitAgent(source);
+		}
+	}
+
 	/**
 	 * Catastrophe (#14 / OMPSQ-135): the orchestrator summoned a human for this agent (repair budget
 	 * exhausted or a catastrophe tripwire). The auto-loop has already halted it; here we make the
@@ -3373,106 +3403,130 @@ export class SquadManager extends EventEmitter {
 		);
 		if (liveFork) throw new Error("a fork of this run already exists");
 
-		const entries = await readCheckpoints(this.stateDir, runId);
-		const chosen = opts.seq !== undefined ? entries.find((e) => e.seq === opts.seq) : entries[entries.length - 1];
-		if (!chosen) throw new Error("no checkpoint found");
+		// Claim the slot SYNCHRONOUSLY, before the first `await` below — closes the TOCTOU window between
+		// the guards above and createInternal's own `this.agents.set` (readCheckpoints, a graph re-parse,
+		// `git rev-parse`/`git branch`, createInternal's fabric-primer snapshot, resolveLandMode, a possible
+		// network `git fetch origin`, and `git worktree add` all sit in that window). Without this, two
+		// concurrent fork() calls for the same source runId (double-click, webapp+TUI, a federated peer)
+		// both pass `liveFork` and both mint a live fork of the same source (review finding 1).
+		if (this.forkInFlight.has(runId)) throw new Error("a fork of this run already exists");
+		this.forkInFlight.add(runId);
+		try {
+			const entries = await readCheckpoints(this.stateDir, runId);
+			const chosen = opts.seq !== undefined ? entries.find((e) => e.seq === opts.seq) : entries[entries.length - 1];
+			if (!chosen) throw new Error("no checkpoint found");
 
-		// Re-parse the workflow graph the same way makeDriver resolves it — an authored file OR a
-		// synthesized verify loop (the `rec.options.workflow!.path` non-null assumption doesn't hold for
-		// `verify:`-only runs, which have no file to re-parse/branch from but ARE terminal-markable). This
-		// also supplies the goalGate/retryTarget/overflow chain the visit reset below walks.
-		const wf: Workflow | undefined = rec.options.workflow?.verify
-			? buildVerifyWorkflow(rec.options.workflow.verify)
-			: rec.options.workflow?.path
-				? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
-				: undefined;
-		if (!wf) throw new Error("cannot fork — no workflow graph to validate the checkpoint against");
-		if (!wf.nodes.has(chosen.currentNode)) {
-			throw new Error(`checkpoint node "${chosen.currentNode}" no longer exists in the workflow graph (it may have been edited) — pick a different step`);
+			// Re-parse the workflow graph the same way makeDriver resolves it — an authored file OR a
+			// synthesized verify loop (the `rec.options.workflow!.path` non-null assumption doesn't hold for
+			// `verify:`-only runs, which have no file to re-parse/branch from but ARE terminal-markable). This
+			// also supplies the goalGate/retryTarget/overflow chain the visit reset below walks.
+			const wf: Workflow | undefined = rec.options.workflow?.verify
+				? buildVerifyWorkflow(rec.options.workflow.verify)
+				: rec.options.workflow?.path
+					? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
+					: undefined;
+			if (!wf) throw new Error("cannot fork — no workflow graph to validate the checkpoint against");
+			if (!wf.nodes.has(chosen.currentNode)) {
+				throw new Error(`checkpoint node "${chosen.currentNode}" no longer exists in the workflow graph (it may have been edited) — pick a different step`);
+			}
+
+			if (!existsSync(rec.dto.worktree)) throw new Error("original worktree is gone — cannot fork");
+			const shaResult = await hardenedGit(["rev-parse", "HEAD"], { cwd: rec.dto.worktree });
+			const sha = shaResult.stdout.trim();
+			if (shaResult.code !== 0 || !sha) throw new Error("could not resolve HEAD in the original worktree");
+
+			// The decision that makes fork actually work for the escalate-exhaustion case: reset visits for
+			// EVERY fix-up tier (each goalGate's retryTarget plus its overflow closure, across all goalGate
+			// nodes in the graph) while carrying every other visit count forward (DESIGN.md Key Decisions).
+			const tiers = new Set<string>();
+			for (const node of wf.nodes.values()) {
+				if (!node.goalGate) continue;
+				for (let t: string | undefined = node.retryTarget; t; t = wf.nodes.get(t)?.overflow) tiers.add(t);
+			}
+			const visits = { ...chosen.visits };
+			for (const tier of tiers) visits[tier] = 0;
+
+			// Name stabilization: strip any existing "-fork"/"-fork-N" suffix before appending one, so forking
+			// a fork never compounds into "x-fork-fork".
+			const baseName = rec.dto.name.replace(/-fork(-\d+)?$/, "");
+			const newName = `${baseName}-fork`;
+			const newId = newAgentId(newName);
+
+			// Branch off the repo root (matching addWorktree's own repoRoot resolution), not the worktree;
+			// createInternal below reuses UNMODIFIED addWorktree's existing-branch checkout path.
+			const branchResult = await hardenedGit(["branch", `squad/${newId}`, sha], { cwd: rec.dto.repo });
+			if (branchResult.code !== 0) throw new Error(`could not create fork branch: ${branchResult.stderr.trim() || branchResult.stdout.trim()}`);
+
+			const forkedState: WorkflowRunState = {
+				goal: chosen.goal,
+				currentNode: chosen.currentNode,
+				visits,
+				vars: chosen.vars,
+				outcome: chosen.outcome,
+				preferredLabel: chosen.preferredLabel,
+				index: chosen.index,
+				resumeAttempts: 0,
+				rollup: [],
+				forkedFrom: { runId, seq: chosen.seq },
+				// terminal / cold / sessionId / proof / branchOutcomes / headSha (log-only) deliberately absent:
+				// a fork is a fresh run, not a continuation of the dead run's own lifecycle state.
+			};
+
+			let newDto: AgentDTO;
+			try {
+				newDto = await this.createInternal(
+					{
+						repo: rec.dto.repo,
+						name: newName,
+						branch: `squad/${newId}`,
+						model: rec.dto.model,
+						approvalMode: rec.options.approvalMode,
+						workflow: rec.options.workflow?.path,
+						verify: rec.options.workflow?.verify?.command,
+						workflowState: forkedState,
+						// Fork inherits the issue (DESIGN.md RT1#13: one issue, one active claimant) — the original
+						// is marked supersededBy below and excluded from adoption/dispatch, so this is never a
+						// double-claim.
+						featureId: rec.options.featureId,
+						issue: rec.options.issue,
+						bypassCap: true,
+						cold: true,
+						explicitId: newId,
+					},
+					actor,
+				);
+			} catch (err) {
+				// createInternal threw after the branch was already cut (e.g. resolveWorktree's `git worktree
+				// add` failing) — nothing else reaps `squad/<newId>`, so a retry (which mints a fresh id) would
+				// otherwise leak one permanent branch per failed attempt (review finding 2, best-effort cleanup).
+				await hardenedGit(["branch", "-D", `squad/${newId}`], { cwd: rec.dto.repo }).catch(() => {});
+				throw err;
+			}
+			// Persisted for display/audit only (mirrors spawnFleetBranch's own `rec.options.task = task`
+			// idiom) — deliberately NOT passed as createInternal's `task` option: createWithId auto-prompts on
+			// `opts.task` regardless of `workflowState`, but `workflowState` here already re-primes the goal
+			// the instant the driver's `start()` returns (WorkflowDriver.start's `resumeState` branch fires
+			// `execRun` before `start()` resolves) — an extra `agent.prompt()` right after would race that
+			// already-in-flight run's own inner agent.
+			const newRec = this.agents.get(newDto.id);
+			if (newRec) newRec.options.task = rec.options.task;
+
+			// Mark the original superseded: excluded from adoption/dispatch permanently (one issue, one active
+			// claimant), forkAvailable cleared so the offer never re-fires for a run that's already been forked.
+			rec.options.workflowState!.terminal!.supersededBy = newId;
+			rec.dto.forkAvailable = false;
+			rec.dto.workflowState = rec.options.workflowState;
+			this.emitAgent(rec);
+			await this.persist();
+
+			void this.recordAudit(actor, "fork", id, "ok", `→ ${newId} @ seq ${chosen.seq}`);
+			return newDto;
+		} finally {
+			// Released unconditionally (success or throw): on success the slot is now durably held by
+			// createInternal's own roster entry (the `liveFork` guard above sees it on the next call), on
+			// throw nothing was ever claimed so the next attempt must be free to proceed.
+			this.forkInFlight.delete(runId);
 		}
-
-		if (!existsSync(rec.dto.worktree)) throw new Error("original worktree is gone — cannot fork");
-		const shaResult = await hardenedGit(["rev-parse", "HEAD"], { cwd: rec.dto.worktree });
-		const sha = shaResult.stdout.trim();
-		if (shaResult.code !== 0 || !sha) throw new Error("could not resolve HEAD in the original worktree");
-
-		// The decision that makes fork actually work for the escalate-exhaustion case: reset visits for
-		// EVERY fix-up tier (each goalGate's retryTarget plus its overflow closure, across all goalGate
-		// nodes in the graph) while carrying every other visit count forward (DESIGN.md Key Decisions).
-		const tiers = new Set<string>();
-		for (const node of wf.nodes.values()) {
-			if (!node.goalGate) continue;
-			for (let t: string | undefined = node.retryTarget; t; t = wf.nodes.get(t)?.overflow) tiers.add(t);
-		}
-		const visits = { ...chosen.visits };
-		for (const tier of tiers) visits[tier] = 0;
-
-		// Name stabilization: strip any existing "-fork"/"-fork-N" suffix before appending one, so forking
-		// a fork never compounds into "x-fork-fork".
-		const baseName = rec.dto.name.replace(/-fork(-\d+)?$/, "");
-		const newName = `${baseName}-fork`;
-		const newId = newAgentId(newName);
-
-		// Branch off the repo root (matching addWorktree's own repoRoot resolution), not the worktree;
-		// createInternal below reuses UNMODIFIED addWorktree's existing-branch checkout path.
-		const branchResult = await hardenedGit(["branch", `squad/${newId}`, sha], { cwd: rec.dto.repo });
-		if (branchResult.code !== 0) throw new Error(`could not create fork branch: ${branchResult.stderr.trim() || branchResult.stdout.trim()}`);
-
-		const forkedState: WorkflowRunState = {
-			goal: chosen.goal,
-			currentNode: chosen.currentNode,
-			visits,
-			vars: chosen.vars,
-			outcome: chosen.outcome,
-			preferredLabel: chosen.preferredLabel,
-			index: chosen.index,
-			resumeAttempts: 0,
-			rollup: [],
-			forkedFrom: { runId, seq: chosen.seq },
-			// terminal / cold / sessionId / proof / branchOutcomes / headSha (log-only) deliberately absent:
-			// a fork is a fresh run, not a continuation of the dead run's own lifecycle state.
-		};
-
-		const newDto = await this.createInternal(
-			{
-				repo: rec.dto.repo,
-				name: newName,
-				branch: `squad/${newId}`,
-				model: rec.dto.model,
-				approvalMode: rec.options.approvalMode,
-				workflow: rec.options.workflow?.path,
-				verify: rec.options.workflow?.verify?.command,
-				workflowState: forkedState,
-				// Fork inherits the issue (DESIGN.md RT1#13: one issue, one active claimant) — the original
-				// is marked supersededBy below and excluded from adoption/dispatch, so this is never a
-				// double-claim.
-				featureId: rec.options.featureId,
-				issue: rec.options.issue,
-				bypassCap: true,
-				cold: true,
-				explicitId: newId,
-			},
-			actor,
-		);
-		// Persisted for display/audit only (mirrors spawnFleetBranch's own `rec.options.task = task`
-		// idiom) — deliberately NOT passed as createInternal's `task` option: createWithId auto-prompts on
-		// `opts.task` regardless of `workflowState`, but `workflowState` here already re-primes the goal
-		// the instant the driver's `start()` returns (WorkflowDriver.start's `resumeState` branch fires
-		// `execRun` before `start()` resolves) — an extra `agent.prompt()` right after would race that
-		// already-in-flight run's own inner agent.
-		const newRec = this.agents.get(newDto.id);
-		if (newRec) newRec.options.task = rec.options.task;
-
-		// Mark the original superseded: excluded from adoption/dispatch permanently (one issue, one active
-		// claimant), forkAvailable cleared so the offer never re-fires for a run that's already been forked.
-		rec.options.workflowState!.terminal!.supersededBy = newId;
-		rec.dto.forkAvailable = false;
-		rec.dto.workflowState = rec.options.workflowState;
-		this.emitAgent(rec);
-		await this.persist();
-
-		void this.recordAudit(actor, "fork", id, "ok", `→ ${newId} @ seq ${chosen.seq}`);
-		return newDto;
 	}
 
 	/** Read-only checkpoint history for a workflow run (the fork-step picker) — keeps stateDir private
