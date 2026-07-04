@@ -67,6 +67,18 @@ export function slug(s: string, maxLen: number): string {
 	return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, maxLen);
 }
 
+/**
+ * Deterministic branch agent id: `br-<hash8(runId+":"+branchKey)>-<slug(nodeId,12)>`. Short and
+ * `[a-z0-9-]`-only so it stays well under socketPathFor's ~108-byte sun_path limit and never carries
+ * `:`/`#` into socket filenames, receipts paths, or branch names. `nodeId` is the branch node's own id
+ * (the workflow-graph node the branch executes), NOT the fork node's id. The single source of truth for
+ * this formula — spawnFleetBranch and squad-manager's reconcileParallelResume both call it so the two
+ * derivations can never drift apart.
+ */
+export function deriveBranchAgentId(runId: string, branchKey: string, nodeId: string): string {
+	return `br-${hash8(`${runId}:${branchKey}`)}-${slug(nodeId, 12)}`;
+}
+
 /** The fleet capability a workflow uses to fan out parallel branches into real, steerable roster agents. */
 export interface WorkflowFleet {
 	runBranch(spec: BranchSpec): Promise<NodeResult>;

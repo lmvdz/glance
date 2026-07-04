@@ -20,7 +20,7 @@ import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
 import { estimateEta } from "./eta.ts";
 import { FlueServiceDriver } from "./flue-service-driver.ts";
-import { type BranchSpec, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
+import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
@@ -363,6 +363,14 @@ export interface SquadManagerOptions {
 	replaySettleTimeoutMs?: number;
 }
 
+/**
+ * Internal-only spawn options carrying a caller-chosen agent id. NEVER added to `CreateAgentOptions` —
+ * that type is what `server.ts`'s `{...cmd.options}` spread deserializes wire commands into, so any
+ * field on it is attacker-reachable. `explicitId` only exists on this module-private type, which only
+ * `createInternal` (a private method, never wire-reachable) can construct and pass down.
+ */
+type InternalCreateOptions = CreateAgentOptions & { explicitId: string };
+
 export interface CommissionOptions {
 	/** Authoring strategy. Default: OmpArchitect (drive a real omp agent). */
 	architect?: Architect;
@@ -446,6 +454,10 @@ export class SquadManager extends EventEmitter {
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
+	/** Deterministic branch agent ids `reconcileParallelResume` just stopped, so the next `spawnFleetBranch`
+	 *  call under the same id knows to append the "resuming after a restart" addendum to the branch's
+	 *  re-prompt. Consumed (deleted) the moment spawnFleetBranch checks it — short-lived, not persisted. */
+	private readonly reconciledStops = new Set<string>();
 	/** Agent ids currently draining agent-host ring replay on reattach — transition()/setPending() apply
 	 *  the state change but record nothing, and maybeAutoSupervise is suppressed, until settling clears. */
 	private readonly settling = new Set<string>();
@@ -2393,6 +2405,25 @@ export class SquadManager extends EventEmitter {
 	// ── Roster mutation ───────────────────────────────────────────────────────
 
 	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		return this.createWithId(opts, undefined, actor);
+	}
+
+	/**
+	 * Sole entry point for a caller-chosen deterministic agent id (spawnFleetBranch's branch ids; concern
+	 * 04's fork ids). Rejects a duplicate id BEFORE any worktree/spawn side effect runs (checked here, not
+	 * inside createWithId, so the check happens ahead of every side effect createWithId's body performs).
+	 * ORDERING REQUIREMENT: a re-spawn of the exact same deterministic id (e.g. resume re-running a
+	 * `not_attempted` branch whose old dead roster record is still around from a prior boot) is an
+	 * expected reuse, not a collision — but this method would reject it. The caller (reconcileParallelResume)
+	 * MUST stop()/delete() any stale roster entry for the id before resume calls spawnFleetBranch again, so
+	 * the id is already free by the time createInternal runs.
+	 */
+	private async createInternal(opts: InternalCreateOptions, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		if (this.agents.has(opts.explicitId)) throw new Error(`agent id already in use: ${opts.explicitId}`);
+		return this.createWithId(opts, opts.explicitId, actor);
+	}
+
+	private async createWithId(opts: CreateAgentOptions, explicitId: string | undefined, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
 		const profile = this.profileFor(opts.profileId);
 		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
 		// what tools the spawned agent may use. They were parsed but NEVER applied — every agent got full tool
@@ -2469,7 +2500,7 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
-		const id = newAgentId(name);
+		const id = explicitId ?? newAgentId(name);
 		const branch = opts.branch ?? `squad/${id}`;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
@@ -2594,6 +2625,12 @@ export class SquadManager extends EventEmitter {
 		this.transition(rec, dto.status, "spawn");
 		this.emitAgent(rec);
 
+		// Cold resume of a parallel fork node: any live roster branch agent left over from before the
+		// restart (reattached separately by reconnectLive, or a stale record surviving in `this.agents`)
+		// must be stopped BEFORE the driver's engine.run() re-enters runParallel, or the deterministic
+		// branch id it re-spawns under would collide with createInternal's duplicate-id guard.
+		if (opts.cold && kind === "workflow" && persisted.workflowState?.branchOutcomes) await this.reconcileParallelResume(persisted);
+
 		let started = false;
 		try {
 			await agent.start();
@@ -2654,6 +2691,43 @@ export class SquadManager extends EventEmitter {
 		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, appendSystemPrompt: p.appendSystemPrompt, bin: this.bin });
 	}
 
+	/**
+	 * Cold resume of a parallel fork node: stop every live roster agent whose deterministic branch id
+	 * matches an expected branch key for `p.workflowState!.currentNode` — whether that key's recorded
+	 * disposition is already resolved (succeeded/failed, so the resumed join uses the recorded outcome,
+	 * not the live agent's state) or still `not_attempted` (so it gets re-spawned fresh under the same id
+	 * moments later by `spawnFleetBranch`, avoiding two roster entries under one id and cleaning up any
+	 * first_success crash-window loser `reconnectLive` already reattached — it has no parentId filter).
+	 * Stopped ids are remembered in `reconciledStops` so the re-spawn that follows knows to append a
+	 * "resuming after a restart" note to the branch's re-prompt.
+	 */
+	private async reconcileParallelResume(p: PersistedAgent): Promise<void> {
+		const ws = p.workflowState;
+		const graphPath = p.workflow?.path;
+		if (!ws?.branchOutcomes || !graphPath) return;
+		let wf: Workflow;
+		try {
+			wf = parseWorkflow(await fs.readFile(resolveWorkflowPath(graphPath), "utf8"));
+		} catch {
+			return; // best-effort — an unreadable/malformed graph leaves reconciliation a no-op, never blocks resume
+		}
+		const fork = wf.nodes.get(ws.currentNode);
+		if (!fork || fork.kind !== "parallel") return;
+		const runId = ws.runId ?? p.id;
+		// Same formula runParallel uses for the fan-out it's about to re-enter (engine.ts).
+		const visitIndex = ws.visits[fork.id] ?? 0;
+		const branchIds = wf.edges.filter((e) => e.from === fork.id).map((e) => e.to);
+		for (let i = 0; i < branchIds.length; i++) {
+			const key = `${fork.id}#${visitIndex}:${i}`;
+			const id = deriveBranchAgentId(runId, key, branchIds[i]!);
+			const rec = this.agents.get(id);
+			if (!rec) continue;
+			await rec.agent.stop().catch(() => {});
+			this.agents.delete(id);
+			this.reconciledStops.add(id);
+		}
+	}
+
 	/** Spawn a real roster agent for a workflow's parallel branch, run the task, resolve with its result. The agent stays in the roster. */
 	private async spawnFleetBranch(repo: string, parentId: string, spec: BranchSpec): Promise<NodeResult> {
 		// Hard ceiling even bypass-cap fan-out respects: a workflow may spawn its declared branches,
@@ -2662,7 +2736,8 @@ export class SquadManager extends EventEmitter {
 		// agent is several processes), so keep the ceiling conservative. Upgrade path: count host PIDs.
 		const live = liveAgents(this.list());
 		if (live >= hardAgentCeiling()) {
-			return { outcome: "failed", text: `agent ceiling reached (${live}/${hardAgentCeiling()}) — branch "${spec.name}" not spawned` };
+			// A transient resource condition, not a genuine execution — notAttempted so resume re-spawns it.
+			return { outcome: "failed", notAttempted: true, text: `agent ceiling reached (${live}/${hardAgentCeiling()}) — branch "${spec.name}" not spawned` };
 		}
 		// WIP cap for fan-out (#18): a workflow with a high max_parallel previously blew past the configured
 		// WIP cap because every branch spawned with bypassCap:true — only the hard ceiling stopped it. Respect
@@ -2674,12 +2749,23 @@ export class SquadManager extends EventEmitter {
 		const occupying = occupyingAgents(this.list());
 		if (!this.scheduler.canAdmit(occupying)) {
 			const reason = this.scheduler.pressured() ? "host under resource pressure" : `WIP cap reached (${occupying}/${this.scheduler.cap()})`;
-			return { outcome: "failed", text: `${reason} — branch "${spec.name}" not spawned` };
+			return { outcome: "failed", notAttempted: true, text: `${reason} — branch "${spec.name}" not spawned` };
 		}
-		const dto = await this.create({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true });
+		// Deterministic id: hash8(runId+":"+branchKey) + a slug of the branch node's own id (spec.name),
+		// so re-running the exact same fan-out slot (a resume, or a re-spawn of a not_attempted key) reuses
+		// the same agent id and worktree. Absent runId/branchKey (no fleet-driven caller, e.g. a bare test
+		// harness) falls back to a fresh id — sequential-branch execution never needs determinism.
+		const id = spec.runId && spec.branchKey ? deriveBranchAgentId(spec.runId, spec.branchKey, spec.name) : undefined;
+		// reconcileParallelResume just stopped a live agent under this exact id ahead of this re-spawn: prior
+		// partial work may already sit in the reused worktree — say so in the re-prompt.
+		const task = id && this.reconciledStops.delete(id) ? `${spec.task}\n\n(Resuming after a restart — prior partial work may already exist in this worktree; continue from where it left off.)` : spec.task;
+		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name) }, LOCAL_ACTOR);
 		const rec = this.agents.get(dto.id);
-		if (!rec) return { outcome: "failed", text: "branch agent not created" };
-		return this.runAgentTask(rec, spec.task, spec.signal);
+		if (!rec) return { outcome: "failed", notAttempted: true, text: "branch agent not created" };
+		// Persisted (not sent as create()'s own auto-prompt — runAgentTask below owns the actual send and
+		// completion tracking) so the branch's task survives on the roster record for display/audit.
+		rec.options.task = task;
+		return this.runAgentTask(rec, task, spec.signal);
 	}
 
 	/** Prompt an agent and resolve once its turn ends, collecting the assistant text.
@@ -2692,20 +2778,24 @@ export class SquadManager extends EventEmitter {
 			if (frame.type === "message_update" && frame.assistantMessageEvent?.type === "text_delta") buf += frame.assistantMessageEvent.delta ?? "";
 			else if (frame.type === "agent_end") finish("succeeded");
 		};
-		const onExit = () => finish("failed");
+		// exit/abort never genuinely completed a turn (process crash / teardown, not an executed result) —
+		// notAttempted so a resumed fan-out re-spawns this branch instead of recording a permanent "failed".
+		// The 30-min timeout below is the deliberate exception: it DID execute and burn its whole budget, so
+		// it records as a real "failed" (auto-respawning it on every resume would loop; fork is the retry path).
+		const onExit = () => finish("failed", true);
 		const onAbort = () => {
 			void rec.agent.stop().catch(() => {});
 			this.transition(rec, "stopped", "abort");
 			this.emitAgent(rec);
-			finish("failed");
+			finish("failed", true);
 		};
 		const timer = setTimeout(() => finish("failed"), 30 * 60_000);
-		const finish = (outcome: "succeeded" | "failed"): void => {
+		const finish = (outcome: "succeeded" | "failed", notAttempted?: boolean): void => {
 			clearTimeout(timer);
 			rec.agent.off("event", onEvent);
 			rec.agent.off("exit", onExit);
 			signal?.removeEventListener("abort", onAbort);
-			resolve({ outcome, text: buf.trim() });
+			resolve({ outcome, text: buf.trim(), notAttempted });
 		};
 		if (signal?.aborted) {
 			onAbort();
@@ -2718,7 +2808,7 @@ export class SquadManager extends EventEmitter {
 		rec.streaming = true;
 		this.transition(rec, "working", "branch-start");
 		this.emitAgent(rec);
-		void rec.agent.prompt(task).catch(() => finish("failed"));
+		void rec.agent.prompt(task).catch(() => finish("failed", true));
 		return promise;
 	}
 
@@ -2950,6 +3040,11 @@ export class SquadManager extends EventEmitter {
 				await this.remove(cmd.id, cmd.deleteWorktree ?? false);
 				void this.recordAudit(actor, "remove", cmd.id, "ok", cmd.deleteWorktree ? "deleted worktree" : undefined);
 				break;
+			default:
+				// An old daemon receiving a command type it predates (e.g. concern 04's "fork") must error
+				// loudly instead of silently no-oping — the switch falling through with no default let a
+				// version-skewed daemon look like it accepted a command it never acted on.
+				throw new Error(`unknown command type: ${(cmd as { type?: string }).type}`);
 		}
 	}
 
@@ -3051,7 +3146,11 @@ export class SquadManager extends EventEmitter {
 
 	private async restart(rec: AgentRecord): Promise<void> {
 		await rec.agent.stop();
-		const fresh = this.makeDriver(rec.options);
+		// restart() always rebuilds a fresh inner thread — cold:true for a workflow agent so the resumed
+		// run keeps the poison cap active (warm/non-cold would silently bypass RESUME_ATTEMPT_CAP: the
+		// engine only checks it when resume.cold is set).
+		const cold = rec.options.kind === "workflow";
+		const fresh = this.makeDriver(rec.options, cold);
 		rec.agent = fresh;
 		rec.streaming = false;
 		// callerOwnsStatus: clear pending without letting setPending derive+record its own transition —
@@ -3068,6 +3167,10 @@ export class SquadManager extends EventEmitter {
 		const digest = await readDigest(this.stateDir, rec.dto.id);
 		if (digest) this.append(rec, "system", "📒 Resume digest — prior session memory:\n" + fenceUntrusted("resume digest", digest));
 		this.emitAgent(rec);
+		// Same cold-resume-of-a-parallel-node protocol as the adoption path (createWithId): stop any live
+		// branch agent left over from before the restart so the re-entered runParallel's deterministic ids
+		// are free.
+		if (cold && rec.options.workflowState?.branchOutcomes) await this.reconcileParallelResume(rec.options);
 		try {
 			await fresh.start();
 			this.transition(rec, "idle", "connect-ok");
