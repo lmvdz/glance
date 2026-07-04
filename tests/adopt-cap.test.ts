@@ -117,6 +117,7 @@ interface TransitionLogEntry {
 
 interface AdoptHost {
 	transitionLog: { recent: () => TransitionLogEntry[] };
+	transitionHistory: (id: string, opts?: { full?: boolean }) => Promise<TransitionLogEntry[]>;
 }
 
 test("adoptOrphanedAgents on a persisted record with pending produces a fresh agent whose dto.pending starts EMPTY, and records an orphan-close transition", async () => {
@@ -156,6 +157,52 @@ test("adoptOrphanedAgents on a persisted record with pending produces a fresh ag
 
 	const transcript = mgr.getTranscript(dto.id);
 	expect(transcript.some((t) => JSON.stringify(t).includes("orphaned by adoption"))).toBe(true);
+
+	await mgr.stop();
+});
+
+test("#lifecycle-truth finding 4: cold-adopting an agent with NO pending still stitches lineage — followLineage crosses the id change", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "adopt-no-pending-state-"));
+	tmps.push(stateDir);
+	const worktree = await fs.mkdtemp(path.join(os.tmpdir(), "adopt-no-pending-wt-"));
+	tmps.push(worktree);
+
+	const persisted: PersistedAgent = {
+		id: "orphan-no-pending-1",
+		name: "orphan",
+		repo: "(none)",
+		worktree,
+		approvalMode: "yolo",
+		// No `pending` at all — the common case. Pre-fix, closeOrphanedPending's lineage-recording
+		// transition() call only ran INSIDE the pending-close loop, so this case never recorded an
+		// "adopted" entry and followLineage's cause.priorId walk had nothing to stitch across.
+		kind: "workflow",
+		workflowState: { goal: "g", currentNode: "n1", visits: {}, vars: {}, index: 0, rollup: [] },
+	};
+	await new FileStore(stateDir).save({ agents: [persisted], transcripts: {}, features: [] });
+
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => new NoopDriver();
+	await mgr.start();
+
+	const roster = mgr.list();
+	expect(roster.length).toBe(1);
+	const dto = roster[0]!;
+	expect(dto.id).not.toBe("orphan-no-pending-1");
+
+	// The unconditional "adopted" entry (#lifecycle-truth finding 4) lands even with no pending to close —
+	// pre-fix, "adopted" was dead code for exactly this (the common) case.
+	const log = (mgr as unknown as AdoptHost).transitionLog.recent().filter((e) => e.agentId === dto.id);
+	const adopted = log.find((e) => e.reason === "adopted" && (e.cause as { priorId?: string } | undefined)?.priorId === "orphan-no-pending-1");
+	expect(adopted).toBeDefined();
+	expect(adopted?.denied).toBeUndefined();
+
+	// followLineage's cause.priorId walk (via transitionHistory's full:true path) finds the "adopted"
+	// entry that names the prior id — there's nothing further to stitch behind it here (the prior id was
+	// never itself a live agent in this run, so it recorded no transitions of its own before the crash),
+	// but the walk must still terminate cleanly and surface the lineage-tagged entry it does have.
+	const full = await (mgr as unknown as AdoptHost).transitionHistory(dto.id, { full: true });
+	expect(full.some((e) => e.agentId === dto.id && e.reason === "adopted" && (e.cause as { priorId?: string } | undefined)?.priorId === "orphan-no-pending-1")).toBe(true);
 
 	await mgr.stop();
 });

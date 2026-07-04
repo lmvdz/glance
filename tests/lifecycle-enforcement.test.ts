@@ -1,8 +1,14 @@
 /**
  * Locks the door behind the lifecycle-write-path migration: every `.dto.status =` / `.dto.pending =`
- * assignment in squad-manager.ts must live inside transition()/setPending() or one of the two
- * whitelisted DTO-literal construction sites (attachExisting, restoreFlueMember — there is no prior
- * state to transition *from* at construction time).
+ * assignment in squad-manager.ts must live inside transition()/setPending() or the one remaining
+ * whitelisted DTO-literal construction site (restoreFlueMember — there is no prior state to transition
+ * *from* at construction time).
+ *
+ * `attachExisting` was whitelisted here too until #lifecycle-truth finding 3: its `finally` block did a
+ * raw `rec.dto.status = this.derive(rec)` immediately before calling transition(), which (a) made every
+ * recorded "reattach" entry from===to by construction and (b) was itself a third raw-write site outside
+ * the two guarded methods. Fixed to call `this.transition(rec, this.derive(rec), "reattach")` directly
+ * and let transition() assign — attachExisting no longer needs an exemption.
  *
  * A CI grep is bypassable ((rec.dto as any).status =, destructured aliases) and the local `rtk` hook
  * mangles bash grep output, so enforcement is a `bun test` that parses the source file directly and
@@ -12,7 +18,7 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
 
-const ALLOWED_METHODS = new Set(["transition", "setPending", "attachExisting", "restoreFlueMember"]);
+const ALLOWED_METHODS = new Set(["transition", "setPending", "restoreFlueMember"]);
 
 /** Method-declaration lines in this file are exactly one tab deep (`\tprivate foo(...): T {`), and
  *  nested code inside a method body is indented two-plus tabs — so a line matching this pattern is

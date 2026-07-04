@@ -265,3 +265,23 @@ unconfigured URL is still blocked.
 OMP_SQUAD_TRACE_ALLOW_PRIVATE=1
 OMP_SQUAD_TRACE_EXPORT_OTLP_URL=http://localhost:4318/v1/traces
 ```
+
+### Pending ghost-expiry poll fallback (off by default)
+
+On warm reattach (a daemon restart reconnecting to a surviving agent-host), a replayed `ui`/`hosttool`
+frame can resurrect a pending question the operator already answered before the crash. Two independent
+rules expire these "ghosts" — both only ever touch pendings tagged `replayed:true`, never a live one:
+
+- **Live turn boundary** (always on): a completed post-settle `agent_end` proves no request is actually
+  still open — deterministic, since a blocking UI request suspends the turn.
+- **Poll-based fallback** (`OMP_SQUAD_PENDING_GHOST_EXPIRY=1`, default **off**): expires a replayed ghost
+  after two consecutive `isStreaming === false` polls, for an agent that never fires another `agent_end`
+  post-reattach. This is a heuristic, not a proof — a host genuinely blocked on a confirm is,
+  definitionally, also "not streaming" — and it shipped without the live acceptance test (a real `omp`
+  blocked on a confirm across a daemon restart) called for before enabling it by default. Set the flag to
+  opt in once you've verified it against your own blocking-gate workflows; expiry is never silent either
+  way (a `pending-cancel` transition + transcript note carry the question text).
+
+```sh
+OMP_SQUAD_PENDING_GHOST_EXPIRY=1   # opt-in; default off — see the risk above
+```

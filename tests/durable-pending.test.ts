@@ -72,6 +72,8 @@ interface DurablePendingHost {
 	agents: Map<string, AgentRecordLike>;
 	setPending: (rec: AgentRecordLike, next: PendingRequest[], reason: DerivedReason) => void;
 	pendingPersistTimers: Map<string, unknown>;
+	settling: Set<string>;
+	persist: () => Promise<void>;
 }
 
 function seed(mgr: SquadManager, id: string, status: AgentStatus = "idle"): AgentRecordLike {
@@ -191,4 +193,38 @@ test("stop() flushes an in-flight pending-persist debounce synchronously (no ≤
 	const snap = await reader.load();
 	const persisted = snap.agents.find((a) => a.id === "a1");
 	expect(persisted?.pending?.map((p) => p.id)).toEqual(["p1"]);
+});
+
+test("#lifecycle-truth finding 5: a replayed pending is never written to disk, even when a persist fires while its agent is mid-settle", async () => {
+	const stateDir = await freshStateDir();
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const host = mgr as unknown as DurablePendingHost;
+
+	const ghostRec = seed(mgr, "ghost-agent", "input");
+	const ghost: PendingRequest = { id: "g1", source: "ui", kind: "confirm", title: "replayed?", createdAt: Date.now(), replayed: true };
+	ghostRec.dto.pending = [ghost];
+	// Simulate the agent being mid-settle (a reattach in progress) — setPending's own settling-guard would
+	// suppress scheduling a NEW debounce timer for THIS agent, but it does nothing about a persist()
+	// triggered by unrelated activity (a different agent's own mutation, a capability install, stop()'s
+	// flush, …) while this one is still settling.
+	host.settling.add("ghost-agent");
+
+	// A live pending on a DIFFERENT, non-settling agent — persisted normally, proving the filter is
+	// scoped to replayed:true entries only, not a blanket pending suppression.
+	const liveRec = seed(mgr, "live-agent", "input");
+	const live: PendingRequest = { id: "l1", source: "ui", kind: "confirm", title: "real question", createdAt: Date.now() };
+	liveRec.dto.pending = [live];
+
+	await host.persist(); // an unrelated persist — NOT triggered by ghost-agent's own setPending
+
+	const reader = new FileStore(stateDir);
+	const snap = await reader.load();
+	const ghostPersisted = snap.agents.find((a) => a.id === "ghost-agent");
+	const livePersisted = snap.agents.find((a) => a.id === "live-agent");
+	expect(ghostPersisted?.pending ?? []).toEqual([]); // the replayed ghost never reached disk
+	expect(livePersisted?.pending?.map((p) => p.id)).toEqual(["l1"]); // a live pending on another agent is unaffected
+
+	host.settling.delete("ghost-agent");
+	await mgr.stop();
 });

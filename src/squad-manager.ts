@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
@@ -232,6 +232,20 @@ function autoresolveConfirm(): boolean {
 	return process.env.OMP_SQUAD_AUTORESOLVE_CONFIRM !== "0";
 }
 
+/**
+ * Gates applyState's poll-based ghost-expiry fallback (#lifecycle-truth finding 6). Default OFF: the
+ * rule infers a replayed pending is stale from two consecutive `isStreaming === false` polls, but that
+ * assumption — `isStreaming` reads false only when NOT suspended on a blocking UI request — is
+ * unverified against a live `omp` genuinely blocked on a confirm (DESIGN.md's own risk log flags this
+ * and calls for a live acceptance test before the rule ships on). The deterministic, proof-based
+ * replay-tag expiry (a completed live turn after settle — `expireReplayedPending` off `agent_end`) is
+ * NOT gated by this flag and stays always on. Read fresh on every call (not cached) so tests can flip it
+ * per-case.
+ */
+function pendingGhostExpiryEnabled(): boolean {
+	return process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY === "1";
+}
+
 // liveAgents + the WIP cap live in ./scheduler.ts; spawn identity/adoption policy in ./spawn-identity.ts;
 // profile/model parsing in ./agent-profiles.ts. Re-exports keep the public import paths stable.
 export { liveAgents };
@@ -306,6 +320,16 @@ interface AgentRecord {
 	 *  poll-based ghost-expiry fallback's counter (concern 04). Reset to 0 the instant a poll reports
 	 *  streaming, or pending drains to empty. */
 	nonStreamingPolls?: number;
+	/** Timestamps (ms epoch) of this agent's own recent error-class transitions (to:"error", reason
+	 *  "fail"|"catastrophe"|"exit-error") — per-agent and unbounded-by-other-agents, unlike the
+	 *  fleet-shared transitionLog ring (#lifecycle-truth finding 9: a busy fleet's 500-entry shared ring
+	 *  can evict a quiet agent's own error entries well before the 1h window elapses, undercounting
+	 *  exactly the flapping agent errorTransitions1h exists to surface). Trimmed to the trailing 1h by
+	 *  countErrorTransitions1h on every read (recordTransition appends, applyState's poll path also
+	 *  re-trims so the count DECAYS even once an agent stops transitioning — finding 8). On cold adopt,
+	 *  closeOrphanedPending seeds this from the (already-hydrated, so cheap) in-memory ring's entries for
+	 *  the prior agent id, so a fresh-id lineage stitch doesn't reset the flapping signal to zero. */
+	errorTransitionTimestamps?: number[];
 }
 
 export interface SquadManagerOptions {
@@ -331,6 +355,12 @@ export interface SquadManagerOptions {
 	fedRepos?: string[];
 	/** Owned-lease gossip cadence override (default {@link LEASE_GOSSIP_INTERVAL_MS}); tests use a fast tick. */
 	leaseGossipIntervalMs?: number;
+	/** Fallback timeout (ms) for concern 2's replay-completion marker on reattach — default 2000. An OLD
+	 *  agent-host process (spawned before the marker frame shipped, surviving a daemon upgrade) never
+	 *  sends it, so attachExisting's settle gate falls back to closing after this long instead of
+	 *  wedging forever. Overridable so tests using a fake driver that never emits "replayComplete" don't
+	 *  pay the full production timeout. */
+	replaySettleTimeoutMs?: number;
 }
 
 export interface CommissionOptions {
@@ -419,6 +449,14 @@ export class SquadManager extends EventEmitter {
 	/** Agent ids currently draining agent-host ring replay on reattach — transition()/setPending() apply
 	 *  the state change but record nothing, and maybeAutoSupervise is suppressed, until settling clears. */
 	private readonly settling = new Set<string>();
+	/** Resolvers awaiting concern 2's replay-completion marker frame from a reattached agent's host,
+	 *  keyed by agent id. Armed by attachExisting BEFORE agent.start() is called (a host that replays
+	 *  its whole ring inside the first socket read can emit the marker synchronously during start()'s
+	 *  own await chain — arming after start() resolves would miss it and always fall through to the
+	 *  timeout) and consumed by wire()'s "replayComplete" listener. */
+	private readonly replayCompleteWaiters = new Map<string, () => void>();
+	/** See {@link SquadManagerOptions.replaySettleTimeoutMs}. */
+	private readonly replaySettleTimeoutMs: number;
 	/** Persisted {agentId,from,to,reason,at} history (stateDir/transitions.jsonl) — ring-authoritative,
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
@@ -452,6 +490,7 @@ export class SquadManager extends EventEmitter {
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m));
 		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
+		this.replaySettleTimeoutMs = opts.replaySettleTimeoutMs ?? 2000;
 	}
 
 	private blockedReason(dto: Pick<AgentDTO, "pending" | "error">): string | undefined {
@@ -823,6 +862,17 @@ export class SquadManager extends EventEmitter {
 		for (const o of this.opportunities) o.stop();
 		clearInterval(this.leaseGossipTimer);
 		await this.persist();
+		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
+		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
+		// so this is a same-state note for the transitions timeline ("supervision paused here"), not a
+		// status change. Never allowed to block shutdown.
+		for (const r of this.agents.values()) {
+			try {
+				this.transition(r, r.dto.status, "daemon-stop");
+			} catch (err) {
+				this.log("warn", `daemon-stop transition record failed for ${r.dto.name}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
 		for (const r of this.agents.values()) r.agent.detach?.();
@@ -929,7 +979,11 @@ export class SquadManager extends EventEmitter {
 					n++;
 					// The fresh id create() minted has a dead RPC correlation for anything p carried — close it,
 					// never restore it (concern 04: RT2-5, restored:true is internally contradictory).
-					if (p.pending?.length) await this.closeOrphanedPending(dto.id, p);
+					// Called UNCONDITIONALLY (not gated on p.pending?.length) — closeOrphanedPending itself now
+					// unconditionally stitches the cause.priorId lineage entry too (#lifecycle-truth finding 4:
+					// previously that only happened inside the pending-close loop, so the common no-pending
+					// adopt never recorded lineage and followLineage's crash-spanning stitch never fired for it).
+					await this.closeOrphanedPending(dto.id, p);
 				})
 				.catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
@@ -941,14 +995,34 @@ export class SquadManager extends EventEmitter {
 	 *  correlation) — record its closure so the operator sees "this agent was waiting on you before the
 	 *  crash" without a permanently-unanswerable entry in dto.pending. If the resumed workflow's checkpoint
 	 *  shows the same gate will re-ask, mark it reask-expected so the operator isn't alarmed by what's
-	 *  actually a normal re-prompt. Reuses the "pending-cancel" DerivedReason (rather than a new
-	 *  TransitionReason) — the distinguishing detail lives in `cause`, matching how `catastrophe` carries
-	 *  its detail in `cause.error` instead of a new reason per catastrophe flavor. Called from both the
-	 *  cold-adopt path (adoptOrphanedAgents, above) and the plain `--restore` path (loadPersisted, below) —
-	 *  both mint a fresh agent id from a PersistedAgent, so both can leak a stale pending the same way. */
+	 *  actually a normal re-prompt. Reuses the "pending-cancel" DerivedReason for the per-question close
+	 *  (rather than a new TransitionReason) — the distinguishing detail lives in `cause`, matching how
+	 *  `catastrophe` carries its detail in `cause.error` instead of a new reason per catastrophe flavor.
+	 *  Called from both the cold-adopt path (adoptOrphanedAgents, above) and the plain `--restore` path
+	 *  (loadPersisted, below) — both mint a fresh agent id from a PersistedAgent, so both can leak a stale
+	 *  pending the same way, and both need the lineage stitch below regardless of pending.
+	 *
+	 *  Called UNCONDITIONALLY now (#lifecycle-truth finding 4) — every call records an "adopted"
+	 *  cause.priorId entry FIRST, even when there is nothing to close, so followLineage's crash-spanning
+	 *  timeline stitch works for the common no-pending adopt too. Previously the lineage entry only fired
+	 *  from inside the pending-close loop below, gated on `persisted.pending?.length`, leaving "adopted"
+	 *  effectively dead code for the far more common clean-adopt case. */
 	private async closeOrphanedPending(newAgentId: string, persisted: PersistedAgent): Promise<void> {
 		const rec = this.agents.get(newAgentId);
 		if (!rec) return;
+		// Same-state (rec.dto.status -> itself), event-class reason — recorded per the recording-semantics
+		// rule (a same-state EXPLICIT-reason call always records; only same-state "turn-progress" is a
+		// silent no-op), so this always lands in the ledger regardless of pending.
+		this.transition(rec, rec.dto.status, "adopted", { priorId: persisted.id });
+		// Seed this agent's own error-transition history from the prior id's entries still sitting in the
+		// already-hydrated in-memory ring (#lifecycle-truth finding 9) — cheap (a linear scan over the
+		// ≤500-entry ring, no extra disk I/O) since the ring is already loaded at construction; a
+		// cold-adopt's fresh id must not reset a genuinely flapping agent's errorTransitions1h to zero.
+		rec.errorTransitionTimestamps = this.transitionLog
+			.recent()
+			.filter((e) => e.agentId === persisted.id && e.to === "error" && (e.reason === "fail" || e.reason === "catastrophe" || e.reason === "exit-error"))
+			.map((e) => e.at);
+		rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec);
 		const reaskExpected = persisted.kind === "workflow" && persisted.workflowState !== undefined && (await this.gateWillReask(persisted));
 		for (const p of persisted.pending ?? []) {
 			this.transition(rec, rec.dto.status, "pending-cancel", {
@@ -1041,28 +1115,44 @@ export class SquadManager extends EventEmitter {
 		this.wire(rec);
 		this.emitAgent(rec);
 		// Settle gate (replay-phantom-transition fix): the agent-host replays up to 4000 ring frames on
-		// reconnect, synchronously re-emitting event/ui frames from inside `agent.start()` before it
-		// resolves. Without suppression each replayed frame would pump a phantom transition into history
-		// on every daemon restart. transition()/setPending() apply state changes but record nothing, and
+		// reconnect, across however many socket reads that takes, re-emitting event/ui frames from inside
+		// (and, for a slow/chunked replay, well after) `agent.start()`'s own await chain. Without
+		// suppression each replayed frame would pump a phantom transition into history on every daemon
+		// restart. transition()/setPending() apply state changes but record nothing, and
 		// maybeAutoSupervise is suppressed, while this agent's id is in both `reattached` and `settling` —
 		// `reattached` is seeded here (before start(), not after) specifically so transition()'s
 		// suppression check is already armed for the frames replayed synchronously inside start() itself.
 		this.settling.add(p.id);
 		this.reattached.add(p.id);
+		// Armed BEFORE agent.start() — see armReplayCompleteWaiter's own comment for why arming after
+		// start() resolves would miss a marker delivered inside start()'s first socket read.
+		const replaySettled = this.armReplayCompleteWaiter(p.id);
 		try {
 			await agent.start();
-			await this.drainOneTick(); // let straggling synchronous replay frames land before settling closes
-		} finally {
+			await this.drainOneTick(); // cheap floor: let a purely-synchronous burst land even for a driver that never sends a marker at all
+			await replaySettled.promise; // the real settle point: the replay-completion marker, or the timeout fallback for an old agent-host
+			this.settling.delete(p.id);
+			this.transition(rec, this.derive(rec), "reattach"); // ONE synthetic entry now that settling is off — derive() assigns via transition(), never a raw write
+		} catch (err) {
 			// Runs on the failure path too (host died between the hostAlive() probe and connect, or the
 			// RPC handshake rejected): both callers swallow the rejection with .catch(log) and leave `rec`
-			// in `this.agents`, so if this settle window didn't close here the agent's id would stay in
-			// `settling` forever — permanently disabling maybeAutoSupervise and silencing transition()'s
-			// ledger recording for it (exactly the partial-failure class this concern targets).
-			rec.dto.status = this.derive(rec); // unchanged on success; reflects the failed-start state otherwise
+			// in `this.agents`. Two bugs this branch fixes (#lifecycle-truth findings 1 & 3):
+			//  (1) previously the `finally` block derived a non-terminal status here (pending=[],
+			//      streaming=false, status="starting" derives to "idle") and the thrown error was
+			//      swallowed by both callers' .catch(log) — a failed reattach landed as a healthy-looking
+			//      "idle" agent with a dead driver, indistinguishable from a real idle agent on the dashboard.
+			//  (3) the raw `rec.dto.status = this.derive(rec)` write immediately before transition() made
+			//      every recorded "reattach" entry from===to by construction — a third raw-write site the
+			//      enforcement test had to whitelist attachExisting for.
+			// Also: without closing the settle window here, this id would stay in `settling` forever,
+			// permanently disabling maybeAutoSupervise and silencing transition()'s ledger for it.
+			replaySettled.cancel(); // start() rejected — the marker (or a timeout wait for one) can never help now
 			this.settling.delete(p.id);
-			this.transition(rec, rec.dto.status, "reattach", {}); // ONE synthetic entry now that settling is off
+			this.transition(rec, "error", "reattach", { error: `reattach failed: ${err instanceof Error ? err.message : String(err)}` });
 			this.emitAgent(rec);
+			throw err;
 		}
+		this.emitAgent(rec);
 	}
 
 	list(): AgentDTO[] {
@@ -2496,6 +2586,12 @@ export class SquadManager extends EventEmitter {
 		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
 		this.agents.set(id, rec);
 		this.wire(rec);
+		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
+		// requirement) — records regardless of pending because "spawn" is an event-class reason, not
+		// "turn-progress" (the only same-state reason transition() silently no-ops on). Marks the start of
+		// every agent's timeline so `GET /api/agents/:id/transitions` never opens on an unexplained first
+		// entry.
+		this.transition(rec, dto.status, "spawn");
 		this.emitAgent(rec);
 
 		let started = false;
@@ -3007,6 +3103,17 @@ export class SquadManager extends EventEmitter {
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
 		a.on("stderr", (line: string) => this.log("warn", `[${rec.dto.name}] ${line}`));
+		// Concern 2's replay-completion marker (agent-host.ts writes it last, right after the ring, so a
+		// client always processes it after every frame that preceded it regardless of how many socket
+		// reads the replay spanned). No-op for a freshly-created (non-reattached) agent — nothing is ever
+		// armed in replayCompleteWaiters for it.
+		a.on("replayComplete", () => {
+			const finish = this.replayCompleteWaiters.get(rec.dto.id);
+			if (finish) {
+				this.replayCompleteWaiters.delete(rec.dto.id);
+				finish();
+			}
+		});
 		a.on("checkpoint", (state: WorkflowRunState) => {
 			rec.options.workflowState = state;
 			rec.dto.workflowState = state;
@@ -3950,10 +4057,13 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Append a recorded (non-denied) transition to the persisted ring (stateDir/transitions.jsonl).
-	 *  `cause` arrives already redacted (transition() redacts once, up front — see its comment). */
+	 *  `cause` arrives already redacted (transition() redacts once, up front — see its comment). `seq` is
+	 *  a uuid, not a per-process counter (#lifecycle-truth finding 7) — a counter would collide across a
+	 *  restart boundary, exactly where dedupeTransitions's file/ring merge needs identity to be trustworthy. */
 	private recordTransition(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
-		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause };
+		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, seq: randomUUID() };
 		this.transitionLog.append(entry);
+		this.recordErrorTransition(rec, entry); // finding 9's per-agent (not fleet-shared-ring) error tally
 		this.pushTransitionEvent(rec, entry); // concern 03 wires DTO tail + rollup off this same call
 		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
 	}
@@ -3961,37 +4071,45 @@ export class SquadManager extends EventEmitter {
 	/** Append a denied-transition attempt to the same ring, flagged so it is never confused with an
 	 *  applied transition. Does not feed pushTransitionEvent — a denied attempt never changed dto.status. */
 	private recordDenied(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
-		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, denied: true };
+		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, denied: true, seq: randomUUID() };
 		this.transitionLog.append(entry);
 		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
 	}
 
 	/** Wires the DTO's capped `transitions` tail + the `errorTransitions1h` rollup off every recorded
 	 *  (non-denied) transition. `turn-progress` entries never join the tail (hot-path noise); the rollup
-	 *  is always recomputed from the full ring so it never undercounts a busy/flapping agent. Both fields
-	 *  ride the next `emitAgent()` the calling site already performs — no extra broadcast here. */
+	 *  is always recomputed from THIS agent's own bounded error-timestamp array (never the fleet-shared
+	 *  ring — finding 9) so it never undercounts a busy/flapping agent. Both fields ride the next
+	 *  `emitAgent()` the calling site already performs — no extra broadcast here. */
 	private pushTransitionEvent(rec: AgentRecord, entry: TransitionEntry): void {
 		if (entry.reason !== "turn-progress") {
 			const tail = [...(rec.dto.transitions ?? []), entry];
 			rec.dto.transitions = tail.length > 5 ? tail.slice(-5) : tail;
 		}
-		rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec.dto.id);
+		rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec);
 	}
 
-	/** Linear scan over the (≤500-entry) in-memory ring — never the file. Cheap enough to run on every
-	 *  transition since it only fires on the already-low-frequency `transition()` path, never on
-	 *  `turn-progress`'s hot early-return. */
-	private countErrorTransitions1h(agentId: string): number {
+	/** Append an error-class transition's timestamp onto THIS agent's own bounded array (#lifecycle-truth
+	 *  finding 9) — the source countErrorTransitions1h now scans, replacing the fleet-shared 500-entry
+	 *  transitionLog ring a busy fleet could evict this agent's own entries out of before the 1h window
+	 *  elapses (the exact undercount the DTO field's doc promised never happens). */
+	private recordErrorTransition(rec: AgentRecord, entry: TransitionEntry): void {
+		if (entry.to !== "error" || (entry.reason !== "fail" && entry.reason !== "catastrophe" && entry.reason !== "exit-error")) return;
+		rec.errorTransitionTimestamps = [...(rec.errorTransitionTimestamps ?? []), entry.at];
+	}
+
+	/** Linear scan + trim over THIS agent's own (small, unbounded-by-other-agents) error-timestamp array
+	 *  — never the fleet-shared transitionLog ring (#lifecycle-truth finding 9: that ring is capped at
+	 *  500 entries TOTAL across every agent, so a busy fleet can evict the very error entries being
+	 *  counted for a quiet-but-flapping agent, contradicting this field's "never undercounts" doc). The
+	 *  trim (not just the count) is what makes the rollup DECAY once an agent stops transitioning
+	 *  (finding 8) — applyState's poll path calls this too, for agents with a nonzero count, so the
+	 *  number ages out even without a fresh transition to trigger the recompute. */
+	private countErrorTransitions1h(rec: AgentRecord): number {
 		const cutoff = Date.now() - 3_600_000;
-		return this.transitionLog
-			.recent()
-			.filter(
-				(e) =>
-					e.agentId === agentId &&
-					e.at >= cutoff &&
-					e.to === "error" &&
-					(e.reason === "fail" || e.reason === "catastrophe" || e.reason === "exit-error"),
-			).length;
+		const kept = (rec.errorTransitionTimestamps ?? []).filter((t) => t >= cutoff);
+		rec.errorTransitionTimestamps = kept;
+		return kept.length;
 	}
 
 	/** A blocking UI request suspends the agent's turn — so a turn that completed (agent_end fired) proves
@@ -4024,9 +4142,45 @@ export class SquadManager extends EventEmitter {
 	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a
 	 *  driver's `start()`) land before the settle gate closes. A microtask alone is not enough — replay
 	 *  frames can be scheduled via setImmediate/setTimeout(0) inside the driver — so this parks behind
-	 *  one macrotask boundary. */
+	 *  one macrotask boundary. Kept as a cheap floor UNDER the real fix below (armReplayCompleteWaiter) —
+	 *  harmless for drivers that never emit a marker at all (fake test doubles), and for the
+	 *  single-socket-read production case it guarantees the burst is fully applied even before the
+	 *  marker-or-timeout race is even set up. */
 	private drainOneTick(): Promise<void> {
 		return new Promise((resolve) => setImmediate(resolve));
+	}
+
+	/** Concern 2's real settle-point fix: the agent-host replays its ring across however many socket
+	 *  reads it takes (up to 4000 lines), NOT within one tick — a bare setImmediate (drainOneTick) is a
+	 *  heuristic that can close the settle gate while frames are still straggling in. The host writes an
+	 *  explicit `{__sq:"replay_complete"}` marker LAST, after every ring line, so a client always
+	 *  processes it after everything that preceded it, however many ticks the delivery spanned (UDS/TCP
+	 *  preserve stream order). Must be armed BEFORE `agent.start()` is called (see the
+	 *  replayCompleteWaiters field comment) — a host that delivers its whole reply in the first socket
+	 *  read can emit the marker synchronously inside start()'s own await chain.
+	 *
+	 *  Falls back to `this.replaySettleTimeoutMs` (default 2000ms) so an OLD agent-host process — spawned
+	 *  before this fix shipped, surviving a daemon upgrade — that never sends the marker still settles
+	 *  eventually instead of wedging maybeAutoSupervise and the ledger for that agent forever. Returns a
+	 *  `cancel()` so a caller whose `agent.start()` itself rejected can tear the waiter (and its timer)
+	 *  down immediately instead of leaving it to expire on its own. */
+	private armReplayCompleteWaiter(id: string): { promise: Promise<void>; cancel: () => void } {
+		let finish: () => void = () => {};
+		const promise = new Promise<void>((resolve) => {
+			let done = false;
+			const timer = setTimeout(() => {
+				finish();
+			}, this.replaySettleTimeoutMs);
+			finish = () => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				this.replayCompleteWaiters.delete(id);
+				resolve();
+			};
+			this.replayCompleteWaiters.set(id, finish);
+		});
+		return { promise, cancel: () => finish() };
 	}
 
 	private fail(rec: AgentRecord, err: unknown): void {
@@ -4212,18 +4366,34 @@ export class SquadManager extends EventEmitter {
 			rec.streaming = state.isStreaming;
 			if (rec.dto.status !== "stopped" && rec.dto.status !== "error") this.transition(rec, this.derive(rec), "turn-progress");
 		} else {
-			// Poll-based ghost-expiry fallback (concern 04): the agent_end rule above only fires on a LIVE
-			// post-settle turn boundary — an agent that was already idle pre-crash with a stale replayed
-			// ghost, and never gets prompted again, would otherwise wedge here forever. Two consecutive
-			// isStreaming===false polls is the signal RpcSessionState gives us that nothing is in flight;
-			// piggybacks the same poll cadence the pending-queue guard above already gates rec.streaming on.
-			if (!state.isStreaming) {
-				rec.nonStreamingPolls = (rec.nonStreamingPolls ?? 0) + 1;
-				if (rec.nonStreamingPolls >= 2) this.expireReplayedPending(rec);
-			} else {
-				rec.nonStreamingPolls = 0;
+			// Poll-based ghost-expiry fallback (concern 04) — gated behind OMP_SQUAD_PENDING_GHOST_EXPIRY
+			// (default OFF, #lifecycle-truth finding 6). Rationale for gating: this rule shipped without
+			// its design-mandated live acceptance test (a real omp blocked on a genuinely-open confirm
+			// across a daemon restart), and the assumption it rests on — `isStreaming` reads false only
+			// when NOT suspended on a blocking UI request — is plausible but unverified; a host waiting on
+			// a blocking confirm is, definitionally, not streaming either. The DETERMINISTIC replay-tag
+			// expiry (the agent_end / live-turn-boundary rule, `expireReplayedPending` above) stays ALWAYS
+			// on — it only fires once a live turn has genuinely completed, which is proof, not a heuristic.
+			if (pendingGhostExpiryEnabled()) {
+				// An agent that was already idle pre-crash with a stale replayed ghost, and never gets
+				// prompted again, would otherwise wedge here forever even with the live rule enabled — two
+				// consecutive isStreaming===false polls is the signal RpcSessionState gives us that nothing
+				// is in flight; piggybacks the same poll cadence the pending-queue guard above already gates
+				// rec.streaming on.
+				if (!state.isStreaming) {
+					rec.nonStreamingPolls = (rec.nonStreamingPolls ?? 0) + 1;
+					if (rec.nonStreamingPolls >= 2) this.expireReplayedPending(rec);
+				} else {
+					rec.nonStreamingPolls = 0;
+				}
 			}
 		}
+		// errorTransitions1h decay (#lifecycle-truth finding 8): without this, a dead errored agent that
+		// never transitions again keeps a stale nonzero count forever (a standing false "flapping" alarm
+		// in insights.ts) — countErrorTransitions1h's own trim only ever ran from the transition() path.
+		// Recomputing here, on every poll tick, for agents that currently show a nonzero count, ages the
+		// rollup out over time even with no new transitions.
+		if ((rec.dto.errorTransitions1h ?? 0) > 0) rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec);
 		this.emitAgent(rec);
 	}
 
@@ -4355,7 +4525,21 @@ export class SquadManager extends EventEmitter {
 	private async persistNow(): Promise<void> {
 		// Fold in the live `pending[]` snapshot (concern 04: durable pause) — `r.options` alone is the
 		// persisted-at-create() shape and never carries later pending mutations.
-		const live = [...this.agents.values()].map((r) => ({ ...r.options, pending: r.dto.pending }));
+		//
+		// Replayed-tagged (ghost-candidate) entries are EXCLUDED here regardless of settle-window timing
+		// (#lifecycle-truth finding 5). setPending's settling-guard on schedulePendingPersist only stops a
+		// NEW debounce timer from being armed while THIS agent is mid-settle — it does nothing about an
+		// already-scheduled timer (armed before settling started) or an unrelated persist() call (a
+		// different agent's own pending mutation, a capability install/audit write, stop()'s flush, …)
+		// firing while THIS agent is mid-settle with a live replayed pending still sitting in dto.pending.
+		// Filtering it out of every snapshot unconditionally is always safe: a replayed entry is either
+		// answered normally (which clears it via setPending before persistNow ever sees it again) or
+		// expired by one of the two ghost-expiry rules — it never needs to survive a crash, since a
+		// subsequent reattach's ring replay resurrects it fresh with a live correlation id anyway (replay,
+		// not the snapshot, is the source of truth on warm reattach — see DESIGN.md's warm-reattach
+		// decision). The settling-guard above stays in place as a separate I/O-churn optimization; removing
+		// it is a distinct (and not obviously behavior-identical) change, so it is left as-is here.
+		const live = [...this.agents.values()].map((r) => ({ ...r.options, pending: r.dto.pending.filter((p) => !p.replayed) }));
 		// D1 FIX: fold in resumable checkpoints the adoption ceiling dropped this boot so the full-snapshot
 		// replace doesn't erase them — a later restart re-attempts them. Live records win on id collision
 		// (a deferred run that has since been adopted is now in the live roster).
@@ -4404,7 +4588,9 @@ export class SquadManager extends EventEmitter {
 				.then(async (dto) => {
 					// Same fresh-id-fresh-correlation leak as adoptOrphanedAgents (this path also mints a new
 					// agent id from a PersistedAgent) — close, never restore, any pending it carried (concern 04).
-					if (p.pending?.length) await this.closeOrphanedPending(dto.id, p);
+					// Unconditional, like adoptOrphanedAgents' call site — closeOrphanedPending unconditionally
+					// stitches the cause.priorId lineage entry too (#lifecycle-truth finding 4).
+					await this.closeOrphanedPending(dto.id, p);
 				})
 				.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}

@@ -94,7 +94,7 @@ interface GhostExpiryHost {
 
 test("a pending rebuilt during the settle window is tagged replayed:true; a live pending never is", async () => {
 	const stateDir = await freshStateDir();
-	const mgr = new SquadManager({ stateDir });
+	const mgr = new SquadManager({ stateDir, replaySettleTimeoutMs: 20 }); // ReplayUiDriver never emits the concern-2 marker — keep the fallback timeout fast
 	await mgr.start();
 	const driver = new ReplayUiDriver();
 	(mgr as unknown as DriverFactoryHost).makeDriver = () => driver;
@@ -117,7 +117,7 @@ test("a pending rebuilt during the settle window is tagged replayed:true; a live
 
 test("a live post-settle agent_end turn boundary expires a ghost-only pending, recording a transition + transcript note", async () => {
 	const stateDir = await freshStateDir();
-	const mgr = new SquadManager({ stateDir });
+	const mgr = new SquadManager({ stateDir, replaySettleTimeoutMs: 20 });
 	await mgr.start();
 	const driver = new ReplayUiDriver();
 	(mgr as unknown as DriverFactoryHost).makeDriver = () => driver;
@@ -148,7 +148,7 @@ test("a live post-settle agent_end turn boundary expires a ghost-only pending, r
 
 test("agent_end's expiry never touches a live (non-replayed) pending alongside the ghost", async () => {
 	const stateDir = await freshStateDir();
-	const mgr = new SquadManager({ stateDir });
+	const mgr = new SquadManager({ stateDir, replaySettleTimeoutMs: 20 });
 	await mgr.start();
 	const driver = new ReplayUiDriver();
 	(mgr as unknown as DriverFactoryHost).makeDriver = () => driver;
@@ -208,50 +208,94 @@ function bareRec(id: string, pending: PendingRequest[]): { dto: AgentDTO; stream
 
 const streamState = (isStreaming: boolean): RpcSessionState => ({ todoPhases: [], isStreaming }) as RpcSessionState;
 
+/** The poll-based fallback is gated behind OMP_SQUAD_PENDING_GHOST_EXPIRY (default OFF — #lifecycle-truth
+ *  finding 6: it shipped without its design-mandated live acceptance test, and a host genuinely blocked
+ *  on a confirm is, definitionally, not streaming either — the same signal this rule treats as staleness).
+ *  These three tests exercise the rule itself, so they opt in explicitly and restore the prior value
+ *  afterward (try/finally) so the flag never leaks into another test file sharing this bun test process. */
+function withPendingGhostExpiry<T>(run: () => T | Promise<T>): Promise<T> {
+	const saved = process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY;
+	process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY = "1";
+	return Promise.resolve()
+		.then(run)
+		.finally(() => {
+			if (saved === undefined) delete process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY;
+			else process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY = saved;
+		});
+}
+
 test("applyState's poll-based fallback expires a replayed ghost after two consecutive non-streaming polls, not one", async () => {
-	const stateDir = await freshStateDir();
-	const mgr = new SquadManager({ stateDir });
-	const host = mgr as unknown as ApplyStateHost;
+	await withPendingGhostExpiry(async () => {
+		const stateDir = await freshStateDir();
+		const mgr = new SquadManager({ stateDir });
+		const host = mgr as unknown as ApplyStateHost;
 
-	const ghost: PendingRequest = { id: "ghost1", source: "ui", kind: "confirm", title: "stale?", createdAt: Date.now(), replayed: true };
-	const rec = bareRec("poll-agent", [ghost]);
+		const ghost: PendingRequest = { id: "ghost1", source: "ui", kind: "confirm", title: "stale?", createdAt: Date.now(), replayed: true };
+		const rec = bareRec("poll-agent", [ghost]);
 
-	host.applyState(rec, streamState(false));
-	expect(rec.dto.pending.some((p) => p.id === "ghost1")).toBe(true); // first non-streaming poll: not yet expired
+		host.applyState(rec, streamState(false));
+		expect(rec.dto.pending.some((p) => p.id === "ghost1")).toBe(true); // first non-streaming poll: not yet expired
 
-	host.applyState(rec, streamState(false));
-	expect(rec.dto.pending.some((p) => p.id === "ghost1")).toBe(false); // second consecutive poll: expired
+		host.applyState(rec, streamState(false));
+		expect(rec.dto.pending.some((p) => p.id === "ghost1")).toBe(false); // second consecutive poll: expired
 
-	await mgr.stop();
+		await mgr.stop();
+	});
 });
 
 test("applyState's poll-based fallback resets its counter on a streaming poll (needs two CONSECUTIVE non-streaming polls)", async () => {
-	const stateDir = await freshStateDir();
-	const mgr = new SquadManager({ stateDir });
-	const host = mgr as unknown as ApplyStateHost;
+	await withPendingGhostExpiry(async () => {
+		const stateDir = await freshStateDir();
+		const mgr = new SquadManager({ stateDir });
+		const host = mgr as unknown as ApplyStateHost;
 
-	const ghost: PendingRequest = { id: "ghost1", source: "ui", kind: "confirm", title: "stale?", createdAt: Date.now(), replayed: true };
-	const rec = bareRec("poll-agent-2", [ghost]);
+		const ghost: PendingRequest = { id: "ghost1", source: "ui", kind: "confirm", title: "stale?", createdAt: Date.now(), replayed: true };
+		const rec = bareRec("poll-agent-2", [ghost]);
 
-	host.applyState(rec, streamState(false)); // 1
-	host.applyState(rec, streamState(true)); // resets the counter
-	host.applyState(rec, streamState(false)); // 1 again, not 2 — not consecutive
-	expect(rec.dto.pending.some((p) => p.id === "ghost1")).toBe(true);
+		host.applyState(rec, streamState(false)); // 1
+		host.applyState(rec, streamState(true)); // resets the counter
+		host.applyState(rec, streamState(false)); // 1 again, not 2 — not consecutive
+		expect(rec.dto.pending.some((p) => p.id === "ghost1")).toBe(true);
 
-	await mgr.stop();
+		await mgr.stop();
+	});
 });
 
 test("applyState's poll fallback never touches a live (non-replayed) pending, regardless of poll count", async () => {
-	const stateDir = await freshStateDir();
-	const mgr = new SquadManager({ stateDir });
-	const host = mgr as unknown as ApplyStateHost;
+	await withPendingGhostExpiry(async () => {
+		const stateDir = await freshStateDir();
+		const mgr = new SquadManager({ stateDir });
+		const host = mgr as unknown as ApplyStateHost;
 
-	const live: PendingRequest = { id: "live1", source: "ui", kind: "confirm", title: "real question", createdAt: Date.now() }; // no replayed flag
-	const rec = bareRec("live-agent", [live]);
+		const live: PendingRequest = { id: "live1", source: "ui", kind: "confirm", title: "real question", createdAt: Date.now() }; // no replayed flag
+		const rec = bareRec("live-agent", [live]);
 
-	for (let i = 0; i < 5; i++) host.applyState(rec, streamState(false));
+		for (let i = 0; i < 5; i++) host.applyState(rec, streamState(false));
 
-	expect(rec.dto.pending.some((p) => p.id === "live1")).toBe(true); // never expired — not tagged replayed
+		expect(rec.dto.pending.some((p) => p.id === "live1")).toBe(true); // never expired — not tagged replayed
 
-	await mgr.stop();
+		await mgr.stop();
+	});
+});
+
+test("applyState's poll-based fallback never fires when OMP_SQUAD_PENDING_GHOST_EXPIRY is unset (default OFF)", async () => {
+	const saved = process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY;
+	delete process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY;
+	try {
+		const stateDir = await freshStateDir();
+		const mgr = new SquadManager({ stateDir });
+		const host = mgr as unknown as ApplyStateHost;
+
+		const ghost: PendingRequest = { id: "ghost1", source: "ui", kind: "confirm", title: "stale?", createdAt: Date.now(), replayed: true };
+		const rec = bareRec("poll-agent-default-off", [ghost]);
+
+		for (let i = 0; i < 5; i++) host.applyState(rec, streamState(false));
+
+		expect(rec.dto.pending.some((p) => p.id === "ghost1")).toBe(true); // never expired — the rule is OFF by default
+
+		await mgr.stop();
+	} finally {
+		if (saved === undefined) delete process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY;
+		else process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY = saved;
+	}
 });
