@@ -350,6 +350,101 @@ test("attachExisting reconciles a stale live branch agent before resuming a warm
 	await mgr.stop();
 });
 
+// (f2) A daemon death between a fork's ENTRY checkpoint (no branchOutcomes yet — the engine only starts
+// recording per-branch outcomes once the first branch completes) and the first branch completion must
+// still reconcile: an absent branchOutcomes map is treated as "every key not yet attempted," not as
+// "nothing to reconcile." Before this fix the three call sites gated on `workflowState?.branchOutcomes`
+// being present, so this exact checkpoint shape skipped reconciliation entirely, and the resumed
+// runParallel's re-spawn collided with the still-live orphaned branch child under createInternal's
+// duplicate-id guard.
+test("attachExisting reconciles a stale live branch agent when the fork checkpoint has no branchOutcomes at all", async () => {
+	const { mgr } = await makeMgr("warm-reconcile-no-outcomes", { replaySettleTimeoutMs: 20 });
+	const host = mgr as unknown as InternalHost;
+
+	const graphDir = await fs.mkdtemp(path.join(os.tmpdir(), "warm-reconcile-no-outcomes-graph-"));
+	tmps.push(graphDir);
+	const graphPath = path.join(graphDir, "wf.fabro");
+	await fs.writeFile(graphPath, PARALLEL_GRAPH);
+
+	const runId = "run-warm-no-outcomes";
+	const staleId = deriveBranchAgentId(runId, "fork#0:0", "branch_a");
+	const staleDriver = new FakeDriver();
+	const stubDto = (id: string, name: string): AgentDTO => ({ id, name, status: "working", repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo", pending: [], lastActivity: Date.now(), messageCount: 0, kind: "omp-operator" });
+	const stubOptions = (id: string, name: string): PersistedAgent => ({ id, name, repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo" });
+	host.agents.set(staleId, fakeRecord(stubDto(staleId, "branch_a"), staleDriver, stubOptions(staleId, "branch_a")));
+
+	const persisted: PersistedAgent = {
+		id: "wf-warm-no-outcomes",
+		name: "wf",
+		repo: "(none)",
+		worktree: "/tmp/wf-warm-no-outcomes",
+		approvalMode: "yolo",
+		kind: "workflow",
+		workflow: { path: graphPath },
+		workflowState: {
+			goal: "g",
+			currentNode: "fork",
+			visits: { fork: 0 },
+			vars: {},
+			index: 0,
+			rollup: [],
+			runId,
+			// No branchOutcomes — the engine emits this shape for the fork's entry checkpoint, before any
+			// branch has completed.
+		},
+	};
+
+	await host.attachExisting(persisted, []);
+
+	expect(staleDriver.stopped).toBe(1);
+	expect(host.agents.has(staleId)).toBe(false);
+	await mgr.stop();
+});
+
+// (f3) Companion to (f2): a key with no recorded disposition (because branchOutcomes is entirely absent)
+// is treated the same as not_attempted for reconciledStops bookkeeping — it will be re-run by the resumed
+// runParallel, so the restart addendum applies to its re-spawn too.
+test("reconcileParallelResume tracks reconciledStops for a key with no recorded outcome when branchOutcomes is absent", async () => {
+	const { mgr } = await makeMgr("reconcile-no-outcomes-stops");
+	const host = mgr as unknown as InternalHost & { reconciledStops: Set<string> };
+
+	const graphDir = await fs.mkdtemp(path.join(os.tmpdir(), "reconcile-no-outcomes-graph-"));
+	tmps.push(graphDir);
+	const graphPath = path.join(graphDir, "wf.fabro");
+	await fs.writeFile(graphPath, PARALLEL_GRAPH);
+
+	const runId = "run-no-outcomes";
+	const idA = deriveBranchAgentId(runId, "fork#0:0", "branch_a");
+	const stubDto = (id: string, name: string): AgentDTO => ({ id, name, status: "working", repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo", pending: [], lastActivity: Date.now(), messageCount: 0, kind: "omp-operator" });
+	const stubOptions = (id: string, name: string): PersistedAgent => ({ id, name, repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo" });
+	host.agents.set(idA, fakeRecord(stubDto(idA, "branch_a"), new FakeDriver(), stubOptions(idA, "branch_a")));
+
+	const p: PersistedAgent = {
+		id: "wf-no-outcomes",
+		name: "wf",
+		repo: "(none)",
+		worktree: "/tmp/wf-no-outcomes",
+		approvalMode: "yolo",
+		kind: "workflow",
+		workflow: { path: graphPath },
+		workflowState: {
+			goal: "g",
+			currentNode: "fork",
+			visits: { fork: 0 },
+			vars: {},
+			index: 0,
+			rollup: [],
+			runId,
+			// branchOutcomes absent entirely.
+		},
+	};
+
+	await host.reconcileParallelResume(p);
+
+	expect(host.reconciledStops.has(idA)).toBe(true);
+	await mgr.stop();
+});
+
 // (g) Companion to (f): the re-spawn that follows a reconciled stop appends the "resuming after a restart"
 // addendum to the branch's task; a fresh, never-reconciled spawn under a different key does not.
 test("spawnFleetBranch appends the restart addendum only for a reconciled (previously-stopped) branch id", async () => {

@@ -1161,7 +1161,7 @@ export class SquadManager extends EventEmitter {
 		// unconditionally on every reattach: it no-ops unless `currentNode` is actually a parallel fork
 		// (reconcileParallelResume's own early-return). reconnectLive's two-pass ordering guarantees every
 		// live branch child is already in `this.agents` by the time a workflow parent gets here.
-		if (p.kind === "workflow" && p.workflowState?.branchOutcomes) await this.reconcileParallelResume(p);
+		if (p.kind === "workflow" && p.workflowState) await this.reconcileParallelResume(p);
 		try {
 			await agent.start();
 			await this.drainOneTick(); // cheap floor: let a purely-synchronous burst land even for a driver that never sends a marker at all
@@ -2652,7 +2652,7 @@ export class SquadManager extends EventEmitter {
 		// restart (reattached separately by reconnectLive, or a stale record surviving in `this.agents`)
 		// must be stopped BEFORE the driver's engine.run() re-enters runParallel, or the deterministic
 		// branch id it re-spawns under would collide with createInternal's duplicate-id guard.
-		if (opts.cold && kind === "workflow" && persisted.workflowState?.branchOutcomes) await this.reconcileParallelResume(persisted);
+		if (opts.cold && kind === "workflow" && persisted.workflowState) await this.reconcileParallelResume(persisted);
 
 		let started = false;
 		try {
@@ -2721,17 +2721,19 @@ export class SquadManager extends EventEmitter {
 	 * not the live agent's state) or still `not_attempted` (so it gets re-spawned fresh under the same id
 	 * moments later by `spawnFleetBranch`, avoiding two roster entries under one id and cleaning up any
 	 * first_success crash-window loser `reconnectLive` already reattached — it has no parentId filter).
-	 * Stopped ids for a still-`not_attempted` key are remembered in `reconciledStops` so the re-spawn that
-	 * follows knows to append a "resuming after a restart" note to the branch's re-prompt — an already-
-	 * resolved (succeeded/failed) key is never re-spawned, so it's never added (nothing would ever consume
-	 * it, and the set would otherwise grow unbounded on a long-lived daemon). Teardown otherwise mirrors
-	 * remove()'s: emit `{type:"removed"}` and persist so clients/the on-disk snapshot converge immediately
-	 * instead of carrying a ghost roster entry until some unrelated later persist.
+	 * Stopped ids for a still-`not_attempted` key (or a key with no recorded outcome at all — the engine
+	 * emits a fork's entry checkpoint with no `branchOutcomes` before spawning any branch, so a restart in
+	 * that window has to treat every key as effectively not-attempted) are remembered in `reconciledStops`
+	 * so the re-spawn that follows knows to append a "resuming after a restart" note to the branch's
+	 * re-prompt — an already-resolved (succeeded/failed) key is never re-spawned, so it's never added
+	 * (nothing would ever consume it, and the set would otherwise grow unbounded on a long-lived daemon).
+	 * Teardown otherwise mirrors remove()'s: emit `{type:"removed"}` and persist so clients/the on-disk
+	 * snapshot converge immediately instead of carrying a ghost roster entry until some unrelated later persist.
 	 */
 	private async reconcileParallelResume(p: PersistedAgent): Promise<void> {
 		const ws = p.workflowState;
 		const graphPath = p.workflow?.path;
-		if (!ws?.branchOutcomes || !graphPath) return;
+		if (!ws || !graphPath) return;
 		let wf: Workflow;
 		try {
 			wf = parseWorkflow(await fs.readFile(resolveWorkflowPath(graphPath), "utf8"));
@@ -2744,6 +2746,7 @@ export class SquadManager extends EventEmitter {
 		// Same formula runParallel uses for the fan-out it's about to re-enter (engine.ts).
 		const visitIndex = ws.visits[fork.id] ?? 0;
 		const branchIds = wf.edges.filter((e) => e.from === fork.id).map((e) => e.to);
+		const dispositions = ws.branchOutcomes ?? {};
 		let stoppedAny = false;
 		for (let i = 0; i < branchIds.length; i++) {
 			const key = `${fork.id}#${visitIndex}:${i}`;
@@ -2752,7 +2755,8 @@ export class SquadManager extends EventEmitter {
 			if (!rec) continue;
 			await rec.agent.stop().catch(() => {});
 			this.agents.delete(id);
-			if (ws.branchOutcomes[key]?.disposition === "not_attempted") this.reconciledStops.add(id);
+			const disposition = dispositions[key]?.disposition;
+			if (disposition === undefined || disposition === "not_attempted") this.reconciledStops.add(id);
 			this.emit("event", { type: "removed", id } satisfies SquadEvent);
 			stoppedAny = true;
 		}
@@ -3201,7 +3205,7 @@ export class SquadManager extends EventEmitter {
 		// Same cold-resume-of-a-parallel-node protocol as the adoption path (createWithId): stop any live
 		// branch agent left over from before the restart so the re-entered runParallel's deterministic ids
 		// are free.
-		if (cold && rec.options.workflowState?.branchOutcomes) await this.reconcileParallelResume(rec.options);
+		if (cold && rec.options.workflowState) await this.reconcileParallelResume(rec.options);
 		try {
 			await fresh.start();
 			this.transition(rec, "idle", "connect-ok");
