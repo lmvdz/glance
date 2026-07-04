@@ -3,7 +3,7 @@
  *
  * The reusable engine is {@link attachLeaseGossip}: given ANY federation bus it
  * wires both halves of cross-host leasing onto it, with no coupling to the
- * daemon (it works entirely off the shared on-disk registries under ~/.omp/squad):
+ * daemon (it works entirely off the shared on-disk registries in the glance state dir):
  *
  *   publish : every tick, read this operator's own live leases per repo and
  *             gossip them to the bus, keyed by the repo's cross-host identity

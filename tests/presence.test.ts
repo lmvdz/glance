@@ -1,6 +1,6 @@
 /**
  * Presence registry — deterministic, no model tokens. Uses real temp repos and
- * the real on-disk registry under ~/.omp/squad/presence (entries are namespaced
+ * the real on-disk registry under <stateDir>/presence (entries are namespaced
  * by resolved path, and the test cleans up its own claims).
  */
 

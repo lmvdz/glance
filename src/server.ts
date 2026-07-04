@@ -61,6 +61,7 @@ import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
+import { resolveStateDir } from "./state-dir.ts";
 import { featureFlagStates, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
 import type { CapabilityInstallState } from "./capabilities/index.ts";
@@ -1860,7 +1861,7 @@ async function graphPayload(url: URL, repo: string): Promise<GraphDoc & { plan: 
 	// explicit window (epoch ms) for history views — the DEPTH massif fetches one
 	// window per week row. Bounded to 32 days so a bad param can't walk all of git.
 	const range = explicitRange(url);
-	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const stateDir = resolveStateDir();
 	const key = range ? `r${range.start}:${range.end}:${repo}` : `${days}:${future}:${repo}`;
 	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
 	const fresh = url.searchParams.get("fresh"); // reload icon bypasses the cache
@@ -1888,7 +1889,7 @@ function explicitRange(url: URL): { start: number; end: number } | null {
 async function attributionPayload(url: URL, repo: string): Promise<ReturnType<typeof buildAttribution>> {
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
 	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
-	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const stateDir = resolveStateDir();
 	await maybeIngestClaudeCode(stateDir, repo);
 	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
 	return buildAttribution(receipts, range, { plan: planFromEnv() });
@@ -1898,7 +1899,7 @@ async function attributionPayload(url: URL, repo: string): Promise<ReturnType<ty
 async function provenancePayload(url: URL, repo: string, manager: SquadManager): Promise<ProvenanceDoc | { error: string }> {
 	const id = (url.searchParams.get("id") ?? "").trim().toUpperCase();
 	if (!/^[A-Z][A-Z0-9]*-\d+$/.test(id)) return { error: "invalid ticket id" };
-	const stateDir = process.env.OMP_SQUAD_STATE_DIR || path.join(os.homedir(), ".omp", "squad");
+	const stateDir = resolveStateDir();
 	const features = (await manager.features(repo).catch(() => [])).map((f) => ({
 		id: f.id,
 		title: f.title,

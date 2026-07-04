@@ -21,6 +21,7 @@ import { claimLease, heartbeatSession, holdersOf, LEASE_TTL_MS, releaseSession }
 import type { LeaseEntry } from "./leases.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { screenToolCall, targetFiles } from "./agent-guard.ts";
+import { protectedStateRoots } from "./state-dir.ts";
 
 interface ToolCallEvent {
 	toolName: string;
@@ -60,11 +61,13 @@ export default function leaseHook(pi: ExtensionAPI): void {
 	pi.on("session_start", async () => {
 		repo = git(process.cwd(), ["rev-parse", "--show-toplevel"]) ?? process.cwd();
 		// Protected trees the guard fences this agent out of: the shared MAIN checkout (resolved via the
-		// worktree's shared git dir) and the whole ~/.omp/squad state dir (launcher/lock/token + sibling
-		// worktrees). The agent's own worktree, though nested under ~/.omp/squad, is exempt in the guard.
+		// worktree's shared git dir) and the glance state dir (launcher/lock/token + sibling worktrees) —
+		// BOTH default locations (~/.glance + legacy ~/.omp/squad) plus any env override, since a
+		// mixed-version daemon may still write the other one. The agent's own worktree, though nested
+		// under the state dir, is exempt in the guard.
 		const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
 		const mainRepo = commonDir ? path.dirname(path.resolve(repo, commonDir)) : repo;
-		protectedRoots = [path.join(home, ".omp", "squad"), mainRepo];
+		protectedRoots = [...protectedStateRoots(home), mainRepo];
 		timer = setInterval(() => void heartbeatSession(session, repo), Math.min(40_000, Math.floor(LEASE_TTL_MS / 3)));
 		timer.unref?.();
 	});

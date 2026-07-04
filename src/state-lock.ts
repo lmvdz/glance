@@ -63,9 +63,9 @@ export class StateLockError extends Error {
 		public readonly owner: LockRecord,
 	) {
 		super(
-			`another omp-squad daemon (pid ${owner.pid} on ${owner.host}) is already using this state dir.\n` +
+			`another glance daemon (pid ${owner.pid} on ${owner.host}) is already using this state dir.\n` +
 				`  lock: ${lockFile}\n` +
-				`  stop it first, or run with a different OMP_SQUAD_STATE_DIR.`,
+				`  stop it first, or run with a different GLANCE_STATE_DIR.`,
 		);
 		this.name = "StateLockError";
 	}

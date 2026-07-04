@@ -652,7 +652,7 @@ export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
 /** Provenance for scope contracts. Operator-declared scopes are enforceable; inferred scopes are advisory until promoted. */
 export type ScopeSource = "inferred" | "operator";
 
-/** Persisted across restarts in ~/.omp/squad/state.json. */
+/** Persisted across restarts in `<stateDir>/state.json`. */
 export interface PersistedAgent {
 	id: string;
 	name: string;
@@ -715,7 +715,7 @@ export interface PersistedAgent {
 	traceId?: string;
 }
 
-/** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */
+/** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
 export interface PersistedFeature {
 	id: string;
 	title: string;

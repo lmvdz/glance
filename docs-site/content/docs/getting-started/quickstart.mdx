@@ -109,7 +109,7 @@ glance up --no-tui &
 glance add /path/to/git/repo --name demo --approval yolo \
   --task 'Create a file proof.txt containing OK via a shell command, then stop.'
 glance list           # watch demo go working → idle
-cat ~/.omp/squad/worktrees/<repo>-squad-demo/proof.txt   # → OK
+cat ~/.glance/worktrees/<repo>-squad-demo/proof.txt   # → OK  (legacy installs: ~/.omp/squad/worktrees/…)
 ```
 
 When `list` shows `demo` settle from `working` to `idle` and the `cat` prints

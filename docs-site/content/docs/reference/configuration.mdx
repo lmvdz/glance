@@ -23,7 +23,7 @@ Read by `src/index.ts` (`cmdUp`) and `src/server.ts` when starting the daemon.
 		'GLANCE_INSECURE': { type: 'flag', default: 'off', description: 'Allow a non-loopback bind without TLS (the bearer token then crosses the wire in clear). Default refuses.' },
 		'GLANCE_TLS_CERT': { type: 'path', default: 'unset', description: 'PEM cert path. TLS is enabled in-process only when both CERT and KEY are set; the scheme becomes https.' },
 		'GLANCE_TLS_KEY': { type: 'path', default: 'unset', description: 'PEM key path. Required together with GLANCE_TLS_CERT.' },
-		'GLANCE_STATE_DIR': { type: 'path', default: '~/.omp/squad', description: 'Directory for state.json, the access token, ledgers, and push keys. (The physical default keeps the historical path.)' },
+		'GLANCE_STATE_DIR': { type: 'path', default: '~/.glance', description: 'Directory for state.json, the access token, ledgers, and push keys. When unset: ~/.glance if it exists, else an existing legacy ~/.omp/squad, else ~/.glance. See State directory below.' },
 		'GLANCE_WEBAPP': { type: 'flag', default: 'off', description: 'Serve the built React dashboard (webapp/dist) at / instead of the zero-build fallback. Requires webapp/dist/index.html to exist.' },
 		'GLANCE_AUTO_SUPERVISE': { type: 'flag', default: 'on', description: 'The standing auto-supervisor loop (file mode). On unless set to 0 (or the --no-supervise flag is passed).' },
 		'GLANCE_SUPERVISE_MODEL': { type: 'string', default: 'omp default', description: 'Model the auto-supervisor answerer runs as. Unset uses the omp default (smol).' },
@@ -241,10 +241,17 @@ See [Plane integration](/docs/integrations/plane).
 
 ## State directory
 
-The state directory (`$GLANCE_STATE_DIR`, default `~/.omp/squad`) holds everything the daemon persists across restarts.
+The state directory holds everything the daemon persists across restarts. Its location is resolved once per process (`src/state-dir.ts`), in this order:
+
+1. `$GLANCE_STATE_DIR` / legacy `$OMP_SQUAD_STATE_DIR` — explicit override always wins.
+2. `~/.glance` — if it exists.
+3. `~/.omp/squad` — if it exists (existing installs keep their state where it is; nothing is moved or copied).
+4. `~/.glance` — neither exists yet: fresh installs get the new path.
+
+So an upgrade in place keeps using `~/.omp/squad` untouched, and state only moves to `~/.glance` on a fresh machine or via an explicit override. Everything below — presence/leases registries, agent sockets, managed worktrees, proof records — derives from this one resolved directory.
 
 <Files>
-	<Folder name="~/.omp/squad" defaultOpen>
+	<Folder name="~/.glance" defaultOpen>
 		<File name="state.json" />
 		<File name="access-token" />
 		<File name="settings.json" />
@@ -261,11 +268,18 @@ The state directory (`$GLANCE_STATE_DIR`, default `~/.omp/squad`) holds everythi
 		<File name="feedback.json" />
 		<File name="vapid.json" />
 		<File name="push-subs.json" />
+		<File name="daemon.lock" />
 		<Folder name="worktrees" />
 		<Folder name="presence" />
 		<Folder name="leases" />
+		<Folder name="proof" />
+		<Folder name="sockets" />
 	</Folder>
 </Files>
+
+<Callout type="info">
+Existing installs that predate the rename keep this exact tree under **`~/.omp/squad`** — it keeps working indefinitely; nothing migrates automatically.
+</Callout>
 
 <TypeTable
 	type={{
@@ -278,5 +292,7 @@ The state directory (`$GLANCE_STATE_DIR`, default `~/.omp/squad`) holds everythi
 		'observer-seen.json / scout-seen.json / opportunity-seen.json': { type: 'JSON', description: 'Dedup fingerprints for the audit loops (per-repo variants are suffixed .<repo>.json).' },
 		'audit.jsonl / automation.jsonl': { type: 'JSONL', description: 'Append-only fleet-action audit trail and background-loop activity feed.' },
 		'vapid.json / push-subs.json': { type: 'JSON', description: 'VAPID keypair + persisted browser push subscriptions for Web Push.' },
+		'daemon.lock': { type: 'JSON', description: 'Single-writer lock record (pid, host, start time) — one daemon per state dir. Removed on clean shutdown.' },
+		'worktrees/ presence/ leases/ proof/ sockets/': { type: 'dirs', description: 'Managed agent worktrees; the cross-process presence + file-lease registries; land-proof records; one Unix socket per live agent host.' },
 	}}
 />

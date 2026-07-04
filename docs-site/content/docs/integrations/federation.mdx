@@ -6,8 +6,9 @@ description: Coordinate glance operators across machines — shared presence, cr
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import { Steps, Step } from 'fumadocs-ui/components/steps';
 
-glance coordinates agents on **one** machine through the shared registries under
-`~/.omp/squad` (presence + leases, one file per claim, heartbeat-TTL). Federation promotes
+glance coordinates agents on **one** machine through the shared registries in the
+state dir (default `~/.glance`, legacy `~/.omp/squad`; presence + leases, one file per
+claim, heartbeat-TTL). Federation promotes
 that coordination **across machines**, so two operators working the same repo from different
 hosts see each other's agents and file leases.
 
@@ -235,7 +236,7 @@ a second host connected, cross-host collisions surface here.
 Leasing already prevents two agents on **one** host from clobbering the same file (advisory
 soft-block-with-override; `LEASE_TTL_MS` = 120 s). The `federation-sync` companion
 (`src/federation-sync.ts`) extends that across hosts — **decoupled from the daemon**, working
-purely off the on-disk registries under `~/.omp/squad`:
+purely off the on-disk registries in the state dir:
 
 <Steps>
 <Step>

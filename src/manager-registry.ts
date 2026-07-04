@@ -28,7 +28,7 @@ import { SquadManager } from "./squad-manager.ts";
 import type { Actor, AgentDTO, SquadEvent } from "./types.ts";
 
 export interface RegistryDeps {
-	/** OMP_SQUAD_STATE_DIR || ~/.omp/squad. Per-org state lives under `<root>/orgs/<orgId>/`. */
+	/** The resolved glance state dir (state-dir.ts). Per-org state lives under `<root>/orgs/<orgId>/`. */
 	root: string;
 	/** Build the per-org persistence store (DbStore(ctx, orgId, dir) in DB mode). */
 	store: (orgId: string) => Store;

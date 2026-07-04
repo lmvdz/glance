@@ -23,7 +23,7 @@
  */
 
 import * as fsp from "node:fs/promises";
-import * as os from "node:os";
+import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
 import type { Socket } from "bun";
 import type { ApprovalMode, ThinkingLevel } from "./types.ts";
@@ -45,9 +45,9 @@ const SQ_SHUTDOWN = '{"__sq":"shutdown"}';
 /** Sent once per connection, after the meta frame + the full ring replay — see the module header. */
 const SQ_REPLAY_COMPLETE = '{"__sq":"replay_complete"}';
 
-/** Directory holding one Unix socket per live agent host. */
+/** Directory holding one Unix socket per live agent host: `<stateDir>/sockets`. */
 export function squadSocketDir(): string {
-	return path.join(os.homedir(), ".omp", "squad", "sockets");
+	return path.join(resolveStateDir(), "sockets");
 }
 
 /** Deterministic socket path for an agent id (so discovery on restart is just a connect). */
