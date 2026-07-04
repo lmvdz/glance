@@ -1,5 +1,5 @@
 # Port astryx scroll-lock hooks
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -24,3 +24,6 @@ None.
 - `bun test webapp/src/lib/scrollLockCore.test.ts` covering: synthetic-scroll classification (scrollHeight grew, scrollTop unchanged → not user intent); wheel-up unlock; re-lock within threshold of bottom; **front-trimmed transcript** (scrollHeight shrinks — spring diff goes negative, no NaN/oscillation); spring converges and terminates.
 - `cd webapp && bunx tsc --noEmit` (or the repo's typecheck script) passes.
 - Files carry Meta attribution headers.
+
+## Resolution
+Ported `useChatStreamScroll`/`useChatNewMessages` plus `sharedResizeObserver` under `webapp/src/hooks/chat/`, with the DOM-free decision logic extracted into `webapp/src/lib/scrollLockCore.ts` and covered by `scrollLockCore.test.ts`. No consumer wiring included (deferred to concern 03).
