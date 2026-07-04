@@ -47,12 +47,15 @@ test("worktreeDiff surfaces tracked modifications and untracked additions", asyn
 	const repo = await makeRepo();
 	await fs.writeFile(path.join(repo, "tracked.txt"), "modified\n");
 	await fs.writeFile(path.join(repo, "new.txt"), "brand new\n");
+	await fs.mkdir(path.join(repo, "nested"));
+	await fs.writeFile(path.join(repo, "nested", "added.txt"), "nested brand new\n");
 
 	const diffs = await worktreeDiff(repo);
 	const byFile = new Map(diffs.map((d) => [d.file, d]));
 
 	expect(byFile.has("tracked.txt")).toBe(true);
 	expect(byFile.has("new.txt")).toBe(true);
+	expect(byFile.has("nested/added.txt")).toBe(true);
 
 	const tracked = byFile.get("tracked.txt")!;
 	expect(tracked.diff).toContain("modified");
@@ -61,6 +64,10 @@ test("worktreeDiff surfaces tracked modifications and untracked additions", asyn
 	const untracked = byFile.get("new.txt")!;
 	expect(untracked.status[0]).toBe("?");
 	expect(untracked.diff).toContain("brand new");
+
+	const nested = byFile.get("nested/added.txt")!;
+	expect(nested.status[0]).toBe("?");
+	expect(nested.diff).toContain("nested brand new");
 });
 
 test("worktreeTree lists files dirs-first and skips .git / node_modules", async () => {

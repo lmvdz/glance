@@ -274,6 +274,9 @@ test("(d) a resolved gap clears its fingerprint, so it would re-file if it recur
 
 test("(e) findings default to needs-triage (do-not-auto-land marker); autodispatch drops the marker for plain findings", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
+	// The afterEach harness restores the LOAD-TIME env; if the process was already
+	// polluted when this file loaded, that snapshot perpetuates it — clear explicitly.
+	delete process.env.OMP_SQUAD_OBSERVE_AUTODISPATCH;
 	// Default: a plain high-severity regression is filed needs-triage (marker present).
 	const h1 = makeDeps(tmpDir(), { runGate: async () => ({ ok: false, firstFailure: "z.test.ts" }) });
 	await new Observer(h1.deps).tick();
