@@ -2592,6 +2592,10 @@ export class SquadManager extends EventEmitter {
 	 */
 	private maybeAutoSupervise(rec: AgentRecord, req: PendingRequest): void {
 		if (process.env.OMP_SQUAD_AUTOSUPERVISE === "0") return;
+		if (req.gateClass) {
+			this.log("info", `autosupervise: SKIP gate "${req.title}" on ${rec.dto.name} (never auto-answered)`);
+			return;
+		}
 		const value = chooseFallback(req);
 		if (!value) return; // nothing safe + deterministic to answer (e.g. a host-tool call) → leave for a human
 		if (this.isRiskyRequest(req)) {
@@ -3159,6 +3163,7 @@ export class SquadManager extends EventEmitter {
 				options: req.method === "select" ? req.options : undefined,
 				placeholder: req.method === "input" ? req.placeholder : req.method === "editor" ? req.prefill : undefined,
 				createdAt: Date.now(),
+				gateClass: req.id.startsWith("gate_") || ("title" in req && req.title.startsWith("GATE:")),
 			};
 			rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== req.id), added];
 			this.append(rec, "system", `⛔ needs input: ${added.title}`, { pending: { requestId: added.id, action: "created" }, status: "running" });

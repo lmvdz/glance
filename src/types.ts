@@ -44,6 +44,9 @@ export interface PendingRequest {
 	/** input placeholder / editor prefill. */
 	placeholder?: string;
 	createdAt: number;
+	/** True for a real workflow gate (raiseGate's gate_-id requests, or a GATE:-prefixed title) — never
+	 *  auto-answered by maybeAutoSupervise or the external supervisor, regardless of budget/risk text. */
+	gateClass?: boolean;
 }
 
 export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";

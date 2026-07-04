@@ -12,6 +12,7 @@ export interface PendingRequest {
   options?: string[];
   placeholder?: string;
   createdAt: number;
+  gateClass?: boolean;
 }
 
 export interface IssueRef {
