@@ -1585,9 +1585,22 @@ export class SquadServer {
  * `id`, so a cheap "has this trace grown?" check doesn't exist — computing it costs the same as
  * recomputing the trace outright. The TTL is the only staleness bound (a new run starting under a
  * shared `feat:<id>` trace id can be hidden from an existing cache hit for up to `TRACE_CACHE_TTL_MS`).
+ *
+ * Bounded two ways so distinct, never-repeated trace ids (a click-through of many one-off runs)
+ * can't grow the map forever: `sweepExpiredTraceCache` runs on every insert (the map is small —
+ * O(cache size), cheap next to the trace scan that just ran) evicting every TTL-expired entry, not
+ * just the requested id; and `TRACE_CACHE_MAX` FIFO-evicts the oldest-inserted entry (Map iteration
+ * order = insertion order) once the sweep still leaves the cache at capacity.
  */
 export const traceCache = new Map<string, { at: number; response: TraceResponse }>();
 export const TRACE_CACHE_TTL_MS = 30_000;
+export const TRACE_CACHE_MAX = 200;
+
+export function sweepExpiredTraceCache(now = Date.now()): void {
+	for (const [key, entry] of traceCache) {
+		if (now - entry.at >= TRACE_CACHE_TTL_MS) traceCache.delete(key);
+	}
+}
 
 export async function tracePayload(manager: SquadManager, id: string): Promise<TraceResponse> {
 	const hit = traceCache.get(id);
@@ -1600,6 +1613,11 @@ export async function tracePayload(manager: SquadManager, id: string): Promise<T
 	// journaled trace is never "finalized" — caching it would hide receipts that land moments later for
 	// up to TRACE_CACHE_TTL_MS) and no receipt still mid-run (no receipt missing endedAt).
 	if (response.receipts.length > 0 && response.receipts.every((r) => r.endedAt !== undefined)) {
+		sweepExpiredTraceCache();
+		if (traceCache.size >= TRACE_CACHE_MAX) {
+			const oldest = traceCache.keys().next().value; // Map preserves insertion order — FIFO
+			if (oldest !== undefined) traceCache.delete(oldest);
+		}
 		traceCache.set(id, { at: Date.now(), response });
 	}
 	return response;

@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { appendReceipt } from "../src/receipts.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { tracePayload, traceCache, TRACE_CACHE_TTL_MS } from "../src/server.ts";
+import { tracePayload, traceCache, sweepExpiredTraceCache, TRACE_CACHE_TTL_MS, TRACE_CACHE_MAX } from "../src/server.ts";
 import type { RunReceipt } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -81,4 +81,38 @@ test("a cached entry expires after TRACE_CACHE_TTL_MS", async () => {
 
 	expect(spy.calls()).toBe(2); // recomputed — the old entry had expired
 	expect(second).not.toBe(first);
+});
+
+test("sweepExpiredTraceCache evicts EVERY TTL-expired entry, not just an id someone happens to re-request", () => {
+	// Regression guard for the unbounded-growth finding: before the sweep, an expired entry only got
+	// evicted on a same-id re-request after its TTL — a never-repeated id just sat in the map forever.
+	// This drives the sweep directly against hand-seeded entries so it doesn't depend on tracePayload's
+	// own finalized-response shape.
+	const now = Date.now();
+	traceCache.set("sweep-old-1", { at: now - TRACE_CACHE_TTL_MS - 1, response: {} as never });
+	traceCache.set("sweep-old-2", { at: now - TRACE_CACHE_TTL_MS - 1, response: {} as never });
+	traceCache.set("sweep-fresh-1", { at: now, response: {} as never });
+
+	sweepExpiredTraceCache(now);
+
+	expect(traceCache.has("sweep-old-1")).toBe(false);
+	expect(traceCache.has("sweep-old-2")).toBe(false);
+	expect(traceCache.has("sweep-fresh-1")).toBe(true);
+	traceCache.delete("sweep-fresh-1"); // leave the shared module-level cache clean for other tests
+});
+
+test("distinct never-repeated finalized traces never grow the cache past TRACE_CACHE_MAX — FIFO evicts the oldest", async () => {
+	const { mgr, dir } = await makeManager();
+	const n = TRACE_CACHE_MAX + 5;
+	for (let i = 0; i < n; i++) {
+		const featureId = `cache-cap-${i}`;
+		const receipt: RunReceipt = { agentId: "a1", name: "alpha", repo: "/repo", runId: `r${i}`, startedAt: 1, endedAt: 2, durationMs: 1, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: [], traceId: `feat:${featureId}`, featureId };
+		await appendReceipt(dir, receipt);
+		await tracePayload(mgr, `feat:${featureId}`);
+	}
+
+	expect(traceCache.size).toBeLessThanOrEqual(TRACE_CACHE_MAX);
+	// FIFO: the very first inserted entries were evicted to make room for later ones.
+	expect(traceCache.has("feat:cache-cap-0")).toBe(false);
+	expect(traceCache.has(`feat:cache-cap-${n - 1}`)).toBe(true); // the most recent survives
 });
