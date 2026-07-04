@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, RefObject } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import type {
+  FormEvent as ReactFormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  RefObject,
+  SyntheticEvent as ReactSyntheticEvent,
+} from 'react';
 
 // =============================================================================
 // Pure decision functions — unit-tested without a DOM (bun:test, no jsdom).
@@ -136,7 +142,13 @@ export interface UseTriggerMenuResult<T> {
   activeIndex: number;
   listboxId: string;
   activeOptionId: string | null;
-  /** Spread onto the textarea for the ARIA combobox wiring. */
+  /**
+   * Spread onto the textarea for the ARIA combobox wiring AND the
+   * detection listeners. The listeners are plain React handler props
+   * (not a native-DOM `useEffect` subscription) so they stay attached
+   * across textarea remounts — e.g. the composer unmounting/remounting
+   * when the session-history view is toggled — with no extra wiring.
+   */
   comboboxProps: {
     role: 'combobox';
     'aria-expanded': boolean;
@@ -144,6 +156,10 @@ export interface UseTriggerMenuResult<T> {
     'aria-activedescendant': string | undefined;
     'aria-autocomplete': 'list';
     'aria-haspopup': 'listbox';
+    onInput: (event: ReactFormEvent<HTMLTextAreaElement>) => void;
+    onClick: (event: ReactMouseEvent<HTMLTextAreaElement>) => void;
+    onKeyUp: (event: ReactKeyboardEvent<HTMLTextAreaElement>) => void;
+    onSelect: (event: ReactSyntheticEvent<HTMLTextAreaElement>) => void;
   };
   /** Call from the textarea's onKeyDown. Returns true when the menu consumed the key
    *  (caller must not also treat it as a send/newline keystroke). */
@@ -184,21 +200,6 @@ export function useTriggerMenu<T>(
     const detected = detectTrigger(el.value, el.selectionStart ?? el.value.length, triggerChars);
     setState((prev) => reduceDetection(prev, detected));
   }, [textareaRef, triggerChars]);
-
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.addEventListener('input', sync);
-    el.addEventListener('click', sync);
-    el.addEventListener('keyup', sync);
-    el.addEventListener('select', sync);
-    return () => {
-      el.removeEventListener('input', sync);
-      el.removeEventListener('click', sync);
-      el.removeEventListener('keyup', sync);
-      el.removeEventListener('select', sync);
-    };
-  }, [sync, textareaRef]);
 
   const activeSource = useMemo(() => triggers.find((t) => t.trigger === state.trigger), [triggers, state.trigger]);
   const items = useMemo(() => (state.open && activeSource ? activeSource.search(state.query) : []), [state.open, state.query, activeSource]);
@@ -265,7 +266,17 @@ export function useTriggerMenu<T>(
     activeIndex,
     listboxId: LISTBOX_ID,
     activeOptionId,
-    comboboxProps: comboboxAriaProps(state.open, activeOptionId, LISTBOX_ID),
+    comboboxProps: {
+      ...comboboxAriaProps(state.open, activeOptionId, LISTBOX_ID),
+      // React handler props (not native addEventListener) so detection
+      // survives the textarea being unmounted/remounted (e.g. leaving and
+      // reopening a session) — they attach fresh on every render, exactly
+      // like the composer's other onChange/onKeyDown handlers.
+      onInput: sync,
+      onClick: sync,
+      onKeyUp: sync,
+      onSelect: sync,
+    },
     handleKeyDown,
     selectItem,
     close,
