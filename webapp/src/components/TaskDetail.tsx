@@ -571,7 +571,7 @@ export const TaskDetail = () => {
   // so an old daemon or a run whose journal hasn't landed yet simply hides the overlay.
   const workflowGraphAgent = React.useMemo(() => activeAgents.find((agent) => agent.workflowGraph), [activeAgents]);
   // Trace drill-in target for the graph overlay's node click — undefined (overlay stays
-  // non-clickable) until the run has either a featureId or a known runId to key the trace on.
+  // non-clickable) until the run has either a featureId or a server-minted traceId to key the trace on.
   const workflowGraphTraceId = React.useMemo(
     () => (workflowGraphAgent ? traceIdForAgent(workflowGraphAgent) : undefined),
     [workflowGraphAgent],

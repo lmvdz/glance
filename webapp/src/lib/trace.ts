@@ -4,12 +4,18 @@
  */
 
 /** Mirrors src/spans.ts's traceIdFor: `feat:<featureId>` for feature work, else
- *  `run:<agentId>:<runId>`. Returns undefined when neither a featureId nor a known runId exists
- *  yet (e.g. a workflow whose first node hasn't started) — there is nothing to fetch yet. */
-export function traceIdForAgent(agent: { id: string; featureId?: string; workflowState?: { runId?: string } }): string | undefined {
+ *  `run:<agentId>:<receiptRunId>`. Prefers `featureId` (stable across every run under that feature);
+ *  otherwise falls back to `agent.traceId` — the SAME id-space the server's `GET /api/trace/:id` and
+ *  `matchesTrace` (spans.ts) require, because it's minted by the identical `RunAccumulator`/
+ *  `SpanCollector` that produces `RunReceipt.traceId`. `agent.workflowState.runId` is NOT usable here:
+ *  it's the workflow ENGINE's own run id (`<agentId>:<base36ts>`, workflow-driver.ts), a different
+ *  id-space from the receipt runId (`Date.now().toString(36)`, receipts.ts) that never matches a real
+ *  trace — a prior version of this function built `run:${agentId}:${workflowState.runId}` from it and
+ *  404'd every time. Returns undefined when neither is known yet (e.g. a workflow whose first node
+ *  hasn't started) — there is nothing to fetch yet. */
+export function traceIdForAgent(agent: { id: string; featureId?: string; traceId?: string }): string | undefined {
   if (agent.featureId) return `feat:${agent.featureId}`;
-  if (agent.workflowState?.runId) return `run:${agent.id}:${agent.workflowState.runId}`;
-  return undefined;
+  return agent.traceId;
 }
 
 /** Formats a millisecond duration as a short human string: `840ms`, `12.3s`, `4m 05s`, `1h 02m`. */

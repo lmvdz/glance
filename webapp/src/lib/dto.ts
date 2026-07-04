@@ -319,6 +319,10 @@ export interface AgentDTO {
   contextTokens?: number;
   contextWindow?: number;
   receipt?: ReceiptRollupDTO;
+  /** The live/last run's trace id — mirrors src/types.ts's AgentDTO.traceId. Same id-space `GET
+   *  /api/trace/:id` expects (`feat:<featureId>` or `run:<agentId>:<receiptRunId>`); absent until a run
+   *  has actually started. `traceIdForAgent` (trace.ts) prefers `featureId` when present, else this. */
+  traceId?: string;
   session?: AgentSessionSummaryDTO;
   profileId?: string;
   activity?: string;

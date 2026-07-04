@@ -8,17 +8,21 @@ import { describe, expect, test } from 'bun:test';
 import { traceIdForAgent, formatDurationMs, formatUsd } from './trace';
 
 describe('traceIdForAgent', () => {
-  test('featureId present → feat:<featureId>, regardless of runId', () => {
-    expect(traceIdForAgent({ id: 'a1', featureId: 'F42', workflowState: { runId: 'r1' } })).toBe('feat:F42');
+  test('featureId present → feat:<featureId>, regardless of traceId', () => {
+    expect(traceIdForAgent({ id: 'a1', featureId: 'F42', traceId: 'run:a1:abc123' })).toBe('feat:F42');
   });
 
-  test('no featureId, runId present → run:<agentId>:<runId>', () => {
-    expect(traceIdForAgent({ id: 'a1', workflowState: { runId: 'r1' } })).toBe('run:a1:r1');
+  test('no featureId, traceId present → the server-minted traceId verbatim (receipt id-space, not workflowState.runId)', () => {
+    expect(traceIdForAgent({ id: 'a1', traceId: 'run:a1:abc123' })).toBe('run:a1:abc123');
   });
 
-  test('no featureId, no runId → undefined (nothing to fetch yet)', () => {
+  // Regression guard: traceIdForAgent must never reconstruct a trace id from workflowState.runId
+  // (the engine's own `<agentId>:<base36ts>` run id) — that id-space never matches a real
+  // `RunReceipt.traceId`/`matchesTrace` (spans.ts), so it 404s 100% of the time it fires. The
+  // narrowed parameter type (no `workflowState`) makes that mistake a compile error, not just a
+  // runtime one.
+  test('no featureId, no traceId → undefined (nothing to fetch yet — no live/completed run)', () => {
     expect(traceIdForAgent({ id: 'a1' })).toBeUndefined();
-    expect(traceIdForAgent({ id: 'a1', workflowState: {} })).toBeUndefined();
   });
 });
 
