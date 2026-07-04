@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { apiFetch } from '../lib/api';
+import { apiFetch, clearToken } from '../lib/api';
 import { authClient, type SocialProvider } from '../lib/auth-client';
 
 // What the server advertises pre-login (GET /api/auth/mode). Drives which auth style the SPA uses and
@@ -124,6 +124,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const res = await apiFetch('/api/auth/mode');
       const mode = (await res.json()) as AuthMode;
       setConfig(mode);
+      // A stale file-mode bearer token makes a DB-mode daemon answer /api/me with {mode:"file"}
+      // (loopback bootstrap), trapping the user in an empty file-mode shell. Drop it before we probe.
+      if (mode.mode === 'db') clearToken();
       await resolveSession(mode);
     } catch {
       // If the mode probe itself fails (daemon down, offline), fall back to the legacy tokenless render

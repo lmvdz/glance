@@ -21,6 +21,23 @@ export function token(): string {
   }
 }
 
+/**
+ * Drop any persisted file-mode bearer token.
+ *
+ * A token left over from an earlier `?token=` (file-mode) session is poison in
+ * DB mode: the daemon's loopback bootstrap accepts it and answers `/api/me` with
+ * `{mode:"file"}`, so the SPA resolves file mode, skips the DB-mode login + org
+ * onboarding, and renders an empty "No project" shell instead. The auth layer
+ * clears it the moment it learns the daemon is in DB mode.
+ */
+export function clearToken(): void {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // storage blocked (private mode / tests) — nothing persisted to clear.
+  }
+}
+
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   captureToken();
   const headers = new Headers(init?.headers);
