@@ -1,4 +1,4 @@
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -223,3 +223,6 @@ Manual: `/run` the daemon + webapp, spawn a `.fabro` workflow with a `max_parall
 | concern | blockedBy |
 |---|---|
 | 04-webapp-topology-view | 01-boot-path-threading-and-durability, 02-subagent-merge-flush-lineage, 03-workflow-graph-journal |
+
+## Resolution
+Shipped in 6769407 + 87d7a76 (trace drill-in designated-cut actually shipped) (+ fixes cfeeade/9466a6f receipt-side traceId on the DTO replacing the wrong-id-space fallback, 879d4ea lineage cycle guards, b648fd1/d435762 trace cache per-manager + new-run revalidation, bad0d50 ID-keyed graph status + pickWorkflowGraphAgent liveness ranking + duration rollover + TopologyPanel subagent leaf rows). 

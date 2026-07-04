@@ -1,4 +1,4 @@
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -184,3 +184,6 @@ bunx tsc --noEmit
 | concern | blockedBy |
 |---|---|
 | 01-boot-path-threading-and-durability | — |
+
+## Resolution
+Shipped in aa7281f (+ audit fixes 848295b/f3209a4/d435762 era: lineageFieldsFrom() shared projection replacing five hand-threaded construction sites, persisted traceId, FileStore failure visibility verified live). Chain-dedup persist verified ≤2 writes/burst with dedicated test.

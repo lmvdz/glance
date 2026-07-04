@@ -1,4 +1,4 @@
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -204,3 +204,6 @@ bunx tsc --noEmit
 | concern | blockedBy |
 |---|---|
 | 02-subagent-merge-flush-lineage | 01-boot-path-threading-and-durability |
+
+## Resolution
+Shipped in 6f78e20 (reviewed post-hoc after a harness death — PASS; + audit fixes a5c42dc create()-restore closure, f3209a4 reattachTerminal closure + dirty-flush emitAgent, 848295b per-run chronological merge ordering). Transition-based dirty tracking with a dedicated progress-before-lifecycle race test.
