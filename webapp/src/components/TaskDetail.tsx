@@ -12,9 +12,12 @@ import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, re
 import { taskRef } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
+import { traceIdForAgent } from '../lib/trace';
+import { pickWorkflowGraphAgent } from '../lib/workflowGraph';
 import { AgentStatusStrip } from './AgentStatusStrip';
 import { TranscriptTimeline } from './AssistantChat';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
+import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
 import type { AgentDTO, ArtifactCommentDTO, PlanAnnotationTargetDTO, TransitionEntry } from '../lib/dto';
@@ -508,6 +511,8 @@ export const TaskDetail = () => {
   // Plan flow "focus" mode: blow the dependency diagram out to a full-pane view (it's far wider
   // than the reading column it previews in).
   const [flowFocus, setFlowFocus] = React.useState(false);
+  // Workflow graph overlay "focus" mode — same full-pane pattern as Plan flow, for the same reason.
+  const [workflowFlowFocus, setWorkflowFlowFocus] = React.useState(false);
   const [transcriptOpenIds, setTranscriptOpenIds] = React.useState<Set<string>>(() => new Set());
   const [transcriptDetailOpenIds, setTranscriptDetailOpenIds] = React.useState<Set<string>>(() => new Set());
   const [timelineOpenIds, setTimelineOpenIds] = React.useState<Set<string>>(() => new Set());
@@ -562,6 +567,18 @@ export const TaskDetail = () => {
   // daemon that never sets the field simply never populates this list, so the button stays hidden
   // instead of 404ing or rendering disabled.
   const forkTargets = React.useMemo(() => activeAgents.filter((agent) => agent.forkAvailable), [activeAgents]);
+  // The workflow agent (if any) whose static topology the graph overlay renders — gated on
+  // `workflowGraph` being present (journaled once per run, concern 03), not just `kind === 'workflow'`,
+  // so an old daemon or a run whose journal hasn't landed yet simply hides the overlay. When a task
+  // carries more than one workflow-graph-bearing agent (a dead, terminal-marked run alongside its
+  // live fork/re-run), `pickWorkflowGraphAgent` prefers the live one instead of raw array order.
+  const workflowGraphAgent = React.useMemo(() => pickWorkflowGraphAgent(activeAgents), [activeAgents]);
+  // Trace drill-in target for the graph overlay's node click — undefined (overlay stays
+  // non-clickable) until the run has either a featureId or a server-minted traceId to key the trace on.
+  const workflowGraphTraceId = React.useMemo(
+    () => (workflowGraphAgent ? traceIdForAgent(workflowGraphAgent) : undefined),
+    [workflowGraphAgent],
+  );
   const hasPlan = !!overviewDoc || planDocuments.length > 0;
   const planFlowConcerns = React.useMemo<GraphConcernInput[]>(
     () => (pipeline?.concerns ?? []).map((c) => ({ file: c.path, title: c.title, status: c.status, open: c.open, complexity: c.complexity, prerequisites: c.prerequisites, touches: c.touches })),
@@ -600,7 +617,7 @@ export const TaskDetail = () => {
   // Answer (pending input) state
   const [answerValues, setAnswerValues] = React.useState<Record<string, string>>({});
 
-  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setForkPickerAgentId(null); setForkCheckpoints([]); setForkSelectedSeq(null); setFlowFocus(false); setTranscriptOpenIds(new Set()); setTranscriptDetailOpenIds(new Set()); }, [selectedTaskId]);
+  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setForkPickerAgentId(null); setForkCheckpoints([]); setForkSelectedSeq(null); setFlowFocus(false); setWorkflowFlowFocus(false); setTranscriptOpenIds(new Set()); setTranscriptDetailOpenIds(new Set()); }, [selectedTaskId]);
   // Esc leaves plan-flow focus mode.
   React.useEffect(() => {
     if (!flowFocus) return;
@@ -608,6 +625,13 @@ export const TaskDetail = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [flowFocus]);
+  // Esc leaves workflow-graph-overlay focus mode.
+  React.useEffect(() => {
+    if (!workflowFlowFocus) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setWorkflowFlowFocus(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [workflowFlowFocus]);
   // Tick the elapsed-time display every second while any agent is working.
   React.useEffect(() => {
     if (!activeAgents.some((a) => a.status === 'working' || a.status === 'starting')) return;
@@ -1559,6 +1583,28 @@ export const TaskDetail = () => {
                 </details>
               )}
 
+              {workflowGraphAgent?.workflowGraph && (
+                <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
+                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
+                    <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+                    <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span className="mr-auto">Workflow graph</span>
+                    <span className="font-normal normal-case text-gray-400">{workflowGraphAgent.workflowGraph.nodes.length} nodes</span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); setWorkflowFlowFocus(true); }}
+                      title="Open full-pane graph view"
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
+                    >
+                      <Maximize2 className="h-3 w-3" aria-hidden="true" /> Expand
+                    </button>
+                  </summary>
+                  <div className="border-t border-gray-100 dark:border-gray-800 p-3">
+                    <WorkflowGraphOverlay graph={workflowGraphAgent.workflowGraph} state={workflowGraphAgent.workflowState} traceId={workflowGraphTraceId} />
+                  </div>
+                </details>
+              )}
+
               <div className="mb-5 grid gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2.5 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400 sm:grid-cols-3">
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Status</div><div className="mt-1 font-medium text-gray-900 dark:text-gray-100">{task.properties.status}</div></div>
                 <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan created</div><div className="mt-1">{formatWhen(task.properties.createdAt ?? pipeline?.feature?.createdAt)}</div></div>
@@ -1833,6 +1879,29 @@ export const TaskDetail = () => {
                   onEdit={editConcern}
                   orientation="vertical"
                 />
+              </div>
+            </div>
+          )}
+
+          {/* Workflow graph focus mode — same full-pane pattern as Plan flow. */}
+          {workflowFlowFocus && workflowGraphAgent?.workflowGraph && (
+            <div className="absolute inset-0 z-30 flex flex-col bg-white dark:bg-gray-950 lg:right-auto lg:w-[var(--detail-pane-width)]" role="dialog" aria-modal="true" aria-label="Workflow graph">
+              <div className="flex items-center gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-800">
+                <GitBranch className="h-4 w-4 text-gray-500" aria-hidden="true" />
+                <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">Workflow graph</span>
+                <span className="text-xs text-gray-400">{workflowGraphAgent.name}</span>
+                <span className="ml-auto text-xs text-gray-400">{workflowGraphAgent.workflowGraph.nodes.length} nodes</span>
+                <button
+                  type="button"
+                  onClick={() => setWorkflowFlowFocus(false)}
+                  title="Close (Esc)"
+                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" /> Close
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto p-4 scrollbar-custom">
+                <WorkflowGraphOverlay graph={workflowGraphAgent.workflowGraph} state={workflowGraphAgent.workflowState} orientation="vertical" traceId={workflowGraphTraceId} />
               </div>
             </div>
           )}

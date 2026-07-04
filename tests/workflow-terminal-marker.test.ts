@@ -254,6 +254,39 @@ test("a terminal-marked workflow's transcript survives a restart (reattachTermin
 	await mgr2.stop();
 });
 
+// Topology review finding 3: reattachTerminal restores a terminal-marked PersistedAgent as an INERT
+// record with no live driver connection ever again — the fourth boot path that reseeds persisted
+// subagents (alongside create()'s restore reseed and restart()). A subagent still "running" in the
+// persisted snapshot when the crash/terminal happened would otherwise claim that forever, since no run
+// is ever left alive under this record to close it.
+test("a persisted 'running' subagent is closed when its terminal-marked workflow is reattached after a restart", async () => {
+	const { mgr: mgr1, repo, stateDir, worktreeBase } = await makeMgr("terminal-subagent-close");
+	const host1 = mgr1 as unknown as InternalHost;
+
+	const dto = await mgr1.create({ name: "wf-subagent-terminal", repo, approvalMode: "yolo", verify: "true" });
+	const rec1 = host1.agents.get(dto.id)!;
+	rec1.agent.emit("checkpoint", runState({ runId: "run-subagent-terminal", currentNode: "n1" }));
+	await rec1.checkpointAppending;
+	// A subagent still "running" at the moment of the crash — no lifecycle/terminal frame ever closed it.
+	rec1.options.subagents = [
+		{ id: "prior-done", agent: "explore", status: "completed", index: 0, lastUpdate: Date.now() - 1000 },
+		{ id: "orphaned-sub", agent: "worker", status: "running", index: 1, lastUpdate: Date.now() - 500 },
+	];
+	rec1.agent.emit("event", { type: "workflow_terminal", reason: "poison cap", checkpoint: checkpoint() });
+	await waitFor(() => rec1.dto.status === "error");
+	await mgr1.stop();
+
+	const mgr2 = new SquadManager({ stateDir, worktreeBase });
+	(mgr2 as unknown as DriverFactoryHost).makeDriver = () => new FakeDriver();
+	await mgr2.start();
+
+	expect(mgr2.getAgent(dto.id)?.status).toBe("error"); // sanity: still the terminal-reattach path
+	const after = mgr2.subagents(dto.id);
+	expect(after.find((n) => n.id === "prior-done")?.status).toBe("completed"); // untouched — already terminal
+	expect(after.find((n) => n.id === "orphaned-sub")?.status).toBe("aborted"); // closed at reattach, never left "running"
+	await mgr2.stop();
+});
+
 // (e) remove(id, deleteWorktree: true) on a workflow agent with a terminal runId deletes its
 // checkpoint-log JSONL file.
 test("remove(id, true) deletes the checkpoint-log JSONL for a terminal workflow's runId", async () => {

@@ -28,7 +28,7 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
 import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
 import { parseStylesheet, resolveNodeStyle } from "./workflow/stylesheet.ts";
-import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowAutonomyMode, WorkflowJournalEvent, WorkflowNode, WorkflowProofState, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowAutonomyMode, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowNode, WorkflowProofState, WorkflowRunState } from "./workflow/types.ts";
 
 /** A branch agent to spawn into the roster (one parallel branch = one fleet agent). */
 export interface BranchSpec {
@@ -44,8 +44,34 @@ export interface BranchSpec {
 	branchKey?: string;
 	/** This workflow run's id, salted into the branch agent id hash so ids stay collision-free across runs/forks. */
 	runId?: string;
+	/** The node in the PARENT's graph this branch executes — structural lineage, kept distinct from `name`
+	 *  (mutable display string, identical across all siblings of one parallel node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
 	/** Aborts when the join short-circuits or a sibling branch threw; the fleet stops the agent so it isn't leaked. */
 	signal?: AbortSignal;
+}
+
+/** Pure builder: the static topology snapshot journaled once per run (workflow.graph). */
+function buildGraphSnapshot(wf: Workflow): WorkflowGraphSnapshot {
+	return {
+		version: 1,
+		name: wf.name,
+		start: wf.start,
+		exit: wf.exit,
+		maxNodeVisits: wf.maxNodeVisits,
+		nodes: [...wf.nodes.values()].map((n) => ({
+			id: n.id,
+			kind: n.kind,
+			label: n.label,
+			maxVisits: n.maxVisits,
+			overflow: n.overflow,
+			goalGate: n.goalGate,
+			retryTarget: n.retryTarget,
+		})),
+		edges: wf.edges.map((e) => ({ from: e.from, to: e.to, label: e.label, condition: e.condition })),
+	};
 }
 
 /**
@@ -134,6 +160,16 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	private gateSeq = 0;
 	private pendingGate?: PendingGate;
 	private runId = "";
+	/**
+	 * Per-driver-instance branch counter keyed by TARGET node id — survives across a run's repeated
+	 * visits to a parallel node (e.g. a fix-up loop that re-fans-out to the same node), so branchIndex
+	 * stays monotonic per node. Topology review finding 5: this counter starts at 0 on every FRESH driver
+	 * instance, including one built for a cold resume/fork — so a re-spawned branch that resumes a
+	 * still-in-progress fan-out would otherwise duplicate a still-rostered sibling's persisted branchIndex
+	 * from an EARLIER visit of the same node (`seedFromResume` below closes that by replaying the resumed
+	 * fan-out's own visit count into this map before the engine ever calls `nextBranchIndex` again).
+	 */
+	private branchIndexByNode = new Map<string, number>();
 
 	constructor(opts: WorkflowDriverOptions) {
 		super();
@@ -161,7 +197,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			execCommand: this.opts.execCommand,
 			readPromptRef: (ref) => fs.readFile(path.join(wfDir, ref.slice(1)), "utf8"),
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
-			spawnBranch: this.opts.fleet ? (node, task, signal, branchKey) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, approvalMode: this.opts.approvalMode, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), branchKey, runId: this.runId, signal }) : undefined,
+			spawnBranch: this.opts.fleet ? (node, task, signal, branchKey) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, approvalMode: this.opts.approvalMode, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), branchKey, runId: this.runId, signal, parentNodeId: node.id, branchIndex: this.nextBranchIndex(node.id) }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
 			cold: this.opts.cold,
@@ -176,8 +212,46 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		this.alive = true;
 		this.emit("ready");
 		if (this.opts.resumeState) {
+			this.seedBranchIndexFromResume(this.opts.resumeState);
 			this.runActive = true;
 			void this.execRun(this.opts.resumeState.goal, this.opts.resumeState);
+		}
+	}
+
+	/**
+	 * Topology review finding 5: reconstruct this fresh driver's `branchIndexByNode` counts from a
+	 * resumed run's IN-PROGRESS fan-out, so a re-spawned branch picks up counting where the dead driver
+	 * left off instead of colliding with an already-rostered sibling's persisted branchIndex.
+	 *
+	 * `branchOutcomes` is populated ONLY while a parallel node is actively fanning out (self-clears on
+	 * join — see EngineCheckpoint.branchOutcomes), one entry per branch regardless of eventual disposition,
+	 * keyed `${forkId}#${visitIndex}:${i}` where `i` indexes the fork's branch target ids in the FIXED
+	 * order `this.wf.edges` gives them (the same list on every visit, since the graph is static). That
+	 * makes `visitIndex` double as "how many times has branchIds[i] already been fanned into BY THIS FORK"
+	 * — exactly what `nextBranchIndex` needs seeded so the next call for that target node returns
+	 * `visitIndex`, matching what the original (dead) driver would have assigned had it not crashed.
+	 * Every branch in the map is seeded, not just a `not_attempted` one that's about to be re-spawned now
+	 * — a LATER revisit of the same fork (another fix-up loop iteration) must keep counting from the true
+	 * history, not just from whatever this one resume happens to re-run.
+	 */
+	private seedBranchIndexFromResume(resume: WorkflowRunState): void {
+		const outcomes = resume.branchOutcomes;
+		if (!outcomes || !this.wf) return;
+		const branchIdsByFork = new Map<string, string[]>();
+		for (const key of Object.keys(outcomes)) {
+			const m = /^(.+)#(\d+):(\d+)$/.exec(key);
+			if (!m) continue;
+			const [, forkId, visitStr, iStr] = m as unknown as [string, string, string, string];
+			let branchIds = branchIdsByFork.get(forkId);
+			if (!branchIds) {
+				branchIds = this.wf.edges.filter((e) => e.from === forkId).map((e) => e.to);
+				branchIdsByFork.set(forkId, branchIds);
+			}
+			const targetId = branchIds[Number(iStr)];
+			if (targetId === undefined) continue;
+			const seeded = Number(visitStr) - 1; // nextBranchIndex's next call returns seeded+1 === visitIndex
+			const current = this.branchIndexByNode.get(targetId) ?? -1;
+			if (seeded > current) this.branchIndexByNode.set(targetId, seeded);
 		}
 	}
 
@@ -249,8 +323,19 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 
 	// ── internals ──────────────────────────────────────────────────────────────
 
+	/** Monotonic per-node branch counter, keyed so re-fanning-out the same node across visits keeps distinguishing siblings. */
+	private nextBranchIndex(nodeId: string): number {
+		const n = (this.branchIndexByNode.get(nodeId) ?? -1) + 1;
+		this.branchIndexByNode.set(nodeId, n);
+		return n;
+	}
+
 	private async execRun(goal: string, resume?: WorkflowRunState): Promise<void> {
 		this.runId = resume?.runId ?? `${this.opts.id}:${Date.now().toString(36)}`;
+		// Emitted here (not in start()) so it always carries the real runId — assigned only just above — and
+		// fires exactly once per run including resumes/second runs on a reused driver. this.wf is guaranteed
+		// set: start() assigns it before execRun can be reached via either prompt() or the resume branch.
+		this.emitJournal({ type: "workflow.graph", graph: buildGraphSnapshot(this.wf!) });
 		this.emit("event", { type: "agent_start" });
 		let outcome: "succeeded" | "failed" = "failed";
 		try {

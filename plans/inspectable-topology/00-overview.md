@@ -1,6 +1,6 @@
 # Inspectable topology — overview
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -55,3 +55,6 @@ The fleet's actual run topology becomes one queryable, restart-surviving tree:
 ## Notes
 
 - /plan Phase 0 snapshot (headless chained run): proceeded over 3 plans with open concerns (agentic-learning-loop 5, factory-control-plane 3, change-driven-loops 2; all last-touched 2026-07-03).
+
+## Completion
+4/4 concerns closed 2026-07-04 on feat/inspectable-topology (stacked on feat/never-lose-work on feat/lifecycle-truth). Suite 1179→1221 root + 334→366 webapp, tsc clean. One workflow harness death mid-run (concern 02's report lost) recovered via post-hoc review — PASS, nothing half-done. Post-batch audit: /code-review high (10 confirmed defects incl. a cross-tenant traceCache leak and a false-stall lastActivity regression) + fable cross-batch audit (SHIP + the subagents-never-rendered honesty gap) — all 14 fixed; independent re-review across 8 regression areas: SHIP. Deferred (DESIGN-accepted): tombstone store, general journal persistence, DbStore diff-upsert, trace sample policy; new: per-status color-class test assertions in TopologyPanel (cosmetic).

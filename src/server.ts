@@ -41,6 +41,7 @@ import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOr
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
+import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
@@ -1238,7 +1239,7 @@ export class SquadServer {
 		}
 		const mtrace = url.pathname.match(/^\/api\/trace\/([^/]+)$/);
 		if (mtrace && req.method === "GET") {
-			const trace = await manager.trace(decodeURIComponent(mtrace[1]));
+			const trace = await tracePayload(manager, decodeURIComponent(mtrace[1]));
 			if (trace.receipts.length === 0 && trace.root.children.length === 0) return new Response("trace not found", { status: 404 });
 			return Response.json(trace);
 		}
@@ -1571,6 +1572,88 @@ export class SquadServer {
 		this.claimed.clear();
 		this.server?.stop(true);
 	}
+}
+
+/**
+ * Per-runId trace cache: `manager.trace()` scans EVERY receipt on disk (`readAllReceipts`), which is
+ * fine for an occasional click but not for one wired raw behind a fast poll. A finalized run's trace
+ * never changes, so once every receipt in its tree has `endedAt` set, the response is cached; a run
+ * still in flight (any receipt missing `endedAt`) is recomputed every call — that scan is cheap (one
+ * active run's worth of receipts), so correctness costs nothing there.
+ *
+ * Scoped PER MANAGER (topology review finding 1): a bare module-level `Map<traceId, …>` would be
+ * shared across every `SquadManager` instance in the process — in DB-registry mode each org gets its
+ * own manager, so a shared cache would serve org A's cached receipts/costs/spans to org B on a
+ * colliding trace id (and the root-factory manager would leak into every org, and vice versa). Keying
+ * by the manager INSTANCE (a `WeakMap`) makes that structurally impossible — manager A's entries live
+ * in manager A's Map, full stop — and needs no explicit org/manager-id plumbing since the same
+ * long-lived manager instance already IS the isolation boundary (ManagerRegistry, ManagerRegistry.md).
+ *
+ * No receipt-count invalidation: `readAllReceipts` always does a full directory scan regardless of
+ * `id`, so a cheap "has this trace grown?" check doesn't exist — computing it costs the same as
+ * recomputing the trace outright. Instead of trusting the TTL alone (finding 2: a re-dispatched
+ * feature's new run could otherwise stay invisible under a stale-but-unexpired `feat:<id>` cache hit
+ * for up to `TRACE_CACHE_TTL_MS`), a hit is cheaply re-validated against the manager's live in-memory
+ * roster (`manager.list()` — no disk I/O): if any roster entry shares the cached feature id and started
+ * AFTER the entry was cached, a new run has begun under that feature and the hit is treated as a miss.
+ *
+ * Bounded two ways so distinct, never-repeated trace ids (a click-through of many one-off runs)
+ * can't grow a manager's cache forever: `sweepExpiredTraceCache` runs on every insert (the map is
+ * small — O(cache size), cheap next to the trace scan that just ran) evicting every TTL-expired entry,
+ * not just the requested id; and `TRACE_CACHE_MAX` FIFO-evicts the oldest-inserted entry (Map iteration
+ * order = insertion order) once the sweep still leaves that manager's cache at capacity.
+ */
+type TraceCache = Map<string, { at: number; response: TraceResponse }>;
+const traceCachesByManager = new WeakMap<SquadManager, TraceCache>();
+export const TRACE_CACHE_TTL_MS = 30_000;
+export const TRACE_CACHE_MAX = 200;
+
+/** The manager-scoped cache Map, lazily created. Exported (only) for test setup/inspection. */
+export function traceCacheFor(manager: SquadManager): TraceCache {
+	let cache = traceCachesByManager.get(manager);
+	if (!cache) {
+		cache = new Map();
+		traceCachesByManager.set(manager, cache);
+	}
+	return cache;
+}
+
+export function sweepExpiredTraceCache(cache: TraceCache, now = Date.now()): void {
+	for (const [key, entry] of cache) {
+		if (now - entry.at >= TRACE_CACHE_TTL_MS) cache.delete(key);
+	}
+}
+
+/** True when a run for `id`'s feature started strictly after `cachedAt` — a re-dispatch the cached
+ *  response predates. Roster-only (no disk scan), so re-validating a hit costs nothing next to the
+ *  full trace recompute it's meant to avoid. Non-feature trace ids (bare / `run:`-prefixed — always
+ *  scoped to one immutable run) never go stale this way, so they're always considered fresh. */
+function hasNewerRunForTrace(manager: SquadManager, id: string, cachedAt: number): boolean {
+	if (!id.startsWith("feat:")) return false;
+	const featureId = id.slice(5);
+	return manager.list().some((dto) => dto.featureId === featureId && (dto.startedAt ?? 0) > cachedAt);
+}
+
+export async function tracePayload(manager: SquadManager, id: string): Promise<TraceResponse> {
+	const cache = traceCacheFor(manager);
+	const hit = cache.get(id);
+	if (hit) {
+		if (Date.now() - hit.at < TRACE_CACHE_TTL_MS && !hasNewerRunForTrace(manager, id, hit.at)) return hit.response;
+		cache.delete(id); // expired, or superseded by a new run under the same feature — evict either way
+	}
+	const response = await manager.trace(id);
+	// Only cache once the trace looks finalized: it must have at least one receipt (an empty/not-yet-
+	// journaled trace is never "finalized" — caching it would hide receipts that land moments later for
+	// up to TRACE_CACHE_TTL_MS) and no receipt still mid-run (no receipt missing endedAt).
+	if (response.receipts.length > 0 && response.receipts.every((r) => r.endedAt !== undefined)) {
+		sweepExpiredTraceCache(cache);
+		if (cache.size >= TRACE_CACHE_MAX) {
+			const oldest = cache.keys().next().value; // Map preserves insertion order — FIFO
+			if (oldest !== undefined) cache.delete(oldest);
+		}
+		cache.set(id, { at: Date.now(), response });
+	}
+	return response;
 }
 
 async function usagePayload(manager: SquadManager, url: URL): Promise<{

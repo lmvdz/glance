@@ -7,10 +7,11 @@
  */
 
 import type { RpcExtensionUIRequest, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import type { WorkflowRunState } from "./workflow/types.ts";
+import type { WorkflowGraphSnapshot, WorkflowRunState } from "./workflow/types.ts";
 import type { Span } from "./spans.ts";
 import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts";
 import type { TransitionReason } from "./agent-lifecycle.ts";
+import type { SubagentNode } from "./subagents.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -472,6 +473,17 @@ export interface AgentDTO {
 	kind: AgentKind;
 	/** Parent workflow agent id, when this agent is a spawned fan-out branch. */
 	parentId?: string;
+	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
+	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
+	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
+	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
+	subagents?: SubagentNode[];
+	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
+	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
+	workflowGraph?: WorkflowGraphSnapshot;
 	/** flue-service only: passed the acceptance gate at onboard time. */
 	verified?: boolean;
 	/** Repo root the worktree was cut from (host-local path; for display). */
@@ -503,6 +515,12 @@ export interface AgentDTO {
 	contextWindow?: number;
 	/** Compact rollup of the latest/in-flight run (tools, cost, duration); live/derived. */
 	receipt?: ReceiptRollup;
+	/** The live/last run's trace id (RunAccumulator's `SpanCollector.id`) — the SAME id-space
+	 *  `RunReceipt.traceId`/`GET /api/trace/:id` use (`feat:<featureId>` or `run:<agentId>:<runId>` where
+	 *  `runId` is the RECEIPT run id `Date.now().toString(36)`, not the workflow engine's own `runId`
+	 *  format). Set alongside `receipt` at the same two sites (turn-progress + finalizeRun) so the two
+	 *  never drift apart. Absent until a run has actually started. */
+	traceId?: string;
 	/** Compact live RPC session metadata for Control Tower parity with the TUI. */
 	session?: AgentSessionSummary;
 	/** Current todo phases from the backing harness, preserved for rich web rendering. */
@@ -649,6 +667,17 @@ export interface PersistedAgent {
 	workflowState?: WorkflowRunState;
 	/** Parent workflow agent id, when this is a spawned fan-out branch. */
 	parentId?: string;
+	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
+	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
+	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
+	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
+	subagents?: SubagentNode[];
+	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
+	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
+	workflowGraph?: WorkflowGraphSnapshot;
 	/** When set, run this agent inside a container instead of locally. */
 	sandbox?: SandboxConfig;
 	/** Repo-relative path prefixes this agent reads — restored so read/write hazards survive a restart. */
@@ -664,6 +693,11 @@ export interface PersistedAgent {
 	 *  dto.pending. A cold-adopted agent's correlation id is dead (the RPC waiter died with the old process),
 	 *  so nothing restored here can ever be legitimately answered — do not build an "answerable restore" path. */
 	pending?: PendingRequest[];
+	/** Mirrors `AgentDTO.traceId` (topology review finding 7) so a restarted run's trace link survives —
+	 *  without this a receipt-linked run still on disk becomes unreachable via `GET /api/trace/:id` the
+	 *  moment the daemon restarts, even though nothing about the receipts themselves changed. Threaded
+	 *  through every boot path via `lineageFieldsFrom`, same sticky rule as the two live-run write sites. */
+	traceId?: string;
 }
 
 /** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */
@@ -726,6 +760,17 @@ export interface CreateAgentOptions {
 	autonomyMode?: AutonomyMode;
 	/** Parent workflow agent id, when spawning a fan-out branch. */
 	parentId?: string;
+	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
+	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
+	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
+	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
+	subagents?: SubagentNode[];
+	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
+	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
+	workflowGraph?: WorkflowGraphSnapshot;
 	/** Run this agent inside a container (sandboxed execution); mounts the worktree by default. */
 	sandbox?: SandboxConfig;
 	/** Auto-pick a process (verify / plan-approve / fan-out) from the task. Default on; false = plain agent. */
@@ -750,6 +795,9 @@ export interface CreateAgentOptions {
 	 *  in-flight graph node must re-execute and re-prime the goal rather than wait on a turn no thread is
 	 *  running. The warm reconnect path leaves this false. */
 	cold?: boolean;
+	/** Carries a persisted run's trace link through the adopt/restore boot paths (topology review finding
+	 *  7) — absent on a genuinely fresh create(), which only ever assigns this once a run actually starts. */
+	traceId?: string;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

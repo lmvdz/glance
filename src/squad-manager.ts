@@ -28,7 +28,7 @@ import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
 import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
-import type { EngineCheckpoint, NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowRunState } from "./workflow/types.ts";
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
@@ -112,7 +112,7 @@ import type {
 	FeedbackReward,
 	FeedbackValidationResponse,
 } from "./types.ts";
-import { type SubagentNode, SubagentTracker } from "./subagents.ts";
+import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPathFor } from "./agent-host.ts";
 import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
@@ -288,6 +288,31 @@ function redactCause(cause: TransitionCause): TransitionCause {
 	const out: TransitionCause = {};
 	for (const [k, v] of Object.entries(cause)) out[k] = typeof v === "string" ? redact(v) : v;
 	return out;
+}
+
+/** The lineage/topology fields threaded onto EVERY PersistedAgent/AgentDTO/CreateAgentOptions
+ *  construction site (create()'s persisted+dto literals, attachExisting, reattachTerminal,
+ *  adoptOrphanedAgents' and loadPersisted's create() calls). Field names are identical across all three
+ *  shapes, so the same picked object spreads cleanly into any of them.
+ *
+ * Topology review finding 9: hand-copying these at five call sites means the next field WILL be missed
+ * at one of them — finding 7 caught exactly that (traceId shipped on AgentDTO in cfeeade with no
+ * PersistedAgent counterpart, so a restarted run's trace link silently went dark). Route every site
+ * through here so a future field is added in ONE place instead of five. */
+function lineageFieldsFrom(p: {
+	parentNodeId?: string;
+	branchIndex?: number;
+	subagents?: SubagentNode[];
+	workflowGraph?: WorkflowGraphSnapshot;
+	traceId?: string;
+}): { parentNodeId?: string; branchIndex?: number; subagents?: SubagentNode[]; workflowGraph?: WorkflowGraphSnapshot; traceId?: string } {
+	return {
+		parentNodeId: p.parentNodeId,
+		branchIndex: p.branchIndex,
+		subagents: p.subagents,
+		workflowGraph: p.workflowGraph,
+		traceId: p.traceId,
+	};
 }
 
 interface AgentRecord {
@@ -1020,6 +1045,7 @@ export class SquadManager extends EventEmitter {
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
+				...lineageFieldsFrom(p),
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,
@@ -1165,6 +1191,7 @@ export class SquadManager extends EventEmitter {
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
+			...lineageFieldsFrom(p),
 			featureId: p.featureId,
 			owns: p.owns,
 			requires: p.requires,
@@ -1179,6 +1206,10 @@ export class SquadManager extends EventEmitter {
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
 		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		// Reseed the fresh tracker from persisted history BEFORE wiring, so a reconnect starts warm instead
+		// of empty — otherwise the first live frame for an already-known subagent id would look like a brand
+		// new node (defaulted fields) and the next flush's merge would drop everything the frame didn't carry.
+		if (p.subagents?.length) rec.subs.applySnapshot(p.subagents);
 		dto.messageCount = transcript.length;
 		this.agents.set(p.id, rec);
 		this.wire(rec);
@@ -1251,6 +1282,20 @@ export class SquadManager extends EventEmitter {
 	 * escalated — so a fresh boot reconstructs the same operator-visible signal from the marker alone.
 	 */
 	private reattachTerminal(p: PersistedAgent, transcript: TranscriptEntry[] = []): void {
+		const subs = new SubagentTracker();
+		// Topology review finding 3: this is the fourth boot path that reseeds persisted subagents
+		// (create()'s restore reseed, restart(), and loadPersisted's --restore already closeNonTerminal
+		// — see the create() reseed above) but this record gets NO live driver connection at all, ever
+		// (that's the whole point of "terminal-marked ⇒ inert"). A subagent left "running" in the
+		// persisted snapshot would otherwise claim that forever with no run left alive to ever close it.
+		if (p.subagents?.length) {
+			subs.applySnapshot(p.subagents);
+			subs.closeNonTerminal();
+			if (subs.isDirty()) {
+				p.subagents = mergeSubagents(p.subagents, subs.snapshot());
+				subs.clearDirty();
+			}
+		}
 		const dto: AgentDTO = {
 			id: p.id,
 			name: p.name,
@@ -1268,6 +1313,7 @@ export class SquadManager extends EventEmitter {
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
+			...lineageFieldsFrom(p),
 			featureId: p.featureId,
 			owns: p.owns,
 			requires: p.requires,
@@ -1281,7 +1327,7 @@ export class SquadManager extends EventEmitter {
 		const agent = this.makeDriver(p); // constructed but never started — this record has no live connection
 		// Review finding 9: transcript threaded through (was hardcoded `[]`) — a terminal run's history is
 		// exactly what the operator needs to decide whether to fork, and `attachExisting` already does this.
-		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs, toolEntries: new Map() };
 		this.agents.set(p.id, rec);
 		this.wire(rec); // no-op until/unless something ever starts `agent`, which this path never does
 		this.markCatastrophe(p.id, p.workflowState!.terminal!.reason);
@@ -1661,8 +1707,16 @@ export class SquadManager extends EventEmitter {
 		return reward;
 	}
 
+	/** The single read contract for subagent lineage: persisted history merged with the live tracker, live
+	 *  wins per id (mergeSubagents — see subagents.ts). `rec.subs.list()` here returns full untruncated live
+	 *  text; `rec.options.subagents`/`rec.dto.subagents` carry the truncated `snapshot()` projection written
+	 *  at the last flush, so a currently-tracked node is always full-fidelity and only a node the live
+	 *  tracker has forgotten (should not happen outside restart()'s clear, which flushes first) falls back to
+	 *  the truncated persisted text. */
 	subagents(id: string): SubagentNode[] {
-		return this.agents.get(id)?.subs.list() ?? [];
+		const rec = this.agents.get(id);
+		if (!rec) return [];
+		return mergeSubagents(rec.options.subagents, rec.subs.list());
 	}
 
 	/** True if this agent was reattached to a surviving host (vs freshly spawned this run). */
@@ -2741,6 +2795,7 @@ export class SquadManager extends EventEmitter {
 			workflowState: opts.workflowState,
 			sandbox: opts.sandbox,
 			parentId: opts.parentId,
+			...lineageFieldsFrom(opts),
 			featureId: opts.featureId,
 			owns: opts.owns,
 			requires: opts.requires,
@@ -2765,6 +2820,7 @@ export class SquadManager extends EventEmitter {
 			issue: opts.issue,
 			kind,
 			parentId: opts.parentId,
+			...lineageFieldsFrom(opts),
 			featureId: opts.featureId,
 			owns: opts.owns,
 			requires: opts.requires,
@@ -2779,6 +2835,25 @@ export class SquadManager extends EventEmitter {
 
 		const agent = this.makeDriver(persisted, opts.cold);
 		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
+		// create() is shared by fresh spawns (no prior subagents) and the adoptOrphanedAgents/loadPersisted
+		// restore paths (opts.subagents carries the persisted history) — reseed the tracker so a restored
+		// workflow/agent's subagent tree starts warm instead of empty, same rationale as attachExisting.
+		if (opts.subagents?.length) {
+			rec.subs.applySnapshot(opts.subagents);
+			// Restore-only closure (review finding, concern 02 follow-up): unlike attachExisting (a WARM
+			// reconnect to a still-live host, where a "running" child may genuinely still be in flight),
+			// this create() path builds a brand-new driver instance for a record that may never run again
+			// as-is (e.g. `opts.adopted` — re-adopted from a surviving worktree, landed directly without a
+			// re-run). A subagent left "running" in the persisted snapshot would otherwise claim that
+			// forever. Stamp it aborted now, before the first frame, so no persisted node can outlive the
+			// run that actually owned it.
+			rec.subs.closeNonTerminal();
+			if (rec.subs.isDirty()) {
+				dto.subagents = mergeSubagents(opts.subagents, rec.subs.snapshot());
+				persisted.subagents = dto.subagents;
+				rec.subs.clearDirty();
+			}
+		}
 		this.agents.set(id, rec);
 		this.wire(rec);
 		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
@@ -2978,7 +3053,7 @@ export class SquadManager extends EventEmitter {
 		// ahead of this re-spawn: prior partial work may already sit in the reused worktree — say so in the
 		// re-prompt.
 		const task = id && this.reconciledStops.delete(id) ? `${spec.task}\n\n(Resuming after a restart — prior partial work may already exist in this worktree; continue from where it left off.)` : spec.task;
-		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name) }, LOCAL_ACTOR);
+		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name), parentNodeId: spec.parentNodeId, branchIndex: spec.branchIndex }, LOCAL_ACTOR);
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", notAttempted: true, text: "branch agent not created" };
 		// Persisted (not sent as create()'s own auto-prompt — runAgentTask below owns the actual send and
@@ -3425,6 +3500,16 @@ export class SquadManager extends EventEmitter {
 		this.setPending(rec, [], "pending-cancel", undefined, { callerOwnsStatus: true });
 		this.transition(rec, "starting", "restart");
 		rec.dto.error = undefined;
+		// Close out any subagent left non-terminal by the run that's about to be torn down (killed mid-flight
+		// or never got its terminal frame before the daemon died) and flush the merge BEFORE clearing, so the
+		// persisted history can never claim "running" under a stopped/restarted agent.
+		rec.subs.closeNonTerminal();
+		if (rec.subs.isDirty()) {
+			rec.dto.subagents = mergeSubagents(rec.options.subagents, rec.subs.snapshot());
+			rec.options.subagents = rec.dto.subagents;
+			rec.subs.clearDirty();
+			void this.persist();
+		}
 		rec.subs.clear();
 		this.wire(rec);
 		// Surface the prior session's digest, fenced as untrusted data, so the operator immediately
@@ -3635,6 +3720,10 @@ export class SquadManager extends EventEmitter {
 	private async remove(id: string, deleteWorktree: boolean): Promise<void> {
 		const rec = this.agents.get(id);
 		if (!rec) return;
+		const liveChildren = [...this.agents.values()].filter((r) => r.dto.parentId === id && r.dto.id !== id);
+		if (liveChildren.length) {
+			this.log("warn", `removing agent "${rec.dto.name}" with ${liveChildren.length} live child(ren) — they become orphaned roots in the topology view`);
+		}
 		await rec.agent.stop();
 		if (deleteWorktree && !rec.options.repo.startsWith("(")) {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});
@@ -3710,7 +3799,43 @@ export class SquadManager extends EventEmitter {
 		if (frame.type?.startsWith("subagent_")) {
 			rec.subs.ingest(frame as { type: string; payload?: unknown });
 			rec.run?.onSubagentFrame(frame as { type: string; payload?: unknown });
+			// Merge-by-id flush (never an overwrite): persisted history ∪ the tracker's truncated/redacted
+			// projection, live wins per id. Gated on isDirty() so a burst of heartbeats/no-op re-ingests
+			// doesn't trigger a persist() on every frame — only a real node creation/transition does.
+			if (rec.subs.isDirty()) {
+				rec.dto.subagents = mergeSubagents(rec.options.subagents, rec.subs.snapshot());
+				rec.options.subagents = rec.dto.subagents;
+				rec.subs.clearDirty();
+				void this.persist(); // chain-deduped by concern 01 — safe to call on every dirty transition
+				// Topology review finding 8: the flush above persisted but never broadcast — the webapp's SSE
+				// copy of dto.subagents staleness-lagged until an unrelated emit happened to fire. Gated the
+				// same as the persist() call (isDirty(), a real node creation/transition), never on a heartbeat.
+				this.emitAgent(rec);
+			}
 			return;
+		}
+		if (frame.type === "workflow_journal") {
+			const event = frame.event as WorkflowJournalEvent;
+			// Only the static topology snapshot gets its own persistence branch here — the graph is a
+			// structural field the generic tail below never derives. All other WorkflowJournalEvent types
+			// (workflow.node.*, verification.*, human_gate.*, etc.) are deliberately unconsumed by any case
+			// here: general journal persistence is the separate hooks-convergence initiative.
+			//
+			// Topology review finding 4: this used to `return` right after the graph branch, skipping the
+			// generic tail (receipt rollup, sticky traceId, derive/transition, `lastActivity` bump,
+			// emitAgent) that every OTHER frame type falls through to below. A long `command` node that only
+			// ever emits journal frames then went stale on `lastActivity` forever, wrongly tripping the TUI's
+			// stall detector (tui.ts, >120s) on an actually-healthy run. Falling through instead (workflow_journal
+			// matches no case in the switch below, same as any other frame type the switch doesn't special-case)
+			// restores that tail for every journal frame, not just workflow.graph.
+			if (event.type === "workflow.graph" && event.graph) {
+				rec.dto.workflowGraph = event.graph;
+				rec.options.workflowGraph = event.graph;
+				void this.persist();
+			}
+			// No `return` here (finding 4 fix) — falls through: "workflow_journal" matches no case in the
+			// switch below (a harmless no-op there, same as any other frame type it doesn't special-case),
+			// then reaches the generic tail.
 		}
 		if (frame.type === "available_commands_update") {
 			this.storeCommands(rec, frame.commands);
@@ -3811,6 +3936,8 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		rec.dto.receipt = rec.run?.rollup();
+		rec.dto.traceId = rec.run?.traceId || rec.dto.traceId; // sticky across a run boundary until the NEXT run's start() reassigns it — never blanked to undefined mid-flight
+		rec.options.traceId = rec.dto.traceId; // topology review finding 7: mirror onto PersistedAgent so a restart never drops the trace link
 		this.transition(rec, this.derive(rec), "turn-progress"); // hottest site — the derived same-state early-return matters most here
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
@@ -4247,6 +4374,18 @@ export class SquadManager extends EventEmitter {
 		// branch diff (not the receipt). Advisory low-sev finding only — never blocks a land.
 		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
+		rec.dto.traceId = run.traceId || rec.dto.traceId; // same sticky rule as the turn-progress site above
+		rec.options.traceId = rec.dto.traceId; // topology review finding 7: mirror onto PersistedAgent so a restart never drops the trace link
+		// Run-end closure: stamp any subagent left non-terminal (started but never got a terminal frame
+		// before this run ended) aborted, and flush the merge — so no persisted node can claim "running"
+		// forever under a run that has already finished.
+		rec.subs.closeNonTerminal();
+		if (rec.subs.isDirty()) {
+			rec.dto.subagents = mergeSubagents(rec.options.subagents, rec.subs.snapshot());
+			rec.options.subagents = rec.dto.subagents;
+			rec.subs.clearDirty();
+			void this.persist();
+		}
 		rec.run = undefined;
 		this.emitAgent(rec);
 	}
@@ -4412,6 +4551,7 @@ export class SquadManager extends EventEmitter {
 			rollup: this.automation.rollup(windowMs, now),
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
+			persistFailures: this.store.saveFailures?.() ?? 0,
 		});
 	}
 
@@ -5104,6 +5244,8 @@ export class SquadManager extends EventEmitter {
 	// ── Persistence ───────────────────────────────────────────────────────────
 
 	private writeChain: Promise<void> = Promise.resolve();
+	private queuedWrite?: Promise<void>;
+	private writeInFlight = false;
 
 	/** Per-agent debounce timers coalescing bursts of `pending[]` mutations (concern 04: durable pause)
 	 *  into one full-roster persist ~1s after the last change, instead of a persist per mutation (which
@@ -5126,17 +5268,35 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Serialized + atomic writer. Each call chains its write after the previous one (so two writes
-	 * never interleave), and resolves only once ITS write completes — making `await persist()` a real
-	 * durability barrier that stop()/upgrade depend on. persistNow()'s temp+rename prevents partials.
+	 * Chain-deduped writer: a burst of N persist() calls produces at most 2 store.save() invocations (the
+	 * in-flight one, plus one queued one that starts after it). Every caller's promise resolves only once a
+	 * write that snapshots state AFTER their call has completed — persistNow() reads live agent state at
+	 * write time, not at enqueue time, so the queued write durably contains every joiner's state. This keeps
+	 * `await persist()` a real durability barrier (stop() depends on it) while collapsing the per-checkpoint
+	 * chattiness a naive always-chain implementation has. Replaces a considered-and-rejected trailing-timer
+	 * coalesce: a timer firing after stop()'s durability barrier could clobber a successor daemon's
+	 * state.json (cross-process last-writer-wins race) — this introduces no post-stop() write path at all.
 	 */
 	private async persist(): Promise<void> {
-		const next = this.writeChain.then(
-			() => this.persistNow(),
-			() => this.persistNow(),
-		);
-		this.writeChain = next.catch(() => {});
-		return next;
+		if (this.queuedWrite) return this.queuedWrite;
+		if (!this.writeInFlight) {
+			this.writeInFlight = true;
+			const p = this.persistNow().finally(() => {
+				this.writeInFlight = false;
+			});
+			this.writeChain = p.catch(() => {});
+			return p;
+		}
+		const queued: Promise<void> = this.writeChain.then(() => {
+			this.queuedWrite = undefined;
+			this.writeInFlight = true;
+			return this.persistNow().finally(() => {
+				this.writeInFlight = false;
+			});
+		});
+		this.queuedWrite = queued;
+		this.writeChain = queued.catch(() => {});
+		return queued;
 	}
 
 	/** Atomic write through the store: file mode → state.json temp+rename; DB mode → roster/feature tables + on-disk transcripts. */
@@ -5211,6 +5371,7 @@ export class SquadManager extends EventEmitter {
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
+				...lineageFieldsFrom(p),
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,
