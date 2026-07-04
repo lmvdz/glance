@@ -52,7 +52,7 @@ interface AttachHost {
 	attachExisting: (p: PersistedAgent, transcript?: unknown[]) => Promise<void>;
 }
 
-const SUBAGENTS: SubagentNode[] = [{ id: "sub-1", agent: "worker", description: "do the thing", status: "running", task: "do the thing", lastUpdate: Date.now() }];
+const SUBAGENTS: SubagentNode[] = [{ id: "sub-1", agent: "worker", description: "do the thing", status: "running", task: "do the thing", lastUpdate: Date.now(), index: 0 }];
 
 const WORKFLOW_GRAPH: WorkflowGraphSnapshot = {
 	version: 1,

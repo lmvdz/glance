@@ -112,7 +112,7 @@ import type {
 	FeedbackReward,
 	FeedbackValidationResponse,
 } from "./types.ts";
-import { type SubagentNode, SubagentTracker } from "./subagents.ts";
+import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPathFor } from "./agent-host.ts";
 import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
@@ -1187,6 +1187,10 @@ export class SquadManager extends EventEmitter {
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
 		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		// Reseed the fresh tracker from persisted history BEFORE wiring, so a reconnect starts warm instead
+		// of empty — otherwise the first live frame for an already-known subagent id would look like a brand
+		// new node (defaulted fields) and the next flush's merge would drop everything the frame didn't carry.
+		if (p.subagents?.length) rec.subs.applySnapshot(p.subagents);
 		dto.messageCount = transcript.length;
 		this.agents.set(p.id, rec);
 		this.wire(rec);
@@ -1673,8 +1677,16 @@ export class SquadManager extends EventEmitter {
 		return reward;
 	}
 
+	/** The single read contract for subagent lineage: persisted history merged with the live tracker, live
+	 *  wins per id (mergeSubagents — see subagents.ts). `rec.subs.list()` here returns full untruncated live
+	 *  text; `rec.options.subagents`/`rec.dto.subagents` carry the truncated `snapshot()` projection written
+	 *  at the last flush, so a currently-tracked node is always full-fidelity and only a node the live
+	 *  tracker has forgotten (should not happen outside restart()'s clear, which flushes first) falls back to
+	 *  the truncated persisted text. */
 	subagents(id: string): SubagentNode[] {
-		return this.agents.get(id)?.subs.list() ?? [];
+		const rec = this.agents.get(id);
+		if (!rec) return [];
+		return mergeSubagents(rec.options.subagents, rec.subs.list());
 	}
 
 	/** True if this agent was reattached to a surviving host (vs freshly spawned this run). */
@@ -2799,6 +2811,10 @@ export class SquadManager extends EventEmitter {
 
 		const agent = this.makeDriver(persisted, opts.cold);
 		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
+		// create() is shared by fresh spawns (no prior subagents) and the adoptOrphanedAgents/loadPersisted
+		// restore paths (opts.subagents carries the persisted history) — reseed the tracker so a restored
+		// workflow/agent's subagent tree starts warm instead of empty, same rationale as attachExisting.
+		if (opts.subagents?.length) rec.subs.applySnapshot(opts.subagents);
 		this.agents.set(id, rec);
 		this.wire(rec);
 		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
@@ -3445,6 +3461,16 @@ export class SquadManager extends EventEmitter {
 		this.setPending(rec, [], "pending-cancel", undefined, { callerOwnsStatus: true });
 		this.transition(rec, "starting", "restart");
 		rec.dto.error = undefined;
+		// Close out any subagent left non-terminal by the run that's about to be torn down (killed mid-flight
+		// or never got its terminal frame before the daemon died) and flush the merge BEFORE clearing, so the
+		// persisted history can never claim "running" under a stopped/restarted agent.
+		rec.subs.closeNonTerminal();
+		if (rec.subs.isDirty()) {
+			rec.dto.subagents = mergeSubagents(rec.options.subagents, rec.subs.snapshot());
+			rec.options.subagents = rec.dto.subagents;
+			rec.subs.clearDirty();
+			void this.persist();
+		}
 		rec.subs.clear();
 		this.wire(rec);
 		// Surface the prior session's digest, fenced as untrusted data, so the operator immediately
@@ -3730,6 +3756,15 @@ export class SquadManager extends EventEmitter {
 		if (frame.type?.startsWith("subagent_")) {
 			rec.subs.ingest(frame as { type: string; payload?: unknown });
 			rec.run?.onSubagentFrame(frame as { type: string; payload?: unknown });
+			// Merge-by-id flush (never an overwrite): persisted history ∪ the tracker's truncated/redacted
+			// projection, live wins per id. Gated on isDirty() so a burst of heartbeats/no-op re-ingests
+			// doesn't trigger a persist() on every frame — only a real node creation/transition does.
+			if (rec.subs.isDirty()) {
+				rec.dto.subagents = mergeSubagents(rec.options.subagents, rec.subs.snapshot());
+				rec.options.subagents = rec.dto.subagents;
+				rec.subs.clearDirty();
+				void this.persist(); // chain-deduped by concern 01 — safe to call on every dirty transition
+			}
 			return;
 		}
 		if (frame.type === "available_commands_update") {
@@ -4267,6 +4302,16 @@ export class SquadManager extends EventEmitter {
 		// branch diff (not the receipt). Advisory low-sev finding only — never blocks a land.
 		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
+		// Run-end closure: stamp any subagent left non-terminal (started but never got a terminal frame
+		// before this run ended) aborted, and flush the merge — so no persisted node can claim "running"
+		// forever under a run that has already finished.
+		rec.subs.closeNonTerminal();
+		if (rec.subs.isDirty()) {
+			rec.dto.subagents = mergeSubagents(rec.options.subagents, rec.subs.snapshot());
+			rec.options.subagents = rec.dto.subagents;
+			rec.subs.clearDirty();
+			void this.persist();
+		}
 		rec.run = undefined;
 		this.emitAgent(rec);
 	}
