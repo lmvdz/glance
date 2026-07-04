@@ -56,9 +56,10 @@ export interface SquadState {
   reload: () => Promise<void>;
   send: (command: ClientCommand) => void;
   subscribe: (id: string) => void;
+  unsubscribe: (id: string) => void;
 }
 
-function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
+export function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
   const match = entry.id ? entries.findIndex((item) => item.id === entry.id) : -1;
   if (match >= 0) {
     const next = entries.slice();
@@ -66,7 +67,38 @@ function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntr
     return next;
   }
   if (entries.some((item) => !entry.id && item.ts === entry.ts && item.kind === entry.kind && item.text === entry.text)) return entries;
+  if (entry.id && entries.length >= TRANSCRIPT_CAP) {
+    // The window is at cap and this id isn't present — it may be a late
+    // upsert for an entry the cap already evicted. Appending it at the end
+    // would put a stale entry after everything newer; drop it instead.
+    //
+    // Order by `ts` (epoch ms), NOT `seq`: `seq` is an in-memory counter on
+    // the daemon that resets to 0 on restart, while persisted+replayed
+    // transcripts keep their old high seqs. Comparing seqs here means every
+    // live entry after a restart (seq 1, 2, 3…) reads as "older than the
+    // head" and gets dropped forever — the chat permanently freezes. `ts` is
+    // wall-clock and stays monotonic across restarts.
+    //
+    // Only drop when both sides actually have a `ts` to compare; if either
+    // is missing, fail open and append rather than risk freezing the chat
+    // over a rare reorder.
+    const head = entries[0];
+    if (head && typeof entry.ts === "number" && typeof head.ts === "number" && entry.ts < head.ts) return entries;
+  }
   return entries.length >= TRANSCRIPT_CAP ? [...entries.slice(entries.length - TRANSCRIPT_CAP + 1), entry] : [...entries, entry];
+}
+
+/**
+ * Ids in `subscribed` that no longer appear in the live agent roster —
+ * called on every `roster` snapshot (and on an explicit `removed` event) so
+ * `subscribedRef` doesn't grow forever across reconnects. Without this, a
+ * dead agent id stays in the set and gets re-subscribed on every socket
+ * reopen (see `onOpen`'s replay loop below), which piles up server-side
+ * subscriptions for agents that no longer exist.
+ */
+export function staleSubscriptionIds(subscribed: ReadonlySet<string>, liveIds: Iterable<string>): string[] {
+  const live = liveIds instanceof Set ? liveIds : new Set(liveIds);
+  return [...subscribed].filter((id) => !live.has(id));
 }
 
 export function useSquad(): SquadState {
@@ -81,7 +113,7 @@ export function useSquad(): SquadState {
   const [resolvedCommentEvents, setResolvedCommentEvents] = useState<Map<string, number>>(() => new Map());
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<SquadSocket | null>(null);
-  const subscribedRef = useRef<string | null>(null);
+  const subscribedRef = useRef<Set<string>>(new Set());
 
   const reload = useCallback(async () => {
     const [nextProjects, nextFeatures, nextAgents, nextCapabilities, nextCatalog] = await Promise.all([
@@ -108,13 +140,17 @@ export function useSquad(): SquadState {
       onOpen: () => {
         setConnected(true);
         safeReload();
-        const id = subscribedRef.current;
-        if (id) socketRef.current?.send({ type: "subscribe", id });
+        for (const id of subscribedRef.current) socketRef.current?.send({ type: "subscribe", id });
       },
       onClose: () => setConnected(false),
       onEvent: (event: SquadEvent) => {
         switch (event.type) {
           case "roster":
+            // Full roster snapshot — prune any subscription for an id that
+            // no longer exists so it stops re-subscribing on reconnect.
+            for (const id of staleSubscriptionIds(subscribedRef.current, event.agents.map((agent) => agent.id))) {
+              subscribedRef.current.delete(id);
+            }
             setAgents(new Map(event.agents.map((agent) => [agent.id, agent])));
             break;
           case "agent":
@@ -125,6 +161,7 @@ export function useSquad(): SquadState {
             });
             break;
           case "removed":
+            subscribedRef.current.delete(event.id);
             setAgents((previous) => {
               const next = new Map(previous);
               next.delete(event.id);
@@ -172,9 +209,12 @@ export function useSquad(): SquadState {
 
   const send = useCallback((command: ClientCommand) => socketRef.current?.send(command), []);
   const subscribe = useCallback((id: string) => {
-    subscribedRef.current = id;
+    subscribedRef.current.add(id);
     socketRef.current?.send({ type: "subscribe", id });
   }, []);
+  const unsubscribe = useCallback((id: string) => {
+    subscribedRef.current.delete(id);
+  }, []);
 
-  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, connected, reload, send, subscribe };
+  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, connected, reload, send, subscribe, unsubscribe };
 }

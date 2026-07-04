@@ -15,7 +15,7 @@ import { summarizeTask } from '../lib/taskStatus';
 import { traceIdForAgent } from '../lib/trace';
 import { pickWorkflowGraphAgent } from '../lib/workflowGraph';
 import { AgentStatusStrip } from './AgentStatusStrip';
-import { TranscriptTimeline } from './AssistantChat';
+import { TranscriptTimeline } from './chat/TranscriptTimeline';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
 import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import type { GraphConcernInput } from '../lib/planGraph';
@@ -521,7 +521,6 @@ export const TaskDetail = () => {
   // events, which always carry the fresh capped tail), the effect below evicts the stale cache entry
   // so the strip falls back to the live tail instead of silently freezing at load time.
   const [fullTimelines, setFullTimelines] = React.useState<Map<string, { entries: TransitionEntry[]; asOf: number }>>(() => new Map());
-  const [now, setNow] = React.useState(Date.now);
   const splitContainerRef = React.useRef<HTMLDivElement | null>(null);
   const planArticleRef = React.useRef<HTMLElement | null>(null);
   const planScrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -632,12 +631,6 @@ export const TaskDetail = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [workflowFlowFocus]);
-  // Tick the elapsed-time display every second while any agent is working.
-  React.useEffect(() => {
-    if (!activeAgents.some((a) => a.status === 'working' || a.status === 'starting')) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [activeAgents]);
   // Auto-subscribe the first working agent so transcript entries arrive via WS.
   React.useEffect(() => {
     const working = activeAgents.find((a) => a.status === 'working' || a.status === 'starting');
@@ -1810,7 +1803,6 @@ export const TaskDetail = () => {
                                       entries={agentTranscript}
                                       messages={[]}
                                       agent={agent}
-                                      now={now}
                                       expanded={isDetailOpen}
                                       onToggle={() => toggleTranscriptDetail(agent.id)}
                                       onAnswer={(requestId, value) => { sendConsoleCommand(answerCommand(agent.id, requestId, value)); showToast('Answer sent', 'info'); }}

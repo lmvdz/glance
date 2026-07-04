@@ -384,6 +384,12 @@ export interface TranscriptEntry {
   text: string;
   ts: number;
   clientTurnId?: string;
+  /**
+   * The user's bare typed text, when it differs from `text` (the full context-augmented
+   * message the agent actually received). UI renders this when present; `text` stays the
+   * durable audit/debug record.
+   */
+  displayText?: string;
   status?: "running" | "ok" | "error" | "cancelled";
   tool?: TranscriptTool;
   format?: TranscriptFormat;
@@ -500,7 +506,7 @@ export type SquadEvent =
 export type ClientCommand =
   | { type: "snapshot" }
   | { type: "subscribe"; id: string }
-  | { type: "prompt"; id: string; message: string; clientTurnId?: string }
+  | { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string }
   | { type: "set-model"; id: string; model: string }
   | { type: "interrupt"; id: string }
   | { type: "kill"; id: string }

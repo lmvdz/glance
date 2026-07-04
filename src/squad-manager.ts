@@ -3304,7 +3304,10 @@ export class SquadManager extends EventEmitter {
 				}
 				await this.ensureConnected(rec);
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
-				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId });
+				// `text` is the durable audit/debug record — the full context-augmented message the
+				// agent actually received. `displayText` (when the client sent one) is the user's bare
+				// typed text; the UI renders that and falls back to `text` for older clients.
+				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
@@ -5162,7 +5165,17 @@ export class SquadManager extends EventEmitter {
 		// neither the in-memory buffer, persisted state.json, nor the emitted transcript event.
 		// Receipt fields carry paths/tallies (not free text), so they need no separate redaction.
 		const seq = ++this.transcriptSeq;
-		const entry: TranscriptEntry = { ...patch, id: patch.id ?? `${rec.dto.id}:${seq}`, seq, kind, text: redact(text), ts: Date.now() };
+		const entry: TranscriptEntry = {
+			...patch,
+			id: patch.id ?? `${rec.dto.id}:${seq}`,
+			seq,
+			kind,
+			text: redact(text),
+			// displayText is free text too (the user's bare typed prompt) — redact it at the same
+			// chokepoint so a secret can't leak through the "clean" rendered copy.
+			displayText: patch.displayText !== undefined ? redact(patch.displayText) : undefined,
+			ts: Date.now(),
+		};
 		rec.transcript.push(entry);
 		if (rec.transcript.length > MAX_TRANSCRIPT) rec.transcript.shift();
 		rec.dto.messageCount = rec.transcript.length;
