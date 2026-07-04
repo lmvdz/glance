@@ -1,5 +1,5 @@
 # streamingMarkdown.ts — settled boundary + artifact suppression
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: research
@@ -34,3 +34,6 @@ None.
 - `splitSettled(x).settled + splitSettled(x).tail === x` for arbitrary inputs (property-style loop over fixtures).
 - Trimming: each rule above, plus **idempotency** (`trim(trim(x)) === trim(x)`) and completed-syntax pass-through (`trim` of well-formed markdown is identity).
 - Settled prefix is never trimmed: assert the pipeline helper never applies `trimStreamingArtifacts` before splitting (structural: `splitSettled` operates on raw input).
+
+## Resolution
+Implemented `findSettledBoundary`, `splitSettled`, and `trimStreamingArtifacts` as pure string functions in `webapp/src/lib/streamingMarkdown.ts`, covered by `streamingMarkdown.test.ts` (boundary, round-trip, idempotency, and pass-through cases). No consumer wiring (deferred to concern 07).
