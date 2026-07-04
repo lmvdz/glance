@@ -70,22 +70,30 @@ const WORKFLOW_GRAPH: WorkflowGraphSnapshot = {
 	exit: "exit",
 };
 
-/** Every lineage/topology field this concern threads, for building fixtures + assertions. */
-function assertLineageFields(dto: AgentDTO | undefined, expectedParentId: string | undefined): void {
+/** Every lineage/topology field this concern threads, for building fixtures + assertions.
+ *  `expectedSubagentStatus` defaults to "running" (SUBAGENTS' own seeded status): attachExisting (a WARM
+ *  reconnect to a still-live host) preserves it verbatim. The create()-based restore paths (adopt/
+ *  loadPersisted) additionally close any "running" subagent at boot (review finding, concern 02
+ *  follow-up) — those two call sites pass "aborted". `lastUpdate` is excluded from the equality check
+ *  (closeNonTerminal stamps a fresh one), so this checks the stable fields via `toMatchObject` instead of
+ *  an exact `toEqual(SUBAGENTS)`. */
+function assertLineageFields(dto: AgentDTO | undefined, expectedParentId: string | undefined, expectedSubagentStatus: SubagentNode["status"] = "running"): void {
 	expect(dto).toBeDefined();
 	expect(dto?.parentId).toBe(expectedParentId);
 	expect(dto?.parentNodeId).toBe("node-a");
 	expect(dto?.branchIndex).toBe(2);
-	expect(dto?.subagents).toEqual(SUBAGENTS);
+	expect(dto?.subagents).toHaveLength(1);
+	expect(dto?.subagents?.[0]).toMatchObject({ id: "sub-1", agent: "worker", description: "do the thing", task: "do the thing", index: 0, status: expectedSubagentStatus });
 	expect(dto?.workflowGraph).toEqual(WORKFLOW_GRAPH);
 }
 
-function assertPersistedLineageFields(p: PersistedAgent | undefined, expectedParentId: string | undefined): void {
+function assertPersistedLineageFields(p: PersistedAgent | undefined, expectedParentId: string | undefined, expectedSubagentStatus: SubagentNode["status"] = "running"): void {
 	expect(p).toBeDefined();
 	expect(p?.parentId).toBe(expectedParentId);
 	expect(p?.parentNodeId).toBe("node-a");
 	expect(p?.branchIndex).toBe(2);
-	expect(p?.subagents).toEqual(SUBAGENTS);
+	expect(p?.subagents).toHaveLength(1);
+	expect(p?.subagents?.[0]).toMatchObject({ id: "sub-1", agent: "worker", description: "do the thing", task: "do the thing", index: 0, status: expectedSubagentStatus });
 	expect(p?.workflowGraph).toEqual(WORKFLOW_GRAPH);
 }
 
@@ -158,12 +166,14 @@ test("adopt: adoptOrphanedAgents → create() carries all four lineage fields on
 	expect(roster.length).toBe(1);
 	const dto = roster[0]!;
 	expect(dto.id).not.toBe(persisted.id); // create() always mints a fresh id on adoption
-	assertLineageFields(dto, undefined);
+	// SUBAGENTS seeds "running" — the create()-restore reseed site closes it at boot (this agent may
+	// never run again as-is), so it surfaces here "aborted", not the seeded "running".
+	assertLineageFields(dto, undefined, "aborted");
 
 	await mgr.stop();
 
 	const raw = JSON.parse(await fs.readFile(path.join(stateDir, "state.json"), "utf8")) as { agents: PersistedAgent[] };
-	assertPersistedLineageFields(raw.agents.find((a) => a.id === dto.id), undefined);
+	assertPersistedLineageFields(raw.agents.find((a) => a.id === dto.id), undefined, "aborted");
 });
 
 // ── loadPersisted (--restore) ─────────────────────────────────────────────────
@@ -197,10 +207,12 @@ test("loadPersisted: --restore carries all four lineage fields onto the DTO and 
 	expect(roster.length).toBe(1);
 	const dto = roster[0]!;
 	expect(dto.id).not.toBe(persisted.id); // loadPersisted also mints a fresh id via create()
-	assertLineageFields(dto, "parent-3");
+	// Same create()-restore closure as the adopt path above — SUBAGENTS' seeded "running" surfaces here
+	// as "aborted".
+	assertLineageFields(dto, "parent-3", "aborted");
 
 	await mgr.stop();
 
 	const raw = JSON.parse(await fs.readFile(path.join(stateDir, "state.json"), "utf8")) as { agents: PersistedAgent[] };
-	assertPersistedLineageFields(raw.agents.find((a) => a.id === dto.id), "parent-3");
+	assertPersistedLineageFields(raw.agents.find((a) => a.id === dto.id), "parent-3", "aborted");
 });

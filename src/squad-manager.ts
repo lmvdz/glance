@@ -2814,7 +2814,22 @@ export class SquadManager extends EventEmitter {
 		// create() is shared by fresh spawns (no prior subagents) and the adoptOrphanedAgents/loadPersisted
 		// restore paths (opts.subagents carries the persisted history) — reseed the tracker so a restored
 		// workflow/agent's subagent tree starts warm instead of empty, same rationale as attachExisting.
-		if (opts.subagents?.length) rec.subs.applySnapshot(opts.subagents);
+		if (opts.subagents?.length) {
+			rec.subs.applySnapshot(opts.subagents);
+			// Restore-only closure (review finding, concern 02 follow-up): unlike attachExisting (a WARM
+			// reconnect to a still-live host, where a "running" child may genuinely still be in flight),
+			// this create() path builds a brand-new driver instance for a record that may never run again
+			// as-is (e.g. `opts.adopted` — re-adopted from a surviving worktree, landed directly without a
+			// re-run). A subagent left "running" in the persisted snapshot would otherwise claim that
+			// forever. Stamp it aborted now, before the first frame, so no persisted node can outlive the
+			// run that actually owned it.
+			rec.subs.closeNonTerminal();
+			if (rec.subs.isDirty()) {
+				dto.subagents = mergeSubagents(opts.subagents, rec.subs.snapshot());
+				persisted.subagents = dto.subagents;
+				rec.subs.clearDirty();
+			}
+		}
 		this.agents.set(id, rec);
 		this.wire(rec);
 		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity

@@ -7,7 +7,11 @@
  *   - run-end closure (`finalizeRun`) stamps any subagent left non-terminal "aborted" so nothing can
  *     persist as "running" forever under a finished run;
  *   - reattaching a persisted agent that carries `subagents` seeds the read contract with that history
- *     before any new frame ever arrives (the applySnapshot reseed).
+ *     before any new frame ever arrives (the applySnapshot reseed);
+ *   - the create()-restore reseed path (adoptOrphanedAgents/loadPersisted, NOT attachExisting) additionally
+ *     closes any subagent still "running" in that persisted snapshot at boot — such an agent may never run
+ *     again as-is (e.g. `adopted: true`), so nothing should be able to claim "running" forever. attachExisting
+ *     (above) deliberately does NOT do this: its children may genuinely still be in flight on a live host.
  */
 
 import { afterAll, expect, test } from "bun:test";
@@ -147,6 +151,29 @@ test("run-end closure: finalizeRun stamps any non-terminal subagent aborted so n
 	const after = mgr.subagents(dto.id);
 	expect(after.find((n) => n.id === "finished")?.status).toBe("completed"); // untouched — already terminal
 	expect(after.find((n) => n.id === "orphaned")?.status).toBe("aborted"); // closed by run-end, never left "running"
+
+	await mgr.stop();
+});
+
+test("create()-restore reseed (e.g. adopted:true) closes a persisted 'running' subagent at boot, with no run ever starting", async () => {
+	const { mgr, repo } = await makeMgr();
+	const seeded: SubagentNode[] = [
+		{ id: "prior-done", agent: "explore", description: "finished before the restart", status: "completed", lastUpdate: Date.now() - 1000, index: 0 },
+		{ id: "prior-running", agent: "worker", description: "never got a terminal frame before the daemon died", status: "running", lastUpdate: Date.now() - 500, index: 1 },
+	];
+
+	// adopted:true: re-created from a surviving worktree, landed directly without a re-run — exactly the
+	// shape that would otherwise keep "prior-running" claiming "running" forever. No `task` is passed, so
+	// ReadyDriver.prompt() is never called and no run ever starts.
+	const dto = await mgr.create({ name: "restore-reseed", repo, approvalMode: "yolo", autoRoute: false, subagents: seeded, adopted: true });
+
+	const after = mgr.subagents(dto.id);
+	expect(after.find((n) => n.id === "prior-done")?.status).toBe("completed"); // untouched — already terminal
+	expect(after.find((n) => n.id === "prior-running")?.status).toBe("aborted"); // closed at boot, never left "running"
+
+	const internals = mgr as unknown as ManagerInternals;
+	const rec = internals.agents.get(dto.id)!;
+	expect(rec.run).toBeUndefined(); // proof no run ever started — the closure happened purely at boot
 
 	await mgr.stop();
 });
