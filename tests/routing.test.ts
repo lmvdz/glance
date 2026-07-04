@@ -80,12 +80,12 @@ function authStub(): AuthInstance {
 	};
 }
 
-async function startedServer(): Promise<string> {
+async function startedServer(opts: { token?: string } = {}): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "routing-"));
 	const registry = new ManagerRegistry({ root: dir, store: (orgId) => new FileStore(path.join(dir, "orgs", orgId)), operator });
 	seed(registry, "orgA", fakeManager([agent("agent-a")]));
 	seed(registry, "orgB", fakeManager([agent("agent-b")]));
-	const server = new SquadServer(undefined, { port: 0, auth: authStub(), registry });
+	const server = new SquadServer(undefined, { port: 0, auth: authStub(), registry, token: opts.token });
 	const url = server.start();
 	cleanups.push(async () => {
 		server.stop();
@@ -123,4 +123,16 @@ test("DB-registry REST routing uses the session org, not request-supplied org", 
 	expect(mutation.status).toBe(403);
 
 	expect((await fetch(`${url}/api/agents`)).status).toBe(401);
+});
+
+test("DB-registry loopback bearer list aggregates live org managers", async () => {
+	const token = "bootstrap-admin-token-xxxxxxxx";
+	const url = await startedServer({ token });
+
+	expect(await agentIds(url, { authorization: `Bearer ${token}` })).toEqual(["agent-a", "agent-b"]);
+	expect((await fetch(`${url}/api/command`, {
+		method: "POST",
+		headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+		body: JSON.stringify({ type: "snapshot" }),
+	})).status).toBe(403);
 });

@@ -191,9 +191,9 @@ test("FILE mode: no auth instance ⇒ mode=file and today's tokenless gate (loop
 	cleanups.push(async () => {
 		await mgr.stop();
 		server.stop();
-		await fs.rm(dir, { recursive: true, force: true });
 		if (prevSignup === undefined) delete process.env.OMP_SQUAD_ALLOW_SIGNUP;
 		else process.env.OMP_SQUAD_ALLOW_SIGNUP = prevSignup;
+		await fs.rm(dir, { recursive: true, force: true });
 	});
 
 	// File mode never advertises signup, social providers, or SSO (no auth instance to sign up against).

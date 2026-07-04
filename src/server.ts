@@ -824,15 +824,16 @@ export class SquadServer {
 			const flags = await this.opts.runtimeSettings.setFeatureFlag(body.key, body.enabled);
 			return Response.json({ featureFlags: flags });
 		}
-		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: the org's
-		// manager (org from the session, never the request), the root factory for the operator's own org, or
-		// none. No active org ⇒ empty reads / 403 mutations.
+		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: session
+		// callers route to their org manager; the on-box bearer token is a break-glass operator view.
 		//
-		// On-box loopback bootstrap admin (session === null but role === admin): the trusted operator holding
-		// the daemon token. When a root factory exists, stamp the sentinel org so they see + drive it (incl.
-		// /api/factory/status) without first provisioning an org. A regular org-less SESSION user never gets
-		// this (they carry a session).
+		// Important DB-mode edge: bearer-token CLI reads have no session org. They still must see live org
+		// managers for operator observability (`glance list`, GET /api/agents) while remaining loopback-only.
+		// If a root factory also exists, include it rather than making a zero-agent root mask live tenant units.
 		const bootstrapAdmin = !!this.registry && session === null && role === "admin";
+		if (bootstrapAdmin && this.registry && req.method === "GET" && url.pathname === "/api/agents") {
+			return Response.json([...(this.singleManager?.list() ?? []), ...this.registry.liveAgents()]);
+		}
 		const orgId = this.registry
 			? bootstrapAdmin && this.singleManager
 				? ROOT_FACTORY_ORG

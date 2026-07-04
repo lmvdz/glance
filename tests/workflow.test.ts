@@ -52,6 +52,26 @@ test("parser: the bundled plan-implement workflow parses into the expected graph
 	expect(approveLabels).toEqual(["Approve", "Revise"]);
 });
 
+test("parser: populates overflow for authored retry tiers", () => {
+	const wf = parseWorkflow(`digraph T {
+		start   [shape=Mdiamond]
+		exit    [shape=Msquare]
+		verify  [shape=parallelogram, goal_gate=true, retry_target="codefix", script="false"]
+		codefix [shape=parallelogram, max_visits=1, overflow="fixup", script="codefix"]
+		fixup   [max_visits=3, overflow="escalate"]
+		escalate [max_visits=2]
+		start -> verify -> exit
+		verify -> fixup [condition="outcome == 'failed'"]
+		codefix -> verify
+		fixup -> verify
+		escalate -> verify
+	}`);
+
+	expect(wf.nodes.get("codefix")?.overflow).toBe("fixup");
+	expect(wf.nodes.get("fixup")?.overflow).toBe("escalate");
+	expect(wf.nodes.get("escalate")?.overflow).toBeUndefined();
+});
+
 test("parser: preserves a multi-line quoted script with operators, honors comments and edge chains", () => {
 	const src = `digraph T {
 		# a comment line

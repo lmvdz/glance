@@ -91,10 +91,12 @@ With a `--task` and no `--plain`/`--workflow`/`--verify`/`--sandbox`, the daemon
 ## `list` (`ls`)
 
 ```bash
-glance list
+glance list [--json]
 ```
 
-Fetches `GET /api/agents` and prints an aligned table: `status`, `name`, `branch` (or `—`), a `⛔N` pending-count badge, and the current `activity` (falling back to the active todo). Prints `no agents` when the roster is empty.
+Fetches `GET /api/agents`. By default it prints an aligned table: `status`, `name`, `branch` (or `—`), a `⛔N` pending-count badge, and the current `activity` (falling back to the active todo). Prints `no agents` when the roster is empty.
+
+With `--json`, prints the raw `AgentDTO[]` roster from the daemon as pretty JSON, including `[]` for an empty roster. Use this mode for scripts and other machine-readable consumers.
 
 ## `prompt` (`say`)
 

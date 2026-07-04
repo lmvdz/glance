@@ -249,6 +249,7 @@ function nodeFromAttrs(id: string, attrs: Record<string, string>): WorkflowNode 
 		goalGate: attrs.goal_gate === "true",
 		retryTarget: attrs.retry_target,
 		maxVisits: attrs.max_visits ? toInt(attrs.max_visits, "max_visits") : undefined,
+		overflow: attrs.overflow,
 		attrs,
 	};
 }

@@ -73,6 +73,8 @@ export interface ObserverDeps {
 	untrackedInMain: () => string[];
 	/** Tracked files on an agent's branch (for the untracked-collision check); `[]` when no branch. */
 	filesOnAgentBranch: (agent: AgentDTO) => string[];
+	/** Uncommitted files in an agent worktree; absent keeps the check disabled for old tests/embedders. */
+	uncommittedInWorktree?: (agent: AgentDTO) => string[];
 	/** Branch → auto-land failure streak (the persisted ledger). Absent ⇒ the land-failure check is
 	 *  skipped — keeps the loop usable in tests / before any land. */
 	landLedger?: () => LandLedger;
@@ -117,6 +119,15 @@ function landFailCap(): number {
 }
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** Strip terminal control sequences before text leaves logs/TTY and becomes a Plane title. */
+export function stripAnsi(value: string): string {
+	return value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-_][0-?]*[ -/]*[@-~]/g, "");
+}
+
+function cleanTitle(value: string): string {
+	return stripAnsi(value).replace(/\s+/g, " ").trim();
+}
 
 /**
  * Run a transient external (Plane) call with ONE retry, then surface-and-swallow. A thrown Plane
@@ -278,6 +289,28 @@ export function landFailureFindings(ledger: LandLedger, liveBranches: Set<string
 	return out;
 }
 
+/** Check 6 — a stopped/idle agent with local uncommitted edits has stranded work that cannot be
+ * inferred from commits-ahead. Surface it as an observer issue instead of letting it rot invisibly in
+ * the worktree. Live working/input agents are excluded: their dirty files are in-progress, not stranded. */
+export function auditStrandedUncommitted(agents: AgentDTO[], dirtyFiles: (a: AgentDTO) => string[]): Finding[] {
+	const out: Finding[] = [];
+	for (const a of agents) {
+		if (a.status !== "idle" && a.status !== "stopped" && a.status !== "error") continue;
+		const files = dirtyFiles(a).map((f) => f.trim()).filter(Boolean).sort();
+		if (files.length === 0) continue;
+		const ident = a.issue?.identifier ?? a.issue?.id ?? a.id;
+		const shown = files.slice(0, 5).join(", ");
+		const extra = files.length > 5 ? `, +${files.length - 5} more` : "";
+		out.push({
+			fingerprint: `stranded-uncommitted:${a.id}:${files.join(",")}`,
+			title: `stranded uncommitted work in ${a.id}`,
+			detail: `${a.status} agent ${a.id}${a.branch ? ` on ${a.branch}` : ""}${a.issue ? ` for ${ident}` : ""} has uncommitted worktree changes: ${shown}${extra}. Commit, land, or intentionally discard them before reaping/reusing the worktree.`,
+			severity: "structural",
+		});
+	}
+	return out;
+}
+
 interface SeenEntry {
 	title: string;
 	issueId?: string;
@@ -385,15 +418,26 @@ export class Observer {
 
 				if (this.seen[f.fingerprint]) continue; // dedup — already filed; never re-file
 
+				const triage = this.needsTriage(f);
+				const findingTitle = cleanTitle(f.title);
+				const title = cleanTitle(`${OBSERVER_TAG}${triage ? ` ${TRIAGE_MARKER}` : ""}: ${findingTitle}`);
+
+				const prior = open.find((i) => {
+					const name = cleanTitle(i.name);
+					return name.includes(OBSERVER_TAG) && name.endsWith(`: ${findingTitle}`);
+				});
+				if (prior) {
+					this.seen[f.fingerprint] = { title: f.title, issueId: prior.id, filedAt: clock() };
+					log(`already open ${prior.identifier ?? prior.id} for ${f.fingerprint}: ${f.title}`);
+					continue;
+				}
+
 				if (openObserverCount >= max) {
 					// Cap reached: log + skip, and do NOT mark reproduced/persist — so it's retried once a slot frees.
 					reproduced.delete(f.fingerprint);
 					log(`observe cap reached (${max} open) — skipping ${f.fingerprint}: ${f.title}`);
 					continue;
 				}
-
-				const triage = this.needsTriage(f);
-				const title = `${OBSERVER_TAG}${triage ? ` ${TRIAGE_MARKER}` : ""}: ${f.title}`;
 				const ref = await this.deps.fileIssue(title).catch(() => null);
 				if (!ref) {
 					reproduced.delete(f.fingerprint); // filing failed — retry next tick
@@ -493,6 +537,7 @@ export class Observer {
 			for (const file of this.deps.filesOnAgentBranch(a)) branchFiles.add(file);
 		}
 		findings.push(...auditUntrackedHazard(this.deps.untrackedInMain(), branchFiles));
+		if (this.deps.uncommittedInWorktree) findings.push(...auditStrandedUncommitted(agents, this.deps.uncommittedInWorktree));
 		// Branches whose auto-land keeps failing the gate (the manager parks them after the cap) ⇒ each
 		// becomes a dedup'd bug issue the dispatcher can pick up to re-do the work on a fresh branch.
 		if (this.deps.landLedger) {

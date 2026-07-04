@@ -25,7 +25,7 @@ import { sweepLeases } from "./leases.ts";
 import { sweepPresence } from "./presence.ts";
 import { sweepProofs } from "./proof.ts";
 import { SquadManager } from "./squad-manager.ts";
-import type { Actor, SquadEvent } from "./types.ts";
+import type { Actor, AgentDTO, SquadEvent } from "./types.ts";
 
 export interface RegistryDeps {
 	/** OMP_SQUAD_STATE_DIR || ~/.omp/squad. Per-org state lives under `<root>/orgs/<orgId>/`. */
@@ -76,6 +76,13 @@ export class ManagerRegistry {
 	/** Existing manager for `orgId`, or undefined — never creates (does this org have a live fleet?). */
 	peek(orgId: string): SquadManager | undefined {
 		return this.managers.get(orgId)?.manager;
+	}
+
+	/** Live roster across every currently materialized org manager. Used only by loopback bearer-token
+	 *  operator observability (`glance list` / GET /api/agents) in DB mode; tenant sessions still route
+	 *  through exactly one org-scoped manager. */
+	liveAgents(): AgentDTO[] {
+		return [...this.managers.values()].flatMap((entry) => entry.manager.list());
 	}
 
 	/** Lazily create (+start +attach listener) or return the manager for `orgId`. Idempotent under concurrency. */
