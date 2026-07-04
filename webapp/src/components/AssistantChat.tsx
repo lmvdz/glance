@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { CodeHighlight } from './CodeHighlight';
 import { ScrollToLatestPill } from './chat/ScrollToLatestPill';
+import { ToolCallGroup, ToolCallRow, fmtDuration, groupToolRuns, toolView } from './chat/ToolCallGroup';
 import { useChatStreamScroll } from '../hooks/chat/useChatStreamScroll';
 import { useChatNewMessages } from '../hooks/chat/useChatNewMessages';
 import { useTaskContext } from '../context/TaskContext';
@@ -151,53 +152,6 @@ const CodeBlock = ({ inline, className, children, ...props }: any) => {
 const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
 const EMPTY_DIFFS: AgentFileDiff[] = [];
 
-const statusDotClass = (status?: TranscriptEntry['status']) => {
-  if (status === 'error') return 'bg-red-500';
-  if (status === 'running') return 'bg-blue-500';
-  if (status === 'cancelled') return 'bg-amber-500';
-  return 'bg-emerald-500';
-};
-const parseToolJson = (text?: string): unknown => {
-  if (!text) return undefined;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-};
-
-const prettyJson = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-
-const asRecord = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
-
-const contentText = (value: unknown): string => {
-  const rec = asRecord(value);
-  if (typeof rec.stdout === 'string') return rec.stdout;
-  if (typeof rec.output === 'string') return rec.output;
-  if (typeof rec.text === 'string') return rec.text;
-  if (Array.isArray(rec.content)) return rec.content.map((item) => asRecord(item).text).filter((text): text is string => typeof text === 'string').join('\n');
-  return typeof value === 'string' ? value : '';
-};
-
-const toolView = (entry: TranscriptEntry) => {
-  const args = parseToolJson(entry.tool?.argsText);
-  const partial = parseToolJson(entry.tool?.partialText);
-  const result = parseToolJson(entry.tool?.resultText);
-  const argRec = asRecord(args);
-  const resultRec = asRecord(result);
-  const partialRec = asRecord(partial);
-  const command = typeof argRec.command === 'string' ? argRec.command : typeof argRec.cmd === 'string' ? argRec.cmd : '';
-  const output = contentText(result) || contentText(partial);
-  const stderr = typeof resultRec.stderr === 'string' ? resultRec.stderr : typeof partialRec.stderr === 'string' ? partialRec.stderr : '';
-  const exitCode = typeof resultRec.exitCode === 'number' ? resultRec.exitCode : typeof resultRec.code === 'number' ? resultRec.code : undefined;
-  const raw = [
-    ['Args', args],
-    ['Partial', partial],
-    ['Result', result],
-  ].filter(([, value]) => value !== undefined);
-  return { title: command ? `Ran ${command}` : entry.text.replace(/^▸\s*/, '') || entry.tool?.name || 'tool', command, output, stderr, exitCode, raw };
-};
-
 const entryAction = (entry?: TranscriptEntry): string => {
   if (!entry) return 'Preparing';
   if (entry.kind === 'thinking') return 'Thinking';
@@ -212,15 +166,6 @@ const transcriptDownloadText = (entry: TranscriptEntry) => {
   if (entry.kind !== 'tool') return `[${new Date(entry.ts).toLocaleString()}] ${label}:\n${entry.text}`;
   const view = toolView(entry);
   return `[${new Date(entry.ts).toLocaleString()}] TOOL:\n${view.title}\n${view.output || ''}${view.stderr ? `\nSTDERR:\n${view.stderr}` : ''}`;
-};
-
-const fmtDuration = (ms?: number) => {
-  if (ms == null) return undefined;
-  const sec = Math.max(0, Math.round(ms / 1000));
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  const rem = sec % 60;
-  return rem ? `${min}m ${rem}s` : `${min}m`;
 };
 
 export const runStatusLabel = (running: boolean, elapsedMs?: number) => `${running ? 'Working' : 'Worked'} for ${fmtDuration(elapsedMs ?? 0)}`;
@@ -430,13 +375,31 @@ export const TranscriptTimeline = ({
     );
   };
 
+  // Consecutive kind:'tool' runs collapse to one ToolCallGroup (latest + "N
+  // previous steps") instead of stacking every call — the actual source of
+  // transcript scroll bloat on long runs (concern 05). Singleton runs pass
+  // through `renderEntry` unchanged.
+  const renderEntries = (list: TranscriptEntry[]) => groupToolRuns(list).map((item) => {
+    if (item.type === 'group') {
+      const first = item.entries[0];
+      const key = first.id ?? `${first.ts}:group:${item.entries.length}`;
+      return (
+        <article key={key} aria-label={`${item.entries.length} tool calls`}>
+          <ToolCallGroup entries={item.entries} />
+        </article>
+      );
+    }
+    const entry = item.entry;
+    return (
+      <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
+        {renderEntry(entry)}
+      </React.Fragment>
+    );
+  });
+
   return (
     <>
-      {promptEntries.map((entry) => (
-        <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
-          {renderEntry(entry)}
-        </React.Fragment>
-      ))}
+      {renderEntries(promptEntries)}
       <ElapsedClock
         start={start}
         end={end}
@@ -445,11 +408,7 @@ export const TranscriptTimeline = ({
           <RunStatusHeader running={running} elapsedMs={elapsedMs} action={entryAction(latestWork)} expanded={expanded} onToggle={onToggle} />
         )}
       />
-      {expanded && hiddenWorkEntries.map((entry) => (
-        <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
-          {renderEntry(entry)}
-        </React.Fragment>
-      ))}
+      {expanded && renderEntries(hiddenWorkEntries)}
       {!running && finalEntry && (
         <div className="space-y-3">
           {renderEntry(finalEntry)}
@@ -489,64 +448,10 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
         </div>
       );
     }
-    const view = toolView(entry);
-    const running = entry.status === 'running';
-    const toolLabel = (entry.tool?.name ?? 'Tool').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-    const hasBody = view.command || view.output || view.stderr || view.raw.length > 0;
-    return (
-      <details data-chat-message open={running} className="group rounded-md">
-        <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900/60">
-          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotClass(entry.status)} ${running ? 'animate-pulse' : ''}`} aria-label={entry.status ?? 'ok'} />
-          <span className="font-semibold text-gray-900 dark:text-gray-100">{toolLabel}</span>
-          <span className={`min-w-0 flex-1 truncate text-gray-500 dark:text-gray-400 ${running ? 'shimmer' : ''}`}>{view.title !== toolLabel ? view.title : ''}</span>
-          {hasBody && <ChevronRight className="ml-auto h-3 w-3 flex-shrink-0 text-gray-300 transition-transform group-open:rotate-90 dark:text-gray-600" aria-hidden />}
-        </summary>
-        {hasBody && (
-          <div className="mt-1 ml-4 space-y-1.5 text-[11px]">
-            {view.command && (
-              <div className="flex gap-2">
-                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">IN</span>
-                <code className="flex-1 rounded bg-gray-100 px-2 py-1.5 font-mono leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap">{view.command}</code>
-              </div>
-            )}
-            {view.output && (
-              <div className="flex gap-2">
-                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">OUT</span>
-                <pre className="max-h-48 flex-1 overflow-auto rounded bg-gray-100 px-2 py-1.5 leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap scrollbar-custom">{view.output}</pre>
-              </div>
-            )}
-            {view.stderr && (
-              <div className="flex gap-2">
-                <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-red-400">ERR</span>
-                <pre className="max-h-32 flex-1 overflow-auto rounded bg-red-50 px-2 py-1.5 leading-relaxed text-red-800 dark:bg-red-950/30 dark:text-red-200 whitespace-pre-wrap scrollbar-custom">{view.stderr}</pre>
-              </div>
-            )}
-            {(view.exitCode !== undefined || entry.tool?.durationMs !== undefined) && (
-              <div className="flex items-center gap-2 pl-8 text-[10px] text-gray-400 dark:text-gray-500">
-                {view.exitCode !== undefined && <span>exit {view.exitCode}</span>}
-                {entry.tool?.durationMs !== undefined && <span>{fmtDuration(entry.tool.durationMs)}</span>}
-              </div>
-            )}
-            {view.raw.length > 0 && (
-              <details className="group/raw ml-8">
-                <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[10px] text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-500 dark:hover:bg-gray-900">
-                  <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
-                  Raw payload
-                </summary>
-                <div className="mt-1 space-y-2">
-                  {view.raw.map(([name, value]) => (
-                    <div key={name as string}>
-                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">{name as string}</div>
-                      <pre className="max-h-44 overflow-auto rounded-md bg-gray-950 p-2.5 leading-relaxed text-gray-100 whitespace-pre-wrap scrollbar-custom">{prettyJson(value)}</pre>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-          </div>
-        )}
-      </details>
-    );
+    // Single tool entry (run length 1) — a run of >1 renders via ToolCallGroup
+    // in TranscriptTimeline instead. Row markup itself lives in ToolCallRow
+    // (moved, not duplicated — concern 05) so both paths share one renderer.
+    return <ToolCallRow entry={entry} />;
   }
 
   if (entry.kind === 'thinking') {

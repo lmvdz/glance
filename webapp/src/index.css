@@ -207,14 +207,34 @@
   .pill-rise {
     animation: pill-rise 0.18s ease-out both;
   }
+
+  /* ToolCallGroup's collapsed <-> expanded transition (astryx pattern):
+     the row grid's implicit track animates from 0fr to 1fr so the hidden
+     rows grow/shrink instead of popping in and out. */
+  .tool-group-rows {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.18s ease-out;
+  }
+
+  .tool-group-rows.tool-group-rows-open {
+    grid-template-rows: 1fr;
+  }
+
+  .tool-group-rows-inner {
+    overflow: hidden;
+    min-height: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .shimmer,
   .shimmer-bg,
   .login-rise,
-  .pill-rise {
+  .pill-rise,
+  .tool-group-rows {
     animation: none;
+    transition: none;
   }
 }
 
