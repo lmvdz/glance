@@ -1,6 +1,6 @@
 # Webapp lifecycle timeline + insights rollup
 
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -175,3 +175,6 @@ None. Pure webapp + DTO-mirror + one manager-side rollup addition.
 
 blockedBy: 02-transition-history.md
 verifyBlocker: confirm `TransitionEntry` and the `"transition"` `SquadEvent` case exist in `src/types.ts` and `SquadManager.transitionHistory()` is callable — `grep -n "transitionHistory\|interface TransitionEntry" src/squad-manager.ts src/types.ts` should return hits before starting.
+
+## Resolution
+Shipped in 3b4e8e2 (+ audit fixes e44e9f2: fullTimelines staleness eviction, empty-tail chrome with Load-full affordance; 4ead110: flappingAgents() wired into HeatPanel as FlappingAgentsCallout). StatusPill/LifecycleTimeline extracted as testable components; badge mapping centralized in agent-badges.ts.

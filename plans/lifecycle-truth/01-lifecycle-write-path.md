@@ -1,6 +1,6 @@
 # Guarded lifecycle write-path
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -195,3 +195,6 @@ None outside this repo. Within it: `src/orchestrator-state.ts`'s separate `Kind`
 ## Dependency graph
 
 blockedBy: none — this is the foundation concern.
+
+## Resolution
+Shipped in a9f1d36 (+ review fix 5a855f8, audit fixes 3a6ccd8/8828721/cd5eee4: failed-reattach→error, replay_complete settle protocol, raw-write removal, unconditional adopted/spawn/daemon-stop lineage entries). Settle-gate ordering bug in this concern's own §3 snippet was corrected at implementation time (reattached seeded before agent.start()).
