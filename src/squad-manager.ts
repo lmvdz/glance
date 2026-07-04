@@ -55,8 +55,9 @@ import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, wit
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
-import { getDoneProofByBranch, getDoneProofByIssue, hasProof, recordDoneProof } from "./done-proof.ts";
-import { ensurePr, landAgentPr } from "./land-pr.ts";
+import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, recordDoneProof } from "./done-proof.ts";
+import { assertMerged, ensurePr, landAgentPr, listPendingPrs, mergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
+import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
@@ -368,6 +369,8 @@ export class SquadManager extends EventEmitter {
 	private readonly observers: Observer[] = [];
 	/** Plan-sync tick timers (one per configured Plane repo); cleared in stop(). */
 	private readonly planSyncTimers: Timer[] = [];
+	/** PR-reconciler backstop timer (concern 07) — always-on, NOT gated by OMP_SQUAD_OBSERVE; cleared in stop(). */
+	private prReconcileTimer?: Timer;
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
@@ -615,6 +618,17 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `plan-sync on (reconciling STATUS lines for ${observeRepos.join(", ")} every ${Math.round(intervalMs / 1000)}s)`);
 		}
 
+		// PR-reconciler backstop (concern 07) — the synchronous `landAgentPr` path already writes
+		// truth at merge-click; this loop only exists for what that path can't see: a human merging (or
+		// closing) a PR directly in GitHub's UI, and the crash-ordering windows between push/create,
+		// merge/proof, and proof/Plane-close. Deliberately NOT gated by OMP_SQUAD_OBSERVE (a toggleable
+		// self-audit must not silently stop Done-writes for merged PRs) and NOT gated on
+		// `observeRepos.length` (its own activity gate is "is there any ledger/roster work at all",
+		// checked fresh inside every tick) — runs in DB mode too, same as every other manager-owned loop.
+		const prReconcileIntervalMs = Number(process.env.OMP_SQUAD_PR_RECONCILE_INTERVAL_MS) || 120_000;
+		this.prReconcileTimer = setInterval(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), prReconcileIntervalMs);
+		setTimeout(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), 20_000); // stagger past plan-sync's own 15s
+
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
 		// reasoning and files the latent items they surfaced but didn't do. One per configured Plane repo
 		// (OMPSQ-137); each only harvests agents whose repo it owns (scoutFor), so a finding lands in the
@@ -759,6 +773,7 @@ export class SquadManager extends EventEmitter {
 		this.orchestrator?.stop();
 		for (const o of this.observers) o.stop();
 		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
+		clearInterval(this.prReconcileTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		clearInterval(this.leaseGossipTimer);
@@ -3051,6 +3066,220 @@ export class SquadManager extends EventEmitter {
 		this.log("info", `closing ${identifier} (branch landed, proof ${proof.verified})`);
 		if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
 		else this.log("warn", `could not close ${identifier} (branch landed)`);
+	}
+
+	// ── PR-reconciler backstop (concern 07) ─────────────────────────────────────────────────────────
+	// `landAgentPr` (concern 06) is synchronous end-to-end, so this loop is a BACKSTOP for the one case
+	// it cannot see — a human merging/closing a PR directly in GitHub's UI — plus the crash-ordering
+	// windows the synchronous path can leave stranded (push↔create, merge↔proof, proof↔Plane-close).
+	// Driven entirely off the durable PendingPr ledger (written at push+create time by land-pr.ts) ∪ the
+	// live roster; NEVER off `planeRepos()` directly, so a test (or a repo later dropped from Plane
+	// config) doesn't need real Plane config for the loop to still reconcile what it already knows about.
+
+	/** One reconciler pass. Its own activity gate ("is there anything to do") is computed fresh every
+	 *  tick from the ledger + roster — an idle daemon with no PR-mode activity makes zero `gh`/`git`
+	 *  calls, never gated behind a toggleable env flag (OMP_SQUAD_OBSERVE is for the operator-toggleable
+	 *  self-audit; Done-truth for merged PRs must not silently stop when that's off). */
+	protected async prReconcileTick(): Promise<void> {
+		const allEntries = listPendingPrs(this.stateDir);
+		const unconfirmed = allEntries.filter((e) => e.state === "open" || (e.state === "merged" && (!e.proofAt || !e.issueClosedAt)));
+		const existingBranches = new Set(allEntries.map((e) => e.branch));
+		// Push-retry candidates: a landReady agent, in a repo resolved to PR mode, with no ledger entry
+		// at all yet — covers both a crash between push and `gh pr create`, and a floated push (concern
+		// 06's `floatPrOnLandReady`) that silently failed.
+		const pushCandidates = [...this.agents.values()].filter((r) => r.dto.landReady && r.dto.branch && r.dto.worktree !== r.dto.repo && !existingBranches.has(r.dto.branch));
+		// ff-heal repo set: every repo this manager currently knows about (a live agent's repo, or a
+		// repo named by a ledger entry) — NOT `planeRepos()`, so healing stays scoped to repos this
+		// reconciler actually has PR-mode activity for.
+		const healRepos = new Set<string>();
+		for (const rec of this.agents.values()) healRepos.add(rec.dto.repo);
+		for (const e of allEntries) {
+			const p = this.repoPathForIdentity(e.repo);
+			if (p) healRepos.add(p);
+		}
+		if (unconfirmed.length === 0 && pushCandidates.length === 0 && healRepos.size === 0) return; // nothing to do — zero gh/git calls this tick
+		for (const entry of unconfirmed) await this.reconcileOnePr(entry).catch((e) => this.log("warn", `pr-reconcile: ${entry.branch} failed: ${e instanceof Error ? e.message : String(e)}`));
+		for (const rec of pushCandidates) await this.retryPushFloat(rec).catch((e) => this.log("warn", `pr-reconcile: push retry threw for ${rec.dto.branch}: ${e instanceof Error ? e.message : String(e)}`));
+		for (const repo of healRepos) await this.ffHealOne(repo).catch((e) => this.log("warn", `pr-reconcile: ff-heal failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`));
+	}
+
+	/** Map a PendingPr entry's `repoIdentity()` key back to a local filesystem repo path — checked
+	 *  against live agents first (cheap, always available), then the configured Plane repo list (covers
+	 *  an entry whose agent has since been removed from the roster). Undefined ⇒ orphaned entry (its
+	 *  repo isn't known to this manager at all); the caller skips it for this tick and retries later. */
+	private repoPathForIdentity(identity: string): string | undefined {
+		for (const rec of this.agents.values()) if (repoIdentity(rec.dto.repo) === identity) return rec.dto.repo;
+		return planeRepos().find((r) => repoIdentity(r) === identity);
+	}
+
+	private agentByBranch(branch: string): AgentRecord | undefined {
+		for (const rec of this.agents.values()) if (rec.dto.branch === branch) return rec;
+		return undefined;
+	}
+
+	/**
+	 * Attempt (or confirm) the Plane close for `entry`'s tracked issue. Returns true when there is
+	 * nothing left to confirm: the entry never had a tracked issue, it was already closed (idempotent
+	 * via `closedIssues`), or this call just closed it successfully. False ⇒ retry on a later tick.
+	 *
+	 * Prefers the live agent's full `dto.issue` (carries `projectId`, which Plane's close call needs to
+	 * route the request) when the agent is still on the roster — `PendingPr` itself only carries
+	 * `issueId`/`issueIdentifier` (no `projectId`), so a synthetic `IssueRef` is the fallback for a
+	 * removed agent only, and — being `projectId`-less — cannot actually route a Plane close; the entry
+	 * stays unconfirmed in that case rather than silently pretending to have closed it.
+	 */
+	private async attemptCloseFor(entry: PendingPr, repo: string): Promise<boolean> {
+		if (!entry.issueId) return true; // no Plane issue was ever tracked for this land — nothing to confirm
+		const rec = this.agentByBranch(entry.branch);
+		const issue: IssueRef = rec?.dto.issue ?? { id: entry.issueId, identifier: entry.issueIdentifier, name: entry.issueIdentifier ?? entry.issueId };
+		if (!this.closedIssues.has(issue.id)) await this.closeLandedIssue(issue, { branch: entry.branch, repo });
+		return this.closedIssues.has(issue.id);
+	}
+
+	/**
+	 * Per-entry reconciliation. Two independent cases, checked in order:
+	 *
+	 *   1. Crash-ordering retry — a DoneProof already exists (`proofAt` set) but the Plane close never
+	 *      confirmed (`issueClosedAt` unset). No `gh` call needed at all: just retry the close. Idempotent
+	 *      via the LEDGER field (`issueClosedAt`), not proof-existence — a second tick after it's set
+	 *      never re-enters this branch (the caller's `unconfirmed` filter excludes it).
+	 *   2. Out-of-band GitHub-UI action — `entry.state` is still "open" locally (the daemon never saw a
+	 *      merge or close happen). `gh pr view` is the only way to learn what a human did outside the
+	 *      daemon entirely: MERGED ⇒ run the SAME per-method reachability assertion `landAgentPr` uses,
+	 *      then write DoneProof + close, explicitly marked as NOT re-verified by the daemon's own gate
+	 *      (the scratch-merge gate never ran for a merge that happened outside it). CLOSED-unmerged ⇒ the
+	 *      design's explicit ruling: mark the ledger entry closed, but leave the branch and `landReady`
+	 *      alone — a human decided, and a later re-Land creates a fresh PR.
+	 */
+	protected async reconcileOnePr(entry: PendingPr): Promise<void> {
+		const repo = this.repoPathForIdentity(entry.repo);
+		if (!repo) {
+			this.log("warn", `pr-reconcile: no repo known for ${entry.repo} (branch ${entry.branch}) — skipping this tick`);
+			return;
+		}
+
+		if (entry.proofAt && !entry.issueClosedAt) {
+			const closed = await this.attemptCloseFor(entry, repo);
+			if (closed) updatePendingPr(this.stateDir, entry.branch, { issueClosedAt: Date.now() });
+			return;
+		}
+
+		const slug = repoIdentity(repo).split("/").slice(-2).join("/");
+		const view = await ghJson<{ state: string; headRefOid?: string; mergeCommit?: { oid: string } }>(
+			["pr", "view", String(entry.prNumber), "--repo", slug, "--json", "state,headRefOid,mergeCommit"],
+			repo,
+		);
+		if (!view) {
+			this.log("warn", `pr-reconcile: gh pr view #${entry.prNumber} failed for ${entry.branch} — retrying next tick`);
+			return;
+		}
+
+		if (view.state === "MERGED" && entry.state !== "merged") {
+			const mode = await this.resolveLandModeFor(repo);
+			if (!mode.defaultBranch) {
+				this.log("warn", `pr-reconcile: ${repo} has no resolved default branch — cannot verify the out-of-band merge of ${entry.branch}`);
+				return;
+			}
+			const defaultBranch = mode.defaultBranch;
+			await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
+			const branchTip = (await hardenedGit(["rev-parse", entry.branch], { cwd: repo })).stdout.trim();
+			if (!branchTip) {
+				this.log("warn", `pr-reconcile: could not resolve local tip of ${entry.branch} — deferring to next tick`);
+				return;
+			}
+			const method = mergeMethod();
+			const assertion = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, method);
+			if (!assertion.ok) {
+				this.log("warn", `pr-reconcile: merge reachability assertion failed for ${entry.branch} (PR #${entry.prNumber}): ${assertion.detail}`);
+				return;
+			}
+			recordDoneProof(this.stateDir, {
+				branch: entry.branch,
+				repo: entry.repo,
+				issueId: entry.issueId,
+				issueIdentifier: entry.issueIdentifier,
+				mode: "pr",
+				method,
+				commit: assertion.commit ?? branchTip,
+				mergeCommit: assertion.mergeCommit,
+				baseRef: `origin/${defaultBranch}`,
+				verified: "green",
+				detail: "merged out-of-band via GitHub UI; gate not re-verified by the daemon",
+				provenAt: Date.now(),
+				prNumber: entry.prNumber,
+				prUrl: entry.prUrl,
+			});
+			const rec = this.agentByBranch(entry.branch);
+			if (rec) rec.dto.landReady = false; // successful land ⇒ clear the confirm-mode staged flag, same as land()
+			recordLandOutcome(this.stateDir, entry.branch, true, "merged out-of-band");
+			const closed = await this.attemptCloseFor(entry, repo);
+			if (rec) this.emitAgent(rec);
+			updatePendingPr(this.stateDir, entry.branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now(), ...(closed ? { issueClosedAt: Date.now() } : {}) });
+			return;
+		}
+
+		if (view.state === "CLOSED" && entry.state !== "closed") {
+			updatePendingPr(this.stateDir, entry.branch, { state: "closed" });
+			this.log("warn", `pr-reconcile: PR #${entry.prNumber} for ${entry.branch} closed without merging — branch and landReady left intact; a re-Land will open a fresh PR`);
+		}
+	}
+
+	/**
+	 * Push-retry: covers a crash between push and `gh pr create`, and a floated push (concern 06's
+	 * `floatPrOnLandReady`) that failed silently. Deliberately a near-duplicate of that method's body
+	 * rather than a shared extraction — mirrors land-pr.ts's own stated convention of duplicating small
+	 * helpers rather than cross-importing another module's private seam.
+	 */
+	private async retryPushFloat(rec: AgentRecord): Promise<void> {
+		const dto = rec.dto;
+		if (!dto.branch) return;
+		const mode = await this.resolveLandModeFor(dto.repo);
+		if (mode.mode !== "pr" || !mode.defaultBranch) return;
+		const ensure = await ensurePr({
+			repo: dto.repo,
+			branch: dto.branch,
+			defaultBranch: mode.defaultBranch,
+			title: `squad(${dto.name}): land ${dto.branch}`,
+			issueId: dto.issue?.id,
+			issueIdentifier: dto.issue?.identifier,
+			agentId: dto.id,
+			stateDir: this.stateDir,
+		});
+		if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
+			rec.dto.prUrl = ensure.prUrl;
+			rec.dto.prNumber = ensure.prNumber;
+			rec.dto.prState = ensure.prState ?? "draft";
+			this.emitAgent(rec);
+		} else {
+			this.log("warn", `pr-reconcile: push retry failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
+		}
+	}
+
+	/**
+	 * Best-effort fast-forward heal for a repo resolved to PR mode: when the local checkout is
+	 * STRICTLY behind `origin/<default>` (an ancestor of it, not equal) and currently checked out on
+	 * that default branch (never a deliberate feature-branch checkout — same condition `resolveLandMode`'s
+	 * probe 4 already requires), fast-forward it. `--ff-only` can never overwrite or lose local work by
+	 * construction — a strictly-behind fast-forward has nothing to lose. Runs inside the SAME
+	 * `withRepoLandLock` a live land uses, so it never races an in-flight merge/scratch-gate.
+	 */
+	private async ffHealOne(repo: string): Promise<void> {
+		const mode = await this.resolveLandModeFor(repo);
+		if (mode.mode !== "pr" || !mode.defaultBranch) return;
+		const defaultBranch = mode.defaultBranch;
+		const current = (await hardenedGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo })).stdout.trim();
+		if (current !== defaultBranch) return; // deliberate non-default checkout wins — never touch
+		await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
+		const localSha = (await hardenedGit(["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+		const remoteSha = (await hardenedGit(["rev-parse", `origin/${defaultBranch}`], { cwd: repo })).stdout.trim();
+		if (!localSha || !remoteSha || localSha === remoteSha) return; // already converged
+		const behind = await isAncestor(localSha, `origin/${defaultBranch}`, repo); // ancestor + not-equal ⇒ strictly behind, never ahead/diverged
+		if (!behind) return;
+		await withRepoLandLock(repo, async () => {
+			const merge = await hardenedGit(["merge", "--ff-only", `origin/${defaultBranch}`], { cwd: repo });
+			if (merge.code === 0) this.log("info", `pr-reconcile: ff-healed ${repo} to ${remoteSha}`);
+			else this.log("warn", `pr-reconcile: ff-heal merge --ff-only failed for ${repo}: ${merge.stderr.trim()}`);
+		});
 	}
 
 	/**
