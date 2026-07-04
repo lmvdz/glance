@@ -179,6 +179,8 @@ test("DB mode: a foreign-Origin mutation is rejected as cross-site (F4)", async 
 });
 
 test("FILE mode: no auth instance ⇒ mode=file and today's tokenless gate (loopback = admin)", async () => {
+	const prevSignup = process.env.OMP_SQUAD_ALLOW_SIGNUP;
+	delete process.env.OMP_SQUAD_ALLOW_SIGNUP;
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fileauth-"));
 	// makeServer's db-mode tests set OMP_SQUAD_ALLOW_SIGNUP and only restore it in afterAll
 	// cleanups, which run after this test — isolate so their leakage can't flip allowSignup.
@@ -191,6 +193,8 @@ test("FILE mode: no auth instance ⇒ mode=file and today's tokenless gate (loop
 	cleanups.push(async () => {
 		await mgr.stop();
 		server.stop();
+		if (prevSignup === undefined) delete process.env.OMP_SQUAD_ALLOW_SIGNUP;
+		else process.env.OMP_SQUAD_ALLOW_SIGNUP = prevSignup;
 		await fs.rm(dir, { recursive: true, force: true });
 		if (prevSignup === undefined) delete process.env.OMP_SQUAD_ALLOW_SIGNUP;
 		else process.env.OMP_SQUAD_ALLOW_SIGNUP = prevSignup;

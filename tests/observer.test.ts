@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
-import { Observer, type ObserverDeps, auditLandedSurvivors, auditStaleDone, auditTestsGreen, landFailureFindings } from "../src/observer.ts";
+import { Observer, type ObserverDeps, auditLandedSurvivors, auditStaleDone, auditStrandedUncommitted, auditTestsGreen, landFailureFindings, stripAnsi } from "../src/observer.ts";
 import { recordDoneProof } from "../src/done-proof.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
@@ -174,6 +174,15 @@ test("(b) a flaky gate (red then green on the confirm re-run) files NOTHING — 
 	expect(filed).toEqual([]); // confirm came back green ⇒ flaky ⇒ no issue filed
 });
 
+test("observer-filed titles strip ANSI control sequences before hitting Plane", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	delete process.env.OMP_SQUAD_OBSERVE_AUTODISPATCH;
+	const { deps, filed } = makeDeps(tmpDir(), { runGate: async () => ({ ok: false, firstFailure: "\x1b[31mauth.test.ts > login\x1b[0m" }) });
+	await new Observer(deps).tick();
+	expect(filed).toEqual(["[observer] do-not-auto-land: regression: auth.test.ts > login"]);
+	expect(stripAnsi("\x1b[31mred\x1b[0m")).toBe("red");
+});
+
 test("(b) a reproduced red gate (red twice) files exactly one regression, named by the confirming run", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	let calls = 0;
@@ -330,6 +339,17 @@ test("cap: observer-filed OPEN issues past OMP_SQUAD_OBSERVE_MAX are logged + sk
 	expect(logs.some((l) => l.includes("observe cap reached"))).toBe(true);
 });
 
+test("an already-open observer ticket prevents a re-file even when seen state was lost", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const prior = { id: "prior-1", name: "[observer]: regression: x.test.ts", identifier: "OMPSQ-422" } satisfies IssueRef;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		listIssues: async () => [prior],
+		runGate: async () => ({ ok: false, firstFailure: "x.test.ts" }),
+	});
+	await new Observer(deps).tick();
+	expect(filed).toEqual([]);
+});
+
 test("autofix: a reap-survivor finding is actioned (removeAgent) and not filed under OMP_SQUAD_OBSERVE_AUTOFIX=1", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	process.env.OMP_SQUAD_OBSERVE_AUTOFIX = "1";
@@ -368,6 +388,27 @@ test("untracked-land-hazard fires only on a collision with an open agent branch"
 	expect(h2.filed).toEqual([]);
 });
 
+
+test("stranded uncommitted work is surfaced for inactive agents, not live working agents", async () => {
+	const issue = { id: "i-1", name: "work", identifier: "OMPSQ-7" } satisfies IssueRef;
+	const idle = agent("idle1", "idle", issue, "squad/idle");
+	const working = agent("work1", "working", issue, "squad/work");
+	const f = auditStrandedUncommitted([idle, working], (a) => (a.id === "idle1" ? ["src/a.ts", "scratch.txt"] : ["src/live.ts"]));
+	expect(f).toHaveLength(1);
+	expect(f[0].fingerprint).toBe("stranded-uncommitted:idle1:scratch.txt,src/a.ts");
+	expect(f[0].title).toBe("stranded uncommitted work in idle1");
+	expect(f[0].detail).toContain("OMPSQ-7");
+});
+
+test("observer files stranded uncommitted worktree changes", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const h = makeDeps(tmpDir(), {
+		listAgents: () => [agent("idle2", "stopped", undefined, "squad/idle2")],
+		uncommittedInWorktree: () => ["src/left-behind.ts"],
+	});
+	await new Observer(h.deps).tick();
+	expect(h.filed).toEqual(["[observer] do-not-auto-land: stranded uncommitted work in idle2"]);
+});
 // ── Check 5: land-ledger mining → bug issue ───────────────────────────────────
 
 test("landFailureFindings flags live branches at/over the cap, ignores reaped + under-cap", () => {

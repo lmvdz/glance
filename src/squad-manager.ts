@@ -661,6 +661,7 @@ export class SquadManager extends EventEmitter {
 					gitAheadOfMain: (a) => this.aheadOfMain(a),
 					untrackedInMain: () => this.untrackedInMain(repo),
 					filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
+					uncommittedInWorktree: (a) => this.uncommittedInWorktree(a),
 					landLedger: () => readLandLedger(this.stateDir),
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `observer-seen.${slug(repo)}.json`,
@@ -2270,6 +2271,16 @@ export class SquadManager extends EventEmitter {
 		if (!a.branch) return [];
 		const r = hardenedGitSync(["-C", a.repo, "ls-tree", "-r", "--name-only", a.branch]);
 		return r.code === 0 ? r.stdout.split("\n").filter((f) => f.length > 0) : [];
+	}
+
+	/** Uncommitted files in an agent worktree — tracked edits plus untracked files. */
+	private uncommittedInWorktree(a: AgentDTO): string[] {
+		const r = hardenedGitSync(["-C", a.worktree, "status", "--porcelain"]);
+		if (r.code !== 0) return [];
+		return r.stdout
+			.split("\n")
+			.map((l) => l.slice(3).trim())
+			.filter((f) => f.length > 0 && !f.startsWith(".omp/"));
 	}
 
 	/**
