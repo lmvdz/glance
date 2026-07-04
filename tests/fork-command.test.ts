@@ -260,6 +260,59 @@ test("restart self-heals a source's supersededBy marker from a fork's persisted 
 	await mgr.stop();
 });
 
+// Review finding 6: createWithId swallows an agent.start() rejection via this.fail() and resolves an
+// error-status DTO instead of throwing. Before this fix, fork() proceeded past that point anyway, marking
+// the source's terminal.supersededBy at a fork that never actually started — stranding BOTH runs (the
+// source pointing at a dead fork it could never re-fork past under the one-live-fork guard, and the fork
+// itself with no forward path). Fork must instead roll back: leave the source offerable, tear down the
+// dead fork's roster record + branch, and surface the failure.
+test("fork rolls back the source's terminal marker when the new fork's agent fails to start", async () => {
+	const { mgr, dto } = await terminalVerifyAgent("fork-i", { verify: 1, codefix: 1 });
+	const host = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => {
+		const d = new FakeDriver();
+		d.start = async () => {
+			throw new Error("boom: driver failed to start");
+		};
+		return d;
+	};
+
+	await expect(mgr.fork(dto.id, {}, LOCAL_ACTOR)).rejects.toThrow(/fork failed to start/);
+
+	const roster = mgr.list();
+	expect(roster.some((a) => a.name.endsWith("-fork"))).toBe(false); // the dead fork does not linger in the roster
+	const source = roster.find((a) => a.id === dto.id)!;
+	expect(source.forkAvailable).toBe(true); // untouched — still offerable
+	expect(source.workflowState?.terminal?.supersededBy).toBeUndefined();
+
+	// The slot wasn't permanently burned — a retry with a working driver must now succeed.
+	host.makeDriver = () => new FakeDriver();
+	const retried = await mgr.fork(dto.id, {}, LOCAL_ACTOR);
+	expect(retried.id).not.toBe(dto.id);
+
+	await mgr.stop();
+});
+
+// Review finding 10: createWithId's own "spawn" transition has no way to know a fork's new id came FROM
+// the source run's id (it's a generic entry point, not fork-aware) — without a lineage stitch, a fork's
+// transition history looks like it appeared out of nowhere, and followLineage (the same mechanism a cold
+// adopt uses) never stitches fork→source into one continuous timeline.
+test("fork records a lineage-stitching transition entry (cause.priorId = source id)", async () => {
+	const { mgr, dto } = await terminalVerifyAgent("fork-lineage", { verify: 1, codefix: 1 });
+
+	const forked = await mgr.fork(dto.id, {}, LOCAL_ACTOR);
+
+	const full = await mgr.transitionHistory(forked.id, { full: true });
+	const forkEntry = full.find((e) => e.agentId === forked.id && e.reason === "fork");
+	expect(forkEntry).toBeDefined();
+	expect(forkEntry!.cause?.priorId).toBe(dto.id);
+	// followLineage actually stitches the source's own prior entries ahead of the fork's — proving the
+	// entry is functional, not just present.
+	expect(full.some((e) => e.agentId === dto.id)).toBe(true);
+
+	await mgr.stop();
+});
+
 // (b) fork refuses when rec.dto.status === "working".
 test("fork refuses a currently-working agent", async () => {
 	const { mgr } = await makeMgr("fork-b");

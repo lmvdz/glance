@@ -3573,6 +3573,21 @@ export class SquadManager extends EventEmitter {
 				await hardenedGit(["branch", "-D", `squad/${newId}`], { cwd: rec.dto.repo }).catch(() => {});
 				throw err;
 			}
+			// Review finding 6: createWithId swallows agent.start() rejections via this.fail() and resolves
+			// an error-status DTO instead of throwing (the try/catch above only ever throws for createInternal's
+			// OWN duplicate-id guard, not for a failure inside createWithId's body). Proceeding past this point
+			// would mark the source superseded by a fork that never actually started — stranding BOTH runs: the
+			// source pointing at a dead fork it can never retry past (the one-live-fork guard blocks a second
+			// attempt), and the fork itself with no forward path. Roll back instead: tear down the dead fork's
+			// roster record + branch (createWithId's own catch already stopped its agent and removed its
+			// worktree if one was created), leave the source's terminal marker/forkAvailable untouched, and
+			// surface the failure so the operator can retry.
+			if (newDto.status === "error") {
+				const reason = newDto.error ?? "fork agent failed to start";
+				await this.remove(newDto.id, true).catch(() => {});
+				await hardenedGit(["branch", "-D", `squad/${newId}`], { cwd: rec.dto.repo }).catch(() => {});
+				throw new Error(`fork failed to start: ${reason}`);
+			}
 			// Persisted for display/audit only (mirrors spawnFleetBranch's own `rec.options.task = task`
 			// idiom) — deliberately NOT passed as createInternal's `task` option: createWithId auto-prompts on
 			// `opts.task` regardless of `workflowState`, but `workflowState` here already re-primes the goal
@@ -3580,7 +3595,13 @@ export class SquadManager extends EventEmitter {
 			// `execRun` before `start()` resolves) — an extra `agent.prompt()` right after would race that
 			// already-in-flight run's own inner agent.
 			const newRec = this.agents.get(newDto.id);
-			if (newRec) newRec.options.task = rec.options.task;
+			if (newRec) {
+				newRec.options.task = rec.options.task;
+				// Review finding 10: createWithId's own "spawn" transition has no way to know this new id came
+				// FROM `id` — stitch the lineage here (same idiom as closeOrphanedPending's "adopted" marker) so
+				// followLineage's crash-spanning timeline stitch also covers fork→source, not just adopt→prior.
+				this.transition(newRec, newRec.dto.status, "fork", { priorId: id });
+			}
 
 			// Mark the original superseded: excluded from adoption/dispatch permanently (one issue, one active
 			// claimant), forkAvailable cleared so the offer never re-fires for a run that's already been forked.

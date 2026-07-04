@@ -20,6 +20,11 @@ export type DerivedReason = "turn-progress" | "pending-add" | "pending-answer" |
 export type ExplicitReason =
 	| "spawn" | "connect-begin" | "connect-ok" | "restart" | "kill" | "abort"
 	| "exit-clean" | "exit-error" | "fail" | "catastrophe" | "task-start" | "branch-start" | "reattach" | "adopted"
+	// Review finding 10: a same-state marker recorded once by fork() right after createInternal, carrying
+	// `cause.priorId` = the source run's id — same idiom as "adopted" (closeOrphanedPending) — so
+	// followLineage's crash-spanning timeline stitch also covers fork→source lineage, which fork's own
+	// createWithId "spawn" transition has no way to carry (it has no knowledge of a fork's source id).
+	| "fork"
 	// Synthetic, same-state, best-effort marker recorded once per live agent in SquadManager.stop() (a
 	// graceful daemon shutdown DETACHES agents rather than stopping them, so this is a timeline note —
 	// "the daemon paused supervision here" — not an actual status change).
