@@ -10,6 +10,7 @@ import type { RpcExtensionUIRequest, RpcSessionState } from "@oh-my-pi/pi-coding
 import type { WorkflowRunState } from "./workflow/types.ts";
 import type { Span } from "./spans.ts";
 import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts";
+import type { TransitionReason } from "./agent-lifecycle.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -19,6 +20,21 @@ export type AgentStatus =
 	| "input" // BLOCKED on a human decision (approval / question / tool input)
 	| "error" // spawn failed, child crashed, or fatal RPC error
 	| "stopped"; // intentionally terminated
+
+/** One recorded (or denied) `{from,to,reason,at}` transition — the persisted shape written to
+ *  `transitions.jsonl` (src/jsonl-log.ts) and mirrored in SquadManager's in-memory ring. */
+export interface TransitionEntry {
+	agentId: string;
+	from: AgentStatus;
+	to: AgentStatus;
+	reason: TransitionReason;
+	at: number;
+	cause?: { error?: string; priorId?: string; [k: string]: unknown };
+	denied?: true;
+	/** Set by concern 04's settle-window pending tagging (not used on TransitionEntry itself in this
+	 *  concern, but reserved on the shared cause shape for forward-compat — not implemented here). */
+	replayed?: true;
+}
 
 /**
  * Which runtime backs a managed agent.
@@ -813,7 +829,8 @@ export type SquadEvent =
 	| { type: "comment"; comment: ArtifactCommentDTO }
 	| { type: "comment-resolved"; id: string; resolvedAt: number }
 	| { type: "audit"; entry: AuditEntry }
-	| { type: "automation"; event: AutomationEvent };
+	| { type: "automation"; event: AutomationEvent }
+	| { type: "transition"; entry: TransitionEntry };
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning (the only token-spending loop); Observer and

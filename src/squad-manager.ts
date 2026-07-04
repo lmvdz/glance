@@ -51,7 +51,7 @@ import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
-import { canTransition, deriveStatus, isDerivedReason, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
+import { canTransition, dedupeTransitions, deriveStatus, followLineage, isDerivedReason, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
@@ -105,6 +105,7 @@ import type {
 	SquadEvent,
 	TranscriptEntry,
 	TranscriptKind,
+	TransitionEntry,
 	FeedbackCampaign,
 	FeedbackItem,
 	FeedbackReward,
@@ -119,6 +120,7 @@ import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
+import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readLandLedger, recordForcedLand, recordLandOutcome } from "./land-ledger.ts";
@@ -264,15 +266,13 @@ function isAgentDisconnected(err: unknown): boolean {
  *  consumes (assigns to `rec.dto.error`); everything else rides along for the log entry only. */
 type TransitionCause = { error?: string; priorId?: string; [k: string]: unknown };
 
-/** One entry in SquadManager's in-memory transition log (this concern's stand-in for concern 02's
- *  persisted JsonlLog — recordTransition/recordDenied are the hook points concern 02 replaces). */
-interface TransitionLogEntry {
-	from: AgentStatus;
-	to: AgentStatus;
-	reason: TransitionReason;
-	at: number;
-	cause?: TransitionCause;
-	denied?: boolean;
+/** Redact every string field of `cause` (error/title/message/etc.) through the same chokepoint
+ *  append() uses (redact.ts) — matches the design's redact-at-write decision (secrets never touch
+ *  transitions.jsonl or the emitted event, at the cost of not covering display-time changes). */
+function redactCause(cause: TransitionCause): TransitionCause {
+	const out: TransitionCause = {};
+	for (const [k, v] of Object.entries(cause)) out[k] = typeof v === "string" ? redact(v) : v;
+	return out;
 }
 
 interface AgentRecord {
@@ -415,10 +415,10 @@ export class SquadManager extends EventEmitter {
 	/** Agent ids currently draining agent-host ring replay on reattach — transition()/setPending() apply
 	 *  the state change but record nothing, and maybeAutoSupervise is suppressed, until settling clears. */
 	private readonly settling = new Set<string>();
-	/** Bounded ring of {from,to,reason,at} entries — this concern's in-memory stand-in for concern 02's
-	 *  persisted JsonlLog. recordTransition/recordDenied push here; no signature change is expected later. */
-	private readonly transitionLog: TransitionLogEntry[] = [];
-	private static readonly TRANSITION_LOG_CAP = 200;
+	/** Persisted {agentId,from,to,reason,at} history (stateDir/transitions.jsonl) — ring-authoritative,
+	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
+	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
+	private readonly transitionLog: JsonlLog<TransitionEntry>;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -439,6 +439,7 @@ export class SquadManager extends EventEmitter {
 		setProofRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
+		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -3825,22 +3826,27 @@ export class SquadManager extends EventEmitter {
 	 */
 	private transition(rec: AgentRecord, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
 		const from = rec.dto.status;
+		// Redacted once here (concern 02) — not just at the persisted-entry boundary in recordTransition/
+		// recordDenied — because `cause.error` is also assigned straight onto `rec.dto.error` below, and
+		// dto.error rides the emitted `agent` SquadEvent verbatim. DESIGN.md's redaction decision names
+		// transition() itself as one of the three chokepoints (transition()/setPending()/persistNow()).
+		const redactedCause = cause ? redactCause(cause) : undefined;
 		if (from === to) {
 			if (isDerivedReason(reason)) return;
 			// same-state EVENT-class calls fall through and DO record below.
 		} else if (!canTransition(from, to, reason)) {
-			this.recordDenied(rec, from, to, reason, cause);
+			this.recordDenied(rec, from, to, reason, redactedCause);
 			this.log("warn", `denied transition ${rec.dto.name}: ${from} -> ${to} (${reason})`);
 			return;
 		}
 		if (this.reattached.has(rec.dto.id) && this.settling.has(rec.dto.id)) {
 			rec.dto.status = to; // still apply the state change — only recording is suppressed during settle
-			if (cause?.error !== undefined) rec.dto.error = cause.error;
+			if (redactedCause?.error !== undefined) rec.dto.error = redactedCause.error;
 			return;
 		}
 		rec.dto.status = to;
-		if (cause?.error !== undefined) rec.dto.error = cause.error; // fixes fail/markCatastrophe push-payload ordering (S6)
-		this.recordTransition(rec, from, to, reason, cause);
+		if (redactedCause?.error !== undefined) rec.dto.error = redactedCause.error; // fixes fail/markCatastrophe push-payload ordering (S6)
+		this.recordTransition(rec, from, to, reason, redactedCause);
 	}
 
 	/** Mirrors transition() for `rec.dto.pending`. `opts.callerOwnsStatus` is for sites that manage status
@@ -3848,28 +3854,53 @@ export class SquadManager extends EventEmitter {
 	 *  suppressing setPending's own derive+record here means restart's ledger gets exactly ONE "restart"
 	 *  entry instead of a spurious intermediate "pending-cancel" derived entry ahead of it). Absent
 	 *  `opts.callerOwnsStatus`, the resulting status is (re)derived and recorded under `reason` —
-	 *  same-state early-return behavior is identical to a direct transition() call. */
+	 *  same-state early-return behavior is identical to a direct transition() call.
+	 *
+	 *  Redacts `title`/`message` on every entry before it lands on `rec.dto.pending` — today those fields
+	 *  ride straight into state (and the emitted `agent` event) verbatim, which is the one gap append()'s
+	 *  redaction chokepoint doesn't already cover (#lifecycle-truth concern 02). */
 	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
-		rec.dto.pending = next;
+		rec.dto.pending = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
 		if (opts?.callerOwnsStatus) return; // caller issues its own explicit transition() for the status change
 		this.transition(rec, this.derive(rec), reason, cause);
 	}
 
-	/** Append a recorded (non-denied) transition to the bounded in-memory ring. Concern 02 replaces the
-	 *  body with a persisted JsonlLog write; the signature is stable across that swap. */
+	/** Append a recorded (non-denied) transition to the persisted ring (stateDir/transitions.jsonl).
+	 *  `cause` arrives already redacted (transition() redacts once, up front — see its comment). */
 	private recordTransition(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
-		this.pushTransitionLog({ from, to, reason, at: Date.now(), cause });
+		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause };
+		this.transitionLog.append(entry);
+		this.pushTransitionEvent(rec, entry); // concern 03 wires DTO tail + rollup off this same call
+		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
 	}
 
 	/** Append a denied-transition attempt to the same ring, flagged so it is never confused with an
-	 *  applied transition. */
+	 *  applied transition. Does not feed pushTransitionEvent — a denied attempt never changed dto.status. */
 	private recordDenied(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
-		this.pushTransitionLog({ from, to, reason, at: Date.now(), cause, denied: true });
+		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, denied: true };
+		this.transitionLog.append(entry);
+		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
 	}
 
-	private pushTransitionLog(entry: TransitionLogEntry): void {
-		this.transitionLog.push(entry);
-		if (this.transitionLog.length > SquadManager.TRANSITION_LOG_CAP) this.transitionLog.shift();
+	/** Hook point for concern 03 (webapp timeline): wires the DTO's capped `transitions` tail + the
+	 *  `errorTransitions1h` rollup off every recorded (non-denied) transition. Deliberately a no-op here —
+	 *  concern 02 ships the wire format (TransitionEntry, the event, the endpoint) without touching AgentDTO. */
+	private pushTransitionEvent(_rec: AgentRecord, _entry: TransitionEntry): void {}
+
+	/** Full history for one agent: ring-served by default (fast, no file I/O); `full:true` additionally
+	 *  reads transitions.jsonl and follows `cause.priorId` lineage (bounded hops) to stitch a crash-spanning
+	 *  timeline for an agent that was cold-adopted under a fresh id (concern 04 populates priorId on adopt).
+	 *
+	 *  Deviation from the plan's literal snippet: the merge-then-lineage set is NOT pre-filtered to `id`
+	 *  before calling followLineage — a prior id's entries live under a DIFFERENT agentId, so filtering to
+	 *  `id` first would discard exactly the ancestor rows lineage-following needs. followLineage does its
+	 *  own id-scoped filtering internally (see agent-lifecycle.ts) over the full ring∪file entry set. */
+	async transitionHistory(id: string, opts: { full?: boolean } = {}): Promise<TransitionEntry[]> {
+		const own = this.transitionLog.recent().filter((e) => e.agentId === id);
+		if (!opts.full) return own; // ring-served, no file I/O — the default, fast path
+		const fromFile = await this.transitionLog.hydrateAll();
+		const merged = dedupeTransitions([...fromFile, ...this.transitionLog.recent()]);
+		return followLineage(id, merged);
 	}
 
 	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a

@@ -79,7 +79,7 @@ interface TransitionLogEntry {
 
 interface AttachHost {
 	attachExisting: (p: PersistedAgent, transcript?: unknown[]) => Promise<void>;
-	transitionLog: TransitionLogEntry[];
+	transitionLog: { recent: () => TransitionLogEntry[] };
 }
 
 test("attachExisting suppresses replay-driven transitions and records exactly one reattach entry", async () => {
@@ -101,7 +101,7 @@ test("attachExisting suppresses replay-driven transitions and records exactly on
 
 	await (mgr as unknown as AttachHost).attachExisting(persisted, []);
 
-	const log = (mgr as unknown as AttachHost).transitionLog;
+	const log = (mgr as unknown as AttachHost).transitionLog.recent();
 	const reattachEntries = log.filter((e) => e.reason === "reattach");
 	const nonReattachEntries = log.filter((e) => e.reason !== "reattach");
 
@@ -176,7 +176,7 @@ test("attachExisting clears the settle gate even when start() rejects, so the le
 	// forever, permanently disabling maybeAutoSupervise and silencing transition()'s ledger for it.
 	expect(host.settling.has(persisted.id)).toBe(false);
 
-	const log = host.transitionLog;
+	const log = host.transitionLog.recent();
 	expect(log.filter((e) => e.reason === "reattach").length).toBe(1); // the ledger still recorded the reattach
 
 	// With the gate cleared, a freshly-added pending request must be eligible for auto-supervise again

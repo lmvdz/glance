@@ -5,7 +5,7 @@
  * (tests/agent-lifecycle.test.ts). SquadManager.transition()/setPending() are the only callers.
  */
 
-import type { AgentStatus } from "./types.ts";
+import type { AgentStatus, TransitionEntry } from "./types.ts";
 
 /** Reasons that derive status purely from existing signals (turn state, pending queue).
  *  Class D: sticky against stopped/error — mirrors derive()'s guard (squad-manager.ts's `derive()`)
@@ -44,4 +44,36 @@ export function deriveStatus(input: { status: AgentStatus; pendingCount: number;
 	if (input.pendingCount > 0) return "input";
 	if (input.streaming) return "working";
 	return "idle";
+}
+
+/** Drop duplicate transition entries — same (agentId,at,reason) triple — keeping first-seen order.
+ *  Used when merging the persisted file with the in-memory ring, which overlap at the boundary. */
+export function dedupeTransitions(entries: TransitionEntry[]): TransitionEntry[] {
+	const seen = new Set<string>();
+	const out: TransitionEntry[] = [];
+	for (const e of entries) {
+		const key = `${e.agentId}|${e.at}|${e.reason}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(e);
+	}
+	return out;
+}
+
+/** Walk `cause.priorId` backwards from `id` (bounded hops) over `all` — every known TransitionEntry
+ *  across every agent (ring ∪ file) — concatenating each prior id's entries ahead of `id`'s own, so a
+ *  cold-adopted agent's post-adopt history reads as one continuous pre/post-crash timeline. Pure over
+ *  TransitionEntry[] (no AgentRecord/SquadManager access needed) so it stays unit-testable standalone. */
+export function followLineage(id: string, all: TransitionEntry[], maxHops = 10): TransitionEntry[] {
+	let cursor = id;
+	let out = all.filter((e) => e.agentId === cursor);
+	for (let hop = 0; hop < maxHops; hop++) {
+		const priorId = out.find((e) => e.agentId === cursor && typeof e.cause?.priorId === "string")?.cause?.priorId;
+		if (typeof priorId !== "string") break;
+		const priorEntries = all.filter((e) => e.agentId === priorId);
+		if (!priorEntries.length) break;
+		out = [...priorEntries, ...out];
+		cursor = priorId;
+	}
+	return dedupeTransitions(out);
 }
