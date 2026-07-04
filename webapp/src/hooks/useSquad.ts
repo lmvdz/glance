@@ -59,15 +59,6 @@ export interface SquadState {
   unsubscribe: (id: string) => void;
 }
 
-/**
- * Order key for comparing a late-arriving entry against the window's head.
- * `seq` is authoritative when present (monotonic per-agent); `ts` is the
- * fallback for entries that predate `seq` support.
- */
-function entryOrderKey(entry: TranscriptEntry): number {
-  return typeof entry.seq === "number" ? entry.seq : entry.ts;
-}
-
 export function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
   const match = entry.id ? entries.findIndex((item) => item.id === entry.id) : -1;
   if (match >= 0) {
@@ -80,10 +71,34 @@ export function appendTranscriptEntry(entries: TranscriptEntry[], entry: Transcr
     // The window is at cap and this id isn't present — it may be a late
     // upsert for an entry the cap already evicted. Appending it at the end
     // would put a stale entry after everything newer; drop it instead.
+    //
+    // Order by `ts` (epoch ms), NOT `seq`: `seq` is an in-memory counter on
+    // the daemon that resets to 0 on restart, while persisted+replayed
+    // transcripts keep their old high seqs. Comparing seqs here means every
+    // live entry after a restart (seq 1, 2, 3…) reads as "older than the
+    // head" and gets dropped forever — the chat permanently freezes. `ts` is
+    // wall-clock and stays monotonic across restarts.
+    //
+    // Only drop when both sides actually have a `ts` to compare; if either
+    // is missing, fail open and append rather than risk freezing the chat
+    // over a rare reorder.
     const head = entries[0];
-    if (head && entryOrderKey(entry) <= entryOrderKey(head)) return entries;
+    if (head && typeof entry.ts === "number" && typeof head.ts === "number" && entry.ts < head.ts) return entries;
   }
   return entries.length >= TRANSCRIPT_CAP ? [...entries.slice(entries.length - TRANSCRIPT_CAP + 1), entry] : [...entries, entry];
+}
+
+/**
+ * Ids in `subscribed` that no longer appear in the live agent roster —
+ * called on every `roster` snapshot (and on an explicit `removed` event) so
+ * `subscribedRef` doesn't grow forever across reconnects. Without this, a
+ * dead agent id stays in the set and gets re-subscribed on every socket
+ * reopen (see `onOpen`'s replay loop below), which piles up server-side
+ * subscriptions for agents that no longer exist.
+ */
+export function staleSubscriptionIds(subscribed: ReadonlySet<string>, liveIds: Iterable<string>): string[] {
+  const live = liveIds instanceof Set ? liveIds : new Set(liveIds);
+  return [...subscribed].filter((id) => !live.has(id));
 }
 
 export function useSquad(): SquadState {
@@ -131,6 +146,11 @@ export function useSquad(): SquadState {
       onEvent: (event: SquadEvent) => {
         switch (event.type) {
           case "roster":
+            // Full roster snapshot — prune any subscription for an id that
+            // no longer exists so it stops re-subscribing on reconnect.
+            for (const id of staleSubscriptionIds(subscribedRef.current, event.agents.map((agent) => agent.id))) {
+              subscribedRef.current.delete(id);
+            }
             setAgents(new Map(event.agents.map((agent) => [agent.id, agent])));
             break;
           case "agent":
@@ -141,6 +161,7 @@ export function useSquad(): SquadState {
             });
             break;
           case "removed":
+            subscribedRef.current.delete(event.id);
             setAgents((previous) => {
               const next = new Map(previous);
               next.delete(event.id);

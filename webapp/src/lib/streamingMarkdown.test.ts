@@ -197,6 +197,19 @@ describe("trimStreamingArtifacts: structural rules", () => {
     expect(trimStreamingArtifacts("text\n\n|---|---|")).toBe("text");
   });
 
+  test("regression: prose containing a pipe elsewhere in the line is never held back", () => {
+    // A trailing pipe anywhere on the line used to trigger the table-header
+    // holdback rule, making ordinary streaming prose vanish mid-stream.
+    expect(trimStreamingArtifacts("Run `foo | bar` to filter")).toBe("Run `foo | bar` to filter");
+    expect(trimStreamingArtifacts("use a | b delimiter")).toBe("use a | b delimiter");
+    expect(trimStreamingArtifacts("intro\n\nRun `a | b` here")).toBe("intro\n\nRun `a | b` here");
+  });
+
+  test("regression: a real table header (line starts with |) is still held back", () => {
+    expect(trimStreamingArtifacts("| a | b |")).toBe("");
+    expect(trimStreamingArtifacts("  | a | b |")).toBe(""); // leading whitespace before the pipe
+  });
+
   test("once a table is established, new rows pass through immediately", () => {
     const table = "| h |\n| --- |\n| r1 |\n| r2 |";
     expect(trimStreamingArtifacts(table)).toBe(table);

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles, ArrowUp, Square, Loader2, Paperclip, X } from 'lucide-react';
-import { useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
+import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
 import type { AgentDTO } from '../../lib/dto';
 import type { Task } from '../../types';
@@ -92,6 +92,17 @@ export function formatPasteSize(byteLength: number): string {
 
 export function pasteChipLabel(text: string): string {
   return `Pasted text · ${formatPasteSize(new TextEncoder().encode(text).length)}`;
+}
+
+/**
+ * Suggestion-chip click: insert, never auto-send. Filling only when the
+ * composer is empty is the least-surprising rule — a chip click must not
+ * wipe an in-progress draft, nor should it fold an unrelated suggestion into
+ * whatever the user is mid-typing. When there's already a draft, the chip
+ * click is a no-op on the text (the caller still focuses the textarea).
+ */
+export function applySuggestionChip(currentInput: string, prompt: string): string {
+  return currentInput.trim() === '' ? prompt : currentInput;
 }
 
 export interface PasteChip {
@@ -288,8 +299,8 @@ export const Composer = ({
     composerTextareaRef.current?.select();
   }, [recallState]);
 
-  const submit = (forcedInput?: string) => {
-    const typed = forcedInput || input.trim();
+  const submit = () => {
+    const typed = input.trim();
     if ((!typed && chips.length === 0) || isLoading) return;
     const textToSend = assembleSendText(typed, chips);
     setInput('');
@@ -301,6 +312,7 @@ export const Composer = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isImeComposing(e)) return; // IME composition in progress — never submit/recall/nav on this keystroke
     if (mentionMenu.handleKeyDown(e)) return; // menu consumed the key (nav/select/dismiss)
     const el = e.currentTarget;
     if (e.key === 'ArrowUp' && el.selectionStart === 0 && el.selectionEnd === 0) {
@@ -354,7 +366,12 @@ export const Composer = ({
           <button
             key={suggestion.label}
             type="button"
-            onClick={() => submit(suggestion.prompt)}
+            onClick={() => {
+              // Insert, don't send — a chip click must never destroy an
+              // in-progress draft or silently submit on the user's behalf.
+              setInput((prev) => applySuggestionChip(prev, suggestion.prompt));
+              composerTextareaRef.current?.focus();
+            }}
             className="flex min-h-8 items-center gap-1.5 rounded-full border border-gray-200 bg-gray-100 px-2.5 py-1 text-[11px] font-medium text-gray-700 transition-colors whitespace-nowrap hover:bg-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800 dark:focus-visible:ring-offset-gray-950"
           >
             {index === 0 && <Sparkles className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" aria-hidden />}
@@ -375,23 +392,20 @@ export const Composer = ({
             <div className="p-2 text-xs font-medium text-gray-500 border-b border-gray-200 dark:border-gray-800">
               Mention a task
             </div>
-            {mentionMenu.items.length > 0 ? (
-              mentionMenu.items.map((task, index) => (
-                <button
-                  key={task.id}
-                  type="button"
-                  {...mentionMenu.getOptionProps(index)}
-                  className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${index === mentionMenu.activeIndex ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
-                >
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: task.status === 'done' ? '#10b981' : '#3b82f6' }}></span>
-                  {task.title}
-                </button>
-              ))
-            ) : (
-              <div className="px-3 py-4 text-center text-sm text-gray-500">
-                No matching tasks
-              </div>
-            )}
+            {/* `mentionMenu.isOpen` is only true when there's at least one match — a
+                zero-match session renders nothing (see useTriggerMenu's `visiblyOpen`)
+                rather than showing a "No matching tasks" popup that hijacks the keyboard. */}
+            {mentionMenu.items.map((task, index) => (
+              <button
+                key={task.id}
+                type="button"
+                {...mentionMenu.getOptionProps(index)}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${index === mentionMenu.activeIndex ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+              >
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: task.status === 'done' ? '#10b981' : '#3b82f6' }}></span>
+                {task.title}
+              </button>
+            ))}
           </div>
         )}
 

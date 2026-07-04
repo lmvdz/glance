@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CLOSED_MENU_STATE, comboboxAriaProps, computeCompletionEdit, detectTrigger, dismissMenu, insertCompletion, reduceDetection, type MenuState } from "./useTriggerMenu";
+import { applyEmptyQueryDismiss, CLOSED_MENU_STATE, comboboxAriaProps, computeCompletionEdit, detectTrigger, dismissMenu, insertCompletion, isImeComposing, reduceDetection, type MenuState } from "./useTriggerMenu";
 
 // =============================================================================
 // detectTrigger
@@ -155,6 +155,48 @@ test("escape-then-retype: a fresh trigger elsewhere reopens the menu", () => {
   const retyped = reduceDetection(dismissed, { trigger: "@", query: "", start: 12 });
   expect(retyped.open).toBe(true);
   expect(retyped.start).toBe(12);
+});
+
+// =============================================================================
+// applyEmptyQueryDismiss — empty-result menu must not linger/hijack keys
+// =============================================================================
+
+test("applyEmptyQueryDismiss: leaves an open session alone while the query has no space yet (still a live search)", () => {
+  const state: MenuState = { open: true, trigger: "@", query: "zzz", start: 3, activeIndex: 0, dismissedStart: null };
+  expect(applyEmptyQueryDismiss(state, 0)).toEqual(state);
+});
+
+test("applyEmptyQueryDismiss: leaves an open session alone when it still has matches", () => {
+  const state: MenuState = { open: true, trigger: "@", query: "fix login", start: 3, activeIndex: 0, dismissedStart: null };
+  expect(applyEmptyQueryDismiss(state, 2)).toEqual(state);
+});
+
+test("applyEmptyQueryDismiss: dismisses once the query has a space AND zero matches", () => {
+  const state: MenuState = { open: true, trigger: "@", query: "totally unknown", start: 3, activeIndex: 0, dismissedStart: null };
+  const next = applyEmptyQueryDismiss(state, 0);
+  expect(next.open).toBe(false);
+  expect(next.dismissedStart).toBe(3); // sticky at this trigger position, same mechanism as Escape
+});
+
+test("applyEmptyQueryDismiss: a closed state is a no-op", () => {
+  expect(applyEmptyQueryDismiss(CLOSED_MENU_STATE, 0)).toEqual(CLOSED_MENU_STATE);
+});
+
+// =============================================================================
+// isImeComposing — IME guard shared by the composer and the trigger menu
+// =============================================================================
+
+test("isImeComposing: true when nativeEvent.isComposing is set", () => {
+  expect(isImeComposing({ nativeEvent: { isComposing: true } })).toBe(true);
+});
+
+test("isImeComposing: true for the legacy keyCode 229 fallback", () => {
+  expect(isImeComposing({ keyCode: 229 })).toBe(true);
+});
+
+test("isImeComposing: false for an ordinary keystroke", () => {
+  expect(isImeComposing({ nativeEvent: { isComposing: false }, keyCode: 13 })).toBe(false);
+  expect(isImeComposing({})).toBe(false);
 });
 
 // =============================================================================

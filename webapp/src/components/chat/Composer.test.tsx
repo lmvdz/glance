@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  applySuggestionChip,
   ComposerAttachmentChip,
   assembleSendText,
   clampGrownHeight,
@@ -131,6 +132,19 @@ test("assembleSendText fences chip contents after the typed message, in attach o
 test("assembleSendText handles a chip-only send (no typed text)", () => {
   const chips: PasteChip[] = [{ id: "1", label: "Pasted text · 1.0 KB", content: "just this" }];
   expect(assembleSendText("", chips)).toBe("```\njust this\n```");
+});
+
+// ---------------------------------------------------------------------------
+// Suggestion chips: insert, never destroy the draft, never auto-send.
+// ---------------------------------------------------------------------------
+
+test("applySuggestionChip fills an empty composer with the suggestion", () => {
+  expect(applySuggestionChip("", "draft a release note")).toBe("draft a release note");
+  expect(applySuggestionChip("   ", "draft a release note")).toBe("draft a release note"); // whitespace-only counts as empty
+});
+
+test("applySuggestionChip leaves an existing draft untouched rather than destroying it", () => {
+  expect(applySuggestionChip("my half-typed message", "draft a release note")).toBe("my half-typed message");
 });
 
 // ---------------------------------------------------------------------------

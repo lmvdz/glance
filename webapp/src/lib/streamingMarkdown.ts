@@ -181,6 +181,17 @@ function isTableSeparator(line: string): boolean {
 }
 
 /**
+ * True when `line` reads as a potential GFM table-header row: it must START
+ * with (optional leading whitespace, then) `|` — a pipe appearing later in
+ * the line is just punctuation/code, not a table opener. Inline code spans
+ * are masked first so a pipe inside `` `like this` `` (e.g. prose like
+ * "Run `foo | bar` to filter") never reads as a table.
+ */
+function looksLikeTableHeaderStart(line: string): boolean {
+  return /^[ \t]*\|/.test(maskCodeSpans(line));
+}
+
+/**
  * Inline artifact pass — only ever rewrites the final (still-arriving) line.
  */
 function trimInlineArtifacts(input: string): string {
@@ -323,7 +334,11 @@ function trimUnsettledStructural(text: string): string {
 
     // Lone table-header line: hold back until the separator row arrives.
     // Once a table is established (header + separator above), new rows pass.
-    if (trimmed.includes("|") && !isTableSeparator(last)) {
+    // Only a line that STARTS with (optional whitespace +) `|` is a
+    // candidate — a pipe appearing later in a prose line (e.g. "Run `foo |
+    // bar` to filter", or even bare "use a | b delimiter") is not a table
+    // opener and must never be held back from view.
+    if (looksLikeTableHeaderStart(last) && !isTableSeparator(last)) {
       let established = false;
       for (let i = lines.length - 2; i >= 1; i--) {
         if (isTableSeparator(lines[i]) && lines[i - 1].includes("|")) {

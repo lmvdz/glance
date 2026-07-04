@@ -107,6 +107,31 @@ export function dismissMenu(state: MenuState): MenuState {
 }
 
 /**
+ * Auto-dismiss transition: once an open session's query contains a space AND
+ * has zero matches, the "no matches" state has nothing useful left to show —
+ * treat it like an Escape-dismiss (sticky at this trigger position via
+ * `dismissedStart`) rather than leaving it open to keep hijacking keys for
+ * the rest of the line. A session with no space yet (still typing the first
+ * word of a query) is left alone — that's still a live search.
+ */
+export function applyEmptyQueryDismiss(state: MenuState, itemCount: number): MenuState {
+  if (state.open && itemCount === 0 && state.query.includes(" ")) return dismissMenu(state);
+  return state;
+}
+
+/**
+ * True when a keyboard event fired during IME composition (e.g. typing
+ * Japanese/Chinese/Korean via a candidate window). `isComposing` is the
+ * standard signal; `keyCode === 229` is the historical fallback some
+ * browsers still emit for the composing Enter/arrow keys instead of setting
+ * `isComposing`. Callers must bail before treating the key as a
+ * submit/nav/menu keystroke — the IME hasn't committed text yet.
+ */
+export function isImeComposing(event: { nativeEvent?: { isComposing?: boolean }; keyCode?: number }): boolean {
+  return Boolean(event.nativeEvent?.isComposing) || event.keyCode === 229;
+}
+
+/**
  * Pure builder for the full combobox ARIA wiring — factored out so both the
  * open and closed states are unit-testable without rendering the textarea.
  */
@@ -198,12 +223,25 @@ export function useTriggerMenu<T>(
     const el = textareaRef.current;
     if (!el) return;
     const detected = detectTrigger(el.value, el.selectionStart ?? el.value.length, triggerChars);
-    setState((prev) => reduceDetection(prev, detected));
-  }, [textareaRef, triggerChars]);
+    setState((prev) => {
+      const next = reduceDetection(prev, detected);
+      if (!next.open) return next;
+      // Compute the would-be match count synchronously (search is a plain
+      // sync function over caller-owned data) so a zero-match query that
+      // already contains a space auto-dismisses in the same tick it would
+      // otherwise render — no one-frame flash of a hijacking empty menu.
+      const source = triggers.find((t) => t.trigger === next.trigger);
+      const itemCount = source ? source.search(next.query).length : 0;
+      return applyEmptyQueryDismiss(next, itemCount);
+    });
+  }, [textareaRef, triggerChars, triggers]);
 
   const activeSource = useMemo(() => triggers.find((t) => t.trigger === state.trigger), [triggers, state.trigger]);
   const items = useMemo(() => (state.open && activeSource ? activeSource.search(state.query) : []), [state.open, state.query, activeSource]);
   const activeIndex = items.length ? Math.min(state.activeIndex, items.length - 1) : 0;
+  // Rendering/ARIA visibility: a menu with zero matches has nothing to show
+  // and must not falsely announce itself as expanded.
+  const visiblyOpen = state.open && items.length > 0;
 
   const close = useCallback(() => setState((prev) => dismissMenu(prev)), []);
 
@@ -218,6 +256,19 @@ export function useTriggerMenu<T>(
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean => {
     if (!state.open) return false;
+    if (isImeComposing(event)) return false; // let the IME finish composing before treating this as a nav/select key
+    if (items.length === 0) {
+      // A "no matching tasks" session renders nothing (see `visiblyOpen`)
+      // and must not hijack the keyboard — arrows/Enter/Tab pass through to
+      // native caret movement / newline. Escape still dismisses so the
+      // (invisible) session doesn't linger and re-detect on the next sync.
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        close();
+        return true;
+      }
+      return false;
+    }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       setState((prev) => ({ ...prev, activeIndex: items.length ? (prev.activeIndex + 1) % items.length : 0 }));
@@ -259,7 +310,11 @@ export function useTriggerMenu<T>(
   }, [items, activeSource, activeIndex, selectItem]);
 
   return {
-    isOpen: state.open,
+    // `isOpen` reflects visible/renderable state, not raw session state: a
+    // zero-match session must render nothing (see the FIX in `handleKeyDown`
+    // above) so it can't hijack keys or falsely promise a popup that isn't
+    // there.
+    isOpen: visiblyOpen,
     query: state.query,
     activeTrigger: state.trigger,
     items,
@@ -267,7 +322,7 @@ export function useTriggerMenu<T>(
     listboxId: LISTBOX_ID,
     activeOptionId,
     comboboxProps: {
-      ...comboboxAriaProps(state.open, activeOptionId, LISTBOX_ID),
+      ...comboboxAriaProps(visiblyOpen, activeOptionId, LISTBOX_ID),
       // React handler props (not native addEventListener) so detection
       // survives the textarea being unmounted/remounted (e.g. leaving and
       // reopening a session) — they attach fresh on every render, exactly
