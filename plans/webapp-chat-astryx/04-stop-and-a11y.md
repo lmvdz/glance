@@ -1,5 +1,5 @@
 # Stop control in the composer + live-region a11y
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -28,3 +28,10 @@ None (uses the existing `ClientCommand.interrupt` path end-to-end).
 ## Verify
 - Static-markup tests: running state → stop affordance present, send absent (and inverse); `role="log"`/`aria-live`/`aria-busy` attributes correct for running vs settled entry sets; attach/mic buttons absent.
 - Manual: start a run, press stop → "stopping…" appears, agent halts (allow driver latency), composer returns to send; double-click does nothing extra; screen-reader spot check (announce-once behavior).
+
+## Resolution
+Extracted the composer's send button into a new exported `ComposerSendButton` (`AssistantChat.tsx`), which toggles to a `Square`/`Loader2` stop affordance whenever `isStopShown` — derived via the existing `interruptibleAgents([selectedAgent])` from `agent-control.ts` — is true. Pressing it fires `sendConsoleCommand(interruptCommand(agentId))` (interrupt, never kill) and flips a `stopPending` debounce flag that disables the button and swaps in a spinner; a second press is a no-op while pending, and the flag resets itself either when the agent leaves the running state (effect keyed on `isStopShown`) or after an 8s timeout as a backstop against a silent driver. The decorative "Attach file" and "Voice input" buttons are removed from the composer entirely (Paperclip import kept — still used elsewhere for task-mention chips; Mic import dropped).
+
+For a11y, `ChatMessagesViewport`'s scroll container is now exported and carries `role="log"`, `aria-live="polite"`, `tabIndex={0}`, and `aria-busy` derived from `transcriptEntries.some(e => e.status === 'running')`. Every rendered entry — both `TranscriptTimeline`'s transcript entries and the legacy `visibleMessages` fallback path — is wrapped in an `<article aria-label="Message from …">` naming its sender (you/glance/tool name/system/thinking), via a small `transcriptEntrySender` helper.
+
+Added 6 new `renderToStaticMarkup` tests in `AssistantChat.test.tsx` covering: send-vs-stop rendering and disabled states, the stopping-debounce state, `role="log"`/`aria-live`/`aria-busy` for running vs settled transcripts, the `<article>` sender wrapping, and the absence of the attach/mic buttons. Full webapp suite (369 tests) and `tsc --noEmit` both pass.

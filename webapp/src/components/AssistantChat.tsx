@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Plus, Mic, Paperclip, ArrowUp, X, ChevronRight, Copy, Check, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare, Clock3, TerminalSquare, FileText, Send } from 'lucide-react';
+import { Sparkles, Plus, Paperclip, ArrowUp, Square, Loader2, X, ChevronRight, Copy, Check, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare, Clock3, TerminalSquare, FileText, Send } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -9,7 +9,7 @@ import { useChatStreamScroll } from '../hooks/chat/useChatStreamScroll';
 import { useChatNewMessages } from '../hooks/chat/useChatNewMessages';
 import { useTaskContext } from '../context/TaskContext';
 import { apiFetch, apiJson, jsonInit } from '../lib/api';
-import { answerCommand, canLand, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../lib/agent-control';
+import { answerCommand, canLand, interruptCommand, interruptibleAgents, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../lib/agent-control';
 import { activeWork, activeWorkDigest } from '../lib/insights';
 import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../lib/fleetActivity';
 import type { AgentDTO, PendingRequest, TodoPhaseDTO, TodoStatus, TranscriptEntry } from '../lib/dto';
@@ -227,6 +227,18 @@ export const runStatusLabel = (running: boolean, elapsedMs?: number) => `${runni
 
 const transcriptIsRunning = (entries: TranscriptEntry[]) => entries.some((entry) => entry.status === 'running');
 
+/** Human sender name for the `aria-label` on each entry's `<article>` wrapper. */
+const transcriptEntrySender = (entry: TranscriptEntry): string => {
+  switch (entry.kind) {
+    case 'user': return 'you';
+    case 'assistant': return 'glance';
+    case 'thinking': return 'glance (thinking)';
+    case 'tool': return (entry.tool?.name ?? 'tool').replace(/_/g, ' ');
+    case 'system': return 'system';
+    default: return entry.kind;
+  }
+};
+
 const agentIsRunning = (agent?: AgentDTO) => agent?.status === 'working' || agent?.status === 'starting';
 
 const transcriptStart = (entries: TranscriptEntry[], messages: Message[], agent?: AgentDTO) => agent?.startedAt ?? entries[0]?.ts ?? messages[0]?.timestamp ?? Date.now();
@@ -409,12 +421,12 @@ export const TranscriptTimeline = ({
         ? agent.pending.find((p) => p.id === entry.pending!.requestId)
         : undefined;
     return (
-      <>
+      <article aria-label={`Message from ${transcriptEntrySender(entry)}`}>
         <TranscriptEntryView entry={entry} />
         {gateRequest && onAnswer && (
           <GateWidget request={gateRequest} onAnswer={(value) => onAnswer(gateRequest.id, value)} />
         )}
-      </>
+      </article>
     );
   };
 
@@ -744,6 +756,60 @@ export const ComposerStats = ({ agent }: { agent?: AgentDTO }) => {
   return <div className="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-gray-500 dark:text-gray-400" aria-label="Run metrics">{parts.map((part, index) => <React.Fragment key={index}>{index > 0 && <span className="text-gray-300 dark:text-gray-700">·</span>}{part}</React.Fragment>)}</div>;
 };
 
+/**
+ * Composer's send/stop toggle. When the active session's agent is running, this becomes a
+ * "stop" affordance that fires `interrupt` (not `kill`) — see `agent-control.ts`. One press
+ * debounces into a disabled "stopping…" state; it never escalates on a second press, and it
+ * resets itself once the agent leaves the running state (or after a timeout if the driver
+ * never reports back).
+ */
+export const ComposerSendButton = ({
+  isStopShown,
+  stopPending,
+  canSend,
+  onSend,
+  onStop,
+}: {
+  isStopShown: boolean;
+  stopPending: boolean;
+  canSend: boolean;
+  onSend: () => void;
+  onStop: () => void;
+}) => {
+  if (isStopShown) {
+    return (
+      <button
+        type="button"
+        aria-label={stopPending ? 'Stopping…' : 'Stop'}
+        onClick={onStop}
+        disabled={stopPending}
+        className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
+          stopPending
+            ? 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
+            : 'bg-gray-900 text-white hover:bg-black dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-white'
+        }`}
+      >
+        {stopPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Square className="h-3.5 w-3.5" aria-hidden />}
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      aria-label="Send message"
+      onClick={onSend}
+      disabled={!canSend}
+      className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
+        canSend
+          ? 'bg-gray-900 text-white hover:bg-black dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-white'
+          : 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
+      }`}
+    >
+      <ArrowUp className="h-4 w-4" aria-hidden />
+    </button>
+  );
+};
+
 interface SuggestionChip {
   label: string;
   prompt: string;
@@ -822,7 +888,7 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
  * `<ChatMessagesViewport key={activeSessionId}>`) — remounting resets lock
  * state and scroll position instead of leaking them across sessions.
  */
-const ChatMessagesViewport = ({
+export const ChatMessagesViewport = ({
   hasTranscript,
   transcriptEntries,
   messages,
@@ -850,10 +916,18 @@ const ChatMessagesViewport = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const { isLocked, scrollToBottom, scrollIfLocked } = useChatStreamScroll({ scrollRef });
   const { hasNewMessages, dismiss, contentRef } = useChatNewMessages({ isLocked, onResize: scrollIfLocked });
+  const anyEntryRunning = transcriptIsRunning(transcriptEntries);
 
   return (
     <div className="relative flex-1 min-h-0">
-      <div ref={scrollRef} className="h-full overflow-y-auto p-3 md:p-4 scrollbar-custom bg-gray-50 dark:bg-gray-950">
+      <div
+        ref={scrollRef}
+        role="log"
+        aria-live="polite"
+        aria-busy={anyEntryRunning}
+        tabIndex={0}
+        className="h-full overflow-y-auto p-3 md:p-4 scrollbar-custom bg-gray-50 dark:bg-gray-950"
+      >
         <div ref={contentRef} className="space-y-4">
           {hasTranscript ? (
             <TranscriptTimeline
@@ -866,7 +940,7 @@ const ChatMessagesViewport = ({
               onAnswer={onAnswer}
             />
           ) : visibleMessages.map((msg, idx) => (
-            <div key={idx} data-chat-message className={`flex flex-col w-full ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+            <article key={idx} aria-label={`Message from ${msg.role === 'user' ? 'you' : 'glance'}`} data-chat-message className={`flex flex-col w-full ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
               {msg.role === 'user' ? (
                 <div className="flex flex-col items-end gap-1 max-w-[85%]">
                   <div className="bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-200 px-4 py-3 rounded-2xl rounded-tr-sm text-[14px] leading-relaxed whitespace-pre-wrap">
@@ -902,7 +976,7 @@ const ChatMessagesViewport = ({
                   </div>
                 </div>
               )}
-            </div>
+            </article>
           ))}
           {isLoading && (
             <div className="flex flex-col w-full items-start text-gray-800 dark:text-gray-300">
@@ -939,6 +1013,8 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const [mentionQuery, setMentionQuery] = useState('');
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [stopPending, setStopPending] = useState(false);
+  const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [todoCollapsed, setTodoCollapsed] = useState(false);
   const [agentDiffs, setAgentDiffs] = useState<AgentFileDiff[] | null>(null);
   const [workExpanded, setWorkExpanded] = useState(false);
@@ -958,6 +1034,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const visibleMessages = hasTranscript ? [] : messages;
   const transcriptRunning = transcriptIsRunning(transcriptEntries);
   const agentRunning = agentIsRunning(selectedAgent) || transcriptRunning || isLoading;
+  const isStopShown = !!selectedAgent && interruptibleAgents([selectedAgent]).length > 0;
   const changedFiles = agentDiffs?.length ?? null;
   const selectedTask = tasks.find(t => t.id === selectedTaskId);
   const suggestionChips = deriveSuggestionChips({ messages, transcriptEntries, selectedTask, selectedAgent, changedFiles });
@@ -974,6 +1051,27 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   useEffect(() => {
     if (agentId) subscribeConsole(agentId);
   }, [agentId, subscribeConsole]);
+
+  // Reset the "stopping…" debounce once the agent actually leaves the running state — the
+  // interrupt itself gives no immediate ack, so this pending flag *is* the feedback.
+  useEffect(() => {
+    if (!isStopShown && stopTimeoutRef.current) {
+      clearTimeout(stopTimeoutRef.current);
+      stopTimeoutRef.current = null;
+      setStopPending(false);
+    }
+  }, [isStopShown]);
+
+  useEffect(() => () => {
+    if (stopTimeoutRef.current) clearTimeout(stopTimeoutRef.current);
+  }, []);
+
+  const handleStop = () => {
+    if (!agentId || stopPending) return; // debounce, never escalate — no reachable kill from here
+    sendConsoleCommand(interruptCommand(agentId));
+    setStopPending(true);
+    stopTimeoutRef.current = setTimeout(() => setStopPending(false), 8000);
+  };
 
   // When an external "Open console" targets a specific agent, find or create a session for it.
   useEffect(() => {
@@ -1444,27 +1542,15 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
                   <option key={option.value || 'default'} value={option.value}>{option.label}</option>
                 ))}
               </select>
-              <button type="button" aria-label="Attach file" className="flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
-                <Paperclip className="h-4 w-4" aria-hidden />
-              </button>
-              <button type="button" aria-label="Voice input" className="flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
-                <Mic className="h-4 w-4" aria-hidden />
-              </button>
               <ComposerStats agent={selectedAgent} />
             </div>
-            <button
-              type="button"
-              aria-label="Send message"
-              onClick={() => handleSend()}
-              disabled={!input.trim() || isLoading}
-              className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
-                input.trim() && !isLoading
-                  ? 'bg-gray-900 text-white hover:bg-black dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-white'
-                  : 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
-              }`}
-            >
-              <ArrowUp className="h-4 w-4" aria-hidden />
-            </button>
+            <ComposerSendButton
+              isStopShown={isStopShown}
+              stopPending={stopPending}
+              canSend={!!input.trim() && !isLoading}
+              onSend={() => handleSend()}
+              onStop={handleStop}
+            />
           </div>
         </div>
       </div>

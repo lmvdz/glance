@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AgentMetaBar, ComposerStats, DiffReviewPanel, GateWidget, RunStatusHeader, TodoPanel, TranscriptEntryView, TranscriptTimeline, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions, runStatusLabel } from "./AssistantChat";
+import { AgentMetaBar, ChatMessagesViewport, ComposerSendButton, ComposerStats, DiffReviewPanel, GateWidget, RunStatusHeader, TodoPanel, TranscriptEntryView, TranscriptTimeline, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions, runStatusLabel } from "./AssistantChat";
 import { ScrollToLatestPill } from "./chat/ScrollToLatestPill";
 import type { AgentDTO, PendingRequest, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
 
@@ -281,4 +281,84 @@ test("ScrollToLatestPill renders only when visible and carries an accessible lab
   const shown = renderToStaticMarkup(<ScrollToLatestPill visible onClick={() => {}} />);
   expect(shown).toContain("New messages");
   expect(shown).toContain('aria-label="Jump to latest messages"');
+});
+
+test("ComposerSendButton shows send when the agent isn't running, and disables it without input", () => {
+  const disabled = renderToStaticMarkup(<ComposerSendButton isStopShown={false} stopPending={false} canSend={false} onSend={() => {}} onStop={() => {}} />);
+  expect(disabled).toContain('aria-label="Send message"');
+  expect(disabled).toContain("disabled");
+  expect(disabled).not.toContain("Stop");
+
+  const enabled = renderToStaticMarkup(<ComposerSendButton isStopShown={false} stopPending={false} canSend onSend={() => {}} onStop={() => {}} />);
+  expect(enabled).toContain('aria-label="Send message"');
+  expect(enabled).not.toContain("disabled");
+});
+
+test("ComposerSendButton swaps to a stop affordance while the agent is running, and debounces into a disabled stopping state", () => {
+  const running = renderToStaticMarkup(<ComposerSendButton isStopShown stopPending={false} canSend={false} onSend={() => {}} onStop={() => {}} />);
+  expect(running).toContain('aria-label="Stop"');
+  expect(running).not.toContain('aria-label="Send message"');
+  expect(running).not.toContain("disabled");
+
+  const pending = renderToStaticMarkup(<ComposerSendButton isStopShown stopPending canSend={false} onSend={() => {}} onStop={() => {}} />);
+  expect(pending).toContain("Stopping");
+  expect(pending).toContain("disabled");
+});
+
+test("ChatMessagesViewport's scroll container is an announced log region, aria-busy only while an entry is running", () => {
+  const runningEntries: TranscriptEntry[] = [{ id: "e1", kind: "assistant", text: "working…", ts: 1, status: "running" }];
+  const settledEntries: TranscriptEntry[] = [{ id: "e2", kind: "assistant", text: "done", ts: 1, status: "ok" }];
+
+  const running = renderToStaticMarkup(
+    <ChatMessagesViewport
+      hasTranscript
+      transcriptEntries={runningEntries}
+      messages={[]}
+      agentDiffs={[]}
+      workExpanded={false}
+      onToggleWork={() => {}}
+      visibleMessages={[]}
+      isLoading={false}
+      toggleReaction={() => {}}
+    />,
+  );
+  expect(running).toContain('role="log"');
+  expect(running).toContain('aria-live="polite"');
+  expect(running).toContain('aria-busy="true"');
+  expect(running).toContain('tabindex="0"');
+
+  const settled = renderToStaticMarkup(
+    <ChatMessagesViewport
+      hasTranscript
+      transcriptEntries={settledEntries}
+      messages={[]}
+      agentDiffs={[]}
+      workExpanded={false}
+      onToggleWork={() => {}}
+      visibleMessages={[]}
+      isLoading={false}
+      toggleReaction={() => {}}
+    />,
+  );
+  expect(settled).toContain('aria-busy="false"');
+});
+
+test("each transcript entry is wrapped in an <article> naming its sender", () => {
+  const entries: TranscriptEntry[] = [
+    { id: "u1", kind: "user", text: "hi", ts: 1, status: "ok" },
+    { id: "a1", kind: "assistant", text: "hello", ts: 2, status: "ok" },
+  ];
+  const html = renderToStaticMarkup(
+    <TranscriptTimeline entries={entries} messages={[]} expanded onToggle={() => {}} />,
+  );
+  expect(html).toContain('<article aria-label="Message from you">');
+  expect(html).toContain('<article aria-label="Message from glance">');
+});
+
+test("attach and mic buttons are gone from the composer's rendered subtree (no more misleading no-ops)", () => {
+  // The composer's send/stop control no longer ships alongside decorative attach/mic buttons;
+  // ComposerSendButton is the sole action rendered in that slot.
+  const html = renderToStaticMarkup(<ComposerSendButton isStopShown={false} stopPending={false} canSend={false} onSend={() => {}} onStop={() => {}} />);
+  expect(html).not.toContain('aria-label="Attach file"');
+  expect(html).not.toContain('aria-label="Voice input"');
 });
