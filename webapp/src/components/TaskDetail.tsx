@@ -18,6 +18,7 @@ import { PlanFlowDiagram } from './PlanFlowDiagram';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
 import type { ArtifactCommentDTO, PlanAnnotationTargetDTO } from '../lib/dto';
+import { prStateBadgeClass, prStateBadgeLabel } from '../lib/agent-badges';
 
 interface PipelineConcern {
   file: string;
@@ -1388,6 +1389,8 @@ export const TaskDetail = () => {
                               <span className={`text-[11px] font-semibold uppercase rounded px-1.5 py-0.5 border ${agent.status === 'working' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400' : agent.status === 'error' ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400' : agent.status === 'input' ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-400' : agent.status === 'stopped' ? 'border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400' : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-400'}`}>{agent.status}</span>
                               <span className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{agent.name}</span>
                               {agent.model && <span className={`hidden sm:block text-[10px] ${statusColor}`}>{agent.model}</span>}
+                              {agent.prState && <span className={`rounded px-1.5 py-0.5 text-[10px] ${prStateBadgeClass(agent.prState)}`}>{prStateBadgeLabel(agent.prState)}</span>}
+                              {agent.prUrl && <a href={agent.prUrl} target="_blank" rel="noreferrer" className="text-[10px] font-medium text-amber-600 underline hover:text-amber-500 dark:text-amber-400">PR #{agent.prNumber}</a>}
                             </div>
                             <div className="flex items-center gap-1 flex-shrink-0">
                               {!isTerminal && isWorking && (

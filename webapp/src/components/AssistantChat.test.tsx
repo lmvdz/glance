@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AgentMetaBar, ComposerStats, DiffReviewPanel, RunStatusHeader, TodoPanel, TranscriptEntryView, TranscriptTimeline, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions, runStatusLabel } from "./AssistantChat";
+import { AgentLandControls, AgentMetaBar, ComposerStats, DiffReviewPanel, RunStatusHeader, TodoPanel, TranscriptEntryView, TranscriptTimeline, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions, runStatusLabel } from "./AssistantChat";
 import type { AgentDTO, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
 
 test("TranscriptEntryView renders human-first tool output with raw payload tucked away", () => {
@@ -173,6 +173,52 @@ test("deriveSuggestionChips adapts to UI/UX chat context", () => {
 
   expect(suggestions.map((item) => item.label)).toContain("Surface UX blind spots");
   expect(suggestions.map((item) => item.label)).toContain("Ask the designer agent");
+});
+
+test("AgentLandControls labels the Land button plainly when prState is absent (local mode)", () => {
+  const agent: AgentDTO = {
+    id: "a1",
+    name: "chat",
+    status: "working",
+    repo: "/home/lars/sui/omp-squad",
+    worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
+    branch: "squad/chat",
+    pending: [],
+    lastActivity: 1,
+    autonomyMode: "assist",
+    effectiveMode: "assist",
+    verificationState: "fresh",
+    availableActions: ["land"],
+    landReady: true,
+  };
+
+  const html = renderToStaticMarkup(<AgentLandControls agent={agent} showToast={() => {}} />);
+  expect(html).toContain("Land ✓");
+  expect(html).not.toContain("Merge PR");
+});
+
+test("AgentLandControls labels the Land button 'Merged ✓' once the PR-mode land has merged", () => {
+  const agent: AgentDTO = {
+    id: "a1",
+    name: "chat",
+    status: "working",
+    repo: "/home/lars/sui/omp-squad",
+    worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
+    branch: "squad/chat",
+    pending: [],
+    lastActivity: 1,
+    autonomyMode: "assist",
+    effectiveMode: "assist",
+    verificationState: "fresh",
+    availableActions: ["land"],
+    landReady: true,
+    prUrl: "https://github.com/acme/repo/pull/42",
+    prNumber: 42,
+    prState: "merged",
+  };
+
+  const html = renderToStaticMarkup(<AgentLandControls agent={agent} showToast={() => {}} />);
+  expect(html).toContain("Merged ✓");
 });
 
 test("detectedPlanDirs finds plan files in tool payloads", () => {

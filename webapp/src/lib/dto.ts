@@ -194,6 +194,10 @@ export interface AgentDTO {
   blockedReason?: string;
   availableActions: AgentAction[];
   landReady?: boolean;
+  /** PR-mode landing metadata, set at push (draft/open) and merge (merged) time. Absent in local mode. */
+  prUrl?: string;
+  prNumber?: number;
+  prState?: 'draft' | 'open' | 'merged' | 'closed';
 }
 
 export interface TranscriptTool {
