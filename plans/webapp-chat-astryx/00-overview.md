@@ -52,6 +52,13 @@
 | 11 | — | — |
 | 12 | 09 | `ls webapp/src/components/chat/Composer.tsx` exists |
 
+## Completion (2026-07-04)
+- 12/12 concerns closed. Executed via workflow (25 agents: 12 implementers, per-batch fable reviews, fixers, committers), then audited: /code-review high (10 CONFIRMED findings) + cross-batch audit (2 significant) → all fixed in a 3-commit review-fix wave (114e898, c2c3fb0, 004616c).
+- Biggest post-review catches: seq-based cap guard froze the chat after daemon restart; destructive localStorage migration lost user turns; pending/failed sends invisible in the collapsed work fold; durable transcript lost the real agent prompt.
+- Final state: webapp 461 tests green, root suite at pre-existing baseline (2 known spawn flakes), tsc clean both sides, build clean.
+- Operational: the daemon must be reinstalled/restarted to serve `displayText` echoes (webapp degrades gracefully against an old daemon — full message shown, as before).
+- Known accepted residue (audit minors): history recall is mount-scoped; one-frame flicker on send-to-idle; 2nd+ user turns still fold into the collapsed work section (pre-existing timeline design, first prompt + trailing sends always visible).
+
 ## Notes
 - WIP snapshot at plan time (headless chained run, gate logged not asked): 3 plans with 10 open concerns (agentic-learning-loop 5, factory-control-plane 3, change-driven-loops 2), all dated 2026-07-03. Proceeded per the /research → /plan chain the user requested.
 - Sign-offs assumed (flag on land if contested): drop thumbs-up/down reactions; remove decorative attach/mic buttons until composer work makes attach real.
