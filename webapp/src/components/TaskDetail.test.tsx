@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { adjacentPlanPath, isOverviewDoc, planDocKind, PlanMarkdown, PlanMarkdownLoading, resetPlanScroll, safePlanIndex } from "./TaskDetail";
+import { adjacentPlanPath, isOverviewDoc, LifecycleTimeline, planDocKind, PlanMarkdown, PlanMarkdownLoading, resetPlanScroll, safePlanIndex, StatusPill } from "./TaskDetail";
 import { BLOCK_REGISTRY, parseMeta } from "./PlanBlocks";
+import type { TransitionEntry } from "../lib/dto";
 
 test("PlanMarkdown renders plan markdown with prose/table styling", () => {
   const html = renderToStaticMarkup(<PlanMarkdown content={"# Overview\n\n| A | B |\n| - | - |\n| 1 | 2 |"} />);
@@ -101,4 +102,60 @@ test("resetPlanScroll uses scrollTop instead of browser-specific scrollTo overlo
 
   expect(pane.scrollTop).toBe(0);
   expect(() => resetPlanScroll(null)).not.toThrow();
+});
+
+test("StatusPill renders the status text with a status-colored badge", () => {
+  const html = renderToStaticMarkup(<StatusPill status="error" />);
+
+  expect(html).toContain(">error<");
+  expect(html).toContain("border-red-200");
+});
+
+function transition(from: TransitionEntry["from"], to: TransitionEntry["to"], extra: Partial<TransitionEntry> = {}): TransitionEntry {
+  return { agentId: "a1", from, to, reason: "restart", at: 1000, ...extra };
+}
+
+test("LifecycleTimeline renders nothing when the agent has no transitions", () => {
+  const html = renderToStaticMarkup(
+    <LifecycleTimeline agent={{ id: "a1", transitions: [] }} isOpen={false} onToggle={() => {}} onLoadFull={() => {}} />,
+  );
+
+  expect(html).toBe("");
+});
+
+test("LifecycleTimeline shows a collapsed toggle with a count when transitions exist", () => {
+  const agent = { id: "a1", transitions: [transition("idle", "working")] };
+  const html = renderToStaticMarkup(<LifecycleTimeline agent={agent} isOpen={false} onToggle={() => {}} onLoadFull={() => {}} />);
+
+  expect(html).toContain("Lifecycle");
+  expect(html).toContain(">1<");
+  expect(html).not.toContain("Load full history");
+});
+
+test("LifecycleTimeline expands entries with cause/denied detail when open", () => {
+  const agent = {
+    id: "a1",
+    transitions: [
+      transition("working", "error", { reason: "fail", cause: { error: "boom" } }),
+      transition("idle", "input", { denied: true }),
+    ],
+  };
+  const html = renderToStaticMarkup(<LifecycleTimeline agent={agent} isOpen onToggle={() => {}} onLoadFull={() => {}} />);
+
+  expect(html).toContain("boom");
+  expect(html).toContain(">denied<");
+  expect(html).toContain("Load full history");
+});
+
+test("LifecycleTimeline prefers fullEntries over the capped tail and hides the load button once loaded", () => {
+  const agent = { id: "a1", transitions: [transition("idle", "working")] };
+  const fullEntries = [transition("starting", "idle"), transition("idle", "working"), transition("working", "input")];
+  const html = renderToStaticMarkup(
+    <LifecycleTimeline agent={agent} isOpen fullEntries={fullEntries} onToggle={() => {}} onLoadFull={() => {}} />,
+  );
+
+  // count badge still reflects the capped tail length (unaffected by fullEntries)
+  expect(html).toContain(">1<");
+  expect(html).not.toContain("Load full history");
+  expect((html.match(/font-mono/g) ?? []).length).toBe(3);
 });

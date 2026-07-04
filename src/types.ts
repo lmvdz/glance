@@ -496,6 +496,14 @@ export interface AgentDTO {
 	todoPhases?: RpcSessionState["todoPhases"];
 	/** Pending human-input requests (status === "input" when non-empty). */
 	pending: PendingRequest[];
+	/** Last 5 SIGNIFICANT lifecycle transitions (turn-progress excluded) — a compact inline strip.
+	 *  Full history via GET /api/agents/:id/transitions. Capped deliberately: this rides emitAgent's
+	 *  broadcast (per RPC-frame on the hot path), so it must never carry the full ring. */
+	transitions?: TransitionEntry[];
+	/** Count of error-class transitions (to:"error", reason "fail"|"catastrophe"|"exit-error") in the
+	 *  trailing 1h, computed over the FULL ring server-side — NOT derived from `transitions` above,
+	 *  which is capped and would undercount a busy/flapping agent. Feeds insights.ts hotspot ranking. */
+	errorTransitions1h?: number;
 	/** ms epoch of last activity of any kind. */
 	lastActivity: number;
 	/** Number of transcript entries (for cheap change detection). */

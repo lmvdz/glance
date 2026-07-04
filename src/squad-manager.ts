@@ -3882,10 +3882,33 @@ export class SquadManager extends EventEmitter {
 		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
 	}
 
-	/** Hook point for concern 03 (webapp timeline): wires the DTO's capped `transitions` tail + the
-	 *  `errorTransitions1h` rollup off every recorded (non-denied) transition. Deliberately a no-op here —
-	 *  concern 02 ships the wire format (TransitionEntry, the event, the endpoint) without touching AgentDTO. */
-	private pushTransitionEvent(_rec: AgentRecord, _entry: TransitionEntry): void {}
+	/** Wires the DTO's capped `transitions` tail + the `errorTransitions1h` rollup off every recorded
+	 *  (non-denied) transition. `turn-progress` entries never join the tail (hot-path noise); the rollup
+	 *  is always recomputed from the full ring so it never undercounts a busy/flapping agent. Both fields
+	 *  ride the next `emitAgent()` the calling site already performs — no extra broadcast here. */
+	private pushTransitionEvent(rec: AgentRecord, entry: TransitionEntry): void {
+		if (entry.reason !== "turn-progress") {
+			const tail = [...(rec.dto.transitions ?? []), entry];
+			rec.dto.transitions = tail.length > 5 ? tail.slice(-5) : tail;
+		}
+		rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec.dto.id);
+	}
+
+	/** Linear scan over the (≤500-entry) in-memory ring — never the file. Cheap enough to run on every
+	 *  transition since it only fires on the already-low-frequency `transition()` path, never on
+	 *  `turn-progress`'s hot early-return. */
+	private countErrorTransitions1h(agentId: string): number {
+		const cutoff = Date.now() - 3_600_000;
+		return this.transitionLog
+			.recent()
+			.filter(
+				(e) =>
+					e.agentId === agentId &&
+					e.at >= cutoff &&
+					e.to === "error" &&
+					(e.reason === "fail" || e.reason === "catastrophe" || e.reason === "exit-error"),
+			).length;
+	}
 
 	/** Full history for one agent: ring-served by default (fast, no file I/O); `full:true` additionally
 	 *  reads transitions.jsonl and follows `cause.priorId` lineage (bounded hops) to stitch a crash-spanning

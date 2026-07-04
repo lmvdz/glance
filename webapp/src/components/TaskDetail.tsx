@@ -17,8 +17,8 @@ import { TranscriptTimeline } from './AssistantChat';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
-import type { ArtifactCommentDTO, PlanAnnotationTargetDTO } from '../lib/dto';
-import { prStateBadgeClass, prStateBadgeLabel } from '../lib/agent-badges';
+import type { AgentDTO, ArtifactCommentDTO, PlanAnnotationTargetDTO, TransitionEntry } from '../lib/dto';
+import { prStateBadgeClass, prStateBadgeLabel, agentStatusBadgeClass } from '../lib/agent-badges';
 
 interface PipelineConcern {
   file: string;
@@ -102,6 +102,63 @@ const EmptyStateIllustration = () => (
     <path d="M144 130L148 134L156 126" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
+
+/** Small status-color badge for one lifecycle status, reusing the roster row's palette
+ *  (agentStatusBadgeClass) so the timeline strip's from/to pills never drift from it. */
+export function StatusPill({ status }: { status: TransitionEntry['from'] }) {
+  return <span className={`rounded px-1 py-0.5 text-[10px] font-semibold uppercase border ${agentStatusBadgeClass(status)}`}>{status}</span>;
+}
+
+/** Collapsible lifecycle history strip for one agent's detail row. Renders nothing when the agent
+ *  has no significant transitions yet (a brand-new agent, or one predating this field). `fullEntries`
+ *  overrides the capped `agent.transitions` tail once "Load full history" has round-tripped. */
+export function LifecycleTimeline({
+  agent,
+  isOpen,
+  fullEntries,
+  onToggle,
+  onLoadFull,
+}: {
+  agent: Pick<AgentDTO, 'id' | 'transitions'>;
+  isOpen: boolean;
+  fullEntries?: TransitionEntry[];
+  onToggle: () => void;
+  onLoadFull: () => void;
+}) {
+  if (!(agent.transitions?.length ?? 0)) return null;
+  const entries = fullEntries ?? agent.transitions!;
+  return (
+    <div className="border-t border-gray-100 dark:border-gray-800">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/50 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500"
+      >
+        <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+        <span>Lifecycle</span>
+        <span className="ml-auto rounded-full bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">{agent.transitions!.length}</span>
+      </button>
+      {isOpen && (
+        <div className="px-3 pb-3 pt-1 space-y-1">
+          {entries.slice().reverse().map((t, i) => (
+            <div key={`${t.at}-${i}`} className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+              <span className="font-mono text-[10px] text-gray-400">{new Date(t.at).toLocaleTimeString()}</span>
+              <StatusPill status={t.from} /><span className="text-gray-300">→</span><StatusPill status={t.to} />
+              <span className="text-gray-400">{t.reason}</span>
+              {t.cause?.error && <span className="truncate text-red-500 dark:text-red-400">{t.cause.error}</span>}
+              {t.denied && <span className="text-amber-500 text-[10px] uppercase">denied</span>}
+            </div>
+          ))}
+          {!fullEntries && (
+            <button type="button" onClick={onLoadFull} className="text-[10px] text-amber-600 hover:underline">
+              Load full history
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function commentFromApi(comment: ArtifactCommentDTO): TaskComment {
   return { id: comment.id, text: comment.body, timestamp: new Date(comment.createdAt).toISOString(), author: comment.author, urgent: comment.urgent, resolvedAt: comment.resolvedAt, kind: comment.kind, subject: comment.subject, annotation: comment.annotation };
@@ -356,6 +413,8 @@ export const TaskDetail = () => {
   const [flowFocus, setFlowFocus] = React.useState(false);
   const [transcriptOpenIds, setTranscriptOpenIds] = React.useState<Set<string>>(() => new Set());
   const [transcriptDetailOpenIds, setTranscriptDetailOpenIds] = React.useState<Set<string>>(() => new Set());
+  const [timelineOpenIds, setTimelineOpenIds] = React.useState<Set<string>>(() => new Set());
+  const [fullTimelines, setFullTimelines] = React.useState<Map<string, TransitionEntry[]>>(() => new Map());
   const [now, setNow] = React.useState(Date.now);
   const splitContainerRef = React.useRef<HTMLDivElement | null>(null);
   const planArticleRef = React.useRef<HTMLElement | null>(null);
@@ -456,6 +515,21 @@ export const TaskDetail = () => {
       return next;
     });
   }, []);
+  const toggleTimeline = React.useCallback((agentId: string) => {
+    setTimelineOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) next.delete(agentId); else next.add(agentId);
+      return next;
+    });
+  }, []);
+  const loadFullTimeline = React.useCallback(async (agentId: string) => {
+    try {
+      const full = await apiJson<TransitionEntry[]>(`/api/agents/${encodeURIComponent(agentId)}/transitions?full=1`);
+      setFullTimelines((prev) => new Map(prev).set(agentId, full));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load full timeline', 'error');
+    }
+  }, [showToast]);
   const handleStopAgents = () => {
     if (!stopTargets.length) return;
     if (!stopConfirm) {
@@ -1386,7 +1460,7 @@ export const TaskDetail = () => {
                         <div key={agent.id} className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
                           <div className="flex items-center justify-between gap-2 px-3 py-2">
                             <div className="min-w-0 flex items-center gap-2">
-                              <span className={`text-[11px] font-semibold uppercase rounded px-1.5 py-0.5 border ${agent.status === 'working' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400' : agent.status === 'error' ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400' : agent.status === 'input' ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-400' : agent.status === 'stopped' ? 'border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400' : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-400'}`}>{agent.status}</span>
+                              <span className={`text-[11px] font-semibold uppercase rounded px-1.5 py-0.5 border ${agentStatusBadgeClass(agent.status)}`}>{agent.status}</span>
                               <span className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{agent.name}</span>
                               {agent.model && <span className={`hidden sm:block text-[10px] ${statusColor}`}>{agent.model}</span>}
                               {agent.prState && <span className={`rounded px-1.5 py-0.5 text-[10px] ${prStateBadgeClass(agent.prState)}`}>{prStateBadgeLabel(agent.prState)}</span>}
@@ -1457,6 +1531,14 @@ export const TaskDetail = () => {
                               )}
                             </div>
                           ))}
+                          {/* Lifecycle timeline strip */}
+                          <LifecycleTimeline
+                            agent={agent}
+                            isOpen={timelineOpenIds.has(agent.id)}
+                            fullEntries={fullTimelines.get(agent.id)}
+                            onToggle={() => toggleTimeline(agent.id)}
+                            onLoadFull={() => void loadFullTimeline(agent.id)}
+                          />
                           {/* Live transcript panel */}
                           {(() => {
                             const agentTranscript = transcripts.get(agent.id) ?? [];
