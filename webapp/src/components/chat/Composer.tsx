@@ -1,5 +1,5 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { Sparkles, ArrowUp, Square, Loader2 } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Sparkles, ArrowUp, Square, Loader2, Paperclip, X } from 'lucide-react';
 import { useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
 import type { AgentDTO } from '../../lib/dto';
@@ -22,6 +22,146 @@ export interface SuggestionChip {
   label: string;
   prompt: string;
 }
+
+// =============================================================================
+// Pure decision functions — unit-tested directly (bun:test, no jsdom). Wired
+// into the component below via plain useState/useEffect.
+// =============================================================================
+
+/** Textarea auto-grow cap: ~8 lines of the composer's 13px/leading-relaxed text plus its
+ *  vertical padding (8 * 19.5px + 20px padding ≈ 176px), then it scrolls instead of growing. */
+export const COMPOSER_MAX_HEIGHT_PX = 176;
+
+export function clampGrownHeight(scrollHeight: number, max = COMPOSER_MAX_HEIGHT_PX): number {
+  return Math.min(scrollHeight, max);
+}
+
+/** History recall: -1 means "viewing the live draft" (not recalling); otherwise an index into
+ *  `history` (0 = newest). `draft` is the in-progress text saved when recall started, restored
+ *  when cycling back past index 0 — terminal convention. */
+export interface HistoryRecallState {
+  index: number;
+  draft: string;
+}
+
+export const INITIAL_RECALL_STATE: HistoryRecallState = { index: -1, draft: '' };
+
+export const PROMPT_HISTORY_LIMIT = 50;
+
+/** Newest-first insert, capped — called once per successful send. */
+export function pushPromptHistory(history: string[], text: string, limit = PROMPT_HISTORY_LIMIT): string[] {
+  return [text, ...history].slice(0, limit);
+}
+
+export interface RecallResult {
+  state: HistoryRecallState;
+  value: string;
+}
+
+/** ArrowUp: step one entry further back in history. Saves the live draft on the first step;
+ *  returns null at the oldest entry (or when there is no history) so the caller lets the
+ *  keystroke fall through to normal caret movement. */
+export function recallOlder(state: HistoryRecallState, history: string[], currentDraft: string): RecallResult | null {
+  if (history.length === 0) return null;
+  if (state.index >= history.length - 1) return null;
+  const index = state.index + 1;
+  const draft = state.index === -1 ? currentDraft : state.draft;
+  return { state: { index, draft }, value: history[index] };
+}
+
+/** ArrowDown: step one entry newer. From index 0, restores the saved draft and exits recall.
+ *  Returns null when already at the draft (nothing newer to go to). */
+export function recallNewer(state: HistoryRecallState, history: string[]): RecallResult | null {
+  if (state.index === -1) return null;
+  if (state.index === 0) return { state: INITIAL_RECALL_STATE, value: state.draft };
+  const index = state.index - 1;
+  return { state: { index, draft: state.draft }, value: history[index] };
+}
+
+/** Paste-as-chip: a paste past this length becomes an attachment chip instead of flooding the
+ *  textarea. 200 chars is comfortably past a normal sentence but well under a pasted diff/log. */
+export const PASTE_CHIP_THRESHOLD = 200;
+
+export function shouldChipPaste(text: string, threshold = PASTE_CHIP_THRESHOLD): boolean {
+  return text.length > threshold;
+}
+
+export function formatPasteSize(byteLength: number): string {
+  return `${(byteLength / 1024).toFixed(1)} KB`;
+}
+
+export function pasteChipLabel(text: string): string {
+  return `Pasted text · ${formatPasteSize(new TextEncoder().encode(text).length)}`;
+}
+
+export interface PasteChip {
+  id: string;
+  label: string;
+  content: string;
+}
+
+/** Fold pasted-text chips into the outgoing message: fenced, appended after the typed text, in
+ *  the order they were attached — this is the honest home for "attach" (04 removed the
+ *  decorative button; nothing was ever wired to it). Runs before the parent's context-blob
+ *  assembly in `handleSend`. */
+export function assembleSendText(typedText: string, chips: PasteChip[]): string {
+  if (chips.length === 0) return typedText;
+  const fenced = chips.map((chip) => `\`\`\`\n${chip.content}\n\`\`\``).join('\n\n');
+  return typedText ? `${typedText}\n\n${fenced}` : fenced;
+}
+
+/** A single paste-as-chip attachment: label + preview (hover `title`, click-to-expand) + remove,
+ *  plus an "insert inline" escape hatch once expanded. Extracted as its own component so the
+ *  markup is directly unit-testable (bun:test has no jsdom to drive the click interaction). */
+export const ComposerAttachmentChip = ({
+  chip,
+  expanded,
+  onToggle,
+  onRemove,
+  onInsertInline,
+}: {
+  chip: PasteChip;
+  expanded: boolean;
+  onToggle: () => void;
+  onRemove: () => void;
+  onInsertInline: () => void;
+}) => (
+  <div className="flex flex-col items-start">
+    <div className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white pl-2 pr-1 py-1 dark:border-gray-700 dark:bg-gray-950">
+      <button
+        type="button"
+        onClick={onToggle}
+        title={chip.content.slice(0, 400)}
+        className="flex items-center gap-1.5 text-[11px] font-medium text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+      >
+        <Paperclip className="h-3 w-3" aria-hidden />
+        {chip.label}
+      </button>
+      <button
+        type="button"
+        aria-label={`Remove ${chip.label}`}
+        onClick={onRemove}
+        className="flex h-5 w-5 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+      >
+        <X className="h-3 w-3" aria-hidden />
+      </button>
+    </div>
+    {expanded && (
+      <div className="mt-1 max-h-40 w-full max-w-xs overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-2 text-[11px] font-mono whitespace-pre-wrap text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+        {chip.content}
+        <div className="mt-1 flex justify-end">
+          <button
+            type="button"
+            onClick={onInsertInline}
+            className="text-[11px] font-medium text-amber-600 hover:underline dark:text-amber-400"
+          >
+            Insert inline
+          </button>
+        </div>
+      </div>
+    )}
+  </div>
+);
 
 /**
  * Composer's send/stop toggle. When the active session's agent is running, this becomes a
@@ -105,6 +245,17 @@ export const Composer = ({
   const [input, setInput] = useState('');
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // History recall (ArrowUp/ArrowDown) cycles this composer instance's own prior sends —
+  // scoped to this mount rather than reaching into the parent's session store, since Composer
+  // already owns every send that passes through `submit`. Not persisted across a full remount.
+  const [promptHistory, setPromptHistory] = useState<string[]>([]);
+  const [recallState, setRecallState] = useState<HistoryRecallState>(INITIAL_RECALL_STATE);
+
+  // Paste-as-chip: a large paste is diverted into an attachment chip instead of flooding the
+  // textarea; chip contents are folded back into the outgoing text on send (see `submit`).
+  const [chips, setChips] = useState<PasteChip[]>([]);
+  const [expandedChipId, setExpandedChipId] = useState<string | null>(null);
+
   // `@`-mention combobox — caret-anchored via the composer textarea's real selection, not a
   // split(' ') heuristic. Task filtering stays synchronous over `tasks`; the `triggers` array
   // is extensible so a future `/` command menu slots in beside it.
@@ -118,19 +269,82 @@ export const Composer = ({
   ], [tasks]);
   const mentionMenu = useTriggerMenu(composerTextareaRef, mentionTriggers, setInput);
 
+  // Auto-grow: track content height up to the 8-line cap, then scroll. Runs on every `input`
+  // change (typed, pasted, recalled, or cleared on send) rather than only on the raw `onChange`
+  // DOM event, since a controlled textarea's value can also change without one (e.g. the
+  // programmatic clear-on-send below).
+  useEffect(() => {
+    const el = composerTextareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${clampGrownHeight(el.scrollHeight)}px`;
+  }, [input]);
+
+  // Select-all on recall (terminal convention) — only while actively browsing history; the
+  // effect runs after the DOM value commits, so `.select()` selects the recalled text, not the
+  // stale pre-update value.
+  useEffect(() => {
+    if (recallState.index === -1) return;
+    composerTextareaRef.current?.select();
+  }, [recallState]);
+
   const submit = (forcedInput?: string) => {
-    const textToSend = forcedInput || input.trim();
-    if (!textToSend || isLoading) return;
+    const typed = forcedInput || input.trim();
+    if ((!typed && chips.length === 0) || isLoading) return;
+    const textToSend = assembleSendText(typed, chips);
     setInput('');
+    setChips([]);
+    setExpandedChipId(null);
+    if (typed) setPromptHistory((prev) => pushPromptHistory(prev, typed));
+    setRecallState(INITIAL_RECALL_STATE);
     onSend(textToSend);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (mentionMenu.handleKeyDown(e)) return; // menu consumed the key (nav/select/dismiss)
+    const el = e.currentTarget;
+    if (e.key === 'ArrowUp' && el.selectionStart === 0 && el.selectionEnd === 0) {
+      const recalled = recallOlder(recallState, promptHistory, input);
+      if (recalled) {
+        e.preventDefault();
+        setRecallState(recalled.state);
+        setInput(recalled.value);
+      }
+      return;
+    }
+    if (e.key === 'ArrowDown' && el.selectionStart === input.length && el.selectionEnd === input.length) {
+      const recalled = recallNewer(recallState, promptHistory);
+      if (recalled) {
+        e.preventDefault();
+        setRecallState(recalled.state);
+        setInput(recalled.value);
+      }
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
     }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const text = e.clipboardData?.getData('text') ?? '';
+    if (!shouldChipPaste(text)) return; // short paste — let it land in the textarea as usual
+    e.preventDefault();
+    setChips((prev) => [...prev, { id: `chip:${Date.now()}:${Math.random().toString(36).slice(2)}`, label: pasteChipLabel(text), content: text }]);
+  };
+
+  const removeChip = (id: string) => {
+    setChips((prev) => prev.filter((chip) => chip.id !== id));
+    setExpandedChipId((prev) => (prev === id ? null : prev));
+  };
+
+  const insertChipInline = (id: string) => {
+    const chip = chips.find((c) => c.id === id);
+    if (!chip) return;
+    setInput((prev) => (prev ? `${prev}\n${chip.content}` : chip.content));
+    setChips((prev) => prev.filter((c) => c.id !== id));
+    setExpandedChipId((prev) => (prev === id ? null : prev));
   };
 
   return (
@@ -181,13 +395,29 @@ export const Composer = ({
           </div>
         )}
 
+        {chips.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-2.5 pt-2" aria-label="Pasted attachments">
+            {chips.map((chip) => (
+              <ComposerAttachmentChip
+                key={chip.id}
+                chip={chip}
+                expanded={expandedChipId === chip.id}
+                onToggle={() => setExpandedChipId((prev) => (prev === chip.id ? null : chip.id))}
+                onRemove={() => removeChip(chip.id)}
+                onInsertInline={() => insertChipInline(chip.id)}
+              />
+            ))}
+          </div>
+        )}
+
         <textarea
           ref={composerTextareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder="Type @ to link a task..."
-          className="w-full bg-transparent border-none outline-none text-[13px] text-gray-900 dark:text-gray-200 px-3 py-2.5 resize-none min-h-12 max-h-40"
+          className="w-full bg-transparent border-none outline-none text-[13px] text-gray-900 dark:text-gray-200 px-3 py-2.5 resize-none overflow-y-auto"
           disabled={isLoading}
           rows={1}
           {...mentionMenu.comboboxProps}
@@ -209,7 +439,7 @@ export const Composer = ({
           <ComposerSendButton
             isStopShown={isStopShown}
             stopPending={stopPending}
-            canSend={!!input.trim() && !isLoading}
+            canSend={(!!input.trim() || chips.length > 0) && !isLoading}
             onSend={() => submit()}
             onStop={onStop}
           />

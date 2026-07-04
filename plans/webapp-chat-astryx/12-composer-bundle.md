@@ -1,5 +1,5 @@
 # Composer quality bundle: auto-grow, history recall, paste-as-chip
-STATUS: open
+STATUS: closed
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -23,3 +23,6 @@ None (chips are folded into the prompt text; no DTO change).
 - `bun test`: history-cycle reducer (draft preservation, bounds, newest-first); paste-length threshold routing; send-text assembly with chips (fencing, order).
 - Static markup: chip renders with remove control; textarea rows/height attributes sane.
 - Manual: paste a long diff → chip, not text-flood; send → agent receives full content; ArrowUp recalls, editing a recalled prompt then ArrowUp again preserves nothing unexpected; auto-grow caps at ~8 lines.
+
+## Resolution
+Implemented all three composer features in webapp/src/components/chat/Composer.tsx: auto-grow textarea (up to 8 lines, resets on send/clear), history recall via ArrowUp/ArrowDown over prior user prompts with draft preservation, and paste-as-chip for pastes over 200 chars with fenced inline insertion on send. Covered by webapp/src/components/chat/Composer.test.tsx.
