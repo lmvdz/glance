@@ -28,7 +28,7 @@ import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
 import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
-import type { EngineCheckpoint, NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, Workflow, WorkflowJournalEvent, WorkflowRunState } from "./workflow/types.ts";
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
@@ -3014,7 +3014,7 @@ export class SquadManager extends EventEmitter {
 		// ahead of this re-spawn: prior partial work may already sit in the reused worktree — say so in the
 		// re-prompt.
 		const task = id && this.reconciledStops.delete(id) ? `${spec.task}\n\n(Resuming after a restart — prior partial work may already exist in this worktree; continue from where it left off.)` : spec.task;
-		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name) }, LOCAL_ACTOR);
+		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name), parentNodeId: spec.parentNodeId, branchIndex: spec.branchIndex }, LOCAL_ACTOR);
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", notAttempted: true, text: "branch agent not created" };
 		// Persisted (not sent as create()'s own auto-prompt — runAgentTask below owns the actual send and
@@ -3764,6 +3764,20 @@ export class SquadManager extends EventEmitter {
 				rec.options.subagents = rec.dto.subagents;
 				rec.subs.clearDirty();
 				void this.persist(); // chain-deduped by concern 01 — safe to call on every dirty transition
+			}
+			return;
+		}
+		if (frame.type === "workflow_journal") {
+			const event = frame.event as WorkflowJournalEvent;
+			// Only the static topology snapshot is consumed here — a purely structural event, so we return
+			// early instead of falling to the generic tail (which would force an unnecessary derive()/emitAgent
+			// churn). All other WorkflowJournalEvent types (workflow.node.*, workflow.human_gate.*, etc.) are
+			// deliberately unconsumed: general journal persistence is the separate hooks-convergence initiative.
+			if (event.type === "workflow.graph" && event.graph) {
+				rec.dto.workflowGraph = event.graph;
+				rec.options.workflowGraph = event.graph;
+				this.emitAgent(rec);
+				void this.persist();
 			}
 			return;
 		}
