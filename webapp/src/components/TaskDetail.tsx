@@ -8,7 +8,7 @@ import { ProofProvenancePanel } from './ProofProvenancePanel';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
-import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS, fetchCheckpoints, resolveForkTarget, type CheckpointEntryDTO } from '../lib/agent-control';
+import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS, fetchCheckpoints, resolveForkTarget, isForkCheckpointResponseCurrent, type CheckpointEntryDTO } from '../lib/agent-control';
 import { taskRef } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
@@ -584,7 +584,17 @@ export const TaskDetail = () => {
   const [modelPickerValue, setModelPickerValue] = React.useState('');
   // Fork picker state — which agent's checkpoint-step picker is open, its fetched checkpoint
   // history, and the currently-selected step (defaults to latest once the fetch resolves).
-  const [forkPickerAgentId, setForkPickerAgentId] = React.useState<string | null>(null);
+  const [forkPickerAgentId, setForkPickerAgentIdState] = React.useState<string | null>(null);
+  // Mirrors forkPickerAgentId synchronously (state is only visible via the stale closure captured
+  // when a fetch started) so the checkpoint-fetch guard below can see which agent the picker is
+  // *currently* open for, not which one it was open for when the fetch began. Every setter that
+  // moves the picker — open, toggle-close, confirm, cancel, task-switch reset — goes through this
+  // one wrapper, so the ref always tracks the latest value.
+  const forkPickerAgentIdRef = React.useRef<string | null>(null);
+  const setForkPickerAgentId = React.useCallback((agentId: string | null) => {
+    forkPickerAgentIdRef.current = agentId;
+    setForkPickerAgentIdState(agentId);
+  }, []);
   const [forkCheckpoints, setForkCheckpoints] = React.useState<CheckpointEntryDTO[]>([]);
   const [forkSelectedSeq, setForkSelectedSeq] = React.useState<number | null>(null);
   // Answer (pending input) state
@@ -705,6 +715,10 @@ export const TaskDetail = () => {
     setForkCheckpoints([]);
     setForkSelectedSeq(null);
     void fetchCheckpoints(agentId).then((entries) => {
+      // Discard a response for an agent the picker has since moved on from — e.g. opening the
+      // picker on a slow agent A then immediately on B must not let A's late fetch overwrite B's
+      // open picker (see agent-control.ts isForkCheckpointResponseCurrent).
+      if (!isForkCheckpointResponseCurrent(agentId, forkPickerAgentIdRef.current)) return;
       setForkCheckpoints(entries);
       setForkSelectedSeq(entries.length ? Math.max(...entries.map((e) => e.seq)) : null);
     });

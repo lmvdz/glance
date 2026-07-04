@@ -78,6 +78,17 @@ export async function fetchCheckpoints(agentId: string): Promise<CheckpointEntry
 }
 
 /**
+ * Guards against a stale `fetchCheckpoints` response overwriting the Fork picker: true only if the
+ * picker is still open for the same agent the fetch was made for. Without this, opening the picker
+ * on agent A (slow fetch), then agent B (fast open) before A resolves, lets A's late response
+ * overwrite B's already-open picker via setForkCheckpoints/setForkSelectedSeq — so confirming then
+ * forks B using A's checkpoint seq (daemon rejects it, or worse, silently forks the wrong step).
+ */
+export function isForkCheckpointResponseCurrent(requestedAgentId: string, currentPickerAgentId: string | null): boolean {
+  return requestedAgentId === currentPickerAgentId;
+}
+
+/**
  * Pure: resolves the exact `fork` command a confirmed picker selection sends, given the fetched
  * checkpoints and whatever seq is currently selected — falling back to the latest entry when nothing
  * has been explicitly picked yet (the picker's own default). Extracted out of the component's click

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { canLand, fetchCheckpoints, forkCommand, landToast, resolveForkTarget, stopCommand, stoppableAgents, verifyToast, type CheckpointEntryDTO } from "./agent-control";
+import { canLand, fetchCheckpoints, forkCommand, isForkCheckpointResponseCurrent, landToast, resolveForkTarget, stopCommand, stoppableAgents, verifyToast, type CheckpointEntryDTO } from "./agent-control";
 import type { AgentDTO } from "./dto";
 
 const agent = (id: string, status: AgentDTO["status"]): AgentDTO =>
@@ -92,4 +92,18 @@ test("fetchCheckpoints degrades to [] instead of throwing when an old daemon 404
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("isForkCheckpointResponseCurrent is true when the picker is still open for the requesting agent", () => {
+  expect(isForkCheckpointResponseCurrent("a1", "a1")).toBe(true);
+});
+
+test("isForkCheckpointResponseCurrent discards a response once the picker has moved to another agent (the fork-mixup bug)", () => {
+  // Opening the picker on slow agent A, then fast agent B, before A's fetch resolves: A's response
+  // must not land on B's now-open picker.
+  expect(isForkCheckpointResponseCurrent("a1", "b1")).toBe(false);
+});
+
+test("isForkCheckpointResponseCurrent discards a response once the picker has been closed entirely", () => {
+  expect(isForkCheckpointResponseCurrent("a1", null)).toBe(false);
 });
