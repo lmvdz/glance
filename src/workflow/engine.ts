@@ -73,7 +73,15 @@ export class WorkflowEngine {
 		while (current) {
 			if (this.cancelled) throw new WorkflowCancelled();
 			const node = this.wf.nodes.get(current);
-			if (!node) return { outcome: "failed", reason: `dangling edge to unknown node "${current}"`, stages: shared.stages };
+			if (!node) {
+				// Fifth terminal-failure return (review finding 5): this used to bypass terminalFail entirely,
+				// so a dangling edge never got a terminal marker — resumable()'s `!terminal` check passed, the
+				// poison cap never tripped (the run dies inside run() before ever reaching the resume-attempt
+				// check), and the run boot-looped through adoption forever. Route it through the same helper as
+				// the other four terminal-failure sites.
+				const checkpoint: EngineCheckpoint = { goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: 0 };
+				return this.terminalFail(opts, shared, checkpoint, "failed", `dangling edge to unknown node "${current}"`);
+			}
 			if (node.kind === "exit") return { outcome: "succeeded", reason: "reached exit", stages: shared.stages };
 
 			// The resumed node was already counted before the restart — don't re-count or re-cap it.

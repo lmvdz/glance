@@ -225,6 +225,35 @@ test("prompt is refused (not re-driven) against a terminal-marked workflow reatt
 	await mgr2.stop();
 });
 
+// Review finding 9: reattachTerminal used to hardcode `transcript: []` even though the snapshot's
+// transcript for this exact id is in scope at the call site (reconnectLive) — a terminal run lost its
+// visible history on every restart, right when the operator needs it most to decide whether to fork.
+test("a terminal-marked workflow's transcript survives a restart (reattachTerminal threads it through)", async () => {
+	const { mgr: mgr1, repo, stateDir, worktreeBase } = await makeMgr("terminal-transcript");
+	const host1 = mgr1 as unknown as InternalHost & { agents: Map<string, AgentRecordLike & { transcript: { kind: string; text: string; ts: number }[] }> };
+
+	const dto = await mgr1.create({ name: "wf-transcript", repo, approvalMode: "yolo", verify: "true" });
+	const rec1 = host1.agents.get(dto.id)!;
+	rec1.agent.emit("checkpoint", runState({ runId: "run-transcript", currentNode: "n1" }));
+	await rec1.checkpointAppending;
+	// Seed some visible history — exactly what the operator needs to decide whether to fork.
+	rec1.transcript.push({ kind: "user", text: "do the thing", ts: Date.now() }, { kind: "assistant", text: "working on it", ts: Date.now() });
+	rec1.agent.emit("event", { type: "workflow_terminal", reason: "poison cap", checkpoint: checkpoint() });
+	await waitFor(() => rec1.dto.status === "error");
+	await mgr1.stop();
+
+	const mgr2 = new SquadManager({ stateDir, worktreeBase });
+	(mgr2 as unknown as DriverFactoryHost).makeDriver = () => new FakeDriver();
+	await mgr2.start();
+
+	const after = mgr2.list().find((a) => a.name === "wf-transcript");
+	expect(after?.status).toBe("error"); // sanity: still the terminal-reattach path
+	const transcript = mgr2.getTranscript(dto.id);
+	expect(transcript.map((t) => t.text)).toEqual(["do the thing", "working on it"]);
+	expect(after?.messageCount).toBe(2);
+	await mgr2.stop();
+});
+
 // (e) remove(id, deleteWorktree: true) on a workflow agent with a terminal runId deletes its
 // checkpoint-log JSONL file.
 test("remove(id, true) deletes the checkpoint-log JSONL for a terminal workflow's runId", async () => {
