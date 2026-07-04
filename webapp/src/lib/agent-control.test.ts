@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { canLand, landToast, stopCommand, stoppableAgents, verifyToast } from "./agent-control";
+import { canLand, fetchCheckpoints, forkCommand, landToast, resolveForkTarget, stopCommand, stoppableAgents, verifyToast, type CheckpointEntryDTO } from "./agent-control";
 import type { AgentDTO } from "./dto";
 
 const agent = (id: string, status: AgentDTO["status"]): AgentDTO =>
@@ -49,4 +49,47 @@ test("verifyToast: green proof invites the land, red proof carries the failing t
   expect(verifyToast({ ok: true })).toEqual({ text: "Proof green — this branch can land", tone: "success" });
   expect(verifyToast({ ok: false, detail: "line one\n2 tests failed" })).toEqual({ text: "Proof RED — 2 tests failed", tone: "error" });
   expect(verifyToast({ ok: false })).toEqual({ text: "Proof RED", tone: "error" });
+});
+
+test("forkCommand('a1', 3) returns a fork command carrying that checkpoint seq", () => {
+  expect(forkCommand("a1", 3)).toEqual({ type: "fork", id: "a1", seq: 3 });
+});
+
+function checkpoint(seq: number, currentNode = "verify"): CheckpointEntryDTO {
+  return { seq, at: seq * 1000, currentNode };
+}
+
+test("resolveForkTarget defaults to the latest checkpoint's seq when nothing is explicitly selected", () => {
+  const checkpoints = [checkpoint(1), checkpoint(3), checkpoint(2)];
+  expect(resolveForkTarget("a1", checkpoints, null)).toEqual({ type: "fork", id: "a1", seq: 3 });
+});
+
+test("resolveForkTarget honors an explicitly selected earlier checkpoint's seq", () => {
+  const checkpoints = [checkpoint(1), checkpoint(2), checkpoint(3)];
+  expect(resolveForkTarget("a1", checkpoints, 1)).toEqual({ type: "fork", id: "a1", seq: 1 });
+});
+
+test("resolveForkTarget returns undefined when no checkpoints have been fetched yet (nothing to fork from)", () => {
+  expect(resolveForkTarget("a1", [], null)).toBeUndefined();
+});
+
+test("fetchCheckpoints returns the daemon's parsed checkpoint list", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({ ok: true, json: async () => [{ seq: 1, at: 100, currentNode: "verify" }] }) as unknown as Response) as typeof fetch;
+  try {
+    expect(await fetchCheckpoints("a1")).toEqual([{ seq: 1, at: 100, currentNode: "verify" }]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchCheckpoints degrades to [] instead of throwing when an old daemon 404s the route", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: false, text: async () => "not found" }) as unknown as Response) as typeof fetch;
+  try {
+    expect(await fetchCheckpoints("a1")).toEqual([]);
+  } finally {
+    globalThis.fetch = original;
+  }
 });

@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { adjacentPlanPath, fullTimelineStale, isOverviewDoc, LifecycleTimeline, planDocKind, PlanMarkdown, PlanMarkdownLoading, resetPlanScroll, safePlanIndex, StatusPill } from "./TaskDetail";
+import { adjacentPlanPath, ForkButton, ForkPicker, fullTimelineStale, isOverviewDoc, LifecycleTimeline, planDocKind, PlanMarkdown, PlanMarkdownLoading, resetPlanScroll, safePlanIndex, StatusPill } from "./TaskDetail";
 import { BLOCK_REGISTRY, parseMeta } from "./PlanBlocks";
+import type { CheckpointEntryDTO } from "../lib/agent-control";
 import type { TransitionEntry } from "../lib/dto";
 
 test("PlanMarkdown renders plan markdown with prose/table styling", () => {
@@ -198,5 +199,50 @@ describe("fullTimelineStale", () => {
   test("is false for an undefined or empty live tail (nothing new to invalidate against)", () => {
     expect(fullTimelineStale(2000, undefined)).toBe(false);
     expect(fullTimelineStale(2000, [])).toBe(false);
+  });
+});
+
+// #never-lose-work concern 05: the Fork control is gated on the persisted `forkAvailable` DTO field
+// so an old daemon (which never sets it) never shows the button, instead of showing it disabled or
+// 404ing when clicked.
+describe("ForkButton", () => {
+  test("renders nothing for an agent with forkAvailable undefined or false", () => {
+    expect(renderToStaticMarkup(<ForkButton agent={{ name: "a1", forkAvailable: undefined }} isOpen={false} onClick={() => {}} />)).toBe("");
+    expect(renderToStaticMarkup(<ForkButton agent={{ name: "a1", forkAvailable: false }} isOpen={false} onClick={() => {}} />)).toBe("");
+  });
+
+  test("renders the Fork trigger for an agent with forkAvailable: true", () => {
+    const html = renderToStaticMarkup(<ForkButton agent={{ name: "a1", forkAvailable: true }} isOpen={false} onClick={() => {}} />);
+    expect(html).toContain("Fork");
+    expect(html).toContain('aria-label="Fork agent"');
+  });
+});
+
+function checkpoint(seq: number, currentNode = "verify"): CheckpointEntryDTO {
+  return { seq, at: seq * 1000, currentNode };
+}
+
+describe("ForkPicker", () => {
+  test("labels the latest checkpoint 'latest' and every earlier one as routing-state-only", () => {
+    const checkpoints = [checkpoint(1, "plan"), checkpoint(2, "implement"), checkpoint(3, "verify")];
+
+    // Latest (seq 3) selected: no rewind caveat shown.
+    const latestHtml = renderToStaticMarkup(
+      <ForkPicker checkpoints={checkpoints} selectedSeq={3} onSelect={() => {}} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    expect(latestHtml).toContain("Step 3 — verify");
+    expect(latestHtml).toContain("(latest)");
+    expect(latestHtml).not.toContain("routing state only");
+
+    // An earlier step (seq 1) selected: the exact Candidate-A caveat string must be present.
+    const earlierHtml = renderToStaticMarkup(
+      <ForkPicker checkpoints={checkpoints} selectedSeq={1} onSelect={() => {}} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    expect(earlierHtml).toContain("routing state only — code stays at the branch tip");
+  });
+
+  test("shows a quiet empty state when no checkpoints have been fetched yet", () => {
+    const html = renderToStaticMarkup(<ForkPicker checkpoints={[]} selectedSeq={null} onSelect={() => {}} onConfirm={() => {}} onCancel={() => {}} />);
+    expect(html).toContain("No checkpoints recorded yet");
   });
 });

@@ -8,7 +8,7 @@ import { ProofProvenancePanel } from './ProofProvenancePanel';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
-import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS } from '../lib/agent-control';
+import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS, fetchCheckpoints, resolveForkTarget, type CheckpointEntryDTO } from '../lib/agent-control';
 import { taskRef } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
@@ -172,6 +172,87 @@ export function LifecycleTimeline({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** "Fork from step N" trigger button beside Restart — gated on the persisted `forkAvailable` DTO
+ *  field so an old daemon (which never sets it) never shows this, instead of showing it disabled or
+ *  404ing when clicked. Renders nothing for any other agent. */
+export function ForkButton({
+  agent,
+  isOpen,
+  onClick,
+}: {
+  agent: Pick<AgentDTO, 'name' | 'forkAvailable'>;
+  isOpen: boolean;
+  onClick: () => void;
+}) {
+  if (!agent.forkAvailable) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`Fork ${agent.name} from a checkpoint`}
+      aria-label="Fork agent"
+      className={`min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isOpen ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30'}`}
+    >
+      ⑂ Fork
+    </button>
+  );
+}
+
+/** The checkpoint-step picker opened by {@link ForkButton}. Candidate-A semantics for this slice: no
+ *  code rewind, so every entry other than the latest is explicitly labeled "routing state only" —
+ *  the fork restarts workflow routing at that node with reset fix-up-tier visits, but the new run's
+ *  code still starts from the source run's current branch tip (captured `headSha` is data only). */
+export function ForkPicker({
+  checkpoints,
+  selectedSeq,
+  onSelect,
+  onConfirm,
+  onCancel,
+}: {
+  checkpoints: CheckpointEntryDTO[];
+  selectedSeq: number | null;
+  onSelect: (seq: number) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const sorted = [...checkpoints].sort((a, b) => b.seq - a.seq);
+  const latestSeq = sorted[0]?.seq;
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50/60 px-2 py-1 dark:border-amber-900 dark:bg-amber-950/30">
+      {sorted.length === 0 ? (
+        <span className="text-xs text-gray-500 dark:text-gray-400">No checkpoints recorded yet</span>
+      ) : (
+        <select
+          autoFocus
+          value={selectedSeq ?? ''}
+          onChange={(e) => onSelect(Number(e.target.value))}
+          className="text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 cursor-pointer"
+          aria-label="Fork from checkpoint"
+        >
+          {sorted.map((c) => (
+            <option key={c.seq} value={c.seq}>
+              {`Step ${c.seq} — ${c.currentNode}`}
+              {c.seq === latestSeq ? ' (latest)' : ''}
+            </option>
+          ))}
+        </select>
+      )}
+      {selectedSeq !== null && selectedSeq !== latestSeq && (
+        <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">routing state only — code stays at the branch tip</span>
+      )}
+      <button
+        type="button"
+        onClick={onConfirm}
+        disabled={selectedSeq === null}
+        className="text-xs font-medium text-amber-700 dark:text-amber-400 disabled:opacity-40 hover:text-amber-900 focus-visible:ring-2 focus-visible:ring-amber-500"
+      >
+        Fork
+      </button>
+      <button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
     </div>
   );
 }
@@ -477,6 +558,10 @@ export const TaskDetail = () => {
   const stopTargets = React.useMemo(() => stoppableAgents(activeAgents), [activeAgents]);
   const interruptTargets = React.useMemo(() => interruptibleAgents(activeAgents), [activeAgents]);
   const restartTargets = React.useMemo(() => restartableAgents(activeAgents), [activeAgents]);
+  // Agents offering a fork point (persisted `forkAvailable`, survives a daemon restart) — an old
+  // daemon that never sets the field simply never populates this list, so the button stays hidden
+  // instead of 404ing or rendering disabled.
+  const forkTargets = React.useMemo(() => activeAgents.filter((agent) => agent.forkAvailable), [activeAgents]);
   const hasPlan = !!overviewDoc || planDocuments.length > 0;
   const planFlowConcerns = React.useMemo<GraphConcernInput[]>(
     () => (pipeline?.concerns ?? []).map((c) => ({ file: c.path, title: c.title, status: c.status, open: c.open, complexity: c.complexity, prerequisites: c.prerequisites, touches: c.touches })),
@@ -497,10 +582,15 @@ export const TaskDetail = () => {
   // Model picker state
   const [modelPickerAgentId, setModelPickerAgentId] = React.useState<string | null>(null);
   const [modelPickerValue, setModelPickerValue] = React.useState('');
+  // Fork picker state — which agent's checkpoint-step picker is open, its fetched checkpoint
+  // history, and the currently-selected step (defaults to latest once the fetch resolves).
+  const [forkPickerAgentId, setForkPickerAgentId] = React.useState<string | null>(null);
+  const [forkCheckpoints, setForkCheckpoints] = React.useState<CheckpointEntryDTO[]>([]);
+  const [forkSelectedSeq, setForkSelectedSeq] = React.useState<number | null>(null);
   // Answer (pending input) state
   const [answerValues, setAnswerValues] = React.useState<Record<string, string>>({});
 
-  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setFlowFocus(false); setTranscriptOpenIds(new Set()); setTranscriptDetailOpenIds(new Set()); }, [selectedTaskId]);
+  React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setForkPickerAgentId(null); setForkCheckpoints([]); setForkSelectedSeq(null); setFlowFocus(false); setTranscriptOpenIds(new Set()); setTranscriptDetailOpenIds(new Set()); }, [selectedTaskId]);
   // Esc leaves plan-flow focus mode.
   React.useEffect(() => {
     if (!flowFocus) return;
@@ -603,6 +693,30 @@ export const TaskDetail = () => {
     showToast(`Model set to ${model.trim()}`, 'info');
     setModelPickerAgentId(null);
     setModelPickerValue('');
+  };
+  const handleOpenForkPicker = (agentId: string) => {
+    if (forkPickerAgentId === agentId) {
+      setForkPickerAgentId(null);
+      setForkCheckpoints([]);
+      setForkSelectedSeq(null);
+      return;
+    }
+    setForkPickerAgentId(agentId);
+    setForkCheckpoints([]);
+    setForkSelectedSeq(null);
+    void fetchCheckpoints(agentId).then((entries) => {
+      setForkCheckpoints(entries);
+      setForkSelectedSeq(entries.length ? Math.max(...entries.map((e) => e.seq)) : null);
+    });
+  };
+  const handleConfirmFork = (agentId: string, agentName: string) => {
+    const cmd = resolveForkTarget(agentId, forkCheckpoints, forkSelectedSeq);
+    if (!cmd) return;
+    sendConsoleCommand(cmd);
+    showToast(`Forking ${agentName} from step ${cmd.seq}…`, 'info');
+    setForkPickerAgentId(null);
+    setForkCheckpoints([]);
+    setForkSelectedSeq(null);
   };
   const handleAnswer = (agentId: string, requestId: string) => {
     const value = answerValues[requestId]?.trim();
@@ -1285,6 +1399,13 @@ export const TaskDetail = () => {
             ↺ Restart{restartTargets.length > 1 ? ` (${restartTargets.length})` : ''}
           </button>
         )}
+        {forkTargets.length > 0 && (
+          <ForkButton
+            agent={forkTargets[0]}
+            isOpen={forkPickerAgentId === forkTargets[0].id}
+            onClick={() => handleOpenForkPicker(forkTargets[0].id)}
+          />
+        )}
         {/* Remove confirm dialog */}
         {removeTarget && (
           <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1 dark:border-red-900 dark:bg-red-950/30">
@@ -1320,6 +1441,16 @@ export const TaskDetail = () => {
             <button type="button" onClick={() => handleSetModel(modelPickerAgentId, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium text-amber-600 dark:text-amber-400 disabled:opacity-40 hover:text-amber-800 focus-visible:ring-2 focus-visible:ring-amber-500">Set</button>
             <button type="button" onClick={() => { setModelPickerAgentId(null); setModelPickerValue(''); }} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
           </div>
+        )}
+        {/* Fork-from-checkpoint picker — opens when a Fork button (toolbar or per-agent row) is clicked */}
+        {forkPickerAgentId && (
+          <ForkPicker
+            checkpoints={forkCheckpoints}
+            selectedSeq={forkSelectedSeq}
+            onSelect={setForkSelectedSeq}
+            onConfirm={() => handleConfirmFork(forkPickerAgentId, activeAgents.find((a) => a.id === forkPickerAgentId)?.name ?? forkPickerAgentId)}
+            onCancel={() => { setForkPickerAgentId(null); setForkCheckpoints([]); setForkSelectedSeq(null); }}
+          />
         )}
         <button onClick={() => focusTaskSearch()} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-amber-500" title="Focus task search (⌘K)" aria-label="Jump to search"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
         <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
@@ -1521,6 +1652,11 @@ export const TaskDetail = () => {
                                   ↺ Restart
                                 </button>
                               )}
+                              {agent.forkAvailable && (
+                                <button type="button" onClick={() => handleOpenForkPicker(agent.id)} title={`Fork ${agent.name} from a checkpoint`} className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${forkPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30'}`}>
+                                  ⑂ Fork
+                                </button>
+                              )}
                               <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${modelPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
                                 Model
                               </button>
@@ -1538,6 +1674,18 @@ export const TaskDetail = () => {
                               </select>
                               <input type="text" value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(agent.id, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }} placeholder="or type model id…" className="flex-1 text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-gray-400" />
                               <button type="button" onClick={() => handleSetModel(agent.id, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium px-2 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-amber-500">Set</button>
+                            </div>
+                          )}
+                          {/* Inline fork-from-checkpoint picker for this agent */}
+                          {forkPickerAgentId === agent.id && (
+                            <div className="border-t border-gray-100 dark:border-gray-800 px-3 py-2">
+                              <ForkPicker
+                                checkpoints={forkCheckpoints}
+                                selectedSeq={forkSelectedSeq}
+                                onSelect={setForkSelectedSeq}
+                                onConfirm={() => handleConfirmFork(agent.id, agent.name)}
+                                onCancel={() => { setForkPickerAgentId(null); setForkCheckpoints([]); setForkSelectedSeq(null); }}
+                              />
                             </div>
                           )}
                           {/* Pending input / Answer section */}

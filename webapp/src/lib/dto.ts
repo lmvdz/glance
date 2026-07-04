@@ -212,6 +212,18 @@ export interface AgentDTO {
   prUrl?: string;
   prNumber?: number;
   prState?: 'draft' | 'open' | 'merged' | 'closed';
+  /** Derived from the daemon's persisted `workflowState.terminal` marker (present and not yet
+   *  superseded by a fork) — survives a daemon restart. Absent (not just false) on an old daemon
+   *  that never sets the field, which is exactly the gate the Fork button uses: an old daemon never
+   *  shows it instead of showing it disabled or 404ing. */
+  forkAvailable?: boolean;
+  /** Mirrors the daemon's WorkflowRunState (src/workflow/types.ts) shape the webapp actually reads:
+   *  just enough to label a terminal run and correlate it to a fork point. Widened/partial on purpose
+   *  — the webapp never branches on exhaustive workflow-state cases. */
+  workflowState?: {
+    runId?: string;
+    terminal?: { reason: string; at?: number; forkPoint?: { runId?: string; seq: number }; supersededBy?: string };
+  };
 }
 
 export interface TranscriptTool {
@@ -362,4 +374,5 @@ export type ClientCommand =
   | { type: "interrupt"; id: string }
   | { type: "kill"; id: string }
   | { type: "restart"; id: string }
-  | { type: "remove"; id: string; deleteWorktree?: boolean };
+  | { type: "remove"; id: string; deleteWorktree?: boolean }
+  | { type: "fork"; id: string; seq?: number };
