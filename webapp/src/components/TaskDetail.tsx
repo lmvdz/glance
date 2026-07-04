@@ -109,9 +109,22 @@ export function StatusPill({ status }: { status: TransitionEntry['from'] }) {
   return <span className={`rounded px-1 py-0.5 text-[10px] font-semibold uppercase border ${agentStatusBadgeClass(status)}`}>{status}</span>;
 }
 
-/** Collapsible lifecycle history strip for one agent's detail row. Renders nothing when the agent
- *  has no significant transitions yet (a brand-new agent, or one predating this field). `fullEntries`
- *  overrides the capped `agent.transitions` tail once "Load full history" has round-tripped. */
+/** True once a live transition newer than a cached "Load full history" fetch has landed for an agent —
+ *  the signal TaskDetail's fullTimelines cache-invalidation effect uses to evict a stale entry so the
+ *  strip falls back to the live (capped) tail instead of freezing forever at load time. `cachedAsOf` is
+ *  the `at` of the newest entry the full-history fetch saw; `liveTail` is the agent's current capped
+ *  `transitions` tail, which always carries the freshest entry via the roster's `agent` events. */
+export function fullTimelineStale(cachedAsOf: number, liveTail?: TransitionEntry[]): boolean {
+  const latestLive = liveTail && liveTail.length ? liveTail[liveTail.length - 1].at : undefined;
+  return latestLive !== undefined && latestLive > cachedAsOf;
+}
+
+/** Collapsible lifecycle history strip for one agent's detail row. Renders nothing only when the
+ *  agent DTO predates the `transitions` field entirely (an old daemon version) — an empty tail on a
+ *  DTO that *does* support the field still renders the chrome (with a quiet placeholder) so the
+ *  "Load full history" affordance stays reachable for a freshly reattached/restored agent whose real
+ *  history lives in transitions.jsonl, not the capped in-memory tail. `fullEntries` overrides the
+ *  capped `agent.transitions` tail once "Load full history" has round-tripped. */
 export function LifecycleTimeline({
   agent,
   isOpen,
@@ -125,8 +138,8 @@ export function LifecycleTimeline({
   onToggle: () => void;
   onLoadFull: () => void;
 }) {
-  if (!(agent.transitions?.length ?? 0)) return null;
-  const entries = fullEntries ?? agent.transitions!;
+  if (agent.transitions === undefined) return null;
+  const entries = fullEntries ?? agent.transitions;
   return (
     <div className="border-t border-gray-100 dark:border-gray-800">
       <button
@@ -136,10 +149,13 @@ export function LifecycleTimeline({
       >
         <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
         <span>Lifecycle</span>
-        <span className="ml-auto rounded-full bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">{agent.transitions!.length}</span>
+        <span className="ml-auto rounded-full bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">{agent.transitions.length}</span>
       </button>
       {isOpen && (
         <div className="px-3 pb-3 pt-1 space-y-1">
+          {entries.length === 0 && (
+            <div className="text-[11px] italic text-gray-400 dark:text-gray-500">No recent transitions in memory.</div>
+          )}
           {entries.slice().reverse().map((t, i) => (
             <div key={`${t.at}-${i}`} className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
               <span className="font-mono text-[10px] text-gray-400">{new Date(t.at).toLocaleTimeString()}</span>
@@ -414,7 +430,11 @@ export const TaskDetail = () => {
   const [transcriptOpenIds, setTranscriptOpenIds] = React.useState<Set<string>>(() => new Set());
   const [transcriptDetailOpenIds, setTranscriptDetailOpenIds] = React.useState<Set<string>>(() => new Set());
   const [timelineOpenIds, setTimelineOpenIds] = React.useState<Set<string>>(() => new Set());
-  const [fullTimelines, setFullTimelines] = React.useState<Map<string, TransitionEntry[]>>(() => new Map());
+  // Cached "Load full history" round-trips, keyed by agent id. `asOf` pins the `at` of the newest
+  // entry the fetch saw — once a live transition lands with a newer `at` (via the roster's `agent`
+  // events, which always carry the fresh capped tail), the effect below evicts the stale cache entry
+  // so the strip falls back to the live tail instead of silently freezing at load time.
+  const [fullTimelines, setFullTimelines] = React.useState<Map<string, { entries: TransitionEntry[]; asOf: number }>>(() => new Map());
   const [now, setNow] = React.useState(Date.now);
   const splitContainerRef = React.useRef<HTMLDivElement | null>(null);
   const planArticleRef = React.useRef<HTMLElement | null>(null);
@@ -525,11 +545,30 @@ export const TaskDetail = () => {
   const loadFullTimeline = React.useCallback(async (agentId: string) => {
     try {
       const full = await apiJson<TransitionEntry[]>(`/api/agents/${encodeURIComponent(agentId)}/transitions?full=1`);
-      setFullTimelines((prev) => new Map(prev).set(agentId, full));
+      const asOf = full.length ? full[full.length - 1].at : 0;
+      setFullTimelines((prev) => new Map(prev).set(agentId, { entries: full, asOf }));
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not load full timeline', 'error');
     }
   }, [showToast]);
+  // Invalidate a cached full-history load the moment a newer live transition lands for that agent —
+  // otherwise fullTimelines freezes the strip at whatever "Load full history" saw and every transition
+  // after that click silently vanishes until a full remount (#lifecycle-truth webapp audit finding 1).
+  React.useEffect(() => {
+    if (fullTimelines.size === 0) return;
+    setFullTimelines((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const agent of agents) {
+        const cached = next.get(agent.id);
+        if (cached && fullTimelineStale(cached.asOf, agent.transitions)) {
+          next.delete(agent.id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [agents, fullTimelines]);
   const handleStopAgents = () => {
     if (!stopTargets.length) return;
     if (!stopConfirm) {
@@ -1535,7 +1574,7 @@ export const TaskDetail = () => {
                           <LifecycleTimeline
                             agent={agent}
                             isOpen={timelineOpenIds.has(agent.id)}
-                            fullEntries={fullTimelines.get(agent.id)}
+                            fullEntries={fullTimelines.get(agent.id)?.entries}
                             onToggle={() => toggleTimeline(agent.id)}
                             onLoadFull={() => void loadFullTimeline(agent.id)}
                           />
