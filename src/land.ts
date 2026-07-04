@@ -201,13 +201,13 @@ export function decideRegressionGate(baseFailures: Iterable<string>, mergedFailu
 	return { allow: newRegressions.length === 0, newRegressions };
 }
 
-/** On by default when OMP_SQUAD_REGRESSION_GATE=1. */
+/** On by default; set OMP_SQUAD_REGRESSION_GATE=0 to disable the post-merge full-suite regression check. */
 function regressionGateEnabled(): boolean {
-	return process.env.OMP_SQUAD_REGRESSION_GATE === "1";
+	return process.env.OMP_SQUAD_REGRESSION_GATE !== "0";
 }
 
 /**
- * Post-merge full-suite regression gate (OMP_SQUAD_REGRESSION_GATE=1).
+ * Post-merge full-suite regression gate (on by default; OMP_SQUAD_REGRESSION_GATE=0 to disable).
  *
  * Called after the acceptance gate passes, with main already at the merged state. Runs the full
  * suite via detectVerify() — deliberately separate from opts.verify, which can be narrower.

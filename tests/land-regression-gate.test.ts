@@ -91,9 +91,24 @@ async function branchWorktree(repo: string, branch: string, files: Record<string
 
 // ─── Test cases (matches plan spec verbatim) ───────────────────────────────
 
-test("flag unset + acceptance gate passes + branch introduces NEW_RED → land allowed (current behavior preserved)", async () => {
+test("flag unset (default ON) + acceptance gate passes + branch introduces NEW_RED → land BLOCKED", async () => {
 	delete process.env.OMP_SQUAD_REGRESSION_GATE;
 	const repo = await gateRepo("rg-1-");
+	const head0 = await gitOut(repo, "rev-parse", "HEAD");
+	const wt = await branchWorktree(repo, "feat", { "NEW_RED": "broken\n", "feature.txt": "new\n" });
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true" });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("regression gate");
+	expect(res.detail).toContain("new.test.ts > introduced");
+	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0); // main rolled back
+});
+
+test("flag explicitly off (=0) + acceptance gate passes + branch introduces NEW_RED → land allowed (escape hatch)", async () => {
+	process.env.OMP_SQUAD_REGRESSION_GATE = "0";
+	const repo = await gateRepo("rg-1b-");
 	const wt = await branchWorktree(repo, "feat", { "NEW_RED": "broken\n", "feature.txt": "new\n" });
 
 	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true" });
