@@ -539,6 +539,11 @@ export interface AgentDTO {
 	workflow?: WorkflowMemberConfig;
 	/** Live workflow checkpoint/rollup, emitted on every stage boundary. */
 	workflowState?: WorkflowRunState;
+	/** Derived from `workflowState.terminal` (present and not yet superseded by a fork) — survives a
+	 *  restart because it's recomputed from the persisted marker rather than tracked independently. Gates
+	 *  the webapp's "Fork from step N" control; an old daemon that never sets this field hides the button
+	 *  instead of showing one that 404s. */
+	forkAvailable?: boolean;
 	/** Requested authority persisted for this run; effectiveMode is capped by daemon policy and blockers. */
 	autonomyMode?: AutonomyMode;
 	/** Actual authority after approval/env caps and blockers. */

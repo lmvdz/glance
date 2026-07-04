@@ -225,6 +225,22 @@ export interface WorkflowRunState extends EngineCheckpoint {
 	 * instead of waiting on a turn that no live thread is running. Set by the manager at resume time.
 	 */
 	cold?: boolean;
+	/**
+	 * Set once the engine escalates a terminal failure (visit-cap-no-overflow, poison cap, no-recovery-
+	 * route, or ran-off-the-end — see engine.ts's `terminalFail`). The load-bearing lifecycle bit: a
+	 * terminal-marked run is excluded from `resumable`, `reconnectLive`'s auto-resume, and `makeDriver`'s
+	 * resumeState, so it is never boot-looped through adoption again. Persisted (unlike the DTO-only
+	 * status flip it replaces) so the marker — and the forkAvailable it derives — survive a restart.
+	 */
+	terminal?: {
+		reason: string;
+		at: number;
+		/** The checkpoint-log entry a fork of this run would restore from. */
+		forkPoint: { runId: string; seq: number };
+		/** Set once an operator forks this run — the new agent id. Excludes this record from adoption/
+		 *  dispatch permanently (one issue, one active claimant) and clears forkAvailable. */
+		supersededBy?: string;
+	};
 }
 
 /**

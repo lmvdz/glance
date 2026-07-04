@@ -28,7 +28,8 @@ import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
 import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
-import type { NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
+import { appendCheckpoint, deleteCheckpointLog, getLastSeq } from "./workflow/checkpoint-log.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
@@ -310,6 +311,11 @@ interface AgentRecord {
 	commands?: CommandInfo[];
 	/** Live receipt accumulator for the in-flight run (one per agent_start..end). */
 	run?: RunAccumulator;
+	/** The checkpoint listener's in-flight `appendCheckpoint` call, if any — awaited by the
+	 *  `workflow_terminal` handler before computing `forkPoint.seq` so it references the checkpoint
+	 *  entry just durably appended rather than racing it (both events fire from the same driver call in
+	 *  quick succession). */
+	checkpointAppending?: Promise<void>;
 	/** In-flight rich tool transcript entries keyed by the runtime toolCallId. */
 	toolEntries: Map<string, TranscriptEntry>;
 	/** Capability tool-grant allow-list (from the spawning profile's `capabilities`). When present, the
@@ -929,11 +935,16 @@ export class SquadManager extends EventEmitter {
 		}
 		for (const p of workflows) {
 			// A workflow run survives a restart only if its inner thread is still alive AND we have a
-			// checkpoint to resume the graph from; otherwise the orchestration is unrecoverable.
+			// checkpoint to resume the graph from; otherwise the orchestration is unrecoverable. A
+			// terminal-marked run is never auto-resumed even if its inner thread somehow survived — its
+			// sticky catastrophe error is the operator's signal, and re-driving it here would silently
+			// re-enter the exact graph position that just escalated.
 			const innerAlive = await hostAlive(socketPathFor(`${p.id}-wf`));
-			if (innerAlive && p.workflowState) {
+			if (innerAlive && p.workflowState && !p.workflowState.terminal) {
 				await this.attachExisting(p, snapshot.transcripts[p.id] ?? []).catch((err) => this.log("warn", `resume ${p.name} failed: ${String(err)}`));
 				n++;
+			} else if (innerAlive && p.workflowState?.terminal) {
+				this.log("warn", `workflow ${p.name} is terminal-marked (${p.workflowState.terminal.reason}) — leaving its live thread alone, not auto-resuming`);
 			} else if (innerAlive) {
 				this.log("warn", `workflow ${p.name} has a live thread but no checkpoint — cannot resume the graph`);
 			}
@@ -947,7 +958,10 @@ export class SquadManager extends EventEmitter {
 	 *  So a restart RESUMES the issue with its context instead of re-dispatching a fresh worktree. */
 	private async adoptOrphanedAgents(snapshot: StateSnapshot): Promise<number> {
 		const halted = openOrchestratorState(this.stateDir);
-		const resumable = (p: PersistedAgent): boolean => p.kind === "workflow" && p.workflowState !== undefined;
+		// Terminal-marked runs are excluded: re-adopting one would re-trip the same escalate condition and
+		// burn a ceiling slot every restart (the boot-loop this marker exists to kill). It stays visible
+		// via its sticky catastrophe error; the operator's only forward path is fork.
+		const resumable = (p: PersistedAgent): boolean => p.kind === "workflow" && p.workflowState !== undefined && !p.workflowState.terminal;
 		// Eligible = adoptable (dead host, on-disk worktree, not a branch child) AND not a branch the
 		// orchestrator already halted (re-adopting a halted run burns a ceiling slot + a resume attempt
 		// before the orchestrator re-skips it).
@@ -1131,6 +1145,9 @@ export class SquadManager extends EventEmitter {
 			scopeSource: p.scopeSource,
 			workflow: p.workflow,
 			workflowState: p.workflowState,
+			// Recomputed from the persisted marker (not carried as an independent flag) so a fresh boot's
+			// reattach reflects forkAvailable correctly even if it was never set in-memory before the restart.
+			forkAvailable: this.deriveForkAvailable(p.workflowState),
 		};
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
@@ -2143,6 +2160,26 @@ export class SquadManager extends EventEmitter {
 		})();
 	}
 
+	/** Best-effort `git rev-parse HEAD` in a worktree — data only (no rewind behavior this slice), used to
+	 *  stamp each checkpoint-log entry with the commit it was taken at. Never throws: an unreadable/gone
+	 *  worktree just means the entry carries no headSha. */
+	private async captureHeadSha(worktree: string): Promise<string | undefined> {
+		try {
+			const r = await hardenedGit(["rev-parse", "HEAD"], { cwd: worktree });
+			return r.code === 0 ? r.stdout.trim() : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** True exactly when a workflow run has hit a persisted terminal marker that hasn't been superseded
+	 *  by a fork yet — the single source `dto.forkAvailable` derives from, so it's recomputed the same
+	 *  way at every reload site (checkpoint listener's workflow_terminal handler, attachExisting,
+	 *  createWithId) instead of drifting between an in-memory flag and the persisted marker. */
+	private deriveForkAvailable(state: WorkflowRunState | undefined): boolean {
+		return !!state?.terminal && !state.terminal.supersededBy;
+	}
+
 	/**
 	 * Catastrophe (#14 / OMPSQ-135): the orchestrator summoned a human for this agent (repair budget
 	 * exhausted or a catastrophe tripwire). The auto-loop has already halted it; here we make the
@@ -2632,6 +2669,7 @@ export class SquadManager extends EventEmitter {
 			scopeSource: opts.scopeSource,
 			workflow: persisted.workflow,
 			workflowState: persisted.workflowState,
+			forkAvailable: this.deriveForkAvailable(persisted.workflowState),
 			adopted: opts.adopted,
 		};
 		this.seedAuthority(dto, requestedMode);
@@ -2703,7 +2741,13 @@ export class SquadManager extends EventEmitter {
 						return cs.length ? `--- Reviewer comments to address (from the plan review) ---\n${cs.map((c) => `- ${c.body}`).join("\n")}` : undefined;
 					}
 				: undefined;
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState: p.workflowState, decoratePrompt, cold });
+			// Defensive floor, not the primary guard: resumable()/reconnectLive/adoption already exclude
+			// terminal-marked runs from ever reaching here with intent to resume. But a legacy full
+			// re-spawn path (`loadPersisted`, the `--restore` CLI flow) passes `workflowState` through
+			// unconditionally regardless of `terminal` — so a terminal run never gets a resumable
+			// resumeState here either, even if some future caller forgets the exclusion upstream.
+			const resumeState = p.workflowState?.terminal ? undefined : p.workflowState;
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, cold });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
@@ -3180,6 +3224,14 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private async restart(rec: AgentRecord): Promise<void> {
+		// A terminal-marked workflow agent refuses to restart: restart() always rebuilds a fresh inner
+		// thread and re-enters the graph, which would silently re-trip the exact escalate condition this
+		// marker exists to stop. Fork (concern 04) is the only forward path once a run is terminal.
+		if (rec.options.kind === "workflow" && rec.options.workflowState?.terminal) {
+			this.log("warn", `refused restart of terminal-marked workflow ${rec.dto.name}: ${rec.options.workflowState.terminal.reason} — fork instead`);
+			this.append(rec, "system", `restart refused — this run is terminal (${rec.options.workflowState.terminal.reason}). Fork from a checkpoint to try again.`);
+			return;
+		}
 		await rec.agent.stop();
 		// restart() always rebuilds a fresh inner thread — cold:true for a workflow agent so the resumed
 		// run keeps the poison cap active (warm/non-cold would silently bypass RESUME_ATTEMPT_CAP: the
@@ -3222,6 +3274,9 @@ export class SquadManager extends EventEmitter {
 		if (deleteWorktree && !rec.options.repo.startsWith("(")) {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});
 		}
+		if (deleteWorktree && rec.options.kind === "workflow" && rec.options.workflowState?.runId) {
+			await deleteCheckpointLog(this.stateDir, rec.options.workflowState.runId).catch(() => {});
+		}
 		this.agents.delete(id);
 		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
@@ -3252,11 +3307,28 @@ export class SquadManager extends EventEmitter {
 				finish();
 			}
 		});
-		a.on("checkpoint", (state: WorkflowRunState) => {
+		a.on("checkpoint", async (state: WorkflowRunState) => {
 			rec.options.workflowState = state;
 			rec.dto.workflowState = state;
 			this.emitAgent(rec);
 			void this.persist();
+			// Append-only history for the fork-step picker (concern 04). Excludes the engine's transient
+			// per-branch fan-out emissions (see EngineCheckpoint.transient) — those are live-progress
+			// snapshots of the SAME fan-out node's entry position, not a new resumable boundary. Wrapped
+			// defensively: this listener runs on every stage boundary (a hot path), and a checkpoint-log
+			// failure must never break the live-progress emission above.
+			if (state.transient || !state.runId) return;
+			const runId = state.runId;
+			const append = (async () => {
+				try {
+					const headSha = await this.captureHeadSha(rec.dto.worktree);
+					await appendCheckpoint(this.stateDir, runId, { ...state, headSha });
+				} catch (err) {
+					this.log("warn", `checkpoint-log append failed for ${rec.dto.id}: ${err instanceof Error ? err.message : String(err)}`);
+				}
+			})();
+			rec.checkpointAppending = append;
+			await append;
 		});
 		a.on("exit", ({ code }: { code: number }) => {
 			// Guard preserved verbatim — an exit reported for an already-stopped agent (e.g. our own
@@ -3352,6 +3424,11 @@ export class SquadManager extends EventEmitter {
 				// The final land still goes through land(), so merge verification/rollback and issue-close stay one seam.
 				void this.autoLandWorkflow(rec, frame.outcome as string | undefined, frame.proof as { state?: string } | undefined);
 				break;
+			case "workflow_terminal": {
+				const { reason, checkpoint } = frame as { reason: string; checkpoint: EngineCheckpoint };
+				void this.handleWorkflowTerminal(rec, reason, checkpoint);
+				break;
+			}
 			case "auto_retry_start": {
 				// A usage-limit retry means the model subscription is rate-limited (5h/weekly cap). Note it so the
 				// dispatcher pauses; log once per episode (only on the not-paused → paused transition) to avoid spam
@@ -3368,6 +3445,36 @@ export class SquadManager extends EventEmitter {
 		this.transition(rec, this.derive(rec), "turn-progress"); // hottest site — the derived same-state early-return matters most here
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * The engine escalated a terminal failure (concern 01's `terminalFail`, fired at all four dead-end
+	 * returns). Persist a `workflowState.terminal` marker — the load-bearing lifecycle bit that excludes
+	 * this run from `resumable`/`reconnectLive`/`makeDriver`'s resumeState — and escalate through the
+	 * EXISTING catastrophe channel (sticky "error" + attention queue + push) rather than a second ad-hoc
+	 * status write.
+	 */
+	private async handleWorkflowTerminal(rec: AgentRecord, reason: string, checkpoint: EngineCheckpoint): Promise<void> {
+		const runId = rec.options.workflowState?.runId ?? rec.dto.id;
+		// The checkpoint listener's own append for the entry checkpoint that preceded this terminal
+		// failure may still be in flight (both events fire from the same driver call in quick
+		// succession) — await it so forkPoint.seq references the checkpoint just durably appended
+		// instead of racing it.
+		await (rec.checkpointAppending ?? Promise.resolve());
+		// getLastSeq() is "how many entries have been durably appended" — the one this terminal failure
+		// died at is the LAST of those. Floored at 0 for the pathological case of a terminal failure with
+		// zero prior checkpoint appends (e.g. a `maxVisits: 0` node tripping the cap on its very first,
+		// never-checkpointed visit) — forkPoint.seq then points at an empty log; unreachable in any graph
+		// with a sane visit cap, so left as a documented edge rather than added machinery.
+		const seq = Math.max((await getLastSeq(this.stateDir, runId)) - 1, 0);
+		const terminal = { reason, at: Date.now(), forkPoint: { runId, seq } };
+		const base: WorkflowRunState = rec.options.workflowState ?? { ...checkpoint, rollup: [], runId };
+		const state: WorkflowRunState = { ...base, terminal };
+		rec.options.workflowState = state;
+		rec.dto.workflowState = state;
+		rec.dto.forkAvailable = this.deriveForkAvailable(state);
+		this.markCatastrophe(rec.dto.id, reason);
+		void this.persist();
 	}
 
 	private updateThinkingStream(rec: AgentRecord, delta: string): void {
