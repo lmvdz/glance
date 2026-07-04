@@ -1,5 +1,5 @@
 # Workbench Shell Foundation
-STATUS: open
+STATUS: cancelled
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

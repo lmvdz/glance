@@ -1,6 +1,6 @@
 # Meta-Harness Dashboard Pages — Overview
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

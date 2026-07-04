@@ -12,7 +12,7 @@
 
 import { detectVerify } from "./intake.ts";
 import { gateExec } from "./gate-runner.ts";
-import { proofGate } from "./proof.ts";
+import { proofGate, recordProof } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 
 export interface LandResult {
@@ -34,6 +34,21 @@ export interface LandResult {
 	 * shared checkout) would otherwise permanently brick every healthy branch behind it.
 	 */
 	retryable?: boolean;
+	/**
+	 * A FORCED land (requireProof:false) merged/committed WITHOUT a passing proof gate — unproven trust
+	 * made legible. The caller records the audit fact (actor + timestamp) in the land ledger; `detail`
+	 * says so too. Absent/false on a normal land or a forced land that happened to have a fresh proof.
+	 */
+	forcedWithoutProof?: boolean;
+	/** PR mode only (concern 06): which land path produced this result. Absent ⇒ local mode. */
+	mode?: "local" | "pr";
+	/** PR mode only: the branch was pushed and a PR ensured (open/adopted), regardless of merge outcome. */
+	pushed?: boolean;
+	prUrl?: string;
+	prNumber?: number;
+	/** PR mode only: the PR's lifecycle state at the moment this result was produced. `merged` is set
+	 *  ONLY after the post-merge reachability assertion passes — never optimistically on `gh pr merge`'s exit code alone. */
+	prState?: "draft" | "open" | "merged" | "closed";
 }
 
 /**
@@ -93,6 +108,24 @@ export interface LandOpts {
 	 * (non-conflicting) land still merges. Off (operator land) ⇒ resolve + merge as before.
 	 */
 	confirmResolved?: boolean;
+	/**
+	 * Stale-branch gate (default ON): refuse to CLEANLY merge a branch whose fork point is behind
+	 * main when both sides edit the same file(s) — the silent-clobber case. Pass false on a force-land
+	 * (mirrors how force skips the proof gate). OMP_SQUAD_STALE_GATE=0 disables it globally.
+	 */
+	staleGate?: boolean;
+	/**
+	 * PR-mode plumbing (concern 06): threaded into `ensurePr`'s ledger entry and the DoneProof a
+	 * PR-mode merge records, so `closeLandedIssue`'s issue-identifier lookup finds it same as the
+	 * local path's manager-layer write does. Completely ignored by the local-mode path (`landAgent`).
+	 */
+	issueId?: string;
+	issueIdentifier?: string;
+	/** Plane project id the tracked issue belongs to — threaded into `PendingPr` so the PR-reconciler
+	 *  backstop (concern 07) can still route a Plane close for an orphaned entry (agent removed from
+	 *  the roster) after this issue's dto is gone. Completely ignored by the local-mode path. */
+	issueProjectId?: string;
+	agentId?: string;
 }
 
 /**
@@ -124,10 +157,16 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output. */
-async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
-	// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
-	const plan = gateExec(cmd, cwd);
+/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output + sandbox flag. */
+async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string; sandboxed: boolean }> {
+	// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a
+	// legible host fallback). A strict-mode fail-closed throw here rolls up as a failed gate (blocks the land).
+	let plan: Awaited<ReturnType<typeof gateExec>>;
+	try {
+		plan = await gateExec(cmd, cwd);
+	} catch (e) {
+		return { code: 1, output: e instanceof Error ? e.message : String(e), sandboxed: false };
+	}
 	const proc = Bun.spawn(plan.argv, { cwd, stdout: "pipe", stderr: "pipe", env: plan.env });
 	const timer = setTimeout(() => proc.kill(), timeoutMs);
 	try {
@@ -136,10 +175,20 @@ async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{
 			new Response(proc.stderr).text(),
 			proc.exited,
 		]);
-		return { code, output: `${stdout}${stderr}`.trim() };
+		return { code, output: `${stdout}${stderr}`.trim(), sandboxed: plan.sandboxed };
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * Durably record the land's post-merge acceptance gate as a proof of the merged main, so a landed
+ * main is always backed by an inspectable proof — not just an in-the-moment pass that vanishes.
+ * Keyed to the main checkout (worktree === repo), so it is an audit record, never a land gate.
+ * Best-effort: a proof-write failure must never fail an otherwise-successful land.
+ */
+async function recordMainProof(repo: string, command: string, ok: boolean, detail: string, sandboxed: boolean): Promise<void> {
+	await recordProof({ repo, worktree: repo, command, ok, detail, sandboxed }).catch(() => {});
 }
 
 /** Cap a string to `n` chars so a gate's failure dump doesn't bloat the land detail. */
@@ -173,13 +222,13 @@ export function decideRegressionGate(baseFailures: Iterable<string>, mergedFailu
 	return { allow: newRegressions.length === 0, newRegressions };
 }
 
-/** On by default when OMP_SQUAD_REGRESSION_GATE=1. */
+/** On by default; set OMP_SQUAD_REGRESSION_GATE=0 to disable the post-merge full-suite regression check. */
 function regressionGateEnabled(): boolean {
-	return process.env.OMP_SQUAD_REGRESSION_GATE === "1";
+	return process.env.OMP_SQUAD_REGRESSION_GATE !== "0";
 }
 
 /**
- * Post-merge full-suite regression gate (OMP_SQUAD_REGRESSION_GATE=1).
+ * Post-merge full-suite regression gate (on by default; OMP_SQUAD_REGRESSION_GATE=0 to disable).
  *
  * Called after the acceptance gate passes, with main already at the merged state. Runs the full
  * suite via detectVerify() — deliberately separate from opts.verify, which can be narrower.
@@ -188,7 +237,7 @@ function regressionGateEnabled(): boolean {
  * also fails on base, decideRegressionGate() compares the extracted failure sets — only strictly
  * new failures block; pre-existing red baseline failures allow a re-merge.
  */
-async function applyRegressionGate(p: {
+export async function applyRegressionGate(p: {
 	repo: string;
 	head0: string;
 	committed: boolean;
@@ -251,7 +300,26 @@ export function landAgent(opts: LandOpts): Promise<LandResult> {
 	return withRepoLandLock(opts.repo, () => landAgentLocked(opts));
 }
 
+/**
+ * Force-land audit seam: a FORCED land (requireProof === false, a deliberate human override — NOT the
+ * legacy `requireProof` undefined) that proceeds without a passing proof gate is unproven trust. We do
+ * NOT block it (force is intentional), but we make it LEGIBLE: evaluate the proof gate once WITHOUT
+ * blocking, and if it would have failed AND the land actually merged/committed, stamp the result so the
+ * caller records the audit fact (actor + timestamp) and the detail says so. A forced land that happened
+ * to carry a fresh proof is not flagged — no crying wolf.
+ */
 async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
+	const forced = opts.requireProof === false;
+	const unproven = forced ? (await proofGate(opts.repo, opts.worktree, opts.branch, opts.verify)) !== undefined : false;
+	const result = await landAgentImpl(opts);
+	if (forced && unproven && result.ok && (result.merged || result.committed)) {
+		result.forcedWithoutProof = true;
+		result.detail = result.detail ? `${result.detail}; landed WITHOUT a passing proof gate (FORCED)` : "landed WITHOUT a passing proof gate (FORCED)";
+	}
+	return result;
+}
+
+async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	const { repo, worktree, branch, message, commitWip } = opts;
 
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe
@@ -304,6 +372,17 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 		return { ok: false, retryable: true, committed, merged: false, message, detail: `main checkout ${repo} has uncommitted tracked changes — refusing to land ${branch} (a failed-gate rollback would discard them); commit or stash them first` };
 	}
 
+	// Stale-branch probe (visual-plan-blocks incident): a branch whose fork point is behind main AND
+	// whose diff touches files main has since changed is a stale snapshot. Computed here, ENFORCED
+	// only on the textually-clean --no-ff path below: a clean merge of such a branch silently reverts
+	// newer main work (the branch rewrites a region main evolved elsewhere in the same file) and the
+	// acceptance gate proves only "tests pass", not "nothing regressed semantically". A CONFLICTING
+	// stale branch keeps flowing to attemptAutoResolve — rebasing replays its commits so the same-file
+	// drift surfaces as conflicts the resolver must consciously resolve, then gate + reviewer prove it.
+	// A fast-forward can't be stale (main hasn't moved). Force-land (staleGate:false) skips this
+	// like the proof gate; OMP_SQUAD_STALE_GATE=0 disables it.
+	const staleReason = opts.staleGate !== false && staleGateEnabled() ? await staleBranchReason(repo, branch) : undefined;
+
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the
 	// gate to run after merge (caller override wins; undefined ⇒ auto-detect; empty ⇒ skip).
 	const head0 = (await git(["rev-parse", "HEAD"], repo)).stdout;
@@ -316,6 +395,8 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			// No acceptance gate — still run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
 			if (rg) return rg;
+			// Record the landed main even without a gate: an inspectable "landed, no acceptance gate ran" proof.
+			await recordMainProof(repo, "(no acceptance gate)", true, detail, false);
 			return { ok: true, committed, merged: true, message, detail };
 		}
 		const v = await runGate(gate, repo);
@@ -323,6 +404,8 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 			// Acceptance gate green — additionally run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
 			if (rg) return rg;
+			// The merged main passed the gate — record it as a durable, inspectable post-merge proof.
+			await recordMainProof(repo, gate, true, `${detail}; verified (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
 			return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
 		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
@@ -346,6 +429,9 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 		if (rm.code !== 0) {
 			return { ok: false, committed, merged: false, message, detail: `base already red (${gate}); re-merging ${branch} failed: ${rm.stderr || rm.stdout}` };
 		}
+		// Landed onto a red baseline — record it honestly: ok:false so the post-merge proof reflects that
+		// main was not green (the branch introduced no NEW failure, but main is still red).
+		await recordMainProof(repo, gate, false, `landed onto a red baseline — main was not green at head0 (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
 		return { ok: true, committed, merged: true, message, detail: `${detail}; landed onto a red baseline — main was not green at head0 (${gate})` };
 	};
 
@@ -354,7 +440,15 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 
 	// Diverged → real merge commit.
 	const merge = await git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo);
-	if (merge.code === 0) return verifyMerged(`merged ${branch}`, () => git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo));
+	if (merge.code === 0) {
+		// Clean merge of a stale branch — the silent-clobber case the probe above exists for. Undo the
+		// merge (main was clean; this mirrors the failed-verify rollback) and refuse with the specifics.
+		if (staleReason) {
+			await git(["reset", "--hard", head0], repo).catch(() => {});
+			return { ok: false, committed, merged: false, message, detail: staleReason };
+		}
+		return verifyMerged(`merged ${branch}`, () => git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo));
+	}
 
 	// Conflict — abort to leave main clean at head0, then try automated resolution (#12) if armed.
 	await git(["merge", "--abort"], repo).catch(() => undefined);
@@ -376,6 +470,44 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 /** On by default; set OMP_SQUAD_AUTORESOLVE=0 to disable automated conflict resolution during a land. */
 function autoresolve(): boolean {
 	return process.env.OMP_SQUAD_AUTORESOLVE !== "0";
+}
+
+/** On by default; set OMP_SQUAD_STALE_GATE=0 to allow stale branches to merge unchecked (old behavior). */
+function staleGateEnabled(): boolean {
+	return process.env.OMP_SQUAD_STALE_GATE !== "0";
+}
+
+/** Cap the file list in a stale-gate refusal so the land detail stays readable. */
+const STALE_OVERLAP_LIST_CAP = 8;
+
+/**
+ * Why `branch` is too stale to merge into `baseRef` (default `"HEAD"` — the local mode's main tip;
+ * PR mode passes a freshly-fetched `origin/<default>` instead), or undefined when it's safe.
+ * Stale ⇐ base gained commits since the branch's fork point (merge-base) AND at least one file is
+ * edited on BOTH sides. Non-overlapping parallel work merges as before; a branch forked from the
+ * current tip can never be stale. Probe failures (unborn HEAD, unrelated histories) return
+ * undefined — the merge path itself surfaces those, and this gate must never block on its own bugs.
+ */
+export async function staleBranchReason(repo: string, branch: string, baseRef = "HEAD"): Promise<string | undefined> {
+	const mb = await git(["merge-base", baseRef, branch], repo);
+	if (mb.code !== 0 || !mb.stdout) return undefined;
+	const base = await git(["rev-parse", baseRef], repo);
+	if (base.code !== 0 || mb.stdout === base.stdout) return undefined; // fork point IS the tip — fresh
+	const baseDiff = await git(["diff", "--name-only", `${mb.stdout}..${baseRef}`], repo);
+	const branchDiff = await git(["diff", "--name-only", `${mb.stdout}..${branch}`], repo);
+	if (baseDiff.code !== 0 || branchDiff.code !== 0) return undefined;
+	const baseFiles = new Set(baseDiff.stdout.split("\n").filter(Boolean));
+	const overlap = branchDiff.stdout.split("\n").filter((f) => f && baseFiles.has(f));
+	if (overlap.length === 0) return undefined;
+	const behind = await git(["rev-list", "--count", `${mb.stdout}..${baseRef}`], repo);
+	const shown = overlap.slice(0, STALE_OVERLAP_LIST_CAP).join(", ");
+	const more = overlap.length > STALE_OVERLAP_LIST_CAP ? ` (+${overlap.length - STALE_OVERLAP_LIST_CAP} more)` : "";
+	return (
+		`stale-branch gate blocked ${branch}: ${baseRef} advanced ${behind.stdout || "?"} commit(s) past this branch's fork point ` +
+		`and both sides edit ${overlap.length} of the same file(s): ${shown}${more}. ` +
+		`Merging a stale snapshot can silently revert newer ${baseRef} work — rebase the branch onto current ${baseRef} and re-verify, ` +
+		`or force-land with a reason. (OMP_SQUAD_STALE_GATE=0 disables this gate.)`
+	);
 }
 
 /** Bound the rebase resolve loop so a pathological branch can't spin forever. */
@@ -444,8 +576,10 @@ async function attemptAutoResolve(a: {
 	};
 
 	// (c) The resolution is unproven until the FULL gate passes on the merged main.
+	let gateSandboxed = false;
 	if (gate) {
 		const v = await runGate(gate, repo);
+		gateSandboxed = v.sandboxed;
 		if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${truncate(v.output, 800)}`);
 	}
 
@@ -457,7 +591,8 @@ async function attemptAutoResolve(a: {
 	const approved = await reviewer({ repo, worktree, branch }).catch(() => false);
 	if (!approved) return rollback(`auto-resolved ${branch} but reviewer rejected the resolution — rolled main back`);
 
-	// (e) Proven ⇒ keep it.
+	// (e) Proven ⇒ keep it, and record the landed main as a durable post-merge proof.
+	await recordMainProof(repo, gate || "(no acceptance gate)", true, `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved`, gateSandboxed);
 	return { ok: true, committed, merged: true, message, detail: `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved` };
 }
 

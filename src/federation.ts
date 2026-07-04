@@ -727,34 +727,9 @@ export class LocalFederationBus implements FederationBus {
 }
 
 /**
- * Listener-only peer-presence feed for a local surface (the command center).
- * Wraps a {@link TailnetFederationBus} purely to RECEIVE presence frames — it
- * never publishes — collecting them into a {@link PeerRoster}. Best-effort: with
- * no reachable coordinator it stays empty and never throws (the bus reconnects
- * on backoff). The daemon's own bus already gossips this host's presence;
- * ponytail: this is a second, read-only connection because the manager doesn't
- * yet expose its peer-presence stream — collapse the two once it does.
+ * Peer-presence for a local surface (the command center) is now read directly off the
+ * manager's own {@link LocalFederationBus} — the manager subscribes to the bus's presence
+ * stream into a {@link PeerRoster} and exposes it (SquadManager.peerPresence). The former
+ * PeerPresenceTracker opened a SECOND, read-only coordinator socket to observe the same
+ * frames; it was collapsed into that single stream (SEAM 2) and removed.
  */
-export class PeerPresenceTracker {
-	private readonly bus: TailnetFederationBus;
-	readonly roster: PeerRoster;
-
-	constructor(opts: { coordinatorUrl: string; operator: Actor; token?: string; ttlMs?: number }) {
-		this.roster = new PeerRoster(opts.operator.id, opts.ttlMs);
-		this.bus = new TailnetFederationBus({ coordinatorUrl: opts.coordinatorUrl, operator: opts.operator, token: opts.token });
-		this.bus.onPresence((p) => this.roster.record(p));
-	}
-
-	async start(): Promise<void> {
-		await this.bus.start();
-	}
-
-	async stop(): Promise<void> {
-		await this.bus.stop();
-	}
-
-	/** Live peer rosters (stale peers pruned). */
-	live(now?: number): OperatorPresence[] {
-		return this.roster.live(now);
-	}
-}

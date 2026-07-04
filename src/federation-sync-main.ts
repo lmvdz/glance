@@ -11,6 +11,7 @@
  * from the local presence registry.
  */
 
+import "./env-compat.ts"; // GLANCE_* ↔ OMP_SQUAD_* aliasing — must run before any env read
 import * as os from "node:os";
 import { startFederationSync } from "./federation-sync.ts";
 import type { Actor } from "./types.ts";

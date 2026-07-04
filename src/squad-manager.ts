@@ -8,12 +8,13 @@
  */
 
 import { EventEmitter } from "node:events";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, type RemoteCommand } from "./federation.ts";
+import { type CommandAck, type FederationBus, LOCAL_ACTOR, NullFederationBus, PeerRoster, type RemoteCommand } from "./federation.ts";
+import { attachLeaseGossip, LEASE_GOSSIP_INTERVAL_MS, type LeaseGossip } from "./federation-sync.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
@@ -49,8 +50,16 @@ import { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type 
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
-import { archivePlanDir, buildFeatures, concernNumFromFile, deletePlanDir, featureLandStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
+import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
+import { canTransition, dedupeTransitions, deriveStatus, followLineage, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
+// Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
+// under the same bare name would read as if that field and this function were the same thing.
+import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
+import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof } from "./done-proof.ts";
+import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
+import { ghJson } from "./gh.ts";
+import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
@@ -96,6 +105,7 @@ import type {
 	SquadEvent,
 	TranscriptEntry,
 	TranscriptKind,
+	TransitionEntry,
 	FeedbackCampaign,
 	FeedbackItem,
 	FeedbackReward,
@@ -104,14 +114,16 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
-import { addWorktree, branchAhead, deleteBranchIfMerged, isGitRepo, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
+import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
+import { JsonlLog } from "./jsonl-log.ts";
+import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
-import { landFailureCount, readLandLedger, recordLandOutcome } from "./land-ledger.ts";
+import { landFailureCount, readLandLedger, recordForcedLand, recordLandOutcome } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
@@ -220,6 +232,20 @@ function autoresolveConfirm(): boolean {
 	return process.env.OMP_SQUAD_AUTORESOLVE_CONFIRM !== "0";
 }
 
+/**
+ * Gates applyState's poll-based ghost-expiry fallback (#lifecycle-truth finding 6). Default OFF: the
+ * rule infers a replayed pending is stale from two consecutive `isStreaming === false` polls, but that
+ * assumption — `isStreaming` reads false only when NOT suspended on a blocking UI request — is
+ * unverified against a live `omp` genuinely blocked on a confirm (DESIGN.md's own risk log flags this
+ * and calls for a live acceptance test before the rule ships on). The deterministic, proof-based
+ * replay-tag expiry (a completed live turn after settle — `expireReplayedPending` off `agent_end`) is
+ * NOT gated by this flag and stays always on. Read fresh on every call (not cached) so tests can flip it
+ * per-case.
+ */
+function pendingGhostExpiryEnabled(): boolean {
+	return process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY === "1";
+}
+
 // liveAgents + the WIP cap live in ./scheduler.ts; spawn identity/adoption policy in ./spawn-identity.ts;
 // profile/model parsing in ./agent-profiles.ts. Re-exports keep the public import paths stable.
 export { liveAgents };
@@ -250,6 +276,19 @@ function isAgentDisconnected(err: unknown): boolean {
 	return err instanceof Error && /agent (not connected|connection lost)/i.test(err.message);
 }
 
+/** Cause payload passed to transition()/setPending() — `error` is the one field transition() itself
+ *  consumes (assigns to `rec.dto.error`); everything else rides along for the log entry only. */
+type TransitionCause = { error?: string; priorId?: string; [k: string]: unknown };
+
+/** Redact every string field of `cause` (error/title/message/etc.) through the same chokepoint
+ *  append() uses (redact.ts) — matches the design's redact-at-write decision (secrets never touch
+ *  transitions.jsonl or the emitted event, at the cost of not covering display-time changes). */
+function redactCause(cause: TransitionCause): TransitionCause {
+	const out: TransitionCause = {};
+	for (const [k, v] of Object.entries(cause)) out[k] = typeof v === "string" ? redact(v) : v;
+	return out;
+}
+
 interface AgentRecord {
 	dto: AgentDTO;
 	agent: AgentDriver;
@@ -277,6 +316,20 @@ interface AgentRecord {
 	 *  agent's declared allow-list is injected into its system prompt AND host tool calls outside the list
 	 *  are hard-denied at the onHostTool seam. Absent ⇒ full tool access (unscoped, the historical default). */
 	toolGrants?: string[];
+	/** Consecutive `applyState` polls seen with `isStreaming === false` while pending is non-empty — the
+	 *  poll-based ghost-expiry fallback's counter (concern 04). Reset to 0 the instant a poll reports
+	 *  streaming, or pending drains to empty. */
+	nonStreamingPolls?: number;
+	/** Timestamps (ms epoch) of this agent's own recent error-class transitions (to:"error", reason
+	 *  "fail"|"catastrophe"|"exit-error") — per-agent and unbounded-by-other-agents, unlike the
+	 *  fleet-shared transitionLog ring (#lifecycle-truth finding 9: a busy fleet's 500-entry shared ring
+	 *  can evict a quiet agent's own error entries well before the 1h window elapses, undercounting
+	 *  exactly the flapping agent errorTransitions1h exists to surface). Trimmed to the trailing 1h by
+	 *  countErrorTransitions1h on every read (recordTransition appends, applyState's poll path also
+	 *  re-trims so the count DECAYS even once an agent stops transitioning — finding 8). On cold adopt,
+	 *  closeOrphanedPending seeds this from the (already-hydrated, so cheap) in-memory ring's entries for
+	 *  the prior agent id, so a fresh-id lineage stitch doesn't reset the flapping signal to zero. */
+	errorTransitionTimestamps?: number[];
 }
 
 export interface SquadManagerOptions {
@@ -297,6 +350,17 @@ export interface SquadManagerOptions {
 	/** Reward disbursement seam. Default: paymentProviderFromEnv() — Tremendous when an API key is set,
 	 *  else a records-only ManualProvider. Inject a fake in tests to avoid the network. */
 	paymentProvider?: PaymentProvider;
+	/** Extra repo paths to always gossip file leases for (OMP_SQUAD_FED_REPOS), on top of those the
+	 *  presence registry discovers. The daemon gossips owned leases in-process over `bus` (SEAM 1). */
+	fedRepos?: string[];
+	/** Owned-lease gossip cadence override (default {@link LEASE_GOSSIP_INTERVAL_MS}); tests use a fast tick. */
+	leaseGossipIntervalMs?: number;
+	/** Fallback timeout (ms) for concern 2's replay-completion marker on reattach — default 2000. An OLD
+	 *  agent-host process (spawned before the marker frame shipped, surviving a daemon upgrade) never
+	 *  sends it, so attachExisting's settle gate falls back to closing after this long instead of
+	 *  wedging forever. Overridable so tests using a fake driver that never emits "replayComplete" don't
+	 *  pay the full production timeout. */
+	replaySettleTimeoutMs?: number;
 }
 
 export interface CommissionOptions {
@@ -314,6 +378,15 @@ export class SquadManager extends EventEmitter {
 	readonly agents = new Map<string, AgentRecord>();
 	private readonly bus: FederationBus;
 	private readonly operator: Actor;
+	/** Peer operator presence observed off the bus's existing presence stream (SEAM 2: collapses the
+	 *  server's former second, read-only coordinator socket). Own-echo dropped, stale peers pruned. */
+	private readonly peerRoster: PeerRoster;
+	/** In-process owned-lease gossip engine (SEAM 1), attached to `bus` on start when federation is live. */
+	private leaseGossip?: LeaseGossip;
+	private leaseGossipTimer?: Timer;
+	/** Extra repo paths to always gossip leases for (OMP_SQUAD_FED_REPOS). */
+	private readonly fedRepos: string[];
+	private readonly leaseGossipIntervalMs: number;
 	private availability: OperatorPresence["availability"] = "active";
 	private readonly stateDir: string;
 	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
@@ -346,6 +419,11 @@ export class SquadManager extends EventEmitter {
 	private readonly observers: Observer[] = [];
 	/** Plan-sync tick timers (one per configured Plane repo); cleared in stop(). */
 	private readonly planSyncTimers: Timer[] = [];
+	/** PR-reconciler backstop timer (concern 07) — always-on, NOT gated by OMP_SQUAD_OBSERVE; cleared in stop(). */
+	private prReconcileTimer?: Timer;
+	/** Untracked-otherwise 20s post-boot stagger for the PR-reconciler tick; cleared in stop() so a
+	 *  manager stopped within the stagger window never fires a tick after shutdown. */
+	private prReconcileStaggerTimer?: Timer;
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
@@ -368,6 +446,21 @@ export class SquadManager extends EventEmitter {
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
+	/** Agent ids currently draining agent-host ring replay on reattach — transition()/setPending() apply
+	 *  the state change but record nothing, and maybeAutoSupervise is suppressed, until settling clears. */
+	private readonly settling = new Set<string>();
+	/** Resolvers awaiting concern 2's replay-completion marker frame from a reattached agent's host,
+	 *  keyed by agent id. Armed by attachExisting BEFORE agent.start() is called (a host that replays
+	 *  its whole ring inside the first socket read can emit the marker synchronously during start()'s
+	 *  own await chain — arming after start() resolves would miss it and always fall through to the
+	 *  timeout) and consumed by wire()'s "replayComplete" listener. */
+	private readonly replayCompleteWaiters = new Map<string, () => void>();
+	/** See {@link SquadManagerOptions.replaySettleTimeoutMs}. */
+	private readonly replaySettleTimeoutMs: number;
+	/** Persisted {agentId,from,to,reason,at} history (stateDir/transitions.jsonl) — ring-authoritative,
+	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
+	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
+	private readonly transitionLog: JsonlLog<TransitionEntry>;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -381,10 +474,14 @@ export class SquadManager extends EventEmitter {
 		super();
 		this.operator = opts.operator ?? LOCAL_ACTOR;
 		this.bus = opts.bus ?? new NullFederationBus();
+		this.peerRoster = new PeerRoster(this.operator.id);
+		this.fedRepos = opts.fedRepos ?? [];
+		this.leaseGossipIntervalMs = opts.leaseGossipIntervalMs ?? (Number(process.env.OMP_SQUAD_LEASE_GOSSIP_MS) || LEASE_GOSSIP_INTERVAL_MS);
 		this.stateDir = opts.stateDir ?? path.join(os.homedir(), ".omp", "squad");
 		setProofRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
+		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -393,6 +490,7 @@ export class SquadManager extends EventEmitter {
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m));
 		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
+		this.replaySettleTimeoutMs = opts.replaySettleTimeoutMs ?? 2000;
 	}
 
 	private blockedReason(dto: Pick<AgentDTO, "pending" | "error">): string | undefined {
@@ -475,6 +573,24 @@ export class SquadManager extends EventEmitter {
 				waiter(ack);
 			}
 		});
+		// SEAM 2: observe peer operator presence off the bus's OWN presence stream (which already receives
+		// coordinator frames) instead of dialing a second read-only socket. Own loopback echoes are dropped
+		// by PeerRoster (self id). NullFederationBus never fires this, so the roster stays empty (inert).
+		this.bus.onPresence((presence) => this.peerRoster.record(presence));
+		// SEAM 1: gossip THIS operator's owned file leases in-process over the same bus, on a timer — so a
+		// normal daemon shares leases without the standalone federation-sync worker. Skipped for the inert
+		// NullFederationBus (OMP_SQUAD_FEDERATION=0 stays a pure no-op: no timer, no registry reads).
+		if (!(this.bus instanceof NullFederationBus)) {
+			this.leaseGossip = attachLeaseGossip({
+				bus: this.bus,
+				operator: this.operator,
+				repos: this.fedRepos,
+				onMirror: (frame) => this.log("info", `federation: mirrored ${frame.leases.length} lease(s) for ${frame.repoId} from ${frame.operator.id}`),
+			});
+			void this.leaseGossip.publishNow().catch(() => {});
+			this.leaseGossipTimer = setInterval(() => void this.leaseGossip?.publishNow().catch(() => {}), this.leaseGossipIntervalMs);
+			this.leaseGossipTimer.unref?.();
+		}
 		this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
 		await this.refreshPlanFeatureSignature();
 		// Auto-dispatch + auto-land (Orchestrator) live in start(), so they are per-org for free in DB
@@ -498,6 +614,7 @@ export class SquadManager extends EventEmitter {
 				paused: () => this.rateLimit.paused(),
 				record: this.automation.for("dispatch"),
 				ledger: openDispatchLedger(this.stateDir),
+				alreadyDone: (repo, issue) => this.issueAlreadyDone(repo, issue),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
@@ -515,6 +632,22 @@ export class SquadManager extends EventEmitter {
 		// seen-map (the first keeps the legacy filename for upgrade continuity; the rest are suffixed).
 		const observeRepos = planeRepos();
 		const slug = (repo: string) => repo.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+		// Land-mode probe — resolved + logged per repo at boot so an operator sees WHY a repo landed in
+		// PR vs local mode without digging ("all 5 probes passed" or the exact reason it forced local).
+		for (const repo of observeRepos) {
+			void resolveLandMode(repo)
+				.then((r) => {
+					this.log("info", `land mode for ${repo}: ${r.mode.toUpperCase()} (${r.reason})`);
+					// The divergence probe (probe 5) forced local mode — give the operator the actual
+					// runbook here, since the probe's own reason string just points back at this log line.
+					if (r.mode === "local" && r.reason.includes("diverged")) {
+						this.log("warn", `${repo}: local default branch has diverged from origin — reconcile it by either (a) pushing the local commits to origin if they're real forward progress the remote is missing, or (b) confirming they're already merged upstream some other way and then resetting the local checkout onto origin/<default> (e.g. \`git reset --hard origin/<default>\`)`);
+						this.log("info", `${repo}: PR mode re-enables automatically once the two branches converge — no restart needed, the next resolved probe picks it up`);
+					}
+				})
+				.catch((e) => this.log("warn", `land mode probe failed for ${repo}: ${String(e)}`));
+		}
 		if (process.env.OMP_SQUAD_OBSERVE !== "0" && observeRepos.length > 0) {
 			observeRepos.forEach((repo, i) => {
 				const observer = new Observer({
@@ -550,6 +683,7 @@ export class SquadManager extends EventEmitter {
 					void syncPlanStatuses({
 						repo,
 						listIssues: () => listPlaneIssuesAllStates(repo),
+						hasProof: (identifier) => hasProof(this.stateDir, identifier),
 						log: (m) => this.log("info", m),
 						record: this.automation.for("plan-sync", repo),
 					}).then((r) => {
@@ -561,6 +695,17 @@ export class SquadManager extends EventEmitter {
 			}
 			this.log("info", `plan-sync on (reconciling STATUS lines for ${observeRepos.join(", ")} every ${Math.round(intervalMs / 1000)}s)`);
 		}
+
+		// PR-reconciler backstop (concern 07) — the synchronous `landAgentPr` path already writes
+		// truth at merge-click; this loop only exists for what that path can't see: a human merging (or
+		// closing) a PR directly in GitHub's UI, and the crash-ordering windows between push/create,
+		// merge/proof, and proof/Plane-close. Deliberately NOT gated by OMP_SQUAD_OBSERVE (a toggleable
+		// self-audit must not silently stop Done-writes for merged PRs) and NOT gated on
+		// `observeRepos.length` (its own activity gate is "is there any ledger/roster work at all",
+		// checked fresh inside every tick) — runs in DB mode too, same as every other manager-owned loop.
+		const prReconcileIntervalMs = Number(process.env.OMP_SQUAD_PR_RECONCILE_INTERVAL_MS) || 120_000;
+		this.prReconcileTimer = setInterval(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), prReconcileIntervalMs);
+		this.prReconcileStaggerTimer = setTimeout(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), 20_000); // stagger past plan-sync's own 15s
 
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
 		// reasoning and files the latent items they surfaced but didn't do. One per configured Plane repo
@@ -643,6 +788,55 @@ export class SquadManager extends EventEmitter {
 		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo" });
 	}
 
+	/**
+	 * Stale-issue guard for the Dispatcher (visual-plan-blocks incident): true when the issue's plan
+	 * concern is already closed in the repo's checked-out tree, so the open Plane issue is drift, not
+	 * work. Two probes, cheapest first:
+	 *   1. plan-doc paths embedded in the issue name (plan-to-plane issue names carry them verbatim) —
+	 *      this catches issues filed WITHOUT a PLANE: backlink in the doc;
+	 *   2. a concern whose PLANE: pointer names this issue's identifier.
+	 * On a hit, also close the Plane issue (best-effort, closeOnDone-gated like closeLandedIssue) so
+	 * the drift heals instead of being re-skipped forever.
+	 */
+	async issueAlreadyDone(repo: string, issue: IssueRef): Promise<boolean> {
+		let closedRef: string | undefined;
+		for (const ref of planDocRefs(issue.name)) {
+			const status = await concernDocStatus(repo, ref);
+			if (status && isClosedConcernStatus(status)) {
+				closedRef = `${ref} (STATUS: ${status})`;
+				break;
+			}
+		}
+		if (!closedRef && issue.identifier) {
+			outer: for (const planDir of await listPlanDirs(repo).catch(() => [])) {
+				for (const concern of await parsePlanConcerns(repo, planDir.dir).catch(() => [])) {
+					if (concern.planeId === issue.identifier && !concern.open) {
+						closedRef = `${concern.path} (STATUS: ${concern.status})`;
+						break outer;
+					}
+				}
+			}
+		}
+		if (!closedRef) return false;
+		this.log("warn", `stale issue ${issue.identifier ?? issue.id}: ${closedRef} is already closed — skipping dispatch`);
+		if (this.closeOnDone && !this.closedIssues.has(issue.id)) {
+			// Skip-dispatch above stays proofless (gating it would re-open PR #18's stale-re-dispatch
+			// incident); only this direct closePlaneIssue write requires a recorded DoneProof. A doc
+			// terminal from before this wave shipped (grandfathered) has no ledger entry — its close is
+			// suppressed and surfaced, never silently written, but dispatch remains skipped either way.
+			const proof = issue.identifier ? getDoneProofByIssue(this.stateDir, issue.identifier) : undefined;
+			if (!proof) {
+				this.log("warn", `terminal-without-proof: ${issue.identifier ?? issue.id} is doc-closed but has no DoneProof — NOT closing in Plane (dispatch still skipped)`);
+				void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", issue.identifier ?? issue.id, "error", `doc says ${closedRef} but no DoneProof exists`);
+			} else if (await closePlaneIssue(issue)) {
+				this.closedIssues.add(issue.id);
+			} else {
+				this.log("warn", `could not close stale issue ${issue.identifier ?? issue.id}`);
+			}
+		}
+		return true;
+	}
+
 	/** Start (or return the existing) agent advancing a Plane issue — the web "Start task" action. */
 	async startTask(repo: string, issue: IssueRef, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
 		const existing = [...this.agents.values()].find((r) => r.dto.issue?.id === issue.id);
@@ -652,14 +846,33 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async stop(): Promise<void> {
+		// Flush any in-flight pending-persist debounce (concern 04) so a graceful shutdown never loses the
+		// ≤1s window — only an actual crash can. The persist() call below already serializes the flushed
+		// snapshot through the normal write chain.
+		for (const t of this.pendingPersistTimers.values()) clearTimeout(t);
+		this.pendingPersistTimers.clear();
 		clearInterval(this.pollTimer);
 		this.dispatcher?.stop();
 		this.orchestrator?.stop();
 		for (const o of this.observers) o.stop();
 		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
+		clearInterval(this.prReconcileTimer);
+		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
+		clearInterval(this.leaseGossipTimer);
 		await this.persist();
+		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
+		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
+		// so this is a same-state note for the transitions timeline ("supervision paused here"), not a
+		// status change. Never allowed to block shutdown.
+		for (const r of this.agents.values()) {
+			try {
+				this.transition(r, r.dto.status, "daemon-stop");
+			} catch (err) {
+				this.log("warn", `daemon-stop transition record failed for ${r.dto.name}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
 		// Detach (don't kill): leave each agent's detached host + omp running so a
 		// restart/upgrade reconnects to live agents with full context.
 		for (const r of this.agents.values()) r.agent.detach?.();
@@ -761,21 +974,110 @@ export class SquadManager extends EventEmitter {
 				// The prior inner host is gone (this is the orphan-adoption path, not warm reconnect), so a
 				// resumed workflow runs on a FRESH thread: cold resume re-executes the in-flight node soundly.
 				cold: true,
-			}).then(() => { n++; }).catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
+			})
+				.then(async (dto) => {
+					n++;
+					// The fresh id create() minted has a dead RPC correlation for anything p carried — close it,
+					// never restore it (concern 04: RT2-5, restored:true is internally contradictory).
+					// Called UNCONDITIONALLY (not gated on p.pending?.length) — closeOrphanedPending itself now
+					// unconditionally stitches the cause.priorId lineage entry too (#lifecycle-truth finding 4:
+					// previously that only happened inside the pending-close loop, so the common no-pending
+					// adopt never recorded lineage and followLineage's crash-spanning stitch never fired for it).
+					await this.closeOrphanedPending(dto.id, p);
+				})
+				.catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
 		if (n || skipped) this.log("info", `took over ${n} orphaned worktree(s) with work; skipped ${skipped} (done/clean or over the ${hardAgentCeiling()}-agent cap)`);
 		return n;
 	}
 
+	/** A cold-adopted agent's persisted pending can never be legitimately answered (fresh id, dead RPC
+	 *  correlation) — record its closure so the operator sees "this agent was waiting on you before the
+	 *  crash" without a permanently-unanswerable entry in dto.pending. If the resumed workflow's checkpoint
+	 *  shows the same gate will re-ask, mark it reask-expected so the operator isn't alarmed by what's
+	 *  actually a normal re-prompt. Reuses the "pending-cancel" DerivedReason for the per-question close
+	 *  (rather than a new TransitionReason) — the distinguishing detail lives in `cause`, matching how
+	 *  `catastrophe` carries its detail in `cause.error` instead of a new reason per catastrophe flavor.
+	 *  Called from both the cold-adopt path (adoptOrphanedAgents, above) and the plain `--restore` path
+	 *  (loadPersisted, below) — both mint a fresh agent id from a PersistedAgent, so both can leak a stale
+	 *  pending the same way, and both need the lineage stitch below regardless of pending.
+	 *
+	 *  Called UNCONDITIONALLY now (#lifecycle-truth finding 4) — every call records an "adopted"
+	 *  cause.priorId entry FIRST, even when there is nothing to close, so followLineage's crash-spanning
+	 *  timeline stitch works for the common no-pending adopt too. Previously the lineage entry only fired
+	 *  from inside the pending-close loop below, gated on `persisted.pending?.length`, leaving "adopted"
+	 *  effectively dead code for the far more common clean-adopt case. */
+	private async closeOrphanedPending(newAgentId: string, persisted: PersistedAgent): Promise<void> {
+		const rec = this.agents.get(newAgentId);
+		if (!rec) return;
+		// Same-state (rec.dto.status -> itself), event-class reason — recorded per the recording-semantics
+		// rule (a same-state EXPLICIT-reason call always records; only same-state "turn-progress" is a
+		// silent no-op), so this always lands in the ledger regardless of pending.
+		this.transition(rec, rec.dto.status, "adopted", { priorId: persisted.id });
+		// Seed this agent's own error-transition history from the prior id's entries still sitting in the
+		// already-hydrated in-memory ring (#lifecycle-truth finding 9) — cheap (a linear scan over the
+		// ≤500-entry ring, no extra disk I/O) since the ring is already loaded at construction; a
+		// cold-adopt's fresh id must not reset a genuinely flapping agent's errorTransitions1h to zero.
+		rec.errorTransitionTimestamps = this.transitionLog
+			.recent()
+			.filter((e) => e.agentId === persisted.id && e.to === "error" && (e.reason === "fail" || e.reason === "catastrophe" || e.reason === "exit-error"))
+			.map((e) => e.at);
+		rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec);
+		const reaskExpected = persisted.kind === "workflow" && persisted.workflowState !== undefined && (await this.gateWillReask(persisted));
+		for (const p of persisted.pending ?? []) {
+			this.transition(rec, rec.dto.status, "pending-cancel", {
+				priorId: persisted.id,
+				question: redact(p.title + (p.message ? `: ${p.message}` : "")),
+				reaskExpected,
+			});
+			this.append(rec, "system", `⛔ prior question orphaned by adoption${reaskExpected ? " (workflow will re-ask)" : ""}: ${redact(p.title)}`, { pending: { requestId: p.id, action: "cancelled" } });
+		}
+	}
+
+	/** Read-only check: will resuming this persisted workflow re-present the SAME human gate the operator
+	 *  was already asked (so the orphan-close note shouldn't alarm them as an unrelated new question)?
+	 *
+	 *  Deviation from the plan's literal snippet: the plan named `GATE_FOLD_VAR` (actually defined in
+	 *  src/workflow/executor.ts, not engine.ts/types.ts as guessed) as the marker to inspect, but that var
+	 *  means the OPPOSITE of what's needed here — it is set once a gate has ALREADY resolved, to fold the
+	 *  reviewer's comments into the next agent turn, and says nothing about whether a not-yet-answered gate
+	 *  will re-ask. The engine-verified signal for "will re-ask" is structural instead: `WorkflowEngine.run()`'s
+	 *  entry checkpoint (engine.ts:101) sets `currentNode` to a `human`-kind node's own id ONLY while it is
+	 *  about to call `executor.humanGate()` for it (i.e. before resolution); the exit checkpoint (engine.ts:125)
+	 *  immediately advances `currentNode` past it the instant it's answered. So `currentNode` pointing at a
+	 *  `human` node in the persisted checkpoint is exactly "resuming this graph will re-ask this gate".
+	 *  Best-effort: any read/parse failure (missing graph file, malformed DOT) answers `false` rather than
+	 *  throwing — this only feeds an advisory transcript note, never a workflow-engine decision. */
+	private async gateWillReask(persisted: PersistedAgent): Promise<boolean> {
+		const graphPath = persisted.workflow?.path;
+		const currentNode = persisted.workflowState?.currentNode;
+		if (!graphPath || !currentNode) return false;
+		try {
+			const wf = parseWorkflow(await fs.readFile(graphPath, "utf8"));
+			return wf.nodes.get(currentNode)?.kind === "human";
+		} catch {
+			return false;
+		}
+	}
+
 	/** Does a persisted (pre-adoption) agent still have local work to resume — uncommitted edits or commits
-	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster. */
+	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster.
+	 *  DoneProof is consulted before the arithmetic (same proof-first idiom as agentHasUnlandedWork /
+	 *  observer.ts's hasDoneProof), gated on `proofCoversTip` so a follow-up commit pushed after the
+	 *  proof was recorded falls back to the arithmetic instead of being permanently invisible: a
+	 *  squash/rebase merge landed out-of-band while the daemon was down would otherwise permanently
+	 *  re-adopt an already-landed branch as "has work" on every restart. */
 	private async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
 		if (!p.worktree) return false;
 		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		if (!p.branch) return false;
-		const r = Bun.spawnSync(["git", "-C", p.repo, "rev-list", "--count", `HEAD..${p.branch}`], { stdout: "pipe", stderr: "ignore" });
-		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+		const proof = getDoneProofByBranch(this.stateDir, p.branch);
+		if (proof && (await proofCoversTip(proof, p.branch, p.repo))) return false;
+		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
+		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
+		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
+		return (await computeAheadOfBase({ repo: p.repo, branch: p.branch, cwd: p.repo })) > 0;
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
@@ -812,9 +1114,44 @@ export class SquadManager extends EventEmitter {
 		this.agents.set(p.id, rec);
 		this.wire(rec);
 		this.emitAgent(rec);
-		await agent.start();
-		rec.dto.status = this.derive(rec);
+		// Settle gate (replay-phantom-transition fix): the agent-host replays up to 4000 ring frames on
+		// reconnect, across however many socket reads that takes, re-emitting event/ui frames from inside
+		// (and, for a slow/chunked replay, well after) `agent.start()`'s own await chain. Without
+		// suppression each replayed frame would pump a phantom transition into history on every daemon
+		// restart. transition()/setPending() apply state changes but record nothing, and
+		// maybeAutoSupervise is suppressed, while this agent's id is in both `reattached` and `settling` —
+		// `reattached` is seeded here (before start(), not after) specifically so transition()'s
+		// suppression check is already armed for the frames replayed synchronously inside start() itself.
+		this.settling.add(p.id);
 		this.reattached.add(p.id);
+		// Armed BEFORE agent.start() — see armReplayCompleteWaiter's own comment for why arming after
+		// start() resolves would miss a marker delivered inside start()'s first socket read.
+		const replaySettled = this.armReplayCompleteWaiter(p.id);
+		try {
+			await agent.start();
+			await this.drainOneTick(); // cheap floor: let a purely-synchronous burst land even for a driver that never sends a marker at all
+			await replaySettled.promise; // the real settle point: the replay-completion marker, or the timeout fallback for an old agent-host
+			this.settling.delete(p.id);
+			this.transition(rec, this.derive(rec), "reattach"); // ONE synthetic entry now that settling is off — derive() assigns via transition(), never a raw write
+		} catch (err) {
+			// Runs on the failure path too (host died between the hostAlive() probe and connect, or the
+			// RPC handshake rejected): both callers swallow the rejection with .catch(log) and leave `rec`
+			// in `this.agents`. Two bugs this branch fixes (#lifecycle-truth findings 1 & 3):
+			//  (1) previously the `finally` block derived a non-terminal status here (pending=[],
+			//      streaming=false, status="starting" derives to "idle") and the thrown error was
+			//      swallowed by both callers' .catch(log) — a failed reattach landed as a healthy-looking
+			//      "idle" agent with a dead driver, indistinguishable from a real idle agent on the dashboard.
+			//  (3) the raw `rec.dto.status = this.derive(rec)` write immediately before transition() made
+			//      every recorded "reattach" entry from===to by construction — a third raw-write site the
+			//      enforcement test had to whitelist attachExisting for.
+			// Also: without closing the settle window here, this id would stay in `settling` forever,
+			// permanently disabling maybeAutoSupervise and silencing transition()'s ledger for it.
+			replaySettled.cancel(); // start() rejected — the marker (or a timeout wait for one) can never help now
+			this.settling.delete(p.id);
+			this.transition(rec, "error", "reattach", { error: `reattach failed: ${err instanceof Error ? err.message : String(err)}` });
+			this.emitAgent(rec);
+			throw err;
+		}
 		this.emitAgent(rec);
 	}
 
@@ -1283,12 +1620,19 @@ export class SquadManager extends EventEmitter {
 	 * Edit one concern of a feature's plan from the flow diagram: rewrite its STATUS and/or the
 	 * concerns that block it, persisting to the concern doc + overview dependency table. Works for
 	 * stored AND derived (plan-dir-scanned) features — it resolves the feature via features().
+	 *
+	 * This is the human-override lane: a status write here is deliberately NOT gated on a DoneProof
+	 * (the flow-diagram editor is exactly where an operator asserts truth the ledger doesn't have yet).
+	 * It gains an audit record instead, so the write is visible rather than invisible.
 	 */
-	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }): Promise<PlanConcern | undefined> {
+	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }, actor: Actor = LOCAL_ACTOR): Promise<PlanConcern | undefined> {
 		const f = (await this.features(opts.repo)).find((x) => x.id === id);
 		if (!f || !f.planDir) return undefined;
 		const concern = await updatePlanConcern(f.repo, f.planDir, opts.file, { status: opts.status, blockedBy: opts.blockedBy });
-		if (concern) this.emitFeaturesChanged();
+		if (concern) {
+			this.emitFeaturesChanged();
+			if (opts.status != null) void this.recordAudit(actor, "concern.status", opts.file, "ok", `-> ${opts.status} (operator/webapp edit, no land proof required)`);
+		}
 		return concern;
 	}
 
@@ -1528,10 +1872,57 @@ export class SquadManager extends EventEmitter {
 		for (const w of landOrder(wts)) {
 			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
-			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, verify: pf.acceptance ?? undefined });
+			// Reroute through the SAME mode-dispatching seam land() uses (concern 06) — landFeature used
+			// to call landAgent directly here, which meant PR mode would keep local-merging every
+			// multi-branch feature land regardless of the resolved mode (the "two worlds inside the
+			// daemon" hole). Issue fields thread through so PR mode's DoneProof/PendingPr ledger entries
+			// are retrievable by issue identifier, same as the single-agent path.
+			const res = await this.landBranch({
+				repo: pf.repo,
+				worktree: w.worktree,
+				branch: w.branch,
+				message: `feature(${pf.title}): land ${w.branch ?? "changes"}`,
+				commitWip: !busy,
+				requireProof: !force,
+				staleGate: !force,
+				verify: pf.acceptance ?? undefined,
+				issueId: rec?.dto.issue?.id,
+				issueIdentifier: rec?.dto.issue?.identifier,
+				issueProjectId: rec?.dto.issue?.projectId,
+				agentId: w.agentId,
+			});
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
+			// Forced member land without a passing proof gate — audit the override per branch.
+			if (res.forcedWithoutProof) {
+				recordForcedLand(this.stateDir, w.branch, actor.id, `${reason ? `${reason}: ` : ""}${res.detail ?? ""}`);
+				void this.store.appendAudit({ actor: actor.id, action: "land.forced-unproven", target: id, detail: { branch: w.branch, reason, at: Date.now() } }).catch(() => {});
+			}
+			if (res.mode === "pr" && rec) {
+				rec.dto.prUrl = res.prUrl;
+				rec.dto.prNumber = res.prNumber;
+				rec.dto.prState = res.prState;
+				this.emitAgent(rec);
+			}
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
-			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
+			if (res.merged) {
+				// PR mode already wrote its own (richer) DoneProof inside landAgentPr — only the local
+				// path needs one written here, mirroring land()'s manager-layer write.
+				if (res.mode !== "pr") {
+					recordDoneProof(this.stateDir, {
+						branch: w.branch ?? "",
+						repo: repoIdentity(pf.repo),
+						issueId: rec?.dto.issue?.id,
+						issueIdentifier: rec?.dto.issue?.identifier,
+						mode: "local",
+						commit: w.branch ? await headCommit(w.worktree) : "",
+						baseRef: "HEAD",
+						verified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
+						detail: res.detail ?? "",
+						provenAt: Date.now(),
+					});
+				}
+				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
+			}
 		}
 		this.emitFeaturesChanged();
 		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
@@ -1579,13 +1970,27 @@ export class SquadManager extends EventEmitter {
 			commitWip: !busy,
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
 			requireProof: !opts.force,
+			staleGate: !opts.force,
+			issueId: dto.issue?.id,
+			issueIdentifier: dto.issue?.identifier,
+			issueProjectId: dto.issue?.projectId,
+			agentId: dto.id,
 		});
+		// PR-mode metadata (concern 06): set directly on the dto at push/merge time, the same pattern
+		// `landReady` already uses. Absent (mode !== "pr") ⇒ local mode, untouched.
+		if (result.mode === "pr") {
+			rec.dto.prUrl = result.prUrl;
+			rec.dto.prNumber = result.prNumber;
+			rec.dto.prState = result.prState;
+			this.emitAgent(rec);
+		}
 		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
 		// (never bump the fail streak) and not landed — surface the ready-to-land flag and return.
 		if (result.staged) {
 			rec.dto.landReady = true;
 			this.emitAgent(rec);
 			this.log("info", `land-confirm: ${id} auto-resolved a conflict — ready to land`);
+			this.floatPrOnLandReady(rec);
 			return result;
 		}
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
@@ -1593,11 +1998,41 @@ export class SquadManager extends EventEmitter {
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
 		// never bump the streak for it, else transient dirty windows park a healthy branch.
 		if (!result.retryable && (auto || result.ok)) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
+		// Forced land that merged WITHOUT a passing proof gate — audit it so the override is never invisible trust.
+		if (result.forcedWithoutProof) {
+			const forceActor = opts.actor ?? LOCAL_ACTOR;
+			recordForcedLand(this.stateDir, dto.branch, forceActor.id, `${opts.reason ? `${opts.reason}: ` : ""}${result.detail ?? result.message}`);
+			void this.recordAudit(forceActor, "land", id, "ok", `landed WITHOUT proof (FORCED)${opts.reason ? `: ${opts.reason}` : ""}`);
+			void this.store.appendAudit({ actor: forceActor.id, action: "land.forced-unproven", target: id, detail: { branch: dto.branch, reason: opts.reason, at: Date.now() } }).catch(() => {});
+		}
 		if (result.ok) {
 			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
-			if (result.merged) await this.closeLandedIssue(dto.issue); // real merge ⇒ close its tracking issue (idempotent, best-effort)
-			else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
+			if (result.merged) {
+				// PR mode already wrote its own (richer, method/mergeCommit-aware) DoneProof inside
+				// landAgentPr — writing a generic "mode: local" one here too would clobber it.
+				if (result.mode !== "pr") {
+					// Retrievable proof that this branch's work is now in main — the ONE artifact later
+					// consumers (closeLandedIssue's proof gate, plan-sync, Observer arithmetic) can trust
+					// instead of re-deriving truth from rev-list math. Best-effort, additive: never blocks land().
+					// TODO: land.ts's LandResult carries no explicit tri-state flag for the red-baseline escape
+					// (verifyMerged :390-414) — this substring match on its own detail wording is the only signal
+					// today. If that wording ever changes, this silently stops matching and falls back to "green".
+					recordDoneProof(this.stateDir, {
+						branch: dto.branch ?? "",
+						repo: repoIdentity(dto.repo),
+						issueId: dto.issue?.id,
+						issueIdentifier: dto.issue?.identifier,
+						mode: "local",
+						commit: dto.branch ? await headCommit(dto.worktree) : "",
+						baseRef: "HEAD",
+						verified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
+						detail: result.detail ?? result.message,
+						provenAt: Date.now(),
+					});
+				}
+				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
+			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
@@ -1627,6 +2062,50 @@ export class SquadManager extends EventEmitter {
 		rec.dto.landReady = true;
 		this.emitAgent(rec);
 		this.log("info", `land-confirm: ${id} verified — ready to land`);
+		this.floatPrOnLandReady(rec);
+	}
+
+	/**
+	 * PR-mode landReady float (concern 06/DESIGN mode-dispatch ruling + the autoLand×PR matrix's
+	 * "landConfirm ON (default): landReady ⇒ push+draft" row): the moment an agent is flagged
+	 * ready-to-land — confirm-mode verified GREEN, or a staged auto-resolved conflict — PR mode should
+	 * already have pushed the branch and opened/adopted its PR, so the badge/URL exist at landReady
+	 * time instead of only appearing at merge-click. Concern 07's reconciler (`landReady && pr-mode &&
+	 * no ledger entry ⇒ retry ensurePr`) is a backstop for a FAILED float, not a substitute for one that
+	 * was never attempted — this is that attempt. Local mode (no `defaultBranch`) is a no-op.
+	 * Fire-and-forget: never blocks flagging the agent ready; a failure here is left for the
+	 * reconciler to retry from the PendingPr ledger.
+	 */
+	private floatPrOnLandReady(rec: AgentRecord): void {
+		const dto = rec.dto;
+		if (!dto.branch || dto.worktree === dto.repo) return; // nothing to land in PR mode
+		void (async () => {
+			try {
+				const mode = await this.resolveLandModeFor(dto.repo);
+				if (mode.mode !== "pr" || !mode.defaultBranch) return;
+				const ensure = await ensurePr({
+					repo: dto.repo,
+					branch: dto.branch as string,
+					defaultBranch: mode.defaultBranch,
+					title: `squad(${dto.name}): land ${dto.branch}`,
+					issueId: dto.issue?.id,
+					issueIdentifier: dto.issue?.identifier,
+					issueProjectId: dto.issue?.projectId,
+					agentId: dto.id,
+					stateDir: this.stateDir,
+				});
+				if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
+					rec.dto.prUrl = ensure.prUrl;
+					rec.dto.prNumber = ensure.prNumber;
+					rec.dto.prState = ensure.prState ?? "draft";
+					this.emitAgent(rec);
+				} else {
+					this.log("warn", `land-confirm: PR float failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
+				}
+			} catch (e) {
+				this.log("warn", `land-confirm: PR float threw for ${dto.name} (${dto.branch}): ${e instanceof Error ? e.message : String(e)}`);
+			}
+		})();
 	}
 
 	/**
@@ -1641,15 +2120,44 @@ export class SquadManager extends EventEmitter {
 		const rec = this.agents.get(id);
 		if (!rec) return;
 		rec.streaming = false;
-		rec.dto.status = "error";
-		rec.dto.error = `CATASTROPHE: ${detail}`;
+		this.transition(rec, "error", "catastrophe", { error: `CATASTROPHE: ${detail}` });
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
 		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
 	}
-	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
-	protected landBranch(opts: LandOpts): Promise<LandResult> {
+	/**
+	 * Thin, overridable wrapper around land-mode.ts's `resolveLandMode` — exists so tests can force
+	 * PR/local mode deterministically without fighting `bun test`'s PROCESS-WIDE `mock.module`
+	 * semantics: a different test file module-mocking `land-mode.ts` for an unrelated reason (e.g.
+	 * `aheadOfBase`-isolation) permanently rebinds squad-manager.ts's own `resolveLandMode` import for
+	 * the rest of the test process the moment this module is first evaluated, regardless of import
+	 * order in any OTHER file. Injecting through a method sidesteps that entirely.
+	 */
+	protected resolveLandModeFor(repo: string): ReturnType<typeof resolveLandMode> {
+		return resolveLandMode(repo);
+	}
+
+	/**
+	 * Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake
+	 * land). Also the universal mode-dispatching point (concern 06): PR mode routes through
+	 * `landAgentPr` (push → ensure PR → scratch-merge gate → `gh pr merge` → assert → DoneProof), local
+	 * mode is the unchanged passthrough to `landAgent`. `land()` and `landFeature()` both call this
+	 * seam, so PR mode inherits proofGate/fail-cap/forced-land-audit/closeLandedIssue for free.
+	 */
+	protected async landBranch(opts: LandOpts): Promise<LandResult> {
+		const mode = await this.resolveLandModeFor(opts.repo);
+		if (mode.mode === "pr") {
+			if (!mode.defaultBranch) {
+				// Forced PR mode (OMP_SQUAD_LAND_MODE=pr) with no resolvable default branch — refuse the
+				// land LOUDLY rather than silently falling through to `landAgent` (a local merge). An
+				// operator who explicitly forced PR mode never wants a "quiet" local merge as the fallback;
+				// that is exactly the "wrong merge world" this env var exists to prevent.
+				this.log("warn", `land refused for ${opts.repo}: ${mode.reason}`);
+				return { ok: false, committed: false, merged: false, message: opts.message, detail: `forced-pr-mode-without-default-branch: ${mode.reason}` };
+			}
+			return landAgentPr({ ...opts, defaultBranch: mode.defaultBranch }, this.stateDir);
+		}
 		return landAgent(opts);
 	}
 
@@ -1710,23 +2218,33 @@ export class SquadManager extends EventEmitter {
 	 * Cheap "has unlanded work" probe for the auto-land loop — uncommitted edits, or commits ahead
 	 * of the repo's checked-out base. Gates the costly acceptance run so it never fires on an idle
 	 * agent with nothing to merge.
+	 *
+	 * DoneProof is consulted FIRST, before any ahead-count arithmetic, mirroring observer.ts's
+	 * `hasDoneProof` idiom: a squash/rebase (or out-of-band) merge makes rev-list arithmetic
+	 * permanently nonzero even though the work is safely in origin/default, so a recorded proof for
+	 * the branch means "no unlanded work" regardless of what the arithmetic says — but only while the
+	 * proof still covers the branch's CURRENT tip (`proofCoversTip`): a follow-up commit pushed to the
+	 * branch after the proof was taken must fall back to the arithmetic, not be swallowed forever.
+	 * Uncommitted dirty edits are checked first regardless of proof — a proof only speaks to the
+	 * committed branch tip it was recorded against, never to edits made since.
 	 */
-	private async agentHasUnlandedWork(id: string): Promise<boolean> {
+	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
-		const r = Bun.spawnSync(["git", "-C", rec.dto.repo, "rev-list", "--count", `HEAD..${rec.dto.branch}`], { stdout: "pipe", stderr: "ignore" });
-		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
+		if (proof && (await proofCoversTip(proof, rec.dto.branch, rec.dto.repo))) return false;
+		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
 	}
 
 	// ── Observer edges (OMPSQ-52) — read-only git probes + the main gate, injected into Observer. ──
 
-	/** Commits on an agent's branch not in main's HEAD: 0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
-	private aheadOfMain(a: AgentDTO): number {
+	/** Commits on an agent's branch not in main (origin-aware in PR mode via `aheadOfBase`):
+	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
+	protected async aheadOfMain(a: AgentDTO): Promise<number> {
 		if (!a.branch) return -1;
-		const r = hardenedGitSync(["-C", a.repo, "rev-list", "--count", `HEAD..${a.branch}`]);
-		return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+		return computeAheadOfBase({ repo: a.repo, branch: a.branch, cwd: a.worktree });
 	}
 
 	/** Count of uncommitted TRACKED files in a checkout — the land-blocking set (matches the land path's
@@ -1851,8 +2369,8 @@ export class SquadManager extends EventEmitter {
 		try {
 			const command = await detectVerify(repo);
 			if (!command) return { ok: true };
-			// gateExec: scrubbed env always; whole run inside a container when OMP_SQUAD_GATE_SANDBOX is set.
-			const plan = gateExec(command, repo);
+			// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a legible host fallback).
+			const plan = await gateExec(command, repo);
 			const proc = Bun.spawn(plan.argv, { cwd: repo, stdout: "pipe", stderr: "pipe", env: plan.env });
 			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 			if (code === 0) return { ok: true };
@@ -1986,7 +2504,15 @@ export class SquadManager extends EventEmitter {
 			repo = opts.repo;
 			resolvedBranch = (await worktreeStatus(cwd).catch(() => ({ branch: undefined }))).branch;
 		} else {
-			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir);
+			// PR-mode agents fork from a freshly-fetched origin default branch, not the local checkout's
+			// (possibly stale, though the mode probe already checked convergence) HEAD.
+			const landMode = await resolveLandMode(opts.repo);
+			let startPoint: string | undefined;
+			if (landMode.mode === "pr" && landMode.defaultBranch) {
+				await hardenedGit(["fetch", "origin", landMode.defaultBranch], { cwd: opts.repo }).catch(() => undefined);
+				startPoint = `origin/${landMode.defaultBranch}`;
+			}
+			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir, startPoint);
 			cwd = wt.cwd;
 			repo = wt.repo;
 			resolvedBranch = wt.inPlace ? undefined : wt.branch;
@@ -2060,19 +2586,25 @@ export class SquadManager extends EventEmitter {
 		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
 		this.agents.set(id, rec);
 		this.wire(rec);
+		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
+		// requirement) — records regardless of pending because "spawn" is an event-class reason, not
+		// "turn-progress" (the only same-state reason transition() silently no-ops on). Marks the start of
+		// every agent's timeline so `GET /api/agents/:id/transitions` never opens on an unexplained first
+		// entry.
+		this.transition(rec, dto.status, "spawn");
 		this.emitAgent(rec);
 
 		let started = false;
 		try {
 			await agent.start();
 			started = true;
-			rec.dto.status = "idle";
+			this.transition(rec, "idle", "connect-ok");
 			if (agent.setSessionName) await agent.setSessionName(`squad:${name}`).catch(() => {});
 			this.emitAgent(rec);
 			if (opts.task) {
 				this.append(rec, "user", opts.task);
 				rec.streaming = true;
-				rec.dto.status = "working";
+				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
 				await agent.prompt(opts.task).catch((err) => this.fail(rec, err));
 			}
@@ -2163,7 +2695,7 @@ export class SquadManager extends EventEmitter {
 		const onExit = () => finish("failed");
 		const onAbort = () => {
 			void rec.agent.stop().catch(() => {});
-			rec.dto.status = "stopped";
+			this.transition(rec, "stopped", "abort");
 			this.emitAgent(rec);
 			finish("failed");
 		};
@@ -2184,7 +2716,7 @@ export class SquadManager extends EventEmitter {
 		rec.agent.once("exit", onExit);
 		this.append(rec, "user", task);
 		rec.streaming = true;
-		rec.dto.status = "working";
+		this.transition(rec, "working", "branch-start");
 		this.emitAgent(rec);
 		void rec.agent.prompt(task).catch(() => finish("failed"));
 		return promise;
@@ -2282,11 +2814,11 @@ export class SquadManager extends EventEmitter {
 	private async ensureConnected(rec: AgentRecord): Promise<void> {
 		if (rec.agent.isAlive && rec.agent.isReady) return;
 		rec.dto.error = undefined;
-		rec.dto.status = "starting";
+		this.transition(rec, "starting", "connect-begin"); // explicit-class: legal from stopped/error
 		this.emitAgent(rec);
 		await rec.agent.start();
 		if (rec.agent.setSessionName) await rec.agent.setSessionName(`squad:${rec.dto.name}`).catch(() => {});
-		rec.dto.status = "idle";
+		this.transition(rec, "idle", "connect-ok");
 		this.emitAgent(rec);
 	}
 
@@ -2371,7 +2903,7 @@ export class SquadManager extends EventEmitter {
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
 				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId });
 				rec.streaming = true;
-				rec.dto.status = "working";
+				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
 				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
 				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncate(cmd.message, 80));
@@ -2406,7 +2938,7 @@ export class SquadManager extends EventEmitter {
 				break;
 			case "kill":
 				await rec.agent.stop();
-				rec.dto.status = "stopped";
+				this.transition(rec, "stopped", "kill");
 				this.emitAgent(rec);
 				void this.recordAudit(actor, "kill", cmd.id);
 				break;
@@ -2459,10 +2991,12 @@ export class SquadManager extends EventEmitter {
 		} else {
 			rec.agent.respondHostTool(req.id, value);
 		}
-		rec.dto.pending = rec.dto.pending.filter((p) => p.id !== req.id);
-		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncate(value, 60)}`, { pending: { requestId: req.id, action: "answered" }, status: "ok" });
+		// streaming=true BEFORE setPending (behavior-identical reorder from the prior mutate-then-derive
+		// ordering): setPending's own derive() then sees streaming already true, so answering while no
+		// other pending remains records exactly one input→working entry, not a phantom pair.
 		rec.streaming = true;
-		rec.dto.status = this.derive(rec);
+		this.setPending(rec, rec.dto.pending.filter((p) => p.id !== req.id), "pending-answer");
+		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncate(value, 60)}`, { pending: { requestId: req.id, action: "answered" }, status: "ok" });
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "answer", rec.dto.id, "ok", `${truncate(req.title, 48)} → ${truncate(value, 40)}`);
 	}
@@ -2481,6 +3015,14 @@ export class SquadManager extends EventEmitter {
 	 */
 	private maybeAutoSupervise(rec: AgentRecord, req: PendingRequest): void {
 		if (process.env.OMP_SQUAD_AUTOSUPERVISE === "0") return;
+		// A UI frame replayed during settle must not trigger an auto-answer against a request the
+		// operator already answered pre-crash — the replay's live correlation id makes it indistinguishable
+		// from a fresh request otherwise.
+		if (this.settling.has(rec.dto.id)) return;
+		if (req.gateClass) {
+			this.log("info", `autosupervise: SKIP gate "${req.title}" on ${rec.dto.name} (never auto-answered)`);
+			return;
+		}
 		const value = chooseFallback(req);
 		if (!value) return; // nothing safe + deterministic to answer (e.g. a host-tool call) → leave for a human
 		if (this.isRiskyRequest(req)) {
@@ -2511,10 +3053,13 @@ export class SquadManager extends EventEmitter {
 		await rec.agent.stop();
 		const fresh = this.makeDriver(rec.options);
 		rec.agent = fresh;
-		rec.dto.status = "starting";
-		rec.dto.pending = [];
-		rec.dto.error = undefined;
 		rec.streaming = false;
+		// callerOwnsStatus: clear pending without letting setPending derive+record its own transition —
+		// otherwise a working agent with an already-empty queue would get a spurious working->idle
+		// "pending-cancel" ledger entry immediately ahead of the real "restart" one below.
+		this.setPending(rec, [], "pending-cancel", undefined, { callerOwnsStatus: true });
+		this.transition(rec, "starting", "restart");
+		rec.dto.error = undefined;
 		rec.subs.clear();
 		this.wire(rec);
 		// Surface the prior session's digest, fenced as untrusted data, so the operator immediately
@@ -2525,7 +3070,7 @@ export class SquadManager extends EventEmitter {
 		this.emitAgent(rec);
 		try {
 			await fresh.start();
-			rec.dto.status = "idle";
+			this.transition(rec, "idle", "connect-ok");
 		} catch (err) {
 			this.fail(rec, err);
 		}
@@ -2558,6 +3103,17 @@ export class SquadManager extends EventEmitter {
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
 		a.on("stderr", (line: string) => this.log("warn", `[${rec.dto.name}] ${line}`));
+		// Concern 2's replay-completion marker (agent-host.ts writes it last, right after the ring, so a
+		// client always processes it after every frame that preceded it regardless of how many socket
+		// reads the replay spanned). No-op for a freshly-created (non-reattached) agent — nothing is ever
+		// armed in replayCompleteWaiters for it.
+		a.on("replayComplete", () => {
+			const finish = this.replayCompleteWaiters.get(rec.dto.id);
+			if (finish) {
+				this.replayCompleteWaiters.delete(rec.dto.id);
+				finish();
+			}
+		});
 		a.on("checkpoint", (state: WorkflowRunState) => {
 			rec.options.workflowState = state;
 			rec.dto.workflowState = state;
@@ -2565,9 +3121,10 @@ export class SquadManager extends EventEmitter {
 			void this.persist();
 		});
 		a.on("exit", ({ code }: { code: number }) => {
+			// Guard preserved verbatim — an exit reported for an already-stopped agent (e.g. our own
+			// kill/restart already flipped it) stays inert exactly as today.
 			if (rec.dto.status !== "stopped") {
-				rec.dto.status = code === 0 ? "stopped" : "error";
-				if (code !== 0) rec.dto.error = `agent exited (code ${code})`;
+				this.transition(rec, code === 0 ? "stopped" : "error", code === 0 ? "exit-clean" : "exit-error", code !== 0 ? { error: `agent exited (code ${code})` } : undefined);
 				this.emitAgent(rec);
 			}
 			void this.finalizeRun(rec);
@@ -2648,6 +3205,7 @@ export class SquadManager extends EventEmitter {
 				this.finishAssistantStream(rec);
 				rec.streaming = false;
 				rec.dto.activity = undefined;
+				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
 				break;
 			}
@@ -2669,7 +3227,7 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		rec.dto.receipt = rec.run?.rollup();
-		rec.dto.status = this.derive(rec);
+		this.transition(rec, this.derive(rec), "turn-progress"); // hottest site — the derived same-state early-return matters most here
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
 	}
@@ -2755,12 +3313,284 @@ export class SquadManager extends EventEmitter {
 	 * (no premature close-on-gate-pass, no close on no-op land). Gated by OMP_SQUAD_AUTOCLOSE
 	 * (closeOnDone). Idempotent via `closedIssues` (a closed id is never re-closed) and best-effort
 	 * (`closePlaneIssue` swallows transport errors). A failed close leaves the id unmarked so a later land retries it.
+	 *
+	 * Additionally gated on a recorded DoneProof (concern 01's ledger): a merge report with no matching
+	 * proof is NOT closed — it is skipped and surfaced via recordAudit instead of silently trusting the
+	 * caller's "it merged" claim. Until landFeature (concern 06) reroutes through the same proof-writing
+	 * seam as land(), its per-member calls here will find no proof and log-suppress; that is expected and
+	 * non-regressive (the branch still really merged via landAgent) and closes itself once concern 06 lands.
 	 */
-	async closeLandedIssue(issue: IssueRef | undefined): Promise<void> {
+	async closeLandedIssue(issue: IssueRef | undefined, ctx?: { branch?: string; repo?: string }): Promise<void> {
 		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;
-		this.log("info", `closing ${issue.identifier ?? issue.id} (branch landed)`);
+		const identifier = issue.identifier ?? issue.id;
+		const proof = issue.identifier ? getDoneProofByIssue(this.stateDir, issue.identifier) : ctx?.branch ? getDoneProofByBranch(this.stateDir, ctx.branch) : undefined;
+		if (!proof) {
+			this.log("warn", `NOT closing ${identifier} (branch landed) — no DoneProof on record; skipping close, surfacing for review`);
+			void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", identifier, "error", `land reported merged but no DoneProof exists for ${ctx?.branch ?? "(no branch)"}`);
+			return;
+		}
+		this.log("info", `closing ${identifier} (branch landed, proof ${proof.verified})`);
 		if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
-		else this.log("warn", `could not close ${issue.identifier ?? issue.id} (branch landed)`);
+		else this.log("warn", `could not close ${identifier} (branch landed)`);
+	}
+
+	// ── PR-reconciler backstop (concern 07) ─────────────────────────────────────────────────────────
+	// `landAgentPr` (concern 06) is synchronous end-to-end, so this loop is a BACKSTOP for the one case
+	// it cannot see — a human merging/closing a PR directly in GitHub's UI — plus the crash-ordering
+	// windows the synchronous path can leave stranded (push↔create, merge↔proof, proof↔Plane-close).
+	// Driven entirely off the durable PendingPr ledger (written at push+create time by land-pr.ts) ∪ the
+	// live roster; NEVER off `planeRepos()` directly, so a test (or a repo later dropped from Plane
+	// config) doesn't need real Plane config for the loop to still reconcile what it already knows about.
+
+	/** One reconciler pass. Its own activity gate ("is there anything to do") is computed fresh every
+	 *  tick from the ledger + roster — an idle daemon with no PR-mode activity makes zero `gh`/`git`
+	 *  calls, never gated behind a toggleable env flag (OMP_SQUAD_OBSERVE is for the operator-toggleable
+	 *  self-audit; Done-truth for merged PRs must not silently stop when that's off). */
+	protected async prReconcileTick(): Promise<void> {
+		const allEntries = listPendingPrs(this.stateDir);
+		// Only entries reconcileOnePr can actually act on: "open" (out-of-band merge/close check), or
+		// "merged" with a proof already written but the Plane close unconfirmed (crash-ordering retry —
+		// mirrors reconcileOnePr's own `entry.proofAt && !entry.issueClosedAt` gate exactly). A "merged"
+		// entry with NO proof yet is not a live case reconcileOnePr handles (defensive dead arm only
+		// reachable via a partial-write crash inside updatePendingPr) — excluding it here stops it from
+		// burning a `gh pr view` call every tick forever with no way to progress.
+		const unconfirmed = allEntries.filter((e) => e.state === "open" || (e.state === "merged" && !!e.proofAt && !e.issueClosedAt));
+		const existingBranches = new Set(allEntries.map((e) => e.branch));
+		// Push-retry candidates: a landReady agent, in a repo resolved to PR mode, with no ledger entry
+		// at all yet — covers both a crash between push and `gh pr create`, and a floated push (concern
+		// 06's `floatPrOnLandReady`) that silently failed.
+		const pushCandidates = [...this.agents.values()].filter((r) => r.dto.landReady && r.dto.branch && r.dto.worktree !== r.dto.repo && !existingBranches.has(r.dto.branch));
+		// ff-heal repo set: repos named by a push-retry candidate, or by an entry NOT YET fully confirmed
+		// (open, unconfirmed-merged, or CLOSED-unmerged — a closed-without-merging PR still deliberately
+		// keeps its repo "in ledger scope" per the design, since that entry is never retired). A FULLY
+		// CONFIRMED merged entry (see `isFullyConfirmedPendingPr`) no longer counts — this is the fix for
+		// "every repo that ever landed a PR gets an ff-heal `git fetch` every tick, indefinitely": once an
+		// entry is retired below, its repo drops out of scope too.
+		const activeEntries = allEntries.filter((e) => !isFullyConfirmedPendingPr(e));
+		const healRepos = new Set<string>();
+		for (const rec of pushCandidates) healRepos.add(rec.dto.repo);
+		for (const e of activeEntries) {
+			const p = this.repoPathForIdentity(e.repo);
+			if (p) healRepos.add(p);
+		}
+		// Retirement: entries ALREADY fully confirmed as of the START of this tick (from a prior tick, or
+		// left over from before this fix shipped) are swept at the end. An entry that becomes fully
+		// confirmed DURING this same tick's reconcile pass (proof + close both landing together) is left
+		// alone this tick — its fields stay visible for this tick's callers — and retires on the next tick
+		// once a fresh read of the ledger shows it confirmed. Counted into the activity gate so a ledger
+		// holding only stale confirmed entries still gets swept even when there is nothing else to do.
+		const retirable = allEntries.filter(isFullyConfirmedPendingPr);
+		if (unconfirmed.length === 0 && pushCandidates.length === 0 && healRepos.size === 0 && retirable.length === 0) return; // nothing to do — zero gh/git calls this tick
+		for (const entry of unconfirmed) await this.reconcileOnePr(entry).catch((e) => this.log("warn", `pr-reconcile: ${entry.branch} failed: ${e instanceof Error ? e.message : String(e)}`));
+		for (const rec of pushCandidates) await this.retryPushFloat(rec).catch((e) => this.log("warn", `pr-reconcile: push retry threw for ${rec.dto.branch}: ${e instanceof Error ? e.message : String(e)}`));
+		for (const repo of healRepos) await this.ffHealOne(repo).catch((e) => this.log("warn", `pr-reconcile: ff-heal failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`));
+		for (const e of retirable) deletePendingPr(this.stateDir, e.branch);
+	}
+
+	/** Map a PendingPr entry's `repoIdentity()` key back to a local filesystem repo path — checked
+	 *  against live agents first (cheap, always available), then the configured Plane repo list (covers
+	 *  an entry whose agent has since been removed from the roster). Undefined ⇒ orphaned entry (its
+	 *  repo isn't known to this manager at all); the caller skips it for this tick and retries later. */
+	private repoPathForIdentity(identity: string): string | undefined {
+		for (const rec of this.agents.values()) if (repoIdentity(rec.dto.repo) === identity) return rec.dto.repo;
+		return planeRepos().find((r) => repoIdentity(r) === identity);
+	}
+
+	private agentByBranch(branch: string): AgentRecord | undefined {
+		for (const rec of this.agents.values()) if (rec.dto.branch === branch) return rec;
+		return undefined;
+	}
+
+	/**
+	 * Attempt (or confirm) the Plane close for `entry`'s tracked issue. Returns true when there is
+	 * nothing left to confirm: the entry never had a tracked issue, autoclose is off (so there is
+	 * nothing to retry — a disabled close is done, not failed), it was already closed (idempotent via
+	 * `closedIssues`), or this call just closed it successfully. False ⇒ retry on a later tick.
+	 *
+	 * Prefers the live agent's full `dto.issue` (carries `projectId`, which Plane's close call needs to
+	 * route the request) when the agent is still on the roster. `PendingPr` also carries `issueProjectId`
+	 * (persisted at `ensurePr` time, mirroring the same field on `dto.issue`), so the synthetic `IssueRef`
+	 * built for a removed agent still routes a real Plane close instead of silently staying unconfirmed
+	 * forever — the durable ledger exists precisely to cover this orphaned-agent case.
+	 */
+	private async attemptCloseFor(entry: PendingPr, repo: string): Promise<boolean> {
+		if (!entry.issueId) return true; // no Plane issue was ever tracked for this land — nothing to confirm
+		if (!this.closeOnDone) {
+			// OMP_SQUAD_AUTOCLOSE=0: `closeLandedIssue` will refuse to close on every tick forever, which
+			// used to read as an unconfirmed close the reconciler kept retrying (a no-op churn: the SAME
+			// gh/Plane state re-checked every tick with no path to ever progress). "Disabled" is not
+			// "failed" — there is nothing to retry, so this entry is done, just never actually closed.
+			this.log("info", `pr-reconcile: not closing ${entry.issueIdentifier ?? entry.issueId} for ${entry.branch} — autoclose is off (OMP_SQUAD_AUTOCLOSE=0); treating the close as done (skipped)`);
+			return true;
+		}
+		const rec = this.agentByBranch(entry.branch);
+		const issue: IssueRef = rec?.dto.issue ?? { id: entry.issueId, identifier: entry.issueIdentifier, name: entry.issueIdentifier ?? entry.issueId, projectId: entry.issueProjectId };
+		if (!this.closedIssues.has(issue.id)) await this.closeLandedIssue(issue, { branch: entry.branch, repo });
+		return this.closedIssues.has(issue.id);
+	}
+
+	/**
+	 * Per-entry reconciliation. Two independent cases, checked in order:
+	 *
+	 *   1. Crash-ordering retry — a DoneProof already exists (`proofAt` set) but the Plane close never
+	 *      confirmed (`issueClosedAt` unset). No `gh` call needed at all: just retry the close. Idempotent
+	 *      via the LEDGER field (`issueClosedAt`), not proof-existence — a second tick after it's set
+	 *      never re-enters this branch (the caller's `unconfirmed` filter excludes it).
+	 *   2. Out-of-band GitHub-UI action — `entry.state` is still "open" locally (the daemon never saw a
+	 *      merge or close happen). `gh pr view` is the only way to learn what a human did outside the
+	 *      daemon entirely: MERGED ⇒ run the SAME per-method reachability assertion `landAgentPr` uses,
+	 *      then write DoneProof + close, explicitly marked as NOT re-verified by the daemon's own gate
+	 *      (the scratch-merge gate never ran for a merge that happened outside it). CLOSED-unmerged ⇒ the
+	 *      design's explicit ruling: mark the ledger entry closed, but leave the branch and `landReady`
+	 *      alone — a human decided, and a later re-Land creates a fresh PR.
+	 */
+	protected async reconcileOnePr(entry: PendingPr): Promise<void> {
+		const repo = this.repoPathForIdentity(entry.repo);
+		if (!repo) {
+			this.log("warn", `pr-reconcile: no repo known for ${entry.repo} (branch ${entry.branch}) — skipping this tick`);
+			return;
+		}
+
+		if (entry.proofAt && !entry.issueClosedAt) {
+			const closed = await this.attemptCloseFor(entry, repo);
+			if (closed) updatePendingPr(this.stateDir, entry.branch, { issueClosedAt: Date.now() });
+			return;
+		}
+
+		const slug = repoIdentity(repo).split("/").slice(-2).join("/");
+		const view = await ghJson<{ state: string; headRefOid?: string; mergeCommit?: { oid: string } }>(
+			["pr", "view", String(entry.prNumber), "--repo", slug, "--json", "state,headRefOid,mergeCommit"],
+			repo,
+		);
+		if (!view) {
+			this.log("warn", `pr-reconcile: gh pr view #${entry.prNumber} failed for ${entry.branch} — retrying next tick`);
+			return;
+		}
+
+		if (view.state === "MERGED" && entry.state !== "merged") {
+			const mode = await this.resolveLandModeFor(repo);
+			if (!mode.defaultBranch) {
+				this.log("warn", `pr-reconcile: ${repo} has no resolved default branch — cannot verify the out-of-band merge of ${entry.branch}`);
+				return;
+			}
+			const defaultBranch = mode.defaultBranch;
+			await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
+			const branchTip = (await hardenedGit(["rev-parse", entry.branch], { cwd: repo })).stdout.trim();
+			if (!branchTip) {
+				this.log("warn", `pr-reconcile: could not resolve local tip of ${entry.branch} — deferring to next tick`);
+				return;
+			}
+			// Method-AGNOSTIC assertion: an out-of-band GitHub-UI merge can use ANY method — not
+			// necessarily the one THIS repo's OMP_SQUAD_PR_MERGE_METHOD is configured to. Asserting only
+			// against the configured method meant a UI Squash on a "merge"-configured repo (GitHub's own
+			// common default button) failed the ancestry check FOREVER: the DoneProof was never written,
+			// the Plane issue never closed, and this tick warned every 2 minutes indefinitely. Try the
+			// ancestry check (the "merge" case) first, then the gh-view-based check (the squash/rebase
+			// case, method-string-agnostic between the two) — accept whichever holds, and record which
+			// one did so DoneProof.method reflects reality instead of the daemon's own configured guess.
+			let method: MergeMethod = "merge";
+			let assertion = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, method);
+			if (!assertion.ok) {
+				const configured = mergeMethod();
+				const viaViewMethod: MergeMethod = configured === "merge" ? "squash" : configured;
+				const viaView = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, viaViewMethod);
+				if (viaView.ok) {
+					assertion = viaView;
+					method = viaViewMethod;
+				}
+			}
+			if (!assertion.ok) {
+				this.log("warn", `pr-reconcile: merge reachability assertion failed for ${entry.branch} (PR #${entry.prNumber}) via both the merge-ancestry and gh-view checks: ${assertion.detail}`);
+				return;
+			}
+			recordDoneProof(this.stateDir, {
+				branch: entry.branch,
+				repo: entry.repo,
+				issueId: entry.issueId,
+				issueIdentifier: entry.issueIdentifier,
+				mode: "pr",
+				method,
+				commit: assertion.commit ?? branchTip,
+				mergeCommit: assertion.mergeCommit,
+				baseRef: `origin/${defaultBranch}`,
+				verified: "unverified",
+				detail: `merged out-of-band via GitHub UI (confirmed via ${method === "merge" ? "merge-ancestry" : "gh-view headRefOid/mergeCommit"} check); gate not re-verified by the daemon`,
+				provenAt: Date.now(),
+				prNumber: entry.prNumber,
+				prUrl: entry.prUrl,
+			});
+			const rec = this.agentByBranch(entry.branch);
+			if (rec) rec.dto.landReady = false; // successful land ⇒ clear the confirm-mode staged flag, same as land()
+			recordLandOutcome(this.stateDir, entry.branch, true, "merged out-of-band");
+			const closed = await this.attemptCloseFor(entry, repo);
+			if (rec) this.emitAgent(rec);
+			updatePendingPr(this.stateDir, entry.branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now(), ...(closed ? { issueClosedAt: Date.now() } : {}) });
+			return;
+		}
+
+		if (view.state === "CLOSED" && entry.state !== "closed") {
+			updatePendingPr(this.stateDir, entry.branch, { state: "closed" });
+			this.log("warn", `pr-reconcile: PR #${entry.prNumber} for ${entry.branch} closed without merging — branch and landReady left intact; a re-Land will open a fresh PR`);
+		}
+	}
+
+	/**
+	 * Push-retry: covers a crash between push and `gh pr create`, and a floated push (concern 06's
+	 * `floatPrOnLandReady`) that failed silently. Deliberately a near-duplicate of that method's body
+	 * rather than a shared extraction — mirrors land-pr.ts's own stated convention of duplicating small
+	 * helpers rather than cross-importing another module's private seam.
+	 */
+	private async retryPushFloat(rec: AgentRecord): Promise<void> {
+		const dto = rec.dto;
+		if (!dto.branch) return;
+		const mode = await this.resolveLandModeFor(dto.repo);
+		if (mode.mode !== "pr" || !mode.defaultBranch) return;
+		const ensure = await ensurePr({
+			repo: dto.repo,
+			branch: dto.branch,
+			defaultBranch: mode.defaultBranch,
+			title: `squad(${dto.name}): land ${dto.branch}`,
+			issueId: dto.issue?.id,
+			issueIdentifier: dto.issue?.identifier,
+			issueProjectId: dto.issue?.projectId,
+			agentId: dto.id,
+			stateDir: this.stateDir,
+		});
+		if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
+			rec.dto.prUrl = ensure.prUrl;
+			rec.dto.prNumber = ensure.prNumber;
+			rec.dto.prState = ensure.prState ?? "draft";
+			this.emitAgent(rec);
+		} else {
+			this.log("warn", `pr-reconcile: push retry failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
+		}
+	}
+
+	/**
+	 * Best-effort fast-forward heal for a repo resolved to PR mode: when the local checkout is
+	 * STRICTLY behind `origin/<default>` (an ancestor of it, not equal) and currently checked out on
+	 * that default branch (never a deliberate feature-branch checkout — same condition `resolveLandMode`'s
+	 * probe 4 already requires), fast-forward it. `--ff-only` can never overwrite or lose local work by
+	 * construction — a strictly-behind fast-forward has nothing to lose. Runs inside the SAME
+	 * `withRepoLandLock` a live land uses, so it never races an in-flight merge/scratch-gate.
+	 */
+	private async ffHealOne(repo: string): Promise<void> {
+		const mode = await this.resolveLandModeFor(repo);
+		if (mode.mode !== "pr" || !mode.defaultBranch) return;
+		const defaultBranch = mode.defaultBranch;
+		const current = (await hardenedGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo })).stdout.trim();
+		if (current !== defaultBranch) return; // deliberate non-default checkout wins — never touch
+		await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
+		const localSha = (await hardenedGit(["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+		const remoteSha = (await hardenedGit(["rev-parse", `origin/${defaultBranch}`], { cwd: repo })).stdout.trim();
+		if (!localSha || !remoteSha || localSha === remoteSha) return; // already converged
+		const behind = await isAncestor(localSha, `origin/${defaultBranch}`, repo); // ancestor + not-equal ⇒ strictly behind, never ahead/diverged
+		if (!behind) return;
+		await withRepoLandLock(repo, async () => {
+			const merge = await hardenedGit(["merge", "--ff-only", `origin/${defaultBranch}`], { cwd: repo });
+			if (merge.code === 0) this.log("info", `pr-reconcile: ff-healed ${repo} to ${remoteSha}`);
+			else this.log("warn", `pr-reconcile: ff-heal merge --ff-only failed for ${repo}: ${merge.stderr.trim()}`);
+		});
 	}
 
 	/**
@@ -2937,6 +3767,36 @@ export class SquadManager extends EventEmitter {
 		return { events: this.automation.recent(query), rollup: this.automation.rollup(query.windowMs) };
 	}
 
+	/**
+	 * First-glance factory liveness (server reads this for GET /api/factory/status). Answers the trust
+	 * question the automation rollup couldn't: for every autonomous loop, is it flag-enabled, did it
+	 * actually ARM this run, and — if not — WHY (the authoritative `planeRepos().length === 0` gate
+	 * reason), plus its live heartbeat freshness and a derived status enum. `liveArmed` reads the manager's
+	 * real runtime fields, so "armed but not fueled" is provably distinct from "off" and from "dead".
+	 */
+	factoryStatus(now = Date.now()): FactoryStatus {
+		// Freshness window: the widest per-loop budget (3 cadences, floor 5m) so a recent heartbeat still
+		// shows up in the rollup regardless of loop cadence.
+		const windowMs = Math.max(...FACTORY_LOOPS.map((l) => Math.max(l.cadenceMs * 3, 300_000)));
+		const liveArmed: Record<string, boolean> = {
+			dispatch: !!this.dispatcher,
+			observer: this.observers.length > 0,
+			scout: this.scouts.size > 0,
+			opportunity: this.opportunities.length > 0,
+			// orchestrator is always built, but its control loop only arms the timer when AUTODRIVE is on.
+			autodrive: !!this.orchestrator && process.env.OMP_SQUAD_AUTODRIVE !== "0",
+			autoland: this.autoLand,
+		};
+		return buildFactoryStatus({
+			now,
+			env: process.env,
+			planeRepoCount: planeRepos().length,
+			rollup: this.automation.rollup(windowMs, now),
+			liveArmed,
+			activeAgents: occupyingAgents(this.list()),
+		});
+	}
+
 	private async commentPlaneTargets(repo: string, subject: string): Promise<string[]> {
 		if (/^[A-Z0-9]+-\d+$/i.test(subject)) return [subject.toUpperCase()];
 		const feature = (await this.features(repo)).find((item) => item.id === subject);
@@ -3004,7 +3864,7 @@ export class SquadManager extends EventEmitter {
 	protected onUi(rec: AgentRecord, req: RpcExtensionUIRequest): void {
 		let added: PendingRequest | undefined;
 		if (req.method === "cancel") {
-			rec.dto.pending = rec.dto.pending.filter((p) => p.id !== req.targetId);
+			this.setPending(rec, rec.dto.pending.filter((p) => p.id !== req.targetId), "pending-cancel");
 			if (req.targetId) this.append(rec, "system", "input request cancelled", { pending: { requestId: req.targetId, action: "cancelled" }, status: "cancelled" });
 		} else if (req.method === "notify") {
 			this.append(rec, "system", `(${req.notifyType ?? "info"}) ${req.message}`);
@@ -3018,11 +3878,18 @@ export class SquadManager extends EventEmitter {
 				options: req.method === "select" ? req.options : undefined,
 				placeholder: req.method === "input" ? req.placeholder : req.method === "editor" ? req.prefill : undefined,
 				createdAt: Date.now(),
+				gateClass: req.id.startsWith("gate_") || ("title" in req && req.title.startsWith("GATE:")),
+				// Tag pendings rebuilt from the agent-host's ring replay during the post-reattach settle window
+				// (concern 04's ghost-expiry rules key off this — never gates answerability, only staleness).
+				replayed: this.settling.has(rec.dto.id) ? true : undefined,
 			};
-			rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== req.id), added];
+			this.setPending(rec, [...rec.dto.pending.filter((p) => p.id !== req.id), added], "pending-add");
 			this.append(rec, "system", `⛔ needs input: ${added.title}`, { pending: { requestId: added.id, action: "created" }, status: "running" });
 		}
-		rec.dto.status = this.derive(rec);
+		// Idempotent when a branch above already ran setPending (derive() is deterministic and pure over
+		// rec's current fields, so this early-returns as a same-state no-op) — only the "notify" branch,
+		// which never touches pending, relies on this as its sole status recompute.
+		this.transition(rec, this.derive(rec), "turn-progress");
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
 		if (added) this.maybeAutoSupervise(rec, added); // opt-in bounded auto-answer (registers the request first, above)
@@ -3065,10 +3932,13 @@ export class SquadManager extends EventEmitter {
 			title: `tool: ${call.toolName}`,
 			message: truncate(JSON.stringify(call.arguments ?? {}), 200),
 			createdAt: Date.now(),
+			// Tag pendings rebuilt from the agent-host's ring replay during the post-reattach settle window
+			// (concern 04's ghost-expiry rules key off this — never gates answerability, only staleness).
+			replayed: this.settling.has(rec.dto.id) ? true : undefined,
 		};
-		rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== call.id), pending];
+		this.setPending(rec, [...rec.dto.pending.filter((p) => p.id !== call.id), pending], "pending-add");
 		this.append(rec, "system", `⛔ tool call needs host: ${call.toolName}`, { pending: { requestId: pending.id, action: "created" }, status: "running", tool: { callId: call.id, name: call.toolName, args: call.arguments, argsText: safeJson(call.arguments) } });
-		rec.dto.status = this.derive(rec);
+		this.transition(rec, this.derive(rec), "turn-progress"); // idempotent — setPending already derived/recorded above
 		this.emitAgent(rec);
 	}
 
@@ -3117,15 +3987,204 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private derive(rec: AgentRecord): AgentStatus {
-		if (rec.dto.status === "stopped" || rec.dto.status === "error") return rec.dto.status;
-		if (rec.dto.pending.length > 0) return "input";
-		if (rec.streaming) return "working";
-		return "idle";
+		return deriveStatus({ status: rec.dto.status, pendingCount: rec.dto.pending.length, streaming: rec.streaming });
+	}
+
+	/**
+	 * The single guarded write-path for AgentStatus (#lifecycle-truth). Every `rec.dto.status =`
+	 * assignment elsewhere in this file is a bug (enforced by tests/lifecycle-enforcement.test.ts) —
+	 * two whitelisted DTO-literal construction sites (attachExisting, restoreFlueMember) are the only
+	 * exceptions, since there is no prior state to transition *from* at construction time.
+	 *
+	 * Recording semantics: a same-state call with a DERIVED reason is a hot-path no-op (turn-progress
+	 * fires per RPC frame) — no record. A same-state call with an EXPLICIT/event reason (a second
+	 * question while already "input", a repeat catastrophe with new detail) DOES record — that is this
+	 * slice's headline deliverable, not an edge case to optimize away. A denied distinct-state attempt
+	 * is spooled with `denied:true` plus a warn log — canTransition is permissive enough that this path
+	 * is unreached today; it is kept as a bug detector, never a silent bug hider.
+	 */
+	private transition(rec: AgentRecord, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
+		const from = rec.dto.status;
+		// Redacted once here (concern 02) — not just at the persisted-entry boundary in recordTransition/
+		// recordDenied — because `cause.error` is also assigned straight onto `rec.dto.error` below, and
+		// dto.error rides the emitted `agent` SquadEvent verbatim. DESIGN.md's redaction decision names
+		// transition() itself as one of the three chokepoints (transition()/setPending()/persistNow()).
+		const redactedCause = cause ? redactCause(cause) : undefined;
+		if (from === to) {
+			// Only "turn-progress" is the genuinely hot-path reason (fires per RPC frame, including every
+			// streaming text delta) — it alone is a silent same-state no-op. `isDerivedReason()` is deliberately
+			// NOT used here: it also covers pending-add/pending-answer/pending-cancel, which classify as
+			// "derived" for terminal-state STICKINESS (canTransition, below) but are event-class for RECORDING
+			// purposes — a second question while already "input", or a repeat orphan-close, DOES record (the
+			// concern's own headline deliverable; DESIGN.md: "spool growth comes solely from turn-progress, so
+			// exempting event-class reasons costs nothing"). Concern 04 (durable-pending's closeOrphanedPending,
+			// which always calls transition() same-state by construction — it's an orphan-close note, not a
+			// status change) is the first caller that actually depends on this distinction being correct.
+			if (reason === "turn-progress") return;
+		} else if (!canTransition(from, to, reason)) {
+			this.recordDenied(rec, from, to, reason, redactedCause);
+			this.log("warn", `denied transition ${rec.dto.name}: ${from} -> ${to} (${reason})`);
+			return;
+		}
+		if (this.reattached.has(rec.dto.id) && this.settling.has(rec.dto.id)) {
+			rec.dto.status = to; // still apply the state change — only recording is suppressed during settle
+			if (redactedCause?.error !== undefined) rec.dto.error = redactedCause.error;
+			return;
+		}
+		rec.dto.status = to;
+		if (redactedCause?.error !== undefined) rec.dto.error = redactedCause.error; // fixes fail/markCatastrophe push-payload ordering (S6)
+		this.recordTransition(rec, from, to, reason, redactedCause);
+	}
+
+	/** Mirrors transition() for `rec.dto.pending`. `opts.callerOwnsStatus` is for sites that manage status
+	 *  themselves (restart clears pending AND sets "starting" via its own separate transition() call —
+	 *  suppressing setPending's own derive+record here means restart's ledger gets exactly ONE "restart"
+	 *  entry instead of a spurious intermediate "pending-cancel" derived entry ahead of it). Absent
+	 *  `opts.callerOwnsStatus`, the resulting status is (re)derived and recorded under `reason` —
+	 *  same-state early-return behavior is identical to a direct transition() call.
+	 *
+	 *  Redacts `title`/`message` on every entry before it lands on `rec.dto.pending` — today those fields
+	 *  ride straight into state (and the emitted `agent` event) verbatim, which is the one gap append()'s
+	 *  redaction chokepoint doesn't already cover (#lifecycle-truth concern 02). */
+	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
+		rec.dto.pending = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
+		// Debounced persist trigger (concern 04) — scheduled regardless of the callerOwnsStatus branch
+		// below, since `pending` already changed above either way. Suppressed during the replay settle
+		// window: a ghost pending rebuilt by ring replay must never resurrect a stale question on disk.
+		if (!this.settling.has(rec.dto.id)) this.schedulePendingPersist(rec.dto.id);
+		if (opts?.callerOwnsStatus) return; // caller issues its own explicit transition() for the status change
+		this.transition(rec, this.derive(rec), reason, cause);
+	}
+
+	/** Append a recorded (non-denied) transition to the persisted ring (stateDir/transitions.jsonl).
+	 *  `cause` arrives already redacted (transition() redacts once, up front — see its comment). `seq` is
+	 *  a uuid, not a per-process counter (#lifecycle-truth finding 7) — a counter would collide across a
+	 *  restart boundary, exactly where dedupeTransitions's file/ring merge needs identity to be trustworthy. */
+	private recordTransition(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
+		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, seq: randomUUID() };
+		this.transitionLog.append(entry);
+		this.recordErrorTransition(rec, entry); // finding 9's per-agent (not fleet-shared-ring) error tally
+		this.pushTransitionEvent(rec, entry); // concern 03 wires DTO tail + rollup off this same call
+		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
+	}
+
+	/** Append a denied-transition attempt to the same ring, flagged so it is never confused with an
+	 *  applied transition. Does not feed pushTransitionEvent — a denied attempt never changed dto.status. */
+	private recordDenied(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
+		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, denied: true, seq: randomUUID() };
+		this.transitionLog.append(entry);
+		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
+	}
+
+	/** Wires the DTO's capped `transitions` tail + the `errorTransitions1h` rollup off every recorded
+	 *  (non-denied) transition. `turn-progress` entries never join the tail (hot-path noise); the rollup
+	 *  is always recomputed from THIS agent's own bounded error-timestamp array (never the fleet-shared
+	 *  ring — finding 9) so it never undercounts a busy/flapping agent. Both fields ride the next
+	 *  `emitAgent()` the calling site already performs — no extra broadcast here. */
+	private pushTransitionEvent(rec: AgentRecord, entry: TransitionEntry): void {
+		if (entry.reason !== "turn-progress") {
+			const tail = [...(rec.dto.transitions ?? []), entry];
+			rec.dto.transitions = tail.length > 5 ? tail.slice(-5) : tail;
+		}
+		rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec);
+	}
+
+	/** Append an error-class transition's timestamp onto THIS agent's own bounded array (#lifecycle-truth
+	 *  finding 9) — the source countErrorTransitions1h now scans, replacing the fleet-shared 500-entry
+	 *  transitionLog ring a busy fleet could evict this agent's own entries out of before the 1h window
+	 *  elapses (the exact undercount the DTO field's doc promised never happens). */
+	private recordErrorTransition(rec: AgentRecord, entry: TransitionEntry): void {
+		if (entry.to !== "error" || (entry.reason !== "fail" && entry.reason !== "catastrophe" && entry.reason !== "exit-error")) return;
+		rec.errorTransitionTimestamps = [...(rec.errorTransitionTimestamps ?? []), entry.at];
+	}
+
+	/** Linear scan + trim over THIS agent's own (small, unbounded-by-other-agents) error-timestamp array
+	 *  — never the fleet-shared transitionLog ring (#lifecycle-truth finding 9: that ring is capped at
+	 *  500 entries TOTAL across every agent, so a busy fleet can evict the very error entries being
+	 *  counted for a quiet-but-flapping agent, contradicting this field's "never undercounts" doc). The
+	 *  trim (not just the count) is what makes the rollup DECAY once an agent stops transitioning
+	 *  (finding 8) — applyState's poll path calls this too, for agents with a nonzero count, so the
+	 *  number ages out even without a fresh transition to trigger the recompute. */
+	private countErrorTransitions1h(rec: AgentRecord): number {
+		const cutoff = Date.now() - 3_600_000;
+		const kept = (rec.errorTransitionTimestamps ?? []).filter((t) => t >= cutoff);
+		rec.errorTransitionTimestamps = kept;
+		return kept.length;
+	}
+
+	/** A blocking UI request suspends the agent's turn — so a turn that completed (agent_end fired) proves
+	 *  no live request is actually open. Any pending still tagged replayed:true is a ghost from the ring
+	 *  replay resurrecting an already-answered (pre-crash) question. Expire it, never silently. Idempotent
+	 *  (no-op when there are no replayed:true entries) — safe to call from both expiry rules (concern 04). */
+	private expireReplayedPending(rec: AgentRecord): void {
+		const ghosts = rec.dto.pending.filter((p) => p.replayed);
+		if (!ghosts.length) return;
+		this.setPending(rec, rec.dto.pending.filter((p) => !p.replayed), "pending-cancel");
+		for (const g of ghosts) this.append(rec, "system", `⛔ stale question expired (answered before restart): ${redact(g.title)}`, { pending: { requestId: g.id, action: "cancelled" } });
+	}
+
+	/** Full history for one agent: ring-served by default (fast, no file I/O); `full:true` additionally
+	 *  reads transitions.jsonl and follows `cause.priorId` lineage (bounded hops) to stitch a crash-spanning
+	 *  timeline for an agent that was cold-adopted under a fresh id (concern 04 populates priorId on adopt).
+	 *
+	 *  Deviation from the plan's literal snippet: the merge-then-lineage set is NOT pre-filtered to `id`
+	 *  before calling followLineage — a prior id's entries live under a DIFFERENT agentId, so filtering to
+	 *  `id` first would discard exactly the ancestor rows lineage-following needs. followLineage does its
+	 *  own id-scoped filtering internally (see agent-lifecycle.ts) over the full ring∪file entry set. */
+	async transitionHistory(id: string, opts: { full?: boolean } = {}): Promise<TransitionEntry[]> {
+		const own = this.transitionLog.recent().filter((e) => e.agentId === id);
+		if (!opts.full) return own; // ring-served, no file I/O — the default, fast path
+		const fromFile = await this.transitionLog.hydrateAll();
+		const merged = dedupeTransitions([...fromFile, ...this.transitionLog.recent()]);
+		return followLineage(id, merged);
+	}
+
+	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a
+	 *  driver's `start()`) land before the settle gate closes. A microtask alone is not enough — replay
+	 *  frames can be scheduled via setImmediate/setTimeout(0) inside the driver — so this parks behind
+	 *  one macrotask boundary. Kept as a cheap floor UNDER the real fix below (armReplayCompleteWaiter) —
+	 *  harmless for drivers that never emit a marker at all (fake test doubles), and for the
+	 *  single-socket-read production case it guarantees the burst is fully applied even before the
+	 *  marker-or-timeout race is even set up. */
+	private drainOneTick(): Promise<void> {
+		return new Promise((resolve) => setImmediate(resolve));
+	}
+
+	/** Concern 2's real settle-point fix: the agent-host replays its ring across however many socket
+	 *  reads it takes (up to 4000 lines), NOT within one tick — a bare setImmediate (drainOneTick) is a
+	 *  heuristic that can close the settle gate while frames are still straggling in. The host writes an
+	 *  explicit `{__sq:"replay_complete"}` marker LAST, after every ring line, so a client always
+	 *  processes it after everything that preceded it, however many ticks the delivery spanned (UDS/TCP
+	 *  preserve stream order). Must be armed BEFORE `agent.start()` is called (see the
+	 *  replayCompleteWaiters field comment) — a host that delivers its whole reply in the first socket
+	 *  read can emit the marker synchronously inside start()'s own await chain.
+	 *
+	 *  Falls back to `this.replaySettleTimeoutMs` (default 2000ms) so an OLD agent-host process — spawned
+	 *  before this fix shipped, surviving a daemon upgrade — that never sends the marker still settles
+	 *  eventually instead of wedging maybeAutoSupervise and the ledger for that agent forever. Returns a
+	 *  `cancel()` so a caller whose `agent.start()` itself rejected can tear the waiter (and its timer)
+	 *  down immediately instead of leaving it to expire on its own. */
+	private armReplayCompleteWaiter(id: string): { promise: Promise<void>; cancel: () => void } {
+		let finish: () => void = () => {};
+		const promise = new Promise<void>((resolve) => {
+			let done = false;
+			const timer = setTimeout(() => {
+				finish();
+			}, this.replaySettleTimeoutMs);
+			finish = () => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				this.replayCompleteWaiters.delete(id);
+				resolve();
+			};
+			this.replayCompleteWaiters.set(id, finish);
+		});
+		return { promise, cancel: () => finish() };
 	}
 
 	private fail(rec: AgentRecord, err: unknown): void {
-		rec.dto.status = "error";
-		rec.dto.error = err instanceof Error ? err.message : String(err);
+		this.transition(rec, "error", "fail", { error: err instanceof Error ? err.message : String(err) });
 		rec.streaming = false;
 		this.log("error", `[${rec.dto.name}] ${rec.dto.error}`);
 		this.emitAgent(rec);
@@ -3231,7 +4290,7 @@ export class SquadManager extends EventEmitter {
 	 *  per attempt. Lossless (abandoned WIP committed to its branch; only merged+clean branches deleted)
 	 *  and never touches a live agent's worktree or one created within the spawn grace. Opt out with
 	 *  OMP_SQUAD_WORKTREE_REAP=0; tune the freshness window with OMP_SQUAD_WORKTREE_GRACE_MS. */
-	private async reapDeadWorktrees(): Promise<void> {
+	protected async reapDeadWorktrees(): Promise<void> {
 		if (process.env.OMP_SQUAD_WORKTREE_REAP === "0") return;
 		const graceMs = Number(process.env.OMP_SQUAD_WORKTREE_GRACE_MS) || 120_000;
 		const owned = new Set([...this.agents.values()].map((r) => r.options.worktree).filter((w): w is string => !!w));
@@ -3240,16 +4299,23 @@ export class SquadManager extends EventEmitter {
 			if (!repo || repo.startsWith("(")) continue; // synthetic / no-repo agents have no worktrees to reap
 			try {
 				const root = await repoRoot(repo);
-				const base = await primaryBranch(root);
 				const wts = await listWorktrees(root);
 				const infos: WorktreeInfo[] = await Promise.all(
 					wts.map(async (w) => {
 						const stat = await fs.stat(w.worktree).catch(() => undefined);
+						// DoneProof consulted FIRST: a proven-landed branch is reap-eligible regardless of
+						// what the ahead-count reports (squash/rebase merges make it permanently nonzero) —
+						// but only while the proof still covers the branch's CURRENT tip (`proofCoversTip`),
+						// so a follow-up commit pushed after the proof was recorded is never reaped as if it
+						// were landed too.
+						const doneProof = !w.isPrimary && w.branch ? getDoneProofByBranch(this.stateDir, w.branch) : undefined;
+						const proven = !!doneProof && w.branch !== undefined && (await proofCoversTip(doneProof, w.branch, root));
 						return {
 							worktree: w.worktree,
 							branch: w.branch ?? "",
 							isPrimary: w.isPrimary,
-							aheadOfBase: w.isPrimary || !w.branch ? 0 : await branchAhead(root, w.branch, base),
+							aheadOfBase: w.isPrimary || !w.branch ? 0 : await computeAheadOfBase({ repo: root, branch: w.branch, cwd: root }),
+							proven,
 							dirty: !w.isPrimary && (await worktreeStatus(w.worktree)).dirtyFiles.length > 0,
 							mtimeMs: stat ? stat.mtimeMs : 0, // dir gone ⇒ ancient ⇒ eligible (removeWorktree prunes the stale entry)
 						};
@@ -3298,8 +4364,36 @@ export class SquadManager extends EventEmitter {
 		// Reconcile streaming truth without clobbering a pending-input state.
 		if (rec.dto.pending.length === 0) {
 			rec.streaming = state.isStreaming;
-			if (rec.dto.status !== "stopped" && rec.dto.status !== "error") rec.dto.status = this.derive(rec);
+			if (rec.dto.status !== "stopped" && rec.dto.status !== "error") this.transition(rec, this.derive(rec), "turn-progress");
+		} else {
+			// Poll-based ghost-expiry fallback (concern 04) — gated behind OMP_SQUAD_PENDING_GHOST_EXPIRY
+			// (default OFF, #lifecycle-truth finding 6). Rationale for gating: this rule shipped without
+			// its design-mandated live acceptance test (a real omp blocked on a genuinely-open confirm
+			// across a daemon restart), and the assumption it rests on — `isStreaming` reads false only
+			// when NOT suspended on a blocking UI request — is plausible but unverified; a host waiting on
+			// a blocking confirm is, definitionally, not streaming either. The DETERMINISTIC replay-tag
+			// expiry (the agent_end / live-turn-boundary rule, `expireReplayedPending` above) stays ALWAYS
+			// on — it only fires once a live turn has genuinely completed, which is proof, not a heuristic.
+			if (pendingGhostExpiryEnabled()) {
+				// An agent that was already idle pre-crash with a stale replayed ghost, and never gets
+				// prompted again, would otherwise wedge here forever even with the live rule enabled — two
+				// consecutive isStreaming===false polls is the signal RpcSessionState gives us that nothing
+				// is in flight; piggybacks the same poll cadence the pending-queue guard above already gates
+				// rec.streaming on.
+				if (!state.isStreaming) {
+					rec.nonStreamingPolls = (rec.nonStreamingPolls ?? 0) + 1;
+					if (rec.nonStreamingPolls >= 2) this.expireReplayedPending(rec);
+				} else {
+					rec.nonStreamingPolls = 0;
+				}
+			}
 		}
+		// errorTransitions1h decay (#lifecycle-truth finding 8): without this, a dead errored agent that
+		// never transitions again keeps a stale nonzero count forever (a standing false "flapping" alarm
+		// in insights.ts) — countErrorTransitions1h's own trim only ever ran from the transition() path.
+		// Recomputing here, on every poll tick, for agents that currently show a nonzero count, ages the
+		// rollup out over time even with no new transitions.
+		if ((rec.dto.errorTransitions1h ?? 0) > 0) rec.dto.errorTransitions1h = this.countErrorTransitions1h(rec);
 		this.emitAgent(rec);
 	}
 
@@ -3371,9 +4465,47 @@ export class SquadManager extends EventEmitter {
 		this.publishPresence();
 	}
 
+	/**
+	 * Live peer operator presence observed off the federation bus (SEAM 2). The server's
+	 * `/api/federation` surface reads this instead of maintaining its own second coordinator
+	 * socket. Stale peers are pruned; empty when there's no coordinator (or federation is off).
+	 */
+	peerPresence(now?: number): OperatorPresence[] {
+		return this.peerRoster.live(now);
+	}
+
+	/**
+	 * Gossip this operator's own live file leases once, now (SEAM 1). Also driven by an internal
+	 * timer once started; exposed so a caller (or a test) can force an immediate publish. No-op
+	 * (returns []) when federation is off (NullFederationBus) — the engine is never attached.
+	 */
+	async gossipLeasesNow(): Promise<string[]> {
+		return (await this.leaseGossip?.publishNow().catch(() => [] as string[])) ?? [];
+	}
+
 	// ── Persistence ───────────────────────────────────────────────────────────
 
 	private writeChain: Promise<void> = Promise.resolve();
+
+	/** Per-agent debounce timers coalescing bursts of `pending[]` mutations (concern 04: durable pause)
+	 *  into one full-roster persist ~1s after the last change, instead of a persist per mutation (which
+	 *  would be too heavy — persistNow() serializes every agent's full transcript on every call). */
+	private pendingPersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+	/** Debounce a `pending[]`-mutation-triggered persist. A ≤1s crash window is documented best-effort —
+	 *  strictly better than the pre-fix baseline of never persisting pending at all; a graceful stop()
+	 *  flushes this timer synchronously so only an actual crash can lose the window. */
+	private schedulePendingPersist(agentId: string): void {
+		const existing = this.pendingPersistTimers.get(agentId);
+		if (existing) clearTimeout(existing);
+		this.pendingPersistTimers.set(
+			agentId,
+			setTimeout(() => {
+				this.pendingPersistTimers.delete(agentId);
+				void this.persist();
+			}, 1000),
+		);
+	}
 
 	/**
 	 * Serialized + atomic writer. Each call chains its write after the previous one (so two writes
@@ -3391,7 +4523,23 @@ export class SquadManager extends EventEmitter {
 
 	/** Atomic write through the store: file mode → state.json temp+rename; DB mode → roster/feature tables + on-disk transcripts. */
 	private async persistNow(): Promise<void> {
-		const live = [...this.agents.values()].map((r) => r.options);
+		// Fold in the live `pending[]` snapshot (concern 04: durable pause) — `r.options` alone is the
+		// persisted-at-create() shape and never carries later pending mutations.
+		//
+		// Replayed-tagged (ghost-candidate) entries are EXCLUDED here regardless of settle-window timing
+		// (#lifecycle-truth finding 5). setPending's settling-guard on schedulePendingPersist only stops a
+		// NEW debounce timer from being armed while THIS agent is mid-settle — it does nothing about an
+		// already-scheduled timer (armed before settling started) or an unrelated persist() call (a
+		// different agent's own pending mutation, a capability install/audit write, stop()'s flush, …)
+		// firing while THIS agent is mid-settle with a live replayed pending still sitting in dto.pending.
+		// Filtering it out of every snapshot unconditionally is always safe: a replayed entry is either
+		// answered normally (which clears it via setPending before persistNow ever sees it again) or
+		// expired by one of the two ghost-expiry rules — it never needs to survive a crash, since a
+		// subsequent reattach's ring replay resurrects it fresh with a live correlation id anyway (replay,
+		// not the snapshot, is the source of truth on warm reattach — see DESIGN.md's warm-reattach
+		// decision). The settling-guard above stays in place as a separate I/O-churn optimization; removing
+		// it is a distinct (and not obviously behavior-identical) change, so it is left as-is here.
+		const live = [...this.agents.values()].map((r) => ({ ...r.options, pending: r.dto.pending.filter((p) => !p.replayed) }));
 		// D1 FIX: fold in resumable checkpoints the adoption ceiling dropped this boot so the full-snapshot
 		// replace doesn't erase them — a later restart re-attempts them. Live records win on id collision
 		// (a deferred run that has since been adopted is now in the live roster).
@@ -3436,7 +4584,15 @@ export class SquadManager extends EventEmitter {
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap
-			}).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
+			})
+				.then(async (dto) => {
+					// Same fresh-id-fresh-correlation leak as adoptOrphanedAgents (this path also mints a new
+					// agent id from a PersistedAgent) — close, never restore, any pending it carried (concern 04).
+					// Unconditional, like adoptOrphanedAgents' call site — closeOrphanedPending unconditionally
+					// stitches the cause.priorId lineage entry too (#lifecycle-truth finding 4).
+					await this.closeOrphanedPending(dto.id, p);
+				})
+				.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
 		return list.length;
 	}

@@ -1,9 +1,9 @@
 ---
 title: CLI
-description: Every omp-squad command, its positional arguments, flags, and the defaults applied by the daemon.
+description: Every glance command, its positional arguments, flags, and the defaults applied by the daemon.
 ---
 
-The `omp-squad` binary is a thin client over a running daemon. `up` starts that daemon; every other command (except `open` and `help`) reaches it over HTTP at `http://127.0.0.1:<port>`, sending the bearer token read from `<state-dir>/access-token` (see [Configuration](/docs/reference/configuration)). If no daemon is listening they print `No squad daemon on <base>. Start one with: omp-squad up` and exit non-zero.
+The `glance` binary is a thin client over a running daemon (`omp-squad` is installed as a legacy alias of the same entry point). `up` starts that daemon; the daemon-facing commands reach it over HTTP at `http://127.0.0.1:<port>`, sending the bearer token read from `<state-dir>/access-token` (see [Configuration](/docs/reference/configuration)). If no daemon is listening they print `No squad daemon on <base>. Start one with: glance up` and exit non-zero. `open`, `who`, `plan-validate`, `curate-plane`, and `help` work without a daemon.
 
 ## Argument grammar
 
@@ -16,7 +16,7 @@ The `omp-squad` binary is a thin client over a running daemon. `up` starts that 
 So `--limit 10` sets `limit="10"` while a bare `--no-tui` sets `no-tui=true`. Values are always strings; numeric flags (`--port`, `--limit`) are coerced with `Number()`.
 
 <Callout type="info">
-Running `omp-squad` with no command is identical to `omp-squad up` — the daemon is the default.
+Running `glance` with no command is identical to `glance up` — the daemon is the default.
 </Callout>
 
 ## Command summary
@@ -34,6 +34,7 @@ Running `omp-squad` with no command is identical to `omp-squad up` — the daemo
 | `automation [--window <dur>] [--loop <name>]` | `auto` | Show what background loops are doing and Scout's LLM cost. |
 | `open` | | Print the dashboard base URL. |
 | `curate-plane [repo] [--file]` | `plane-curator` | Group recurring Plane issues into unified fix proposals. |
+| `plan-validate <dir> [--json]` | `validate-plan` | Check a plan dir's dependency graph for cycles / dangling deps (offline). |
 | `commission <name> --purpose <s> [flags]` | `hire` | Author + validate a Flue worker; onboard it if it passes the gate. |
 | `help` | `-h`, `--help` | Print usage. |
 
@@ -42,20 +43,20 @@ An unknown command prints `unknown command: <cmd>` followed by the usage text an
 ## `up`
 
 ```bash
-omp-squad up [--port N] [--no-tui] [--restore] [--host <addr>] [--no-supervise]
+glance up [--port N] [--no-tui] [--restore] [--host <addr>] [--no-supervise]
 ```
 
 Starts a `SquadManager`, a `SquadServer` (HTTP + WebSocket), the external-session tracker, and — unless opted out — the standing auto-supervisor. Prints the dashboard URL and access token; on a TTY it then runs the terminal TUI, otherwise it stays headless and prints every reachable URL with a `?token=` query so you can sign in from another device.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--port N` | `7878` (or `$OMP_SQUAD_PORT`) | Port the daemon binds. |
+| `--port N` | `7878` (or `$GLANCE_PORT`) | Port the daemon binds. |
 | `--no-tui` | TUI on if `stdin` is a TTY | Run headless; never launch the TUI. Headless is also forced automatically when `stdin` is not a TTY. |
 | `--restore` | off | Reattach to persisted agents from `state.json`; prints `restored N agent(s)`. |
-| `--host <addr>` | `127.0.0.1` (or `$OMP_SQUAD_HOST`) | Bind address. Set `0.0.0.0` to reach it across your LAN. |
-| `--no-supervise` | supervisor on | Don't start the auto-supervisor loop. Equivalent to `OMP_SQUAD_AUTO_SUPERVISE=0`. |
+| `--host <addr>` | `127.0.0.1` (or `$GLANCE_HOST`) | Bind address. Set `0.0.0.0` to reach it across your LAN. |
+| `--no-supervise` | supervisor on | Don't start the auto-supervisor loop. Equivalent to `GLANCE_AUTO_SUPERVISE=0`. |
 
-TLS is enabled in-process only when both `$OMP_SQUAD_TLS_CERT` and `$OMP_SQUAD_TLS_KEY` are set; the scheme then becomes `https`. Federation joins a coordinator when `$OMP_SQUAD_COORDINATOR` is set. See [Configuration](/docs/reference/configuration) for all of these.
+TLS is enabled in-process only when both `$GLANCE_TLS_CERT` and `$GLANCE_TLS_KEY` are set; the scheme then becomes `https`. Federation joins a coordinator when `$GLANCE_COORDINATOR` is set. See [Configuration](/docs/reference/configuration) for all of these.
 
 <Callout type="warn">
 A bearer token is auto-generated in the state dir on first boot and printed on every start. It guards `/ws` and everything under `/api`. The static SPA shell loads without it so the PWA can install before sign-in.
@@ -64,7 +65,7 @@ A bearer token is auto-generated in the state dir on first boot and printed on e
 ## `add`
 
 ```bash
-omp-squad add [<repo>] [flags]
+glance add [<repo>] [flags]
 ```
 
 Spawns one agent. The `<repo>` positional defaults to the current working directory (`process.cwd()`). Before spawning, the CLI checks presence and warns on stderr if any agent (squad or raw omp session) is already active on that repo. On success it prints the new agent's name, status, id, and worktree path. The flags below map onto `CreateAgentOptions` and are sent as a `create` command; the defaults shown are applied by the daemon (`SquadManager.create`), not the CLI.
@@ -80,6 +81,7 @@ Spawns one agent. The `<repo>` positional defaults to the current working direct
 | `--workflow <name\|path>` | none | Run a bundled workflow (`research-plan-implement`, `plan-implement`, `fan-out`) or a `.fabro` path; `--task` becomes the goal. |
 | `--verify <cmd>` | none | Wrap `--task` in an implement → verify → fixup loop; the gate passes on exit code `0`. |
 | `--sandbox <image>` | none | Run the agent inside a container from `<image>` (mounts the worktree). |
+| `--acp` | off | Run an ACP runtime (`auggie --acp` by default) instead of `omp --mode rpc`. `--runtime acp` is equivalent. |
 | `--plain` | off | Skip auto-routing; spawn a plain agent with no verify/plan/fan-out inference. |
 
 <Callout type="info">
@@ -89,7 +91,7 @@ With a `--task` and no `--plain`/`--workflow`/`--verify`/`--sandbox`, the daemon
 ## `list` (`ls`)
 
 ```bash
-omp-squad list
+glance list
 ```
 
 Fetches `GET /api/agents` and prints an aligned table: `status`, `name`, `branch` (or `—`), a `⛔N` pending-count badge, and the current `activity` (falling back to the active todo). Prints `no agents` when the roster is empty.
@@ -97,7 +99,7 @@ Fetches `GET /api/agents` and prints an aligned table: `status`, `name`, `branch
 ## `prompt` (`say`)
 
 ```bash
-omp-squad prompt <id> <message...>
+glance prompt <id> <message...>
 ```
 
 Sends a `prompt` command to agent `<id>`; all positionals after the id are joined with spaces into the message. Both `<id>` and a non-empty message are required (else it prints `usage:` and exits `1`). Prints `sent` on success.
@@ -105,7 +107,7 @@ Sends a `prompt` command to agent `<id>`; all positionals after the id are joine
 ## `kill` (`stop`)
 
 ```bash
-omp-squad kill <id>
+glance kill <id>
 ```
 
 Sends a `kill` command to terminate the agent's process without removing it from the roster. The agent entry remains visible with status `stopped`. Use `rm` to also drop it from the roster. Prints `killed` on success.
@@ -113,7 +115,7 @@ Sends a `kill` command to terminate the agent's process without removing it from
 ## `rm` (`remove`)
 
 ```bash
-omp-squad rm <id> [--delete-worktree]
+glance rm <id> [--delete-worktree]
 ```
 
 Sends a `remove` command. `--delete-worktree` (boolean) also tears down the agent's git worktree; omit it to keep the worktree on disk. Prints `removed` on success.
@@ -121,7 +123,7 @@ Sends a `remove` command. `--delete-worktree` (boolean) also tears down the agen
 ## `who`
 
 ```bash
-omp-squad who [repo]
+glance who [repo]
 ```
 
 Reads the shared presence registry. With a `repo` it lists agents working that repo; with no argument it lists all active agents (squad members **and** raw omp sessions). Each row shows source, `operator/agent`, repo name, optional branch, and a humanized "N ago" since the last heartbeat. Prints `nobody is working on <repo>` / `no active agents` when empty.
@@ -129,7 +131,7 @@ Reads the shared presence registry. With a `repo` it lists agents working that r
 ## `logs`
 
 ```bash
-omp-squad logs <id> [--limit N]
+glance logs <id> [--limit N]
 ```
 
 Fetches `GET /api/agents/<id>/transcript` and prints the last `N` entries (kind in upper case, then text). `<id>` is required.
@@ -141,7 +143,7 @@ Fetches `GET /api/agents/<id>/transcript` and prints the last `N` entries (kind 
 ## `automation` (`auto`)
 
 ```bash
-omp-squad automation [--window <dur>] [--loop <name>] [--limit N] [--json]
+glance automation [--window <dur>] [--loop <name>] [--limit N] [--json]
 ```
 
 Fetches `GET /api/automation` and prints a summary of what the daemon's background loops (Scout, Observer, Opportunity, Dispatcher) have been doing — the terminal twin of the automation panel in the dashboard.
@@ -158,19 +160,31 @@ Output: a per-loop summary table (events, LLM calls, issues filed, candidates fo
 ## `curate-plane` (`plane-curator`)
 
 ```bash
-omp-squad curate-plane [repo] [--file]
+glance curate-plane [repo] [--file]
 ```
 
-Reads Plane issues for the given repo (defaults to `cwd`) and groups recurring or related issues into unified fix proposals. Requires Plane to be configured. Prints `Plane is not configured or unreachable` and exits 1 if Plane is unavailable.
+Reads Plane issues for the given repo (defaults to `cwd`) and groups recurring or related issues into unified fix proposals — it talks to Plane directly, no daemon needed. Prints `Plane is not configured or unreachable` and exits 1 if Plane is unavailable.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--file` | off | Emit the cluster report as a file instead of printing to stdout. |
+| `--file` | off | Also **file one `[curator]` do-not-auto-land Plane issue per cluster**, so the fleet fixes one unified issue instead of dispatching duplicates. |
+
+## `plan-validate` (`validate-plan`)
+
+```bash
+glance plan-validate <dir> [--json]
+```
+
+Offline validator for a `plans/<name>/` directory: reads the concern docs off disk and reports dependency-graph **cycles** and **dangling deps** — no daemon, no network. Clean → a `✓` line and exit `0`; issues → one `[kind] message` line each and exit `1`.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--json` | off | Emit `{ dir, issues }` JSON instead of lines (still exits `1` when issues exist). |
 
 ## `open`
 
 ```bash
-omp-squad open
+glance open
 ```
 
 Prints the daemon base URL `http://127.0.0.1:<port>` (honoring `--port`) and nothing else — no token, no path. Useful for piping into a browser launcher.
@@ -178,7 +192,7 @@ Prints the daemon base URL `http://127.0.0.1:<port>` (honoring `--port`) and not
 ## `commission` (`hire`)
 
 ```bash
-omp-squad commission <name> --purpose <s> [flags]
+glance commission <name> --purpose <s> [flags]
 ```
 
 Authors and validates a Flue worker, then onboards it as a `flue-service` member if it passes the acceptance gate. Both the `<name>` positional and `--purpose` are required (else it prints `usage:` and exits `1`). It prints each gate check (`✓` / `✗` / `·`) and, on success, the onboarded member's name (with `verified` when the acceptance gate ran), id, and directory. A failed gate prints `rejected — gate failed; worker left at <dir>` and exits `1`.
@@ -197,7 +211,7 @@ See [Commissioning](/docs/commissioning) for the full authoring loop.
 ## `help`
 
 ```bash
-omp-squad help        # also: -h, --help
+glance help        # also: -h, --help
 ```
 
 Prints the usage banner.

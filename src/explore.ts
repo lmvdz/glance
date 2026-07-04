@@ -81,7 +81,7 @@ export interface FileDiff {
  * when `dir` is not a git repository.
  */
 export async function worktreeDiff(dir: string): Promise<FileDiff[]> {
-	const status = await runGit(["-C", dir, "status", "--porcelain"]);
+	const status = await runGit(["-C", dir, "status", "--porcelain", "--untracked-files=all"]);
 	if (status.code !== 0) return [];
 	if (!status.stdout) return [];
 

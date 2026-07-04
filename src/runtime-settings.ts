@@ -15,7 +15,8 @@ export type FeatureFlagKey =
 	| "OMP_SQUAD_OBSERVE"
 	| "OMP_SQUAD_OBSERVE_AUTODISPATCH"
 	| "OMP_SQUAD_OBSERVE_AUTOFIX"
-	| "OMP_SQUAD_SCOUT";
+	| "OMP_SQUAD_SCOUT"
+	| "OMP_SQUAD_REGRESSION_GATE";
 
 export interface FeatureFlagDefinition {
 	key: FeatureFlagKey;
@@ -48,6 +49,7 @@ export const FEATURE_FLAGS: FeatureFlagDefinition[] = [
 	{ key: "OMP_SQUAD_OBSERVE_AUTODISPATCH", label: "Observer auto-dispatch", description: "File plain observer findings without the do-not-auto-land marker.", defaultEnabled: false },
 	{ key: "OMP_SQUAD_OBSERVE_AUTOFIX", label: "Observer autofix", description: "Let observer run safe housekeeping fixes such as reaping landed survivors.", defaultEnabled: false },
 	{ key: "OMP_SQUAD_SCOUT", label: "Reasoning scout", description: "Harvest unresolved work items surfaced in agent reasoning.", defaultEnabled: true, restartRequired: true },
+	{ key: "OMP_SQUAD_REGRESSION_GATE", label: "Regression gate", description: "Run the full suite on merged main after a land and block on any newly introduced failure.", defaultEnabled: true, restartRequired: false },
 ];
 
 const FLAG_KEYS = new Set<string>(FEATURE_FLAGS.map((flag) => flag.key));

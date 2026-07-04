@@ -8,7 +8,7 @@ cheapest, highest-leverage borrow from [fabro](/docs/workflows). Instead of trus
 "I'm done", the agent's work must make your gate command **exit 0**:
 
 ```bash
-omp-squad add ~/code/myproject --task "Add rate limiting to the public API." \
+glance add ~/code/myproject --task "Add rate limiting to the public API." \
   --verify "bun run check && bun test"
 ```
 
@@ -51,7 +51,7 @@ When you need more than a single linear gate — a plan-and-approve step, parall
 routing per node — author a graph and pass `--workflow` instead:
 
 ```bash
-omp-squad add ~/code/myproject --name feature \
+glance add ~/code/myproject --name feature \
   --workflow workflows/plan-implement/workflow.fabro \
   --task "Add rate limiting to the public API."
 ```

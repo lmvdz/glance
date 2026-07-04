@@ -276,3 +276,52 @@ test("(#17) a persistent listIssues failure is logged and the repo is skipped (t
 	expect(spawned).toEqual([]);
 	expect(logs.some((m) => m.includes("listIssues failed for /r after retry"))).toBe(true);
 });
+
+// Stale-issue guard (visual-plan-blocks incident): an open Plane issue whose plan concern is
+// already closed in the repo is drift, not work — skipped + ledgered, never spawned.
+test("stale-issue guard: alreadyDone issues are skipped, ledgered, and named in the skip reason", async () => {
+	const events: AutomationReport[] = [];
+	const logs: string[] = [];
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-done-"));
+	const ledger = openDispatchLedger(dir);
+	const { deps, spawned } = harness({
+		record: (r) => events.push(r),
+		log: (m) => logs.push(m),
+		ledger,
+		alreadyDone: async (_repo, iss) => iss.id === "B",
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(2);
+	expect(spawned.sort()).toEqual(["A", "C"]); // B never spawned
+	expect(ledger.has("B")).toBe(true); // ledgered ⇒ not re-examined next tick / next boot
+	expect(logs.some((m) => m.includes("B") && m.includes("already closed"))).toBe(true);
+	await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+});
+
+test("stale-issue guard: an all-done no-op tick reports the already-done skip reason", async () => {
+	const events: AutomationReport[] = [];
+	const { deps, spawned } = harness({
+		record: (r) => events.push(r),
+		alreadyDone: async () => true,
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(0);
+	expect(spawned).toEqual([]);
+	expect(events).toHaveLength(1);
+	expect(events[0].skipReason).toBe("already-done");
+});
+
+test("stale-issue guard: a throwing guard fails open — the issue dispatches normally", async () => {
+	const { deps, spawned } = harness({
+		alreadyDone: async () => {
+			throw new Error("plan dir unreadable");
+		},
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(3); // guard error must never wedge the loop
+	expect(spawned.sort()).toEqual(["A", "B", "C"]);
+});
+
+test("stale-issue guard: absent (undefined) keeps the old behavior byte-for-byte", async () => {
+	const { deps, spawned } = harness();
+	expect(deps.alreadyDone).toBeUndefined();
+	expect(await new Dispatcher(deps).tick()).toBe(3);
+	expect(spawned.sort()).toEqual(["A", "B", "C"]);
+});

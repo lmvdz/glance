@@ -96,6 +96,38 @@ test("landAgent: requireProof refuses missing proof and allows fresh proof", asy
 	expect(landed.merged).toBe(true);
 });
 
+test("landAgent: a FORCED land without a passing proof is flagged forcedWithoutProof (unproven trust, made legible)", async () => {
+	const repo = await baseRepo("land-force-unproven-");
+	const wt = await branchWorktree(repo, "feat-forced", "forced.txt");
+
+	// requireProof:false is the force override. No proof was ever run → the gate would have blocked,
+	// so the merge is unproven and must be flagged for the audit trail.
+	const res = await landAgent({ repo, worktree: wt, branch: "feat-forced", message: "force land", commitWip: false, requireProof: false });
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect(res.forcedWithoutProof).toBe(true);
+	expect(res.detail).toContain("WITHOUT a passing proof gate (FORCED)");
+});
+
+test("landAgent: a forced land that HAS a fresh proof is NOT flagged (no crying wolf)", async () => {
+	const repo = await baseRepo("land-force-proven-");
+	const wt = await branchWorktree(repo, "feat-proven", "proven.txt");
+	await runProof({ repo, worktree: wt, command: "true" }); // a genuine fresh proof exists
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat-proven", message: "force land proven", commitWip: false, requireProof: false });
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect(res.forcedWithoutProof).toBeFalsy();
+});
+
+test("landAgent: a normal land (requireProof undefined) is never flagged as forced", async () => {
+	const repo = await baseRepo("land-normal-noflag-");
+	const wt = await branchWorktree(repo, "feat-normal", "normal.txt");
+	const res = await landAgent({ repo, worktree: wt, branch: "feat-normal", message: "land normal", commitWip: false });
+	expect(res.ok).toBe(true);
+	expect(res.forcedWithoutProof).toBeFalsy();
+});
+
 test("dirtyLandTargetWarnings: flags only targets with uncommitted tracked changes", () => {
 	const counts: Record<string, number> = { "/clean": 0, "/dirty": 3 };
 	const warns = dirtyLandTargetWarnings(["/clean", "/dirty"], (r) => counts[r] ?? 0);

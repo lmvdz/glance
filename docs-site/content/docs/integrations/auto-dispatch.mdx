@@ -7,50 +7,51 @@ import { TypeTable } from 'fumadocs-ui/components/type-table';
 
 Auto-dispatch closes the autonomous-org loop: the daemon polls the Plane repos you've mapped
 and spawns a [routed](/docs/integrations/intake) agent for each new open issue, so work starts
-without anyone typing a line. Each issue flows **issue → routed run → verify → close**, and
-the operator supervises by exception. The loop is the `Dispatcher` in `src/dispatch.ts`, wired
-into `SquadManager` on start.
+without anyone typing a line. Each issue flows **issue → routed run → verify → land → close**,
+and the operator supervises by exception. The loop is the `Dispatcher` in `src/dispatch.ts`,
+wired into `SquadManager` on start.
 
-<Callout type="warn">
-Off by default — the daemon **never** auto-spawns unless `OMP_SQUAD_AUTODISPATCH` is set. It
-also requires a working [Plane](/docs/integrations/plane) configuration; with Plane unset
-there are no repos to poll.
+<Callout type="info">
+**On by default when Plane is configured.** With a working [Plane](/docs/integrations/plane)
+configuration the dispatcher arms itself; set `GLANCE_AUTODISPATCH=0` to disable it. With
+Plane unset there are no repos to poll and the loop reports `not-armed` on
+`GET /api/factory/status`.
 </Callout>
 
 ## Configuration
 
-Set these on the daemon:
-
 <TypeTable
   type={{
-    OMP_SQUAD_AUTODISPATCH: {
+    GLANCE_AUTODISPATCH: {
       type: 'flag',
-      description: 'Enable the issue → agent loop. Off by default.',
+      default: 'on',
+      description: 'The issue → agent loop. On when Plane is configured; set 0 to disable.',
     },
-    OMP_SQUAD_DISPATCH_INTERVAL_MS: {
+    GLANCE_DISPATCH_INTERVAL_MS: {
       type: 'number',
       default: '60000',
       description: 'Poll interval in milliseconds — how often mapped repos are checked for new open issues.',
     },
-    OMP_SQUAD_DISPATCH_MAX: {
+    GLANCE_DISPATCH_MAX: {
       type: 'number',
       default: '3',
       description: 'Max concurrent dispatched agents (those currently busy on an issue). Caps how many spawn before earlier ones finish.',
     },
-    OMP_SQUAD_AUTOCLOSE: {
+    GLANCE_AUTOCLOSE: {
       type: 'flag',
-      description: 'Mark an issue done (transition to the completed group) once its agent passes a verification gate. Off by default.',
+      default: 'on',
+      description: 'Close the tracking issue when its branch lands. Set 0 to leave closing to a human.',
     },
   }}
 />
 
-```sh title="enable auto-dispatch"
-OMP_SQUAD_AUTODISPATCH=1 \
-OMP_SQUAD_DISPATCH_INTERVAL_MS=30000 \
-OMP_SQUAD_DISPATCH_MAX=2 \
-OMP_SQUAD_AUTOCLOSE=1 \
-omp-squad up
+```sh title="tune (or disable) auto-dispatch"
+GLANCE_DISPATCH_INTERVAL_MS=30000 \
+GLANCE_DISPATCH_MAX=2 \
+glance up
 # → auto-dispatch on (every 30s, max 2, auto-close)
+
+GLANCE_AUTODISPATCH=0 glance up   # backlog polling off
 ```
 
 ## How a poll works
@@ -60,7 +61,9 @@ omp-squad up
 1. Walks `planeRepos()` — the `PLANE_PROJECT_MAP` keys.
 2. Calls `listPlaneIssues(repo)`. A `null` result (Plane not configured / unreachable) skips
    that repo; the list is already filtered to open issues (completed/cancelled excluded).
-3. For each issue not already represented, spawns a routed agent via `dispatchSpawn` →
+3. Orders candidates by **Plane priority** (`urgent` → `high` → `medium` → `low` → `none`),
+   so a constrained budget always goes to the most important open work first.
+4. For each issue that passes the guards below, spawns a routed agent via `dispatchSpawn` →
    `SquadManager.create({ … autoRoute: true, approvalMode: "yolo" })`. The task is
    `"<identifier>: <name>"`, so [intake](/docs/integrations/intake) picks the process per
    issue — verify loop, plan+approval, or fan-out. The branch is descriptive and stable:
@@ -71,24 +74,37 @@ The spawned agent carries the issue as its tracking ref, and a successful
 [land](/docs/guides/landing) closes that issue — the same `closePlaneIssue` path every landed
 branch uses.
 
-## Bounding the spawn storm
+## Guards — what a poll refuses to spawn
 
-A backlog must never trigger a flood, so the dispatcher is bounded several ways:
+A backlog must never trigger a flood, and a stale tracker must never re-dispatch finished
+work. The dispatcher checks, per issue:
 
-- **`maxActive`** (`OMP_SQUAD_DISPATCH_MAX`) — the per-tick budget is `maxActive` minus the
+- **`maxActive`** (`GLANCE_DISPATCH_MAX`) — the per-tick budget is `maxActive` minus the
   count of dispatched agents currently busy (`working` / `starting` / `input`). At the cap, no
   new spawn this tick.
-- **Never double-dispatch** — an issue id already in the roster (any state) or already
-  dispatched **this session** is skipped, so a slow issue isn't re-spawned on the next poll.
+- **Never double-dispatch** — an issue id already in the roster (any state) or recorded in the
+  **dispatch ledger** (`<stateDir>/dispatch-ledger.json`, persisted across restarts) is
+  skipped — a daemon restart does not re-spawn agents for issues it already worked.
+- **Stale-issue guard** — an open issue whose plan concern is already closed in the repo
+  (`alreadyDone`: the `PLANE: <ID>` pointer's plan doc has a done STATUS) is skipped, ledgered,
+  and best-effort **auto-closed** to heal the tracker drift, instead of re-implementing
+  finished work.
+- **Dependency gate** — an issue with open `blocked_by` relations waits for its blockers.
+- **Triage gate** — issues carrying the do-not-auto-land marker (Scout/Observer findings, or
+  anything labeled for human review) are never auto-dispatched.
+- **Rate-limit pause** — when an agent's model subscription hits a usage cap (a 429 / the
+  provider's 5-hour or weekly limit), the daemon sees omp's `auto_retry_start` and pauses
+  dispatch until the provider's retry hint elapses, rather than spawning agents that would
+  immediately stall on the same cap.
 - **Global WIP cap** — dispatch also respects the fleet-wide live-agent ceiling
-  (`OMP_SQUAD_MAX_WIP`, via the scheduler). It's rechecked before every spawn; at the ceiling
+  (`GLANCE_MAX_WIP`, via the scheduler). It's rechecked before every spawn; at the ceiling
   the tick stops and leaves the rest for later.
 - **No overlapping polls** — a tick that's still running causes the next one to no-op.
 
 <Callout type="info">
-`OMP_SQUAD_AUTOCLOSE` is what turns "verify" into "close": with it set, an agent that lands a
-green gate transitions its issue to the completed group automatically. Without it, dispatch
-still spawns and verifies, but closing the issue stays a human (or land) action.
+`GLANCE_AUTOCLOSE` closes the tracking issue **when the branch lands** — not on a bare
+verification pass. With it off, dispatch still spawns and verifies, but closing the issue
+stays a human (or explicit land) action.
 </Callout>
 
 ## Related

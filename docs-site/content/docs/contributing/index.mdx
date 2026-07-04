@@ -6,7 +6,7 @@ description: Repo layout, how to build and test, the ponytail engineering mandat
 import { Files, File, Folder } from 'fumadocs-ui/components/files';
 import { Steps, Step } from 'fumadocs-ui/components/steps';
 
-omp-squad is a single Bun + TypeScript package. One dependency at runtime
+glance is a single Bun + TypeScript package. One dependency at runtime
 (`@oh-my-pi/pi-tui`), `@oh-my-pi/pi-coding-agent` for spawning fleet agents, and
 TypeScript for the typecheck — that's the whole tree. Everything else is the
 standard library and the platform. This page is the map: where things live, how
@@ -55,9 +55,16 @@ group does.
       <File name="verify-workflow.ts" />
       <File name="commission-executor.ts" />
     </Folder>
+    <Folder name="capabilities">
+      <File name="index.ts" />
+      <File name="catalog.ts" />
+    </Folder>
     <Folder name="web">
       <File name="index.html" />
     </Folder>
+  </Folder>
+  <Folder name="webapp">
+    <File name="src/… (React 19 + Vite dashboard)" />
   </Folder>
   <Folder name="tests">
     <File name="squad.test.ts" />
@@ -69,11 +76,19 @@ group does.
     <File name="fan-out/workflow.fabro" />
     <File name="commission/workflow.fabro" />
     <File name="plan-implement/workflow.fabro" />
+    <File name="resolve-conflict/workflow.fabro" />
+  </Folder>
+  <Folder name="docs-site">
+    <File name="content/docs/… (this site)" />
   </Folder>
   <File name="README.md" />
   <File name="AGENTS.md" />
   <File name="package.json" />
 </Files>
+
+The core package stays dependency-light; `webapp/` (the React dashboard, served behind
+`GLANCE_WEBAPP=1`) and `docs-site/` (this documentation) are separate apps with their own
+`node_modules`.
 
 ### Subsystems
 
@@ -135,12 +150,12 @@ TypeScript sources directly (`bin` points at `src/index.ts`).
 </Steps>
 
 A full model-driven smoke test (spends tokens, needs a git repo) is documented
-in the README's **Verify** section: `omp-squad up --no-tui`, `add` an agent with
+in the README's **Verify** section: `glance up --no-tui`, `add` an agent with
 `--approval yolo` on a throwaway task, and watch it go `working → idle`.
 
 ## The engineering mandate
 
-Every change to omp-squad — and every fleet agent or commissioned worker it
+Every change to glance — and every fleet agent or commissioned worker it
 spawns — is held to the **ponytail** bar in `AGENTS.md`. Read it before you write
 code; the short version:
 

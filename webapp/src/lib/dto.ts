@@ -12,6 +12,19 @@ export interface PendingRequest {
   options?: string[];
   placeholder?: string;
   createdAt: number;
+  gateClass?: boolean;
+}
+
+/** Mirrors backend `TransitionEntry` (src/types.ts). One recorded (or denied) `{from,to,reason,at}`
+ *  lifecycle transition. */
+export interface TransitionEntry {
+  agentId: string;
+  from: AgentStatus;
+  to: AgentStatus;
+  reason: string; // widen from the backend's literal union — the webapp only displays it, never branches on exhaustive cases
+  at: number;
+  cause?: { error?: string; priorId?: string; [k: string]: unknown };
+  denied?: true;
 }
 
 export interface IssueRef {
@@ -181,6 +194,8 @@ export interface AgentDTO {
   todo?: { done: number; total: number; active?: string };
   todoPhases?: TodoPhaseDTO[];
   pending: PendingRequest[];
+  transitions?: TransitionEntry[];
+  errorTransitions1h?: number;
   lastActivity: number;
   messageCount?: number;
   error?: string;
@@ -193,6 +208,10 @@ export interface AgentDTO {
   blockedReason?: string;
   availableActions: AgentAction[];
   landReady?: boolean;
+  /** PR-mode landing metadata, set at push (draft/open) and merge (merged) time. Absent in local mode. */
+  prUrl?: string;
+  prNumber?: number;
+  prState?: 'draft' | 'open' | 'merged' | 'closed';
 }
 
 export interface TranscriptTool {
@@ -332,7 +351,8 @@ export type SquadEvent =
   | { type: "comment-resolved"; id: string; resolvedAt: number }
   | { type: "transcript"; id: string; entry: TranscriptEntry }
   | { type: "commands"; id: string; commands: CommandInfo[] }
-  | { type: "log"; level: "info" | "warn" | "error"; text: string };
+  | { type: "log"; level: "info" | "warn" | "error"; text: string }
+  | { type: "transition"; entry: TransitionEntry };
 
 export type ClientCommand =
   | { type: "snapshot" }

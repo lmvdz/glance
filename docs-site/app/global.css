@@ -3,48 +3,50 @@
 @import 'fumadocs-ui/css/preset.css';
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Mastra brand palette — override fumadocs-ui design tokens.
+   glance brand palette (see brand.md) — override fumadocs-ui design tokens.
+   Ink-dark surfaces, a single warm ember accent (#F0A35A), cool neutral text.
+   Light mode uses a deepened ember for AA contrast on light surfaces.
    Token names + dark/light scoping confirmed in
    node_modules/fumadocs-ui/css/lib/default-colors.css (light = @theme/:root,
-   dark = .dark). Values mirror the product UI (src/web/index.html theme blocks).
-   :root must precede .dark so the dark class wins at equal specificity.
+   dark = .dark). :root must precede .dark so the dark class wins at equal
+   specificity.
    ────────────────────────────────────────────────────────────────────────── */
 :root {
-  --color-fd-background: #f6f7f9;
-  --color-fd-foreground: #11161c;
-  --color-fd-muted: #eef0f3;
-  --color-fd-muted-foreground: #566069;
+  --color-fd-background: #f7f6f4;
+  --color-fd-foreground: #1c1611;
+  --color-fd-muted: #f0eeeb;
+  --color-fd-muted-foreground: #60584f;
   --color-fd-popover: #ffffff;
-  --color-fd-popover-foreground: #11161c;
+  --color-fd-popover-foreground: #1c1611;
   --color-fd-card: #ffffff;
-  --color-fd-card-foreground: #11161c;
-  --color-fd-border: #dde1e6;
-  --color-fd-primary: #0a8f4d;
+  --color-fd-card-foreground: #1c1611;
+  --color-fd-border: #e4e0da;
+  --color-fd-primary: #b45309;
   --color-fd-primary-foreground: #ffffff;
-  --color-fd-secondary: #eef0f3;
-  --color-fd-secondary-foreground: #11161c;
-  --color-fd-accent: #eef0f3;
-  --color-fd-accent-foreground: #11161c;
-  --color-fd-ring: #0a8f4d;
+  --color-fd-secondary: #f0eeeb;
+  --color-fd-secondary-foreground: #1c1611;
+  --color-fd-accent: #f0eeeb;
+  --color-fd-accent-foreground: #1c1611;
+  --color-fd-ring: #b45309;
 }
 
 .dark {
-  --color-fd-background: #060607;
-  --color-fd-foreground: #eceef0;
-  --color-fd-muted: #141518;
-  --color-fd-muted-foreground: #9a9ca1;
-  --color-fd-popover: #0d0e10;
-  --color-fd-popover-foreground: #eceef0;
-  --color-fd-card: #0d0e10;
-  --color-fd-card-foreground: #eceef0;
-  --color-fd-border: rgba(255, 255, 255, 0.08);
-  --color-fd-primary: #1fe070;
-  --color-fd-primary-foreground: #04140b;
-  --color-fd-secondary: #141518;
-  --color-fd-secondary-foreground: #eceef0;
-  --color-fd-accent: #141518;
-  --color-fd-accent-foreground: #eceef0;
-  --color-fd-ring: #1fe070;
+  --color-fd-background: #0a0a0b;
+  --color-fd-foreground: #e7e7e9;
+  --color-fd-muted: #151517;
+  --color-fd-muted-foreground: #8a8a90;
+  --color-fd-popover: #0c0c0e;
+  --color-fd-popover-foreground: #e7e7e9;
+  --color-fd-card: #0c0c0e;
+  --color-fd-card-foreground: #e7e7e9;
+  --color-fd-border: #1c1c20;
+  --color-fd-primary: #f0a35a;
+  --color-fd-primary-foreground: #1c1208;
+  --color-fd-secondary: #151517;
+  --color-fd-secondary-foreground: #e7e7e9;
+  --color-fd-accent: #151517;
+  --color-fd-accent-foreground: #e7e7e9;
+  --color-fd-ring: #f0a35a;
 }
 
 html {

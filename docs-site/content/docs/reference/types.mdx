@@ -102,7 +102,7 @@ The serializable per-agent snapshot sent to every surface (over `/api/agents` an
 		issue: { type: 'IssueRef', description: 'Work item this agent is advancing (e.g. a Plane issue).' },
 		featureId: { type: 'string', description: 'Feature this agent belongs to.' },
 		owns: { type: 'string[]', description: 'Repo-relative path prefixes this agent owns; overlapping spawns are refused.' },
-		queued: { type: 'boolean', description: 'Only on the synthetic DTO create() returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent.' },
+		queued: { type: 'boolean', description: 'Only on the synthetic DTO create() returns when a spawn is parked at the WIP cap (GLANCE_QUEUE_ON_FULL). Never set on a roster agent.' },
 	}}
 />
 
@@ -189,7 +189,11 @@ type SquadEvent =
 	| { type: "transcript"; id: string; entry: TranscriptEntry }
 	| { type: "log"; level: "info" | "warn" | "error"; text: string }
 	| { type: "commands"; id: string; commands: CommandInfo[] }
-	| { type: "features-changed" };
+	| { type: "features-changed" }
+	| { type: "comment"; comment: ArtifactCommentDTO }
+	| { type: "comment-resolved"; id: string; resolvedAt: number }
+	| { type: "audit"; entry: AuditEntry }
+	| { type: "automation"; event: AutomationEvent };
 ```
 
 | Variant | Meaning |
@@ -201,6 +205,9 @@ type SquadEvent =
 | `log` | A daemon log line. |
 | `commands` | The slash commands available to an agent changed. |
 | `features-changed` | The feature set changed; refetch `/api/features`. |
+| `comment` / `comment-resolved` | A plan annotation / task comment was created or resolved (live review sync). |
+| `audit` | A new append-only audit-trail entry. |
+| `automation` | A background-loop `AutomationEvent` (the live Automation feed). |
 
 ## ClientCommand
 

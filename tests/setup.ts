@@ -20,6 +20,13 @@ for (const k of Object.keys(process.env)) {
 	if (k.startsWith("PLANE_") || k.startsWith("OMP_SQUAD_")) delete process.env[k];
 }
 
+// Pin gate execution to the HOST for the suite. The sandbox is now the default whenever docker is
+// usable, but the pipeline tests (proof/land/observer) exercise gate LOGIC — running each `bash -lc`
+// gate inside a real container would make them slow, network-dependent (image pulls), and non-hermetic.
+// The sandbox PLANNER itself is unit-tested in gate-runner.test.ts with an injected docker probe.
+// A test that specifically wants sandbox planning overrides this per-test and restores it.
+process.env.OMP_SQUAD_GATE_SANDBOX = "host";
+
 // Point the fleet state dir at a throwaway. presence/leases (ttl-registry) and any daemon a test spins up
 // now live here instead of the operator's real ~/.omp/squad — the source of the flaky "empty data"
 // failures where stale/live presence + lease files leaked into read-API assertions.

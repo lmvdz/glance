@@ -5,11 +5,11 @@ description: The shipped workflow graphs and when to reach for each, plus how --
 
 import { Step, Steps } from 'fumadocs-ui/components/steps';
 
-omp-squad ships five workflow graphs under `workflows/`. Point `--workflow` at one by name (or
+glance ships five workflow graphs under `workflows/`. Point `--workflow` at one by name (or
 at any `.fabro` path of your own) and `--task` becomes the run's goal.
 
 ```bash
-omp-squad add ~/code/myproject --workflow plan-implement \
+glance add ~/code/myproject --workflow plan-implement \
   --task "Add rate limiting to the public API."
 ```
 
@@ -121,7 +121,7 @@ service.
 
 ## resolve-conflict
 
-omp-squad's integration-layer resolver. When a feature branch won't land because main moved
+glance's integration-layer resolver. When a feature branch won't land because main moved
 under it, this graph brings main **into** the branch, auto-resolves the conflicts, **proves**
 the result with the repo's own verify gate, and commits — leaving the branch
 fast-forwardable into main.

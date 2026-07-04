@@ -180,6 +180,10 @@ test("DB mode: a foreign-Origin mutation is rejected as cross-site (F4)", async 
 
 test("FILE mode: no auth instance ⇒ mode=file and today's tokenless gate (loopback = admin)", async () => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fileauth-"));
+	// makeServer's db-mode tests set OMP_SQUAD_ALLOW_SIGNUP and only restore it in afterAll
+	// cleanups, which run after this test — isolate so their leakage can't flip allowSignup.
+	const prevSignup = process.env.OMP_SQUAD_ALLOW_SIGNUP;
+	delete process.env.OMP_SQUAD_ALLOW_SIGNUP;
 	const mgr = new SquadManager({ stateDir: dir });
 	await mgr.start();
 	const server = new SquadServer(mgr, { port: 0 }); // no auth, no token
@@ -188,9 +192,11 @@ test("FILE mode: no auth instance ⇒ mode=file and today's tokenless gate (loop
 		await mgr.stop();
 		server.stop();
 		await fs.rm(dir, { recursive: true, force: true });
+		if (prevSignup === undefined) delete process.env.OMP_SQUAD_ALLOW_SIGNUP;
+		else process.env.OMP_SQUAD_ALLOW_SIGNUP = prevSignup;
 	});
 
-	// File mode never advertises social providers or SSO; allowSignup reflects the env (closed by default here).
+	// File mode never advertises signup, social providers, or SSO (no auth instance to sign up against).
 	expect(await (await fetch(`${url}/api/auth/mode`)).json()).toEqual({ mode: "file", allowSignup: false, socialProviders: [], sso: false });
 	// Tokenless server = loopback/unit-test mode: every request is admin, so /api/agents is open.
 	expect((await fetch(`${url}/api/agents`)).status).toBe(200);

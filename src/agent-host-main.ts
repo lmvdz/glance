@@ -5,6 +5,7 @@
  *   bun agent-host-main.ts --id <id> --cwd <dir> --socket <path> [--model --approval --thinking --append-system-prompt --bin]
  */
 
+import "./env-compat.ts"; // GLANCE_* ↔ OMP_SQUAD_* aliasing — must run before any env read
 import { runAgentHost } from "./agent-host.ts";
 import type { ApprovalMode, ThinkingLevel } from "./types.ts";
 

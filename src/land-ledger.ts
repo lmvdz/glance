@@ -74,3 +74,49 @@ export function recordLandOutcome(stateDir: string, branch: string | undefined, 
 	writeLandLedger(stateDir, ledger);
 	return fails;
 }
+
+/**
+ * Forced-land audit trail — a force-land is a human override that bypasses the proof gate. It must
+ * never be invisible trust: every land that merged WITHOUT a passing proof (forcedWithoutProof) is
+ * appended here with the actor + timestamp, so "who force-landed what, unproven, when" is inspectable.
+ * Append-only JSON list under <stateDir>; best-effort (a disk failure must never break the land).
+ */
+export interface ForcedLand {
+	/** The branch that was force-landed without a passing proof. */
+	branch: string;
+	/** The actor id that forced it (LOCAL_ACTOR for an operator, or a specific identity). */
+	actor: string;
+	/** Truncated land detail — why the proof gate was not satisfied. */
+	detail: string;
+	/** ms epoch of the forced land. */
+	at: number;
+}
+
+function forcedPath(stateDir: string): string {
+	return path.join(stateDir, "land-forced.json");
+}
+
+/** Every forced (proof-bypassing) land recorded, oldest first. Corrupt/missing ⇒ empty. */
+export function readForcedLands(stateDir: string): ForcedLand[] {
+	try {
+		const p = forcedPath(stateDir);
+		if (!existsSync(p)) return [];
+		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		return Array.isArray(raw) ? (raw as ForcedLand[]) : [];
+	} catch {
+		return [];
+	}
+}
+
+/** Append one forced-land audit record. No-op for an undefined branch. Returns the new record count. */
+export function recordForcedLand(stateDir: string, branch: string | undefined, actor: string, detail: string, now = Date.now()): number {
+	if (!branch) return readForcedLands(stateDir).length;
+	const list = readForcedLands(stateDir);
+	list.push({ branch, actor, detail: detail.slice(0, 600), at: now });
+	try {
+		writeFileSync(forcedPath(stateDir), JSON.stringify(list));
+	} catch {
+		/* best-effort: a disk failure must never break the land it records */
+	}
+	return list.length;
+}

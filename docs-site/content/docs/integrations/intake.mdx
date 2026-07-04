@@ -7,7 +7,7 @@ import { TypeTable } from 'fumadocs-ui/components/type-table';
 
 The goal: a human never has to do anything but say *what* they want; the OS chooses *how*.
 Spawning takes one natural-language line — the per-project composer, a Plane issue, or
-`omp-squad add … --task` — no forms, no flags. The **intake router** (`src/intake.ts`) reads
+`glance add … --task` — no forms, no flags. The **intake router** (`src/intake.ts`) reads
 the task plus the repo and routes it to a process.
 
 ## The four routes
@@ -82,13 +82,13 @@ So you override routing by being explicit:
 
 ## LLM router (opt-in)
 
-By default routing is heuristic. Set `OMP_SQUAD_LLM_ROUTER=1` and the manager classifies
+By default routing is heuristic. Set `GLANCE_LLM_ROUTER=1` and the manager classifies
 intent with a one-shot call on the fast / `smol` model instead — same `routeIntake` seam, no
 caller changes.
 
 <TypeTable
   type={{
-    OMP_SQUAD_LLM_ROUTER: {
+    GLANCE_LLM_ROUTER: {
       type: 'flag',
       description: 'When set, classify intent with a one-shot smol-model call (omp -p --no-tools --smol). Falls back to heuristics on any failure. Off by default.',
     },
@@ -109,7 +109,7 @@ routes, the workflows they map to, and the override rules are identical to heuri
 ## Where it runs
 
 Every task-bearing spawn flows through intake: the project-view composer, the
-[spawn-from-issue](/docs/integrations/plane) button, `omp-squad add --task`, and — when
+[spawn-from-issue](/docs/integrations/plane) button, `glance add --task`, and — when
 enabled — every issue pulled in by [auto-dispatch](/docs/integrations/auto-dispatch). Same
 router, same reasons, logged the same way.
 

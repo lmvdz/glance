@@ -306,6 +306,24 @@ export function churnHotspots(
     .slice(0, limit);
 }
 
+// ───────────────────────────── flapping agents ─────────────────────────────
+
+export interface FlappingAgent {
+  agentId: string;
+  name: string;
+  errorTransitions1h: number;
+}
+
+/** Agents that have errored/caught-fire repeatedly in the last hour — a signal a capped client-side
+ *  transitions tail cannot produce (it truncates at 5 entries and would undercount exactly the
+ *  busiest/most error-prone agents). Server computes this over the full ring; we just rank it. */
+export function flappingAgents(agents: AgentDTO[] | null | undefined, minCount = 2): FlappingAgent[] {
+  return (agents ?? [])
+    .filter((a) => (a.errorTransitions1h ?? 0) >= minCount)
+    .map((a) => ({ agentId: a.id, name: a.name, errorTransitions1h: a.errorTransitions1h ?? 0 }))
+    .sort((a, b) => b.errorTransitions1h - a.errorTransitions1h);
+}
+
 // ───────────────────────────── automation digest ─────────────────────────────
 
 export interface AutomationDigest {
@@ -413,7 +431,7 @@ function fmtIdle(ms: number): string {
 // ───────────────────────────── attention items ─────────────────────────────
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
-export type AttentionKind = 'blocked' | 'land-ready' | 'error' | 'resource' | 'collision';
+export type AttentionKind = 'blocked' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping';
 export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap';
 
 export interface AttentionAction {
@@ -479,6 +497,23 @@ export function attentionItems(input: AttentionInput): AttentionItem[] {
       });
       mark(a.id, 'blocked');
       continue; // a blocked agent's other states are moot until answered
+    }
+
+    // Flapping: errored ≥2x in the last hour — structurally wrong, distinct from a one-off error.
+    if (a.status === 'error' && (a.errorTransitions1h ?? 0) >= 2) {
+      items.push({
+        id: `flapping:${a.id}`,
+        severity: 'critical',
+        kind: 'flapping',
+        title: `${a.name} is flapping (${a.errorTransitions1h}x/hr)`,
+        detail: a.error ?? 'Agent has errored repeatedly in the last hour — something is structurally wrong.',
+        agentId: a.id,
+        since: a.lastActivity,
+        action: { label: 'Restart', kind: 'restart' },
+      });
+      mark(a.id, 'flapping');
+      mark(a.id, 'error'); // still fundamentally an error state — dedupes a server-reported error action item too
+      continue;
     }
 
     // Errored / catastrophe → restart (or view to diagnose).

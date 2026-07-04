@@ -5,13 +5,20 @@
  * `verify` override (no real toolchain): "exit 1" simulates a broken build, "true" a passing one.
  */
 
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { landAgent } from "../src/land.ts";
+import { proofFor, setProofRoot } from "../src/proof.ts";
 
 const tmps: string[] = [];
+beforeAll(async () => {
+	// Isolate the post-merge proof records this suite writes into a throwaway state dir.
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "land-verify-state-"));
+	tmps.push(stateDir);
+	setProofRoot(stateDir);
+});
 afterAll(async () => {
 	for (const d of tmps) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
 });
@@ -82,6 +89,34 @@ test("landAgent: gate success lands normally", async () => {
 	expect(res.ok).toBe(true);
 	expect(res.merged).toBe(true);
 	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).toContain("feature.txt");
+});
+
+test("landAgent: a successful gate land records a durable post-merge proof of the merged main", async () => {
+	const repo = await baseRepo("land-verify-postproof-");
+	const wt = await branchWorktree(repo, "feat", "feature.txt");
+
+	await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true" });
+
+	// The landed main is backed by an inspectable proof keyed to the merged HEAD — not just an
+	// in-the-moment pass. It is stored against the main checkout (worktree === repo).
+	const mainHead = await out(repo, "rev-parse", "HEAD");
+	const proof = await proofFor(repo, repo);
+	expect(proof?.ok).toBe(true);
+	expect(proof?.commit).toBe(mainHead);
+	expect(proof?.command).toBe("true");
+	expect(proof?.branch).toBe("main");
+});
+
+test("landAgent: no-acceptance-gate land still records a post-merge proof (no gate ran)", async () => {
+	const repo = await baseRepo("land-verify-nogate-");
+	const wt = await branchWorktree(repo, "feat", "feature.txt");
+
+	await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "" });
+
+	const proof = await proofFor(repo, repo);
+	expect(proof?.ok).toBe(true);
+	expect(proof?.command).toBe("(no acceptance gate)");
+	expect(proof?.commit).toBe(await out(repo, "rev-parse", "HEAD"));
 });
 
 test("landAgent: empty verify string skips the gate (back-compat)", async () => {
