@@ -22,6 +22,15 @@ export interface Message {
   role: 'user' | 'model';
   text: string;
   timestamp: number;
+  /** Stamped on a user turn at send time (fix, review finding 1) so render-time coverage
+   *  dedupe (`partitionSessionMessages`) can match this durable copy against the transcript
+   *  entry the server echoes back with the same id, or against the ephemeral `pendingSend`
+   *  still showing it live — additive field, tolerated by `normalizeAssistantSessions`. */
+  clientTurnId?: string;
+  /** Set by the send-timeout/catch path when a turn never reached (or never echoed from) the
+   *  server. Survives reload (unlike `pendingSends`, which is render state only) so a failed
+   *  send still renders with error styling after a refresh. */
+  undelivered?: boolean;
 }
 
 interface ConsoleStart {
@@ -76,26 +85,21 @@ const stripLegacyReaction = (message: Message): Message => {
   return rest as Message;
 };
 
-/** Pre-migration (double-write era) `handleSend` appended every user turn straight into
- *  `session.messages`, even after an agent existed — so old localStorage blobs for
- *  agent-backed sessions carry the operator's turns twice: once here, once in the
- *  replayed server transcript (the durable record post concern-10). Drop the user-role
- *  entries so they migrate out on load instead of rendering (and downloading) doubled
- *  forever. Only sessions with an `agentId` are touched — pre-agent sessions (welcome
- *  text, chit-chat) have no server transcript to duplicate against and keep their
- *  `messages` as-is. */
-const migrateDoubleWrittenMessages = (session: Session): Session => {
-  if (!session.metadata?.agentId) return session;
-  const messages = session.messages.filter((message) => message.role !== 'user');
-  return messages.length === session.messages.length ? session : { ...session, messages };
-};
+// A prior revision of this file destructively dropped every role:'user' message from
+// agent-backed sessions here (on the theory the replayed server transcript was always a
+// complete duplicate). It wasn't: the server transcript ring is 800-entries-capped and an
+// agent record can go dead/evicted, so for those sessions the localStorage copy was the
+// ONLY copy — the migration was silent, permanent data loss (review finding 1). There is
+// no load-time migration anymore. `handleSend` writes the typed turn into `session.messages`
+// AND the replayed transcript keeps growing; render-time coverage dedupe
+// (`partitionSessionMessages`, used by `buildTranscriptRenderEntries`) suppresses whichever
+// copy is redundant instead of one of them being deleted outright.
 
 export function normalizeAssistantSessions(value: unknown, now = Date.now()): Session[] {
   if (!Array.isArray(value)) return [createInitialSession(now)];
   const sessions = value
     .filter(isSession)
     .map((session) => ({ ...session, messages: session.messages.map(stripLegacyReaction) }))
-    .map(migrateDoubleWrittenMessages)
     .sort((a, b) => b.updatedAt - a.updatedAt);
   return sessions.length ? sessions : [createInitialSession(now)];
 }
@@ -133,7 +137,12 @@ const PENDING_SEND_TIMEOUT_MS = 15_000;
 
 const transcriptDownloadText = (entry: TranscriptEntry) => {
   const label = entry.kind === 'user' ? 'You' : entry.kind === 'assistant' ? 'Assistant' : entry.kind.toUpperCase();
-  if (entry.kind !== 'tool') return `[${new Date(entry.ts).toLocaleString()}] ${label}:\n${entry.text}`;
+  if (entry.kind !== 'tool') {
+    // Operators see/export what they typed, not the context-augmented `text` the agent
+    // actually received (that stays the durable audit record) — review finding 4.
+    const text = entry.kind === 'user' ? (entry.displayText ?? entry.text) : entry.text;
+    return `[${new Date(entry.ts).toLocaleString()}] ${label}:\n${text}`;
+  }
   const view = toolView(entry);
   return `[${new Date(entry.ts).toLocaleString()}] TOOL:\n${view.title}\n${view.output || ''}${view.stderr ? `\nSTDERR:\n${view.stderr}` : ''}`;
 };
@@ -200,30 +209,115 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
   return [...dirs];
 };
 
-// ── Single message model (replay-as-truth) ──────────────────────────────────
-// Read-time mapper: a session's `messages` array now holds only pre-agent content
-// (the welcome text, chit-chat before an agent spins up). Once a session has an
-// agent, its durable record is the replayed server transcript — `messages` stops
-// growing (see `handleSend`). This mapper lets the one render path (TranscriptTimeline)
-// still show that earlier pre-agent content by turning each `Message` into a
-// `TranscriptEntry` with a stable synthetic id.
+// ── Single message model (replay-as-truth + client durability) ─────────────────────────
+// Read-time mapper: turns a durable `Message` (pre-agent welcome/chit-chat, a durably
+// double-written user turn, or an undelivered-send error notice) into a `TranscriptEntry`
+// with a stable synthetic id, so it can render through the one TranscriptTimeline path
+// alongside the replayed server transcript. `undelivered` maps to `status:'error'` so it
+// picks up the same error styling as a `pendingSend` that timed out.
 export const messageToTranscriptEntry = (message: Message): TranscriptEntry => ({
   id: `msg:${message.role}:${message.timestamp}`,
   kind: message.role === 'user' ? 'user' : 'assistant',
   text: message.text,
   ts: message.timestamp,
   format: 'markdown',
-  status: 'ok',
+  status: message.undelivered ? 'error' : 'ok',
+  clientTurnId: message.clientTurnId,
 });
 
-/** One render list, one order: mapped pre-agent messages, then the replayed transcript,
- *  then any still-in-flight optimistic sends — appended at the END (never prepended;
- *  prepending renders new sends at the top of the transcript). */
-export const buildTranscriptRenderEntries = (messages: Message[], transcriptEntries: TranscriptEntry[], pendingSends: TranscriptEntry[]): TranscriptEntry[] => [
-  ...messages.map(messageToTranscriptEntry),
-  ...transcriptEntries,
-  ...pendingSends,
-];
+/**
+ * Coverage dedupe (review finding 1): `handleSend` durably writes every user turn into
+ * `session.messages` (fix for the destructive-migration data loss above) in addition to the
+ * ephemeral `pendingSend` it also creates. Both, plus the replayed transcript, can carry the
+ * *same* turn — this decides, per message, whether it's already visible elsewhere (and should
+ * be suppressed) or needs to render on its own, and if so, where:
+ *
+ *  - Covered by the real transcript (`clientTurnId` match, else exact `displayText ?? text`
+ *    match, each transcript entry consumed at most once) → suppressed; it already renders
+ *    from `transcriptEntries` itself.
+ *  - Covered by a live `pendingSend` (same `clientTurnId`, still `status:'running'`) →
+ *    suppressed; the pendingSend already shows it with a live status.
+ *  - Otherwise uncovered → positioned by `timestamp` against `windowHeadTs` (the transcript's
+ *    first entry, or the current agent's `startedAt` when the transcript hasn't produced
+ *    anything yet, or +Infinity when neither exists): older → `prologue` (renders at the top,
+ *    chronological — this is how an orphaned send from a dead/evicted agent surfaces, since a
+ *    replacement agent's transcript starts *after* it); everything else → `trailing` (renders
+ *    after the transcript, newest last — a send still in flight, or one that failed and is
+ *    only known via its `undelivered` Message now that the reload wiped `pendingSends`).
+ */
+export function partitionSessionMessages(
+  messages: Message[],
+  transcriptEntries: TranscriptEntry[],
+  pendingSends: TranscriptEntry[],
+  windowHeadTs: number,
+): { prologue: TranscriptEntry[]; trailing: TranscriptEntry[] } {
+  const transcriptUserEntries = transcriptEntries.filter((entry) => entry.kind === 'user');
+  const consumedTranscriptEntries = new Set<TranscriptEntry>();
+  const liveTurnIds = new Set(
+    pendingSends.filter((entry) => entry.status !== 'error' && entry.clientTurnId).map((entry) => entry.clientTurnId as string),
+  );
+
+  const prologue: TranscriptEntry[] = [];
+  const trailing: TranscriptEntry[] = [];
+
+  for (const message of messages) {
+    if (message.role === 'user') {
+      if (message.clientTurnId) {
+        const echoed = transcriptUserEntries.find(
+          (entry) => entry.clientTurnId === message.clientTurnId && !consumedTranscriptEntries.has(entry),
+        );
+        if (echoed) {
+          consumedTranscriptEntries.add(echoed);
+          continue; // covered by the real transcript
+        }
+        if (liveTurnIds.has(message.clientTurnId)) continue; // covered by a live pendingSend
+      } else {
+        // Legacy message with no clientTurnId (pre-fix localStorage blob): fall back to an
+        // exact text match against the operator's typed text, consumed oldest-first.
+        const matched = transcriptUserEntries.find(
+          (entry) => !consumedTranscriptEntries.has(entry) && (entry.displayText ?? entry.text) === message.text,
+        );
+        if (matched) {
+          consumedTranscriptEntries.add(matched);
+          continue;
+        }
+      }
+    }
+    const entry = messageToTranscriptEntry(message);
+    (message.timestamp < windowHeadTs ? prologue : trailing).push(entry);
+  }
+
+  return { prologue, trailing };
+}
+
+/**
+ * Render composition: `entries` is the ordinary TranscriptTimeline content (prologue-mapped
+ * messages, then the replayed transcript) — TranscriptTimeline's collapsible-work fold and
+ * "is anything running" calculations key off this and only this. `trailingEntries` (uncovered
+ * fresh/failed sends, then any still-in-flight `pendingSends`) is a separate always-visible
+ * section rendered after the fold/final-answer — it must never be folded, and must never make
+ * the fold logic think a run is still in progress (review finding 2).
+ */
+export function buildTranscriptRenderEntries(
+  messages: Message[],
+  transcriptEntries: TranscriptEntry[],
+  pendingSends: TranscriptEntry[],
+  agentStartedAt?: number,
+): { entries: TranscriptEntry[]; trailingEntries: TranscriptEntry[] } {
+  // Fallback order when there's no transcript to anchor against: the current agent's
+  // `startedAt` (an agent exists, just hasn't echoed anything yet — e.g. a send still in
+  // flight), else -Infinity (no agent at all for this attempt, e.g. `/api/console` itself
+  // failed) so an uncovered message defaults to trailing (a fresh/failed send) rather than
+  // prologue (stale content) — the only genuinely ambiguous case, a session with nothing but
+  // its pre-agent welcome text, is unaffected either way since there is nothing else to order
+  // it against.
+  const windowHeadTs = transcriptEntries[0]?.ts ?? agentStartedAt ?? Number.NEGATIVE_INFINITY;
+  const { prologue, trailing } = partitionSessionMessages(messages, transcriptEntries, pendingSends, windowHeadTs);
+  return {
+    entries: [...prologue, ...transcriptEntries],
+    trailingEntries: [...trailing, ...pendingSends],
+  };
+}
 
 /** Drops any pending (optimistic) send whose `clientTurnId` has now arrived as a
  *  `kind==='user'` entry in the real transcript. Restricted to user-kind on purpose:
@@ -251,6 +345,8 @@ export const clearEchoedPendingSends = (pendingSends: TranscriptEntry[], transcr
  */
 export const ChatMessagesViewport = ({
   entries,
+  trailingEntries = EMPTY_TRANSCRIPT,
+  transcriptEntries = EMPTY_TRANSCRIPT,
   selectedAgent,
   agentDiffs,
   workExpanded,
@@ -259,6 +355,13 @@ export const ChatMessagesViewport = ({
   isLoading,
 }: {
   entries: TranscriptEntry[];
+  /** Uncovered fresh/failed sends + in-flight pendingSends — always-visible trailing
+   *  section, never folded (review finding 2). */
+  trailingEntries?: TranscriptEntry[];
+  /** The real, replayed server transcript only — used (not `entries`, which may carry a
+   *  prologue, and not `trailingEntries`, which may carry a pendingSend) to decide whether
+   *  the log region is "busy" in the collapsible-work-fold sense (review finding 2). */
+  transcriptEntries?: TranscriptEntry[];
   selectedAgent?: AgentDTO;
   agentDiffs: AgentFileDiff[];
   workExpanded: boolean;
@@ -269,7 +372,13 @@ export const ChatMessagesViewport = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const { isLocked, scrollToBottom, scrollIfLocked } = useChatStreamScroll({ scrollRef });
   const { hasNewMessages, dismiss, contentRef } = useChatNewMessages({ isLocked, onResize: scrollIfLocked });
-  const anyEntryRunning = transcriptIsRunning(entries);
+  // Two distinct notions of "busy" (review finding 2): the work-fold's own `running` (computed
+  // inside TranscriptTimeline from the real transcript only) decides what stays folded; this
+  // aria-busy is a broader, purely-accessibility signal that also goes true while a send is
+  // still in flight (isLoading, or a pendingSend with status:'running') even before the
+  // transcript has produced anything to be "running" about.
+  const pendingInFlight = trailingEntries.some((entry) => entry.status === 'running');
+  const anyEntryRunning = transcriptIsRunning(transcriptEntries) || isLoading || pendingInFlight;
 
   return (
     <div className="relative flex-1 min-h-0">
@@ -284,6 +393,7 @@ export const ChatMessagesViewport = ({
         <div ref={contentRef} className="space-y-4">
           <TranscriptTimeline
             entries={entries}
+            trailingEntries={trailingEntries}
             messages={EMPTY_MESSAGES}
             agent={selectedAgent}
             diffs={agentDiffs}
@@ -343,7 +453,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const transcriptEntries = agentId ? (transcripts.get(agentId) ?? EMPTY_TRANSCRIPT) : EMPTY_TRANSCRIPT;
   const todoPhases = selectedAgent?.todoPhases ?? [];
   const sessionPendingSends = activeSessionId ? pendingSends.filter((entry) => entry.id?.startsWith(`pending:${activeSessionId}:`)) : EMPTY_TRANSCRIPT;
-  const renderEntries = buildTranscriptRenderEntries(messages, transcriptEntries, sessionPendingSends);
+  const { entries: mainEntries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, sessionPendingSends, selectedAgent?.startedAt);
   const transcriptRunning = transcriptIsRunning(transcriptEntries);
   const agentRunning = agentIsRunning(selectedAgent) || transcriptRunning || isLoading;
   const isStopShown = !!selectedAgent && interruptibleAgents([selectedAgent]).length > 0;
@@ -467,10 +577,15 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     setWorkExpanded(agentRunning);
   }, [agentId, agentRunning]);
 
-  // Titling for a freshly-started "New Chat" session now happens inline in `handleSend`
-  // (the first send that spins up an agent), since sent text no longer lands in `messages`.
-  const updateSessionMessages = (sessionId: string, newMessages: Message[]) => {
-    setSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, messages: newMessages, updatedAt: Date.now() } : s)));
+  // Titling for a freshly-started "New Chat" session happens inline in `handleSend` (the first
+  // send that spins up an agent). Accepts either a replacement array or an updater function —
+  // the updater form is required wherever a caller runs after an `await` or inside a `setTimeout`
+  // (the send-timeout and catch paths below), since the `messages` closed over at call time may
+  // be stale by then.
+  const updateSessionMessages = (sessionId: string, next: Message[] | ((messages: Message[]) => Message[])) => {
+    setSessions(prev => prev.map(s => (s.id === sessionId
+      ? { ...s, messages: typeof next === 'function' ? (next as (messages: Message[]) => Message[])(s.messages) : next, updatedAt: Date.now() }
+      : s)));
   };
 
   useEffect(() => {
@@ -532,29 +647,37 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   // its own input before calling this with a non-empty `textToSend`. Context-assembly (fleet
   // snapshot, task context, agent creation) stays here, unchanged.
   //
-  // Single message model (concern 10 — replay-as-truth): a send is never written straight into
-  // `session.messages` — the server always echoes the prompt into the agent's persisted
-  // transcript (replayed on every subscribe), so a client-side write here would duplicate it on
-  // refresh. Instead the send shows up instantly as an optimistic `pendingSend`, which is cleared
-  // the moment its `clientTurnId` echoes back as a real transcript entry (or times out into an
-  // error hint if it never does).
+  // Single message model (concern 10 — replay-as-truth) + client durability (review finding 1):
+  // the server echoes every prompt into the agent's persisted transcript (replayed on every
+  // subscribe) — but that ring is 800-entries-capped and an agent record can go dead/evicted, so
+  // it is NOT a substitute for a client-side durable copy. A send therefore writes twice: an
+  // ephemeral `pendingSend` (instant optimistic UI, cleared the moment its `clientTurnId` echoes
+  // back as a real transcript entry) AND a durable `Message` appended to `session.messages`
+  // (survives reload; render-time coverage dedupe — `partitionSessionMessages` — suppresses
+  // whichever copy is redundant once the real thing shows up).
   const handleSend = async (textToSend: string) => {
     if (!textToSend || isLoading || !activeSessionId) return;
     const sessionId = activeSessionId;
 
     const clientTurnId = `turn:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     const pendingId = `pending:${sessionId}:${clientTurnId}`;
+    const sentAt = Date.now();
     setPendingSends((prev) => [...prev, {
       id: pendingId,
       kind: 'user',
       text: textToSend,
-      ts: Date.now(),
+      ts: sentAt,
       format: 'markdown',
       status: 'running',
       clientTurnId,
     }]);
+    updateSessionMessages(sessionId, (prev) => [...prev, { role: 'user', text: textToSend, timestamp: sentAt, clientTurnId }]);
     pendingSendTimeouts.current.set(clientTurnId, setTimeout(() => {
-      setPendingSends((prev) => prev.map((entry) => (entry.clientTurnId === clientTurnId ? { ...entry, status: 'error' } : entry)));
+      // Never echoed back. Hand off from the ephemeral pendingSend to the durable Message's
+      // `undelivered` flag instead of leaving an errored pendingSend sitting in the state
+      // forever (review finding 2) — the Message survives reload, the pendingSend does not.
+      setPendingSends((prev) => prev.filter((entry) => entry.clientTurnId !== clientTurnId));
+      updateSessionMessages(sessionId, (prev) => prev.map((m) => (m.clientTurnId === clientTurnId ? { ...m, undelivered: true } : m)));
       pendingSendTimeouts.current.delete(clientTurnId);
     }, PENDING_SEND_TIMEOUT_MS));
     setIsLoading(true);
@@ -587,8 +710,11 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
         clearTimeout(timeout);
         pendingSendTimeouts.current.delete(clientTurnId);
       }
-      setPendingSends((prev) => prev.map((entry) => (entry.clientTurnId === clientTurnId ? { ...entry, status: 'error' } : entry)));
-      updateSessionMessages(sessionId, [...messages, { role: 'model', text: `Error: ${error.message || 'Could not reach glance chat'}`, timestamp: Date.now() }]);
+      setPendingSends((prev) => prev.filter((entry) => entry.clientTurnId !== clientTurnId));
+      updateSessionMessages(sessionId, (prev) => [
+        ...prev.map((m) => (m.clientTurnId === clientTurnId ? { ...m, undelivered: true } : m)),
+        { role: 'model', text: `Error: ${error.message || 'Could not reach glance chat'}`, timestamp: Date.now() },
+      ]);
     } finally {
       setIsLoading(false);
     }
@@ -596,7 +722,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
 
   const downloadHistory = () => {
     if (!activeSession) return;
-    const content = renderEntries.map(transcriptDownloadText).join('\n\n-------------------\n\n');
+    const content = [...mainEntries, ...trailingEntries].map(transcriptDownloadText).join('\n\n-------------------\n\n');
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -770,7 +896,9 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       {/* Messages */}
       <ChatMessagesViewport
         key={activeSessionId ?? 'none'}
-        entries={renderEntries}
+        entries={mainEntries}
+        trailingEntries={trailingEntries}
+        transcriptEntries={transcriptEntries}
         selectedAgent={selectedAgent}
         agentDiffs={agentDiffs ?? EMPTY_DIFFS}
         workExpanded={workExpanded}

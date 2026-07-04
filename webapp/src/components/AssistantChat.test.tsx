@@ -9,6 +9,7 @@ import {
   detectedPlanDirs,
   messageToTranscriptEntry,
   normalizeAssistantSessions,
+  partitionSessionMessages,
   type Message,
 } from "./AssistantChat";
 import { AgentMetaBar } from "./chat/AgentMetaBar";
@@ -199,6 +200,47 @@ test("TranscriptTimeline never folds the operator's sent message into the collap
   expect(collapsed).toContain("the answer");
 });
 
+test("TranscriptTimeline: a pending send in trailingEntries renders after the fold WITHOUT swallowing the previous finalEntry, and does not flip the work-fold's own running (review finding 2 core regression)", () => {
+  const entries: TranscriptEntry[] = [
+    { id: "u1", kind: "user", text: "first question", ts: 1, status: "ok" },
+    { id: "a1", kind: "assistant", text: "the first answer", ts: 2, status: "ok" },
+  ];
+  const pendingSend: TranscriptEntry[] = [{ id: "pending:s1:turn-b", kind: "user", text: "second question", ts: 3, status: "running", clientTurnId: "turn-b" }];
+
+  const html = renderToStaticMarkup(
+    <TranscriptTimeline entries={entries} trailingEntries={pendingSend} messages={[]} expanded={false} onToggle={() => {}} />,
+  );
+  // The prior answer must still be visible — before the fix, a trailing pendingSend flipped
+  // `running` true and folded the finalEntry away along with the freshly sent message.
+  expect(html).toContain("the first answer");
+  expect(html).toContain("second question");
+  expect(html).toContain("Worked for"); // NOT "Working for" — the fold correctly sees the run as settled
+  expect(html).not.toContain("Working for");
+});
+
+test("TranscriptTimeline: an error-status user entry (undelivered send) gets a visible 'Not delivered' hint and a copy-text affordance", () => {
+  const entries: TranscriptEntry[] = [{ id: "u1", kind: "user", text: "never landed", ts: 1, status: "error" }];
+  const html = renderToStaticMarkup(<TranscriptEntryView entry={entries[0]!} />);
+  expect(html).toContain("never landed");
+  expect(html).toContain("Not delivered");
+  expect(html).toContain("Copy text");
+  expect(html).toContain("border-red-300");
+});
+
+test("TranscriptEntryView renders the operator's bare typed text (displayText) for a user entry, not the context-augmented text sent to the agent (review finding 4)", () => {
+  const entry: TranscriptEntry = {
+    id: "u1",
+    kind: "user",
+    text: "What's being worked on?\n\n[Live context for reference]\n...lots of injected fleet state...",
+    displayText: "What's being worked on?",
+    ts: 1,
+    status: "ok",
+  };
+  const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+  expect(html).toContain("What&#x27;s being worked on?");
+  expect(html).not.toContain("injected fleet state");
+});
+
 test("DiffReviewPanel renders compact changed-file access", () => {
   const html = renderToStaticMarkup(<DiffReviewPanel diffs={[{ file: "README.md", status: "M", diff: "+ compact chat" }]} />);
   expect(html).toContain("1 changed file");
@@ -237,12 +279,7 @@ test("normalizeAssistantSessions strips legacy reaction fields from old localSto
   expect(session?.messages.some((message) => "reaction" in message)).toBe(false);
 });
 
-test("normalizeAssistantSessions migrates legacy double-written turns out of agent-backed sessions (concern 10)", () => {
-  // Pre-migration (double-write era) `handleSend` appended every user turn straight
-  // into `session.messages` even after an agent existed — so an old localStorage blob
-  // for an agent-backed session carries the operator's turns both here AND in the
-  // replayed server transcript. Only the user-role entries are duplicates; the
-  // pre-agent welcome (model-role) stays.
+test("normalizeAssistantSessions no longer destructively migrates agent-backed sessions (review finding 1 — the prior migration silently deleted the ONLY copy for evicted/dead-agent/failed sends)", () => {
   const legacy = [{
     id: "s1",
     title: "Old chat",
@@ -255,14 +292,10 @@ test("normalizeAssistantSessions migrates legacy double-written turns out of age
     ],
   }];
 
+  // Every message survives load, agentId or not — data preservation, not migration.
   const [session] = normalizeAssistantSessions(legacy);
-  expect(session?.messages).toEqual([
-    { role: "model", text: "welcome", timestamp: 1 },
-    { role: "model", text: "on it", timestamp: 3 },
-  ]);
+  expect(session?.messages).toEqual(legacy[0].messages);
 
-  // Pre-agent sessions (no agentId) are untouched — there is no server transcript to
-  // de-duplicate against yet.
   const preAgent = [{ id: "s2", title: "New chat", updatedAt: 5, messages: legacy[0].messages }];
   expect(normalizeAssistantSessions(preAgent)[0]?.messages).toEqual(legacy[0].messages);
 });
@@ -391,13 +424,14 @@ test("ComposerSendButton swaps to a stop affordance while the agent is running, 
   expect(pending).toContain("disabled");
 });
 
-test("ChatMessagesViewport's scroll container is an announced log region, aria-busy only while an entry is running", () => {
+test("ChatMessagesViewport's scroll container is an announced log region, aria-busy while a real transcript entry is running, while a send is loading, or while a pendingSend is in flight (review finding 2 — these are computed separately from the work-fold's own running)", () => {
   const runningEntries: TranscriptEntry[] = [{ id: "e1", kind: "assistant", text: "working…", ts: 1, status: "running" }];
   const settledEntries: TranscriptEntry[] = [{ id: "e2", kind: "assistant", text: "done", ts: 1, status: "ok" }];
 
   const running = renderToStaticMarkup(
     <ChatMessagesViewport
       entries={runningEntries}
+      transcriptEntries={runningEntries}
       agentDiffs={[]}
       workExpanded={false}
       onToggleWork={() => {}}
@@ -412,6 +446,7 @@ test("ChatMessagesViewport's scroll container is an announced log region, aria-b
   const settled = renderToStaticMarkup(
     <ChatMessagesViewport
       entries={settledEntries}
+      transcriptEntries={settledEntries}
       agentDiffs={[]}
       workExpanded={false}
       onToggleWork={() => {}}
@@ -419,6 +454,37 @@ test("ChatMessagesViewport's scroll container is an announced log region, aria-b
     />,
   );
   expect(settled).toContain('aria-busy="false"');
+
+  // isLoading (the brief agent-creation await) makes the log busy even though the real
+  // transcript hasn't produced anything running yet.
+  const loading = renderToStaticMarkup(
+    <ChatMessagesViewport
+      entries={settledEntries}
+      transcriptEntries={settledEntries}
+      agentDiffs={[]}
+      workExpanded={false}
+      onToggleWork={() => {}}
+      isLoading
+    />,
+  );
+  expect(loading).toContain('aria-busy="true"');
+
+  // A running pendingSend (still in flight, not yet echoed) also makes the log busy — but,
+  // critically, it must NOT be part of `transcriptEntries`/`entries` (that would let it
+  // corrupt the work-fold's own running calc — see the TranscriptTimeline-level test below).
+  const pendingInFlight: TranscriptEntry[] = [{ id: "pending:s1:turn-a", kind: "user", text: "sending…", ts: 2, status: "running", clientTurnId: "turn-a" }];
+  const sending = renderToStaticMarkup(
+    <ChatMessagesViewport
+      entries={settledEntries}
+      transcriptEntries={settledEntries}
+      trailingEntries={pendingInFlight}
+      agentDiffs={[]}
+      workExpanded={false}
+      onToggleWork={() => {}}
+      isLoading={false}
+    />,
+  );
+  expect(sending).toContain('aria-busy="true"');
 });
 
 test("each transcript entry is wrapped in an <article> naming its sender", () => {
@@ -546,15 +612,100 @@ test("messageToTranscriptEntry maps role to kind, stamps markdown/ok, and derive
   expect(messageToTranscriptEntry(userMessage).id).toBe(userEntry.id);
 });
 
-test("buildTranscriptRenderEntries appends pending sends at the end: mapped messages, then transcript, then pending", () => {
+test("buildTranscriptRenderEntries: prologue (mapped welcome) leads `entries`, the real transcript follows, and an uncovered fresh send lands in `trailingEntries` alongside its pendingSend (review finding 1+2)", () => {
   const messages: Message[] = [{ role: "model", text: "welcome", timestamp: 1 }];
   const transcriptEntries: TranscriptEntry[] = [{ id: "t1", kind: "user", text: "first turn", ts: 2, status: "ok" }];
   const pendingSends: TranscriptEntry[] = [{ id: "pending:s1:turn-x", kind: "user", text: "in flight", ts: 3, status: "running", clientTurnId: "turn-x" }];
 
-  const merged = buildTranscriptRenderEntries(messages, transcriptEntries, pendingSends);
-  expect(merged.map((entry) => entry.text)).toEqual(["welcome", "first turn", "in flight"]);
-  // Pending is last (append-at-end) — never prepended, which would render new sends at the top.
-  expect(merged.at(-1)?.text).toBe("in flight");
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, pendingSends);
+  expect(entries.map((entry) => entry.text)).toEqual(["welcome", "first turn"]);
+  // pendingSend is last (append-at-end) — never prepended, which would render new sends at the top.
+  expect(trailingEntries.map((entry) => entry.text)).toEqual(["in flight"]);
+});
+
+// ── Coverage dedupe (review finding 1): a durably double-written user Message must not
+// double-render against the transcript entry or pendingSend that already shows it live. ──────
+
+test("partitionSessionMessages: a durable user Message covered by clientTurnId match against a real transcript entry is suppressed entirely", () => {
+  const messages: Message[] = [{ role: "user", text: "do the thing", timestamp: 5, clientTurnId: "turn-a" }];
+  const transcriptEntries: TranscriptEntry[] = [{ id: "t1", kind: "user", text: "do the thing (with context)", displayText: "do the thing", ts: 6, status: "ok", clientTurnId: "turn-a" }];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries.map((e) => e.text)).toEqual(["do the thing (with context)"]);
+  expect(trailingEntries).toEqual([]);
+});
+
+test("partitionSessionMessages: a legacy Message with no clientTurnId falls back to an exact text match against displayText, consumed at most once", () => {
+  const messages: Message[] = [
+    { role: "user", text: "hello", timestamp: 1 },
+    { role: "user", text: "hello", timestamp: 10 }, // duplicate text, sent AFTER the transcript's only entry
+  ];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "user", text: "hello (with context)", displayText: "hello", ts: 3, status: "ok" },
+  ];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  // First "hello" is covered (suppressed). Second has nothing left to match, so it's uncovered
+  // and — being newer than the transcript's only entry — renders trailing.
+  expect(entries.map((e) => e.text)).toEqual(["hello (with context)"]);
+  expect(trailingEntries.map((e) => e.text)).toEqual(["hello"]);
+});
+
+test("partitionSessionMessages: an uncovered message older than the transcript's first entry renders as prologue (top, chronological) — the orphaned-send-from-a-dead-agent scenario", () => {
+  // A session's agent got evicted/died; a new agent was created later for the same session.
+  // The old turn's clientTurnId will never appear in the NEW agent's transcript.
+  const messages: Message[] = [{ role: "user", text: "orphaned turn", timestamp: 1, clientTurnId: "turn-old" }];
+  const transcriptEntries: TranscriptEntry[] = [{ id: "t1", kind: "user", text: "new agent's first turn", ts: 100, status: "ok", clientTurnId: "turn-new" }];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries.map((e) => e.text)).toEqual(["orphaned turn", "new agent's first turn"]);
+  expect(trailingEntries).toEqual([]);
+});
+
+test("partitionSessionMessages: an uncovered message newer than the transcript's last entry renders trailing, after the transcript", () => {
+  const messages: Message[] = [{ role: "model", text: "Error: could not reach glance chat", timestamp: 200 }];
+  const transcriptEntries: TranscriptEntry[] = [{ id: "t1", kind: "assistant", text: "the answer", ts: 100, status: "ok" }];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries.map((e) => e.text)).toEqual(["the answer"]);
+  expect(trailingEntries.map((e) => e.text)).toEqual(["Error: could not reach glance chat"]);
+});
+
+test("partitionSessionMessages: a live pendingSend suppresses its matching durable Message so a just-typed send doesn't render twice while in flight", () => {
+  const messages: Message[] = [{ role: "user", text: "sending now", timestamp: 500, clientTurnId: "turn-live" }];
+  const transcriptEntries: TranscriptEntry[] = []; // agent just created, nothing echoed yet
+  const pendingSends: TranscriptEntry[] = [{ id: "pending:s1:turn-live", kind: "user", text: "sending now", ts: 500, status: "running", clientTurnId: "turn-live" }];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, pendingSends);
+  expect(entries).toEqual([]);
+  // Only the pendingSend renders — not a duplicate copy of the durable Message.
+  expect(trailingEntries).toHaveLength(1);
+  expect(trailingEntries[0]?.id).toBe("pending:s1:turn-live");
+});
+
+test("buildTranscriptRenderEntries falls back to the current agent's startedAt as the prologue/trailing threshold when the transcript hasn't produced anything yet", () => {
+  const messages: Message[] = [
+    { role: "model", text: "welcome", timestamp: 1 }, // predates the agent — prologue
+  ];
+  const { prologue, trailing } = partitionSessionMessages(messages, [], [], /* windowHeadTs */ 1000);
+  expect(prologue.map((e) => e.text)).toEqual(["welcome"]);
+  expect(trailing).toEqual([]);
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, [], [], /* agentStartedAt */ 1000);
+  expect(entries.map((e) => e.text)).toEqual(["welcome"]);
+  expect(trailingEntries).toEqual([]);
+});
+
+test("partitionSessionMessages: an undelivered Message survives reload and renders trailing with status:'error', once its pendingSend is gone", () => {
+  // Simulates a page reload after a send timed out: `pendingSends` resets to empty (it's
+  // render state only), but the durable Message persisted with `undelivered: true`.
+  const messages: Message[] = [{ role: "user", text: "never landed", timestamp: 50, clientTurnId: "turn-dead", undelivered: true }];
+  const transcriptEntries: TranscriptEntry[] = [];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries).toEqual([]);
+  expect(trailingEntries).toHaveLength(1);
+  expect(trailingEntries[0]).toMatchObject({ text: "never landed", status: "error", clientTurnId: "turn-dead" });
 });
 
 test("clearEchoedPendingSends drops a pending send once its clientTurnId echoes back as a user-kind transcript entry", () => {

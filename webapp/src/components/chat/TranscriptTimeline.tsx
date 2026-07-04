@@ -128,6 +128,7 @@ const ElapsedClock = ({
 
 export const TranscriptTimeline = ({
   entries,
+  trailingEntries = EMPTY_TRANSCRIPT,
   messages,
   agent,
   diffs = EMPTY_DIFFS,
@@ -136,6 +137,11 @@ export const TranscriptTimeline = ({
   onAnswer,
 }: {
   entries: TranscriptEntry[];
+  /** Uncovered fresh/failed sends plus any still-in-flight pendingSends (review finding 2):
+   *  rendered in an always-visible section after the fold/final-answer, never folded, and
+   *  never fed into `entries` — a running pendingSend here must not make the run below look
+   *  like it's still in progress, which used to swallow the previous final answer. */
+  trailingEntries?: TranscriptEntry[];
   messages: { timestamp: number }[];
   agent?: AgentDTO;
   diffs?: AgentFileDiff[];
@@ -144,7 +150,11 @@ export const TranscriptTimeline = ({
   onAnswer?: (requestId: string, value: string) => void;
 }) => {
   const { prologueEntries, promptEntries, workEntries, finalEntry } = splitTranscriptEntries(entries);
+  // Deliberately scoped to `entries` (the real transcript, plus its prologue) — never
+  // `trailingEntries` — so a pendingSend showing `status:'running'` can't flip this true and
+  // fold away the previous finalEntry (review finding 2).
   const running = agentIsRunning(agent) || transcriptIsRunning(entries);
+  const visibleTrailingEntries = trailingEntries.filter((entry) => entry.text.trim());
   const start = transcriptStart(entries, messages, agent);
   const end = transcriptEnd(entries, Date.now(), agent);
   const latestWork = [...workEntries].reverse().find((entry) => entry.kind !== 'assistant' || entry.status === 'running') ?? workEntries.at(-1);
@@ -208,18 +218,55 @@ export const TranscriptTimeline = ({
         </div>
       )}
       {running && <DiffReviewPanel diffs={diffs} />}
+      {visibleTrailingEntries.length > 0 && (
+        <div className="space-y-3" data-trailing-section>
+          {renderEntries(visibleTrailingEntries)}
+        </div>
+      )}
     </>
   );
 };
 
+/** Best-effort clipboard copy for the "not delivered" bubble's restore affordance. `Composer`
+ *  owns its `input` state privately (not lifted to a prop `AssistantChat` could set), so
+ *  copy-to-clipboard is the clean route here rather than reaching into another component's
+ *  internals — see review finding 2's "Restore to composer" note. */
+const copyToClipboard = (text: string) => {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(text);
+  }
+};
+
 export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEntry }) => {
   if (entry.kind === 'user') {
+    // The operator's bare typed text, when the server captured one — `text` stays the
+    // durable, context-augmented record the agent actually received (review finding 4).
+    const shown = entry.displayText ?? entry.text;
+    const undelivered = entry.status === 'error';
     return (
       <div data-chat-message className="flex flex-col w-full items-end">
         <div className="flex flex-col items-end gap-1 max-w-[88%]">
-          <div className="rounded-2xl rounded-tr-md bg-gray-200 px-3.5 py-2.5 text-[13px] leading-relaxed text-gray-900 whitespace-pre-wrap dark:bg-gray-900 dark:text-gray-100">
-            {entry.text}
+          <div
+            className={`rounded-2xl rounded-tr-md px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap ${
+              undelivered
+                ? 'border border-red-300 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200'
+                : 'bg-gray-200 text-gray-900 dark:bg-gray-900 dark:text-gray-100'
+            }`}
+          >
+            {shown}
           </div>
+          {undelivered && (
+            <div className="flex items-center gap-2 px-1">
+              <span className="text-[10px] font-medium text-red-600 dark:text-red-400">Not delivered</span>
+              <button
+                type="button"
+                onClick={() => copyToClipboard(shown)}
+                className="text-[10px] font-medium text-red-600 underline decoration-red-300 hover:text-red-700 dark:text-red-400 dark:decoration-red-800"
+              >
+                Copy text
+              </button>
+            </div>
+          )}
           <span className="text-[10px] text-gray-400 dark:text-gray-500 px-1">
             {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
