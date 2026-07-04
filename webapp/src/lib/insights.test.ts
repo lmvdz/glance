@@ -3,6 +3,7 @@ import {
   computeCapacity,
   detectCollisions,
   churnHotspots,
+  flappingAgents,
   automationDigest,
   attentionItems,
   pushRolling,
@@ -223,6 +224,33 @@ describe('churnHotspots', () => {
   });
 });
 
+// ───────────────────────────── flappingAgents ─────────────────────────────
+
+describe('flappingAgents', () => {
+  test('ranks agents at/above the threshold desc by errorTransitions1h', () => {
+    const agents = [
+      agent('a', 'error', { errorTransitions1h: 2 }),
+      agent('b', 'error', { errorTransitions1h: 5 }),
+      agent('c', 'idle', { errorTransitions1h: 1 }),
+    ];
+    const rows = flappingAgents(agents);
+    expect(rows.map((r) => r.agentId)).toEqual(['b', 'a']);
+    expect(rows[0].errorTransitions1h).toBe(5);
+  });
+
+  test('respects a custom minCount threshold', () => {
+    const agents = [agent('a', 'error', { errorTransitions1h: 3 })];
+    expect(flappingAgents(agents, 4)).toEqual([]);
+    expect(flappingAgents(agents, 3)).toHaveLength(1);
+  });
+
+  test('undefined errorTransitions1h and null/undefined agents → empty', () => {
+    expect(flappingAgents([agent('a', 'error')])).toEqual([]);
+    expect(flappingAgents(null)).toEqual([]);
+    expect(flappingAgents(undefined)).toEqual([]);
+  });
+});
+
 // ───────────────────────────── automationDigest ─────────────────────────────
 
 describe('automationDigest', () => {
@@ -324,6 +352,19 @@ describe('attentionItems', () => {
     expect(items[0].kind).toBe('error');
     expect(items[0].action?.kind).toBe('restart');
     expect(items[0].detail).toBe('boom');
+  });
+
+  test('errored agent with ≥2 errors/hr → flapping item, not plain error', () => {
+    const items = attentionItems({ agents: [agent('a', 'error', { error: 'boom', errorTransitions1h: 3 })] });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('flapping');
+    expect(items[0].severity).toBe('critical');
+    expect(items[0].action?.kind).toBe('restart');
+  });
+
+  test('errored agent with 1 error/hr stays a plain error item', () => {
+    const items = attentionItems({ agents: [agent('a', 'error', { error: 'boom', errorTransitions1h: 1 })] });
+    expect(items[0].kind).toBe('error');
   });
 
   test('landReady agent → warn land item', () => {

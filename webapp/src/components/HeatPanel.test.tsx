@@ -10,12 +10,13 @@
 import { expect, test, describe } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
-import { detectCollisions, churnHotspots, type UsageRun, type HeatPayload } from '../lib/insights';
+import { detectCollisions, churnHotspots, flappingAgents, type UsageRun, type HeatPayload } from '../lib/insights';
 import type { AgentDTO } from '../lib/dto';
+import { FlappingAgentsCallout } from './HeatPanel';
 
 // ────────────────────────────────── fixtures ──────────────────────────────────
 
-function agent(id: string, status: AgentDTO['status'] = 'working'): AgentDTO {
+function agent(id: string, status: AgentDTO['status'] = 'working', extra: Partial<AgentDTO> = {}): AgentDTO {
   return {
     id,
     name: `Agent ${id}`,
@@ -25,6 +26,7 @@ function agent(id: string, status: AgentDTO['status'] = 'working'): AgentDTO {
     pending: [],
     lastActivity: 0,
     messageCount: 0,
+    ...extra,
   } as AgentDTO;
 }
 
@@ -154,6 +156,41 @@ describe('Callout rendering', () => {
     );
     expect(html).toContain('View agents');
     expect(html).toContain('<button');
+  });
+});
+
+// ────────────────────────────── FlappingAgentsCallout ──────────────────────────
+//
+// flappingAgents() (lib/insights.ts) had full unit coverage but was never rendered
+// anywhere — the HeatPanel ("Activity & hotspots") now wires it in as an agent-level
+// hotspot signal alongside the file-churn hotspots. These tests cover the rendering
+// half; flappingAgents()'s own ranking/threshold logic is covered in insights.test.ts.
+
+describe('FlappingAgentsCallout', () => {
+  test('renders nothing for an empty flapping list', () => {
+    const html = renderToStaticMarkup(<FlappingAgentsCallout agents={[]} onView={() => {}} />);
+    expect(html).toBe('');
+  });
+
+  test('renders each flapping agent with its hourly error rate and a View action', () => {
+    const rows = flappingAgents([
+      agent('a1', 'error', { errorTransitions1h: 5 }),
+      agent('a2', 'idle', { errorTransitions1h: 3 }), // recovered but still flagged
+    ]);
+    const html = renderToStaticMarkup(<FlappingAgentsCallout agents={rows} onView={() => {}} />);
+
+    expect(html).toContain('2 agents flapping in the last hour');
+    expect(html).toContain('Agent a1');
+    expect(html).toContain('5x/hr');
+    expect(html).toContain('Agent a2');
+    expect(html).toContain('3x/hr');
+    expect((html.match(/View</g) ?? []).length).toBe(2);
+  });
+
+  test('singular copy for exactly one flapping agent', () => {
+    const rows = flappingAgents([agent('a1', 'error', { errorTransitions1h: 4 })]);
+    const html = renderToStaticMarkup(<FlappingAgentsCallout agents={rows} onView={() => {}} />);
+    expect(html).toContain('1 agent flapping in the last hour');
   });
 });
 

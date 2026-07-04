@@ -1,6 +1,6 @@
 # Persisted transition history
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -205,3 +205,6 @@ None. `webapp/src/lib/dto.ts` additions and consumption are concern 03 — this 
 
 blockedBy: 01-lifecycle-write-path.md
 verifyBlocker: confirm `transition()`/`setPending()` exist on `SquadManager` with the `recordTransition`/`recordDenied` stub hook points — `grep -n "private recordTransition\|private recordDenied" src/squad-manager.ts` should return two hits before starting.
+
+## Resolution
+Shipped in a17bb3c (+ audit fixes cd5eee4: uuid seq identity for dedupe, per-agent error timestamps, poll-path decay). Redaction moved up into transition() (chokepoint per DESIGN) at implementation time; followLineage filters after ring∪file merge, not before.

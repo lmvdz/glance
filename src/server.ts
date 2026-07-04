@@ -1266,6 +1266,11 @@ export class SquadServer {
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
+		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
+		if (mtrans) {
+			const full = url.searchParams.get("full") === "1";
+			return Response.json(await manager.transitionHistory(decodeURIComponent(mtrans[1]), { full }));
+		}
 		const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
 		if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
 		const mrec = url.pathname.match(/^\/api\/agents\/([^/]+)\/receipts$/);

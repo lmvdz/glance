@@ -63,6 +63,11 @@ const HOST_ENTRY = path.join(import.meta.dir, "agent-host-main.ts");
  *  - "hosttool"(HostToolCallFrame)  host tool call needing a result
  *  - "exit"    ({code})             the omp child / host ended
  *  - "stderr"  (text)               diagnostic line
+ *  - "replayComplete" ()            the host finished writing its ring replay to THIS connection
+ *                                    (agent-host.ts's `{"__sq":"replay_complete"}` marker, sent last —
+ *                                    used by SquadManager's reattach settle gate to know precisely when
+ *                                    to stop suppressing transition/pending recording, instead of
+ *                                    guessing with a fixed tick).
  */
 export class RpcAgent extends EventEmitter implements AgentDriver {
 	private sock?: Socket<undefined>;
@@ -240,6 +245,10 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 			frame = JSON.parse(line);
 		} catch {
 			this.emit("stderr", line);
+			return;
+		}
+		if (frame.__sq === "replay_complete") {
+			this.emit("replayComplete");
 			return;
 		}
 		if (frame.__sq === "meta") {

@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { adjacentPlanPath, isOverviewDoc, planDocKind, PlanMarkdown, PlanMarkdownLoading, resetPlanScroll, safePlanIndex } from "./TaskDetail";
+import { adjacentPlanPath, fullTimelineStale, isOverviewDoc, LifecycleTimeline, planDocKind, PlanMarkdown, PlanMarkdownLoading, resetPlanScroll, safePlanIndex, StatusPill } from "./TaskDetail";
 import { BLOCK_REGISTRY, parseMeta } from "./PlanBlocks";
+import type { TransitionEntry } from "../lib/dto";
 
 test("PlanMarkdown renders plan markdown with prose/table styling", () => {
   const html = renderToStaticMarkup(<PlanMarkdown content={"# Overview\n\n| A | B |\n| - | - |\n| 1 | 2 |"} />);
@@ -101,4 +102,101 @@ test("resetPlanScroll uses scrollTop instead of browser-specific scrollTo overlo
 
   expect(pane.scrollTop).toBe(0);
   expect(() => resetPlanScroll(null)).not.toThrow();
+});
+
+test("StatusPill renders the status text with a status-colored badge", () => {
+  const html = renderToStaticMarkup(<StatusPill status="error" />);
+
+  expect(html).toContain(">error<");
+  expect(html).toContain("border-red-200");
+});
+
+function transition(from: TransitionEntry["from"], to: TransitionEntry["to"], extra: Partial<TransitionEntry> = {}): TransitionEntry {
+  return { agentId: "a1", from, to, reason: "restart", at: 1000, ...extra };
+}
+
+test("LifecycleTimeline renders nothing when the agent DTO predates the transitions field", () => {
+  const html = renderToStaticMarkup(
+    <LifecycleTimeline agent={{ id: "a1" }} isOpen={false} onToggle={() => {}} onLoadFull={() => {}} />,
+  );
+
+  expect(html).toBe("");
+});
+
+// #lifecycle-truth webapp audit finding 2: an empty tail on a DTO that DOES support the
+// `transitions` field (freshly reattached/restored agent, capped tail not yet populated) must still
+// render the strip chrome — hiding it also hid the only path (Load full history) to the durable
+// history that actually exists in transitions.jsonl.
+test("LifecycleTimeline still renders the strip chrome with a placeholder when the tail is empty but supported", () => {
+  const collapsedHtml = renderToStaticMarkup(
+    <LifecycleTimeline agent={{ id: "a1", transitions: [] }} isOpen={false} onToggle={() => {}} onLoadFull={() => {}} />,
+  );
+  expect(collapsedHtml).toContain("Lifecycle");
+  expect(collapsedHtml).toContain(">0<");
+
+  const openHtml = renderToStaticMarkup(
+    <LifecycleTimeline agent={{ id: "a1", transitions: [] }} isOpen onToggle={() => {}} onLoadFull={() => {}} />,
+  );
+  expect(openHtml).toContain("No recent transitions");
+  expect(openHtml).toContain("Load full history");
+});
+
+test("LifecycleTimeline shows a collapsed toggle with a count when transitions exist", () => {
+  const agent = { id: "a1", transitions: [transition("idle", "working")] };
+  const html = renderToStaticMarkup(<LifecycleTimeline agent={agent} isOpen={false} onToggle={() => {}} onLoadFull={() => {}} />);
+
+  expect(html).toContain("Lifecycle");
+  expect(html).toContain(">1<");
+  expect(html).not.toContain("Load full history");
+});
+
+test("LifecycleTimeline expands entries with cause/denied detail when open", () => {
+  const agent = {
+    id: "a1",
+    transitions: [
+      transition("working", "error", { reason: "fail", cause: { error: "boom" } }),
+      transition("idle", "input", { denied: true }),
+    ],
+  };
+  const html = renderToStaticMarkup(<LifecycleTimeline agent={agent} isOpen onToggle={() => {}} onLoadFull={() => {}} />);
+
+  expect(html).toContain("boom");
+  expect(html).toContain(">denied<");
+  expect(html).toContain("Load full history");
+});
+
+test("LifecycleTimeline prefers fullEntries over the capped tail and hides the load button once loaded", () => {
+  const agent = { id: "a1", transitions: [transition("idle", "working")] };
+  const fullEntries = [transition("starting", "idle"), transition("idle", "working"), transition("working", "input")];
+  const html = renderToStaticMarkup(
+    <LifecycleTimeline agent={agent} isOpen fullEntries={fullEntries} onToggle={() => {}} onLoadFull={() => {}} />,
+  );
+
+  // count badge still reflects the capped tail length (unaffected by fullEntries)
+  expect(html).toContain(">1<");
+  expect(html).not.toContain("Load full history");
+  expect((html.match(/font-mono/g) ?? []).length).toBe(3);
+});
+
+// #lifecycle-truth webapp audit finding 1: fullTimelines was populated once by "Load full history"
+// and never invalidated, so a live transition landing after that click silently vanished from the
+// strip until a full remount. fullTimelineStale() is the pure predicate TaskDetail's invalidation
+// effect uses to evict the stale cache entry.
+describe("fullTimelineStale", () => {
+  test("is false when the live tail has no entry newer than the cached fetch", () => {
+    const cachedAsOf = 2000;
+    const liveTail = [transition("idle", "working", { at: 1000 }), transition("working", "idle", { at: 2000 })];
+    expect(fullTimelineStale(cachedAsOf, liveTail)).toBe(false);
+  });
+
+  test("is true once a live transition lands after the cached fetch's newest entry", () => {
+    const cachedAsOf = 2000;
+    const liveTail = [transition("working", "idle", { at: 2000 }), transition("idle", "error", { at: 3000, reason: "fail" })];
+    expect(fullTimelineStale(cachedAsOf, liveTail)).toBe(true);
+  });
+
+  test("is false for an undefined or empty live tail (nothing new to invalidate against)", () => {
+    expect(fullTimelineStale(2000, undefined)).toBe(false);
+    expect(fullTimelineStale(2000, [])).toBe(false);
+  });
 });

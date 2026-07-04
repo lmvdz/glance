@@ -1,6 +1,6 @@
 # Durable pending + cold-adopt orphan-close + ghost expiry
 
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -190,3 +190,6 @@ None outside this repo.
 
 blockedBy: 01-lifecycle-write-path.md
 verifyBlocker: confirm the settle gate (`this.settling`) and `setPending()` exist — `grep -n "private readonly settling\|private setPending" src/squad-manager.ts` should return hits before starting. This concern does NOT depend on 02/03 and may land in parallel with them once 01 is merged.
+
+## Resolution
+Shipped in 0d5390f (+ audit fixes 8828721: persistNow filters replayed ghosts; poll-based ghost expiry env-gated behind OMP_SQUAD_PENDING_GHOST_EXPIRY default OFF pending the live blocked-confirm acceptance test — deterministic replay-tag expiry stays always-on). gateWillReask implemented against the parsed-graph human-node signal, not GATE_FOLD_VAR. Also narrowed concern 01's same-state early-return to turn-progress only.

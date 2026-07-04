@@ -1,6 +1,6 @@
 # Lifecycle truth — overview
 
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -49,3 +49,6 @@ Agent lifecycle state becomes trustworthy and explainable:
 ## Notes
 
 - /plan Phase 0 snapshot (headless chained run): proceeded over 3 plans with open concerns (agentic-learning-loop 5, factory-control-plane 3, change-driven-loops 2; all last-touched 2026-07-03).
+
+## Completion
+4/4 concerns closed 2026-07-04 on feat/lifecycle-truth (suite 1073→1122 root + 321 webapp, tsc clean). Post-batch audit: /code-review high (10 confirmed findings) + fable cross-batch audit (2 significant) — all 12 fixed in 3a6ccd8/8828721/cd5eee4/e44e9f2/4ead110. Follow-ups deliberately deferred: live acceptance test to un-gate OMP_SQUAD_PENDING_GHOST_EXPIRY; server.ts lastStatus push-diff replacement via transition events (scope cut in this plan).
