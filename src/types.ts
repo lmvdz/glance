@@ -136,6 +136,14 @@ export interface IssueRef {
 	/** Name flags this issue for human review / do-NOT-auto-land (e.g. SECURITY-CRITICAL). The dispatcher
 	 *  skips it (never auto-dispatched/auto-landed), but it still appears in the UI's issue list. */
 	noAutoDispatch?: boolean;
+	/** Repo-relative path prefixes this issue reads before it can run. Operator-declared values are dispatch-enforced. */
+	requires?: string[];
+	/** Repo-relative path prefixes this issue owns/edits. */
+	owns?: string[];
+	/** Repo-relative path prefixes this issue will write/create. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the issue scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
 }
 
 // ── Feedback Loop domain/wire types ─────────────────────────────────────────

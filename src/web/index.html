@@ -536,6 +536,9 @@
     <div class="field"><label>Approval</label><select name="approvalMode"><option value="yolo">yolo</option><option value="write">write</option><option value="always-ask">always-ask</option></select></div>
     <div class="field"><label>Thinking</label><select name="thinking"><option value="low">low</option><option value="minimal">minimal</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></div>
     <div class="field"><label>Task</label><textarea name="task" rows="3" placeholder="Refactor the auth module to…"></textarea></div>
+    <div class="field"><label>Owns</label><textarea name="owns" rows="2" placeholder="src/auth, webapp/src"></textarea><div class="sub">Write prefixes this agent may edit.</div></div>
+    <div class="field"><label>Requires</label><textarea name="requires" rows="2" placeholder="src/api/types.ts"></textarea><div class="sub">Read prefixes that must exist or be produced first.</div></div>
+    <div class="field"><label>Produces</label><textarea name="produces" rows="2" placeholder="src/api"></textarea><div class="sub">Output prefixes; defaults to owns when blank.</div></div>
     <div class="actions"><button type="button" id="addCancel">Cancel</button><button class="primary" value="ok">Spawn</button></div>
   </form>
 </dialog>
@@ -1908,6 +1911,14 @@ async function smartSpawn(prompt) {
   }
 }
 
+function scopeLine(a) {
+  const bits = [];
+  if (a.requires && a.requires.length) bits.push(`requires ${a.requires.map(esc).join(", ")}`);
+  if (a.produces && a.produces.length) bits.push(`produces ${a.produces.map(esc).join(", ")}`);
+  if (!bits.length) return "";
+  return `<div class="meta">scope <span class="badge b-kind">${esc(a.scopeSource || "inferred")}</span> ${bits.join(" · ")}</div>`;
+}
+
 function fillAgentGrid(p) {
   const grid = $("#agrid"); if (!grid) return;
   grid.innerHTML = "";
@@ -1927,6 +1938,7 @@ function fillAgentGrid(p) {
     card.innerHTML = `<div class="r1"><span class="badge b-${a.status}">${a.status}</span>${a.prUrl?`<a class="badge b-ready" href="${a.prUrl}" target="_blank" rel="noreferrer">${a.prState==="merged"?"merged":"PR #"+a.prNumber}</a>`:a.landReady?`<span class="badge b-ready">✓ ready to land</span>`:""}${a.status==="working"?`<span class="spin" style="color:var(--work)">${SPIN[spinFrame]}</span>`:""}${kindBadge}${child?`<span class="branchmark">↳ branch</span>`:""}<span class="nm">${esc(a.name)}</span>${stalled?`<span class="pill bad" title="working but no activity for a while">⏳ idle ${ago(a.lastActivity)}</span>`:""}</div>
       ${a.issue?`<div class="issue">${esc(a.issue.identifier||"")} ${esc(a.issue.name)}</div>`:""}
       <div class="meta">${esc(a.activity || a.todo?.active || "—")}</div>
+      ${scopeLine(a)}
       <div class="meta">${a.todo?`todo ${a.todo.done}/${a.todo.total} · `:""}${pct!=null?`<span style="color:${ctxColor(pct)}" title="context window usage${pct>0.9?" — near compaction":""}">ctx ${Math.round(pct*100)}%</span> · `:""}<span class="agotime" data-ts="${a.lastActivity}">${ago(a.lastActivity)} ago</span>${a.model?` · <span title="model" style="color:var(--dim)">${esc(a.model)}</span>`:""}${receiptSpan(a.receipt)}</div>`;
     clickable(card, () => openAgent(a.id), `${a.name} — ${a.status}`);
     grid.appendChild(card);
@@ -2422,16 +2434,19 @@ function appendTranscript(e) {
   const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60; t.appendChild(div); if (atBottom) t.scrollTop = t.scrollHeight;
 }
 
+function pathList(value) {
+  return String(value || "").split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+}
+
 function announce(m) { const el = $("#srlive"); if (el) el.textContent = String(m || ""); }
 function toast(text, level) { const el = document.createElement("div"); el.className = "toast " + (level||"info"); el.textContent = text; $("#log").appendChild(el); announce(text); setTimeout(()=>el.remove(), 5000); }
 
 // add modal
-const dlg = $("#addDlg");
-$("#addBtn").onclick = () => { const repo = $("#addForm").repo; if (selProject) repo.value = selProject; dlg.showModal(); };
-$("#addCancel").onclick = () => dlg.close();
 $("#addForm").onsubmit = (e) => {
   const f = new FormData(e.target); const options = { repo: f.get("repo").trim() };
   for (const k of ["name","task"]) { const v=(f.get(k)||"").trim(); if (v) options[k]=v; }
+  for (const k of ["owns","requires","produces"]) { const v = pathList(f.get(k)); if (v.length) options[k] = v; }
+  if (options.owns || options.requires || options.produces) options.scopeSource = "operator";
   options.approvalMode = f.get("approvalMode"); options.thinking = f.get("thinking");
   send({ type:"create", options }); e.target.reset();
 };
