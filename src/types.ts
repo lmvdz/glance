@@ -34,6 +34,15 @@ export interface TransitionEntry {
 	/** Set by concern 04's settle-window pending tagging (not used on TransitionEntry itself in this
 	 *  concern, but reserved on the shared cause shape for forward-compat — not implemented here). */
 	replayed?: true;
+	/** Globally-unique identity for THIS entry (a uuid, not a counter — a per-process monotonic counter
+	 *  would collide across a restart boundary, exactly where dedupeTransitions's merge of the persisted
+	 *  file with the freshly-hydrated ring needs identity to be trustworthy). dedupeTransitions() keys on
+	 *  this when present, falling back to the old (agentId,at,reason) composite for entries written before
+	 *  this field existed (#lifecycle-truth finding 7: that composite collapses distinct same-millisecond
+	 *  transitions — e.g. closeOrphanedPending's several pending-cancel entries in one adopt — so `full=1`
+	 *  could return FEWER entries than the capped ring view). Optional so old transitions.jsonl lines
+	 *  (no `seq`) still parse and hydrate. */
+	seq?: string;
 }
 
 /**

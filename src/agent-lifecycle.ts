@@ -19,7 +19,11 @@ export type DerivedReason = "turn-progress" | "pending-add" | "pending-answer" |
  *  stopped/error→starting in ensureConnected, abort does any→stopped (runAgentTask's onAbort). */
 export type ExplicitReason =
 	| "spawn" | "connect-begin" | "connect-ok" | "restart" | "kill" | "abort"
-	| "exit-clean" | "exit-error" | "fail" | "catastrophe" | "task-start" | "branch-start" | "reattach" | "adopted";
+	| "exit-clean" | "exit-error" | "fail" | "catastrophe" | "task-start" | "branch-start" | "reattach" | "adopted"
+	// Synthetic, same-state, best-effort marker recorded once per live agent in SquadManager.stop() (a
+	// graceful daemon shutdown DETACHES agents rather than stopping them, so this is a timeline note —
+	// "the daemon paused supervision here" — not an actual status change).
+	| "daemon-stop";
 
 export type TransitionReason = DerivedReason | ExplicitReason;
 
@@ -46,13 +50,20 @@ export function deriveStatus(input: { status: AgentStatus; pendingCount: number;
 	return "idle";
 }
 
-/** Drop duplicate transition entries — same (agentId,at,reason) triple — keeping first-seen order.
- *  Used when merging the persisted file with the in-memory ring, which overlap at the boundary. */
+/** Drop duplicate transition entries, keeping first-seen order. Used when merging the persisted file
+ *  with the in-memory ring, which overlap at the boundary.
+ *
+ *  Identity: prefers the entry's `seq` (a uuid stamped at record time — see TransitionEntry) when
+ *  present. The OLD composite key (agentId,at,reason) is only a fallback for entries written before
+ *  `seq` existed — it is provably wrong as a primary key (#lifecycle-truth finding 7): distinct
+ *  same-millisecond transitions with the same reason (e.g. closeOrphanedPending recording several
+ *  "pending-cancel" entries for the same agent in one adopt) collapse into one, so `full=1` could
+ *  return FEWER entries than the capped ring-only view. */
 export function dedupeTransitions(entries: TransitionEntry[]): TransitionEntry[] {
 	const seen = new Set<string>();
 	const out: TransitionEntry[] = [];
 	for (const e of entries) {
-		const key = `${e.agentId}|${e.at}|${e.reason}`;
+		const key = typeof e.seq === "string" ? `seq:${e.seq}` : `${e.agentId}|${e.at}|${e.reason}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		out.push(e);

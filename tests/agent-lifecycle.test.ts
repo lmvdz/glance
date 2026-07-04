@@ -7,8 +7,8 @@
  */
 
 import { expect, test } from "bun:test";
-import { canTransition, deriveStatus, isDerivedReason } from "../src/agent-lifecycle.ts";
-import type { AgentStatus } from "../src/types.ts";
+import { canTransition, dedupeTransitions, deriveStatus, isDerivedReason } from "../src/agent-lifecycle.ts";
+import type { AgentStatus, TransitionEntry } from "../src/types.ts";
 
 const ALL_STATUSES: AgentStatus[] = ["starting", "working", "idle", "input", "error", "stopped"];
 
@@ -40,7 +40,7 @@ test("derived reasons never leave stopped or error", () => {
 });
 
 test("explicit reasons are legal from every state, including terminal→terminal", () => {
-	const explicitReasons = ["spawn", "connect-begin", "connect-ok", "restart", "kill", "abort", "exit-clean", "exit-error", "fail", "catastrophe", "task-start", "branch-start", "reattach", "adopted"] as const;
+	const explicitReasons = ["spawn", "connect-begin", "connect-ok", "restart", "kill", "abort", "exit-clean", "exit-error", "fail", "catastrophe", "task-start", "branch-start", "reattach", "adopted", "daemon-stop"] as const;
 	for (const reason of explicitReasons) {
 		for (const from of ALL_STATUSES) {
 			for (const to of ALL_STATUSES) {
@@ -77,4 +77,30 @@ test("deriveStatus: streaming beats idle", () => {
 
 test("deriveStatus: no pending, not streaming -> idle", () => {
 	expect(deriveStatus({ status: "starting", pendingCount: 0, streaming: false })).toBe("idle");
+});
+
+function entry(patch: Partial<TransitionEntry>): TransitionEntry {
+	return { agentId: "a1", from: "idle", to: "input", reason: "pending-add", at: 1000, ...patch };
+}
+
+test("dedupeTransitions: seq is the identity when present — same-millisecond, same-reason entries with distinct seq are NOT collapsed (finding 7)", () => {
+	// closeOrphanedPending-style burst: several pending-cancel entries for the same agent recorded in the
+	// same millisecond. The old (agentId,at,reason) composite key would wrongly collapse these to one.
+	const a = entry({ reason: "pending-cancel", seq: "seq-1" });
+	const b = entry({ reason: "pending-cancel", seq: "seq-2" });
+	const c = entry({ reason: "pending-cancel", seq: "seq-3" });
+	expect(dedupeTransitions([a, b, c])).toEqual([a, b, c]);
+});
+
+test("dedupeTransitions: a genuine duplicate (same seq) still collapses, keeping first-seen order", () => {
+	const a = entry({ seq: "same-seq" });
+	const dupe = entry({ seq: "same-seq", at: 2000 }); // even a differing field elsewhere is still the same record
+	expect(dedupeTransitions([a, dupe])).toEqual([a]);
+});
+
+test("dedupeTransitions: falls back to the (agentId,at,reason) composite for pre-seq entries (no `seq` field)", () => {
+	const legacyA = entry({}); // no seq — as if hydrated from a transitions.jsonl line written before this fix
+	const legacyDupe = entry({});
+	const distinct = entry({ reason: "pending-answer" });
+	expect(dedupeTransitions([legacyA, legacyDupe, distinct])).toEqual([legacyA, distinct]);
 });
