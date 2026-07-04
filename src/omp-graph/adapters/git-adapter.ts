@@ -45,7 +45,12 @@ export function parseGitLog(raw: string): GitCommit[] {
 	let cur: GitCommit | null = null;
 	for (const line of raw.split("\n")) {
 		if (line.startsWith(MARK)) {
-			const [, sha = "", iso = "", author = "", subject = ""] = line.split("\t");
+			const [, a = "", b = "", c = "", d = ""] = line.split("\t");
+			const hasSha = !Number.isNaN(Date.parse(b));
+			const sha = hasSha ? a : "";
+			const iso = hasSha ? b : a;
+			const author = hasSha ? c : b;
+			const subject = hasSha ? d : c;
 			const t = Date.parse(iso);
 			if (Number.isNaN(t)) {
 				cur = null;

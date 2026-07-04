@@ -49,9 +49,10 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 	const costByDay = bucketSums(range, DAY_MS, inWin.map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })));
 	const commitsByDay = daySums(doc, "git.commits", range);
 	const totalCommits = commitsByDay.reduce((a, b) => a + b.v, 0);
-	// true closed count from the uncapped daily bars — plane.closed MARKS cap at `limit`
-	// for legibility, so counting them understated cost/ticket once past the cap.
-	const ticketsClosed = sumBars(doc, "plane.closedPerDay");
+	const ticketsClosed = sumBars(doc, "plane.closedPerDay") || (() => {
+		const closed = doc.tracks.find((z) => z.id === "plane.closed");
+		return closed && closed.type === "events" ? closed.marks.length : 0;
+	})();
 
 	// token cache-hit rate — context reuse, the cheapest cost lever
 	const cacheRead = inWin.reduce((a, r) => a + (r.tokens?.cacheRead ?? 0), 0);
