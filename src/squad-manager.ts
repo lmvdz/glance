@@ -371,6 +371,9 @@ export class SquadManager extends EventEmitter {
 	private readonly planSyncTimers: Timer[] = [];
 	/** PR-reconciler backstop timer (concern 07) — always-on, NOT gated by OMP_SQUAD_OBSERVE; cleared in stop(). */
 	private prReconcileTimer?: Timer;
+	/** Untracked-otherwise 20s post-boot stagger for the PR-reconciler tick; cleared in stop() so a
+	 *  manager stopped within the stagger window never fires a tick after shutdown. */
+	private prReconcileStaggerTimer?: Timer;
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
@@ -627,7 +630,7 @@ export class SquadManager extends EventEmitter {
 		// checked fresh inside every tick) — runs in DB mode too, same as every other manager-owned loop.
 		const prReconcileIntervalMs = Number(process.env.OMP_SQUAD_PR_RECONCILE_INTERVAL_MS) || 120_000;
 		this.prReconcileTimer = setInterval(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), prReconcileIntervalMs);
-		setTimeout(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), 20_000); // stagger past plan-sync's own 15s
+		this.prReconcileStaggerTimer = setTimeout(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), 20_000); // stagger past plan-sync's own 15s
 
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
 		// reasoning and files the latent items they surfaced but didn't do. One per configured Plane repo
@@ -774,6 +777,7 @@ export class SquadManager extends EventEmitter {
 		for (const o of this.observers) o.stop();
 		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
 		clearInterval(this.prReconcileTimer);
+		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		clearInterval(this.leaseGossipTimer);
@@ -1671,6 +1675,7 @@ export class SquadManager extends EventEmitter {
 				verify: pf.acceptance ?? undefined,
 				issueId: rec?.dto.issue?.id,
 				issueIdentifier: rec?.dto.issue?.identifier,
+				issueProjectId: rec?.dto.issue?.projectId,
 				agentId: w.agentId,
 			});
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
@@ -1755,6 +1760,7 @@ export class SquadManager extends EventEmitter {
 			staleGate: !opts.force,
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
+			issueProjectId: dto.issue?.projectId,
 			agentId: dto.id,
 		});
 		// PR-mode metadata (concern 06): set directly on the dto at push/merge time, the same pattern
@@ -1871,6 +1877,7 @@ export class SquadManager extends EventEmitter {
 					title: `squad(${dto.name}): land ${dto.branch}`,
 					issueId: dto.issue?.id,
 					issueIdentifier: dto.issue?.identifier,
+					issueProjectId: dto.issue?.projectId,
 					agentId: dto.id,
 					stateDir: this.stateDir,
 				});
@@ -3082,17 +3089,24 @@ export class SquadManager extends EventEmitter {
 	 *  self-audit; Done-truth for merged PRs must not silently stop when that's off). */
 	protected async prReconcileTick(): Promise<void> {
 		const allEntries = listPendingPrs(this.stateDir);
-		const unconfirmed = allEntries.filter((e) => e.state === "open" || (e.state === "merged" && (!e.proofAt || !e.issueClosedAt)));
+		// Only entries reconcileOnePr can actually act on: "open" (out-of-band merge/close check), or
+		// "merged" with a proof already written but the Plane close unconfirmed (crash-ordering retry —
+		// mirrors reconcileOnePr's own `entry.proofAt && !entry.issueClosedAt` gate exactly). A "merged"
+		// entry with NO proof yet is not a live case reconcileOnePr handles (defensive dead arm only
+		// reachable via a partial-write crash inside updatePendingPr) — excluding it here stops it from
+		// burning a `gh pr view` call every tick forever with no way to progress.
+		const unconfirmed = allEntries.filter((e) => e.state === "open" || (e.state === "merged" && !!e.proofAt && !e.issueClosedAt));
 		const existingBranches = new Set(allEntries.map((e) => e.branch));
 		// Push-retry candidates: a landReady agent, in a repo resolved to PR mode, with no ledger entry
 		// at all yet — covers both a crash between push and `gh pr create`, and a floated push (concern
 		// 06's `floatPrOnLandReady`) that silently failed.
 		const pushCandidates = [...this.agents.values()].filter((r) => r.dto.landReady && r.dto.branch && r.dto.worktree !== r.dto.repo && !existingBranches.has(r.dto.branch));
-		// ff-heal repo set: every repo this manager currently knows about (a live agent's repo, or a
-		// repo named by a ledger entry) — NOT `planeRepos()`, so healing stays scoped to repos this
-		// reconciler actually has PR-mode activity for.
+		// ff-heal repo set: ONLY repos with actual PR-mode reconciliation work this tick — a repo named
+		// by a ledger entry, or a push-retry candidate's repo — NOT every repo a live agent happens to be
+		// in. DESIGN's ruling is "active only when ledger non-empty"; healing every roster repo on every
+		// tick (regardless of ledger activity) would probe `gh`/`git` for pure local-mode agents too.
 		const healRepos = new Set<string>();
-		for (const rec of this.agents.values()) healRepos.add(rec.dto.repo);
+		for (const rec of pushCandidates) healRepos.add(rec.dto.repo);
 		for (const e of allEntries) {
 			const p = this.repoPathForIdentity(e.repo);
 			if (p) healRepos.add(p);
@@ -3123,15 +3137,15 @@ export class SquadManager extends EventEmitter {
 	 * via `closedIssues`), or this call just closed it successfully. False ⇒ retry on a later tick.
 	 *
 	 * Prefers the live agent's full `dto.issue` (carries `projectId`, which Plane's close call needs to
-	 * route the request) when the agent is still on the roster — `PendingPr` itself only carries
-	 * `issueId`/`issueIdentifier` (no `projectId`), so a synthetic `IssueRef` is the fallback for a
-	 * removed agent only, and — being `projectId`-less — cannot actually route a Plane close; the entry
-	 * stays unconfirmed in that case rather than silently pretending to have closed it.
+	 * route the request) when the agent is still on the roster. `PendingPr` also carries `issueProjectId`
+	 * (persisted at `ensurePr` time, mirroring the same field on `dto.issue`), so the synthetic `IssueRef`
+	 * built for a removed agent still routes a real Plane close instead of silently staying unconfirmed
+	 * forever — the durable ledger exists precisely to cover this orphaned-agent case.
 	 */
 	private async attemptCloseFor(entry: PendingPr, repo: string): Promise<boolean> {
 		if (!entry.issueId) return true; // no Plane issue was ever tracked for this land — nothing to confirm
 		const rec = this.agentByBranch(entry.branch);
-		const issue: IssueRef = rec?.dto.issue ?? { id: entry.issueId, identifier: entry.issueIdentifier, name: entry.issueIdentifier ?? entry.issueId };
+		const issue: IssueRef = rec?.dto.issue ?? { id: entry.issueId, identifier: entry.issueIdentifier, name: entry.issueIdentifier ?? entry.issueId, projectId: entry.issueProjectId };
 		if (!this.closedIssues.has(issue.id)) await this.closeLandedIssue(issue, { branch: entry.branch, repo });
 		return this.closedIssues.has(issue.id);
 	}
@@ -3242,6 +3256,7 @@ export class SquadManager extends EventEmitter {
 			title: `squad(${dto.name}): land ${dto.branch}`,
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
+			issueProjectId: dto.issue?.projectId,
 			agentId: dto.id,
 			stateDir: this.stateDir,
 		});

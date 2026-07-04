@@ -249,6 +249,42 @@ test("prReconcileTick: out-of-band GitHub-UI merge writes DoneProof, clears land
 	});
 });
 
+test("prReconcileTick: closes Plane for an ORPHANED entry (its agent removed from the roster) via the ledger's persisted issueProjectId", async () => {
+	await withPlane(async (patches) => {
+		const stateDir = await tmpDir("reconcile-orphan-state-");
+		const { repo, origin } = await convergedRepo("reconcile-orphan-");
+		const wt = await branchWorktree(repo, "squad/a9", { "feature.txt": "new\n" });
+		const issue: IssueRef = { id: "iss-orphan", identifier: "PROJ-9", name: "orphaned work", projectId: "proj-9" };
+		const mgr = new TestManager({ stateDir });
+		// The agent that pushed "squad/a9" has since been reaped/removed from the roster entirely — only
+		// a DIFFERENT live agent on the same repo keeps the repo itself reachable to the reconciler.
+		seedAgent(mgr, "sibling", repo, wt, undefined as unknown as string);
+		expect(mgr.agents.get("a9")).toBeUndefined(); // confirm truly orphaned — no agent tracks this branch
+
+		const { mergeCommit, headOid } = await mergeOutOfBand(repo, origin, "squad/a9");
+		recordPendingPr(stateDir, {
+			branch: "squad/a9",
+			repo: repoIdentity(repo),
+			prNumber: 77,
+			prUrl: "https://github.com/acme/app/pull/77",
+			issueId: issue.id,
+			issueIdentifier: issue.identifier,
+			issueProjectId: issue.projectId, // persisted at ensurePr time — the fix under test
+			agentId: "a9",
+			createdAt: Date.now(),
+			state: "open",
+		});
+		prViewByNumber.set(77, { state: "MERGED", headRefOid: headOid, mergeCommit: { oid: mergeCommit } });
+
+		await mgr.tick();
+
+		expect(patches()).toBe(1); // Plane close succeeded via the synthetic IssueRef's persisted projectId
+		const entry = getPendingPr(stateDir, "squad/a9");
+		expect(entry?.state).toBe("merged");
+		expect(entry?.issueClosedAt).toBeDefined(); // NOT stuck retrying forever
+	});
+});
+
 // ── Closed-unmerged ─────────────────────────────────────────────────────────────────────────────
 
 test("prReconcileTick: a PR closed without merging is marked closed, but branch/landReady stay intact", async () => {
@@ -372,6 +408,10 @@ test("prReconcileTick: ff-heals a repo strictly behind origin/<default> while ch
 	// No branch/worktree needed — ffHealOne only cares about the repo's own primary checkout. Reuse
 	// `repo` itself as a stand-in "worktree" so seedAgent's shape is satisfied.
 	seedAgent(mgr, "a5", repo, repo, undefined as unknown as string);
+	// ff-heal is scoped to repos with actual ledger activity (DESIGN's "active only when ledger
+	// non-empty" ruling) — a fully-resolved ("closed") entry is enough to put the repo in scope without
+	// triggering any further `reconcileOnePr` work of its own (only "open"/unconfirmed-"merged" entries do).
+	recordPendingPr(stateDir, { branch: "squad/a5-done", repo: repoIdentity(repo), prNumber: 1, prUrl: "https://github.com/acme/app/pull/1", createdAt: Date.now(), state: "closed" });
 
 	await mgr.tick();
 
@@ -393,6 +433,7 @@ test("prReconcileTick: does NOT ff-heal a repo checked out on a non-default bran
 
 	const mgr = new TestManager({ stateDir });
 	seedAgent(mgr, "a6", repo, repo, undefined as unknown as string);
+	recordPendingPr(stateDir, { branch: "squad/a6-done", repo: repoIdentity(repo), prNumber: 2, prUrl: "https://github.com/acme/app/pull/2", createdAt: Date.now(), state: "closed" });
 
 	await mgr.tick();
 
@@ -410,6 +451,7 @@ test("prReconcileTick: does NOT ff-heal a repo that is ahead of origin/<default>
 
 	const mgr = new TestManager({ stateDir });
 	seedAgent(mgr, "a7", repo, repo, undefined as unknown as string);
+	recordPendingPr(stateDir, { branch: "squad/a7-done", repo: repoIdentity(repo), prNumber: 3, prUrl: "https://github.com/acme/app/pull/3", createdAt: Date.now(), state: "closed" });
 
 	await mgr.tick();
 
@@ -421,6 +463,35 @@ test("prReconcileTick: does NOT ff-heal a repo that is ahead of origin/<default>
 test("prReconcileTick: an empty ledger and roster is a true no-op — zero gh/git calls", async () => {
 	const stateDir = await tmpDir("reconcile-noop-state-");
 	const mgr = new TestManager({ stateDir });
+
+	const realSpawn = Bun.spawn.bind(Bun);
+	let spawnedGit = false;
+	// @ts-expect-error — test-only monkeypatch to observe whether ANY real subprocess call happens.
+	Bun.spawn = (argv: unknown, opts?: unknown) => {
+		if (Array.isArray(argv) && argv[0] === "git") spawnedGit = true;
+		// biome-ignore lint: forwarding to the real implementation
+		return realSpawn(argv as never, opts as never);
+	};
+	try {
+		await mgr.tick();
+	} finally {
+		Bun.spawn = realSpawn;
+	}
+
+	expect(spawnedGit).toBe(false);
+	expect(ghCalls.length).toBe(0);
+});
+
+test("prReconcileTick: an empty ledger with a live (non-landReady) agent is still a true no-op — zero gh/git calls", async () => {
+	// Regression guard: the activity gate must be derived from the ledger (∪ push-retry candidates),
+	// NEVER from "every repo a live agent happens to be in" — a daemon with agents but nothing to
+	// reconcile (including pure local-mode repos) must never probe `gh`/`git` on every tick.
+	const stateDir = await tmpDir("reconcile-noop-liveagent-state-");
+	const { repo } = await convergedRepo("reconcile-noop-liveagent-");
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a8", repo, repo, undefined as unknown as string); // live, but no branch/PR/ledger activity
+
+	expect(listPendingPrs(stateDir)).toEqual([]);
 
 	const realSpawn = Bun.spawn.bind(Bun);
 	let spawnedGit = false;

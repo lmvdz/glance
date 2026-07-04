@@ -97,6 +97,10 @@ export interface PendingPr {
 	prUrl: string;
 	issueId?: string;
 	issueIdentifier?: string;
+	/** Plane project id the tracked issue belongs to — needed by `transitionTo` to route a close call.
+	 *  Persisted here (not just on the live agent's `dto.issue`) so an ORPHANED entry (agent removed
+	 *  from the roster) can still confirm its Plane close via the reconciler's fallback `IssueRef`. */
+	issueProjectId?: string;
 	agentId?: string;
 	createdAt: number;
 	state: "open" | "merged" | "closed";
@@ -170,6 +174,7 @@ export interface EnsurePrInput {
 	stateDir: string;
 	issueId?: string;
 	issueIdentifier?: string;
+	issueProjectId?: string;
 	agentId?: string;
 }
 
@@ -227,6 +232,7 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 				prUrl: openPr.url,
 				issueId: input.issueId,
 				issueIdentifier: input.issueIdentifier,
+				issueProjectId: input.issueProjectId,
 				agentId: input.agentId,
 				createdAt: Date.now(),
 				state: "open",
@@ -261,6 +267,7 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 		prUrl: url,
 		issueId: input.issueId,
 		issueIdentifier: input.issueIdentifier,
+		issueProjectId: input.issueProjectId,
 		agentId: input.agentId,
 		createdAt: Date.now(),
 		state: "open",
@@ -353,6 +360,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		title: message,
 		issueId: opts.issueId,
 		issueIdentifier: opts.issueIdentifier,
+		issueProjectId: opts.issueProjectId,
 		agentId: opts.agentId,
 		stateDir,
 	});

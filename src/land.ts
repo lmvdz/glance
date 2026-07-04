@@ -121,6 +121,10 @@ export interface LandOpts {
 	 */
 	issueId?: string;
 	issueIdentifier?: string;
+	/** Plane project id the tracked issue belongs to — threaded into `PendingPr` so the PR-reconciler
+	 *  backstop (concern 07) can still route a Plane close for an orphaned entry (agent removed from
+	 *  the roster) after this issue's dto is gone. Completely ignored by the local-mode path. */
+	issueProjectId?: string;
 	agentId?: string;
 }
 
