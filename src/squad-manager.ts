@@ -29,7 +29,7 @@ import { CommissionExecutor } from "./workflow/commission-executor.ts";
 import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import type { EngineCheckpoint, NodeResult, Workflow, WorkflowRunState } from "./workflow/types.ts";
-import { appendCheckpoint, deleteCheckpointLog, evictCheckpointChain, getLastSeq } from "./workflow/checkpoint-log.ts";
+import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
@@ -3190,6 +3190,9 @@ export class SquadManager extends EventEmitter {
 				await this.restart(rec);
 				void this.recordAudit(actor, "restart", cmd.id);
 				break;
+			case "fork":
+				await this.fork(cmd.id, { seq: cmd.seq }, actor);
+				break;
 			case "remove":
 				await this.remove(cmd.id, cmd.deleteWorktree ?? false);
 				void this.recordAudit(actor, "remove", cmd.id, "ok", cmd.deleteWorktree ? "deleted worktree" : undefined);
@@ -3340,6 +3343,147 @@ export class SquadManager extends EventEmitter {
 			this.fail(rec, err);
 		}
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * fork(id, {seq?}): mint a brand-new run from a terminal (escalate-exhausted) workflow's checkpoint
+	 * history — same code tip (`git rev-parse HEAD` in the original worktree, never `dto.branch`, which
+	 * is undefined for in-place/ad-hoc agents), fix-up-tier retry budgets reset, fresh runId/agent id.
+	 * The forward path once a run is terminal-marked (see `handleWorkflowTerminal`): `prompt`/`restart`
+	 * both refuse a terminal run and point here instead. Offer-only (never auto-fired), refused while the
+	 * original is `working`, and limited to one live fork per source runId (DESIGN.md: one issue, one
+	 * active claimant).
+	 */
+	async fork(id: string, opts: { seq?: number } = {}, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		const rec = this.agents.get(id);
+		if (!rec) throw new Error("agent not found");
+		if (rec.dto.status === "working") throw new Error("cannot fork a running agent — stop or wait for it to finish");
+		if (!rec.dto.forkAvailable) throw new Error("this agent has no fork point available");
+
+		const runId = rec.options.workflowState!.runId!;
+		// One live fork per source runId: a fork that already died AND was itself superseded by a further
+		// fork no longer occupies the slot (its lineage moved on to that further fork — fork it instead).
+		// Anything else — still running, idle, or terminal-but-not-yet-re-forked — is the active claimant
+		// and blocks a second fork of the SAME source run.
+		const liveFork = [...this.agents.values()].find(
+			(r) =>
+				r.options.workflowState?.forkedFrom?.runId === runId &&
+				r.dto.status !== "stopped" &&
+				!(r.dto.status === "error" && r.options.workflowState?.terminal?.supersededBy),
+		);
+		if (liveFork) throw new Error("a fork of this run already exists");
+
+		const entries = await readCheckpoints(this.stateDir, runId);
+		const chosen = opts.seq !== undefined ? entries.find((e) => e.seq === opts.seq) : entries[entries.length - 1];
+		if (!chosen) throw new Error("no checkpoint found");
+
+		// Re-parse the workflow graph the same way makeDriver resolves it — an authored file OR a
+		// synthesized verify loop (the `rec.options.workflow!.path` non-null assumption doesn't hold for
+		// `verify:`-only runs, which have no file to re-parse/branch from but ARE terminal-markable). This
+		// also supplies the goalGate/retryTarget/overflow chain the visit reset below walks.
+		const wf: Workflow | undefined = rec.options.workflow?.verify
+			? buildVerifyWorkflow(rec.options.workflow.verify)
+			: rec.options.workflow?.path
+				? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
+				: undefined;
+		if (!wf) throw new Error("cannot fork — no workflow graph to validate the checkpoint against");
+		if (!wf.nodes.has(chosen.currentNode)) {
+			throw new Error(`checkpoint node "${chosen.currentNode}" no longer exists in the workflow graph (it may have been edited) — pick a different step`);
+		}
+
+		if (!existsSync(rec.dto.worktree)) throw new Error("original worktree is gone — cannot fork");
+		const shaResult = await hardenedGit(["rev-parse", "HEAD"], { cwd: rec.dto.worktree });
+		const sha = shaResult.stdout.trim();
+		if (shaResult.code !== 0 || !sha) throw new Error("could not resolve HEAD in the original worktree");
+
+		// The decision that makes fork actually work for the escalate-exhaustion case: reset visits for
+		// EVERY fix-up tier (each goalGate's retryTarget plus its overflow closure, across all goalGate
+		// nodes in the graph) while carrying every other visit count forward (DESIGN.md Key Decisions).
+		const tiers = new Set<string>();
+		for (const node of wf.nodes.values()) {
+			if (!node.goalGate) continue;
+			for (let t: string | undefined = node.retryTarget; t; t = wf.nodes.get(t)?.overflow) tiers.add(t);
+		}
+		const visits = { ...chosen.visits };
+		for (const tier of tiers) visits[tier] = 0;
+
+		// Name stabilization: strip any existing "-fork"/"-fork-N" suffix before appending one, so forking
+		// a fork never compounds into "x-fork-fork".
+		const baseName = rec.dto.name.replace(/-fork(-\d+)?$/, "");
+		const newName = `${baseName}-fork`;
+		const newId = newAgentId(newName);
+
+		// Branch off the repo root (matching addWorktree's own repoRoot resolution), not the worktree;
+		// createInternal below reuses UNMODIFIED addWorktree's existing-branch checkout path.
+		const branchResult = await hardenedGit(["branch", `squad/${newId}`, sha], { cwd: rec.dto.repo });
+		if (branchResult.code !== 0) throw new Error(`could not create fork branch: ${branchResult.stderr.trim() || branchResult.stdout.trim()}`);
+
+		const forkedState: WorkflowRunState = {
+			goal: chosen.goal,
+			currentNode: chosen.currentNode,
+			visits,
+			vars: chosen.vars,
+			outcome: chosen.outcome,
+			preferredLabel: chosen.preferredLabel,
+			index: chosen.index,
+			resumeAttempts: 0,
+			rollup: [],
+			forkedFrom: { runId, seq: chosen.seq },
+			// terminal / cold / sessionId / proof / branchOutcomes / headSha (log-only) deliberately absent:
+			// a fork is a fresh run, not a continuation of the dead run's own lifecycle state.
+		};
+
+		const newDto = await this.createInternal(
+			{
+				repo: rec.dto.repo,
+				name: newName,
+				branch: `squad/${newId}`,
+				model: rec.dto.model,
+				approvalMode: rec.options.approvalMode,
+				workflow: rec.options.workflow?.path,
+				verify: rec.options.workflow?.verify?.command,
+				workflowState: forkedState,
+				// Fork inherits the issue (DESIGN.md RT1#13: one issue, one active claimant) — the original
+				// is marked supersededBy below and excluded from adoption/dispatch, so this is never a
+				// double-claim.
+				featureId: rec.options.featureId,
+				issue: rec.options.issue,
+				bypassCap: true,
+				cold: true,
+				explicitId: newId,
+			},
+			actor,
+		);
+		// Persisted for display/audit only (mirrors spawnFleetBranch's own `rec.options.task = task`
+		// idiom) — deliberately NOT passed as createInternal's `task` option: createWithId auto-prompts on
+		// `opts.task` regardless of `workflowState`, but `workflowState` here already re-primes the goal
+		// the instant the driver's `start()` returns (WorkflowDriver.start's `resumeState` branch fires
+		// `execRun` before `start()` resolves) — an extra `agent.prompt()` right after would race that
+		// already-in-flight run's own inner agent.
+		const newRec = this.agents.get(newDto.id);
+		if (newRec) newRec.options.task = rec.options.task;
+
+		// Mark the original superseded: excluded from adoption/dispatch permanently (one issue, one active
+		// claimant), forkAvailable cleared so the offer never re-fires for a run that's already been forked.
+		rec.options.workflowState!.terminal!.supersededBy = newId;
+		rec.dto.forkAvailable = false;
+		rec.dto.workflowState = rec.options.workflowState;
+		this.emitAgent(rec);
+		await this.persist();
+
+		void this.recordAudit(actor, "fork", id, "ok", `→ ${newId} @ seq ${chosen.seq}`);
+		return newDto;
+	}
+
+	/** Read-only checkpoint history for a workflow run (the fork-step picker) — keeps stateDir private
+	 *  (mirrors `receipts()`) and NEVER returns `vars` (the design's explicit "never vars" rule: a
+	 *  checkpoint's vars can carry truncated tool output, not a redaction a client should get to bypass). */
+	async checkpoints(id: string): Promise<CheckpointLogEntry[]> {
+		const rec = this.agents.get(id);
+		const runId = rec?.options.workflowState?.runId;
+		if (!runId) return [];
+		const entries = await readCheckpoints(this.stateDir, runId);
+		return entries.map((e) => ({ seq: e.seq, at: e.at, currentNode: e.currentNode, outcome: e.outcome }));
 	}
 
 	private async remove(id: string, deleteWorktree: boolean): Promise<void> {

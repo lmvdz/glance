@@ -946,6 +946,7 @@ export type ClientCommand =
 	| { type: "interrupt"; id: string }
 	| { type: "kill"; id: string }
 	| { type: "restart"; id: string }
+	| { type: "fork"; id: string; seq?: number }
 	| { type: "remove"; id: string; deleteWorktree?: boolean }
 	| { type: "create"; options: CreateAgentOptions }
 	| { type: "message"; to: string; text: string }

@@ -215,6 +215,10 @@ export interface BranchOutcome {
 export interface WorkflowRunState extends EngineCheckpoint {
 	rollup: { label: string; status: "in_progress" | "completed" }[];
 	runId?: string;
+	/** Set on a run minted by `fork()` (concern 04): the source run/checkpoint it was forked from. Kept
+	 *  runId-free-vs-branchKey style is not needed here (this identifies the fork's own lineage, not a
+	 *  branch key), so it plainly carries the source runId + the checkpoint seq the fork restored from. */
+	forkedFrom?: { runId: string; seq: number };
 	autonomy?: WorkflowAutonomyMode;
 	sessionId?: string;
 	proof?: WorkflowProofState;

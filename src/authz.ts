@@ -38,6 +38,10 @@ export function commandTier(cmd: ClientCommand): Role {
 		case "kill":
 		case "restart":
 		case "remove":
+		// fork mirrors restart's tier: a rare, deliberate, operator-initiated action (DESIGN.md), but one
+		// that mints a brand-new roster agent from a dead run's checkpoint — same destructive-lifecycle
+		// class as restart, not everyday driving.
+		case "fork":
 			return "admin";
 		// prompt / answer / interrupt / create / commission
 		default:

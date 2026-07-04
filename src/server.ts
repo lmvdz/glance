@@ -1275,6 +1275,10 @@ export class SquadServer {
 		if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
 		const mrec = url.pathname.match(/^\/api\/agents\/([^/]+)\/receipts$/);
 		if (mrec) return Response.json(await manager.receipts(decodeURIComponent(mrec[1])));
+		// Read-only checkpoint history for the fork-step picker; never includes `vars` (see
+		// SquadManager.checkpoints's doc comment).
+		const mchk = url.pathname.match(/^\/api\/agents\/([^/]+)\/checkpoints$/);
+		if (mchk) return Response.json(await manager.checkpoints(decodeURIComponent(mchk[1])));
 		const mcmd = url.pathname.match(/^\/api\/agents\/([^/]+)\/commands$/);
 		if (mcmd) return Response.json(manager.commandsFor(decodeURIComponent(mcmd[1])) ?? []);
 		const mdiff = url.pathname.match(/^\/api\/agents\/([^/]+)\/(diff|tree)$/);
