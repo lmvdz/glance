@@ -12,6 +12,7 @@ import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, re
 import { taskRef } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
+import { traceIdForAgent } from '../lib/trace';
 import { AgentStatusStrip } from './AgentStatusStrip';
 import { TranscriptTimeline } from './AssistantChat';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
@@ -569,6 +570,12 @@ export const TaskDetail = () => {
   // `workflowGraph` being present (journaled once per run, concern 03), not just `kind === 'workflow'`,
   // so an old daemon or a run whose journal hasn't landed yet simply hides the overlay.
   const workflowGraphAgent = React.useMemo(() => activeAgents.find((agent) => agent.workflowGraph), [activeAgents]);
+  // Trace drill-in target for the graph overlay's node click — undefined (overlay stays
+  // non-clickable) until the run has either a featureId or a known runId to key the trace on.
+  const workflowGraphTraceId = React.useMemo(
+    () => (workflowGraphAgent ? traceIdForAgent(workflowGraphAgent) : undefined),
+    [workflowGraphAgent],
+  );
   const hasPlan = !!overviewDoc || planDocuments.length > 0;
   const planFlowConcerns = React.useMemo<GraphConcernInput[]>(
     () => (pipeline?.concerns ?? []).map((c) => ({ file: c.path, title: c.title, status: c.status, open: c.open, complexity: c.complexity, prerequisites: c.prerequisites, touches: c.touches })),
@@ -1590,7 +1597,7 @@ export const TaskDetail = () => {
                     </button>
                   </summary>
                   <div className="border-t border-gray-100 dark:border-gray-800 p-3">
-                    <WorkflowGraphOverlay graph={workflowGraphAgent.workflowGraph} state={workflowGraphAgent.workflowState} />
+                    <WorkflowGraphOverlay graph={workflowGraphAgent.workflowGraph} state={workflowGraphAgent.workflowState} traceId={workflowGraphTraceId} />
                   </div>
                 </details>
               )}
@@ -1891,7 +1898,7 @@ export const TaskDetail = () => {
                 </button>
               </div>
               <div className="flex-1 overflow-auto p-4 scrollbar-custom">
-                <WorkflowGraphOverlay graph={workflowGraphAgent.workflowGraph} state={workflowGraphAgent.workflowState} orientation="vertical" />
+                <WorkflowGraphOverlay graph={workflowGraphAgent.workflowGraph} state={workflowGraphAgent.workflowState} orientation="vertical" traceId={workflowGraphTraceId} />
               </div>
             </div>
           )}

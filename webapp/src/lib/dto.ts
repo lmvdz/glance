@@ -238,6 +238,60 @@ export interface SubagentNodeDTO {
   index: number;
 }
 
+/** Aggregate rollup across every receipt under a trace — mirrors src/spans.ts's TraceRollup.
+ *  Never sampled (unlike the span waterfall below), so this is always the primary view. */
+export interface TraceRollupDTO {
+  runs: number;
+  toolCalls: number;
+  costUsd: number;
+  tokens: number;
+  durationMs: number;
+  errors: number;
+}
+
+export type TraceSpanKindDTO = 'run' | 'node' | 'tool' | 'subagent' | 'verify' | 'land' | 'resolve';
+export type TraceSpanStatusDTO = 'ok' | 'error' | 'running';
+
+/** One span in the trace tree — mirrors src/spans.ts's TraceNode. Fine spans are tail-sampled, so a
+ *  node with no children isn't necessarily a leaf run; see TraceResponseDTO.partial. */
+export interface TraceNodeDTO {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  name: string;
+  kind: TraceSpanKindDTO;
+  startedAt: number;
+  endedAt?: number;
+  status: TraceSpanStatusDTO;
+  attrs?: Record<string, string>;
+  children: TraceNodeDTO[];
+  rollup: TraceRollupDTO;
+}
+
+/** One receipt contributing to a trace — the fields the drill-in panel's run list needs, not the
+ *  full server-side RunReceipt (which also carries filesTouched/toolTally/etc.). */
+export interface TraceReceiptSummaryDTO {
+  agentId: string;
+  name: string;
+  status: string;
+  runId: string;
+  costUsd?: number;
+  durationMs?: number;
+  toolCalls: number;
+  endedAt?: number;
+}
+
+/** Mirrors src/spans.ts's TraceResponse — the `/api/trace/:id` payload. */
+export interface TraceResponseDTO {
+  traceId: string;
+  root: TraceNodeDTO;
+  rollup: TraceRollupDTO;
+  receipts: TraceReceiptSummaryDTO[];
+  /** True when at least one receipt kept only its rollup because fine spans were sampled out —
+   *  the span waterfall below `rollup` is then labeled "sampled — partial". */
+  partial: boolean;
+}
+
 export interface AgentDTO {
   id: string;
   name: string;

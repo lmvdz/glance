@@ -1580,18 +1580,27 @@ export class SquadServer {
  * never changes, so once every receipt in its tree has `endedAt` set, the response is cached; a run
  * still in flight (any receipt missing `endedAt`) is recomputed every call — that scan is cheap (one
  * active run's worth of receipts), so correctness costs nothing there.
+ *
+ * No receipt-count invalidation: `readAllReceipts` always does a full directory scan regardless of
+ * `id`, so a cheap "has this trace grown?" check doesn't exist — computing it costs the same as
+ * recomputing the trace outright. The TTL is the only staleness bound (a new run starting under a
+ * shared `feat:<id>` trace id can be hidden from an existing cache hit for up to `TRACE_CACHE_TTL_MS`).
  */
-export const traceCache = new Map<string, { receiptCount: number; at: number; response: TraceResponse }>();
+export const traceCache = new Map<string, { at: number; response: TraceResponse }>();
 export const TRACE_CACHE_TTL_MS = 30_000;
 
 export async function tracePayload(manager: SquadManager, id: string): Promise<TraceResponse> {
 	const hit = traceCache.get(id);
-	if (hit && Date.now() - hit.at < TRACE_CACHE_TTL_MS) return hit.response;
+	if (hit) {
+		if (Date.now() - hit.at < TRACE_CACHE_TTL_MS) return hit.response;
+		traceCache.delete(id); // expired — evict rather than let the map grow forever
+	}
 	const response = await manager.trace(id);
-	// Only cache once the trace looks finalized (no receipt still mid-run) — cheap heuristic: no receipt
-	// missing endedAt. A running trace is recomputed every call (small — receipts for one active run).
-	if (response.receipts.every((r) => r.endedAt !== undefined)) {
-		traceCache.set(id, { receiptCount: response.receipts.length, at: Date.now(), response });
+	// Only cache once the trace looks finalized: it must have at least one receipt (an empty/not-yet-
+	// journaled trace is never "finalized" — caching it would hide receipts that land moments later for
+	// up to TRACE_CACHE_TTL_MS) and no receipt still mid-run (no receipt missing endedAt).
+	if (response.receipts.length > 0 && response.receipts.every((r) => r.endedAt !== undefined)) {
+		traceCache.set(id, { at: Date.now(), response });
 	}
 	return response;
 }
