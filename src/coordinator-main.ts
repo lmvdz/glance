@@ -13,6 +13,7 @@
  * Bun.serve keeps the process alive on its own — no keep-alive timer needed.
  */
 
+import "./env-compat.ts"; // GLANCE_* ↔ OMP_SQUAD_* aliasing — must run before any env read
 import { runCoordinator } from "./coordinator.ts";
 
 /** Loopback-only bind? (mirrors isLoopbackHost in index.ts; inlined to avoid pulling in the CLI module graph) */

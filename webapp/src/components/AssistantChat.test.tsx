@@ -12,7 +12,7 @@ import {
   partitionSessionMessages,
   type Message,
 } from "./AssistantChat";
-import { AgentMetaBar } from "./chat/AgentMetaBar";
+import { AgentLandControls, AgentMetaBar } from "./chat/AgentMetaBar";
 import { ComposerSendButton } from "./chat/Composer";
 import { ComposerStats } from "./chat/AgentMetaBar";
 import { DiffReviewPanel } from "./chat/DiffReviewPanel";
@@ -746,4 +746,50 @@ test("clearEchoedPendingSends ignores non-user-kind entries even if they somehow
 
   const next = clearEchoedPendingSends(pendingSends, transcriptEntries);
   expect(next).toHaveLength(1);
+});
+
+test("AgentLandControls labels the Land button plainly when prState is absent (local mode)", () => {
+  const agent: AgentDTO = {
+    id: "a1",
+    name: "chat",
+    status: "working",
+    repo: "/home/lars/sui/omp-squad",
+    worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
+    branch: "squad/chat",
+    pending: [],
+    lastActivity: 1,
+    autonomyMode: "assist",
+    effectiveMode: "assist",
+    verificationState: "fresh",
+    availableActions: ["land"],
+    landReady: true,
+  };
+
+  const html = renderToStaticMarkup(<AgentLandControls agent={agent} showToast={() => {}} />);
+  expect(html).toContain("Land ✓");
+  expect(html).not.toContain("Merge PR");
+});
+
+test("AgentLandControls labels the Land button 'Merged ✓' once the PR-mode land has merged", () => {
+  const agent: AgentDTO = {
+    id: "a1",
+    name: "chat",
+    status: "working",
+    repo: "/home/lars/sui/omp-squad",
+    worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
+    branch: "squad/chat",
+    pending: [],
+    lastActivity: 1,
+    autonomyMode: "assist",
+    effectiveMode: "assist",
+    verificationState: "fresh",
+    availableActions: ["land"],
+    landReady: true,
+    prUrl: "https://github.com/acme/repo/pull/42",
+    prNumber: 42,
+    prState: "merged",
+  };
+
+  const html = renderToStaticMarkup(<AgentLandControls agent={agent} showToast={() => {}} />);
+  expect(html).toContain("Merged ✓");
 });

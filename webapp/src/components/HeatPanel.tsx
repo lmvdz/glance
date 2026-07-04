@@ -8,17 +8,20 @@
  * Layout, top to bottom:
  *   1. Collision callout — files ≥2 LIVE agents are editing right now (the
  *      omp-squad-specific merge-conflict prediction; nothing else gives you this).
- *   2. Controls         — time range (wired to /api/heat?days=) + pattern toggle.
- *   3. Legend           — the magma cold→hot ramp.
- *   4. HeatTree         — the magma folder-tree heat matrix (the centerpiece).
- *   5. Top hot areas    — ranked files with an honest 0–100 score + trend tag.
- *   6. Raw heat data    — collapsed <details> for power users.
+ *   2. Flapping agents callout — agents that errored ≥2x in the last hour, even ones
+ *      that have since recovered (a signal the "Needs you" panel drops once an agent's
+ *      current status is no longer `error` — see FlappingAgentsCallout below).
+ *   3. Controls         — time range (wired to /api/heat?days=) + pattern toggle.
+ *   4. Legend           — the magma cold→hot ramp.
+ *   5. HeatTree         — the magma folder-tree heat matrix (the centerpiece).
+ *   6. Top hot areas    — ranked files with an honest 0–100 score + trend tag.
+ *   7. Raw heat data    — collapsed <details> for power users.
  *
  * Every number traces to real receipt data — see lib/heatmap.ts. No fabricated
  * "complexity"/"coupling" metrics.
  *
  * Shared foundation (imported, not reimplemented):
- *   - detectCollisions / HeatPayload / UsagePayload from insights
+ *   - detectCollisions / flappingAgents / HeatPayload / UsagePayload from insights
  *   - buildHeatTree / rankHotAreas / agentsByFileMap / initialExpanded / magma
  *     / MAGMA_GRADIENT from lib/heatmap
  *   - PanelShell / VerdictBadge / Callout / SectionCard / HeatTree from ./ui
@@ -28,7 +31,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Flame, RefreshCw, Users, Sparkles } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
-import { detectCollisions, type HeatPayload, type UsagePayload } from '../lib/insights';
+import { detectCollisions, flappingAgents, type HeatPayload, type UsagePayload, type FlappingAgent } from '../lib/insights';
 import {
   buildHeatTree,
   rankHotAreas,
@@ -79,6 +82,38 @@ const MagmaStrip: React.FC<{ daily: number[] }> = ({ daily }) => {
   );
 };
 
+/** Fleet-wide agent hotspots: chronically flapping agents, alongside the file hotspots below. Wires
+ *  flappingAgents() (previously computed but never rendered anywhere) into this "Activity & hotspots"
+ *  panel — it catches agents that erred repeatedly in the last hour even after they've since
+ *  recovered to a non-error status, a signal the "Needs you" panel's flapping alert can't show once
+ *  the agent is no longer actively in the `error` state. */
+export const FlappingAgentsCallout: React.FC<{ agents: FlappingAgent[]; onView: (agentId: string) => void }> = ({ agents, onView }) => {
+  if (agents.length === 0) return null;
+  return (
+    <Callout tone="warn" title={`${agents.length} agent${agents.length === 1 ? '' : 's'} flapping in the last hour`}>
+      <ul className="mt-2 space-y-2" aria-label="Flapping agent details">
+        {agents.map((a) => (
+          <li
+            key={a.agentId}
+            className="flex items-center justify-between gap-3 rounded-md border border-amber-200/60 dark:border-amber-900/40 bg-white/60 dark:bg-gray-950/40 px-3 py-2"
+          >
+            <span className="truncate text-xs font-medium text-gray-800 dark:text-gray-200">
+              {a.name} <span className="font-mono text-[10px] text-amber-600 dark:text-amber-400">{a.errorTransitions1h}x/hr</span>
+            </span>
+            <button
+              onClick={() => onView(a.agentId)}
+              className="flex-shrink-0 rounded-md border border-amber-200 dark:border-amber-800 bg-white/70 dark:bg-gray-900/50 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-300 transition-colors hover:bg-white dark:hover:bg-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+              aria-label={`View ${a.name}`}
+            >
+              View
+            </button>
+          </li>
+        ))}
+      </ul>
+    </Callout>
+  );
+};
+
 const HotAreaCard: React.FC<{ area: HotArea }> = ({ area }) => {
   const { dir, file } = splitPath(area.path);
   return (
@@ -109,7 +144,7 @@ const HotAreaCard: React.FC<{ area: HotArea }> = ({ area }) => {
 // ──────────────────────────────── component ──────────────────────────────────
 
 export const HeatPanel: React.FC = () => {
-  const { agents } = useTaskContext();
+  const { agents, openConsole } = useTaskContext();
 
   const [days, setDays] = useState<(typeof RANGES)[number]>(14);
   const [showPatterns, setShowPatterns] = useState(true);
@@ -144,6 +179,8 @@ export const HeatPanel: React.FC = () => {
 
   const collisions = useMemo(() => detectCollisions(usage?.runs, agents), [usage?.runs, agents]);
 
+  const flapping = useMemo(() => flappingAgents(agents), [agents]);
+
   const agentsByFile = useMemo(() => agentsByFileMap(usage?.runs), [usage?.runs]);
 
   const tree = useMemo(
@@ -161,16 +198,19 @@ export const HeatPanel: React.FC = () => {
 
   const hasCollisions = collisions.length > 0;
   const hasContested = topContested !== null;
+  const hasFlapping = flapping.length > 0;
 
-  const verdictKind: 'critical' | 'warn' | 'healthy' = hasCollisions ? 'critical' : hasContested ? 'warn' : 'healthy';
+  const verdictKind: 'critical' | 'warn' | 'healthy' = hasCollisions ? 'critical' : hasContested || hasFlapping ? 'warn' : 'healthy';
 
-  const verdictText = hasCollisions
-    ? `${collisions.length} collision risk${collisions.length === 1 ? '' : 's'}${hasContested ? ' · 1 contested file' : ''}`
-    : hasContested
-      ? '1 contested file'
-      : tree.fileCount > 0
-        ? `${tree.fileCount} file${tree.fileCount === 1 ? '' : 's'} active`
-        : 'No contention';
+  const verdictParts: string[] = [];
+  if (hasCollisions) verdictParts.push(`${collisions.length} collision risk${collisions.length === 1 ? '' : 's'}`);
+  if (hasContested) verdictParts.push('1 contested file');
+  if (hasFlapping) verdictParts.push(`${flapping.length} flapping agent${flapping.length === 1 ? '' : 's'}`);
+  const verdictText = verdictParts.length > 0
+    ? verdictParts.join(' · ')
+    : tree.fileCount > 0
+      ? `${tree.fileCount} file${tree.fileCount === 1 ? '' : 's'} active`
+      : 'No contention';
 
   const subtitle = (
     <span className="flex items-center gap-2">
@@ -258,6 +298,9 @@ export const HeatPanel: React.FC = () => {
               </ul>
             </Callout>
           )}
+
+          {/* ── FLAPPING AGENTS ──────────────────────────────────────────── */}
+          {hasFlapping && <FlappingAgentsCallout agents={flapping} onView={(id) => openConsole(id)} />}
 
           {/* ── CONTROLS ─────────────────────────────────────────────────── */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 py-2.5">

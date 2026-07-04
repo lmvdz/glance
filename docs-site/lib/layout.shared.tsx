@@ -4,10 +4,10 @@ import { gitConfig } from './shared';
 export function baseOptions(): BaseLayoutProps {
   return {
     nav: {
-      // JSX supported — green "omp" mark mirrors the product UI brand
+      // JSX supported — ember star + lowercase wordmark, per brand.md
       title: (
         <span className="font-semibold tracking-tight">
-          <span className="text-fd-primary">omp</span>-squad
+          <span className="text-fd-primary">✦</span> glance
         </span>
       ),
     },

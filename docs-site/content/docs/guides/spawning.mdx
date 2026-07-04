@@ -1,17 +1,17 @@
 ---
 title: Spawning Agents
-description: omp-squad add in depth — every flag, what happens when an agent spawns, and the verbs that steer it afterward.
+description: glance add in depth — every flag, what happens when an agent spawns, and the verbs that steer it afterward.
 ---
 
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import { Step, Steps } from 'fumadocs-ui/components/steps';
 
-`omp-squad add <repo> [flags]` spawns one agent in a fresh git worktree of `<repo>` and routes
+`glance add <repo> [flags]` spawns one agent in a fresh git worktree of `<repo>` and routes
 the daemon to manage it. `<repo>` defaults to the current directory. Everything the **+ New
 agent** dialog and the dashboard composers do, this command does — with the full flag surface.
 
 ```bash
-omp-squad add ~/code/myproject --name auth-refactor \
+glance add ~/code/myproject --name auth-refactor \
   --task "Refactor the auth module to use the new session API."
 ```
 
@@ -30,6 +30,7 @@ Defined in `src/index.ts` (`HELP` + `cmdAdd`) and `CreateAgentOptions` in `src/t
     "--workflow": { description: "Run a bundled workflow by name (research-plan-implement, plan-implement, fan-out) or a .fabro path as the agent's process.", type: "name | path", default: "—" },
     "--verify": { description: "Wrap --task in an implement → verify → fixup loop; the gate is <cmd> exiting 0.", type: "string", default: "—" },
     "--sandbox": { description: "Run the agent's omp inside a container built from <image> (mounts the worktree).", type: "image", default: "—" },
+    "--acp": { description: "Run an ACP runtime (auggie --acp by default; Claude Code / Codex via ACP) instead of omp --mode rpc. --runtime acp is equivalent.", type: "boolean", default: "false" },
     "--plain": { description: "Skip auto-routing and spawn a plain agent (no verify / plan / fan-out).", type: "boolean", default: "false" },
   }}
 />
@@ -85,8 +86,8 @@ spawned name, status, id, and worktree path.
 </Steps>
 
 <Callout type="warn">
-The daemon enforces a global **live-agent WIP cap** (`OMP_SQUAD_MAX_WIP`, default 6). Past it a
-spawn is refused — or, with `OMP_SQUAD_QUEUE_ON_FULL`, **parked** (FIFO) and returned as a
+The daemon enforces a global **live-agent WIP cap** (`GLANCE_MAX_WIP`, default 6). Past it a
+spawn is refused — or, with `GLANCE_QUEUE_ON_FULL`, **parked** (FIFO) and returned as a
 `queued` signal for the orchestrator to drain later. See
 [Configuration](/docs/reference/configuration).
 </Callout>
@@ -103,21 +104,21 @@ same `applyCommand` path on the manager).
 
 | Verb | CLI | TUI | Web |
 |---|---|---|---|
-| **prompt** / **say** — send a follow-up instruction (mid-turn it steers) | `omp-squad prompt <id> <msg…>` | type + `Enter` | composer / **Send** |
+| **prompt** / **say** — send a follow-up instruction (mid-turn it steers) | `glance prompt <id> <msg…>` | type + `Enter` | composer / **Send** |
 | **interrupt** — abort the current turn | — | `/stop` or `/interrupt` | **Interrupt** |
 | **restart** — restart the agent process | — | `/restart` | **Restart** |
 | **kill** — kill the agent process | — | `/kill` | **Kill** |
-| **remove** — drop the agent from the roster | `omp-squad rm <id>` | `/rm` | (palette) |
+| **remove** — drop the agent from the roster | `glance rm <id>` | `/rm` | (palette) |
 
 ```bash
 # Follow-up instruction (alias: `say`)
-omp-squad prompt auth-refactor-<id> "Also update the tests."
+glance prompt auth-refactor-<id> "Also update the tests."
 
 # Remove the agent and delete its worktree
-omp-squad rm auth-refactor-<id> --delete-worktree
+glance rm auth-refactor-<id> --delete-worktree
 ```
 
-`omp-squad rm` removes the agent; add **`--delete-worktree`** to also tear down its git worktree
+`glance rm` removes the agent; add **`--delete-worktree`** to also tear down its git worktree
 (otherwise the worktree and its branch are left on disk for you to inspect or land). To get an
 agent's work into `main`, see [Landing](/docs/guides/landing).
 

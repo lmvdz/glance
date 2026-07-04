@@ -1,9 +1,9 @@
 ---
 title: Introduction
-description: omp-squad is a control plane for a fleet of Oh My Pi agents — each in its own git worktree, steered from a terminal TUI and a web dashboard over one event stream.
+description: glance is a control plane for a fleet of Oh My Pi agents — each in its own git worktree, steered from a terminal TUI and a web dashboard over one event stream.
 ---
 
-omp-squad manages a fleet of [Oh My Pi](https://omp.sh) (`omp`) coding agents
+glance manages a fleet of [Oh My Pi](https://omp.sh) (`omp`) coding agents
 running in parallel — **one per git worktree** — from a terminal TUI *and* a web
 dashboard. Think `claude agents`, but for the omp harness, and built to go
 further: a single control plane you run wherever development happens, where you
@@ -19,7 +19,7 @@ plane you lose track of which agent is busy, which finished, and — the expensi
 one — **which is blocked waiting for you**. A blocked agent you don't notice is
 just wasted wall-clock.
 
-omp-squad makes that legible. Every agent is an isolated worktree process, so
+glance makes that legible. Every agent is an isolated worktree process, so
 parallel agents never clobber each other's files. A live board shows what each is
 doing and which need input, and you can dive into any one and steer it — answer a
 prompt, send a follow-up, interrupt, restart, or kill it. You supervise by
@@ -32,7 +32,7 @@ Four ideas carry the whole system:
 - **One worktree per agent.** Each agent runs in its own `git worktree` (branch
   `squad/<name>`), so the worktree is both the isolation boundary and the blast
   radius — you review its diff before merging.
-- **Each agent is a real `omp --mode rpc` child.** omp-squad doesn't reimplement
+- **Each agent is a real `omp --mode rpc` child.** glance doesn't reimplement
   the agent; it spawns the real `omp` harness in RPC mode and speaks omp's
   newline-JSON protocol to it (`prompt` / `steer` / `abort` / `get_state`).
 - **Status is derived, not declared.** An agent's lifecycle state
@@ -46,7 +46,7 @@ Four ideas carry the whole system:
 ## How it works
 
 ```text
-        omp-squad (one process)
+        glance (one process)
         ┌─────────────────────────────────────────────┐
         │  SquadManager  ── roster, status, transcript │
         │     │                                        │

@@ -1,20 +1,26 @@
 ---
-title: omp-squad
+title: glance
 description: A control plane for a fleet of Oh My Pi coding agents — one per git worktree — driven from a terminal TUI and a web dashboard.
 ---
 
-**omp-squad** runs many [Oh My Pi](https://omp.sh) (`omp`) coding agents in parallel and gives you
+**glance** runs many [Oh My Pi](https://omp.sh) (`omp`) coding agents in parallel and gives you
 one place to watch and steer them. Each agent works in its own `git worktree` as a real
 `omp --mode rpc` child process; a single `SquadManager` derives every agent's live status from its
 event stream and broadcasts it to two interchangeable surfaces — a terminal **TUI** and a **web
 dashboard**.
 
-The bottleneck of N parallel agents isn't the agents — it's *your attention*. omp-squad is built to
+The bottleneck of N parallel agents isn't the agents — it's *your attention*. glance is built to
 route it: see at a glance who is working, who is idle, and **who is blocked waiting for you**, then
-drop into any agent and steer it.
+drop into any agent and steer it. With an issue tracker connected, the [autonomy layer](/docs/architecture/autonomy)
+closes the loop end to end — issue → routed agent → verify → land → close — and you supervise by exception.
+
+<Callout type="info">
+glance was formerly **omp-squad**. The `omp-squad` binary and every `OMP_SQUAD_*` environment
+variable keep working as legacy aliases; the canonical names are `glance` and `GLANCE_*`.
+</Callout>
 
 ```text
-        omp-squad (one process)
+        glance (one process)
         ┌─────────────────────────────────────────────┐
         │  SquadManager  ── roster, status, transcript │
         │     │                                        │
@@ -30,7 +36,7 @@ drop into any agent and steer it.
 ## Start here
 
 <Cards>
-  <Card title="Introduction" href="/docs/getting-started" description="What omp-squad is and the mental model behind it." />
+  <Card title="Introduction" href="/docs/getting-started" description="What glance is and the mental model behind it." />
   <Card title="Installation" href="/docs/getting-started/installation" description="Requirements and setup in under a minute." />
   <Card title="Quickstart" href="/docs/getting-started/quickstart" description="Spawn, watch, steer, and land your first agent." />
   <Card title="Core concepts" href="/docs/getting-started/concepts" description="Agents, kinds, status, worktrees, surfaces." />

@@ -96,6 +96,19 @@ test("detached worktree (no branch) is skipped", () => {
 	expect(d).toHaveLength(0);
 });
 
+test("proven (DoneProof recorded) is treated as merged even when aheadOfBase is unknown/nonzero", () => {
+	// Squash/rebase merges make aheadOfBase permanently nonzero (or unknowable) even though the work
+	// IS safely in origin/default — `proven` is the escape hatch so those branches still get reaped.
+	const d = run([wt({ aheadOfBase: 4, proven: true })]);
+	expect(d).toHaveLength(1);
+	expect(d[0]).toMatchObject({ reason: "merged", deleteBranch: true });
+});
+
+test("unproven + aheadOfBase>0 is unaffected (regression guard: proven is additive, not a relaxation)", () => {
+	const d = run([wt({ aheadOfBase: 4, proven: false })], { openIdentifiers: new Set(["OMPSQ-35"]) });
+	expect(d).toHaveLength(0);
+});
+
 test("OMPSQ-41: a worktree OUTSIDE the managed base is never reaped, even when merged + clean", () => {
 	// An out-of-band worktree (e.g. made by hand under /tmp) is merged+clean+dead but lives outside
 	// worktreeBase() ⇒ the reaper must not touch it (destroying out-of-band work was the OMPSQ-41 bug).

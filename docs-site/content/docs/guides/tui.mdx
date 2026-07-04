@@ -5,13 +5,13 @@ description: The two-level, arrow-driven terminal dashboard — navigation, keys
 
 import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 
-`omp-squad up` opens a terminal dashboard (`src/tui.ts`) alongside the web server. It is a
+`glance up` opens a terminal dashboard (`src/tui.ts`) alongside the web server. It is a
 thin client of the same `SquadManager` the web dashboard uses, so anything you do in one
 shows up in the other. The TUI is **two-level and arrow-driven**, modelled on `claude agents`:
 a **dashboard list** of every agent, and a **session view** for the one you open.
 
 ```text
-omp-squad  3 agents · 1 need input
+glance  3 agents · 1 need input
 ────────────────────────────────────────────────────────
 ⛔ ⚙ feature       squad/feature   stage 3/6      3/6  41%
 ◐    alpha         squad/alpha     edit src/a.ts       12%
@@ -142,6 +142,6 @@ text is added to the history ring so you can recall it later.
 
 <Cards>
 <Card title="Web dashboard" href="/docs/guides/web-dashboard" description="The browser command center — projects, queue, race board, and the ⌘K palette." />
-<Card title="Spawning agents" href="/docs/guides/spawning" description="omp-squad add in depth — every flag, what happens on spawn, and the steering verbs." />
+<Card title="Spawning agents" href="/docs/guides/spawning" description="glance add in depth — every flag, what happens on spawn, and the steering verbs." />
 <Card title="Landing work" href="/docs/guides/landing" description="Merge an agent's branch back into main." />
 </Cards>

@@ -3,7 +3,7 @@ title: The RPC protocol
 description: The omp --mode rpc newline-JSON wire, the detached agent-host, how AgentStatus is derived from the event stream, and the subagent feed.
 ---
 
-An `omp-operator` agent is a real `omp --mode rpc` process. omp-squad speaks omp's
+An `omp-operator` agent is a real `omp --mode rpc` process. glance speaks omp's
 documented **newline-delimited JSON** RPC protocol: commands go in, an event stream
 comes out, and the manager *derives* each agent's status from that stream. The daemon
 never parses a terminal — it consumes structured frames.
