@@ -1,10 +1,13 @@
 /**
- * Concern 01 (inspectable-topology): `parentNodeId`/`branchIndex`/`subagents`/`workflowGraph` are new
- * lineage/topology fields on `CreateAgentOptions`/`PersistedAgent`/`AgentDTO`. Every boot path that
- * reconstructs an `AgentRecord` from persisted state builds `dto`/`persisted` as EXPLICIT field-literal
- * objects (nothing "rides along automatically") — so each of the three restore call sites needs its own
- * round-trip proof: persist an agent carrying all four fields, boot via that path, assert the fields
- * survive on both the resulting `AgentDTO` and the NEXT persisted `state.json` snapshot.
+ * Concern 01 (inspectable-topology): `parentNodeId`/`branchIndex`/`subagents`/`workflowGraph`/`traceId`
+ * are lineage/topology fields on `CreateAgentOptions`/`PersistedAgent`/`AgentDTO` (`traceId` added by
+ * topology review finding 7 — a restarted run previously lost its `GET /api/trace/:id` link even though
+ * its receipts were still on disk, since `AgentDTO.traceId` had no `PersistedAgent` counterpart to survive
+ * the restart). Every boot path that reconstructs an `AgentRecord` from persisted state builds `dto`/
+ * `persisted` as EXPLICIT field-literal objects (nothing "rides along automatically") — so each of the
+ * three restore call sites needs its own round-trip proof: persist an agent carrying all five fields, boot
+ * via that path, assert the fields survive on both the resulting `AgentDTO` and the NEXT persisted
+ * `state.json` snapshot.
  */
 
 import { EventEmitter } from "node:events";
@@ -77,6 +80,8 @@ const WORKFLOW_GRAPH: WorkflowGraphSnapshot = {
  *  follow-up) — those two call sites pass "aborted". `lastUpdate` is excluded from the equality check
  *  (closeNonTerminal stamps a fresh one), so this checks the stable fields via `toMatchObject` instead of
  *  an exact `toEqual(SUBAGENTS)`. */
+const TRACE_ID = "feat:boot-lineage-trace-1";
+
 function assertLineageFields(dto: AgentDTO | undefined, expectedParentId: string | undefined, expectedSubagentStatus: SubagentNode["status"] = "running"): void {
 	expect(dto).toBeDefined();
 	expect(dto?.parentId).toBe(expectedParentId);
@@ -85,6 +90,7 @@ function assertLineageFields(dto: AgentDTO | undefined, expectedParentId: string
 	expect(dto?.subagents).toHaveLength(1);
 	expect(dto?.subagents?.[0]).toMatchObject({ id: "sub-1", agent: "worker", description: "do the thing", task: "do the thing", index: 0, status: expectedSubagentStatus });
 	expect(dto?.workflowGraph).toEqual(WORKFLOW_GRAPH);
+	expect(dto?.traceId).toBe(TRACE_ID);
 }
 
 function assertPersistedLineageFields(p: PersistedAgent | undefined, expectedParentId: string | undefined, expectedSubagentStatus: SubagentNode["status"] = "running"): void {
@@ -95,6 +101,7 @@ function assertPersistedLineageFields(p: PersistedAgent | undefined, expectedPar
 	expect(p?.subagents).toHaveLength(1);
 	expect(p?.subagents?.[0]).toMatchObject({ id: "sub-1", agent: "worker", description: "do the thing", task: "do the thing", index: 0, status: expectedSubagentStatus });
 	expect(p?.workflowGraph).toEqual(WORKFLOW_GRAPH);
+	expect(p?.traceId).toBe(TRACE_ID);
 }
 
 // ── reconnect (attachExisting) ───────────────────────────────────────────────
@@ -118,6 +125,7 @@ test("reconnect: attachExisting carries all four lineage fields onto the DTO and
 		branchIndex: 2,
 		subagents: SUBAGENTS,
 		workflowGraph: WORKFLOW_GRAPH,
+		traceId: TRACE_ID,
 	};
 
 	await (mgr as unknown as AttachHost).attachExisting(persisted, []);
@@ -155,6 +163,7 @@ test("adopt: adoptOrphanedAgents → create() carries all four lineage fields on
 		branchIndex: 2,
 		subagents: SUBAGENTS,
 		workflowGraph: WORKFLOW_GRAPH,
+		traceId: TRACE_ID,
 	};
 	await new FileStore(stateDir).save({ agents: [persisted], transcripts: {}, features: [] });
 
@@ -194,6 +203,7 @@ test("loadPersisted: --restore carries all four lineage fields onto the DTO and 
 		branchIndex: 2,
 		subagents: SUBAGENTS,
 		workflowGraph: WORKFLOW_GRAPH,
+		traceId: TRACE_ID,
 	};
 	await new FileStore(stateDir).save({ agents: [persisted], transcripts: {}, features: [] });
 

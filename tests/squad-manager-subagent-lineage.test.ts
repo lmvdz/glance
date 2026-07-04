@@ -108,6 +108,30 @@ test("a dirty subagent transition flushes the merge onto dto.subagents/options.s
 	await mgr.stop();
 });
 
+// Topology review finding 8: the dirty-flush persisted but never broadcast, so the webapp's SSE copy of
+// dto.subagents staleness-lagged until some UNRELATED emit happened to fire afterward.
+test("a dirty subagent transition also emits the 'agent' event, not just the dirty-gated persist()", async () => {
+	const { mgr, repo } = await makeMgr();
+	const dto = await mgr.create({ name: "lineage-emit", repo, approvalMode: "yolo", autoRoute: false });
+	const internals = mgr as unknown as ManagerInternals;
+	const rec = internals.agents.get(dto.id)!;
+
+	const emitted: string[] = [];
+	mgr.on("event", (e: { type: string; agent?: { id: string; subagents?: unknown[] } }) => {
+		if (e.type === "agent" && e.agent?.id === dto.id) emitted.push(JSON.stringify(e.agent.subagents ?? []));
+	});
+
+	internals.onAgentEvent(rec, lifecycleFrame("s1", "started", 0));
+	expect(emitted).toHaveLength(1); // one emit for the one dirty transition
+	expect(emitted[0]).toContain("s1");
+
+	// A no-op re-ingest (covered below too) must not ALSO emit — gated identically to persist().
+	internals.onAgentEvent(rec, lifecycleFrame("s1", "started", 0));
+	expect(emitted).toHaveLength(1);
+
+	await mgr.stop();
+});
+
 test("a no-op re-ingest and a pure heartbeat do not trigger a flush (options.subagents unchanged)", async () => {
 	const { mgr, repo } = await makeMgr();
 	const dto = await mgr.create({ name: "lineage-quiet", repo, approvalMode: "yolo", autoRoute: false });

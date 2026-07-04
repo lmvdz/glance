@@ -276,12 +276,34 @@ test("SquadManager: onAgentEvent populates rec.dto.workflowGraph/rec.options.wor
 	expect(rec.dto.workflowGraph).toEqual(GRAPH_SNAPSHOT);
 	expect(rec.options.workflowGraph).toBe(rec.dto.workflowGraph); // one projection, not two
 
-	// Other WorkflowJournalEvent types stay deliberately unconsumed — no scope creep into general journal
-	// persistence. workflowGraph must not be clobbered/undefined'd, and no new field should appear from it.
+	// Other WorkflowJournalEvent types stay deliberately unconsumed by any journal-specific case — no scope
+	// creep into general journal persistence. workflowGraph must not be clobbered/undefined'd, and no new
+	// field should appear FROM the journal payload itself.
 	const before = { ...rec.dto };
+	rec.dto.lastActivity = before.lastActivity - 1000; // force a detectable bump below
 	internals.onAgentEvent(rec, { type: "workflow_journal", event: { type: "workflow.node.start", at: Date.now(), workflow: "wf", runId: "wf-agent:abc", nodeId: "a", label: "A" } });
-	expect(rec.dto).toEqual(before); // node.start caused no dto mutation whatsoever
+	// Topology review finding 4: a workflow_journal frame falls through to the SAME generic tail every
+	// other frame type gets — node.start itself contributes no new field, but `lastActivity` still bumps
+	// (proof the TUI's stall detector, tui.ts >120s, never goes stale on a run that only emits journal
+	// frames) and emitAgent still fires. Everything the journal payload could have written stays untouched.
+	expect(rec.dto.lastActivity).toBeGreaterThan(before.lastActivity - 1000);
+	expect({ ...rec.dto, lastActivity: before.lastActivity }).toEqual(before);
 
+	await mgr.stop();
+});
+
+test("SquadManager: a workflow.node.start journal frame bumps lastActivity instead of leaving it stale (finding 4)", async () => {
+	const { mgr, repo } = await makeMgr("wfj-lastactivity");
+	const dto = await mgr.create({ name: "wf-agent-la", repo, approvalMode: "yolo", autoRoute: false });
+	const internals = mgr as unknown as ManagerInternals;
+	const rec = internals.agents.get(dto.id)!;
+
+	rec.dto.lastActivity = Date.now() - 60_000; // simulate a long-running command node gone "quiet"
+	const stale = rec.dto.lastActivity;
+
+	internals.onAgentEvent(rec, { type: "workflow_journal", event: { type: "workflow.node.start", at: Date.now(), workflow: "wf", runId: "wf-agent-la:abc", nodeId: "cmd", label: "cmd" } });
+
+	expect(rec.dto.lastActivity).toBeGreaterThan(stale);
 	await mgr.stop();
 });
 

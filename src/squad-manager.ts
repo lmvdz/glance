@@ -28,7 +28,7 @@ import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
 import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
-import type { EngineCheckpoint, NodeResult, Workflow, WorkflowJournalEvent, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowRunState } from "./workflow/types.ts";
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
@@ -288,6 +288,31 @@ function redactCause(cause: TransitionCause): TransitionCause {
 	const out: TransitionCause = {};
 	for (const [k, v] of Object.entries(cause)) out[k] = typeof v === "string" ? redact(v) : v;
 	return out;
+}
+
+/** The lineage/topology fields threaded onto EVERY PersistedAgent/AgentDTO/CreateAgentOptions
+ *  construction site (create()'s persisted+dto literals, attachExisting, reattachTerminal,
+ *  adoptOrphanedAgents' and loadPersisted's create() calls). Field names are identical across all three
+ *  shapes, so the same picked object spreads cleanly into any of them.
+ *
+ * Topology review finding 9: hand-copying these at five call sites means the next field WILL be missed
+ * at one of them — finding 7 caught exactly that (traceId shipped on AgentDTO in cfeeade with no
+ * PersistedAgent counterpart, so a restarted run's trace link silently went dark). Route every site
+ * through here so a future field is added in ONE place instead of five. */
+function lineageFieldsFrom(p: {
+	parentNodeId?: string;
+	branchIndex?: number;
+	subagents?: SubagentNode[];
+	workflowGraph?: WorkflowGraphSnapshot;
+	traceId?: string;
+}): { parentNodeId?: string; branchIndex?: number; subagents?: SubagentNode[]; workflowGraph?: WorkflowGraphSnapshot; traceId?: string } {
+	return {
+		parentNodeId: p.parentNodeId,
+		branchIndex: p.branchIndex,
+		subagents: p.subagents,
+		workflowGraph: p.workflowGraph,
+		traceId: p.traceId,
+	};
 }
 
 interface AgentRecord {
@@ -1020,10 +1045,7 @@ export class SquadManager extends EventEmitter {
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
-				parentNodeId: p.parentNodeId,
-				branchIndex: p.branchIndex,
-				subagents: p.subagents,
-				workflowGraph: p.workflowGraph,
+				...lineageFieldsFrom(p),
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,
@@ -1169,10 +1191,7 @@ export class SquadManager extends EventEmitter {
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
-			parentNodeId: p.parentNodeId,
-			branchIndex: p.branchIndex,
-			subagents: p.subagents,
-			workflowGraph: p.workflowGraph,
+			...lineageFieldsFrom(p),
 			featureId: p.featureId,
 			owns: p.owns,
 			requires: p.requires,
@@ -1263,6 +1282,20 @@ export class SquadManager extends EventEmitter {
 	 * escalated — so a fresh boot reconstructs the same operator-visible signal from the marker alone.
 	 */
 	private reattachTerminal(p: PersistedAgent, transcript: TranscriptEntry[] = []): void {
+		const subs = new SubagentTracker();
+		// Topology review finding 3: this is the fourth boot path that reseeds persisted subagents
+		// (create()'s restore reseed, restart(), and loadPersisted's --restore already closeNonTerminal
+		// — see the create() reseed above) but this record gets NO live driver connection at all, ever
+		// (that's the whole point of "terminal-marked ⇒ inert"). A subagent left "running" in the
+		// persisted snapshot would otherwise claim that forever with no run left alive to ever close it.
+		if (p.subagents?.length) {
+			subs.applySnapshot(p.subagents);
+			subs.closeNonTerminal();
+			if (subs.isDirty()) {
+				p.subagents = mergeSubagents(p.subagents, subs.snapshot());
+				subs.clearDirty();
+			}
+		}
 		const dto: AgentDTO = {
 			id: p.id,
 			name: p.name,
@@ -1280,10 +1313,7 @@ export class SquadManager extends EventEmitter {
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
-			parentNodeId: p.parentNodeId,
-			branchIndex: p.branchIndex,
-			subagents: p.subagents,
-			workflowGraph: p.workflowGraph,
+			...lineageFieldsFrom(p),
 			featureId: p.featureId,
 			owns: p.owns,
 			requires: p.requires,
@@ -1297,7 +1327,7 @@ export class SquadManager extends EventEmitter {
 		const agent = this.makeDriver(p); // constructed but never started — this record has no live connection
 		// Review finding 9: transcript threaded through (was hardcoded `[]`) — a terminal run's history is
 		// exactly what the operator needs to decide whether to fork, and `attachExisting` already does this.
-		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs, toolEntries: new Map() };
 		this.agents.set(p.id, rec);
 		this.wire(rec); // no-op until/unless something ever starts `agent`, which this path never does
 		this.markCatastrophe(p.id, p.workflowState!.terminal!.reason);
@@ -2765,10 +2795,7 @@ export class SquadManager extends EventEmitter {
 			workflowState: opts.workflowState,
 			sandbox: opts.sandbox,
 			parentId: opts.parentId,
-			parentNodeId: opts.parentNodeId,
-			branchIndex: opts.branchIndex,
-			subagents: opts.subagents,
-			workflowGraph: opts.workflowGraph,
+			...lineageFieldsFrom(opts),
 			featureId: opts.featureId,
 			owns: opts.owns,
 			requires: opts.requires,
@@ -2793,10 +2820,7 @@ export class SquadManager extends EventEmitter {
 			issue: opts.issue,
 			kind,
 			parentId: opts.parentId,
-			parentNodeId: opts.parentNodeId,
-			branchIndex: opts.branchIndex,
-			subagents: opts.subagents,
-			workflowGraph: opts.workflowGraph,
+			...lineageFieldsFrom(opts),
 			featureId: opts.featureId,
 			owns: opts.owns,
 			requires: opts.requires,
@@ -3783,22 +3807,35 @@ export class SquadManager extends EventEmitter {
 				rec.options.subagents = rec.dto.subagents;
 				rec.subs.clearDirty();
 				void this.persist(); // chain-deduped by concern 01 — safe to call on every dirty transition
+				// Topology review finding 8: the flush above persisted but never broadcast — the webapp's SSE
+				// copy of dto.subagents staleness-lagged until an unrelated emit happened to fire. Gated the
+				// same as the persist() call (isDirty(), a real node creation/transition), never on a heartbeat.
+				this.emitAgent(rec);
 			}
 			return;
 		}
 		if (frame.type === "workflow_journal") {
 			const event = frame.event as WorkflowJournalEvent;
-			// Only the static topology snapshot is consumed here — a purely structural event, so we return
-			// early instead of falling to the generic tail (which would force an unnecessary derive()/emitAgent
-			// churn). All other WorkflowJournalEvent types (workflow.node.*, workflow.human_gate.*, etc.) are
-			// deliberately unconsumed: general journal persistence is the separate hooks-convergence initiative.
+			// Only the static topology snapshot gets its own persistence branch here — the graph is a
+			// structural field the generic tail below never derives. All other WorkflowJournalEvent types
+			// (workflow.node.*, verification.*, human_gate.*, etc.) are deliberately unconsumed by any case
+			// here: general journal persistence is the separate hooks-convergence initiative.
+			//
+			// Topology review finding 4: this used to `return` right after the graph branch, skipping the
+			// generic tail (receipt rollup, sticky traceId, derive/transition, `lastActivity` bump,
+			// emitAgent) that every OTHER frame type falls through to below. A long `command` node that only
+			// ever emits journal frames then went stale on `lastActivity` forever, wrongly tripping the TUI's
+			// stall detector (tui.ts, >120s) on an actually-healthy run. Falling through instead (workflow_journal
+			// matches no case in the switch below, same as any other frame type the switch doesn't special-case)
+			// restores that tail for every journal frame, not just workflow.graph.
 			if (event.type === "workflow.graph" && event.graph) {
 				rec.dto.workflowGraph = event.graph;
 				rec.options.workflowGraph = event.graph;
-				this.emitAgent(rec);
 				void this.persist();
 			}
-			return;
+			// No `return` here (finding 4 fix) — falls through: "workflow_journal" matches no case in the
+			// switch below (a harmless no-op there, same as any other frame type it doesn't special-case),
+			// then reaches the generic tail.
 		}
 		if (frame.type === "available_commands_update") {
 			this.storeCommands(rec, frame.commands);
@@ -3900,6 +3937,7 @@ export class SquadManager extends EventEmitter {
 		}
 		rec.dto.receipt = rec.run?.rollup();
 		rec.dto.traceId = rec.run?.traceId || rec.dto.traceId; // sticky across a run boundary until the NEXT run's start() reassigns it — never blanked to undefined mid-flight
+		rec.options.traceId = rec.dto.traceId; // topology review finding 7: mirror onto PersistedAgent so a restart never drops the trace link
 		this.transition(rec, this.derive(rec), "turn-progress"); // hottest site — the derived same-state early-return matters most here
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
@@ -4337,6 +4375,7 @@ export class SquadManager extends EventEmitter {
 		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
 		rec.dto.traceId = run.traceId || rec.dto.traceId; // same sticky rule as the turn-progress site above
+		rec.options.traceId = rec.dto.traceId; // topology review finding 7: mirror onto PersistedAgent so a restart never drops the trace link
 		// Run-end closure: stamp any subagent left non-terminal (started but never got a terminal frame
 		// before this run ended) aborted, and flush the merge — so no persisted node can claim "running"
 		// forever under a run that has already finished.
@@ -5332,10 +5371,7 @@ export class SquadManager extends EventEmitter {
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
-				parentNodeId: p.parentNodeId,
-				branchIndex: p.branchIndex,
-				subagents: p.subagents,
-				workflowGraph: p.workflowGraph,
+				...lineageFieldsFrom(p),
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,

@@ -693,6 +693,11 @@ export interface PersistedAgent {
 	 *  dto.pending. A cold-adopted agent's correlation id is dead (the RPC waiter died with the old process),
 	 *  so nothing restored here can ever be legitimately answered — do not build an "answerable restore" path. */
 	pending?: PendingRequest[];
+	/** Mirrors `AgentDTO.traceId` (topology review finding 7) so a restarted run's trace link survives —
+	 *  without this a receipt-linked run still on disk becomes unreachable via `GET /api/trace/:id` the
+	 *  moment the daemon restarts, even though nothing about the receipts themselves changed. Threaded
+	 *  through every boot path via `lineageFieldsFrom`, same sticky rule as the two live-run write sites. */
+	traceId?: string;
 }
 
 /** Persisted feature envelope — additive `features[]` in ~/.omp/squad/state.json. */
@@ -790,6 +795,9 @@ export interface CreateAgentOptions {
 	 *  in-flight graph node must re-execute and re-prime the goal rather than wait on a turn no thread is
 	 *  running. The warm reconnect path leaves this false. */
 	cold?: boolean;
+	/** Carries a persisted run's trace link through the adopt/restore boot paths (topology review finding
+	 *  7) — absent on a genuinely fresh create(), which only ever assigns this once a run actually starts. */
+	traceId?: string;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */
