@@ -115,3 +115,76 @@ test("attachExisting suppresses replay-driven transitions and records exactly on
 
 	await mgr.stop();
 });
+
+/** A driver whose start() rejects — models a host that died between the hostAlive() probe and connect,
+ *  or an RPC handshake failure (the TOCTOU class attachExisting's settle window must survive). */
+class FailingStartDriver extends EventEmitter implements AgentDriver {
+	ready = false;
+	alive = false;
+
+	get isReady(): boolean {
+		return this.ready;
+	}
+	get isAlive(): boolean {
+		return this.alive;
+	}
+	async start(): Promise<void> {
+		throw new Error("handshake failed");
+	}
+	async stop(): Promise<void> {
+		this.alive = false;
+		this.ready = false;
+	}
+	async prompt(): Promise<void> {}
+	async abort(): Promise<unknown> {
+		return undefined;
+	}
+	async getState(): Promise<RpcSessionState> {
+		return {} as RpcSessionState;
+	}
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
+interface SettleGateHost extends AttachHost {
+	settling: Set<string>;
+	agents: Map<string, { dto: { pending: unknown[] }; agent: AgentDriver }>;
+	maybeAutoSupervise: (rec: unknown, req: { id: string; source: "ui" | "tool"; kind: string; title: string; createdAt: number }) => void;
+}
+
+test("attachExisting clears the settle gate even when start() rejects, so the ledger and auto-supervise resume", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "settle-gate-fail-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const driver = new FailingStartDriver();
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => driver;
+
+	const persisted: PersistedAgent = {
+		id: "settle-gate-fail-agent",
+		name: "chat",
+		repo: "(none)",
+		worktree: "(none)",
+		approvalMode: "yolo",
+	};
+
+	await expect((mgr as unknown as AttachHost).attachExisting(persisted, [])).rejects.toThrow("handshake failed");
+
+	const host = mgr as unknown as SettleGateHost;
+	// The settle window must close on the failure path too — otherwise this id stays in `settling`
+	// forever, permanently disabling maybeAutoSupervise and silencing transition()'s ledger for it.
+	expect(host.settling.has(persisted.id)).toBe(false);
+
+	const log = host.transitionLog;
+	expect(log.filter((e) => e.reason === "reattach").length).toBe(1); // the ledger still recorded the reattach
+
+	// With the gate cleared, a freshly-added pending request must be eligible for auto-supervise again
+	// (pre-fix, `settling.has` alone gated it and this id would be stuck suppressed forever).
+	const rec = host.agents.get(persisted.id);
+	expect(rec).toBeDefined();
+	host.maybeAutoSupervise(rec, { id: "post-failure-confirm", source: "ui", kind: "confirm", title: "confirm?", createdAt: Date.now() });
+	expect(mgr.getTranscript(persisted.id).some((t) => JSON.stringify(t).includes("post-failure-confirm"))).toBe(true);
+
+	await mgr.stop();
+});

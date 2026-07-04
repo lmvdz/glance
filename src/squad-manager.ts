@@ -983,12 +983,20 @@ export class SquadManager extends EventEmitter {
 		// suppression check is already armed for the frames replayed synchronously inside start() itself.
 		this.settling.add(p.id);
 		this.reattached.add(p.id);
-		await agent.start();
-		await this.drainOneTick(); // let straggling synchronous replay frames land before settling closes
-		rec.dto.status = this.derive(rec); // unchanged — applies under settle suppression, so nothing recorded yet
-		this.settling.delete(p.id);
-		this.transition(rec, rec.dto.status, "reattach", {}); // ONE synthetic entry now that settling is off
-		this.emitAgent(rec);
+		try {
+			await agent.start();
+			await this.drainOneTick(); // let straggling synchronous replay frames land before settling closes
+		} finally {
+			// Runs on the failure path too (host died between the hostAlive() probe and connect, or the
+			// RPC handshake rejected): both callers swallow the rejection with .catch(log) and leave `rec`
+			// in `this.agents`, so if this settle window didn't close here the agent's id would stay in
+			// `settling` forever — permanently disabling maybeAutoSupervise and silencing transition()'s
+			// ledger recording for it (exactly the partial-failure class this concern targets).
+			rec.dto.status = this.derive(rec); // unchanged on success; reflects the failed-start state otherwise
+			this.settling.delete(p.id);
+			this.transition(rec, rec.dto.status, "reattach", {}); // ONE synthetic entry now that settling is off
+			this.emitAgent(rec);
+		}
 	}
 
 	list(): AgentDTO[] {
@@ -2884,10 +2892,10 @@ export class SquadManager extends EventEmitter {
 		const fresh = this.makeDriver(rec.options);
 		rec.agent = fresh;
 		rec.streaming = false;
-		this.setPending(rec, [], "pending-cancel");
-		// Separate explicit call (not merged into setPending via opts.status) so this records as "restart",
-		// not silently absorbed into the pending-cancel derived reason — and unconditionally wins the race
-		// against setPending's own derive() regardless of the agent's pre-restart status.
+		// callerOwnsStatus: clear pending without letting setPending derive+record its own transition —
+		// otherwise a working agent with an already-empty queue would get a spurious working->idle
+		// "pending-cancel" ledger entry immediately ahead of the real "restart" one below.
+		this.setPending(rec, [], "pending-cancel", undefined, { callerOwnsStatus: true });
 		this.transition(rec, "starting", "restart");
 		rec.dto.error = undefined;
 		rec.subs.clear();
@@ -3835,14 +3843,15 @@ export class SquadManager extends EventEmitter {
 		this.recordTransition(rec, from, to, reason, cause);
 	}
 
-	/** Mirrors transition() for `rec.dto.pending`. `opts.status` is for sites that manage status
+	/** Mirrors transition() for `rec.dto.pending`. `opts.callerOwnsStatus` is for sites that manage status
 	 *  themselves (restart clears pending AND sets "starting" via its own separate transition() call —
-	 *  the two stay distinct calls so restart's transition records as "restart", not silently absorbed
-	 *  into a derived reason). Absent `opts.status`, the resulting status is (re)derived and recorded
-	 *  under `reason` — same-state early-return behavior is identical to a direct transition() call. */
-	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { status?: AgentStatus }): void {
+	 *  suppressing setPending's own derive+record here means restart's ledger gets exactly ONE "restart"
+	 *  entry instead of a spurious intermediate "pending-cancel" derived entry ahead of it). Absent
+	 *  `opts.callerOwnsStatus`, the resulting status is (re)derived and recorded under `reason` —
+	 *  same-state early-return behavior is identical to a direct transition() call. */
+	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
 		rec.dto.pending = next;
-		if (opts?.status !== undefined) return; // caller issues its own explicit transition() for the status change
+		if (opts?.callerOwnsStatus) return; // caller issues its own explicit transition() for the status change
 		this.transition(rec, this.derive(rec), reason, cause);
 	}
 
