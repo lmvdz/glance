@@ -82,6 +82,50 @@ test("readCheckpoints skips a torn trailing line and sorts by seq", async () => 
 	expect(entries.map((e) => e.seq)).toEqual([0, 1]);
 });
 
+// Review finding 7: a crash mid-append leaves a partial line with NO trailing newline. Before this fix,
+// the next appendCheckpoint's seq-init (lineCount) counted the torn fragment as a whole line, and its
+// fs.appendFile() glued its own write directly onto the fragment's tail (no newline between them) —
+// producing ONE unparseable merged line. That's a permanent seq hole: both the torn entry AND the fully-
+// written one that got glued onto it become unreadable forever, and a forkPoint.seq referencing either
+// becomes un-forkable.
+test("appendCheckpoint repairs a torn trailing line on disk instead of merging the next write onto it", async () => {
+	const stateDir = await tmpStateDir();
+	const runId = "run-torn-append";
+	const file = checkpointLogPath(stateDir, runId);
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	// Two complete lines (seq 0, 1) followed by a torn fragment with NO trailing newline — simulates a
+	// crash mid-append of what would have been seq 2.
+	const complete = [JSON.stringify({ ...state({ runId }), seq: 0, at: 1 }), JSON.stringify({ ...state({ runId }), seq: 1, at: 2 })];
+	await fs.writeFile(file, `${complete.join("\n")}\n{"seq":2,"cur`);
+	expect((await fs.readFile(file, "utf8")).endsWith("\n")).toBe(false); // sanity: genuinely torn
+
+	// Must start at seq 2 (the count of COMPLETE lines) — the old lineCount() bug would count the torn
+	// fragment as a whole line and start at 3 — and must never glue onto the fragment's tail.
+	await appendCheckpoint(stateDir, runId, state({ runId, currentNode: "repaired" }));
+
+	const raw = await fs.readFile(file, "utf8");
+	for (const line of raw.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow(); // no merged line
+
+	const entries = await readCheckpoints(stateDir, runId);
+	expect(entries.map((e) => e.seq)).toEqual([0, 1, 2]);
+	expect(entries[2]!.currentNode).toBe("repaired");
+});
+
+// Companion: the log can be torn from its very first write (zero complete entries survive).
+test("appendCheckpoint repairs a log that is entirely a torn line with zero complete entries", async () => {
+	const stateDir = await tmpStateDir();
+	const runId = "run-all-torn";
+	const file = checkpointLogPath(stateDir, runId);
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await fs.writeFile(file, `{"seq":0,"cur`); // torn from the very first write — nothing parseable at all
+
+	await appendCheckpoint(stateDir, runId, state({ runId, currentNode: "first" }));
+
+	const entries = await readCheckpoints(stateDir, runId);
+	expect(entries.map((e) => e.seq)).toEqual([0]);
+	expect(entries[0]!.currentNode).toBe("first");
+});
+
 test("readCheckpoints on a missing file returns an empty array", async () => {
 	const stateDir = await tmpStateDir();
 	expect(await readCheckpoints(stateDir, "never-existed")).toEqual([]);

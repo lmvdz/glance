@@ -38,14 +38,48 @@ export function checkpointLogPath(stateDir: string, runId: string): string {
 /** Per-runId append state: the next seq to assign, and the promise chain serializing writes. */
 const chains = new Map<string, { seq: number; chain: Promise<void> }>();
 
-async function lineCount(file: string): Promise<number> {
+/**
+ * Count PARSEABLE, newline-terminated lines, repairing a torn trailing line on disk (review finding 7): a
+ * crash mid-append leaves a partial line with NO trailing newline. The naive `text.trim().split("\n").length`
+ * this used to do counts that torn fragment as a whole line — so the next `appendFile` glues its own write
+ * directly onto the fragment's tail (no separating newline), producing ONE unparseable merged line that
+ * `readCheckpoints` can only skip whole. That's a permanent seq hole: BOTH the torn entry AND the next
+ * (fully-written) one are lost from every future read, and a `forkPoint.seq` referencing either becomes
+ * un-forkable. Fixing this requires repairing the file the FIRST time this runId's log is touched after a
+ * boot (`chainFor`'s init) — before any append can glue onto it — so `seq` always equals the number of
+ * complete, parseable lines and a torn fragment can never merge with a subsequent write.
+ */
+async function repairAndCountLines(file: string): Promise<number> {
+	let text: string;
 	try {
-		const text = await fs.readFile(file, "utf8");
-		const trimmed = text.trim();
-		return trimmed ? trimmed.split("\n").length : 0;
+		text = await fs.readFile(file, "utf8");
 	} catch {
 		return 0; // ENOENT (or any read failure) ⇒ nothing appended yet this process/host.
 	}
+	if (!text) return 0;
+	// split("\n") on a file written exclusively via `appendFile(..., json + "\n")` always ends in one of two
+	// ways: a clean file's last element is "" (the byte after the final "\n"); a torn file's last element is
+	// the unterminated partial write itself. Every OTHER element was followed by a real "\n" in the original
+	// text, so it's a candidate complete line regardless of which case this is.
+	const rawLines = text.split("\n");
+	const tail = rawLines[rawLines.length - 1] ?? "";
+	const candidateLines = rawLines.slice(0, -1).filter((l) => l.trim());
+	let complete = 0;
+	for (const line of candidateLines) {
+		try {
+			JSON.parse(line);
+			complete++;
+		} catch {
+			// A malformed COMPLETE (newline-terminated) line shouldn't normally happen — stay consistent with
+			// readCheckpoints' own tolerance: skip, don't count, don't throw.
+		}
+	}
+	if (tail.trim()) {
+		// Torn trailing line — repair ON DISK now, before any append() can ever glue onto it. Truncates the
+		// file to just its complete, newline-terminated lines.
+		await fs.writeFile(file, complete > 0 ? candidateLines.join("\n") + "\n" : "");
+	}
+	return complete;
 }
 
 function truncateField(value: string): string {
@@ -54,14 +88,17 @@ function truncateField(value: string): string {
 }
 
 /** Reserve (or reuse) this runId's chain entry SYNCHRONOUSLY — no `await` before `chains.set` — so N
- *  concurrent `appendCheckpoint` calls for the same runId in the same tick all observe the one entry
- *  this function creates, instead of each racing `lineCount` independently and all starting at seq 0. */
+ *  concurrent `appendCheckpoint` calls for the same runId in the same tick all observe the one entry this
+ *  function creates, instead of each racing `repairAndCountLines` independently and all starting at seq 0.
+ *  `repairAndCountLines` runs exactly once here, on this runId's FIRST touch after a process boot — the
+ *  only point a torn trailing line (from a crash mid-append before this boot) could otherwise be glued
+ *  onto by the very first append below. */
 function chainFor(runId: string, file: string): { seq: number; chain: Promise<void> } {
 	let entry = chains.get(runId);
 	if (!entry) {
 		entry = { seq: 0, chain: Promise.resolve() };
 		chains.set(runId, entry);
-		entry.chain = lineCount(file).then((n) => {
+		entry.chain = repairAndCountLines(file).then((n) => {
 			entry!.seq = n;
 		});
 	}
@@ -98,7 +135,7 @@ export async function getLastSeq(stateDir: string, runId: string): Promise<numbe
 		await entry.chain.catch(() => {}); // let any in-flight init/append settle before reading seq
 		return entry.seq;
 	}
-	return lineCount(checkpointLogPath(stateDir, runId));
+	return repairAndCountLines(checkpointLogPath(stateDir, runId));
 }
 
 /** Read every well-formed entry, sorted by seq ascending. Tolerates a torn trailing line (partial JSON
