@@ -12,8 +12,11 @@
  *                   `{"__sq":"meta", ready, pid, exited}`.
  *   client → host : omp RPC commands forwarded verbatim to omp stdin, plus
  *                   control `{"__sq":"shutdown"}` (terminate omp + host).
- * On connect the host sends a meta frame then replays its ring buffer, so a
- * reconnecting daemon rebuilds the agent's state.
+ * On connect the host sends a meta frame then replays its ring buffer, followed by an explicit
+ * `{"__sq":"replay_complete"}` marker — so a reconnecting daemon rebuilds the agent's state AND knows
+ * precisely when the replay has fully landed (rather than guessing with a fixed tick), however many
+ * socket reads the replay itself spans. Written LAST, after every ring line, so a client that processes
+ * frames strictly in stream order (UDS/TCP preserve order) always sees it after everything replayed.
  *
  * UDS chosen over TCP loopback (~3x lower local latency, bidirectional) and over
  * tmux pane-scraping (we keep omp's structured JSON-RPC frames).
@@ -39,6 +42,8 @@ export interface AgentHostOptions {
 
 const RING_MAX = 4000;
 const SQ_SHUTDOWN = '{"__sq":"shutdown"}';
+/** Sent once per connection, after the meta frame + the full ring replay — see the module header. */
+const SQ_REPLAY_COMPLETE = '{"__sq":"replay_complete"}';
 
 /** Directory holding one Unix socket per live agent host. */
 export function squadSocketDir(): string {
@@ -186,6 +191,7 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 				try {
 					sock.write(`${meta()}\n`);
 					for (const line of ring) sock.write(`${line}\n`);
+					sock.write(`${SQ_REPLAY_COMPLETE}\n`);
 				} catch {
 					/* client vanished */
 				}
