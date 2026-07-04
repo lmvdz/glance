@@ -661,6 +661,21 @@ test("WorkflowDriver: a fan-out spawns one fleet agent per branch and merges", a
 	expect(fleetCalls.map((s) => s.name).sort()).toEqual(["a", "b"]); // one fleet agent per branch
 	expect(fleetCalls.every((s) => s.task.includes("explore the change"))).toBe(true); // goal threaded into each branch task
 	expect((frames.findLast((f) => f.type === "message_update")?.assistantMessageEvent?.delta ?? "")).toContain("✓ workflow");
+	// Driver-side spawnBranch closure wiring (parentNodeId: node.id, nextBranchIndex(node.id)) — otherwise
+	// untested at the value level, so a regression dropping/mis-wiring either field would still pass every
+	// other assertion above. Real semantics of a NORMAL fan-out (distinct target nodes "a" and "b" off one
+	// fork, not a re-fanned-out single node): each branch's `node` IS its own target node, so siblings get
+	// DISTINCT parentNodeIds (their own node id, matching `name` here) — never the shared fork node's id —
+	// and branchIndex 0 for EACH, since `nextBranchIndex` is keyed per node id and this is each node's first
+	// (only) visit. branchIndex only climbs past 0 when the SAME node is fanned out to more than once
+	// (e.g. a fix-up loop re-entering one parallel node across visits), which this workflow never does.
+	const specA = fleetCalls.find((s) => s.name === "a")!;
+	const specB = fleetCalls.find((s) => s.name === "b")!;
+	expect(specA.parentNodeId).toBe("a");
+	expect(specB.parentNodeId).toBe("b");
+	expect(specA.parentNodeId).not.toBe(specB.parentNodeId); // siblings get distinct parentNodeIds, not one shared fork-node id
+	expect(specA.branchIndex).toBe(0);
+	expect(specB.branchIndex).toBe(0);
 	await driver.stop();
 });
 
