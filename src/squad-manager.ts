@@ -901,29 +901,42 @@ export class SquadManager extends EventEmitter {
 		return this.scouts.get(key);
 	}
 
-	/** On daemon start, reattach to any agent whose detached host survived (upgrade/restart). */
+	/** On daemon start, reattach to any agent whose detached host survived (upgrade/restart).
+	 *
+	 *  Two passes, not one: a workflow's live parallel-branch children are ordinary (non-"workflow")
+	 *  snapshot entries and can appear ANYWHERE in `snapshot.agents`, including after their parent. If a
+	 *  workflow parent's `attachExisting` (which reconciles + resumes the graph — see its own comment)
+	 *  ran before all of that parent's children were reattached, a fresh deterministic re-spawn from the
+	 *  resumed fan-out could claim a child's id before the later loop iteration reattaches the still-live
+	 *  old host under that same id — two agents racing one worktree. Attaching every non-workflow agent
+	 *  first closes that race: by the time a workflow parent's `attachExisting` runs, every live branch
+	 *  child it could reconcile against is already in `this.agents`. */
 	private async reconnectLive(snapshot: StateSnapshot): Promise<number> {
 		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		let n = 0;
+		const workflows: PersistedAgent[] = [];
 		for (const p of snapshot.agents) {
 			if (this.agents.has(p.id)) continue;
 			if (p.kind === "flue-service") continue; // flue workers are not reattached
 			if (p.kind === "workflow") {
-				// A workflow run survives a restart only if its inner thread is still alive AND we have a
-				// checkpoint to resume the graph from; otherwise the orchestration is unrecoverable.
-				const innerAlive = await hostAlive(socketPathFor(`${p.id}-wf`));
-				if (innerAlive && p.workflowState) {
-					await this.attachExisting(p, snapshot.transcripts[p.id] ?? []).catch((err) => this.log("warn", `resume ${p.name} failed: ${String(err)}`));
-					n++;
-				} else if (innerAlive) {
-					this.log("warn", `workflow ${p.name} has a live thread but no checkpoint — cannot resume the graph`);
-				}
+				workflows.push(p);
 				continue;
 			}
 			if (!(await hostAlive(socketPathFor(p.id)))) continue;
 			await this.attachExisting(p, snapshot.transcripts[p.id] ?? []).catch((err) => this.log("warn", `reattach ${p.name} failed: ${String(err)}`));
 			n++;
+		}
+		for (const p of workflows) {
+			// A workflow run survives a restart only if its inner thread is still alive AND we have a
+			// checkpoint to resume the graph from; otherwise the orchestration is unrecoverable.
+			const innerAlive = await hostAlive(socketPathFor(`${p.id}-wf`));
+			if (innerAlive && p.workflowState) {
+				await this.attachExisting(p, snapshot.transcripts[p.id] ?? []).catch((err) => this.log("warn", `resume ${p.name} failed: ${String(err)}`));
+				n++;
+			} else if (innerAlive) {
+				this.log("warn", `workflow ${p.name} has a live thread but no checkpoint — cannot resume the graph`);
+			}
 		}
 		if (n) this.log("info", `reattached ${n} live agent(s)`);
 		return n;
@@ -1139,6 +1152,16 @@ export class SquadManager extends EventEmitter {
 		// Armed BEFORE agent.start() — see armReplayCompleteWaiter's own comment for why arming after
 		// start() resolves would miss a marker delivered inside start()'s first socket read.
 		const replaySettled = this.armReplayCompleteWaiter(p.id);
+		// A WARM reattach (this path) still re-runs the graph from its checkpoint the instant `agent.start()`
+		// resolves — WorkflowDriver.start() fires `execRun` off `resumeState` unconditionally, `cold` only
+		// changes whether the in-flight node re-executes on a fresh inner thread. So a mid-fan-out checkpoint
+		// resumed here re-enters `runParallel` exactly like the cold/adopt path does, and needs the same
+		// stop-stale-branch-ids reconciliation first — otherwise the re-spawn collides with (or races) a
+		// branch child `reconnectLive` already reattached under the very same deterministic id. Safe to call
+		// unconditionally on every reattach: it no-ops unless `currentNode` is actually a parallel fork
+		// (reconcileParallelResume's own early-return). reconnectLive's two-pass ordering guarantees every
+		// live branch child is already in `this.agents` by the time a workflow parent gets here.
+		if (p.kind === "workflow" && p.workflowState?.branchOutcomes) await this.reconcileParallelResume(p);
 		try {
 			await agent.start();
 			await this.drainOneTick(); // cheap floor: let a purely-synchronous burst land even for a driver that never sends a marker at all
@@ -2698,8 +2721,12 @@ export class SquadManager extends EventEmitter {
 	 * not the live agent's state) or still `not_attempted` (so it gets re-spawned fresh under the same id
 	 * moments later by `spawnFleetBranch`, avoiding two roster entries under one id and cleaning up any
 	 * first_success crash-window loser `reconnectLive` already reattached — it has no parentId filter).
-	 * Stopped ids are remembered in `reconciledStops` so the re-spawn that follows knows to append a
-	 * "resuming after a restart" note to the branch's re-prompt.
+	 * Stopped ids for a still-`not_attempted` key are remembered in `reconciledStops` so the re-spawn that
+	 * follows knows to append a "resuming after a restart" note to the branch's re-prompt — an already-
+	 * resolved (succeeded/failed) key is never re-spawned, so it's never added (nothing would ever consume
+	 * it, and the set would otherwise grow unbounded on a long-lived daemon). Teardown otherwise mirrors
+	 * remove()'s: emit `{type:"removed"}` and persist so clients/the on-disk snapshot converge immediately
+	 * instead of carrying a ghost roster entry until some unrelated later persist.
 	 */
 	private async reconcileParallelResume(p: PersistedAgent): Promise<void> {
 		const ws = p.workflowState;
@@ -2717,6 +2744,7 @@ export class SquadManager extends EventEmitter {
 		// Same formula runParallel uses for the fan-out it's about to re-enter (engine.ts).
 		const visitIndex = ws.visits[fork.id] ?? 0;
 		const branchIds = wf.edges.filter((e) => e.from === fork.id).map((e) => e.to);
+		let stoppedAny = false;
 		for (let i = 0; i < branchIds.length; i++) {
 			const key = `${fork.id}#${visitIndex}:${i}`;
 			const id = deriveBranchAgentId(runId, key, branchIds[i]!);
@@ -2724,8 +2752,11 @@ export class SquadManager extends EventEmitter {
 			if (!rec) continue;
 			await rec.agent.stop().catch(() => {});
 			this.agents.delete(id);
-			this.reconciledStops.add(id);
+			if (ws.branchOutcomes[key]?.disposition === "not_attempted") this.reconciledStops.add(id);
+			this.emit("event", { type: "removed", id } satisfies SquadEvent);
+			stoppedAny = true;
 		}
+		if (stoppedAny) await this.persist();
 	}
 
 	/** Spawn a real roster agent for a workflow's parallel branch, run the task, resolve with its result. The agent stays in the roster. */

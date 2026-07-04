@@ -72,6 +72,7 @@ interface InternalHost {
 	spawnFleetBranch(repo: string, parentId: string, spec: BranchSpec): Promise<{ outcome: string; text?: string }>;
 	reconcileParallelResume(p: PersistedAgent): Promise<void>;
 	restart(rec: FakeAgentRecord): Promise<void>;
+	attachExisting(p: PersistedAgent, transcript?: unknown[]): Promise<void>;
 }
 
 function fakeRecord(dto: AgentDTO, agent: AgentDriver, options: PersistedAgent): FakeAgentRecord {
@@ -94,12 +95,12 @@ async function makeRepo(prefix: string): Promise<string> {
 	return repo;
 }
 
-async function makeMgr(prefix: string): Promise<{ mgr: SquadManager; repo: string; worktreeBase: string }> {
+async function makeMgr(prefix: string, opts: { replaySettleTimeoutMs?: number } = {}): Promise<{ mgr: SquadManager; repo: string; worktreeBase: string }> {
 	const repo = await makeRepo(`${prefix}-repo-`);
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-state-`));
 	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-wt-`));
 	tmps.push(stateDir, worktreeBase);
-	const mgr = new SquadManager({ stateDir, worktreeBase });
+	const mgr = new SquadManager({ stateDir, worktreeBase, ...opts });
 	await mgr.start();
 	(mgr as unknown as DriverFactoryHost).makeDriver = () => new FakeDriver();
 	return { mgr, repo, worktreeBase };
@@ -242,6 +243,168 @@ test("reconcileParallelResume stops live roster agents under both a not_attempte
 	expect(driverB.stopped).toBe(1);
 	expect(host.agents.has(idNotAttempted)).toBe(false);
 	expect(host.agents.has(idSucceeded)).toBe(false);
+	await mgr.stop();
+});
+
+// (d2) reconcileParallelResume only remembers a stopped id in `reconciledStops` for a still-`not_attempted`
+// key — a resolved (succeeded/failed) key is never re-spawned by spawnFleetBranch, so nothing should ever
+// consume it, and the set must not grow for it.
+test("reconcileParallelResume only tracks reconciledStops for not_attempted keys, not resolved ones", async () => {
+	const { mgr } = await makeMgr("reconcile-stops-scope");
+	const host = mgr as unknown as InternalHost & { reconciledStops: Set<string> };
+
+	const graphDir = await fs.mkdtemp(path.join(os.tmpdir(), "reconcile-stops-graph-"));
+	tmps.push(graphDir);
+	const graphPath = path.join(graphDir, "wf.fabro");
+	await fs.writeFile(graphPath, PARALLEL_GRAPH);
+
+	const runId = "run-scope";
+	const idNotAttempted = deriveBranchAgentId(runId, "fork#0:0", "branch_a");
+	const idSucceeded = deriveBranchAgentId(runId, "fork#0:1", "branch_b");
+	const stubDto = (id: string, name: string): AgentDTO => ({ id, name, status: "working", repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo", pending: [], lastActivity: Date.now(), messageCount: 0, kind: "omp-operator" });
+	const stubOptions = (id: string, name: string): PersistedAgent => ({ id, name, repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo" });
+	host.agents.set(idNotAttempted, fakeRecord(stubDto(idNotAttempted, "branch_a"), new FakeDriver(), stubOptions(idNotAttempted, "branch_a")));
+	host.agents.set(idSucceeded, fakeRecord(stubDto(idSucceeded, "branch_b"), new FakeDriver(), stubOptions(idSucceeded, "branch_b")));
+
+	const p: PersistedAgent = {
+		id: "wf-scope",
+		name: "wf",
+		repo: "(none)",
+		worktree: "/tmp/wf-scope",
+		approvalMode: "yolo",
+		kind: "workflow",
+		workflow: { path: graphPath },
+		workflowState: {
+			goal: "g",
+			currentNode: "fork",
+			visits: { fork: 0 },
+			vars: {},
+			index: 0,
+			rollup: [],
+			runId,
+			branchOutcomes: {
+				"fork#0:0": { disposition: "not_attempted", at: Date.now() },
+				"fork#0:1": { disposition: "succeeded", at: Date.now(), text: "done" },
+			},
+		},
+	};
+
+	await host.reconcileParallelResume(p);
+
+	expect(host.reconciledStops.has(idNotAttempted)).toBe(true);
+	expect(host.reconciledStops.has(idSucceeded)).toBe(false); // never re-spawned — must not linger in the set
+	await mgr.stop();
+});
+
+// (f) The WARM reattach path (attachExisting, the sole caller of reconcileParallelResume that runs with
+// cold unset) reconciles a stale live branch child left over from before a restart BEFORE the resumed
+// workflow gets a chance to re-enter the same fan-out slot — this is the significant bug: previously only
+// restart()'s cold path called reconcileParallelResume, so a warm reattach (the common graceful-restart
+// case) re-ran the parallel node's fan-out straight into the still-live old branch id and createInternal's
+// duplicate-id guard tore down the ENTIRE fan-out.
+test("attachExisting reconciles a stale live branch agent before resuming a warm (non-cold) workflow reattach", async () => {
+	const { mgr } = await makeMgr("warm-reconcile", { replaySettleTimeoutMs: 20 });
+	const host = mgr as unknown as InternalHost;
+
+	const graphDir = await fs.mkdtemp(path.join(os.tmpdir(), "warm-reconcile-graph-"));
+	tmps.push(graphDir);
+	const graphPath = path.join(graphDir, "wf.fabro");
+	await fs.writeFile(graphPath, PARALLEL_GRAPH);
+
+	const runId = "run-warm";
+	const staleId = deriveBranchAgentId(runId, "fork#0:0", "branch_a");
+	const staleDriver = new FakeDriver();
+	const stubDto = (id: string, name: string): AgentDTO => ({ id, name, status: "working", repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo", pending: [], lastActivity: Date.now(), messageCount: 0, kind: "omp-operator" });
+	const stubOptions = (id: string, name: string): PersistedAgent => ({ id, name, repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo" });
+	host.agents.set(staleId, fakeRecord(stubDto(staleId, "branch_a"), staleDriver, stubOptions(staleId, "branch_a")));
+
+	const persisted: PersistedAgent = {
+		id: "wf-warm",
+		name: "wf",
+		repo: "(none)",
+		worktree: "/tmp/wf-warm",
+		approvalMode: "yolo",
+		kind: "workflow",
+		workflow: { path: graphPath },
+		workflowState: {
+			goal: "g",
+			currentNode: "fork",
+			visits: { fork: 0 },
+			vars: {},
+			index: 0,
+			rollup: [],
+			runId,
+			branchOutcomes: {
+				"fork#0:0": { disposition: "not_attempted", at: Date.now() },
+				"fork#0:1": { disposition: "not_attempted", at: Date.now() },
+			},
+		},
+	};
+
+	// This is NOT the cold-adopt path — attachExisting is reconnectLive's warm reattach, and never passes
+	// cold:true to makeDriver. Reconciliation must run here regardless.
+	await host.attachExisting(persisted, []);
+
+	expect(staleDriver.stopped).toBe(1);
+	expect(host.agents.has(staleId)).toBe(false);
+	await mgr.stop();
+});
+
+// (g) Companion to (f): the re-spawn that follows a reconciled stop appends the "resuming after a restart"
+// addendum to the branch's task; a fresh, never-reconciled spawn under a different key does not.
+test("spawnFleetBranch appends the restart addendum only for a reconciled (previously-stopped) branch id", async () => {
+	const { mgr, repo } = await makeMgr("reprompt-addendum");
+	const host = mgr as unknown as InternalHost;
+
+	const graphDir = await fs.mkdtemp(path.join(os.tmpdir(), "reprompt-graph-"));
+	tmps.push(graphDir);
+	const graphPath = path.join(graphDir, "wf.fabro");
+	await fs.writeFile(graphPath, PARALLEL_GRAPH);
+
+	const runId = "run-reprompt";
+	const staleId = deriveBranchAgentId(runId, "fork#0:0", "branch_a");
+	const staleDriver = new FakeDriver();
+	const stubDto = (id: string, name: string): AgentDTO => ({ id, name, status: "working", repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo", pending: [], lastActivity: Date.now(), messageCount: 0, kind: "omp-operator" });
+	const stubOptions = (id: string, name: string): PersistedAgent => ({ id, name, repo: "(none)", worktree: `/tmp/${name}`, approvalMode: "yolo" });
+	host.agents.set(staleId, fakeRecord(stubDto(staleId, "branch_a"), staleDriver, stubOptions(staleId, "branch_a")));
+
+	const p: PersistedAgent = {
+		id: "wf-reprompt",
+		name: "wf",
+		repo: "(none)",
+		worktree: "/tmp/wf-reprompt",
+		approvalMode: "yolo",
+		kind: "workflow",
+		workflow: { path: graphPath },
+		workflowState: {
+			goal: "g",
+			currentNode: "fork",
+			visits: { fork: 0 },
+			vars: {},
+			index: 0,
+			rollup: [],
+			runId,
+			branchOutcomes: { "fork#0:0": { disposition: "not_attempted", at: Date.now() } },
+		},
+	};
+
+	await host.reconcileParallelResume(p);
+	expect(staleDriver.stopped).toBe(1);
+
+	const reconciledSpec: BranchSpec = { name: "branch_a", task: "do the thing", runId, branchKey: "fork#0:0" };
+	const r1 = await host.spawnFleetBranch(repo, "wf-reprompt", reconciledSpec);
+	expect(r1.outcome).toBe("succeeded");
+	const reconciledRec = host.agents.get(staleId)!;
+	expect((reconciledRec.agent as FakeDriver).prompted[0]).toBe("do the thing\n\n(Resuming after a restart — prior partial work may already exist in this worktree; continue from where it left off.)");
+
+	// A fresh spawn under a key that was never reconciled must NOT carry the addendum.
+	const freshSpec: BranchSpec = { name: "branch_b", task: "do another thing", runId, branchKey: "fork#0:1" };
+	const r2 = await host.spawnFleetBranch(repo, "wf-reprompt", freshSpec);
+	expect(r2.outcome).toBe("succeeded");
+	const freshId = deriveBranchAgentId(runId, "fork#0:1", "branch_b");
+	const freshRec = host.agents.get(freshId)!;
+	expect((freshRec.agent as FakeDriver).prompted[0]).toBe("do another thing");
+
 	await mgr.stop();
 });
 
