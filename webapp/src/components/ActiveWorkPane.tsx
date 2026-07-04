@@ -23,6 +23,7 @@ import { Radar, RefreshCw, FolderGit2, GitBranch, MessageSquare, Send, GitMerge,
 import { apiJson, jsonInit } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
 import { answerCommand, canLand, restartCommand } from '../lib/agent-control';
+import { landButtonLabel, prStateBadgeClass, prStateBadgeLabel } from '../lib/agent-badges';
 import type { AgentDTO } from '../lib/dto';
 import { activeWork, activeWorkAction, ACTIVE_WORK_STATUS_LABEL, type ActiveWorkItem, type ActiveWorkStatus, type ActiveWorkAction, type ActiveWorkActionKind, type ActiveWorkAgentLine } from '../lib/insights';
 import { fleetActivityLines, fleetActivityRollup, type FleetActivityLine, type FleetActivityKind } from '../lib/fleetActivity';
@@ -349,8 +350,10 @@ const FleetAgentRow: React.FC<{
       <span className="flex flex-shrink-0 items-center gap-1.5 text-[11px] tabular-nums text-gray-500 dark:text-gray-400">
         {ctx && <span title="context used">{ctx}</span>}
         {cost && <span title="run cost">{cost}</span>}
-        {agent.landReady && <span className="rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">✓ ready</span>}
-        {!agent.landReady && agent.verificationState === 'fresh' && <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">proof fresh</span>}
+        {agent.prState ? (
+          <span className={`rounded px-1.5 py-0.5 text-xs ${prStateBadgeClass(agent.prState)}`}>{prStateBadgeLabel(agent.prState)}</span>
+        ) : agent.landReady && <span className="rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">✓ ready</span>}
+        {!agent.landReady && !agent.prState && agent.verificationState === 'fresh' && <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">proof fresh</span>}
       </span>
       {landable && (
         <button
@@ -359,7 +362,7 @@ const FleetAgentRow: React.FC<{
           className="flex min-h-8 flex-shrink-0 items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-2 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
           aria-label={`Land ${agent.name}`}
         >
-          {busy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <GitMerge className="h-3 w-3" aria-hidden="true" />} Land
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <GitMerge className="h-3 w-3" aria-hidden="true" />} {landButtonLabel(agent)}
         </button>
       )}
     </div>

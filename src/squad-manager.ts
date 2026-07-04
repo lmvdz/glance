@@ -52,6 +52,13 @@ import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, s
 export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
+// Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
+// under the same bare name would read as if that field and this function were the same thing.
+import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
+import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof } from "./done-proof.ts";
+import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
+import { ghJson } from "./gh.ts";
+import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
@@ -105,7 +112,7 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
-import { addWorktree, branchAhead, deleteBranchIfMerged, isGitRepo, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
+import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
@@ -362,6 +369,11 @@ export class SquadManager extends EventEmitter {
 	private readonly observers: Observer[] = [];
 	/** Plan-sync tick timers (one per configured Plane repo); cleared in stop(). */
 	private readonly planSyncTimers: Timer[] = [];
+	/** PR-reconciler backstop timer (concern 07) — always-on, NOT gated by OMP_SQUAD_OBSERVE; cleared in stop(). */
+	private prReconcileTimer?: Timer;
+	/** Untracked-otherwise 20s post-boot stagger for the PR-reconciler tick; cleared in stop() so a
+	 *  manager stopped within the stagger window never fires a tick after shutdown. */
+	private prReconcileStaggerTimer?: Timer;
 	/** Scouts keyed by configured Plane repo — one per repo so multi-repo reasoning is all harvested. */
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
@@ -553,6 +565,22 @@ export class SquadManager extends EventEmitter {
 		// seen-map (the first keeps the legacy filename for upgrade continuity; the rest are suffixed).
 		const observeRepos = planeRepos();
 		const slug = (repo: string) => repo.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+		// Land-mode probe — resolved + logged per repo at boot so an operator sees WHY a repo landed in
+		// PR vs local mode without digging ("all 5 probes passed" or the exact reason it forced local).
+		for (const repo of observeRepos) {
+			void resolveLandMode(repo)
+				.then((r) => {
+					this.log("info", `land mode for ${repo}: ${r.mode.toUpperCase()} (${r.reason})`);
+					// The divergence probe (probe 5) forced local mode — give the operator the actual
+					// runbook here, since the probe's own reason string just points back at this log line.
+					if (r.mode === "local" && r.reason.includes("diverged")) {
+						this.log("warn", `${repo}: local default branch has diverged from origin — reconcile it by either (a) pushing the local commits to origin if they're real forward progress the remote is missing, or (b) confirming they're already merged upstream some other way and then resetting the local checkout onto origin/<default> (e.g. \`git reset --hard origin/<default>\`)`);
+						this.log("info", `${repo}: PR mode re-enables automatically once the two branches converge — no restart needed, the next resolved probe picks it up`);
+					}
+				})
+				.catch((e) => this.log("warn", `land mode probe failed for ${repo}: ${String(e)}`));
+		}
 		if (process.env.OMP_SQUAD_OBSERVE !== "0" && observeRepos.length > 0) {
 			observeRepos.forEach((repo, i) => {
 				const observer = new Observer({
@@ -588,6 +616,7 @@ export class SquadManager extends EventEmitter {
 					void syncPlanStatuses({
 						repo,
 						listIssues: () => listPlaneIssuesAllStates(repo),
+						hasProof: (identifier) => hasProof(this.stateDir, identifier),
 						log: (m) => this.log("info", m),
 						record: this.automation.for("plan-sync", repo),
 					}).then((r) => {
@@ -599,6 +628,17 @@ export class SquadManager extends EventEmitter {
 			}
 			this.log("info", `plan-sync on (reconciling STATUS lines for ${observeRepos.join(", ")} every ${Math.round(intervalMs / 1000)}s)`);
 		}
+
+		// PR-reconciler backstop (concern 07) — the synchronous `landAgentPr` path already writes
+		// truth at merge-click; this loop only exists for what that path can't see: a human merging (or
+		// closing) a PR directly in GitHub's UI, and the crash-ordering windows between push/create,
+		// merge/proof, and proof/Plane-close. Deliberately NOT gated by OMP_SQUAD_OBSERVE (a toggleable
+		// self-audit must not silently stop Done-writes for merged PRs) and NOT gated on
+		// `observeRepos.length` (its own activity gate is "is there any ledger/roster work at all",
+		// checked fresh inside every tick) — runs in DB mode too, same as every other manager-owned loop.
+		const prReconcileIntervalMs = Number(process.env.OMP_SQUAD_PR_RECONCILE_INTERVAL_MS) || 120_000;
+		this.prReconcileTimer = setInterval(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), prReconcileIntervalMs);
+		this.prReconcileStaggerTimer = setTimeout(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), 20_000); // stagger past plan-sync's own 15s
 
 		// Scout (sibling to the Observer) — semantic harvest, not operational audit: it reads agents'
 		// reasoning and files the latent items they surfaced but didn't do. One per configured Plane repo
@@ -711,10 +751,21 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		if (!closedRef) return false;
-		this.log("warn", `stale issue ${issue.identifier ?? issue.id}: ${closedRef} is already closed — skipping dispatch${this.closeOnDone ? ", closing the issue" : ""}`);
+		this.log("warn", `stale issue ${issue.identifier ?? issue.id}: ${closedRef} is already closed — skipping dispatch`);
 		if (this.closeOnDone && !this.closedIssues.has(issue.id)) {
-			if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
-			else this.log("warn", `could not close stale issue ${issue.identifier ?? issue.id}`);
+			// Skip-dispatch above stays proofless (gating it would re-open PR #18's stale-re-dispatch
+			// incident); only this direct closePlaneIssue write requires a recorded DoneProof. A doc
+			// terminal from before this wave shipped (grandfathered) has no ledger entry — its close is
+			// suppressed and surfaced, never silently written, but dispatch remains skipped either way.
+			const proof = issue.identifier ? getDoneProofByIssue(this.stateDir, issue.identifier) : undefined;
+			if (!proof) {
+				this.log("warn", `terminal-without-proof: ${issue.identifier ?? issue.id} is doc-closed but has no DoneProof — NOT closing in Plane (dispatch still skipped)`);
+				void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", issue.identifier ?? issue.id, "error", `doc says ${closedRef} but no DoneProof exists`);
+			} else if (await closePlaneIssue(issue)) {
+				this.closedIssues.add(issue.id);
+			} else {
+				this.log("warn", `could not close stale issue ${issue.identifier ?? issue.id}`);
+			}
 		}
 		return true;
 	}
@@ -733,6 +784,8 @@ export class SquadManager extends EventEmitter {
 		this.orchestrator?.stop();
 		for (const o of this.observers) o.stop();
 		for (const t of this.planSyncTimers.splice(0)) clearInterval(t);
+		clearInterval(this.prReconcileTimer);
+		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		clearInterval(this.leaseGossipTimer);
@@ -845,14 +898,23 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Does a persisted (pre-adoption) agent still have local work to resume — uncommitted edits or commits
-	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster. */
+	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster.
+	 *  DoneProof is consulted before the arithmetic (same proof-first idiom as agentHasUnlandedWork /
+	 *  observer.ts's hasDoneProof), gated on `proofCoversTip` so a follow-up commit pushed after the
+	 *  proof was recorded falls back to the arithmetic instead of being permanently invisible: a
+	 *  squash/rebase merge landed out-of-band while the daemon was down would otherwise permanently
+	 *  re-adopt an already-landed branch as "has work" on every restart. */
 	private async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
 		if (!p.worktree) return false;
 		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		if (!p.branch) return false;
-		const r = Bun.spawnSync(["git", "-C", p.repo, "rev-list", "--count", `HEAD..${p.branch}`], { stdout: "pipe", stderr: "ignore" });
-		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+		const proof = getDoneProofByBranch(this.stateDir, p.branch);
+		if (proof && (await proofCoversTip(proof, p.branch, p.repo))) return false;
+		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
+		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
+		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
+		return (await computeAheadOfBase({ repo: p.repo, branch: p.branch, cwd: p.repo })) > 0;
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
@@ -1360,12 +1422,19 @@ export class SquadManager extends EventEmitter {
 	 * Edit one concern of a feature's plan from the flow diagram: rewrite its STATUS and/or the
 	 * concerns that block it, persisting to the concern doc + overview dependency table. Works for
 	 * stored AND derived (plan-dir-scanned) features — it resolves the feature via features().
+	 *
+	 * This is the human-override lane: a status write here is deliberately NOT gated on a DoneProof
+	 * (the flow-diagram editor is exactly where an operator asserts truth the ledger doesn't have yet).
+	 * It gains an audit record instead, so the write is visible rather than invisible.
 	 */
-	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }): Promise<PlanConcern | undefined> {
+	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }, actor: Actor = LOCAL_ACTOR): Promise<PlanConcern | undefined> {
 		const f = (await this.features(opts.repo)).find((x) => x.id === id);
 		if (!f || !f.planDir) return undefined;
 		const concern = await updatePlanConcern(f.repo, f.planDir, opts.file, { status: opts.status, blockedBy: opts.blockedBy });
-		if (concern) this.emitFeaturesChanged();
+		if (concern) {
+			this.emitFeaturesChanged();
+			if (opts.status != null) void this.recordAudit(actor, "concern.status", opts.file, "ok", `-> ${opts.status} (operator/webapp edit, no land proof required)`);
+		}
 		return concern;
 	}
 
@@ -1605,15 +1674,57 @@ export class SquadManager extends EventEmitter {
 		for (const w of landOrder(wts)) {
 			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
-			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, staleGate: !force, verify: pf.acceptance ?? undefined });
+			// Reroute through the SAME mode-dispatching seam land() uses (concern 06) — landFeature used
+			// to call landAgent directly here, which meant PR mode would keep local-merging every
+			// multi-branch feature land regardless of the resolved mode (the "two worlds inside the
+			// daemon" hole). Issue fields thread through so PR mode's DoneProof/PendingPr ledger entries
+			// are retrievable by issue identifier, same as the single-agent path.
+			const res = await this.landBranch({
+				repo: pf.repo,
+				worktree: w.worktree,
+				branch: w.branch,
+				message: `feature(${pf.title}): land ${w.branch ?? "changes"}`,
+				commitWip: !busy,
+				requireProof: !force,
+				staleGate: !force,
+				verify: pf.acceptance ?? undefined,
+				issueId: rec?.dto.issue?.id,
+				issueIdentifier: rec?.dto.issue?.identifier,
+				issueProjectId: rec?.dto.issue?.projectId,
+				agentId: w.agentId,
+			});
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			// Forced member land without a passing proof gate — audit the override per branch.
 			if (res.forcedWithoutProof) {
 				recordForcedLand(this.stateDir, w.branch, actor.id, `${reason ? `${reason}: ` : ""}${res.detail ?? ""}`);
 				void this.store.appendAudit({ actor: actor.id, action: "land.forced-unproven", target: id, detail: { branch: w.branch, reason, at: Date.now() } }).catch(() => {});
 			}
+			if (res.mode === "pr" && rec) {
+				rec.dto.prUrl = res.prUrl;
+				rec.dto.prNumber = res.prNumber;
+				rec.dto.prState = res.prState;
+				this.emitAgent(rec);
+			}
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
-			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
+			if (res.merged) {
+				// PR mode already wrote its own (richer) DoneProof inside landAgentPr — only the local
+				// path needs one written here, mirroring land()'s manager-layer write.
+				if (res.mode !== "pr") {
+					recordDoneProof(this.stateDir, {
+						branch: w.branch ?? "",
+						repo: repoIdentity(pf.repo),
+						issueId: rec?.dto.issue?.id,
+						issueIdentifier: rec?.dto.issue?.identifier,
+						mode: "local",
+						commit: w.branch ? await headCommit(w.worktree) : "",
+						baseRef: "HEAD",
+						verified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
+						detail: res.detail ?? "",
+						provenAt: Date.now(),
+					});
+				}
+				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
+			}
 		}
 		this.emitFeaturesChanged();
 		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
@@ -1662,13 +1773,26 @@ export class SquadManager extends EventEmitter {
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
 			requireProof: !opts.force,
 			staleGate: !opts.force,
+			issueId: dto.issue?.id,
+			issueIdentifier: dto.issue?.identifier,
+			issueProjectId: dto.issue?.projectId,
+			agentId: dto.id,
 		});
+		// PR-mode metadata (concern 06): set directly on the dto at push/merge time, the same pattern
+		// `landReady` already uses. Absent (mode !== "pr") ⇒ local mode, untouched.
+		if (result.mode === "pr") {
+			rec.dto.prUrl = result.prUrl;
+			rec.dto.prNumber = result.prNumber;
+			rec.dto.prState = result.prState;
+			this.emitAgent(rec);
+		}
 		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
 		// (never bump the fail streak) and not landed — surface the ready-to-land flag and return.
 		if (result.staged) {
 			rec.dto.landReady = true;
 			this.emitAgent(rec);
 			this.log("info", `land-confirm: ${id} auto-resolved a conflict — ready to land`);
+			this.floatPrOnLandReady(rec);
 			return result;
 		}
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
@@ -1686,8 +1810,31 @@ export class SquadManager extends EventEmitter {
 		if (result.ok) {
 			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
-			if (result.merged) await this.closeLandedIssue(dto.issue); // real merge ⇒ close its tracking issue (idempotent, best-effort)
-			else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
+			if (result.merged) {
+				// PR mode already wrote its own (richer, method/mergeCommit-aware) DoneProof inside
+				// landAgentPr — writing a generic "mode: local" one here too would clobber it.
+				if (result.mode !== "pr") {
+					// Retrievable proof that this branch's work is now in main — the ONE artifact later
+					// consumers (closeLandedIssue's proof gate, plan-sync, Observer arithmetic) can trust
+					// instead of re-deriving truth from rev-list math. Best-effort, additive: never blocks land().
+					// TODO: land.ts's LandResult carries no explicit tri-state flag for the red-baseline escape
+					// (verifyMerged :390-414) — this substring match on its own detail wording is the only signal
+					// today. If that wording ever changes, this silently stops matching and falls back to "green".
+					recordDoneProof(this.stateDir, {
+						branch: dto.branch ?? "",
+						repo: repoIdentity(dto.repo),
+						issueId: dto.issue?.id,
+						issueIdentifier: dto.issue?.identifier,
+						mode: "local",
+						commit: dto.branch ? await headCommit(dto.worktree) : "",
+						baseRef: "HEAD",
+						verified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
+						detail: result.detail ?? result.message,
+						provenAt: Date.now(),
+					});
+				}
+				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
+			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
@@ -1717,6 +1864,50 @@ export class SquadManager extends EventEmitter {
 		rec.dto.landReady = true;
 		this.emitAgent(rec);
 		this.log("info", `land-confirm: ${id} verified — ready to land`);
+		this.floatPrOnLandReady(rec);
+	}
+
+	/**
+	 * PR-mode landReady float (concern 06/DESIGN mode-dispatch ruling + the autoLand×PR matrix's
+	 * "landConfirm ON (default): landReady ⇒ push+draft" row): the moment an agent is flagged
+	 * ready-to-land — confirm-mode verified GREEN, or a staged auto-resolved conflict — PR mode should
+	 * already have pushed the branch and opened/adopted its PR, so the badge/URL exist at landReady
+	 * time instead of only appearing at merge-click. Concern 07's reconciler (`landReady && pr-mode &&
+	 * no ledger entry ⇒ retry ensurePr`) is a backstop for a FAILED float, not a substitute for one that
+	 * was never attempted — this is that attempt. Local mode (no `defaultBranch`) is a no-op.
+	 * Fire-and-forget: never blocks flagging the agent ready; a failure here is left for the
+	 * reconciler to retry from the PendingPr ledger.
+	 */
+	private floatPrOnLandReady(rec: AgentRecord): void {
+		const dto = rec.dto;
+		if (!dto.branch || dto.worktree === dto.repo) return; // nothing to land in PR mode
+		void (async () => {
+			try {
+				const mode = await this.resolveLandModeFor(dto.repo);
+				if (mode.mode !== "pr" || !mode.defaultBranch) return;
+				const ensure = await ensurePr({
+					repo: dto.repo,
+					branch: dto.branch as string,
+					defaultBranch: mode.defaultBranch,
+					title: `squad(${dto.name}): land ${dto.branch}`,
+					issueId: dto.issue?.id,
+					issueIdentifier: dto.issue?.identifier,
+					issueProjectId: dto.issue?.projectId,
+					agentId: dto.id,
+					stateDir: this.stateDir,
+				});
+				if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
+					rec.dto.prUrl = ensure.prUrl;
+					rec.dto.prNumber = ensure.prNumber;
+					rec.dto.prState = ensure.prState ?? "draft";
+					this.emitAgent(rec);
+				} else {
+					this.log("warn", `land-confirm: PR float failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
+				}
+			} catch (e) {
+				this.log("warn", `land-confirm: PR float threw for ${dto.name} (${dto.branch}): ${e instanceof Error ? e.message : String(e)}`);
+			}
+		})();
 	}
 
 	/**
@@ -1738,8 +1929,38 @@ export class SquadManager extends EventEmitter {
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
 		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
 	}
-	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
-	protected landBranch(opts: LandOpts): Promise<LandResult> {
+	/**
+	 * Thin, overridable wrapper around land-mode.ts's `resolveLandMode` — exists so tests can force
+	 * PR/local mode deterministically without fighting `bun test`'s PROCESS-WIDE `mock.module`
+	 * semantics: a different test file module-mocking `land-mode.ts` for an unrelated reason (e.g.
+	 * `aheadOfBase`-isolation) permanently rebinds squad-manager.ts's own `resolveLandMode` import for
+	 * the rest of the test process the moment this module is first evaluated, regardless of import
+	 * order in any OTHER file. Injecting through a method sidesteps that entirely.
+	 */
+	protected resolveLandModeFor(repo: string): ReturnType<typeof resolveLandMode> {
+		return resolveLandMode(repo);
+	}
+
+	/**
+	 * Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake
+	 * land). Also the universal mode-dispatching point (concern 06): PR mode routes through
+	 * `landAgentPr` (push → ensure PR → scratch-merge gate → `gh pr merge` → assert → DoneProof), local
+	 * mode is the unchanged passthrough to `landAgent`. `land()` and `landFeature()` both call this
+	 * seam, so PR mode inherits proofGate/fail-cap/forced-land-audit/closeLandedIssue for free.
+	 */
+	protected async landBranch(opts: LandOpts): Promise<LandResult> {
+		const mode = await this.resolveLandModeFor(opts.repo);
+		if (mode.mode === "pr") {
+			if (!mode.defaultBranch) {
+				// Forced PR mode (OMP_SQUAD_LAND_MODE=pr) with no resolvable default branch — refuse the
+				// land LOUDLY rather than silently falling through to `landAgent` (a local merge). An
+				// operator who explicitly forced PR mode never wants a "quiet" local merge as the fallback;
+				// that is exactly the "wrong merge world" this env var exists to prevent.
+				this.log("warn", `land refused for ${opts.repo}: ${mode.reason}`);
+				return { ok: false, committed: false, merged: false, message: opts.message, detail: `forced-pr-mode-without-default-branch: ${mode.reason}` };
+			}
+			return landAgentPr({ ...opts, defaultBranch: mode.defaultBranch }, this.stateDir);
+		}
 		return landAgent(opts);
 	}
 
@@ -1800,23 +2021,33 @@ export class SquadManager extends EventEmitter {
 	 * Cheap "has unlanded work" probe for the auto-land loop — uncommitted edits, or commits ahead
 	 * of the repo's checked-out base. Gates the costly acceptance run so it never fires on an idle
 	 * agent with nothing to merge.
+	 *
+	 * DoneProof is consulted FIRST, before any ahead-count arithmetic, mirroring observer.ts's
+	 * `hasDoneProof` idiom: a squash/rebase (or out-of-band) merge makes rev-list arithmetic
+	 * permanently nonzero even though the work is safely in origin/default, so a recorded proof for
+	 * the branch means "no unlanded work" regardless of what the arithmetic says — but only while the
+	 * proof still covers the branch's CURRENT tip (`proofCoversTip`): a follow-up commit pushed to the
+	 * branch after the proof was taken must fall back to the arithmetic, not be swallowed forever.
+	 * Uncommitted dirty edits are checked first regardless of proof — a proof only speaks to the
+	 * committed branch tip it was recorded against, never to edits made since.
 	 */
-	private async agentHasUnlandedWork(id: string): Promise<boolean> {
+	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
-		const r = Bun.spawnSync(["git", "-C", rec.dto.repo, "rev-list", "--count", `HEAD..${rec.dto.branch}`], { stdout: "pipe", stderr: "ignore" });
-		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
+		if (proof && (await proofCoversTip(proof, rec.dto.branch, rec.dto.repo))) return false;
+		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
 	}
 
 	// ── Observer edges (OMPSQ-52) — read-only git probes + the main gate, injected into Observer. ──
 
-	/** Commits on an agent's branch not in main's HEAD: 0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
-	private aheadOfMain(a: AgentDTO): number {
+	/** Commits on an agent's branch not in main (origin-aware in PR mode via `aheadOfBase`):
+	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
+	protected async aheadOfMain(a: AgentDTO): Promise<number> {
 		if (!a.branch) return -1;
-		const r = hardenedGitSync(["-C", a.repo, "rev-list", "--count", `HEAD..${a.branch}`]);
-		return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+		return computeAheadOfBase({ repo: a.repo, branch: a.branch, cwd: a.worktree });
 	}
 
 	/** Count of uncommitted TRACKED files in a checkout — the land-blocking set (matches the land path's
@@ -2076,7 +2307,15 @@ export class SquadManager extends EventEmitter {
 			repo = opts.repo;
 			resolvedBranch = (await worktreeStatus(cwd).catch(() => ({ branch: undefined }))).branch;
 		} else {
-			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir);
+			// PR-mode agents fork from a freshly-fetched origin default branch, not the local checkout's
+			// (possibly stale, though the mode probe already checked convergence) HEAD.
+			const landMode = await resolveLandMode(opts.repo);
+			let startPoint: string | undefined;
+			if (landMode.mode === "pr" && landMode.defaultBranch) {
+				await hardenedGit(["fetch", "origin", landMode.defaultBranch], { cwd: opts.repo }).catch(() => undefined);
+				startPoint = `origin/${landMode.defaultBranch}`;
+			}
+			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir, startPoint);
 			cwd = wt.cwd;
 			repo = wt.repo;
 			resolvedBranch = wt.inPlace ? undefined : wt.branch;
@@ -2571,6 +2810,10 @@ export class SquadManager extends EventEmitter {
 	 */
 	private maybeAutoSupervise(rec: AgentRecord, req: PendingRequest): void {
 		if (process.env.OMP_SQUAD_AUTOSUPERVISE === "0") return;
+		if (req.gateClass) {
+			this.log("info", `autosupervise: SKIP gate "${req.title}" on ${rec.dto.name} (never auto-answered)`);
+			return;
+		}
 		const value = chooseFallback(req);
 		if (!value) return; // nothing safe + deterministic to answer (e.g. a host-tool call) → leave for a human
 		if (this.isRiskyRequest(req)) {
@@ -2845,12 +3088,284 @@ export class SquadManager extends EventEmitter {
 	 * (no premature close-on-gate-pass, no close on no-op land). Gated by OMP_SQUAD_AUTOCLOSE
 	 * (closeOnDone). Idempotent via `closedIssues` (a closed id is never re-closed) and best-effort
 	 * (`closePlaneIssue` swallows transport errors). A failed close leaves the id unmarked so a later land retries it.
+	 *
+	 * Additionally gated on a recorded DoneProof (concern 01's ledger): a merge report with no matching
+	 * proof is NOT closed — it is skipped and surfaced via recordAudit instead of silently trusting the
+	 * caller's "it merged" claim. Until landFeature (concern 06) reroutes through the same proof-writing
+	 * seam as land(), its per-member calls here will find no proof and log-suppress; that is expected and
+	 * non-regressive (the branch still really merged via landAgent) and closes itself once concern 06 lands.
 	 */
-	async closeLandedIssue(issue: IssueRef | undefined): Promise<void> {
+	async closeLandedIssue(issue: IssueRef | undefined, ctx?: { branch?: string; repo?: string }): Promise<void> {
 		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;
-		this.log("info", `closing ${issue.identifier ?? issue.id} (branch landed)`);
+		const identifier = issue.identifier ?? issue.id;
+		const proof = issue.identifier ? getDoneProofByIssue(this.stateDir, issue.identifier) : ctx?.branch ? getDoneProofByBranch(this.stateDir, ctx.branch) : undefined;
+		if (!proof) {
+			this.log("warn", `NOT closing ${identifier} (branch landed) — no DoneProof on record; skipping close, surfacing for review`);
+			void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", identifier, "error", `land reported merged but no DoneProof exists for ${ctx?.branch ?? "(no branch)"}`);
+			return;
+		}
+		this.log("info", `closing ${identifier} (branch landed, proof ${proof.verified})`);
 		if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
-		else this.log("warn", `could not close ${issue.identifier ?? issue.id} (branch landed)`);
+		else this.log("warn", `could not close ${identifier} (branch landed)`);
+	}
+
+	// ── PR-reconciler backstop (concern 07) ─────────────────────────────────────────────────────────
+	// `landAgentPr` (concern 06) is synchronous end-to-end, so this loop is a BACKSTOP for the one case
+	// it cannot see — a human merging/closing a PR directly in GitHub's UI — plus the crash-ordering
+	// windows the synchronous path can leave stranded (push↔create, merge↔proof, proof↔Plane-close).
+	// Driven entirely off the durable PendingPr ledger (written at push+create time by land-pr.ts) ∪ the
+	// live roster; NEVER off `planeRepos()` directly, so a test (or a repo later dropped from Plane
+	// config) doesn't need real Plane config for the loop to still reconcile what it already knows about.
+
+	/** One reconciler pass. Its own activity gate ("is there anything to do") is computed fresh every
+	 *  tick from the ledger + roster — an idle daemon with no PR-mode activity makes zero `gh`/`git`
+	 *  calls, never gated behind a toggleable env flag (OMP_SQUAD_OBSERVE is for the operator-toggleable
+	 *  self-audit; Done-truth for merged PRs must not silently stop when that's off). */
+	protected async prReconcileTick(): Promise<void> {
+		const allEntries = listPendingPrs(this.stateDir);
+		// Only entries reconcileOnePr can actually act on: "open" (out-of-band merge/close check), or
+		// "merged" with a proof already written but the Plane close unconfirmed (crash-ordering retry —
+		// mirrors reconcileOnePr's own `entry.proofAt && !entry.issueClosedAt` gate exactly). A "merged"
+		// entry with NO proof yet is not a live case reconcileOnePr handles (defensive dead arm only
+		// reachable via a partial-write crash inside updatePendingPr) — excluding it here stops it from
+		// burning a `gh pr view` call every tick forever with no way to progress.
+		const unconfirmed = allEntries.filter((e) => e.state === "open" || (e.state === "merged" && !!e.proofAt && !e.issueClosedAt));
+		const existingBranches = new Set(allEntries.map((e) => e.branch));
+		// Push-retry candidates: a landReady agent, in a repo resolved to PR mode, with no ledger entry
+		// at all yet — covers both a crash between push and `gh pr create`, and a floated push (concern
+		// 06's `floatPrOnLandReady`) that silently failed.
+		const pushCandidates = [...this.agents.values()].filter((r) => r.dto.landReady && r.dto.branch && r.dto.worktree !== r.dto.repo && !existingBranches.has(r.dto.branch));
+		// ff-heal repo set: repos named by a push-retry candidate, or by an entry NOT YET fully confirmed
+		// (open, unconfirmed-merged, or CLOSED-unmerged — a closed-without-merging PR still deliberately
+		// keeps its repo "in ledger scope" per the design, since that entry is never retired). A FULLY
+		// CONFIRMED merged entry (see `isFullyConfirmedPendingPr`) no longer counts — this is the fix for
+		// "every repo that ever landed a PR gets an ff-heal `git fetch` every tick, indefinitely": once an
+		// entry is retired below, its repo drops out of scope too.
+		const activeEntries = allEntries.filter((e) => !isFullyConfirmedPendingPr(e));
+		const healRepos = new Set<string>();
+		for (const rec of pushCandidates) healRepos.add(rec.dto.repo);
+		for (const e of activeEntries) {
+			const p = this.repoPathForIdentity(e.repo);
+			if (p) healRepos.add(p);
+		}
+		// Retirement: entries ALREADY fully confirmed as of the START of this tick (from a prior tick, or
+		// left over from before this fix shipped) are swept at the end. An entry that becomes fully
+		// confirmed DURING this same tick's reconcile pass (proof + close both landing together) is left
+		// alone this tick — its fields stay visible for this tick's callers — and retires on the next tick
+		// once a fresh read of the ledger shows it confirmed. Counted into the activity gate so a ledger
+		// holding only stale confirmed entries still gets swept even when there is nothing else to do.
+		const retirable = allEntries.filter(isFullyConfirmedPendingPr);
+		if (unconfirmed.length === 0 && pushCandidates.length === 0 && healRepos.size === 0 && retirable.length === 0) return; // nothing to do — zero gh/git calls this tick
+		for (const entry of unconfirmed) await this.reconcileOnePr(entry).catch((e) => this.log("warn", `pr-reconcile: ${entry.branch} failed: ${e instanceof Error ? e.message : String(e)}`));
+		for (const rec of pushCandidates) await this.retryPushFloat(rec).catch((e) => this.log("warn", `pr-reconcile: push retry threw for ${rec.dto.branch}: ${e instanceof Error ? e.message : String(e)}`));
+		for (const repo of healRepos) await this.ffHealOne(repo).catch((e) => this.log("warn", `pr-reconcile: ff-heal failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`));
+		for (const e of retirable) deletePendingPr(this.stateDir, e.branch);
+	}
+
+	/** Map a PendingPr entry's `repoIdentity()` key back to a local filesystem repo path — checked
+	 *  against live agents first (cheap, always available), then the configured Plane repo list (covers
+	 *  an entry whose agent has since been removed from the roster). Undefined ⇒ orphaned entry (its
+	 *  repo isn't known to this manager at all); the caller skips it for this tick and retries later. */
+	private repoPathForIdentity(identity: string): string | undefined {
+		for (const rec of this.agents.values()) if (repoIdentity(rec.dto.repo) === identity) return rec.dto.repo;
+		return planeRepos().find((r) => repoIdentity(r) === identity);
+	}
+
+	private agentByBranch(branch: string): AgentRecord | undefined {
+		for (const rec of this.agents.values()) if (rec.dto.branch === branch) return rec;
+		return undefined;
+	}
+
+	/**
+	 * Attempt (or confirm) the Plane close for `entry`'s tracked issue. Returns true when there is
+	 * nothing left to confirm: the entry never had a tracked issue, autoclose is off (so there is
+	 * nothing to retry — a disabled close is done, not failed), it was already closed (idempotent via
+	 * `closedIssues`), or this call just closed it successfully. False ⇒ retry on a later tick.
+	 *
+	 * Prefers the live agent's full `dto.issue` (carries `projectId`, which Plane's close call needs to
+	 * route the request) when the agent is still on the roster. `PendingPr` also carries `issueProjectId`
+	 * (persisted at `ensurePr` time, mirroring the same field on `dto.issue`), so the synthetic `IssueRef`
+	 * built for a removed agent still routes a real Plane close instead of silently staying unconfirmed
+	 * forever — the durable ledger exists precisely to cover this orphaned-agent case.
+	 */
+	private async attemptCloseFor(entry: PendingPr, repo: string): Promise<boolean> {
+		if (!entry.issueId) return true; // no Plane issue was ever tracked for this land — nothing to confirm
+		if (!this.closeOnDone) {
+			// OMP_SQUAD_AUTOCLOSE=0: `closeLandedIssue` will refuse to close on every tick forever, which
+			// used to read as an unconfirmed close the reconciler kept retrying (a no-op churn: the SAME
+			// gh/Plane state re-checked every tick with no path to ever progress). "Disabled" is not
+			// "failed" — there is nothing to retry, so this entry is done, just never actually closed.
+			this.log("info", `pr-reconcile: not closing ${entry.issueIdentifier ?? entry.issueId} for ${entry.branch} — autoclose is off (OMP_SQUAD_AUTOCLOSE=0); treating the close as done (skipped)`);
+			return true;
+		}
+		const rec = this.agentByBranch(entry.branch);
+		const issue: IssueRef = rec?.dto.issue ?? { id: entry.issueId, identifier: entry.issueIdentifier, name: entry.issueIdentifier ?? entry.issueId, projectId: entry.issueProjectId };
+		if (!this.closedIssues.has(issue.id)) await this.closeLandedIssue(issue, { branch: entry.branch, repo });
+		return this.closedIssues.has(issue.id);
+	}
+
+	/**
+	 * Per-entry reconciliation. Two independent cases, checked in order:
+	 *
+	 *   1. Crash-ordering retry — a DoneProof already exists (`proofAt` set) but the Plane close never
+	 *      confirmed (`issueClosedAt` unset). No `gh` call needed at all: just retry the close. Idempotent
+	 *      via the LEDGER field (`issueClosedAt`), not proof-existence — a second tick after it's set
+	 *      never re-enters this branch (the caller's `unconfirmed` filter excludes it).
+	 *   2. Out-of-band GitHub-UI action — `entry.state` is still "open" locally (the daemon never saw a
+	 *      merge or close happen). `gh pr view` is the only way to learn what a human did outside the
+	 *      daemon entirely: MERGED ⇒ run the SAME per-method reachability assertion `landAgentPr` uses,
+	 *      then write DoneProof + close, explicitly marked as NOT re-verified by the daemon's own gate
+	 *      (the scratch-merge gate never ran for a merge that happened outside it). CLOSED-unmerged ⇒ the
+	 *      design's explicit ruling: mark the ledger entry closed, but leave the branch and `landReady`
+	 *      alone — a human decided, and a later re-Land creates a fresh PR.
+	 */
+	protected async reconcileOnePr(entry: PendingPr): Promise<void> {
+		const repo = this.repoPathForIdentity(entry.repo);
+		if (!repo) {
+			this.log("warn", `pr-reconcile: no repo known for ${entry.repo} (branch ${entry.branch}) — skipping this tick`);
+			return;
+		}
+
+		if (entry.proofAt && !entry.issueClosedAt) {
+			const closed = await this.attemptCloseFor(entry, repo);
+			if (closed) updatePendingPr(this.stateDir, entry.branch, { issueClosedAt: Date.now() });
+			return;
+		}
+
+		const slug = repoIdentity(repo).split("/").slice(-2).join("/");
+		const view = await ghJson<{ state: string; headRefOid?: string; mergeCommit?: { oid: string } }>(
+			["pr", "view", String(entry.prNumber), "--repo", slug, "--json", "state,headRefOid,mergeCommit"],
+			repo,
+		);
+		if (!view) {
+			this.log("warn", `pr-reconcile: gh pr view #${entry.prNumber} failed for ${entry.branch} — retrying next tick`);
+			return;
+		}
+
+		if (view.state === "MERGED" && entry.state !== "merged") {
+			const mode = await this.resolveLandModeFor(repo);
+			if (!mode.defaultBranch) {
+				this.log("warn", `pr-reconcile: ${repo} has no resolved default branch — cannot verify the out-of-band merge of ${entry.branch}`);
+				return;
+			}
+			const defaultBranch = mode.defaultBranch;
+			await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
+			const branchTip = (await hardenedGit(["rev-parse", entry.branch], { cwd: repo })).stdout.trim();
+			if (!branchTip) {
+				this.log("warn", `pr-reconcile: could not resolve local tip of ${entry.branch} — deferring to next tick`);
+				return;
+			}
+			// Method-AGNOSTIC assertion: an out-of-band GitHub-UI merge can use ANY method — not
+			// necessarily the one THIS repo's OMP_SQUAD_PR_MERGE_METHOD is configured to. Asserting only
+			// against the configured method meant a UI Squash on a "merge"-configured repo (GitHub's own
+			// common default button) failed the ancestry check FOREVER: the DoneProof was never written,
+			// the Plane issue never closed, and this tick warned every 2 minutes indefinitely. Try the
+			// ancestry check (the "merge" case) first, then the gh-view-based check (the squash/rebase
+			// case, method-string-agnostic between the two) — accept whichever holds, and record which
+			// one did so DoneProof.method reflects reality instead of the daemon's own configured guess.
+			let method: MergeMethod = "merge";
+			let assertion = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, method);
+			if (!assertion.ok) {
+				const configured = mergeMethod();
+				const viaViewMethod: MergeMethod = configured === "merge" ? "squash" : configured;
+				const viaView = await assertMerged({ repo, defaultBranch, branchTipSha: branchTip, prNumber: entry.prNumber }, viaViewMethod);
+				if (viaView.ok) {
+					assertion = viaView;
+					method = viaViewMethod;
+				}
+			}
+			if (!assertion.ok) {
+				this.log("warn", `pr-reconcile: merge reachability assertion failed for ${entry.branch} (PR #${entry.prNumber}) via both the merge-ancestry and gh-view checks: ${assertion.detail}`);
+				return;
+			}
+			recordDoneProof(this.stateDir, {
+				branch: entry.branch,
+				repo: entry.repo,
+				issueId: entry.issueId,
+				issueIdentifier: entry.issueIdentifier,
+				mode: "pr",
+				method,
+				commit: assertion.commit ?? branchTip,
+				mergeCommit: assertion.mergeCommit,
+				baseRef: `origin/${defaultBranch}`,
+				verified: "unverified",
+				detail: `merged out-of-band via GitHub UI (confirmed via ${method === "merge" ? "merge-ancestry" : "gh-view headRefOid/mergeCommit"} check); gate not re-verified by the daemon`,
+				provenAt: Date.now(),
+				prNumber: entry.prNumber,
+				prUrl: entry.prUrl,
+			});
+			const rec = this.agentByBranch(entry.branch);
+			if (rec) rec.dto.landReady = false; // successful land ⇒ clear the confirm-mode staged flag, same as land()
+			recordLandOutcome(this.stateDir, entry.branch, true, "merged out-of-band");
+			const closed = await this.attemptCloseFor(entry, repo);
+			if (rec) this.emitAgent(rec);
+			updatePendingPr(this.stateDir, entry.branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now(), ...(closed ? { issueClosedAt: Date.now() } : {}) });
+			return;
+		}
+
+		if (view.state === "CLOSED" && entry.state !== "closed") {
+			updatePendingPr(this.stateDir, entry.branch, { state: "closed" });
+			this.log("warn", `pr-reconcile: PR #${entry.prNumber} for ${entry.branch} closed without merging — branch and landReady left intact; a re-Land will open a fresh PR`);
+		}
+	}
+
+	/**
+	 * Push-retry: covers a crash between push and `gh pr create`, and a floated push (concern 06's
+	 * `floatPrOnLandReady`) that failed silently. Deliberately a near-duplicate of that method's body
+	 * rather than a shared extraction — mirrors land-pr.ts's own stated convention of duplicating small
+	 * helpers rather than cross-importing another module's private seam.
+	 */
+	private async retryPushFloat(rec: AgentRecord): Promise<void> {
+		const dto = rec.dto;
+		if (!dto.branch) return;
+		const mode = await this.resolveLandModeFor(dto.repo);
+		if (mode.mode !== "pr" || !mode.defaultBranch) return;
+		const ensure = await ensurePr({
+			repo: dto.repo,
+			branch: dto.branch,
+			defaultBranch: mode.defaultBranch,
+			title: `squad(${dto.name}): land ${dto.branch}`,
+			issueId: dto.issue?.id,
+			issueIdentifier: dto.issue?.identifier,
+			issueProjectId: dto.issue?.projectId,
+			agentId: dto.id,
+			stateDir: this.stateDir,
+		});
+		if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
+			rec.dto.prUrl = ensure.prUrl;
+			rec.dto.prNumber = ensure.prNumber;
+			rec.dto.prState = ensure.prState ?? "draft";
+			this.emitAgent(rec);
+		} else {
+			this.log("warn", `pr-reconcile: push retry failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
+		}
+	}
+
+	/**
+	 * Best-effort fast-forward heal for a repo resolved to PR mode: when the local checkout is
+	 * STRICTLY behind `origin/<default>` (an ancestor of it, not equal) and currently checked out on
+	 * that default branch (never a deliberate feature-branch checkout — same condition `resolveLandMode`'s
+	 * probe 4 already requires), fast-forward it. `--ff-only` can never overwrite or lose local work by
+	 * construction — a strictly-behind fast-forward has nothing to lose. Runs inside the SAME
+	 * `withRepoLandLock` a live land uses, so it never races an in-flight merge/scratch-gate.
+	 */
+	private async ffHealOne(repo: string): Promise<void> {
+		const mode = await this.resolveLandModeFor(repo);
+		if (mode.mode !== "pr" || !mode.defaultBranch) return;
+		const defaultBranch = mode.defaultBranch;
+		const current = (await hardenedGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo })).stdout.trim();
+		if (current !== defaultBranch) return; // deliberate non-default checkout wins — never touch
+		await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
+		const localSha = (await hardenedGit(["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+		const remoteSha = (await hardenedGit(["rev-parse", `origin/${defaultBranch}`], { cwd: repo })).stdout.trim();
+		if (!localSha || !remoteSha || localSha === remoteSha) return; // already converged
+		const behind = await isAncestor(localSha, `origin/${defaultBranch}`, repo); // ancestor + not-equal ⇒ strictly behind, never ahead/diverged
+		if (!behind) return;
+		await withRepoLandLock(repo, async () => {
+			const merge = await hardenedGit(["merge", "--ff-only", `origin/${defaultBranch}`], { cwd: repo });
+			if (merge.code === 0) this.log("info", `pr-reconcile: ff-healed ${repo} to ${remoteSha}`);
+			else this.log("warn", `pr-reconcile: ff-heal merge --ff-only failed for ${repo}: ${merge.stderr.trim()}`);
+		});
 	}
 
 	/**
@@ -3138,6 +3653,7 @@ export class SquadManager extends EventEmitter {
 				options: req.method === "select" ? req.options : undefined,
 				placeholder: req.method === "input" ? req.placeholder : req.method === "editor" ? req.prefill : undefined,
 				createdAt: Date.now(),
+				gateClass: req.id.startsWith("gate_") || ("title" in req && req.title.startsWith("GATE:")),
 			};
 			rec.dto.pending = [...rec.dto.pending.filter((p) => p.id !== req.id), added];
 			this.append(rec, "system", `⛔ needs input: ${added.title}`, { pending: { requestId: added.id, action: "created" }, status: "running" });
@@ -3351,7 +3867,7 @@ export class SquadManager extends EventEmitter {
 	 *  per attempt. Lossless (abandoned WIP committed to its branch; only merged+clean branches deleted)
 	 *  and never touches a live agent's worktree or one created within the spawn grace. Opt out with
 	 *  OMP_SQUAD_WORKTREE_REAP=0; tune the freshness window with OMP_SQUAD_WORKTREE_GRACE_MS. */
-	private async reapDeadWorktrees(): Promise<void> {
+	protected async reapDeadWorktrees(): Promise<void> {
 		if (process.env.OMP_SQUAD_WORKTREE_REAP === "0") return;
 		const graceMs = Number(process.env.OMP_SQUAD_WORKTREE_GRACE_MS) || 120_000;
 		const owned = new Set([...this.agents.values()].map((r) => r.options.worktree).filter((w): w is string => !!w));
@@ -3360,16 +3876,23 @@ export class SquadManager extends EventEmitter {
 			if (!repo || repo.startsWith("(")) continue; // synthetic / no-repo agents have no worktrees to reap
 			try {
 				const root = await repoRoot(repo);
-				const base = await primaryBranch(root);
 				const wts = await listWorktrees(root);
 				const infos: WorktreeInfo[] = await Promise.all(
 					wts.map(async (w) => {
 						const stat = await fs.stat(w.worktree).catch(() => undefined);
+						// DoneProof consulted FIRST: a proven-landed branch is reap-eligible regardless of
+						// what the ahead-count reports (squash/rebase merges make it permanently nonzero) —
+						// but only while the proof still covers the branch's CURRENT tip (`proofCoversTip`),
+						// so a follow-up commit pushed after the proof was recorded is never reaped as if it
+						// were landed too.
+						const doneProof = !w.isPrimary && w.branch ? getDoneProofByBranch(this.stateDir, w.branch) : undefined;
+						const proven = !!doneProof && w.branch !== undefined && (await proofCoversTip(doneProof, w.branch, root));
 						return {
 							worktree: w.worktree,
 							branch: w.branch ?? "",
 							isPrimary: w.isPrimary,
-							aheadOfBase: w.isPrimary || !w.branch ? 0 : await branchAhead(root, w.branch, base),
+							aheadOfBase: w.isPrimary || !w.branch ? 0 : await computeAheadOfBase({ repo: root, branch: w.branch, cwd: root }),
+							proven,
 							dirty: !w.isPrimary && (await worktreeStatus(w.worktree)).dirtyFiles.length > 0,
 							mtimeMs: stat ? stat.mtimeMs : 0, // dir gone ⇒ ancient ⇒ eligible (removeWorktree prunes the stale entry)
 						};

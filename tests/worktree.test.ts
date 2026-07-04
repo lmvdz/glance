@@ -99,3 +99,64 @@ test("resolveWorktree threads base into addWorktree", async () => {
 	expect(wt.cwd).toBe(path.join("/tmpC", "r-b"));
 	expect(wt.inPlace).toBe(false);
 });
+
+// ── startPoint (concern 05: PR-mode worktrees fork from fetched origin/<default>) ──────────────
+
+test("addWorktree: a given startPoint is appended as the git start-point for a NEW branch", async () => {
+	let seenArgs: string[] | undefined;
+	const run: GitRunner = async (args) => {
+		if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { code: 0, stdout: "/tmp/omp-fake-repo", stderr: "" };
+		if (args[0] === "worktree" && args[1] === "list") return { code: 0, stdout: "", stderr: "" };
+		if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 1, stdout: "", stderr: "" }; // branch absent → -b path
+		if (args[0] === "worktree" && args[1] === "add") {
+			seenArgs = args;
+			return OK;
+		}
+		return OK;
+	};
+	const wt = await addWorktree({ repo: "/tmp/omp-fake-repo", branch: "squad/x", startPoint: "origin/main" }, run);
+	expect(seenArgs).toEqual(["worktree", "add", "-b", "squad/x", wt.worktree, "origin/main"]);
+});
+
+test("addWorktree: startPoint omitted is byte-identical to today (regression guard)", async () => {
+	let seenArgs: string[] | undefined;
+	const run: GitRunner = async (args) => {
+		if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { code: 0, stdout: "/tmp/omp-fake-repo", stderr: "" };
+		if (args[0] === "worktree" && args[1] === "list") return { code: 0, stdout: "", stderr: "" };
+		if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 1, stdout: "", stderr: "" };
+		if (args[0] === "worktree" && args[1] === "add") {
+			seenArgs = args;
+			return OK;
+		}
+		return OK;
+	};
+	const wt = await addWorktree({ repo: "/tmp/omp-fake-repo", branch: "squad/x" }, run);
+	expect(seenArgs).toEqual(["worktree", "add", "-b", "squad/x", wt.worktree]);
+});
+
+test("addWorktree: startPoint is ignored when the branch already exists (nothing to fork)", async () => {
+	let seenArgs: string[] | undefined;
+	const run: GitRunner = async (args) => {
+		if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { code: 0, stdout: "/tmp/omp-fake-repo", stderr: "" };
+		if (args[0] === "worktree" && args[1] === "list") return { code: 0, stdout: "", stderr: "" };
+		if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: "", stderr: "" }; // branch exists
+		if (args[0] === "worktree" && args[1] === "add") {
+			seenArgs = args;
+			return OK;
+		}
+		return OK;
+	};
+	const wt = await addWorktree({ repo: "/tmp/omp-fake-repo", branch: "squad/x", startPoint: "origin/main" }, run);
+	expect(seenArgs).toEqual(["worktree", "add", wt.worktree, "squad/x"]);
+});
+
+test("resolveWorktree threads startPoint into addWorktree", async () => {
+	let seenStartPoint: string | undefined;
+	const add: typeof addWorktree = async (opts) => {
+		seenStartPoint = opts.startPoint;
+		return { worktree: path.join(opts.base ?? worktreeBase(), "r-b"), branch: opts.branch, repo: opts.repo };
+	};
+	const wt = await resolveWorktree("/repo", "squad/x", add, async () => true, undefined, "origin/main");
+	expect(seenStartPoint).toBe("origin/main");
+	expect(wt.inPlace).toBe(false);
+});

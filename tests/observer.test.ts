@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
 import { Observer, type ObserverDeps, auditLandedSurvivors, auditStaleDone, auditTestsGreen, landFailureFindings } from "../src/observer.ts";
+import { recordDoneProof } from "../src/done-proof.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
@@ -28,12 +29,12 @@ afterEach(() => {
 
 const tmpDir = (): string => mkdtempSync(path.join(os.tmpdir(), "observer-"));
 
-const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squad/x"): AgentDTO => ({
+const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squad/x", repo = "/r"): AgentDTO => ({
 	id,
 	name: id,
 	status,
 	kind: "omp-operator",
-	repo: "/r",
+	repo,
 	worktree: "/w",
 	branch,
 	approvalMode: "write",
@@ -42,6 +43,28 @@ const agent = (id: string, status: AgentStatus, issue?: IssueRef, branch = "squa
 	messageCount: 0,
 	issue,
 });
+
+async function git(cwd: string, ...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+	const p = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+/** A REAL tmp git repo with `branch` pointing at one commit — `hasDoneProof`'s tip-coverage check
+ *  (`proofCoversTip`) does a genuine `git rev-parse`, so the proof-first tests below need a resolvable
+ *  branch tip to prove coverage against, not the fixed fake "/r" the plain `agent()` helper uses. */
+async function gitRepoWithBranchTip(branch: string): Promise<{ repo: string; tip: string }> {
+	const repo = tmpDir();
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	writeFileSync(path.join(repo, "a.txt"), "a\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	await git(repo, "branch", branch);
+	const tip = (await git(repo, "rev-parse", branch)).stdout;
+	return { repo, tip };
+}
 
 interface Harness {
 	deps: ObserverDeps;
@@ -71,7 +94,7 @@ function makeDeps(stateDir: string, over: Partial<ObserverDeps> = {}): Harness {
 		},
 		removeAgent: async () => {},
 		runGate: async () => ({ ok: true }),
-		gitAheadOfMain: () => 0,
+		gitAheadOfMain: async () => 0,
 		untrackedInMain: () => [],
 		filesOnAgentBranch: () => [],
 		stateDir,
@@ -172,7 +195,7 @@ test("(b) an idle ahead=0 agent whose issue is Done does NOT file a reap (housek
 	const { deps, filed } = makeDeps(tmpDir(), {
 		listAgents: () => [agent("ag1", "idle", done)],
 		listIssues: async () => [], // done issue absent from the open set ⇒ Done
-		gitAheadOfMain: () => 0,
+		gitAheadOfMain: async () => 0,
 	});
 	await new Observer(deps).tick();
 	expect(filed).toEqual([]); // landed-survivor reap is housekeeping — reaped/logged, NEVER filed as backlog
@@ -188,7 +211,7 @@ test("a STOPPED landed-and-Done agent is reaped too (the common done-state — h
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	const done = { id: "done-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
 	// A stopped ahead=0 Done agent is NOT filed (housekeeping reap, never backlog noise).
-	const filer = makeDeps(tmpDir(), { listAgents: () => [agent("s1", "stopped", done)], listIssues: async () => [], gitAheadOfMain: () => 0 });
+	const filer = makeDeps(tmpDir(), { listAgents: () => [agent("s1", "stopped", done)], listIssues: async () => [], gitAheadOfMain: async () => 0 });
 	await new Observer(filer.deps).tick();
 	expect(filer.filed).toEqual([]);
 
@@ -198,7 +221,7 @@ test("a STOPPED landed-and-Done agent is reaped too (the common done-state — h
 	const fixer = makeDeps(tmpDir(), {
 		listAgents: () => [agent("s2", "stopped", done)],
 		listIssues: async () => [],
-		gitAheadOfMain: () => 0,
+		gitAheadOfMain: async () => 0,
 		removeAgent: async (id) => { removed.push(id); },
 	});
 	await new Observer(fixer.deps).tick();
@@ -209,7 +232,7 @@ test("a STOPPED landed-and-Done agent is reaped too (the common done-state — h
 test("a stopped agent still AHEAD of main (unlanded) is NOT reaped as a survivor", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	const done = { id: "d2", name: "x", identifier: "OMPSQ-60" } satisfies IssueRef;
-	const { deps, filed } = makeDeps(tmpDir(), { listAgents: () => [agent("s3", "stopped", done)], listIssues: async () => [], gitAheadOfMain: () => 2 });
+	const { deps, filed } = makeDeps(tmpDir(), { listAgents: () => [agent("s3", "stopped", done)], listIssues: async () => [], gitAheadOfMain: async () => 2 });
 	await new Observer(deps).tick();
 	// ahead>0 ⇒ not a landed survivor (it's a stale-done finding instead); never reaped.
 	expect(filed.some((t) => t.includes("reap landed survivor"))).toBe(false);
@@ -264,7 +287,7 @@ test("(e) findings default to needs-triage (do-not-auto-land marker); autodispat
 
 	// Structural findings ALWAYS keep the marker, even under autodispatch.
 	const done = { id: "d", name: "n", identifier: "OMPSQ-9" } satisfies IssueRef;
-	const h3 = makeDeps(tmpDir(), { listAgents: () => [agent("a", "working", done)], listIssues: async () => [], gitAheadOfMain: () => 3 });
+	const h3 = makeDeps(tmpDir(), { listAgents: () => [agent("a", "working", done)], listIssues: async () => [], gitAheadOfMain: async () => 3 });
 	await new Observer(h3.deps).tick();
 	expect(h3.filed).toEqual([]);
 	expect(h3.reopened).toEqual(["d"]);
@@ -281,7 +304,7 @@ test("autofix actions a survivor even if it was already FILED while autofix was 
 	const { deps, filed } = makeDeps(dir, {
 		listAgents: () => [agent("agz", "stopped", done)],
 		listIssues: async () => [],
-		gitAheadOfMain: () => 0,
+		gitAheadOfMain: async () => 0,
 		removeAgent: async (id) => { removed.push(id); },
 	});
 	await new Observer(deps).tick();
@@ -312,7 +335,7 @@ test("autofix: a reap-survivor finding is actioned (removeAgent) and not filed u
 	const { deps, filed } = makeDeps(tmpDir(), {
 		listAgents: () => [agent("survivor", "idle", done)],
 		listIssues: async () => [],
-		gitAheadOfMain: () => 0,
+		gitAheadOfMain: async () => 0,
 		removeAgent: async (id) => {
 			removed.push(id);
 		},
@@ -372,36 +395,38 @@ test("(b) the observer files exactly one bug for a branch whose auto-land keeps 
 	expect(filed[0]).toContain("auto-land failing for squad/a1");
 });
 
-test("survivor fingerprint is keyed on the stable Plane identifier, not the ephemeral agent id", () => {
+const noProof = () => false;
+
+test("survivor fingerprint is keyed on the stable Plane identifier, not the ephemeral agent id", async () => {
 	const issue = { id: "iss-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
 	// Two agent ids for the SAME landed issue (a re-dispatch) ⇒ ONE stable fingerprint, so a reap
 	// can't be re-filed per re-spawn (the old `survivor:${a.id}` key flooded the tracker).
-	const f1 = auditLandedSurvivors([agent("ompsq-48-aaaa", "stopped", issue)], new Set<string>(), () => 0, async () => {});
-	const f2 = auditLandedSurvivors([agent("ompsq-48-bbbb", "stopped", issue)], new Set<string>(), () => 0, async () => {});
+	const f1 = await auditLandedSurvivors([agent("ompsq-48-aaaa", "stopped", issue)], new Set<string>(), async () => 0, async () => {}, noProof);
+	const f2 = await auditLandedSurvivors([agent("ompsq-48-bbbb", "stopped", issue)], new Set<string>(), async () => 0, async () => {}, noProof);
 	expect(f1[0].fingerprint).toBe("survivor:OMPSQ-48");
 	expect(f2[0].fingerprint).toBe(f1[0].fingerprint);
 });
 
-test("auditStaleDone: below the systemic threshold ⇒ reopens the source false-Done issues", () => {
+test("auditStaleDone: below the systemic threshold ⇒ reopens the source false-Done issues", async () => {
 	const mk = (n: number) => ({ id: `i${n}`, name: "x", identifier: `OMPSQ-${n}` }) satisfies IssueRef;
 	const agents = [agent("a1", "stopped", mk(1)), agent("a2", "stopped", mk(2))];
-	const f = auditStaleDone(agents, new Set<string>(), () => 3);
+	const f = await auditStaleDone(agents, new Set<string>(), async () => 3, noProof);
 	expect(f.length).toBe(2);
 	expect(f.map((x) => x.fingerprint).sort()).toEqual(["false-done:OMPSQ-1", "false-done:OMPSQ-2"]);
 	expect(f.map((x) => x.reopenIssue?.id).sort()).toEqual(["i1", "i2"]);
 });
 
-test("auditStaleDone: ≥3 stranded at once ⇒ one systemic finding plus source issue reopens", () => {
+test("auditStaleDone: ≥3 stranded at once ⇒ one systemic finding plus source issue reopens", async () => {
 	const mk = (n: number) => ({ id: `i${n}`, name: "x", identifier: `OMPSQ-${n}` }) satisfies IssueRef;
 	const agents = [1, 2, 3, 4].map((n) => agent(`a${n}`, "stopped", mk(n)));
-	const f = auditStaleDone(agents, new Set<string>(), () => 1);
+	const f = await auditStaleDone(agents, new Set<string>(), async () => 1, noProof);
 	expect(f.length).toBe(5);
 	expect(f[0].fingerprint).toBe("autoland-systemic-failure"); // count-independent ⇒ dedups across ticks
 	expect(f[0].severity).toBe("structural");
 	expect(f[0].detail).toContain("OMPSQ-1, OMPSQ-2, OMPSQ-3, OMPSQ-4"); // names the stranded set
 	expect(f.slice(1).map((x) => x.reopenIssue?.id).sort()).toEqual(["i1", "i2", "i3", "i4"]);
 	// The aggregate set shifting (one lands, a new one strands) keeps the SAME fingerprint ⇒ no re-file.
-	const f2 = auditStaleDone([2, 3, 4, 5].map((n) => agent(`a${n}`, "stopped", mk(n))), new Set<string>(), () => 1);
+	const f2 = await auditStaleDone([2, 3, 4, 5].map((n) => agent(`a${n}`, "stopped", mk(n))), new Set<string>(), async () => 1, noProof);
 	expect(f2[0].fingerprint).toBe(f[0].fingerprint);
 });
 
@@ -435,7 +460,7 @@ test("a resolved false-Done fingerprint never closes the reopened source issue",
 	const h = makeDeps(tmpDir(), {
 		listAgents: () => [agent("ag", "stopped", done)],
 		listIssues: async () => openIssues,
-		gitAheadOfMain: () => 2,
+		gitAheadOfMain: async () => 2,
 	});
 	const obs = new Observer(h.deps);
 	await obs.tick();
@@ -481,4 +506,113 @@ test("(#17) a persistent listIssues failure is surfaced (warn record), and the t
 	await new Observer(h.deps).tick(); // must NOT throw
 	expect(logs.some((m) => m.includes("listIssues failed after retry"))).toBe(true);
 	expect(events.some((e) => e.level === "warn" && (e.detail ?? "").includes("listIssues failed"))).toBe(true);
+});
+
+// ── proof-first short-circuit (concern 05): DoneProof consulted BEFORE ahead-count arithmetic ──────
+
+test("(proof-first) a recorded DoneProof stops the stale-done reopen AND makes the landed survivor reap-eligible, even though gitAheadOfMain reports >0 (simulated squash merge)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_AUTOFIX = "1";
+	const dir = tmpDir();
+	const done = { id: "done-77", name: "shipped", identifier: "OMPSQ-77" } satisfies IssueRef;
+	const { repo, tip } = await gitRepoWithBranchTip("squad/sq77");
+	recordDoneProof(dir, {
+		branch: "squad/sq77",
+		repo: "r",
+		issueIdentifier: "OMPSQ-77",
+		mode: "pr",
+		method: "squash",
+		commit: tip, // matches the branch's CURRENT tip — proof covers it
+		baseRef: "origin/main",
+		verified: "green",
+		detail: "squash-merged PR #9",
+		provenAt: Date.now(),
+	});
+	const removed: string[] = [];
+	const { deps, filed, reopened } = makeDeps(dir, {
+		listAgents: () => [agent("sq77", "stopped", done, "squad/sq77", repo)],
+		listIssues: async () => [], // done issue absent from the open set ⇒ Done
+		gitAheadOfMain: async () => 5, // squash-merge inflated count — would normally read as unlanded
+		removeAgent: async (id) => {
+			removed.push(id);
+		},
+	});
+	await new Observer(deps).tick();
+	expect(reopened).toEqual([]); // proof ⇒ never treated as false-done, regardless of the count
+	expect(removed).toEqual(["sq77"]); // proof ⇒ eligible for the survivor reap despite ahead>0
+	expect(filed).toEqual([]); // actioned (autofix), never filed as backlog noise
+});
+
+test("(proof-first) without OBSERVE_AUTOFIX, the same proven survivor is logged (not filed) and never reopened as false-done", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1"; // autofix OFF by default
+	const dir = tmpDir();
+	const done = { id: "done-78", name: "shipped", identifier: "OMPSQ-78" } satisfies IssueRef;
+	const { repo, tip } = await gitRepoWithBranchTip("squad/sq78");
+	recordDoneProof(dir, { branch: "squad/sq78", repo: "r", issueIdentifier: "OMPSQ-78", mode: "pr", commit: tip, baseRef: "origin/main", verified: "green", detail: "squash-merged", provenAt: Date.now() });
+	const { deps, filed, reopened } = makeDeps(dir, {
+		listAgents: () => [agent("sq78", "idle", done, "squad/sq78", repo)],
+		listIssues: async () => [],
+		gitAheadOfMain: async () => 3,
+	});
+	await new Observer(deps).tick();
+	expect(reopened).toEqual([]);
+	expect(filed).toEqual([]); // autoFixable findings are never filed as backlog, proof or not
+});
+
+test("(regression) a DoneProof recorded at T1 does NOT cover the branch once it advances to T2 — falls back to the arithmetic and reopens again", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const dir = tmpDir();
+	const done = { id: "done-80", name: "shipped", identifier: "OMPSQ-80" } satisfies IssueRef;
+	const { repo, tip: t1 } = await gitRepoWithBranchTip("squad/sq80");
+	recordDoneProof(dir, {
+		branch: "squad/sq80",
+		repo: "r",
+		issueIdentifier: "OMPSQ-80",
+		mode: "pr",
+		commit: t1,
+		baseRef: "origin/main",
+		verified: "green",
+		detail: "landed at T1",
+		provenAt: Date.now(),
+	});
+	// T2: a follow-up commit lands on the SAME branch AFTER the proof was recorded — the proof only
+	// ever speaks to T1, so it must not silently swallow this too.
+	await git(repo, "checkout", "-q", "squad/sq80");
+	writeFileSync(path.join(repo, "b.txt"), "b\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "T2");
+
+	const { deps, reopened } = makeDeps(dir, {
+		listAgents: () => [agent("sq80", "stopped", done, "squad/sq80", repo)],
+		listIssues: async () => [],
+		gitAheadOfMain: async () => 2, // T2's follow-up commit is genuinely unlanded
+	});
+	await new Observer(deps).tick();
+	expect(reopened).toEqual(["done-80"]); // the stale T1 proof no longer shields it — the real arithmetic decides
+});
+
+test("(regression) without a DoneProof, ahead>0 still reopens as false-done — the non-proof case is unchanged", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const done = { id: "done-79", name: "n", identifier: "OMPSQ-79" } satisfies IssueRef;
+	const { deps, reopened } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("sq79", "stopped", done, "squad/sq79")],
+		listIssues: async () => [],
+		gitAheadOfMain: async () => 3,
+	});
+	await new Observer(deps).tick();
+	expect(reopened).toEqual(["done-79"]);
+});
+
+test("(proof-first, unit-level) auditLandedSurvivors/auditStaleDone never call aheadOf when the branch is already proven", async () => {
+	const issue = { id: "iss-9", name: "shipped", identifier: "OMPSQ-90" } satisfies IssueRef;
+	let aheadCalls = 0;
+	const aheadOf = async (): Promise<number> => {
+		aheadCalls++;
+		return 7; // would read as unlanded if ever consulted
+	};
+	const survivors = await auditLandedSurvivors([agent("a", "stopped", issue)], new Set<string>(), aheadOf, async () => {}, () => true);
+	expect(survivors).toHaveLength(1);
+	const stale = await auditStaleDone([agent("a", "stopped", issue)], new Set<string>(), aheadOf, () => true);
+	expect(stale).toHaveLength(0);
+	expect(aheadCalls).toBe(0); // proof consulted FIRST — the arithmetic never runs
 });

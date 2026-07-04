@@ -329,15 +329,20 @@ test("concernDocStatus: reads STATUS from a concern doc; null for missing/status
 	await fs.writeFile(path.join(repo, "plans/demo/01-a.md"), "# A\nSTATUS: closed\n");
 	await fs.writeFile(path.join(repo, "plans/demo/02-b.md"), "# B\n**Status:** open\n");
 	await fs.writeFile(path.join(repo, "plans/demo/notes.md"), "# just notes\n");
+	// plan-sync's unproven-done marker (concern 04): the parenthetical is a human-legible annotation
+	// only — C_STATUS captures just the [\w-]+ token immediately after STATUS:, so this still reads "done".
+	await fs.writeFile(path.join(repo, "plans/demo/03-unproven.md"), "# Unproven\nSTATUS: done (unproven — closed in Plane without land proof)\n");
 
 	expect(await concernDocStatus(repo, "plans/demo/01-a.md")).toBe("closed");
 	expect(await concernDocStatus(repo, "plans/demo/02-b.md")).toBe("open");
 	expect(await concernDocStatus(repo, "plans/demo/notes.md")).toBeNull();
 	expect(await concernDocStatus(repo, "plans/demo/missing.md")).toBeNull();
 	expect(await concernDocStatus(repo, "../outside.md")).toBeNull(); // issue text is untrusted
+	expect(await concernDocStatus(repo, "plans/demo/03-unproven.md")).toBe("done");
 
 	expect(isClosedConcernStatus("closed")).toBe(true);
 	expect(isClosedConcernStatus("DONE")).toBe(true);
 	expect(isClosedConcernStatus("open")).toBe(false);
 	expect(isClosedConcernStatus("in-progress")).toBe(false);
+	expect(isClosedConcernStatus("done")).toBe(true); // what concernDocStatus resolves the unproven marker to
 });

@@ -12,6 +12,7 @@ export interface PendingRequest {
   options?: string[];
   placeholder?: string;
   createdAt: number;
+  gateClass?: boolean;
 }
 
 export interface IssueRef {
@@ -193,6 +194,10 @@ export interface AgentDTO {
   blockedReason?: string;
   availableActions: AgentAction[];
   landReady?: boolean;
+  /** PR-mode landing metadata, set at push (draft/open) and merge (merged) time. Absent in local mode. */
+  prUrl?: string;
+  prNumber?: number;
+  prState?: 'draft' | 'open' | 'merged' | 'closed';
 }
 
 export interface TranscriptTool {
