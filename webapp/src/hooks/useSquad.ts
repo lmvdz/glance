@@ -56,9 +56,19 @@ export interface SquadState {
   reload: () => Promise<void>;
   send: (command: ClientCommand) => void;
   subscribe: (id: string) => void;
+  unsubscribe: (id: string) => void;
 }
 
-function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
+/**
+ * Order key for comparing a late-arriving entry against the window's head.
+ * `seq` is authoritative when present (monotonic per-agent); `ts` is the
+ * fallback for entries that predate `seq` support.
+ */
+function entryOrderKey(entry: TranscriptEntry): number {
+  return typeof entry.seq === "number" ? entry.seq : entry.ts;
+}
+
+export function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
   const match = entry.id ? entries.findIndex((item) => item.id === entry.id) : -1;
   if (match >= 0) {
     const next = entries.slice();
@@ -66,6 +76,13 @@ function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntr
     return next;
   }
   if (entries.some((item) => !entry.id && item.ts === entry.ts && item.kind === entry.kind && item.text === entry.text)) return entries;
+  if (entry.id && entries.length >= TRANSCRIPT_CAP) {
+    // The window is at cap and this id isn't present — it may be a late
+    // upsert for an entry the cap already evicted. Appending it at the end
+    // would put a stale entry after everything newer; drop it instead.
+    const head = entries[0];
+    if (head && entryOrderKey(entry) <= entryOrderKey(head)) return entries;
+  }
   return entries.length >= TRANSCRIPT_CAP ? [...entries.slice(entries.length - TRANSCRIPT_CAP + 1), entry] : [...entries, entry];
 }
 
@@ -81,7 +98,7 @@ export function useSquad(): SquadState {
   const [resolvedCommentEvents, setResolvedCommentEvents] = useState<Map<string, number>>(() => new Map());
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<SquadSocket | null>(null);
-  const subscribedRef = useRef<string | null>(null);
+  const subscribedRef = useRef<Set<string>>(new Set());
 
   const reload = useCallback(async () => {
     const [nextProjects, nextFeatures, nextAgents, nextCapabilities, nextCatalog] = await Promise.all([
@@ -108,8 +125,7 @@ export function useSquad(): SquadState {
       onOpen: () => {
         setConnected(true);
         safeReload();
-        const id = subscribedRef.current;
-        if (id) socketRef.current?.send({ type: "subscribe", id });
+        for (const id of subscribedRef.current) socketRef.current?.send({ type: "subscribe", id });
       },
       onClose: () => setConnected(false),
       onEvent: (event: SquadEvent) => {
@@ -172,9 +188,12 @@ export function useSquad(): SquadState {
 
   const send = useCallback((command: ClientCommand) => socketRef.current?.send(command), []);
   const subscribe = useCallback((id: string) => {
-    subscribedRef.current = id;
+    subscribedRef.current.add(id);
     socketRef.current?.send({ type: "subscribe", id });
   }, []);
+  const unsubscribe = useCallback((id: string) => {
+    subscribedRef.current.delete(id);
+  }, []);
 
-  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, connected, reload, send, subscribe };
+  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, connected, reload, send, subscribe, unsubscribe };
 }

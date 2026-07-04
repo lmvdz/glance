@@ -1,5 +1,5 @@
 # useSquad reconnect + transcript-window hardening
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -19,3 +19,6 @@ None (server already tolerates repeated subscribe commands — it just replays).
 ## Verify
 - Unit tests (pure parts): the append/upsert/drop decision extracted or tested through the exported helper — id-upsert in place; new entry appends; stale-evicted upsert drops; cap slides correctly.
 - Manual: subscribe chat to agent A and TaskDetail to agent B; kill the WS (dev-tools offline toggle or daemon restart); on reconnect both transcripts resume growing.
+
+## Resolution
+`subscribedRef` converted to a `Set<string>` with reconnect re-subscribing every entry, plus `unsubscribeConsole` to prune stale ids; `appendTranscriptEntry` now drops stale-evicted upserts instead of appending them out of order. Covered by `useSquad.test.ts`.
