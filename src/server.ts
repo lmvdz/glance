@@ -988,7 +988,7 @@ export class SquadServer {
 			if ("status" in body && typeof body.status === "string" && body.status.trim()) opts.status = body.status.trim();
 			if ("blockedBy" in body && Array.isArray(body.blockedBy)) opts.blockedBy = body.blockedBy.map((n) => Number(n)).filter((n) => Number.isFinite(n));
 			if (opts.status === undefined && opts.blockedBy === undefined) return new Response("nothing to update", { status: 400 });
-			const concern = await manager.updateConcern(decodeURIComponent(mfconcern[1]), opts);
+			const concern = await manager.updateConcern(decodeURIComponent(mfconcern[1]), opts, actor);
 			return concern ? Response.json({ concern }) : new Response("no such concern", { status: 404 });
 		}
 		const mfanswer = url.pathname.match(/^\/api\/features\/([^/]+)\/answers$/);

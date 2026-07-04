@@ -47,6 +47,8 @@ export interface PlanSyncDeps {
 	repo: string;
 	/** Open + closed issues for the repo; `null` ⇒ Plane unreachable this tick (skip, no writes). */
 	listIssues: () => Promise<IssueRef[] | null>;
+	/** Whether a DoneProof (concern 01's ledger) is on record for the issue identifier — gates the `done` write. */
+	hasProof: (issueIdentifier: string) => boolean;
 	log?: (msg: string) => void;
 	record?: AutomationRecorder;
 }
@@ -56,11 +58,13 @@ export interface PlanSyncResult {
 	updated: { path: string; planeId: string; from: string; to: string }[];
 	/** Doc says done/cancelled but the tracker disagrees — surfaced, never auto-reopened. */
 	conflicts: { path: string; planeId: string; doc: string; plane: string }[];
+	/** Plane says done/completed but no DoneProof exists — written as `done (unproven ...)`, surfaced here. */
+	unproven: { path: string; planeId: string }[];
 }
 
 /** One reconcile pass over every plan dir in the repo. Best-effort: an unreadable doc is skipped. */
 export async function syncPlanStatuses(deps: PlanSyncDeps): Promise<PlanSyncResult> {
-	const result: PlanSyncResult = { scanned: 0, updated: [], conflicts: [] };
+	const result: PlanSyncResult = { scanned: 0, updated: [], conflicts: [], unproven: [] };
 	const issues = await deps.listIssues();
 	if (issues === null) return result; // tracker unreachable — change nothing
 	const byIdentifier = new Map<string, IssueRef>();
@@ -90,13 +94,22 @@ export async function syncPlanStatuses(deps: PlanSyncDeps): Promise<PlanSyncResu
 				}
 				continue;
 			}
+			// A Plane-completed doc with no recorded DoneProof is a legitimate human override (or a
+			// grandfathered pre-ship Done) — allowed, but never written as an indistinguishable-from-verified
+			// bare `done`. The parenthetical is purely a human-legible annotation: features.ts's C_STATUS
+			// regex only captures the `[\w-]+` token immediately after `STATUS:`, so it still reads back as `done`.
+			let writeValue = next;
+			if (next === "done" && !deps.hasProof(concern.planeId)) {
+				writeValue = "done (unproven — closed in Plane without land proof)";
+				result.unproven.push({ path: concern.path, planeId: concern.planeId });
+			}
 			try {
 				const abs = path.join(deps.repo, concern.path);
 				const text = await fsp.readFile(abs, "utf8");
 				if (!STATUS_LINE.test(text)) continue;
-				await fsp.writeFile(abs, text.replace(STATUS_LINE, `STATUS: ${next}`));
-				result.updated.push({ path: concern.path, planeId: concern.planeId, from: concern.status, to: next });
-				deps.log?.(`plan-sync: ${concern.planeId} ${concern.status} → ${next} (${concern.file})`);
+				await fsp.writeFile(abs, text.replace(STATUS_LINE, `STATUS: ${writeValue}`));
+				result.updated.push({ path: concern.path, planeId: concern.planeId, from: concern.status, to: writeValue });
+				deps.log?.(`plan-sync: ${concern.planeId} ${concern.status} → ${writeValue} (${concern.file})`);
 			} catch {
 				// skip an unwritable doc; next tick retries
 			}
@@ -109,7 +122,7 @@ export async function syncPlanStatuses(deps: PlanSyncDeps): Promise<PlanSyncResu
 		found: result.updated.length,
 		level: result.conflicts.length ? "warn" : "info",
 		detail: result.updated.length
-			? `${result.updated.length} STATUS line(s) reconciled${result.conflicts.length ? `; ${result.conflicts.length} terminal-doc conflict(s)` : ""}`
+			? `${result.updated.length} STATUS line(s) reconciled${result.conflicts.length ? `; ${result.conflicts.length} terminal-doc conflict(s)` : ""}${result.unproven.length ? `; ${result.unproven.length} unproven done(s)` : ""}`
 			: result.conflicts.length
 				? `${result.conflicts.length} terminal-doc conflict(s) surfaced (doc says done, tracker disagrees)`
 				: `no drift across ${result.scanned} PLANE-linked concern(s)`,

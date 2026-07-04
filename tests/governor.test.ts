@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { agentsToAdopt, liveAgents, newAgentId, planeIssueBranch, SquadManager } from "../src/squad-manager.ts";
+import { recordDoneProof } from "../src/done-proof.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -40,13 +41,13 @@ const dto = (status: AgentStatus): AgentDTO => ({
 	messageCount: 0,
 });
 
-async function freshManager(planeBase?: string): Promise<SquadManager> {
+async function freshManager(planeBase?: string): Promise<{ mgr: SquadManager; stateDir: string }> {
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "gov-"));
 	tmps.push(stateDir);
 	process.env.PLANE_API_KEY = "secret";
 	process.env.PLANE_WORKSPACE = "acme";
 	if (planeBase) process.env.PLANE_BASE_URL = planeBase;
-	return new SquadManager({ stateDir });
+	return { mgr: new SquadManager({ stateDir }), stateDir };
 }
 
 // ── #3 WIP cap ──────────────────────────────────────────────────────────────
@@ -61,7 +62,7 @@ test("liveAgents counts non-terminal agents only (stopped/error free their slot)
 });
 
 test("create throws at the WIP cap before cutting a worktree", async () => {
-	const mgr = await freshManager();
+	const { mgr } = await freshManager();
 	// Shadow the public list() the cap reads, so the guard fires without spawning anything.
 	const overridable: { list: () => AgentDTO[] } = mgr;
 	overridable.list = () => [dto("working"), dto("working")]; // 2 occupying → fills cap 2
@@ -72,7 +73,7 @@ test("create throws at the WIP cap before cutting a worktree", async () => {
 });
 
 test("create does NOT count idle/landed agents toward the WIP cap (they free their slot)", async () => {
-	const mgr = await freshManager();
+	const { mgr } = await freshManager();
 	const overridable: { list: () => AgentDTO[] } = mgr;
 	overridable.list = () => [dto("idle"), dto("idle")]; // 2 idle = 0 occupying
 	process.env.OMP_SQUAD_MAX_WIP = "2";
@@ -84,7 +85,7 @@ test("create does NOT count idle/landed agents toward the WIP cap (they free the
 });
 
 test("create stays under cap when a slot is free (no throw at the boundary)", async () => {
-	const mgr = await freshManager();
+	const { mgr } = await freshManager();
 	const overridable: { list: () => AgentDTO[] } = mgr;
 	overridable.list = () => [dto("working"), dto("stopped")]; // 1 live, cap 2 → headroom
 	process.env.OMP_SQUAD_MAX_WIP = "2";
@@ -117,13 +118,22 @@ function planeStub(opts: { completed: boolean; onPatch?: () => void }): { server
 }
 
 const trackedIssue: IssueRef = { id: "iss-1", name: "do the thing", projectId: "proj-9" };
+const trackedBranch = "squad/tracked";
+
+/** Record a DoneProof for `trackedIssue`/`trackedBranch` — these close-on-land tests exercise the
+ * closed-write mechanics (idempotency, autoclose gating, retry), not the proof gate itself (that's
+ * tests/close-landed-issue-proof.test.ts), so they need a proof on record for the close to proceed. */
+function seedProof(stateDir: string): void {
+	recordDoneProof(stateDir, { branch: trackedBranch, repo: "r", issueId: trackedIssue.id, mode: "local", commit: "c", baseRef: "HEAD", verified: "green", detail: "test proof", provenAt: Date.now() });
+}
 
 test("closeLandedIssue closes the issue once, then is idempotent", async () => {
 	const { server, patches } = planeStub({ completed: true });
 	try {
-		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
-		await mgr.closeLandedIssue(trackedIssue);
-		await mgr.closeLandedIssue(trackedIssue); // already closed → no second PATCH
+		const { mgr, stateDir } = await freshManager(`http://127.0.0.1:${server.port}`);
+		seedProof(stateDir);
+		await mgr.closeLandedIssue(trackedIssue, { branch: trackedBranch });
+		await mgr.closeLandedIssue(trackedIssue, { branch: trackedBranch }); // already closed → no second PATCH
 		expect(patches()).toBe(1);
 	} finally {
 		server.stop(true);
@@ -134,8 +144,9 @@ test("closeLandedIssue is gated by OMP_SQUAD_AUTOCLOSE (=0 ⇒ no close, even on
 	const { server, patches } = planeStub({ completed: true });
 	try {
 		process.env.OMP_SQUAD_AUTOCLOSE = "0"; // read at construction → closeOnDone false
-		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
-		await mgr.closeLandedIssue(trackedIssue);
+		const { mgr, stateDir } = await freshManager(`http://127.0.0.1:${server.port}`);
+		seedProof(stateDir);
+		await mgr.closeLandedIssue(trackedIssue, { branch: trackedBranch });
 		expect(patches()).toBe(0); // auto-close off ⇒ a land never touches Plane; you close manually
 	} finally {
 		server.stop(true);
@@ -145,8 +156,19 @@ test("closeLandedIssue is gated by OMP_SQUAD_AUTOCLOSE (=0 ⇒ no close, even on
 test("closeLandedIssue no-ops for an issue-less member (no Plane call)", async () => {
 	const { server, patches } = planeStub({ completed: true });
 	try {
-		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
+		const { mgr } = await freshManager(`http://127.0.0.1:${server.port}`);
 		await mgr.closeLandedIssue(undefined);
+		expect(patches()).toBe(0);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("closeLandedIssue does NOT close without a recorded DoneProof (suppressed, surfaced, no Plane call)", async () => {
+	const { server, patches } = planeStub({ completed: true });
+	try {
+		const { mgr } = await freshManager(`http://127.0.0.1:${server.port}`); // no seedProof — nothing on the ledger
+		await mgr.closeLandedIssue(trackedIssue, { branch: trackedBranch });
 		expect(patches()).toBe(0);
 	} finally {
 		server.stop(true);
@@ -171,11 +193,12 @@ test("closeLandedIssue retries after a failed close (id marked only on success)"
 		},
 	});
 	try {
-		const mgr = await freshManager(`http://127.0.0.1:${server.port}`);
-		await mgr.closeLandedIssue(trackedIssue); // no completed state → close fails, id left unmarked
+		const { mgr, stateDir } = await freshManager(`http://127.0.0.1:${server.port}`);
+		seedProof(stateDir);
+		await mgr.closeLandedIssue(trackedIssue, { branch: trackedBranch }); // no completed state → close fails, id left unmarked
 		expect(patches).toBe(0);
 		completed = true;
-		await mgr.closeLandedIssue(trackedIssue); // now there's a completed state → succeeds
+		await mgr.closeLandedIssue(trackedIssue, { branch: trackedBranch }); // now there's a completed state → succeeds
 		expect(patches).toBe(1);
 	} finally {
 		server.stop(true);

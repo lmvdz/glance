@@ -52,7 +52,7 @@ import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, s
 export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
-import { recordDoneProof } from "./done-proof.ts";
+import { getDoneProofByBranch, getDoneProofByIssue, hasProof, recordDoneProof } from "./done-proof.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
@@ -590,6 +590,7 @@ export class SquadManager extends EventEmitter {
 					void syncPlanStatuses({
 						repo,
 						listIssues: () => listPlaneIssuesAllStates(repo),
+						hasProof: (identifier) => hasProof(this.stateDir, identifier),
 						log: (m) => this.log("info", m),
 						record: this.automation.for("plan-sync", repo),
 					}).then((r) => {
@@ -713,10 +714,21 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		if (!closedRef) return false;
-		this.log("warn", `stale issue ${issue.identifier ?? issue.id}: ${closedRef} is already closed — skipping dispatch${this.closeOnDone ? ", closing the issue" : ""}`);
+		this.log("warn", `stale issue ${issue.identifier ?? issue.id}: ${closedRef} is already closed — skipping dispatch`);
 		if (this.closeOnDone && !this.closedIssues.has(issue.id)) {
-			if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
-			else this.log("warn", `could not close stale issue ${issue.identifier ?? issue.id}`);
+			// Skip-dispatch above stays proofless (gating it would re-open PR #18's stale-re-dispatch
+			// incident); only this direct closePlaneIssue write requires a recorded DoneProof. A doc
+			// terminal from before this wave shipped (grandfathered) has no ledger entry — its close is
+			// suppressed and surfaced, never silently written, but dispatch remains skipped either way.
+			const proof = issue.identifier ? getDoneProofByIssue(this.stateDir, issue.identifier) : undefined;
+			if (!proof) {
+				this.log("warn", `terminal-without-proof: ${issue.identifier ?? issue.id} is doc-closed but has no DoneProof — NOT closing in Plane (dispatch still skipped)`);
+				void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", issue.identifier ?? issue.id, "error", `doc says ${closedRef} but no DoneProof exists`);
+			} else if (await closePlaneIssue(issue)) {
+				this.closedIssues.add(issue.id);
+			} else {
+				this.log("warn", `could not close stale issue ${issue.identifier ?? issue.id}`);
+			}
 		}
 		return true;
 	}
@@ -1362,12 +1374,19 @@ export class SquadManager extends EventEmitter {
 	 * Edit one concern of a feature's plan from the flow diagram: rewrite its STATUS and/or the
 	 * concerns that block it, persisting to the concern doc + overview dependency table. Works for
 	 * stored AND derived (plan-dir-scanned) features — it resolves the feature via features().
+	 *
+	 * This is the human-override lane: a status write here is deliberately NOT gated on a DoneProof
+	 * (the flow-diagram editor is exactly where an operator asserts truth the ledger doesn't have yet).
+	 * It gains an audit record instead, so the write is visible rather than invisible.
 	 */
-	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }): Promise<PlanConcern | undefined> {
+	async updateConcern(id: string, opts: { repo?: string; file: string; status?: string; blockedBy?: number[] }, actor: Actor = LOCAL_ACTOR): Promise<PlanConcern | undefined> {
 		const f = (await this.features(opts.repo)).find((x) => x.id === id);
 		if (!f || !f.planDir) return undefined;
 		const concern = await updatePlanConcern(f.repo, f.planDir, opts.file, { status: opts.status, blockedBy: opts.blockedBy });
-		if (concern) this.emitFeaturesChanged();
+		if (concern) {
+			this.emitFeaturesChanged();
+			if (opts.status != null) void this.recordAudit(actor, "concern.status", opts.file, "ok", `-> ${opts.status} (operator/webapp edit, no land proof required)`);
+		}
 		return concern;
 	}
 
@@ -1615,7 +1634,7 @@ export class SquadManager extends EventEmitter {
 				void this.store.appendAudit({ actor: actor.id, action: "land.forced-unproven", target: id, detail: { branch: w.branch, reason, at: Date.now() } }).catch(() => {});
 			}
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
-			if (res.merged) void this.closeLandedIssue(rec?.dto.issue); // real merge ⇒ close its tracking issue (idempotent)
+			if (res.merged) void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
 		}
 		this.emitFeaturesChanged();
 		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
@@ -1707,7 +1726,7 @@ export class SquadManager extends EventEmitter {
 					detail: result.detail ?? result.message,
 					provenAt: Date.now(),
 				});
-				await this.closeLandedIssue(dto.issue); // real merge ⇒ close its tracking issue (idempotent, best-effort)
+				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
@@ -2870,12 +2889,25 @@ export class SquadManager extends EventEmitter {
 	 * (no premature close-on-gate-pass, no close on no-op land). Gated by OMP_SQUAD_AUTOCLOSE
 	 * (closeOnDone). Idempotent via `closedIssues` (a closed id is never re-closed) and best-effort
 	 * (`closePlaneIssue` swallows transport errors). A failed close leaves the id unmarked so a later land retries it.
+	 *
+	 * Additionally gated on a recorded DoneProof (concern 01's ledger): a merge report with no matching
+	 * proof is NOT closed — it is skipped and surfaced via recordAudit instead of silently trusting the
+	 * caller's "it merged" claim. Until landFeature (concern 06) reroutes through the same proof-writing
+	 * seam as land(), its per-member calls here will find no proof and log-suppress; that is expected and
+	 * non-regressive (the branch still really merged via landAgent) and closes itself once concern 06 lands.
 	 */
-	async closeLandedIssue(issue: IssueRef | undefined): Promise<void> {
+	async closeLandedIssue(issue: IssueRef | undefined, ctx?: { branch?: string; repo?: string }): Promise<void> {
 		if (!this.closeOnDone || !issue || this.closedIssues.has(issue.id)) return;
-		this.log("info", `closing ${issue.identifier ?? issue.id} (branch landed)`);
+		const identifier = issue.identifier ?? issue.id;
+		const proof = issue.identifier ? getDoneProofByIssue(this.stateDir, issue.identifier) : ctx?.branch ? getDoneProofByBranch(this.stateDir, ctx.branch) : undefined;
+		if (!proof) {
+			this.log("warn", `NOT closing ${identifier} (branch landed) — no DoneProof on record; skipping close, surfacing for review`);
+			void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", identifier, "error", `land reported merged but no DoneProof exists for ${ctx?.branch ?? "(no branch)"}`);
+			return;
+		}
+		this.log("info", `closing ${identifier} (branch landed, proof ${proof.verified})`);
 		if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
-		else this.log("warn", `could not close ${issue.identifier ?? issue.id} (branch landed)`);
+		else this.log("warn", `could not close ${identifier} (branch landed)`);
 	}
 
 	/**
