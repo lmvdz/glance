@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AgentMetaBar, ComposerStats, DiffReviewPanel, RunStatusHeader, TodoPanel, TranscriptEntryView, TranscriptTimeline, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions, runStatusLabel } from "./AssistantChat";
-import type { AgentDTO, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
+import { AgentMetaBar, ComposerStats, DiffReviewPanel, GateWidget, RunStatusHeader, TodoPanel, TranscriptEntryView, TranscriptTimeline, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions, runStatusLabel } from "./AssistantChat";
+import { ScrollToLatestPill } from "./chat/ScrollToLatestPill";
+import type { AgentDTO, PendingRequest, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
 
 test("TranscriptEntryView renders human-first tool output with raw payload tucked away", () => {
   const entry: TranscriptEntry = {
@@ -37,7 +38,8 @@ test("TranscriptEntryView renders foldable streaming thinking", () => {
   };
 
   const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
-  expect(html).toContain("<details open");
+  expect(html).toContain("<details data-chat-message");
+  expect(html).toContain('open=""');
   expect(html).toContain("Thinking");
   expect(html).toContain("streaming");
   expect(html).toContain("running processes");
@@ -204,4 +206,79 @@ test("detectedPlanDirs finds plan files in tool payloads", () => {
   }];
 
   expect(detectedPlanDirs(entries)).toEqual(["plans/live-plan"]);
+});
+
+test("data-chat-message is stamped on every TranscriptEntryView kind", () => {
+  const kinds: TranscriptEntry[] = [
+    { id: "u1", kind: "user", text: "hi", ts: 1, status: "ok" },
+    { id: "a1", kind: "assistant", text: "hello", ts: 2, status: "ok" },
+    { id: "th1", kind: "thinking", text: "pondering", ts: 3, status: "ok" },
+    { id: "to1", kind: "tool", text: "▸ bash: ls", ts: 4, status: "ok", tool: { callId: "to1", name: "bash", argsText: "{}" } },
+    { id: "sy1", kind: "system", text: "note", ts: 5, status: "ok" },
+  ];
+
+  for (const entry of kinds) {
+    const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+    expect(html).toContain("data-chat-message");
+  }
+});
+
+test("data-chat-message is stamped on the workflow stage-marker branch of the tool kind", () => {
+  const entry: TranscriptEntry = { id: "stage1", kind: "tool", text: "▸ stage: implement", ts: 1, status: "ok", format: "stage" };
+  const html = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+  expect(html).toContain("data-chat-message");
+  expect(html).toContain("implement");
+});
+
+test("data-chat-message is stamped on GateWidget (both the options and free-text branches)", () => {
+  const withOptions: PendingRequest = { id: "p1", source: "ui", kind: "gate", title: "Pick one", options: ["yes", "no"], createdAt: 1 };
+  const optionsHtml = renderToStaticMarkup(<GateWidget request={withOptions} onAnswer={() => {}} />);
+  expect(optionsHtml).toContain("data-chat-message");
+  expect(optionsHtml).toContain("Pick one");
+
+  const freeText: PendingRequest = { id: "p2", source: "ui", kind: "gate", title: "Type a reply", createdAt: 1 };
+  const freeTextHtml = renderToStaticMarkup(<GateWidget request={freeText} onAnswer={() => {}} />);
+  expect(freeTextHtml).toContain("data-chat-message");
+  expect(freeTextHtml).toContain("Type a reply");
+});
+
+test("data-chat-message is stamped on DiffReviewPanel", () => {
+  const html = renderToStaticMarkup(<DiffReviewPanel diffs={[{ file: "a.ts", status: "M" }]} />);
+  expect(html).toContain("data-chat-message");
+});
+
+test("a gate appearing mid-transcript still carries data-chat-message (detection must catch it while scrolled up)", () => {
+  const agent: AgentDTO = {
+    id: "a1",
+    name: "chat",
+    status: "waiting",
+    repo: "/home/lars/sui/omp-squad",
+    worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
+    pending: [{ id: "req-1", source: "tool", kind: "gate", title: "Approve this?", createdAt: 1 }],
+    lastActivity: 1,
+    autonomyMode: "assist",
+    effectiveMode: "assist",
+    verificationState: "unknown",
+    availableActions: ["answer"],
+  };
+  const entries: TranscriptEntry[] = [
+    { id: "u1", kind: "user", text: "Do the thing", ts: 1, status: "ok" },
+    { id: "sys1", kind: "system", text: "Waiting for approval", ts: 2, status: "ok", pending: { action: "created", requestId: "req-1" } },
+  ];
+
+  const html = renderToStaticMarkup(
+    <TranscriptTimeline entries={entries} messages={[]} agent={agent} expanded onToggle={() => {}} onAnswer={() => {}} />,
+  );
+  expect(html).toContain("Approve this?");
+  // Both the system entry and the gate widget it triggers must be detectable.
+  expect((html.match(/data-chat-message/g) ?? []).length).toBeGreaterThanOrEqual(2);
+});
+
+test("ScrollToLatestPill renders only when visible and carries an accessible label", () => {
+  const hidden = renderToStaticMarkup(<ScrollToLatestPill visible={false} onClick={() => {}} />);
+  expect(hidden).toBe("");
+
+  const shown = renderToStaticMarkup(<ScrollToLatestPill visible onClick={() => {}} />);
+  expect(shown).toContain("New messages");
+  expect(shown).toContain('aria-label="Jump to latest messages"');
 });

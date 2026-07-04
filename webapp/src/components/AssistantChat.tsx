@@ -4,6 +4,9 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { CodeHighlight } from './CodeHighlight';
+import { ScrollToLatestPill } from './chat/ScrollToLatestPill';
+import { useChatStreamScroll } from '../hooks/chat/useChatStreamScroll';
+import { useChatNewMessages } from '../hooks/chat/useChatNewMessages';
 import { useTaskContext } from '../context/TaskContext';
 import { apiFetch, apiJson, jsonInit } from '../lib/api';
 import { answerCommand, canLand, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../lib/agent-control';
@@ -272,7 +275,7 @@ export const RunStatusHeader = ({
   </button>
 );
 
-const GateWidget = ({
+export const GateWidget = ({
   request,
   onAnswer,
 }: {
@@ -282,7 +285,7 @@ const GateWidget = ({
   const [text, setText] = useState('');
   if (request.options && request.options.length > 0) {
     return (
-      <div className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
+      <div data-chat-message className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
         <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
         <div className="flex flex-wrap gap-2">
           {request.options.map((opt) => (
@@ -299,7 +302,7 @@ const GateWidget = ({
     );
   }
   return (
-    <div className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
+    <div data-chat-message className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
       <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
       {request.message && <div className="mb-2 text-[11px] text-gray-600 dark:text-gray-400">{request.message}</div>}
       <textarea
@@ -332,7 +335,7 @@ const GateWidget = ({
 export const DiffReviewPanel = ({ diffs }: { diffs: AgentFileDiff[] }) => {
   if (!diffs.length) return null;
   return (
-    <section className="rounded-lg border border-gray-200 bg-white/70 p-2.5 text-xs dark:border-gray-800 dark:bg-gray-900/40" aria-label="Changed files">
+    <section data-chat-message className="rounded-lg border border-gray-200 bg-white/70 p-2.5 text-xs dark:border-gray-800 dark:bg-gray-900/40" aria-label="Changed files">
       <details>
         <summary className="flex cursor-pointer list-none items-center gap-2 text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100">
           <FileText className="h-3.5 w-3.5 flex-shrink-0" aria-hidden />
@@ -449,7 +452,7 @@ export const TranscriptTimeline = ({
 export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEntry }) => {
   if (entry.kind === 'user') {
     return (
-      <div className="flex flex-col w-full items-end">
+      <div data-chat-message className="flex flex-col w-full items-end">
         <div className="flex flex-col items-end gap-1 max-w-[88%]">
           <div className="rounded-2xl rounded-tr-md bg-gray-200 px-3.5 py-2.5 text-[13px] leading-relaxed text-gray-900 whitespace-pre-wrap dark:bg-gray-900 dark:text-gray-100">
             {entry.text}
@@ -467,7 +470,7 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
     if (entry.format === 'stage') {
       const label = entry.text.replace(/^[▸►]\s*stage:\s*/i, '');
       return (
-        <div className="flex items-center gap-2 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+        <div data-chat-message className="flex items-center gap-2 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
           <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
           <span className="font-medium uppercase tracking-wider">{label}</span>
           <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
@@ -479,7 +482,7 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
     const toolLabel = (entry.tool?.name ?? 'Tool').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     const hasBody = view.command || view.output || view.stderr || view.raw.length > 0;
     return (
-      <details open={running} className="group rounded-md">
+      <details data-chat-message open={running} className="group rounded-md">
         <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900/60">
           <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotClass(entry.status)} ${running ? 'animate-pulse' : ''}`} aria-label={entry.status ?? 'ok'} />
           <span className="font-semibold text-gray-900 dark:text-gray-100">{toolLabel}</span>
@@ -537,7 +540,7 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
   if (entry.kind === 'thinking') {
     const running = entry.status === 'running';
     return (
-      <details open={running} className="group rounded-md">
+      <details data-chat-message open={running} className="group rounded-md">
         <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-gray-500 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900">
           <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 transition-transform group-open:rotate-90" aria-hidden />
           <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-amber-500 dark:text-amber-400" aria-hidden />
@@ -553,14 +556,14 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
 
   if (entry.kind === 'system') {
     return (
-      <div className="rounded-md bg-gray-100 px-2 py-1.5 text-[11px] font-mono leading-relaxed text-gray-600 dark:bg-gray-900 dark:text-gray-400 whitespace-pre-wrap">
+      <div data-chat-message className="rounded-md bg-gray-100 px-2 py-1.5 text-[11px] font-mono leading-relaxed text-gray-600 dark:bg-gray-900 dark:text-gray-400 whitespace-pre-wrap">
         {entry.text}
       </div>
     );
   }
 
   return (
-    <div className="w-full text-gray-800 dark:text-gray-300">
+    <div data-chat-message className="w-full text-gray-800 dark:text-gray-300">
       <div className="mb-1.5 flex items-center gap-2 text-[11px] text-gray-500">
         {entry.kind === 'assistant' ? 'glance' : entry.kind} <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         {entry.status === 'running' && <span className="shimmer text-[10px]">streaming</span>}
@@ -811,6 +814,120 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
   return [...dirs];
 };
 
+/**
+ * The scrollable transcript viewport: locked-to-bottom-by-default, unlocks on
+ * upward scroll, surfaces a "jump to latest" pill on new content while
+ * unlocked. Owns its own `useChatStreamScroll`/`useChatNewMessages` instances
+ * so the parent can key it by session (`AssistantChat` renders
+ * `<ChatMessagesViewport key={activeSessionId}>`) — remounting resets lock
+ * state and scroll position instead of leaking them across sessions.
+ */
+const ChatMessagesViewport = ({
+  hasTranscript,
+  transcriptEntries,
+  messages,
+  selectedAgent,
+  agentDiffs,
+  workExpanded,
+  onToggleWork,
+  onAnswer,
+  visibleMessages,
+  isLoading,
+  toggleReaction,
+}: {
+  hasTranscript: boolean;
+  transcriptEntries: TranscriptEntry[];
+  messages: Message[];
+  selectedAgent?: AgentDTO;
+  agentDiffs: AgentFileDiff[];
+  workExpanded: boolean;
+  onToggleWork: () => void;
+  onAnswer?: (requestId: string, value: string) => void;
+  visibleMessages: Message[];
+  isLoading: boolean;
+  toggleReaction: (idx: number, reaction: 'like' | 'dislike') => void;
+}) => {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const { isLocked, scrollToBottom, scrollIfLocked } = useChatStreamScroll({ scrollRef });
+  const { hasNewMessages, dismiss, contentRef } = useChatNewMessages({ isLocked, onResize: scrollIfLocked });
+
+  return (
+    <div className="relative flex-1 min-h-0">
+      <div ref={scrollRef} className="h-full overflow-y-auto p-3 md:p-4 scrollbar-custom bg-gray-50 dark:bg-gray-950">
+        <div ref={contentRef} className="space-y-4">
+          {hasTranscript ? (
+            <TranscriptTimeline
+              entries={transcriptEntries}
+              messages={messages}
+              agent={selectedAgent}
+              diffs={agentDiffs}
+              expanded={workExpanded}
+              onToggle={onToggleWork}
+              onAnswer={onAnswer}
+            />
+          ) : visibleMessages.map((msg, idx) => (
+            <div key={idx} data-chat-message className={`flex flex-col w-full ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+              {msg.role === 'user' ? (
+                <div className="flex flex-col items-end gap-1 max-w-[85%]">
+                  <div className="bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-200 px-4 py-3 rounded-2xl rounded-tr-sm text-[14px] leading-relaxed whitespace-pre-wrap">
+                    {msg.text}
+                  </div>
+                  <span className="text-[10px] text-gray-400 dark:text-gray-500 px-1">
+                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+              ) : (
+                <div className="w-full text-gray-800 dark:text-gray-300">
+                  <div className="text-[11px] text-gray-500 mb-2 flex items-center gap-2">
+                    glance <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                  <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
+                    <Markdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ code: CodeBlock }}>{msg.text}</Markdown>
+                  </div>
+                  <div className="flex items-center gap-2 mt-3 text-gray-400 dark:text-gray-500">
+                    <button
+                      onClick={() => toggleReaction(idx, 'like')}
+                      className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'like' ? 'text-green-500 dark:text-green-400 bg-green-50 dark:bg-green-900/20' : ''}`}
+                      title="Helpful"
+                    >
+                      <ThumbsUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => toggleReaction(idx, 'dislike')}
+                      className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'dislike' ? 'text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20' : ''}`}
+                      title="Not helpful"
+                    >
+                      <ThumbsDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+          {isLoading && (
+            <div className="flex flex-col w-full items-start text-gray-800 dark:text-gray-300">
+              <div className="text-[11px] text-gray-500 dark:text-gray-500 mb-2 flex items-center gap-2">
+                glance workflow <span className="w-1 h-1 rounded-full bg-gray-400 dark:bg-gray-600"></span> Starting...
+              </div>
+              <div className="flex gap-1 items-center h-6">
+                <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce"></span>
+                <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
+                <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <ScrollToLatestPill
+        visible={hasNewMessages && !isLocked}
+        onClick={() => {
+          scrollToBottom();
+          dismiss();
+        }}
+      />
+    </div>
+  );
+};
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, showToast } = useTaskContext();
@@ -828,7 +945,6 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: 'omp default', value: '' }]);
   const [selectedModel, setSelectedModel] = useState('');
   const [chatWidth, setChatWidth] = useState(storedChatWidth);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const promotedPlanDirs = useRef<Set<string>>(new Set());
   const chatPanelRef = useRef<HTMLDivElement>(null);
 
@@ -928,17 +1044,9 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     }));
   };
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
   useEffect(() => {
     localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(sessions));
   }, [sessions]);
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [sessions, isLoading, activeSessionId, transcriptEntries]);
 
   useEffect(() => {
     const repo = currentProject?.id;
@@ -1255,73 +1363,23 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       <TodoPanel phases={todoPhases} collapsed={todoCollapsed} onToggle={() => setTodoCollapsed((value) => !value)} />
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-4 scrollbar-custom bg-gray-50 dark:bg-gray-950">
-        {hasTranscript ? (
-          <TranscriptTimeline
-            entries={transcriptEntries}
-            messages={messages}
-            agent={selectedAgent}
-            diffs={agentDiffs ?? EMPTY_DIFFS}
-            expanded={workExpanded}
-            onToggle={() => setWorkExpanded((value) => !value)}
-            onAnswer={selectedAgent ? (requestId, value) => {
-              sendConsoleCommand(answerCommand(selectedAgent.id, requestId, value));
-              showToast(`Answer sent to ${selectedAgent.name}`, 'success');
-            } : undefined}
-          />
-        ) : visibleMessages.map((msg, idx) => (
-          <div key={idx} className={`flex flex-col w-full ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-            {msg.role === 'user' ? (
-              <div className="flex flex-col items-end gap-1 max-w-[85%]">
-                <div className="bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-200 px-4 py-3 rounded-2xl rounded-tr-sm text-[14px] leading-relaxed whitespace-pre-wrap">
-                  {msg.text}
-                </div>
-                <span className="text-[10px] text-gray-400 dark:text-gray-500 px-1">
-                  {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
-              </div>
-            ) : (
-              <div className="w-full text-gray-800 dark:text-gray-300">
-                <div className="text-[11px] text-gray-500 mb-2 flex items-center gap-2">
-                  glance <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </div>
-                <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
-                  <Markdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ code: CodeBlock }}>{msg.text}</Markdown>
-                </div>
-                <div className="flex items-center gap-2 mt-3 text-gray-400 dark:text-gray-500">
-                  <button
-                    onClick={() => toggleReaction(idx, 'like')}
-                    className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'like' ? 'text-green-500 dark:text-green-400 bg-green-50 dark:bg-green-900/20' : ''}`}
-                    title="Helpful"
-                  >
-                    <ThumbsUp className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => toggleReaction(idx, 'dislike')}
-                    className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'dislike' ? 'text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20' : ''}`}
-                    title="Not helpful"
-                  >
-                    <ThumbsDown className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-        {isLoading && (
-          <div className="flex flex-col w-full items-start text-gray-800 dark:text-gray-300">
-            <div className="text-[11px] text-gray-500 dark:text-gray-500 mb-2 flex items-center gap-2">
-              glance workflow <span className="w-1 h-1 rounded-full bg-gray-400 dark:bg-gray-600"></span> Starting...
-            </div>
-            <div className="flex gap-1 items-center h-6">
-              <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce"></span>
-              <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
-              <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
-            </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
+      <ChatMessagesViewport
+        key={activeSessionId ?? 'none'}
+        hasTranscript={hasTranscript}
+        transcriptEntries={transcriptEntries}
+        messages={messages}
+        selectedAgent={selectedAgent}
+        agentDiffs={agentDiffs ?? EMPTY_DIFFS}
+        workExpanded={workExpanded}
+        onToggleWork={() => setWorkExpanded((value) => !value)}
+        onAnswer={selectedAgent ? (requestId, value) => {
+          sendConsoleCommand(answerCommand(selectedAgent.id, requestId, value));
+          showToast(`Answer sent to ${selectedAgent.name}`, 'success');
+        } : undefined}
+        visibleMessages={visibleMessages}
+        isLoading={isLoading}
+        toggleReaction={toggleReaction}
+      />
 
       {/* Input Area */}
       <div className="p-3 bg-white dark:bg-gray-950 flex-shrink-0 border-t border-gray-200 dark:border-gray-800">

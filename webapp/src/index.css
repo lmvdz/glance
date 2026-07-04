@@ -187,16 +187,33 @@
   }
 }
 
+/* Jump-to-latest pill entrance: rises in from the bottom edge. */
+@keyframes pill-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @layer utilities {
   .login-rise {
     animation: login-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .pill-rise {
+    animation: pill-rise 0.18s ease-out both;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .shimmer,
   .shimmer-bg,
-  .login-rise {
+  .login-rise,
+  .pill-rise {
     animation: none;
   }
 }
