@@ -1,5 +1,5 @@
 # Memoize transcript entries, isolate the clock, split persistence
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -23,3 +23,6 @@ None.
 - `bun test webapp/src/components/AssistantChat.test.tsx` passes unchanged (memo must not alter static markup).
 - Add a test: render twice with the same `transcriptEntries` array identity — assert `TranscriptEntryView` output stable (or unit-test the memo comparator if extracted).
 - Manual: during a streaming run, React DevTools profiler (or a render-count probe) shows settled entries not re-rendering on WS frames; localStorage writes no longer fire on transcript-only updates (breakpoint or wrap setItem).
+
+## Resolution
+`TranscriptEntryView` memoized, elapsed-time extracted into its own leaf component with an internal interval, and localStorage persistence split into a `[sessions]`-keyed effect separate from scroll handling. Verified via `AssistantChat.test.tsx`.

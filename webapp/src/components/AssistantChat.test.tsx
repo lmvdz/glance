@@ -43,6 +43,21 @@ test("TranscriptEntryView renders foldable streaming thinking", () => {
   expect(html).toContain("running processes");
 });
 
+test("TranscriptEntryView is memoized (same entry identity renders identical markup twice)", () => {
+  const entry: TranscriptEntry = {
+    id: "a1",
+    kind: "assistant",
+    text: "Done. Tightened the UI.",
+    ts: 1,
+    status: "ok",
+  };
+
+  const first = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+  const second = renderToStaticMarkup(<TranscriptEntryView entry={entry} />);
+  expect(second).toBe(first);
+  expect((TranscriptEntryView as unknown as { $$typeof?: symbol }).$$typeof?.toString()).toContain("react.memo");
+});
+
 test("TodoPanel renders persistent beautiful progress and can collapse", () => {
   const phases: TodoPhaseDTO[] = [{
     name: "Implementation",
@@ -132,7 +147,6 @@ test("TranscriptTimeline collapses completed work and keeps final summary visibl
     <TranscriptTimeline
       entries={entries}
       messages={[]}
-      now={3}
       diffs={[{ file: "webapp/src/index.css", status: "M", diff: "+ .shimmer" }]}
       expanded={false}
       onToggle={() => {}}

@@ -354,11 +354,32 @@ export const DiffReviewPanel = ({ diffs }: { diffs: AgentFileDiff[] }) => {
   );
 };
 
+// Ticks its own clock (only while `running`) so a 1s re-render is scoped to
+// this leaf instead of the whole transcript panel.
+const ElapsedClock = ({
+  start,
+  end,
+  running,
+  render,
+}: {
+  start: number;
+  end: number;
+  running: boolean;
+  render: (elapsedMs: number) => React.ReactElement;
+}) => {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!running) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [running]);
+  return render((running ? now : end) - start);
+};
+
 export const TranscriptTimeline = ({
   entries,
   messages,
   agent,
-  now,
   diffs = EMPTY_DIFFS,
   expanded,
   onToggle,
@@ -367,7 +388,6 @@ export const TranscriptTimeline = ({
   entries: TranscriptEntry[];
   messages: Message[];
   agent?: AgentDTO;
-  now: number;
   diffs?: AgentFileDiff[];
   expanded: boolean;
   onToggle: () => void;
@@ -375,7 +395,8 @@ export const TranscriptTimeline = ({
 }) => {
   const { promptEntries, workEntries, finalEntry } = splitTranscriptEntries(entries);
   const running = agentIsRunning(agent) || transcriptIsRunning(entries);
-  const elapsedMs = transcriptEnd(entries, now, agent) - transcriptStart(entries, messages, agent);
+  const start = transcriptStart(entries, messages, agent);
+  const end = transcriptEnd(entries, Date.now(), agent);
   const latestWork = [...workEntries].reverse().find((entry) => entry.kind !== 'assistant' || entry.status === 'running') ?? workEntries.at(-1);
   const hiddenWorkEntries = !running && finalEntry ? workEntries.filter((entry) => entry !== finalEntry) : workEntries;
 
@@ -401,7 +422,14 @@ export const TranscriptTimeline = ({
           {renderEntry(entry)}
         </React.Fragment>
       ))}
-      <RunStatusHeader running={running} elapsedMs={elapsedMs} action={entryAction(latestWork)} expanded={expanded} onToggle={onToggle} />
+      <ElapsedClock
+        start={start}
+        end={end}
+        running={running}
+        render={(elapsedMs) => (
+          <RunStatusHeader running={running} elapsedMs={elapsedMs} action={entryAction(latestWork)} expanded={expanded} onToggle={onToggle} />
+        )}
+      />
       {expanded && hiddenWorkEntries.map((entry) => (
         <React.Fragment key={entry.id ?? `${entry.ts}:${entry.kind}:${entry.text}`}>
           {renderEntry(entry)}
@@ -418,7 +446,7 @@ export const TranscriptTimeline = ({
   );
 };
 
-export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
+export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEntry }) => {
   if (entry.kind === 'user') {
     return (
       <div className="flex flex-col w-full items-end">
@@ -542,7 +570,7 @@ export const TranscriptEntryView = ({ entry }: { entry: TranscriptEntry }) => {
       </div>
     </div>
   );
-};
+});
 
 const todoDotStyle: Record<TodoStatus, string> = {
   completed: 'border-emerald-500 bg-emerald-500 text-white dark:border-emerald-400 dark:bg-emerald-400 dark:text-emerald-950',
@@ -797,7 +825,6 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const [todoCollapsed, setTodoCollapsed] = useState(false);
   const [agentDiffs, setAgentDiffs] = useState<AgentFileDiff[] | null>(null);
   const [workExpanded, setWorkExpanded] = useState(false);
-  const [now, setNow] = useState(Date.now);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: 'omp default', value: '' }]);
   const [selectedModel, setSelectedModel] = useState('');
   const [chatWidth, setChatWidth] = useState(storedChatWidth);
@@ -889,15 +916,6 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     setWorkExpanded(agentRunning);
   }, [agentId, agentRunning]);
 
-  useEffect(() => {
-    if (!agentRunning) {
-      setNow(Date.now());
-      return;
-    }
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [agentRunning]);
-
   const updateSessionMessages = (sessionId: string, newMessages: Message[]) => {
     setSessions(prev => prev.map(s => {
       if (s.id === sessionId) {
@@ -915,8 +933,11 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   };
 
   useEffect(() => {
-    scrollToBottom();
     localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(sessions));
+  }, [sessions]);
+
+  useEffect(() => {
+    scrollToBottom();
   }, [sessions, isLoading, activeSessionId, transcriptEntries]);
 
   useEffect(() => {
@@ -1240,7 +1261,6 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             entries={transcriptEntries}
             messages={messages}
             agent={selectedAgent}
-            now={now}
             diffs={agentDiffs ?? EMPTY_DIFFS}
             expanded={workExpanded}
             onToggle={() => setWorkExpanded((value) => !value)}
