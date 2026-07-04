@@ -1,6 +1,16 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ChatMessagesViewport, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions } from "./AssistantChat";
+import {
+  buildTranscriptRenderEntries,
+  ChatMessagesViewport,
+  chatWidthFromClientX,
+  clearEchoedPendingSends,
+  deriveSuggestionChips,
+  detectedPlanDirs,
+  messageToTranscriptEntry,
+  normalizeAssistantSessions,
+  type Message,
+} from "./AssistantChat";
 import { AgentMetaBar } from "./chat/AgentMetaBar";
 import { ComposerSendButton } from "./chat/Composer";
 import { ComposerStats } from "./chat/AgentMetaBar";
@@ -169,6 +179,26 @@ test("TranscriptTimeline collapses completed work and keeps final summary visibl
   expect(html).toContain("Review diff");
 });
 
+test("TranscriptTimeline never folds the operator's sent message into the collapsed work section, even when a mapped pre-agent welcome leads the list (concern 10)", () => {
+  // Mirrors buildTranscriptRenderEntries's merged shape for a brand-new agent-backed
+  // session: the mapped welcome (kind:'assistant', id prefixed `msg:`) leads, followed
+  // by the replayed transcript's echoed prompt and its answer. Before the fix, the
+  // leading assistant-kind welcome made `firstWorkIndex` resolve to 0, bucketing the
+  // whole thing (including the operator prompt) as collapsible "work".
+  const entries: TranscriptEntry[] = [
+    { id: "msg:model:1", kind: "assistant", text: "welcome", ts: 1, status: "ok" },
+    { id: "t1", kind: "user", text: "operator prompt", ts: 2, status: "ok" },
+    { id: "a1", kind: "assistant", text: "the answer", ts: 3, status: "ok" },
+  ];
+
+  const collapsed = renderToStaticMarkup(
+    <TranscriptTimeline entries={entries} messages={[]} expanded={false} onToggle={() => {}} />,
+  );
+  expect(collapsed).toContain("welcome");
+  expect(collapsed).toContain("operator prompt");
+  expect(collapsed).toContain("the answer");
+});
+
 test("DiffReviewPanel renders compact changed-file access", () => {
   const html = renderToStaticMarkup(<DiffReviewPanel diffs={[{ file: "README.md", status: "M", diff: "+ compact chat" }]} />);
   expect(html).toContain("1 changed file");
@@ -186,6 +216,55 @@ test("normalizeAssistantSessions falls back when restored chat state is empty or
   expect(normalizeAssistantSessions([], 42)[0]).toMatchObject({ id: "default", title: "Initial conversation", updatedAt: 42 });
   expect(normalizeAssistantSessions([{ id: "s2", title: "Newer", messages: [], updatedAt: 2 }, { id: "s1", title: "Older", messages: [], updatedAt: 1 }])[0]?.id).toBe("s2");
   expect(normalizeAssistantSessions([{ id: "bad", messages: [], updatedAt: 1 }], 7)[0]).toMatchObject({ id: "default", updatedAt: 7 });
+});
+
+test("normalizeAssistantSessions strips legacy reaction fields from old localStorage blobs (dropped thumbs up/down UI)", () => {
+  const legacy = [{
+    id: "s1",
+    title: "Old chat",
+    updatedAt: 5,
+    messages: [
+      { role: "model", text: "hi", timestamp: 1, reaction: "like" },
+      { role: "user", text: "hello", timestamp: 2 },
+    ],
+  }];
+
+  const [session] = normalizeAssistantSessions(legacy);
+  expect(session?.messages).toEqual([
+    { role: "model", text: "hi", timestamp: 1 },
+    { role: "user", text: "hello", timestamp: 2 },
+  ]);
+  expect(session?.messages.some((message) => "reaction" in message)).toBe(false);
+});
+
+test("normalizeAssistantSessions migrates legacy double-written turns out of agent-backed sessions (concern 10)", () => {
+  // Pre-migration (double-write era) `handleSend` appended every user turn straight
+  // into `session.messages` even after an agent existed — so an old localStorage blob
+  // for an agent-backed session carries the operator's turns both here AND in the
+  // replayed server transcript. Only the user-role entries are duplicates; the
+  // pre-agent welcome (model-role) stays.
+  const legacy = [{
+    id: "s1",
+    title: "Old chat",
+    updatedAt: 5,
+    metadata: { agentId: "agent-1" },
+    messages: [
+      { role: "model", text: "welcome", timestamp: 1 },
+      { role: "user", text: "do the thing", timestamp: 2 },
+      { role: "model", text: "on it", timestamp: 3 },
+    ],
+  }];
+
+  const [session] = normalizeAssistantSessions(legacy);
+  expect(session?.messages).toEqual([
+    { role: "model", text: "welcome", timestamp: 1 },
+    { role: "model", text: "on it", timestamp: 3 },
+  ]);
+
+  // Pre-agent sessions (no agentId) are untouched — there is no server transcript to
+  // de-duplicate against yet.
+  const preAgent = [{ id: "s2", title: "New chat", updatedAt: 5, messages: legacy[0].messages }];
+  expect(normalizeAssistantSessions(preAgent)[0]?.messages).toEqual(legacy[0].messages);
 });
 
 test("deriveSuggestionChips adapts to UI/UX chat context", () => {
@@ -318,15 +397,11 @@ test("ChatMessagesViewport's scroll container is an announced log region, aria-b
 
   const running = renderToStaticMarkup(
     <ChatMessagesViewport
-      hasTranscript
-      transcriptEntries={runningEntries}
-      messages={[]}
+      entries={runningEntries}
       agentDiffs={[]}
       workExpanded={false}
       onToggleWork={() => {}}
-      visibleMessages={[]}
       isLoading={false}
-      toggleReaction={() => {}}
     />,
   );
   expect(running).toContain('role="log"');
@@ -336,15 +411,11 @@ test("ChatMessagesViewport's scroll container is an announced log region, aria-b
 
   const settled = renderToStaticMarkup(
     <ChatMessagesViewport
-      hasTranscript
-      transcriptEntries={settledEntries}
-      messages={[]}
+      entries={settledEntries}
       agentDiffs={[]}
       workExpanded={false}
       onToggleWork={() => {}}
-      visibleMessages={[]}
       isLoading={false}
-      toggleReaction={() => {}}
     />,
   );
   expect(settled).toContain('aria-busy="false"');
@@ -358,8 +429,34 @@ test("each transcript entry is wrapped in an <article> naming its sender", () =>
   const html = renderToStaticMarkup(
     <TranscriptTimeline entries={entries} messages={[]} expanded onToggle={() => {}} />,
   );
-  expect(html).toContain('<article aria-label="Message from you">');
-  expect(html).toContain('<article aria-label="Message from glance">');
+  expect(html).toContain('<article aria-label="Message from you"');
+  expect(html).toContain('<article aria-label="Message from glance"');
+});
+
+test("TranscriptTimeline stamps data-kind/data-status on each entry's <article> root (styling/test hook)", () => {
+  const entries: TranscriptEntry[] = [
+    { id: "u1", kind: "user", text: "hi", ts: 1, status: "ok" },
+    { id: "a1", kind: "assistant", text: "still writing", ts: 2, status: "running" },
+  ];
+  const html = renderToStaticMarkup(
+    <TranscriptTimeline entries={entries} messages={[]} expanded onToggle={() => {}} />,
+  );
+  expect(html).toContain('data-kind="user"');
+  expect(html).toContain('data-kind="assistant"');
+  expect(html).toContain('data-status="running"');
+});
+
+test("TranscriptTimeline stamps data-kind=\"tool\" on a collapsed tool-call group root, with the latest call's status", () => {
+  const entries: TranscriptEntry[] = [
+    { id: "u1", kind: "user", text: "go", ts: 1, status: "ok" },
+    { id: "t1", kind: "tool", text: "▸ bash: one", ts: 2, status: "ok", tool: { callId: "t1", name: "bash" } },
+    { id: "t2", kind: "tool", text: "▸ bash: two", ts: 3, status: "running", tool: { callId: "t2", name: "bash" } },
+  ];
+  const html = renderToStaticMarkup(
+    <TranscriptTimeline entries={entries} messages={[]} expanded onToggle={() => {}} />,
+  );
+  expect(html).toContain('data-kind="tool"');
+  expect(html).toContain('data-status="running"');
 });
 
 test("attach and mic buttons are gone from the composer's rendered subtree (no more misleading no-ops)", () => {
@@ -430,4 +527,72 @@ test("the settled markdown prefix is memoized: identical settled text renders id
   expect(htmlB).toContain("Settled paragraph one");
   expect(htmlB).toContain("Settled paragraph two");
   expect(htmlB).toContain("growing tail");
+});
+
+// ── Single message model (replay-as-truth) ──────────────────────────────────
+
+test("messageToTranscriptEntry maps role to kind, stamps markdown/ok, and derives a stable id", () => {
+  const userMessage: Message = { role: "user", text: "hello", timestamp: 100 };
+  const modelMessage: Message = { role: "model", text: "hi there", timestamp: 200 };
+
+  const userEntry = messageToTranscriptEntry(userMessage);
+  expect(userEntry).toMatchObject({ kind: "user", text: "hello", ts: 100, format: "markdown", status: "ok" });
+  expect(userEntry.id).toBeTruthy();
+
+  const modelEntry = messageToTranscriptEntry(modelMessage);
+  expect(modelEntry.kind).toBe("assistant");
+
+  // Same input maps to the same synthetic id (stable across re-renders).
+  expect(messageToTranscriptEntry(userMessage).id).toBe(userEntry.id);
+});
+
+test("buildTranscriptRenderEntries appends pending sends at the end: mapped messages, then transcript, then pending", () => {
+  const messages: Message[] = [{ role: "model", text: "welcome", timestamp: 1 }];
+  const transcriptEntries: TranscriptEntry[] = [{ id: "t1", kind: "user", text: "first turn", ts: 2, status: "ok" }];
+  const pendingSends: TranscriptEntry[] = [{ id: "pending:s1:turn-x", kind: "user", text: "in flight", ts: 3, status: "running", clientTurnId: "turn-x" }];
+
+  const merged = buildTranscriptRenderEntries(messages, transcriptEntries, pendingSends);
+  expect(merged.map((entry) => entry.text)).toEqual(["welcome", "first turn", "in flight"]);
+  // Pending is last (append-at-end) — never prepended, which would render new sends at the top.
+  expect(merged.at(-1)?.text).toBe("in flight");
+});
+
+test("clearEchoedPendingSends drops a pending send once its clientTurnId echoes back as a user-kind transcript entry", () => {
+  const pendingSends: TranscriptEntry[] = [
+    { id: "pending:s1:turn-a", kind: "user", text: "sent", ts: 1, status: "running", clientTurnId: "turn-a" },
+    { id: "pending:s1:turn-b", kind: "user", text: "still in flight", ts: 2, status: "running", clientTurnId: "turn-b" },
+  ];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "user", text: "sent", ts: 3, status: "ok", clientTurnId: "turn-a" },
+  ];
+
+  const next = clearEchoedPendingSends(pendingSends, transcriptEntries);
+  expect(next.map((entry) => entry.clientTurnId)).toEqual(["turn-b"]);
+});
+
+test("clearEchoedPendingSends does NOT clear a pending send when a gate answer echoes (answerCommand reuses clientTurnId for requestId, not the send's turn id)", () => {
+  const pendingSends: TranscriptEntry[] = [
+    { id: "pending:s1:turn-a", kind: "user", text: "do the thing", ts: 1, status: "running", clientTurnId: "turn-a" },
+  ];
+  // A gate answer travels as `{ type: 'prompt', clientTurnId: requestId }` (see answerCommand),
+  // so its echoed transcript entry is also kind:'user' with a clientTurnId — but a different one.
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "user", text: "yes", ts: 2, status: "ok", clientTurnId: "req-1" },
+  ];
+
+  const next = clearEchoedPendingSends(pendingSends, transcriptEntries);
+  expect(next).toHaveLength(1);
+  expect(next[0]?.clientTurnId).toBe("turn-a");
+});
+
+test("clearEchoedPendingSends ignores non-user-kind entries even if they somehow share a clientTurnId", () => {
+  const pendingSends: TranscriptEntry[] = [
+    { id: "pending:s1:turn-a", kind: "user", text: "sent", ts: 1, status: "running", clientTurnId: "turn-a" },
+  ];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "assistant", text: "not an echo", ts: 2, status: "ok", clientTurnId: "turn-a" },
+  ];
+
+  const next = clearEchoedPendingSends(pendingSends, transcriptEntries);
+  expect(next).toHaveLength(1);
 });

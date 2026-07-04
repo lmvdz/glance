@@ -52,14 +52,28 @@ const transcriptEnd = (entries: TranscriptEntry[], now: number, agent?: AgentDTO
       : entries.at(-1)?.ts ?? now
 );
 
+// Mapped pre-agent messages (`messageToTranscriptEntry` in AssistantChat.tsx, ids
+// stamped `msg:<role>:<timestamp>`) are a synthetic prologue prepended to the merged
+// render list — the session's welcome text / chit-chat that predates the agent
+// transcript entirely. They must never be folded into the collapsible "work" section,
+// and (since they usually start with an assistant-kind welcome) they must not be
+// allowed to poison `firstWorkIndex` into 0 for the *real* transcript that follows —
+// that used to fold the operator's very first sent message into the collapsed work
+// section and hide it the instant the run finished (concern 10 fix).
+const isPrologueEntry = (entry: TranscriptEntry) => !!entry.id?.startsWith('msg:');
+
 const splitTranscriptEntries = (entries: TranscriptEntry[]) => {
   const visibleEntries = entries.filter((entry) => entry.text.trim());
-  const firstWorkIndex = visibleEntries.findIndex((entry) => entry.kind !== 'user');
-  if (firstWorkIndex < 0) return { promptEntries: visibleEntries, workEntries: EMPTY_TRANSCRIPT, finalEntry: undefined };
-  const promptEntries = visibleEntries.slice(0, firstWorkIndex);
-  const workEntries = visibleEntries.slice(firstWorkIndex);
+  let prologueEnd = 0;
+  while (prologueEnd < visibleEntries.length && isPrologueEntry(visibleEntries[prologueEnd])) prologueEnd++;
+  const prologueEntries = visibleEntries.slice(0, prologueEnd);
+  const rest = visibleEntries.slice(prologueEnd);
+  const firstWorkIndex = rest.findIndex((entry) => entry.kind !== 'user');
+  if (firstWorkIndex < 0) return { prologueEntries, promptEntries: rest, workEntries: EMPTY_TRANSCRIPT, finalEntry: undefined };
+  const promptEntries = rest.slice(0, firstWorkIndex);
+  const workEntries = rest.slice(firstWorkIndex);
   const finalEntry = [...workEntries].reverse().find((entry) => entry.kind === 'assistant' && entry.status !== 'running');
-  return { promptEntries, workEntries, finalEntry };
+  return { prologueEntries, promptEntries, workEntries, finalEntry };
 };
 
 export const runStatusLabel = (running: boolean, elapsedMs?: number) => `${running ? 'Working' : 'Worked'} for ${fmtDuration(elapsedMs ?? 0)}`;
@@ -129,7 +143,7 @@ export const TranscriptTimeline = ({
   onToggle: () => void;
   onAnswer?: (requestId: string, value: string) => void;
 }) => {
-  const { promptEntries, workEntries, finalEntry } = splitTranscriptEntries(entries);
+  const { prologueEntries, promptEntries, workEntries, finalEntry } = splitTranscriptEntries(entries);
   const running = agentIsRunning(agent) || transcriptIsRunning(entries);
   const start = transcriptStart(entries, messages, agent);
   const end = transcriptEnd(entries, Date.now(), agent);
@@ -142,7 +156,7 @@ export const TranscriptTimeline = ({
         ? agent.pending.find((p) => p.id === entry.pending!.requestId)
         : undefined;
     return (
-      <article aria-label={`Message from ${transcriptEntrySender(entry)}`}>
+      <article aria-label={`Message from ${transcriptEntrySender(entry)}`} data-kind={entry.kind} data-status={entry.status ?? ''}>
         <TranscriptEntryView entry={entry} />
         {gateRequest && onAnswer && (
           <GateWidget request={gateRequest} onAnswer={(value) => onAnswer(gateRequest.id, value)} />
@@ -159,8 +173,9 @@ export const TranscriptTimeline = ({
     if (item.type === 'group') {
       const first = item.entries[0];
       const key = first.id ?? `${first.ts}:group:${item.entries.length}`;
+      const latestStatus = item.entries[item.entries.length - 1]?.status ?? '';
       return (
-        <article key={key} aria-label={`${item.entries.length} tool calls`}>
+        <article key={key} aria-label={`${item.entries.length} tool calls`} data-kind="tool" data-status={latestStatus}>
           <ToolCallGroup entries={item.entries} />
         </article>
       );
@@ -175,6 +190,7 @@ export const TranscriptTimeline = ({
 
   return (
     <>
+      {renderEntries(prologueEntries)}
       {renderEntries(promptEntries)}
       <ElapsedClock
         start={start}

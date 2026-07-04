@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Plus, Paperclip, X, Trash2, Maximize2, Minimize2, Download, ThumbsUp, ThumbsDown, ArrowLeft, MessageSquare } from 'lucide-react';
+import { Sparkles, Plus, Paperclip, X, Trash2, Maximize2, Minimize2, Download, ArrowLeft, MessageSquare } from 'lucide-react';
 import { SettledMarkdown } from './chat/SettledMarkdown';
 import { ScrollToLatestPill } from './chat/ScrollToLatestPill';
 import { AgentMetaBar, AgentLandControls } from './chat/AgentMetaBar';
@@ -22,7 +22,6 @@ export interface Message {
   role: 'user' | 'model';
   text: string;
   timestamp: number;
-  reaction?: 'like' | 'dislike';
 }
 
 interface ConsoleStart {
@@ -69,9 +68,35 @@ const isSession = (value: unknown): value is Session => {
   return typeof rec.id === 'string' && typeof rec.title === 'string' && Array.isArray(rec.messages) && typeof rec.updatedAt === 'number';
 };
 
+/** Old localStorage blobs may carry a `reaction` field on messages from the (now removed)
+ *  thumbs up/down UI. Strip it so it doesn't ride forward into freshly re-persisted state. */
+const stripLegacyReaction = (message: Message): Message => {
+  if (!message || typeof message !== 'object' || !('reaction' in message)) return message;
+  const { reaction: _reaction, ...rest } = message as Message & { reaction?: unknown };
+  return rest as Message;
+};
+
+/** Pre-migration (double-write era) `handleSend` appended every user turn straight into
+ *  `session.messages`, even after an agent existed — so old localStorage blobs for
+ *  agent-backed sessions carry the operator's turns twice: once here, once in the
+ *  replayed server transcript (the durable record post concern-10). Drop the user-role
+ *  entries so they migrate out on load instead of rendering (and downloading) doubled
+ *  forever. Only sessions with an `agentId` are touched — pre-agent sessions (welcome
+ *  text, chit-chat) have no server transcript to duplicate against and keep their
+ *  `messages` as-is. */
+const migrateDoubleWrittenMessages = (session: Session): Session => {
+  if (!session.metadata?.agentId) return session;
+  const messages = session.messages.filter((message) => message.role !== 'user');
+  return messages.length === session.messages.length ? session : { ...session, messages };
+};
+
 export function normalizeAssistantSessions(value: unknown, now = Date.now()): Session[] {
   if (!Array.isArray(value)) return [createInitialSession(now)];
-  const sessions = value.filter(isSession).sort((a, b) => b.updatedAt - a.updatedAt);
+  const sessions = value
+    .filter(isSession)
+    .map((session) => ({ ...session, messages: session.messages.map(stripLegacyReaction) }))
+    .map(migrateDoubleWrittenMessages)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
   return sessions.length ? sessions : [createInitialSession(now)];
 }
 
@@ -103,6 +128,8 @@ export const chatWidthFromClientX = (panelRight: number, clientX: number) => cla
 
 const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
 const EMPTY_DIFFS: AgentFileDiff[] = [];
+const EMPTY_MESSAGES: { timestamp: number }[] = [];
+const PENDING_SEND_TIMEOUT_MS = 15_000;
 
 const transcriptDownloadText = (entry: TranscriptEntry) => {
   const label = entry.kind === 'user' ? 'You' : entry.kind === 'assistant' ? 'Assistant' : entry.kind.toUpperCase();
@@ -173,6 +200,47 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
   return [...dirs];
 };
 
+// ── Single message model (replay-as-truth) ──────────────────────────────────
+// Read-time mapper: a session's `messages` array now holds only pre-agent content
+// (the welcome text, chit-chat before an agent spins up). Once a session has an
+// agent, its durable record is the replayed server transcript — `messages` stops
+// growing (see `handleSend`). This mapper lets the one render path (TranscriptTimeline)
+// still show that earlier pre-agent content by turning each `Message` into a
+// `TranscriptEntry` with a stable synthetic id.
+export const messageToTranscriptEntry = (message: Message): TranscriptEntry => ({
+  id: `msg:${message.role}:${message.timestamp}`,
+  kind: message.role === 'user' ? 'user' : 'assistant',
+  text: message.text,
+  ts: message.timestamp,
+  format: 'markdown',
+  status: 'ok',
+});
+
+/** One render list, one order: mapped pre-agent messages, then the replayed transcript,
+ *  then any still-in-flight optimistic sends — appended at the END (never prepended;
+ *  prepending renders new sends at the top of the transcript). */
+export const buildTranscriptRenderEntries = (messages: Message[], transcriptEntries: TranscriptEntry[], pendingSends: TranscriptEntry[]): TranscriptEntry[] => [
+  ...messages.map(messageToTranscriptEntry),
+  ...transcriptEntries,
+  ...pendingSends,
+];
+
+/** Drops any pending (optimistic) send whose `clientTurnId` has now arrived as a
+ *  `kind==='user'` entry in the real transcript. Restricted to user-kind on purpose:
+ *  gate answers also travel as `{ type: 'prompt', clientTurnId: requestId }` (see
+ *  `answerCommand`), so their echoed transcript entry also carries a `clientTurnId` —
+ *  but it will never equal a prompt-originated pending send's turn id, and matching
+ *  only against user-kind entries keeps that distinction explicit rather than incidental. */
+export const clearEchoedPendingSends = (pendingSends: TranscriptEntry[], transcriptEntries: TranscriptEntry[]): TranscriptEntry[] => {
+  if (!pendingSends.length) return pendingSends;
+  const echoedTurnIds = new Set(
+    transcriptEntries.filter((entry) => entry.kind === 'user' && entry.clientTurnId).map((entry) => entry.clientTurnId as string),
+  );
+  if (!echoedTurnIds.size) return pendingSends;
+  const next = pendingSends.filter((entry) => !(entry.clientTurnId && echoedTurnIds.has(entry.clientTurnId)));
+  return next.length === pendingSends.length ? pendingSends : next;
+};
+
 /**
  * The scrollable transcript viewport: locked-to-bottom-by-default, unlocks on
  * upward scroll, surfaces a "jump to latest" pill on new content while
@@ -182,34 +250,26 @@ export const detectedPlanDirs = (entries: TranscriptEntry[]): string[] => {
  * state and scroll position instead of leaking them across sessions.
  */
 export const ChatMessagesViewport = ({
-  hasTranscript,
-  transcriptEntries,
-  messages,
+  entries,
   selectedAgent,
   agentDiffs,
   workExpanded,
   onToggleWork,
   onAnswer,
-  visibleMessages,
   isLoading,
-  toggleReaction,
 }: {
-  hasTranscript: boolean;
-  transcriptEntries: TranscriptEntry[];
-  messages: Message[];
+  entries: TranscriptEntry[];
   selectedAgent?: AgentDTO;
   agentDiffs: AgentFileDiff[];
   workExpanded: boolean;
   onToggleWork: () => void;
   onAnswer?: (requestId: string, value: string) => void;
-  visibleMessages: Message[];
   isLoading: boolean;
-  toggleReaction: (idx: number, reaction: 'like' | 'dislike') => void;
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const { isLocked, scrollToBottom, scrollIfLocked } = useChatStreamScroll({ scrollRef });
   const { hasNewMessages, dismiss, contentRef } = useChatNewMessages({ isLocked, onResize: scrollIfLocked });
-  const anyEntryRunning = transcriptIsRunning(transcriptEntries);
+  const anyEntryRunning = transcriptIsRunning(entries);
 
   return (
     <div className="relative flex-1 min-h-0">
@@ -222,55 +282,15 @@ export const ChatMessagesViewport = ({
         className="h-full overflow-y-auto p-3 md:p-4 scrollbar-custom bg-gray-50 dark:bg-gray-950"
       >
         <div ref={contentRef} className="space-y-4">
-          {hasTranscript ? (
-            <TranscriptTimeline
-              entries={transcriptEntries}
-              messages={messages}
-              agent={selectedAgent}
-              diffs={agentDiffs}
-              expanded={workExpanded}
-              onToggle={onToggleWork}
-              onAnswer={onAnswer}
-            />
-          ) : visibleMessages.map((msg, idx) => (
-            <article key={idx} aria-label={`Message from ${msg.role === 'user' ? 'you' : 'glance'}`} data-chat-message className={`flex flex-col w-full ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-              {msg.role === 'user' ? (
-                <div className="flex flex-col items-end gap-1 max-w-[85%]">
-                  <div className="bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-200 px-4 py-3 rounded-2xl rounded-tr-sm text-[14px] leading-relaxed whitespace-pre-wrap">
-                    {msg.text}
-                  </div>
-                  <span className="text-[10px] text-gray-400 dark:text-gray-500 px-1">
-                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                </div>
-              ) : (
-                <div className="w-full text-gray-800 dark:text-gray-300">
-                  <div className="text-[11px] text-gray-500 mb-2 flex items-center gap-2">
-                    glance <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </div>
-                  <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300">
-                    <SettledMarkdown text={msg.text} />
-                  </div>
-                  <div className="flex items-center gap-2 mt-3 text-gray-400 dark:text-gray-500">
-                    <button
-                      onClick={() => toggleReaction(idx, 'like')}
-                      className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'like' ? 'text-green-500 dark:text-green-400 bg-green-50 dark:bg-green-900/20' : ''}`}
-                      title="Helpful"
-                    >
-                      <ThumbsUp className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => toggleReaction(idx, 'dislike')}
-                      className={`min-h-10 min-w-10 p-2 rounded-md hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${msg.reaction === 'dislike' ? 'text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20' : ''}`}
-                      title="Not helpful"
-                    >
-                      <ThumbsDown className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </article>
-          ))}
+          <TranscriptTimeline
+            entries={entries}
+            messages={EMPTY_MESSAGES}
+            agent={selectedAgent}
+            diffs={agentDiffs}
+            expanded={workExpanded}
+            onToggle={onToggleWork}
+            onAnswer={onAnswer}
+          />
           {isLoading && (
             <div className="flex flex-col w-full items-start text-gray-800 dark:text-gray-300">
               <div className="text-[11px] text-gray-500 dark:text-gray-500 mb-2 flex items-center gap-2">
@@ -311,6 +331,8 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: 'omp default', value: '' }]);
   const [selectedModel, setSelectedModel] = useState('');
   const [chatWidth, setChatWidth] = useState(storedChatWidth);
+  const [pendingSends, setPendingSends] = useState<TranscriptEntry[]>([]);
+  const pendingSendTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const promotedPlanDirs = useRef<Set<string>>(new Set());
   const chatPanelRef = useRef<HTMLDivElement>(null);
 
@@ -320,8 +342,8 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const selectedAgent = agentId ? agents.find((agent) => agent.id === agentId) : undefined;
   const transcriptEntries = agentId ? (transcripts.get(agentId) ?? EMPTY_TRANSCRIPT) : EMPTY_TRANSCRIPT;
   const todoPhases = selectedAgent?.todoPhases ?? [];
-  const hasTranscript = transcriptEntries.length > 0;
-  const visibleMessages = hasTranscript ? [] : messages;
+  const sessionPendingSends = activeSessionId ? pendingSends.filter((entry) => entry.id?.startsWith(`pending:${activeSessionId}:`)) : EMPTY_TRANSCRIPT;
+  const renderEntries = buildTranscriptRenderEntries(messages, transcriptEntries, sessionPendingSends);
   const transcriptRunning = transcriptIsRunning(transcriptEntries);
   const agentRunning = agentIsRunning(selectedAgent) || transcriptRunning || isLoading;
   const isStopShown = !!selectedAgent && interruptibleAgents([selectedAgent]).length > 0;
@@ -341,6 +363,31 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   useEffect(() => {
     if (agentId) subscribeConsole(agentId);
   }, [agentId, subscribeConsole]);
+
+  // Clear an optimistic pending send once its clientTurnId echoes back as a real
+  // (kind==='user') transcript entry — the send genuinely landed. Gate answers reuse
+  // clientTurnId for their own requestId, but only user-kind entries are matched here,
+  // and only against clientTurnIds this component itself minted, so an answer never
+  // clears an unrelated pending send.
+  useEffect(() => {
+    setPendingSends((prev) => {
+      const next = clearEchoedPendingSends(prev, transcriptEntries);
+      if (next === prev) return prev;
+      const stillPending = new Set(next.map((entry) => entry.clientTurnId));
+      for (const [turnId, timeout] of pendingSendTimeouts.current) {
+        if (!stillPending.has(turnId)) {
+          clearTimeout(timeout);
+          pendingSendTimeouts.current.delete(turnId);
+        }
+      }
+      return next;
+    });
+  }, [transcriptEntries]);
+
+  useEffect(() => () => {
+    for (const timeout of pendingSendTimeouts.current.values()) clearTimeout(timeout);
+    pendingSendTimeouts.current.clear();
+  }, []);
 
   // Reset the "stopping…" debounce once the agent actually leaves the running state — the
   // interrupt itself gives no immediate ack, so this pending flag *is* the feedback.
@@ -420,16 +467,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     setWorkExpanded(agentRunning);
   }, [agentId, agentRunning]);
 
+  // Titling for a freshly-started "New Chat" session now happens inline in `handleSend`
+  // (the first send that spins up an agent), since sent text no longer lands in `messages`.
   const updateSessionMessages = (sessionId: string, newMessages: Message[]) => {
-    setSessions(prev => prev.map(s => {
-      if (s.id === sessionId) {
-        const title = s.title === 'New Chat' && newMessages.length > 1 && newMessages[1].role === 'user'
-          ? newMessages[1].text.substring(0, 30) + '...'
-          : s.title;
-        return { ...s, messages: newMessages, updatedAt: Date.now(), title };
-      }
-      return s;
-    }));
+    setSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, messages: newMessages, updatedAt: Date.now() } : s)));
   };
 
   useEffect(() => {
@@ -490,12 +531,32 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   // and the `@`-mention trigger-menu now live in `chat/Composer.tsx`, which validates and clears
   // its own input before calling this with a non-empty `textToSend`. Context-assembly (fleet
   // snapshot, task context, agent creation) stays here, unchanged.
+  //
+  // Single message model (concern 10 — replay-as-truth): a send is never written straight into
+  // `session.messages` — the server always echoes the prompt into the agent's persisted
+  // transcript (replayed on every subscribe), so a client-side write here would duplicate it on
+  // refresh. Instead the send shows up instantly as an optimistic `pendingSend`, which is cleared
+  // the moment its `clientTurnId` echoes back as a real transcript entry (or times out into an
+  // error hint if it never does).
   const handleSend = async (textToSend: string) => {
     if (!textToSend || isLoading || !activeSessionId) return;
+    const sessionId = activeSessionId;
 
     const clientTurnId = `turn:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-    const newMessages = [...messages, { role: 'user' as const, text: textToSend, timestamp: Date.now() }];
-    updateSessionMessages(activeSessionId, newMessages);
+    const pendingId = `pending:${sessionId}:${clientTurnId}`;
+    setPendingSends((prev) => [...prev, {
+      id: pendingId,
+      kind: 'user',
+      text: textToSend,
+      ts: Date.now(),
+      format: 'markdown',
+      status: 'running',
+      clientTurnId,
+    }]);
+    pendingSendTimeouts.current.set(clientTurnId, setTimeout(() => {
+      setPendingSends((prev) => prev.map((entry) => (entry.clientTurnId === clientTurnId ? { ...entry, status: 'error' } : entry)));
+      pendingSendTimeouts.current.delete(clientTurnId);
+    }, PENDING_SEND_TIMEOUT_MS));
     setIsLoading(true);
 
     try {
@@ -505,8 +566,9 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
         const started = await apiJson<ConsoleStart>('/api/console', jsonInit('POST', { repo: currentProject?.id, model: selectedModel || undefined }));
         nextAgentId = started.agentId;
         subscribeConsole(nextAgentId);
-        setSessions(prev => prev.map(session => session.id === activeSessionId ? {
+        setSessions(prev => prev.map(session => session.id === sessionId ? {
           ...session,
+          title: session.title === 'New Chat' ? (textToSend.length > 30 ? `${textToSend.slice(0, 30)}...` : textToSend) : session.title,
           metadata: { ...session.metadata, agentId: nextAgentId, status: 'active', stage: 'Chat' },
         } : session));
       }
@@ -518,33 +580,23 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       const activitySnapshot = fleetActivityDigest(fleetActivityRollup(audit), fleetActivityLines(audit, agents));
       const taskContext = selectedTask ? `\n\nCurrent feature context:\n${selectedTask.id} — ${selectedTask.title}\n${selectedTask.description}` : '';
       const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}\n\n${activitySnapshot}${taskContext}`;
-      sendConsoleCommand({ type: 'prompt', id: nextAgentId, message, clientTurnId });
+      sendConsoleCommand({ type: 'prompt', id: nextAgentId, message, displayText: textToSend, clientTurnId });
     } catch (error: any) {
-      updateSessionMessages(activeSessionId, [...newMessages, { role: 'model', text: `Error: ${error.message || 'Could not reach glance chat'}`, timestamp: Date.now() }]);
+      const timeout = pendingSendTimeouts.current.get(clientTurnId);
+      if (timeout) {
+        clearTimeout(timeout);
+        pendingSendTimeouts.current.delete(clientTurnId);
+      }
+      setPendingSends((prev) => prev.map((entry) => (entry.clientTurnId === clientTurnId ? { ...entry, status: 'error' } : entry)));
+      updateSessionMessages(sessionId, [...messages, { role: 'model', text: `Error: ${error.message || 'Could not reach glance chat'}`, timestamp: Date.now() }]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const toggleReaction = (idx: number, reaction: 'like' | 'dislike') => {
-    if (!activeSessionId) return;
-    setSessions(prev => prev.map(s => {
-      if (s.id === activeSessionId) {
-        const updated = [...s.messages];
-        if (updated[idx].reaction === reaction) {
-          delete updated[idx].reaction;
-        } else {
-          updated[idx].reaction = reaction;
-        }
-        return { ...s, messages: updated };
-      }
-      return s;
-    }));
-  };
-
   const downloadHistory = () => {
     if (!activeSession) return;
-    const content = hasTranscript ? transcriptEntries.map(transcriptDownloadText).join('\n\n-------------------\n\n') : messages.map(m => `[${new Date(m.timestamp).toLocaleString()}] ${m.role === 'user' ? 'You' : 'Assistant'}:\n${m.text}`).join('\n\n-------------------\n\n');
+    const content = renderEntries.map(transcriptDownloadText).join('\n\n-------------------\n\n');
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -718,9 +770,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       {/* Messages */}
       <ChatMessagesViewport
         key={activeSessionId ?? 'none'}
-        hasTranscript={hasTranscript}
-        transcriptEntries={transcriptEntries}
-        messages={messages}
+        entries={renderEntries}
         selectedAgent={selectedAgent}
         agentDiffs={agentDiffs ?? EMPTY_DIFFS}
         workExpanded={workExpanded}
@@ -729,9 +779,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
           sendConsoleCommand(answerCommand(selectedAgent.id, requestId, value));
           showToast(`Answer sent to ${selectedAgent.name}`, 'success');
         } : undefined}
-        visibleMessages={visibleMessages}
         isLoading={isLoading}
-        toggleReaction={toggleReaction}
       />
 
       {/* Input Area */}

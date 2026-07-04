@@ -885,7 +885,7 @@ export interface AuditEntry {
 // ── Surface → manager commands ──────────────────────────────────────────────
 
 export type ClientCommand =
-	| { type: "prompt"; id: string; message: string; clientTurnId?: string }
+	| { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string }
 	| { type: "set-model"; id: string; model: string }
 	| { type: "answer"; id: string; requestId: string; value: string }
 	| { type: "interrupt"; id: string }

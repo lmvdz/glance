@@ -78,3 +78,46 @@ test("manager preserves client turn ids and rich tool lifecycle in one transcrip
 	expect(new Set(streamed.filter((e) => e.kind === "thinking").map((e) => e.id)).size).toBe(1);
 	await mgr.stop();
 });
+
+test("prompt echoes displayText in the transcript while the agent receives the full context-augmented message", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-repo-"));
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-state-"));
+	tmps.push(repo, stateDir);
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	let receivedMessage: string | undefined;
+	class EchoDriver extends RichDriver {
+		override async prompt(message: string): Promise<void> {
+			receivedMessage = message;
+			await super.prompt(message);
+		}
+	}
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => new EchoDriver();
+	const dto = await mgr.create({ name: "chat-echo", repo, approvalMode: "yolo", autoRoute: false });
+	const fullMessage = "what's up\n\n[Live context for reference — only act on it if asked]\nfleet snapshot...";
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: fullMessage, clientTurnId: "turn-b", displayText: "what's up" });
+
+	const transcript = mgr.getTranscript(dto.id);
+	const userEntries = transcript.filter((e) => e.kind === "user" && e.clientTurnId === "turn-b");
+	expect(userEntries).toHaveLength(1);
+	expect(userEntries[0]?.text).toBe("what's up");
+	expect(receivedMessage).toBe(fullMessage);
+	await mgr.stop();
+});
+
+test("prompt without displayText falls back to echoing the full message (older clients)", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-repo-"));
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-state-"));
+	tmps.push(repo, stateDir);
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => new RichDriver();
+	const dto = await mgr.create({ name: "chat-legacy", repo, approvalMode: "yolo", autoRoute: false });
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "hello legacy", clientTurnId: "turn-c" });
+
+	const transcript = mgr.getTranscript(dto.id);
+	const userEntries = transcript.filter((e) => e.kind === "user" && e.clientTurnId === "turn-c");
+	expect(userEntries).toHaveLength(1);
+	expect(userEntries[0]?.text).toBe("hello legacy");
+	await mgr.stop();
+});

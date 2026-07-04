@@ -337,7 +337,7 @@ export type SquadEvent =
 export type ClientCommand =
   | { type: "snapshot" }
   | { type: "subscribe"; id: string }
-  | { type: "prompt"; id: string; message: string; clientTurnId?: string }
+  | { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string }
   | { type: "set-model"; id: string; model: string }
   | { type: "interrupt"; id: string }
   | { type: "kill"; id: string }

@@ -2459,7 +2459,7 @@ export class SquadManager extends EventEmitter {
 			case "prompt": {
 				await this.ensureConnected(rec);
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
-				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId });
+				this.append(rec, "user", cmd.displayText ?? cmd.message, { clientTurnId: cmd.clientTurnId });
 				rec.streaming = true;
 				rec.dto.status = "working";
 				this.emitAgent(rec);

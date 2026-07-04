@@ -1,5 +1,5 @@
 # Single message model (replay-as-truth) + clean echo text
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -31,3 +31,6 @@ Daemon change (1): the running daemon uses the **global install** — after land
 - `bun test` (root, with node_modules/.bin on PATH — repo gotcha) covering: prompt handler stores `displayText` when present, full message still reaches the agent (server test near existing squad-manager tests); mapper role/kind + reaction stripping; pending-send lifecycle incl. gate-answer echo NOT clearing a pending user send; ordering (pending at end).
 - Manual, the red-team scenarios: (a) send mid-run → message appears at the bottom instantly, does not inflate into the context blob when the echo lands; (b) refresh mid-run → no duplicated turns, full history via replay; (c) pre-agent session from old localStorage renders and survives refresh; (d) answer a gate → no pending-send weirdness.
 - Daemon restarted and `/api` version confirmed before manual passes.
+
+## Resolution
+Implemented: single message model with replay-as-truth. `displayText?: string` added to the prompt `ClientCommand` (src/types.ts + webapp/src/lib/dto.ts), server stores `displayText ?? cmd.message` as the transcript user entry while forwarding the full context-augmented message to the agent (src/squad-manager.ts). Webapp stops double-writing once a session has an agentId, renders through a single `TranscriptTimeline` path with a read-time mapper for pre-agent messages, and uses transient `pendingSends` reconciled by `clientTurnId`. Legacy bubble render path and reaction UI removed. Covered by tests/rich-transcript.test.ts and webapp/src/components/AssistantChat.test.tsx.
