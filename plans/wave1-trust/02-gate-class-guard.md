@@ -1,6 +1,6 @@
 # Gate-class guard
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -165,3 +165,8 @@ None — single repo.
   - `supervisor.ts`'s `handleAgent`/`resolveRequest` path (inject a fake `fetchContext`/`decide` that would throw if called) never calls `decide()` or marks the gate request `inflight`/`answered` for a `gateClass` request, while the same plain-confirm request IS resolved (asserting the mock `decide`/`chooseFallback` fallback WAS invoked).
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/manager-autonomy.test.ts tests/supervisor.test.ts` — existing approve-bias assertions for non-gate kinds still pass unchanged.
 - `bun run check`
+
+## Resolution
+
+Closed 2026-07-04 via commit b4db5a2 on branch worktree-research-direct-vs-glance. gateClass stamped in onUi (gate_ id + GATE: title) and enforced in both auto-answer engines; supervisor loop extracted to createSupervisorLoop for DI testing; 5 new tests.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).

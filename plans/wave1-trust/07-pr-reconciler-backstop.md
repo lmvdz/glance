@@ -1,6 +1,6 @@
 # PR reconciler backstop
 
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -73,3 +73,8 @@ None — single repo.
   - No-op guard: an empty ledger ⇒ zero `gh`/`git` calls for the whole tick (assert via the mock's call count).
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test` (full suite) — confirm this new always-on timer doesn't fire during other tests that don't set up a `stateDir`/ledger (should short-circuit on the empty-ledger no-op guard).
 - `bun run check`
+
+## Resolution
+
+Closed 2026-07-04 via commit 7f5519c (+1ed2d63 review fixes) on branch worktree-research-direct-vs-glance. Always-on 120s PendingPr reconciler (not OBSERVE-gated): out-of-band merge reconcile, push retry, CLOSED-PR surfacing, close retry, guarded ff-heal.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).

@@ -1,6 +1,8 @@
 # Wave 1 trust — overview
 
-STATUS: open
+STATUS: closed
+
+**Completion (2026-07-04): 8/8 concerns closed.** Executed in 4 batches via workflow (commits 690e414..26ef688) with a fable review gate per batch (3 batch-fix commits: 1bfae45, ed93bcf, 1ed2d63), then a cross-batch goal-completion audit (verdict GO; follow-ups fixed in ce72f8e) and a 34-agent /code-review at high effort (10 confirmed findings, all fixed in the commit after ce72f8e). Suite grew 948 → 1060+ tests, 0 fail, tsc clean throughout. Remaining follow-ups deferred to a later wave: fold recordMainProof fully into the DoneProof ledger (structured red-baseline flag on LandResult instead of detail-substring), optional `gh pr checks` consultation when CI exists, LLM autoresolve port for conflicted PRs (accepted risk 4 in DESIGN.md).
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

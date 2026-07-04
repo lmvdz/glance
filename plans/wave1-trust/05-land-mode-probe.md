@@ -1,6 +1,6 @@
 # Land-mode probe and origin-aware ahead-of
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -206,3 +206,8 @@ None — single repo.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/observer.test.ts` — proof-first short-circuit: a branch with a recorded DoneProof and `aheadOf(a) > 0` (simulating a squash-merged branch) is NOT reopened by `auditStaleDone` and IS eligible for `auditLandedSurvivors`'s reap; the existing non-proof cases (verified behavior above) are unchanged.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/worktree*.test.ts` — `addWorktree`'s new `startPoint` param: when given, `worktree add -b <branch> <dir> <startPoint>` is the exact git invocation (assert via the injectable `GitRunner`); when omitted, behavior is byte-identical to today (regression guard on the no-startPoint path).
 - `bun run check`
+
+## Resolution
+
+Closed 2026-07-04 via commit fc05393 (+1bfae45 review fixes) on branch worktree-research-direct-vs-glance. 5-point per-repo probe (slug, gh repo view, push dry-run, branch==default, ancestry), src/gh.ts wrapper, addWorktree startPoint, origin-aware aheadOfBase swapped into all consumers, DoneProof-first observer/reaper.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).

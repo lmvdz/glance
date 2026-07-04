@@ -1,6 +1,6 @@
 # PR land path
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -196,3 +196,8 @@ None — single repo.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/land-seam.test.ts` — the enforcement test from §2: in PR mode, zero `git merge` invocations against the primary checkout (`cwd === repo`) across both `land()` and `landFeature()`'s full call graph, using a spied `GitRunner`.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/land.test.ts tests/squad-manager*.test.ts` — local-mode behavior byte-identical to pre-concern (regression guard: `landBranch` in local mode is still a pure passthrough to `landAgent`).
 - `bun run check`
+
+## Resolution
+
+Closed 2026-07-04 via commit 13d40c1 (+ed93bcf review fixes) on branch worktree-research-direct-vs-glance. landBranch mode dispatch + landFeature reroute; ensurePr idempotent push+draft; synchronous landAgentPr with scratch-merge gate (acceptance + regression) and per-method post-merge assertion; no-git-merge-in-pr-mode enforcement test.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).

@@ -1,6 +1,6 @@
 # Webapp PR surface
 
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -88,3 +88,8 @@ None — single repo.
 - `bun run check` (webapp typecheck — new optional DTO fields compile cleanly, no `any` widening).
 - Manual probe (documented in the `run`/`verify` skill style used elsewhere in this repo, since this concern is pure UI): with a repo resolved to PR mode (concern 05) and a landed agent (concern 06), open the webapp dashboard and confirm: (a) the fleet list badge shows "awaiting merge"/"merged" instead of the plain ready-to-land badge once `prState` is set; (b) the Land button in `AssistantChat.tsx` reads "Merge PR" before merge and "Merged ✓" after; (c) `TaskDetail.tsx`'s agent header shows a working `PR #<n>` link; (d) the legacy `src/web/index.html` fallback (load it directly, bypassing the Vite build) shows the same PR link/badge.
 - No new automated webapp test is required for this concern beyond the typecheck — if the webapp's existing component test setup (check for one, e.g. a `webapp/src/**/*.test.tsx` convention) already covers `ActiveWorkPane`/`AssistantChat` rendering, extend those with one case each asserting the PR-state badge/label render correctly for `prState: undefined` (unchanged legacy path) and `prState: "merged"` (new path) — do not introduce a new test framework/harness if none exists for the webapp today.
+
+## Resolution
+
+Closed 2026-07-04 via commit 26ef688 (+1ed2d63 review fixes) on branch worktree-research-direct-vs-glance. prUrl/prNumber/prState end-to-end; shared agent-badges helper across ActiveWorkPane/AssistantChat/TaskDetail; per-mode Land button label; legacy web/index.html badge.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).

@@ -1,6 +1,6 @@
 # Done-write gating
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -208,3 +208,8 @@ Update Phase 8's step 8a to gate the Plane close on the commits actually being p
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/features.test.ts` (or wherever `isClosedConcernStatus`/`concernDocStatus` are covered) — confirm (add a case if none exists) that `isClosedConcernStatus("done")` and a doc containing `STATUS: done (unproven — closed in Plane without land proof)` both still resolve to "closed" via `concernDocStatus` + `isClosedConcernStatus`.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test` (full suite) — no other test broke on the `closeLandedIssue` signature change or the `PlanSyncDeps`/`PlanSyncResult` shape additions.
 - `bun run check`
+
+## Resolution
+
+Closed 2026-07-04 via commit 9900de4 on branch worktree-research-direct-vs-glance. closeLandedIssue proof-gated; issueAlreadyDone split (skip proofless / close proof-gated); plan-sync hasProof injection with done (unproven) marker + surfacing; setConcernStatus audited; claim-and-implement skill 8a push-reachability gate applied from the main session.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).

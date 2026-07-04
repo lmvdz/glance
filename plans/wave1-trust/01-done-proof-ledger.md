@@ -1,6 +1,6 @@
 # Done-proof ledger
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -129,3 +129,8 @@ None — single repo.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/done-proof.test.ts` — ledger round-trip, tri-state, `isAncestor` fast-forward/diverged cases, and the `land()` delegation test above.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/land.test.ts tests/squad-manager*.test.ts` (whichever existing files cover `land()` today) — no change in observable `LandResult` shape or behavior; the new ledger write is additive and best-effort.
 - `bun run check`
+
+## Resolution
+
+Closed 2026-07-04 via commit 690e414 on branch worktree-research-direct-vs-glance. DoneProof ledger (done-proofs.json, tri-state verified) + isAncestor primitive + manager-layer proof write on local land; 10 new tests.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).

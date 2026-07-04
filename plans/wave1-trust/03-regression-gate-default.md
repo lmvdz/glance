@@ -1,6 +1,6 @@
 # Regression gate default flip
 
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -83,3 +83,8 @@ None — single repo.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test tests/factory-status.test.ts` — unaffected.
 - `PATH="$PATH:$(pwd)/node_modules/.bin" bun test` (full suite) — no other test implicitly assumed the old default.
 - `bun run check`
+
+## Resolution
+
+Closed 2026-07-04 via commit 8bbfffc on branch worktree-research-direct-vs-glance. OMP_SQUAD_REGRESSION_GATE flipped to default-ON (!== "0"), registered in runtime-settings FEATURE_FLAGS, .env.example updated, tests inverted + explicit =0 opt-out case.
+Post-execution hardening: ce72f8e (cross-batch audit follow-ups: proof-first unlanded-work, honest unverified proofs, ledger retirement, autoclose-off retirement, divergence runbook) and the code-review fix commit that follows it (10 confirmed findings: push-probe fast-forward trap, PR-mode staleGate/commitWip/force-audit, proof tip-coverage, forced-pr default-branch, method-agnostic reconcile, ledger PR-number refresh).
