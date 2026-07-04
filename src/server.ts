@@ -632,7 +632,7 @@ export class SquadServer {
 		// The SPA reads this pre-login to choose its auth style and render only affordances the server backs:
 		// file mode ⇒ bearer token (no login page); db mode ⇒ session login, with sign-up + social buttons
 		// gated by what's actually configured server-side.
-		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file", allowSignup: signupOpen(), socialProviders: this.dbMode ? configuredSocialProviders() : [], sso: this.dbMode && ssoEnabled() });
+		if (url.pathname === "/api/auth/mode") return Response.json({ mode: this.dbMode ? "db" : "file", allowSignup: this.dbMode && signupOpen(), socialProviders: this.dbMode ? configuredSocialProviders() : [], sso: this.dbMode && ssoEnabled() });
 		// WorkOS Directory Sync (SCIM) webhook. Unauthenticated by session — authenticated by the HMAC
 		// signature over the RAW body (verifyWorkosSignature). Placed OUTSIDE /api/auth/* so better-auth's
 		// catch-all doesn't intercept it. 404 when no secret is configured (feature off).
