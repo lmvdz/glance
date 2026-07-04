@@ -4,6 +4,7 @@
  */
 
 import type { AgentDTO, ClientCommand } from './dto';
+import { apiJson } from './api';
 
 /** Statuses that are terminal — an agent here can't (and needn't) be stopped/interrupted. */
 const TERMINAL: ReadonlySet<AgentDTO['status']> = new Set(['stopped', 'error']);
@@ -45,6 +46,63 @@ export function restartCommand(agentId: string): ClientCommand {
 /** Remove an agent, optionally deleting its worktree. */
 export function removeCommand(agentId: string, deleteWorktree = false): ClientCommand {
   return { type: 'remove', id: agentId, deleteWorktree };
+}
+
+/**
+ * Fork a terminal-marked workflow run from a checkpoint (default: the daemon picks its latest).
+ * Mirrors the daemon's `SquadManager.fork(id, {seq?})` — this slice is routing-state-only ("Candidate
+ * A"): the new run starts at the checkpoint's node with reset fix-up-tier visits, but the code stays
+ * at the source run's branch tip. Gated in the UI on `AgentDTO.forkAvailable`.
+ */
+export function forkCommand(agentId: string, seq?: number): ClientCommand {
+  return { type: 'fork', id: agentId, seq };
+}
+
+/** One entry from GET /api/agents/:id/checkpoints (mirrors the daemon's CheckpointLogEntry — never `vars`). */
+export interface CheckpointEntryDTO {
+  seq: number;
+  at: number;
+  currentNode: string;
+  outcome?: 'succeeded' | 'failed';
+}
+
+/** Read-only checkpoint history for the fork-step picker. Returns [] (rather than throwing) on an old
+ *  daemon that 404s the route, so a stale webapp/daemon pairing degrades to an empty picker instead of
+ *  a crash — the button itself is separately gated on `forkAvailable` so this path is rarely hit cold. */
+export async function fetchCheckpoints(agentId: string): Promise<CheckpointEntryDTO[]> {
+  try {
+    return await apiJson<CheckpointEntryDTO[]>(`/api/agents/${encodeURIComponent(agentId)}/checkpoints`);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Guards against a stale `fetchCheckpoints` response overwriting the Fork picker: true only if the
+ * picker is still open for the same agent the fetch was made for. Without this, opening the picker
+ * on agent A (slow fetch), then agent B (fast open) before A resolves, lets A's late response
+ * overwrite B's already-open picker via setForkCheckpoints/setForkSelectedSeq — so confirming then
+ * forks B using A's checkpoint seq (daemon rejects it, or worse, silently forks the wrong step).
+ */
+export function isForkCheckpointResponseCurrent(requestedAgentId: string, currentPickerAgentId: string | null): boolean {
+  return requestedAgentId === currentPickerAgentId;
+}
+
+/**
+ * Pure: resolves the exact `fork` command a confirmed picker selection sends, given the fetched
+ * checkpoints and whatever seq is currently selected — falling back to the latest entry when nothing
+ * has been explicitly picked yet (the picker's own default). Extracted out of the component's click
+ * handler so the "select a step, confirm" flow is unit-testable without mounting React (this webapp
+ * has no jsdom/testing-library; components are tested DOM-free per project convention).
+ */
+export function resolveForkTarget(
+  agentId: string,
+  checkpoints: CheckpointEntryDTO[],
+  selectedSeq: number | null,
+): Extract<ClientCommand, { type: 'fork' }> | undefined {
+  if (checkpoints.length === 0) return undefined;
+  const seq = selectedSeq ?? Math.max(...checkpoints.map((c) => c.seq));
+  return forkCommand(agentId, seq) as Extract<ClientCommand, { type: 'fork' }>;
 }
 
 /** Change the model for an agent. */

@@ -28,7 +28,7 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
 import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
 import { parseStylesheet, resolveNodeStyle } from "./workflow/stylesheet.ts";
-import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowAutonomyMode, WorkflowJournalEvent, WorkflowNode, WorkflowProofState, WorkflowRunState } from "./workflow/types.ts";
+import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowAutonomyMode, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowNode, WorkflowProofState, WorkflowRunState } from "./workflow/types.ts";
 
 /** A branch agent to spawn into the roster (one parallel branch = one fleet agent). */
 export interface BranchSpec {
@@ -39,8 +39,70 @@ export interface BranchSpec {
 	autonomy?: WorkflowAutonomyMode;
 	proof?: WorkflowProofState;
 	sessionId?: string;
+	/** The engine's deterministic `${nodeId}#${visitIndex}:${branchIndex}` identity for this branch — runId-free
+	 *  so recorded outcomes survive a fork. Consumed by spawnFleetBranch to derive a collision-free agent id. */
+	branchKey?: string;
+	/** This workflow run's id, salted into the branch agent id hash so ids stay collision-free across runs/forks. */
+	runId?: string;
+	/** The node in the PARENT's graph this branch executes — structural lineage, kept distinct from `name`
+	 *  (mutable display string, identical across all siblings of one parallel node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
 	/** Aborts when the join short-circuits or a sibling branch threw; the fleet stops the agent so it isn't leaked. */
 	signal?: AbortSignal;
+}
+
+/** Pure builder: the static topology snapshot journaled once per run (workflow.graph). */
+function buildGraphSnapshot(wf: Workflow): WorkflowGraphSnapshot {
+	return {
+		version: 1,
+		name: wf.name,
+		start: wf.start,
+		exit: wf.exit,
+		maxNodeVisits: wf.maxNodeVisits,
+		nodes: [...wf.nodes.values()].map((n) => ({
+			id: n.id,
+			kind: n.kind,
+			label: n.label,
+			maxVisits: n.maxVisits,
+			overflow: n.overflow,
+			goalGate: n.goalGate,
+			retryTarget: n.retryTarget,
+		})),
+		edges: wf.edges.map((e) => ({ from: e.from, to: e.to, label: e.label, condition: e.condition })),
+	};
+}
+
+/**
+ * FNV-1a 32-bit hash, hex-encoded (8 chars) — used (with `slug`) to derive short, deterministic branch
+ * agent ids from `runId + ":" + branchKey` so they stay well under socketPathFor's ~108-byte sun_path
+ * limit regardless of workflow/nodeId length, and never carry `:`/`#` into socket filenames or branch names.
+ */
+export function hash8(s: string): string {
+	let h = 0x811c9dc5;
+	for (let i = 0; i < s.length; i++) {
+		h ^= s.charCodeAt(i);
+		h = Math.imul(h, 0x01000193);
+	}
+	return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/** Slugify a node id into a short, filesystem/socket-safe suffix for a branch agent id. */
+export function slug(s: string, maxLen: number): string {
+	return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, maxLen);
+}
+
+/**
+ * Deterministic branch agent id: `br-<hash8(runId+":"+branchKey)>-<slug(nodeId,12)>`. Short and
+ * `[a-z0-9-]`-only so it stays well under socketPathFor's ~108-byte sun_path limit and never carries
+ * `:`/`#` into socket filenames, receipts paths, or branch names. `nodeId` is the branch node's own id
+ * (the workflow-graph node the branch executes), NOT the fork node's id. The single source of truth for
+ * this formula — spawnFleetBranch and squad-manager's reconcileParallelResume both call it so the two
+ * derivations can never drift apart.
+ */
+export function deriveBranchAgentId(runId: string, branchKey: string, nodeId: string): string {
+	return `br-${hash8(`${runId}:${branchKey}`)}-${slug(nodeId, 12)}`;
 }
 
 /** The fleet capability a workflow uses to fan out parallel branches into real, steerable roster agents. */
@@ -98,6 +160,16 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	private gateSeq = 0;
 	private pendingGate?: PendingGate;
 	private runId = "";
+	/**
+	 * Per-driver-instance branch counter keyed by TARGET node id — survives across a run's repeated
+	 * visits to a parallel node (e.g. a fix-up loop that re-fans-out to the same node), so branchIndex
+	 * stays monotonic per node. Topology review finding 5: this counter starts at 0 on every FRESH driver
+	 * instance, including one built for a cold resume/fork — so a re-spawned branch that resumes a
+	 * still-in-progress fan-out would otherwise duplicate a still-rostered sibling's persisted branchIndex
+	 * from an EARLIER visit of the same node (`seedFromResume` below closes that by replaying the resumed
+	 * fan-out's own visit count into this map before the engine ever calls `nextBranchIndex` again).
+	 */
+	private branchIndexByNode = new Map<string, number>();
 
 	constructor(opts: WorkflowDriverOptions) {
 		super();
@@ -125,7 +197,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			execCommand: this.opts.execCommand,
 			readPromptRef: (ref) => fs.readFile(path.join(wfDir, ref.slice(1)), "utf8"),
 			resolveStyle: (node) => resolveNodeStyle(node, rules),
-			spawnBranch: this.opts.fleet ? (node, task, signal) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, approvalMode: this.opts.approvalMode, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), signal }) : undefined,
+			spawnBranch: this.opts.fleet ? (node, task, signal, branchKey) => this.opts.fleet!.runBranch({ name: node.id, task, model: node.model, approvalMode: this.opts.approvalMode, autonomy: this.autonomy(), proof: this.opts.proof, sessionId: this.sessionId(), branchKey, runId: this.runId, signal, parentNodeId: node.id, branchIndex: this.nextBranchIndex(node.id) }) : undefined,
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
 			cold: this.opts.cold,
@@ -140,8 +212,46 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		this.alive = true;
 		this.emit("ready");
 		if (this.opts.resumeState) {
+			this.seedBranchIndexFromResume(this.opts.resumeState);
 			this.runActive = true;
 			void this.execRun(this.opts.resumeState.goal, this.opts.resumeState);
+		}
+	}
+
+	/**
+	 * Topology review finding 5: reconstruct this fresh driver's `branchIndexByNode` counts from a
+	 * resumed run's IN-PROGRESS fan-out, so a re-spawned branch picks up counting where the dead driver
+	 * left off instead of colliding with an already-rostered sibling's persisted branchIndex.
+	 *
+	 * `branchOutcomes` is populated ONLY while a parallel node is actively fanning out (self-clears on
+	 * join — see EngineCheckpoint.branchOutcomes), one entry per branch regardless of eventual disposition,
+	 * keyed `${forkId}#${visitIndex}:${i}` where `i` indexes the fork's branch target ids in the FIXED
+	 * order `this.wf.edges` gives them (the same list on every visit, since the graph is static). That
+	 * makes `visitIndex` double as "how many times has branchIds[i] already been fanned into BY THIS FORK"
+	 * — exactly what `nextBranchIndex` needs seeded so the next call for that target node returns
+	 * `visitIndex`, matching what the original (dead) driver would have assigned had it not crashed.
+	 * Every branch in the map is seeded, not just a `not_attempted` one that's about to be re-spawned now
+	 * — a LATER revisit of the same fork (another fix-up loop iteration) must keep counting from the true
+	 * history, not just from whatever this one resume happens to re-run.
+	 */
+	private seedBranchIndexFromResume(resume: WorkflowRunState): void {
+		const outcomes = resume.branchOutcomes;
+		if (!outcomes || !this.wf) return;
+		const branchIdsByFork = new Map<string, string[]>();
+		for (const key of Object.keys(outcomes)) {
+			const m = /^(.+)#(\d+):(\d+)$/.exec(key);
+			if (!m) continue;
+			const [, forkId, visitStr, iStr] = m as unknown as [string, string, string, string];
+			let branchIds = branchIdsByFork.get(forkId);
+			if (!branchIds) {
+				branchIds = this.wf.edges.filter((e) => e.from === forkId).map((e) => e.to);
+				branchIdsByFork.set(forkId, branchIds);
+			}
+			const targetId = branchIds[Number(iStr)];
+			if (targetId === undefined) continue;
+			const seeded = Number(visitStr) - 1; // nextBranchIndex's next call returns seeded+1 === visitIndex
+			const current = this.branchIndexByNode.get(targetId) ?? -1;
+			if (seeded > current) this.branchIndexByNode.set(targetId, seeded);
 		}
 	}
 
@@ -213,8 +323,19 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 
 	// ── internals ──────────────────────────────────────────────────────────────
 
+	/** Monotonic per-node branch counter, keyed so re-fanning-out the same node across visits keeps distinguishing siblings. */
+	private nextBranchIndex(nodeId: string): number {
+		const n = (this.branchIndexByNode.get(nodeId) ?? -1) + 1;
+		this.branchIndexByNode.set(nodeId, n);
+		return n;
+	}
+
 	private async execRun(goal: string, resume?: WorkflowRunState): Promise<void> {
 		this.runId = resume?.runId ?? `${this.opts.id}:${Date.now().toString(36)}`;
+		// Emitted here (not in start()) so it always carries the real runId — assigned only just above — and
+		// fires exactly once per run including resumes/second runs on a reused driver. this.wf is guaranteed
+		// set: start() assigns it before execRun can be reached via either prompt() or the resume branch.
+		this.emitJournal({ type: "workflow.graph", graph: buildGraphSnapshot(this.wf!) });
 		this.emit("event", { type: "agent_start" });
 		let outcome: "succeeded" | "failed" = "failed";
 		try {
@@ -225,9 +346,13 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			const result = await this.engine!.run(goal, {
 				resume: resumeRun,
 				checkpoint: (c) => this.onCheckpoint(c),
-				escalate: (reason) => {
+				escalate: (reason, checkpoint) => {
 					this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `⚠ ${reason}` } });
 					this.emit("event", { type: "message_end" });
+					// Lets the manager (concern 03) persist a workflowState.terminal marker and route it
+					// through the existing catastrophe channel, regardless of which of the engine's four
+					// terminal-failure sites fired.
+					this.emit("event", { type: "workflow_terminal", reason, checkpoint });
 				},
 			});
 			outcome = result.outcome;

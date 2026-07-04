@@ -90,8 +90,11 @@ export async function pruneStaleSockets(): Promise<string[]> {
 	return pruned;
 }
 
-/** Tell a host to terminate (kills its omp child; the host then exits and removes its own socket). */
-async function shutdownHost(socket: string): Promise<void> {
+/** Tell a host to terminate (kills its omp child; the host then exits and removes its own socket).
+ *  Exported so a caller that reattaches a record WITHOUT owning its live host (e.g. a terminal-marked
+ *  workflow's surviving inner thread) can explicitly shut it down instead of relying on reapOrphanHosts,
+ *  which only reaps `<id>-wf` sockets whose owner `<id>` is NOT in the live roster. */
+export async function shutdownHost(socket: string): Promise<void> {
 	try {
 		const s = await Bun.connect<undefined>({ unix: socket, socket: { data: () => {}, close: () => {}, error: () => {} } });
 		s.write(`${SQ_SHUTDOWN}\n`);

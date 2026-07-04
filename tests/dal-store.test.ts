@@ -165,6 +165,54 @@ test("FileStore: round-trips state.json in the exact persistNow on-disk format (
 	expect(await store.load()).toEqual({ agents: [a1], transcripts, features: [f1] });
 });
 
+test("FileStore: round-trips a PersistedAgent carrying all four inspectable-topology lineage fields, byte-identical", async () => {
+	const fdir = path.join(dir, "filestore-lineage");
+	const store = new FileStore(fdir);
+
+	const a1 = agent("a1", {
+		branch: "squad/a1",
+		parentId: "parent-1",
+		parentNodeId: "node-a",
+		branchIndex: 3,
+		subagents: [{ id: "sub-1", agent: "worker", description: "task desc", status: "running", task: "task desc", lastUpdate: 42 }],
+		workflowGraph: {
+			version: 1,
+			name: "wf",
+			nodes: [{ id: "start", kind: "start" }, { id: "exit", kind: "exit" }],
+			edges: [{ from: "start", to: "exit" }],
+			start: "start",
+			exit: "exit",
+		},
+	});
+	await store.save({ agents: [a1], transcripts: {}, features: [] });
+
+	const raw = await fs.readFile(path.join(fdir, "state.json"), "utf8");
+	expect(raw).toBe(JSON.stringify({ version: 1, agents: [a1], transcripts: {}, features: [] }, null, 2));
+
+	const loaded = await store.load();
+	expect(loaded.agents).toEqual([a1]);
+	expect(loaded.agents[0]?.parentNodeId).toBe("node-a");
+	expect(loaded.agents[0]?.branchIndex).toBe(3);
+	expect(loaded.agents[0]?.subagents).toEqual(a1.subagents);
+	expect(loaded.agents[0]?.workflowGraph).toEqual(a1.workflowGraph);
+});
+
+test("FileStore: save() failures are counted (not silently swallowed) — the topology durability guarantee rests on this write landing", async () => {
+	// Point the store's stateDir at a PLAIN FILE, not a directory: writeFileDurable's `fs.mkdir(dir, {
+	// recursive: true })` then throws ENOTDIR, exercising save()'s catch path without relying on
+	// platform-specific permission semantics (which root/sandboxed test runners can bypass).
+	const blockerFile = path.join(dir, "not-a-directory");
+	await fs.writeFile(blockerFile, "x");
+	const store = new FileStore(blockerFile);
+
+	expect(store.saveFailures()).toBe(0);
+	await expect(store.save({ agents: [agent("a1")], transcripts: {}, features: [] })).resolves.toBeUndefined();
+	expect(store.saveFailures()).toBe(1);
+	// A second failing save increments the same counter (cumulative for the process, not per-call).
+	await store.save({ agents: [agent("a1")], transcripts: {}, features: [] });
+	expect(store.saveFailures()).toBe(2);
+});
+
 test("FileStore: audit/usage are no-ops (single-tenant file mode)", async () => {
 	const store = new FileStore(path.join(dir, "filestore-noop"));
 	await store.appendAudit({ actor: "x", action: "y" });

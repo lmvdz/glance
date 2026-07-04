@@ -1,5 +1,5 @@
 # fork() command: git branch-from-checkpoint, fix-up-tier visit reset, and the checkpoints REST endpoint
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -39,3 +39,6 @@ None — single-repo plan.
 
 ## Verify
 PATH="$PWD/node_modules/.bin:$PATH" bun test src/squad-manager.test.ts src/server.test.ts (confirm exact test filenames via `find src -maxdepth 1 -name '*.test.ts'` first). Required cases: (a) forking a terminal (escalate-exhausted) run resets every fix-up-tier visit count to 0 while carrying forward all non-tier visit counts, and the fork's `resumeAttempts` is 0; (b) fork refuses when `rec.dto.status==="working"`; (c) fork refuses a second time for the same source runId while a live fork exists; (d) fork against a worktree that no longer exists on disk throws a clear error instead of defaulting to repo HEAD; (e) fork with a `seq` pointing at a currentNode absent from a re-parsed (edited) graph throws a clear validation error; (f) `GET /api/agents/:id/checkpoints` never includes a `vars` key in any returned entry; (g) the forked agent's id, branch name, and worktree path are all derived from the SAME `newId` (spawn-identity invariant preserved).
+
+## Resolution
+Shipped in ee19c6b (+ 4db83ff TOCTOU double-fork guard + supersededBy self-heal; audit fix 0b85a99: rollback when the fork fails to start, fork→source priorId lineage stitching). Fork validates checkpoint vs parsed graph, resets goalGate retryTarget/overflow visit budgets, inherits the issue per DESIGN RT1#13.

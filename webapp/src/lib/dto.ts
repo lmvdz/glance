@@ -175,10 +175,141 @@ export type AutonomyMode = "observe" | "assist" | "autodrive";
 export type VerificationState = "unknown" | "none" | "failed" | "stale" | "fresh";
 export type AgentAction = "prompt" | "answer" | "interrupt" | "verify" | "land" | "set-mode";
 
+/** Mirrors src/types.ts's AgentKind — which runtime backs this agent. */
+export type AgentKind = "omp-operator" | "flue-service" | "workflow";
+
+/** One node in a journaled workflow graph snapshot (mirrors src/workflow/types.ts's WorkflowGraphNode). */
+export interface WorkflowGraphNodeDTO {
+  id: string;
+  kind: string;
+  label?: string;
+  maxVisits?: number;
+  overflow?: string;
+  goalGate?: boolean;
+  /** On failure with no matching edge, route here — rendered as a dashed failure edge. */
+  retryTarget?: string;
+}
+
+/** One edge in a journaled workflow graph snapshot (mirrors WorkflowGraphEdge). */
+export interface WorkflowGraphEdgeDTO {
+  from: string;
+  to: string;
+  label?: string;
+  condition?: string;
+}
+
+/** Static topology snapshot of a workflow's DOT graph, journaled once per run (concern 03) so the
+ *  UI can render intended structure with live progress overlaid. version:1 is additive/forward-compat. */
+export interface WorkflowGraphSnapshotDTO {
+  version: 1;
+  name: string;
+  nodes: WorkflowGraphNodeDTO[];
+  edges: WorkflowGraphEdgeDTO[];
+  start: string;
+  exit: string;
+  maxNodeVisits?: number;
+}
+
+/** Live progress over a workflowGraph — mirrors the fields of src/workflow/types.ts's WorkflowRunState
+ *  the webapp actually reads. Widened/partial on purpose, matching the existing workflowState doc
+ *  convention: the webapp never branches on exhaustive workflow-state cases. `runId`/`terminal` are
+ *  kept from the pre-existing narrower shape (still riding the same wire payload, still what the Fork
+ *  button's `forkAvailable` gate is documented against). */
+export interface WorkflowRunStateDTO {
+  currentNode: string;
+  visits: Record<string, number>;
+  vars: Record<string, string>;
+  outcome?: "succeeded" | "failed";
+  preferredLabel?: string;
+  rollup: { label: string; status: "in_progress" | "completed" }[];
+  runId?: string;
+  terminal?: { reason: string; at?: number; forkPoint?: { runId?: string; seq: number }; supersededBy?: string };
+}
+
+/** One node in an agent's subagent tree (task-spawned children) — mirrors src/subagents.ts's
+ *  SubagentNode. task/description are truncated + redacted server-side before they ever reach here. */
+export interface SubagentNodeDTO {
+  id: string;
+  agent: string;
+  description?: string;
+  status: string;
+  task?: string;
+  lastUpdate: number;
+  index: number;
+}
+
+/** Aggregate rollup across every receipt under a trace — mirrors src/spans.ts's TraceRollup.
+ *  Never sampled (unlike the span waterfall below), so this is always the primary view. */
+export interface TraceRollupDTO {
+  runs: number;
+  toolCalls: number;
+  costUsd: number;
+  tokens: number;
+  durationMs: number;
+  errors: number;
+}
+
+export type TraceSpanKindDTO = 'run' | 'node' | 'tool' | 'subagent' | 'verify' | 'land' | 'resolve';
+export type TraceSpanStatusDTO = 'ok' | 'error' | 'running';
+
+/** One span in the trace tree — mirrors src/spans.ts's TraceNode. Fine spans are tail-sampled, so a
+ *  node with no children isn't necessarily a leaf run; see TraceResponseDTO.partial. */
+export interface TraceNodeDTO {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  name: string;
+  kind: TraceSpanKindDTO;
+  startedAt: number;
+  endedAt?: number;
+  status: TraceSpanStatusDTO;
+  attrs?: Record<string, string>;
+  children: TraceNodeDTO[];
+  rollup: TraceRollupDTO;
+}
+
+/** One receipt contributing to a trace — the fields the drill-in panel's run list needs, not the
+ *  full server-side RunReceipt (which also carries filesTouched/toolTally/etc.). */
+export interface TraceReceiptSummaryDTO {
+  agentId: string;
+  name: string;
+  status: string;
+  runId: string;
+  costUsd?: number;
+  durationMs?: number;
+  toolCalls: number;
+  endedAt?: number;
+}
+
+/** Mirrors src/spans.ts's TraceResponse — the `/api/trace/:id` payload. */
+export interface TraceResponseDTO {
+  traceId: string;
+  root: TraceNodeDTO;
+  rollup: TraceRollupDTO;
+  receipts: TraceReceiptSummaryDTO[];
+  /** True when at least one receipt kept only its rollup because fine spans were sampled out —
+   *  the span waterfall below `rollup` is then labeled "sampled — partial". */
+  partial: boolean;
+}
+
 export interface AgentDTO {
   id: string;
   name: string;
   status: AgentStatus;
+  /** Which runtime backs this agent. */
+  kind?: AgentKind;
+  /** Parent agent id, when this agent is a spawned fan-out branch (workflow) or task subagent. */
+  parentId?: string;
+  /** The node in the PARENT's workflow graph this branch executes — structural lineage, distinct
+   *  from `name` (mutable, identical across parallel siblings of one node). */
+  parentNodeId?: string;
+  /** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+  branchIndex?: number;
+  /** Persisted subagent tree snapshot (task-spawned children). */
+  subagents?: SubagentNodeDTO[];
+  /** Static workflow graph topology, captured once per run (concern 03's workflow.graph journal event). */
+  workflowGraph?: WorkflowGraphSnapshotDTO;
+  workflow?: { path?: string; verify?: { command: string } };
   repo: string;
   worktree: string;
   branch?: string;
@@ -188,6 +319,10 @@ export interface AgentDTO {
   contextTokens?: number;
   contextWindow?: number;
   receipt?: ReceiptRollupDTO;
+  /** The live/last run's trace id — mirrors src/types.ts's AgentDTO.traceId. Same id-space `GET
+   *  /api/trace/:id` expects (`feat:<featureId>` or `run:<agentId>:<receiptRunId>`); absent until a run
+   *  has actually started. `traceIdForAgent` (trace.ts) prefers `featureId` when present, else this. */
+  traceId?: string;
   session?: AgentSessionSummaryDTO;
   profileId?: string;
   activity?: string;
@@ -212,6 +347,14 @@ export interface AgentDTO {
   prUrl?: string;
   prNumber?: number;
   prState?: 'draft' | 'open' | 'merged' | 'closed';
+  /** Derived from the daemon's persisted `workflowState.terminal` marker (present and not yet
+   *  superseded by a fork) — survives a daemon restart. Absent (not just false) on an old daemon
+   *  that never sets the field, which is exactly the gate the Fork button uses: an old daemon never
+   *  shows it instead of showing it disabled or 404ing. */
+  forkAvailable?: boolean;
+  /** Live progress (currentNode/rollup/etc.) over `workflowGraph`'s static topology, plus the
+   *  terminal/runId subset the Fork button's `forkAvailable` gate is documented against. */
+  workflowState?: WorkflowRunStateDTO;
 }
 
 export interface TranscriptTool {
@@ -362,4 +505,5 @@ export type ClientCommand =
   | { type: "interrupt"; id: string }
   | { type: "kill"; id: string }
   | { type: "restart"; id: string }
-  | { type: "remove"; id: string; deleteWorktree?: boolean };
+  | { type: "remove"; id: string; deleteWorktree?: boolean }
+  | { type: "fork"; id: string; seq?: number };

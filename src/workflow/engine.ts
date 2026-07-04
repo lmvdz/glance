@@ -13,7 +13,7 @@
  * the run, it fails (this is what bounds fix-up loops).
  */
 
-import type { EngineCheckpoint, NodeExecutor, NodeResult, Outcome, RunContext, RunResult, StageEvent, Workflow, WorkflowNode, WorkflowRunState } from "./types.ts";
+import type { BranchOutcome, EngineCheckpoint, NodeExecutor, NodeResult, Outcome, RunContext, RunResult, StageEvent, Workflow, WorkflowNode, WorkflowRunState } from "./types.ts";
 
 const DEFAULT_NODE_VISITS = 50;
 
@@ -32,6 +32,15 @@ interface Shared {
 	index: number;
 	/** Last normalized (trimmed) output of each goal-gate node, to detect a zero-progress retry loop. */
 	goalOutputs: Record<string, string>;
+}
+
+/** Options accepted by `run()`. */
+interface RunOpts {
+	resume?: WorkflowRunState;
+	checkpoint?: (c: EngineCheckpoint) => void;
+	/** Fired at every terminal-failure return (visit-cap-no-overflow, poison-cap, no-recovery-route,
+	 *  ran-off-the-end) with the checkpoint the run died at, so a caller can persist a terminal marker. */
+	escalate?: (reason: string, checkpoint: EngineCheckpoint) => void | Promise<void>;
 }
 
 export class WorkflowCancelled extends Error {
@@ -54,7 +63,7 @@ export class WorkflowEngine {
 		this.cancelled = true;
 	}
 
-	async run(goal: string, opts?: { resume?: WorkflowRunState; checkpoint?: (c: EngineCheckpoint) => void; escalate?: (reason: string) => void | Promise<void> }): Promise<RunResult> {
+	async run(goal: string, opts?: RunOpts): Promise<RunResult> {
 		const resume = opts?.resume;
 		const ctx: RunContext = { goal, vars: resume ? { ...resume.vars } : {}, outcome: resume?.outcome, preferredLabel: resume?.preferredLabel };
 		const shared: Shared = { visits: resume ? { ...resume.visits } : {}, stages: [], cap: this.wf.maxNodeVisits ?? DEFAULT_NODE_VISITS, index: resume?.index ?? 0, goalOutputs: {} };
@@ -64,7 +73,15 @@ export class WorkflowEngine {
 		while (current) {
 			if (this.cancelled) throw new WorkflowCancelled();
 			const node = this.wf.nodes.get(current);
-			if (!node) return { outcome: "failed", reason: `dangling edge to unknown node "${current}"`, stages: shared.stages };
+			if (!node) {
+				// Fifth terminal-failure return (review finding 5): this used to bypass terminalFail entirely,
+				// so a dangling edge never got a terminal marker — resumable()'s `!terminal` check passed, the
+				// poison cap never tripped (the run dies inside run() before ever reaching the resume-attempt
+				// check), and the run boot-looped through adoption forever. Route it through the same helper as
+				// the other four terminal-failure sites.
+				const checkpoint: EngineCheckpoint = { goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: 0 };
+				return this.terminalFail(opts, shared, checkpoint, "failed", `dangling edge to unknown node "${current}"`);
+			}
 			if (node.kind === "exit") return { outcome: "succeeded", reason: "reached exit", stages: shared.stages };
 
 			// The resumed node was already counted before the restart — don't re-count or re-cap it.
@@ -77,7 +94,8 @@ export class WorkflowEngine {
 						current = node.overflow;
 						continue;
 					}
-					return { outcome: "failed", reason: `node "${current}" exceeded its visit cap (${limit})`, stages: shared.stages };
+					const checkpoint: EngineCheckpoint = { goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: 0 };
+					return this.terminalFail(opts, shared, checkpoint, "failed", `node "${current}" exceeded its visit cap (${limit})`);
 				}
 				shared.visits[current] = (shared.visits[current] ?? 0) + 1;
 			}
@@ -89,21 +107,22 @@ export class WorkflowEngine {
 			if (resuming && resume?.cold) {
 				const prior = resume.resumeAttempts ?? 0;
 				if (prior >= RESUME_ATTEMPT_CAP) {
-					const reason = `cold resume of "${current}" hit the ${RESUME_ATTEMPT_CAP}-attempt cap — escalating instead of re-running`;
-					await opts?.escalate?.(reason);
-					return { outcome: "failed", reason: `resume poison cap: "${current}" re-ran ${RESUME_ATTEMPT_CAP}× without progress — escalated to a human`, stages: shared.stages };
+					const checkpoint: EngineCheckpoint = { goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: prior };
+					const escalateReason = `cold resume of "${current}" hit the ${RESUME_ATTEMPT_CAP}-attempt cap — escalating instead of re-running`;
+					return this.terminalFail(opts, shared, checkpoint, "failed", `resume poison cap: "${current}" re-ran ${RESUME_ATTEMPT_CAP}× without progress — escalated to a human`, escalateReason);
 				}
 				entryAttempts = prior + 1;
 			}
 
 			const index = shared.index++;
 			// Entry checkpoint: "currentNode is about to run". Preserves the warm-reattach property.
-			opts?.checkpoint?.({ goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: entryAttempts });
+			const entryCheckpoint: EngineCheckpoint = { goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: entryAttempts };
+			opts?.checkpoint?.(entryCheckpoint);
 			this.stage(shared, index, node, "start", ctx);
 
 			let next: string | undefined;
 			if (node.kind === "parallel") {
-				ctx.outcome = await this.runParallel(node, ctx, shared);
+				ctx.outcome = await this.runParallel(node, ctx, shared, opts, resuming, entryCheckpoint);
 				next = this.findMerge(node);
 			} else {
 				await this.execute(node, ctx, resuming);
@@ -115,7 +134,10 @@ export class WorkflowEngine {
 
 			if (!next) {
 				const ok = ctx.outcome !== "failed";
-				return { outcome: ok ? "succeeded" : "failed", reason: ok ? `no outgoing edge from "${current}"` : `"${current}" failed with no recovery route`, stages: shared.stages };
+				const outcome: Outcome = ok ? "succeeded" : "failed";
+				const reason = ok ? `no outgoing edge from "${current}"` : `"${current}" failed with no recovery route`;
+				const checkpoint: EngineCheckpoint = { goal, currentNode: current, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: entryAttempts };
+				return this.terminalFail(opts, shared, checkpoint, outcome, reason);
 			}
 
 			// Exit checkpoint (the second phase): "currentNode FINISHED; advance to `next`". A finished
@@ -125,14 +147,53 @@ export class WorkflowEngine {
 			opts?.checkpoint?.({ goal, currentNode: next, visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: 0 });
 			current = next;
 		}
-		return { outcome: "failed", reason: "ran off the end of the graph", stages: shared.stages };
+		const checkpoint: EngineCheckpoint = { goal, currentNode: current ?? "", visits: { ...shared.visits }, vars: { ...ctx.vars }, outcome: ctx.outcome, preferredLabel: ctx.preferredLabel, index: shared.index, resumeAttempts: 0 };
+		return this.terminalFail(opts, shared, checkpoint, "failed", "ran off the end of the graph");
 	}
 
-	/** Fan out a parallel node's branches concurrently (each a single agent node), then join. */
-	private async runParallel(fork: WorkflowNode, ctx: RunContext, shared: Shared): Promise<Outcome> {
+	/**
+	 * Terminal-failure escalation channel: fired at every one of the engine's four dead-end returns
+	 * (visit-cap-no-overflow, poison-cap, no-recovery-route, ran-off-the-end) so a caller can persist a
+	 * terminal marker exactly once regardless of which site tripped. Only fires `escalate` when the
+	 * outcome is actually "failed" — the no-outgoing-edge success case shares this helper's call site
+	 * but must never escalate.
+	 */
+	private async terminalFail(opts: RunOpts | undefined, shared: Shared, checkpoint: EngineCheckpoint, outcome: Outcome, reason: string, escalateReason: string = reason): Promise<RunResult> {
+		if (outcome === "failed") await opts?.escalate?.(escalateReason, checkpoint);
+		return { outcome, reason, stages: shared.stages };
+	}
+
+	/**
+	 * Fan out a parallel node's branches concurrently (each a single agent node), then join.
+	 * `isResume` is true exactly when this call is processing the node the run resumed onto (never on a
+	 * later revisit of the same fork within one run() call, e.g. a fix-up loop) — only then is
+	 * `opts.resume.branchOutcomes` honored. `entrySnapshot` is the checkpoint `run()` already emitted for
+	 * this node's entry; every per-branch checkpoint below is a verbatim clone of it (plus branchOutcomes),
+	 * so the poison counter, visits, and currentNode can never drift mid-fan-out.
+	 */
+	private async runParallel(fork: WorkflowNode, ctx: RunContext, shared: Shared, opts: RunOpts | undefined, isResume: boolean, entrySnapshot: EngineCheckpoint): Promise<Outcome> {
 		const branchIds = this.wf.edges.filter((e) => e.from === fork.id).map((e) => e.to);
 		const policy = fork.attrs.join_policy === "first_success" ? "first_success" : "wait_all";
 		const maxParallel = fork.attrs.max_parallel ? Math.max(1, Number.parseInt(fork.attrs.max_parallel, 10) || 4) : 4;
+
+		// Deterministic, runId-free per-branch identity: stable across a fork (which mints a new runId)
+		// and across a resume of this exact fan-out (the fork node's visit count doesn't change mid-fan-out).
+		const visitIndex = shared.visits[fork.id] ?? 0;
+		const branchKeys = branchIds.map((_, i) => `${fork.id}#${visitIndex}:${i}`);
+
+		const recorded = isResume ? opts?.resume?.branchOutcomes : undefined;
+		const branchOutcomes: Record<string, BranchOutcome> = {};
+		for (const key of branchKeys) branchOutcomes[key] = recorded?.[key] ?? { disposition: "not_attempted", at: Date.now() };
+
+		const emitBranchCheckpoint = (): void => {
+			opts?.checkpoint?.({ ...entrySnapshot, transient: true, branchOutcomes: { ...branchOutcomes } });
+		};
+
+		// A recorded winner from before a crash means this fan-out already resolved — never re-spawn.
+		if (policy === "first_success" && branchKeys.some((k) => branchOutcomes[k]!.disposition === "succeeded")) {
+			ctx.vars.parallelResults = JSON.stringify(branchIds.map((id, i) => ({ branch: id, outcome: branchOutcomes[branchKeys[i]!]!.disposition, text: branchOutcomes[branchKeys[i]!]!.text })));
+			return "succeeded";
+		}
 
 		// One controller per fan-out. Aborting it signals every in-flight branch agent to stop, so a
 		// first_success win tears down the losers, and a thrown branch executor tears down its siblings
@@ -140,7 +201,7 @@ export class WorkflowEngine {
 		const controller = new AbortController();
 		const results = new Array<NodeResult | undefined>(branchIds.length);
 
-		const runOne = async (bid: string): Promise<NodeResult> => {
+		const runOne = async (bid: string, key: string): Promise<NodeResult> => {
 			const bn = this.wf.nodes.get(bid);
 			if (!bn) return { outcome: "failed" };
 			const limit = bn.maxVisits ?? shared.cap;
@@ -152,13 +213,14 @@ export class WorkflowEngine {
 			const branchCtx: RunContext = { goal: ctx.goal, vars: { ...ctx.vars } };
 			let r: NodeResult;
 			try {
-				r = this.executor.runBranch ? await this.executor.runBranch(bn, branchCtx, controller.signal) : await this.executor.runAgent(bn, branchCtx);
+				r = this.executor.runBranch ? await this.executor.runBranch(bn, branchCtx, controller.signal, key) : await this.executor.runAgent(bn, branchCtx);
 			} catch {
 				// A branch executor that rejected (e.g. its spawn crashed) fails just this branch — never
 				// the whole run. Abort the controller so any sibling agent already in flight is torn down
 				// rather than orphaned: a Promise.all rejection here would lose those handles entirely.
+				// The rejection was never a genuine execution, so it's re-spawnable on resume.
 				controller.abort();
-				r = { outcome: "failed" };
+				r = { outcome: "failed", notAttempted: true };
 			}
 			branchCtx.outcome = r.outcome;
 			if (r.text !== undefined) branchCtx.vars.lastText = r.text;
@@ -166,19 +228,33 @@ export class WorkflowEngine {
 			return r;
 		};
 
+		// Only branches that weren't already resolved on a resumed pass are actually run.
+		const toRun = branchIds.map((_, i) => i).filter((i) => branchOutcomes[branchKeys[i]!]!.disposition === "not_attempted");
+
 		// Bounded concurrency: at most `maxParallel` branches in flight. For first_success the join
 		// resolves the instant one branch succeeds — we abort the rest and stop pulling new work, so
 		// the merge never blocks on the slowest/hung loser.
 		let cursor = 0;
 		const worker = async (): Promise<void> => {
-			while (cursor < branchIds.length && !controller.signal.aborted) {
-				const idx = cursor++;
-				const r = await runOne(branchIds[idx]!);
+			while (cursor < toRun.length && !controller.signal.aborted) {
+				const idx = toRun[cursor++]!;
+				const r = await runOne(branchIds[idx]!, branchKeys[idx]!);
 				results[idx] = r;
-				if (policy === "first_success" && r.outcome === "succeeded") controller.abort();
+				// A genuinely-executed result (including the 30-min turn timeout) records its real outcome;
+				// ceiling/WIP refusals, aborts, and spawn crashes record not_attempted so resume re-spawns them.
+				branchOutcomes[branchKeys[idx]!] = { disposition: r.notAttempted ? "not_attempted" : r.outcome, text: r.text, at: Date.now() };
+				emitBranchCheckpoint();
+				if (policy === "first_success" && r.outcome === "succeeded" && !r.notAttempted) controller.abort();
 			}
 		};
-		await Promise.all(Array.from({ length: Math.min(maxParallel, branchIds.length) }, () => worker()));
+		await Promise.all(Array.from({ length: Math.min(maxParallel, toRun.length) }, () => worker()));
+
+		// Fold recorded (resumed) dispositions back into results for branches this pass never ran.
+		for (let i = 0; i < branchIds.length; i++) {
+			if (results[i] !== undefined) continue;
+			const rec = branchOutcomes[branchKeys[i]!]!;
+			results[i] = { outcome: rec.disposition === "succeeded" ? "succeeded" : "failed", text: rec.text };
+		}
 
 		// Branches short-circuited before they ever ran count as failed for the record.
 		const final = branchIds.map((_, i) => results[i] ?? { outcome: "failed" as Outcome });

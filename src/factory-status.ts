@@ -89,6 +89,9 @@ export interface FactoryStatus {
 	loops: FactoryLoopReport[];
 	/** Headline status for the strip's master heartbeat dot. */
 	overall: FactoryLoopStatus;
+	/** Cumulative FileStore.save() failures this process (0 in DB mode / a healthy run). The topology
+	 *  guarantee (inspectable-topology) rests on this write landing, so a nonzero count is actionable. */
+	persistFailures: number;
 }
 
 /** Effective flag read: default-ON unless explicitly "0" (mirrors the manager's `env !== "0"` gates). */
@@ -111,6 +114,8 @@ export interface BuildFactoryStatusInput {
 	liveArmed: Partial<Record<string, boolean>>;
 	/** Roster agents occupying a slot (starting/working/input). */
 	activeAgents: number;
+	/** Cumulative FileStore.save() failures this process (0 when the store doesn't track them / DB mode). */
+	persistFailures: number;
 }
 
 /** Derive one loop's report from its spec + the live facts. Pure — the unit under test. */
@@ -192,5 +197,6 @@ export function buildFactoryStatus(input: BuildFactoryStatusInput): FactoryStatu
 		planeRepoCount: input.planeRepoCount,
 		loops,
 		overall: deriveOverall(loops, input.activeAgents),
+		persistFailures: input.persistFailures,
 	};
 }

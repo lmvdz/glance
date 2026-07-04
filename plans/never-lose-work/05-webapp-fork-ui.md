@@ -1,5 +1,5 @@
 # Webapp: Fork-from-step-N control in TaskDetail
-STATUS: open
+STATUS: closed
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -19,3 +19,6 @@ None — single-repo plan.
 
 ## Verify
 PATH="$PWD/node_modules/.bin:$PATH" bun test webapp/src/components/TaskDetail.test.tsx webapp/src/lib/agent-control.test.ts (confirm exact test filenames first via `find webapp/src -name '*.test.ts*'`). Required cases: (a) `forkCommand('a1', 3)` returns `{type:'fork', id:'a1', seq:3}`; (b) TaskDetail does NOT render the Fork button for an agent with `forkAvailable` undefined/false; (c) TaskDetail renders the Fork button for an agent with `forkAvailable: true`, and clicking it + selecting an earlier checkpoint sends a `fork` command with that checkpoint's `seq` and shows the 'routing state only' label for non-latest entries.
+
+## Resolution
+Shipped in a249b73 (+ audit fix c76faf4: stale checkpoint-fetch responses discarded via forkPickerAgentIdRef + isForkCheckpointResponseCurrent). ForkButton/ForkPicker as DOM-free-testable components; fetch via apiJson for auth parity.
