@@ -84,6 +84,20 @@ test("STRICT overrides the host opt-out: refuses rather than silently host-runni
 	await expect(gateExec("true", "/repo", { source: { OMP_SQUAD_GATE_SANDBOX: "host", OMP_SQUAD_GATE_SANDBOX_STRICT: "1" } as NodeJS.ProcessEnv, dockerProbe: hasDocker })).rejects.toBeInstanceOf(GateSandboxUnavailableError);
 });
 
+test("sandbox runs as the daemon's uid:gid with a writable HOME — container writes must not land root-owned on the host", async () => {
+	const plan = await gateExec("bun run build", "/wt/x", { source: { ...HOST_SRC }, dockerProbe: hasDocker });
+	const argv = plan.argv.join(" ");
+	expect(argv).toContain(`--user ${process.getuid!()}:${process.getgid!()}`);
+	expect(argv).toContain("-e HOME=/tmp"); // the mapped uid has no passwd entry in the image; `/` is unwritable
+});
+
+test("OMP_SQUAD_GATE_SANDBOX_USER overrides the container user verbatim (root restores old behavior)", async () => {
+	const plan = await gateExec("true", "/repo", { source: { ...HOST_SRC, OMP_SQUAD_GATE_SANDBOX_USER: "root" }, dockerProbe: hasDocker });
+	const argv = plan.argv.join(" ");
+	expect(argv).toContain("--user root");
+	expect(argv).not.toContain(`--user ${process.getuid!()}`);
+});
+
 test("OMP_SQUAD_GATE_SANDBOX_DISABLE=1 forces host exec even when docker is present", async () => {
 	const plan = await gateExec("true", "/repo", { source: { OMP_SQUAD_GATE_SANDBOX_DISABLE: "1" } as NodeJS.ProcessEnv, dockerProbe: hasDocker });
 	expect(plan.argv).toEqual(["bash", "-lc", "true"]);
