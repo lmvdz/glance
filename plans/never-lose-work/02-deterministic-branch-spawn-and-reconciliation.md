@@ -1,5 +1,5 @@
 # createInternal spawn path, deterministic branch agent ids, and stop-and-reprompt cold-resume reconciliation
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -33,3 +33,6 @@ None — single-repo plan.
 
 ## Verify
 PATH="$PWD/node_modules/.bin:$PATH" bun test src/squad-manager.test.ts (or the relevant existing test file — run `find src -name 'squad-manager*.test.ts'` first to confirm the filename). Required cases: (a) `createInternal` with a duplicate id throws before any worktree/spawn side effect runs; (b) a wire-level `{type:"create", options: {...}}` command whose JSON body includes an injected `explicitId`-shaped key is silently ignored by `create()` (the field never reaches `createWithId`'s explicitId param, i.e. the resulting agent's id is NOT the attacker-supplied value); (c) `spawnFleetBranch` called twice with the same `(runId, branchKey)` produces the same agent id both times; (d) `reconcileParallelResume` stops a live roster agent whose id matches a `not_attempted` expected key and a live roster agent whose id matches a `succeeded` expected key, leaving no live agent under either id before the resumed `runParallel` runs; (e) `restart()` on a workflow-kind agent passes `cold:true` into `makeDriver` (assert via a spy/mock on `WorkflowDriver`'s constructor options or `resumeAgent`'s cold branch being exercised); (f) `applyCommand` with an unrecognized `cmd.type` throws rather than returning silently.
+
+## Resolution
+Shipped in c09bda6 (+ review fixes 912dfcd warm-reattach wiring, 04a749b absent-branchOutcomes entry-checkpoint window; audit fix 40d00e6: resolved branches stay in the roster via unresolvedBranchIds(), spawnFleetBranch self-heals stale ids, --restore skips unresolved branch children, operator kill records permanent failed via killedByOperator, operator restart resets resumeAttempts).

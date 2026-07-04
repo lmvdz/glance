@@ -1,5 +1,5 @@
 # Append-only checkpoint log + persisted terminal marker with adoption/resume exclusion
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -29,3 +29,6 @@ None — single-repo plan.
 
 ## Verify
 PATH="$PWD/node_modules/.bin:$PATH" bun test src/workflow/checkpoint-log.test.ts src/squad-manager.test.ts. Required cases: (a) `appendCheckpoint` called 3 times for the same runId across a SIMULATED restart (fresh module state, i.e. re-import or reset the in-memory seq map between calls in the test, while the file already has 2 prior lines) produces seq values 0,1,2 then continuing at 3,4 post-restart with no duplicates or gaps; (b) `readCheckpoints` on a file with a torn trailing line (partial JSON, e.g. write `{"seq":0,...}\n{"seq":1,"cur` with no closing) returns only the well-formed entries, sorted by seq; (c) a `workflow_terminal` frame results in `rec.dto.status==="error"` (via markCatastrophe), `rec.options.workflowState.terminal` set with a `forkPoint`, and `rec.dto.forkAvailable===true`; (d) a terminal-marked persisted agent is excluded by `resumable()` and never appears in `agentsToAdopt`'s output on a simulated reconnectLive/adopt pass; (e) `remove(id, true)` on a workflow agent with a terminal runId deletes its checkpoint-log JSONL file (assert via `fs.access` rejecting after).
+
+## Resolution
+Shipped in a7e6e81 (+ 1cf70a8 terminal survival across restart; audit fixes c911acf torn-trailing-line repairAndCountLines, 40d00e6 reattachTerminal transcript threading). checkpointAppending promise handle chosen over the plan's accept-a-small-race option — fully deterministic seq.
