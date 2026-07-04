@@ -244,6 +244,99 @@ test("dispatcher: dispatches higher-priority Plane issues first without bypassin
 	expect(spawned).toEqual(["urgent", "high"]);
 });
 
+type ScopedIssue = IssueRef & {
+	requires?: string[];
+	produces?: string[];
+	owns?: string[];
+	scopeSource?: "operator" | "inferred";
+};
+
+const scopedIssue = (id: string, over: Partial<ScopedIssue>): ScopedIssue => ({ id, name: `issue ${id}`, ...over });
+
+test("dispatcher: defers operator-declared requires when the required path is missing", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-requires-missing-"));
+	try {
+		const logs: string[] = [];
+		const events: AutomationReport[] = [];
+		const { deps, spawned } = harness({
+			repos: () => [repo],
+			listIssues: async () => [scopedIssue("A", { requires: ["src/api/types.ts"], scopeSource: "operator" })],
+			log: (m) => logs.push(m),
+			record: (r) => events.push(r),
+		});
+
+		expect(await new Dispatcher(deps).tick()).toBe(0);
+		expect(spawned).toEqual([]);
+		expect(logs).toContain("defer A — requires unmet: src/api/types.ts");
+		expect(events[0]).toMatchObject({ spawned: 0, skipReason: "blocked", detail: "requires unmet: src/api/types.ts" });
+	} finally {
+		await fs.rm(repo, { recursive: true, force: true });
+	}
+});
+
+test("dispatcher: dispatches operator-declared requires when the required path exists on disk", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-requires-existing-"));
+	try {
+		await fs.mkdir(path.join(repo, "src/api"), { recursive: true });
+		await fs.writeFile(path.join(repo, "src/api/types.ts"), "export type Ready = true;\n");
+		const { deps, spawned } = harness({
+			repos: () => [repo],
+			listIssues: async () => [scopedIssue("A", { requires: ["src/api/types.ts"], scopeSource: "operator" })],
+		});
+
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+	} finally {
+		await fs.rm(repo, { recursive: true, force: true });
+	}
+});
+
+test("dispatcher: inferred unresolved requires dispatch and surface an advisory", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-requires-inferred-"));
+	try {
+		const logs: string[] = [];
+		const findings: string[] = [];
+		const { deps, spawned } = harness({
+			repos: () => [repo],
+			listIssues: async () => [scopedIssue("A", { requires: ["src/model.ts"], scopeSource: "inferred" })],
+			log: (m) => logs.push(m),
+			scopeFinding: (_repo, message) => findings.push(message),
+		});
+
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+		expect(findings).toEqual(["inferred requires unmet for A: src/model.ts"]);
+		expect(logs).toContain("scope warning A — inferred requires unmet: src/model.ts");
+	} finally {
+		await fs.rm(repo, { recursive: true, force: true });
+	}
+});
+
+test("dispatcher: a queued requires/produces cycle dispatches the highest-priority issue", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-requires-cycle-"));
+	try {
+		const logs: string[] = [];
+		const findings: string[] = [];
+		const { deps, spawned } = harness({
+			repos: () => [repo],
+			maxActive: 1,
+			listIssues: async () => [
+				scopedIssue("low", { priority: "low", requires: ["src/high-output.ts"], produces: ["src/low-output.ts"], scopeSource: "operator" }),
+				scopedIssue("high", { priority: "high", requires: ["src/low-output.ts"], produces: ["src/high-output.ts"], scopeSource: "operator" }),
+			],
+			log: (m) => logs.push(m),
+			scopeFinding: (_repo, message) => findings.push(message),
+		});
+
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["high"]);
+		expect(findings).toEqual(["requires cycle for high: src/low-output.ts"]);
+		expect(logs).toContain("scope warning high — requires cycle: src/low-output.ts");
+	} finally {
+		await fs.rm(repo, { recursive: true, force: true });
+	}
+});
+
 test("dispatchOrder ranks known priorities before plain issues", () => {
 	expect([issue("B"), issue("A", "urgent"), issue("C", "high")].sort(dispatchOrder).map((i) => i.id)).toEqual(["A", "C", "B"]);
 });

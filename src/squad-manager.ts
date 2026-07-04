@@ -671,6 +671,8 @@ export class SquadManager extends EventEmitter {
 				record: this.automation.for("dispatch"),
 				ledger: openDispatchLedger(this.stateDir),
 				alreadyDone: (repo, issue) => this.issueAlreadyDone(repo, issue),
+				liveAgents: () => this.list(),
+				scopeFinding: (repo, message) => this.fileScopeFinding("low", repo, message),
 			});
 			this.dispatcher.start(interval);
 			this.log("info", `auto-dispatch on (every ${Math.round(interval / 1000)}s, max ${maxActive}${this.closeOnDone ? ", auto-close" : ""})`);
@@ -842,7 +844,7 @@ export class SquadManager extends EventEmitter {
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
 	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
-		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo" });
+		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo", requires: issue.requires, owns: issue.owns, produces: issue.produces, scopeSource: issue.scopeSource });
 	}
 
 	/**

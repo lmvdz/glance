@@ -9,11 +9,62 @@
  * the selection + concurrency logic is tested without Plane, tokens, or a clock.
  */
 
+import * as path from "node:path";
+import { existsSync } from "node:fs";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { DispatchLedger } from "./dispatch-ledger.ts";
-import type { AutomationSkipReason, IssueRef } from "./types.ts";
+import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
+
+function norm(p: string): string {
+	const out: string[] = [];
+	for (const seg of p.trim().split("/")) {
+		if (seg === "" || seg === ".") continue;
+		if (seg === "..") out.pop();
+		else out.push(seg);
+	}
+	return out.join("/").toLowerCase();
+}
+
+function under(a: string, b: string): boolean {
+	return a === b || a.startsWith(`${b}/`);
+}
+
+function overlaps(a: string, b: string): boolean {
+	const x = norm(a);
+	const y = norm(b);
+	return x !== "" && y !== "" && (under(x, y) || under(y, x));
+}
+
+function pathExistsInRepo(repo: string, rel: string): boolean {
+	const safe = norm(rel);
+	if (!safe) return false;
+	const full = path.resolve(repo, safe);
+	const root = path.resolve(repo);
+	if (full !== root && !full.startsWith(`${root}${path.sep}`)) return false;
+	return existsSync(full);
+}
+
+function issueKey(issue: IssueRef): string {
+	return issue.identifier ?? issue.id;
+}
+
+function issueProduces(issue: IssueRef): string[] {
+	return issue.produces?.length ? issue.produces : (issue.owns ?? []);
+}
+
+function hasScopeCycle(issue: IssueRef, ordered: readonly IssueRef[]): boolean {
+	const requires = issue.requires ?? [];
+	if (!requires.length) return false;
+	const produced = issueProduces(issue);
+	if (!produced.length) return false;
+	return ordered.some((other) => other.id !== issue.id && (other.requires ?? []).some((req) => produced.some((prod) => overlaps(req, prod))) && issueProduces(other).some((prod) => requires.some((req) => overlaps(req, prod))));
+}
+
+function liveProducedPaths(repo: string, live: readonly AgentDTO[]): string[] {
+	return live.filter((a) => a.repo === repo && a.status !== "stopped" && a.status !== "error").flatMap((a) => a.produces?.length ? a.produces : (a.owns ?? []));
+}
 
 /**
  * Run a transient external (Plane) call with ONE retry, then surface-and-swallow. A thrown Plane
@@ -74,6 +125,10 @@ export interface DispatchDeps {
 	 * The implementation may also close the issue to heal the drift. Errors ⇒ treated as not-done.
 	 */
 	alreadyDone?: (repo: string, issue: IssueRef) => Promise<boolean>;
+	/** Current live/queued agents; used to defer read-after-write hazards until producers land. */
+	liveAgents?: () => AgentDTO[];
+	/** Advisory scope finding sink. */
+	scopeFinding?: (repo: string, message: string) => void;
 }
 
 export class Dispatcher {
@@ -200,6 +255,23 @@ export class Dispatcher {
 						this.deps.log(`skip ${issue.identifier ?? issue.id} — its plan concern is already closed in ${repo} (stale issue, not dispatching)`);
 						noteSkip("already-done", "open issue's plan concern is already closed in the repo");
 						continue;
+					}
+					// Scope dependency gate: operator-declared requires are real ordering constraints.
+					// Inferred requirements are advisory only; never let a hallucinated path wedge dispatch.
+					const requires = issue.requires ?? [];
+					const unmet = requires.filter((r) => !pathExistsInRepo(repo, r) && !liveProducedPaths(repo, this.deps.liveAgents?.() ?? []).some((p) => overlaps(r, p)));
+					if (unmet.length > 0) {
+						if (issue.scopeSource === "operator" && !hasScopeCycle(issue, ordered)) {
+							if (!this.blockedLogged.has(issue.id)) {
+								this.blockedLogged.add(issue.id);
+								this.deps.log(`defer ${issueKey(issue)} — requires unmet: ${unmet.join(", ")}`);
+							}
+							noteSkip("blocked", `requires unmet: ${unmet.join(", ")}`);
+							continue;
+						}
+						const why = hasScopeCycle(issue, ordered) ? "requires cycle" : "inferred requires unmet";
+						this.deps.scopeFinding?.(repo, `${why} for ${issueKey(issue)}: ${unmet.join(", ")}`);
+						this.deps.log(`scope warning ${issueKey(issue)} — ${why}: ${unmet.join(", ")}`);
 					}
 					this.dispatched.add(issue.id);
 					this.deps.ledger?.add(issue.id);

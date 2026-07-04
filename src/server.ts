@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
-import type { ArtifactCommentDTO, ClientCommand, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanRevisionCandidateState, PlanAnnotationTarget, SquadEvent } from "./types.ts";
+import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
 import { worktreeDiff, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
@@ -36,6 +36,22 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+
+function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> {
+	const out: Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> = {};
+	if (!body || typeof body !== "object") return out;
+	for (const key of ["requires", "owns", "produces"] as const) {
+		const value = (body as Record<string, unknown>)[key];
+		if (Array.isArray(value)) {
+			const paths = value.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean);
+			if (paths.length) out[key] = paths;
+		}
+	}
+	const source = (body as Record<string, unknown>).scopeSource;
+	if (source === "operator" || source === "inferred") out.scopeSource = source;
+	else if (out.requires || out.owns || out.produces) out.scopeSource = "operator";
+	return out;
+}
 import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
