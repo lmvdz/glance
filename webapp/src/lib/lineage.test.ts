@@ -52,6 +52,33 @@ describe('buildLineageTree', () => {
     expect(tree[0].children).toHaveLength(0);
   });
 
+  test('self-parent (parentId === own id) → promoted to an orphaned root with no children, not vanished', () => {
+    const agents = [agent('x', { parentId: 'x' })];
+    const tree = buildLineageTree(agents);
+    expect(tree).toHaveLength(1);
+    expect(tree[0].agent.id).toBe('x');
+    expect(tree[0].orphaned).toBe(true);
+    expect(tree[0].children).toHaveLength(0);
+  });
+
+  test('2-node parentId cycle (p→q→p, no dangling parentId) → neither node vanishes: one promoted to an orphaned root, the other nests under it (the back-edge is dropped, not looped)', () => {
+    const agents = [agent('p', { parentId: 'q' }), agent('q', { parentId: 'p' })];
+    const tree = buildLineageTree(agents);
+    const allIds = new Set<string>();
+    const collect = (nodes: typeof tree): void => {
+      for (const n of nodes) {
+        allIds.add(n.agent.id);
+        collect(n.children);
+      }
+    };
+    collect(tree);
+    expect(allIds).toEqual(new Set(['p', 'q'])); // both present somewhere — neither dropped
+    expect(tree).toHaveLength(1); // exactly one promoted root (the other nests as its child)
+    expect(tree[0].orphaned).toBe(true);
+    expect(tree[0].children).toHaveLength(1);
+    expect(tree[0].children[0].children).toHaveLength(0); // the cycle's back-edge is dropped, not re-looped
+  });
+
   test('multi-level nesting (a branch that is itself a workflow with its own branches) → 3-level tree', () => {
     const agents = [
       agent('root'),
