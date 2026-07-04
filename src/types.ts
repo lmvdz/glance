@@ -515,6 +515,12 @@ export interface AgentDTO {
 	contextWindow?: number;
 	/** Compact rollup of the latest/in-flight run (tools, cost, duration); live/derived. */
 	receipt?: ReceiptRollup;
+	/** The live/last run's trace id (RunAccumulator's `SpanCollector.id`) — the SAME id-space
+	 *  `RunReceipt.traceId`/`GET /api/trace/:id` use (`feat:<featureId>` or `run:<agentId>:<runId>` where
+	 *  `runId` is the RECEIPT run id `Date.now().toString(36)`, not the workflow engine's own `runId`
+	 *  format). Set alongside `receipt` at the same two sites (turn-progress + finalizeRun) so the two
+	 *  never drift apart. Absent until a run has actually started. */
+	traceId?: string;
 	/** Compact live RPC session metadata for Control Tower parity with the TUI. */
 	session?: AgentSessionSummary;
 	/** Current todo phases from the backing harness, preserved for rich web rendering. */

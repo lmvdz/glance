@@ -3884,6 +3884,7 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		rec.dto.receipt = rec.run?.rollup();
+		rec.dto.traceId = rec.run?.traceId || rec.dto.traceId; // sticky across a run boundary until the NEXT run's start() reassigns it — never blanked to undefined mid-flight
 		this.transition(rec, this.derive(rec), "turn-progress"); // hottest site — the derived same-state early-return matters most here
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
@@ -4320,6 +4321,7 @@ export class SquadManager extends EventEmitter {
 		// branch diff (not the receipt). Advisory low-sev finding only — never blocks a land.
 		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
+		rec.dto.traceId = run.traceId || rec.dto.traceId; // same sticky rule as the turn-progress site above
 		// Run-end closure: stamp any subagent left non-terminal (started but never got a terminal frame
 		// before this run ended) aborted, and flush the merge — so no persisted node can claim "running"
 		// forever under a run that has already finished.
