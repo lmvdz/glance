@@ -61,7 +61,7 @@ const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
 USAGE
   glance up [--port N] [--no-tui] [--restore]   Start the daemon (web + TUI)
   glance add <repo> [flags]                     Spawn an agent in a new worktree
-  glance list                                   Show the roster
+  glance list [--json]                          Show the roster
   glance prompt <id> <message...>               Send an instruction to an agent
   glance kill <id>                              Stop an agent but keep it in the roster
   glance rm <id> [--delete-worktree]            Remove an agent
@@ -88,9 +88,8 @@ ADD FLAGS
 COMMISSION FLAGS
   --purpose <s>            What the worker does (required)
   --model <spec>           Model specifier, or "false" for a deterministic worker (default: false)
-  --target <t>             node | cloudflare (default: node)
-  --capabilities <a,b>     Least-privilege allowlist (recorded). An env:NAME entry grants that one daemon env var to the scrubbed acceptance run; all other secrets denied
-  --accept-payload <json>  Acceptance input · pair with --accept-expect <json> (expected result subset)
+LIST FLAGS
+  --json           Emit the raw roster JSON from GET /api/agents
 
 CURATE-PLANE FLAGS
   --file                    File one [curator] do-not-auto-land issue per cluster
@@ -443,20 +442,9 @@ async function cmdAdd(args: string[]): Promise<void> {
 	process.stdout.write(`spawned ${dto.name} [${dto.status}]\n  id: ${dto.id}\n  worktree: ${dto.worktree}\n`);
 }
 
-async function cmdList(args: string[]): Promise<void> {
-	const { flags } = parseArgs(args);
-	let agents: AgentDTO[];
-	try {
-		const res = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() });
-		agents = (await res.json()) as AgentDTO[];
-	} catch {
-		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
-		process.exit(1);
-	}
-	if (!agents.length) {
-		process.stdout.write("no agents\n");
-		return;
-	}
+export function renderAgentRoster(agents: AgentDTO[], opts: { json?: boolean } = {}): string {
+	if (opts.json) return `${JSON.stringify(agents, null, 2)}\n`;
+	if (!agents.length) return "no agents\n";
 	const rows = agents.map((a) => ({
 		status: a.status,
 		name: a.name,
@@ -469,11 +457,26 @@ async function cmdList(args: string[]): Promise<void> {
 		name: Math.max(4, ...rows.map((r) => r.name.length)),
 		branch: Math.max(6, ...rows.map((r) => r.branch.length)),
 	};
-	for (const r of rows) {
-		process.stdout.write(
-			`${r.status.padEnd(w.status)}  ${r.name.padEnd(w.name)}  ${r.branch.padEnd(w.branch)}  ${r.pend.padEnd(4)}  ${r.activity}\n`,
-		);
+	return rows
+		.map((r) => `${r.status.padEnd(w.status)}  ${r.name.padEnd(w.name)}  ${r.branch.padEnd(w.branch)}  ${r.pend.padEnd(4)}  ${r.activity}`)
+		.join("\n") + "\n";
+}
+
+async function cmdList(args: string[]): Promise<void> {
+	const { flags } = parseArgs(args);
+	let agents: AgentDTO[];
+	try {
+		const res = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() });
+		if (!res.ok) {
+			process.stderr.write(`list failed: ${res.status} ${await res.text()}\n`);
+			process.exit(1);
+		}
+		agents = (await res.json()) as AgentDTO[];
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
 	}
+	process.stdout.write(renderAgentRoster(agents, { json: flags.json === true }));
 }
 
 async function cmdPrompt(args: string[]): Promise<void> {
