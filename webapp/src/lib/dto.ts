@@ -222,6 +222,12 @@ export interface TranscriptEntry {
   text: string;
   ts: number;
   clientTurnId?: string;
+  /**
+   * The user's bare typed text, when it differs from `text` (the full context-augmented
+   * message the agent actually received). UI renders this when present; `text` stays the
+   * durable audit/debug record.
+   */
+  displayText?: string;
   status?: "running" | "ok" | "error" | "cancelled";
   tool?: TranscriptTool;
   format?: TranscriptFormat;

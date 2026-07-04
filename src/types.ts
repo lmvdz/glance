@@ -80,6 +80,13 @@ export interface TranscriptEntry {
 	ts: number;
 	/** Echoes a UI-submitted prompt id so optimistic turns reconcile without text matching. */
 	clientTurnId?: string;
+	/**
+	 * The user's bare typed text, when it differs from `text` (e.g. `text` carries the
+	 * full context-augmented message the agent actually received — fleet snapshot, live
+	 * context, etc — while this is what they typed). UI renders this when present, but
+	 * `text` remains the durable audit/debug record of what the agent was actually given.
+	 */
+	displayText?: string;
 	status?: TranscriptStatus;
 	tool?: TranscriptTool;
 	format?: TranscriptFormat;
