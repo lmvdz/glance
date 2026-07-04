@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AgentMetaBar, ChatMessagesViewport, ComposerSendButton, ComposerStats, DiffReviewPanel, GateWidget, RunStatusHeader, TodoPanel, TranscriptEntryView, TranscriptTimeline, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions, runStatusLabel } from "./AssistantChat";
+import { ChatMessagesViewport, chatWidthFromClientX, deriveSuggestionChips, detectedPlanDirs, normalizeAssistantSessions } from "./AssistantChat";
+import { AgentMetaBar } from "./chat/AgentMetaBar";
+import { ComposerSendButton } from "./chat/Composer";
+import { ComposerStats } from "./chat/AgentMetaBar";
+import { DiffReviewPanel } from "./chat/DiffReviewPanel";
+import { GateWidget } from "./chat/GateWidget";
+import { RunStatusHeader, TranscriptEntryView, TranscriptTimeline, runStatusLabel } from "./chat/TranscriptTimeline";
+import { TodoPanel } from "./chat/TodoPanel";
 import { ScrollToLatestPill } from "./chat/ScrollToLatestPill";
 import type { AgentDTO, PendingRequest, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
 

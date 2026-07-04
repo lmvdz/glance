@@ -1,5 +1,5 @@
 # Split AssistantChat.tsx into components/chat/
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -27,3 +27,17 @@ None.
 ## Verify
 - `bun test` (webapp suite) green; typecheck green; `bun run build` (webapp) succeeds.
 - Manual smoke after the final commit: open chat, stream a run, Verify/Land buttons, answer a gate with Cmd/Ctrl+Enter, expand diff panel, tool group expand — all identical to before the split.
+
+## Resolution
+`AssistantChat.tsx` shrank from 1492 to 753 lines. New `webapp/src/components/chat/` modules, each a pure move except `Composer.tsx`:
+
+- `CodeBlock.tsx` — the markdown `code` renderer.
+- `SettledMarkdown.tsx` — imports `CodeBlock` and `streamingMarkdown` directly (not via `AssistantChat`), the cycle-guard called out in DESIGN.md.
+- `TodoPanel.tsx`, `GateWidget.tsx` — pure moves.
+- `DiffReviewPanel.tsx` — pure move; also now the home of the `AgentFileDiff` interface (previously in `AssistantChat.tsx`), since both `DiffReviewPanel` and `TranscriptTimeline` need the type without importing back across the cycle boundary.
+- `AgentMetaBar.tsx` — `AgentMetaBar` + `AgentLandControls` + `ComposerStats` and their private formatting helpers.
+- `TranscriptTimeline.tsx` — `TranscriptTimeline` + `TranscriptEntryView` + `RunStatusHeader` (+ `ElapsedClock`, `entryAction`, and the transcript-splitting helpers) as one module. `transcriptIsRunning`/`agentIsRunning`/`runStatusLabel` are exported and imported forward into `AssistantChat.tsx` (same "one definition, forward import" pattern already used for `ToolCallGroup`). The `messages` prop is typed `{ timestamp: number }[]` instead of the app's `Message` type — the only field this module actually reads — so `Message` never has to cross the `chat/` boundary.
+- `Composer.tsx` — the one declared state-relocation: owns the composer's `input` state and the `@`-mention trigger-menu wiring (`useTriggerMenu`, `mentionTriggers`, `composerTextareaRef`), plus the suggestion-chip row and `ComposerSendButton`. Exposes `onSend(text: string)`; `AssistantChat.tsx`'s `handleSend` still owns context-assembly (fleet snapshot, task context, agent creation) and now takes the already-validated text as a required argument instead of reading `input` state directly.
+- `index.ts` — barrel re-export for the whole directory (not used by `TaskDetail.tsx`, which imports `TranscriptTimeline` directly per the plan).
+
+`TaskDetail.tsx:16` repointed to `./chat/TranscriptTimeline` in the same commit. `AssistantChat.test.tsx` updated to import each moved export from its new home; all pre-existing assertions unchanged. `grep -r "from '\.\./AssistantChat'" webapp/src/components/chat/` is empty (no cycle). `bun test` (webapp): 405 pass / 0 fail. `bunx tsc --noEmit` and `bun run build` both clean.

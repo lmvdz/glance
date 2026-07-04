@@ -13,7 +13,7 @@ import { taskRef } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
 import { AgentStatusStrip } from './AgentStatusStrip';
-import { TranscriptTimeline } from './AssistantChat';
+import { TranscriptTimeline } from './chat/TranscriptTimeline';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
@@ -355,7 +355,6 @@ export const TaskDetail = () => {
   const [flowFocus, setFlowFocus] = React.useState(false);
   const [transcriptOpenIds, setTranscriptOpenIds] = React.useState<Set<string>>(() => new Set());
   const [transcriptDetailOpenIds, setTranscriptDetailOpenIds] = React.useState<Set<string>>(() => new Set());
-  const [now, setNow] = React.useState(Date.now);
   const splitContainerRef = React.useRef<HTMLDivElement | null>(null);
   const planArticleRef = React.useRef<HTMLElement | null>(null);
   const planScrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -428,12 +427,6 @@ export const TaskDetail = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [flowFocus]);
-  // Tick the elapsed-time display every second while any agent is working.
-  React.useEffect(() => {
-    if (!activeAgents.some((a) => a.status === 'working' || a.status === 'starting')) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [activeAgents]);
   // Auto-subscribe the first working agent so transcript entries arrive via WS.
   React.useEffect(() => {
     const working = activeAgents.find((a) => a.status === 'working' || a.status === 'starting');
@@ -1478,7 +1471,6 @@ export const TaskDetail = () => {
                                       entries={agentTranscript}
                                       messages={[]}
                                       agent={agent}
-                                      now={now}
                                       expanded={isDetailOpen}
                                       onToggle={() => toggleTranscriptDetail(agent.id)}
                                       onAnswer={(requestId, value) => { sendConsoleCommand(answerCommand(agent.id, requestId, value)); showToast('Answer sent', 'info'); }}
