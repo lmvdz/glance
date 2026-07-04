@@ -11,6 +11,7 @@ import { afterEach, expect, mock, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { recordDoneProof } from "../src/done-proof.ts";
 
 interface AheadCall {
 	repo: string;
@@ -145,6 +146,27 @@ test("agentHasUnlandedWork: a dirty worktree short-circuits true WITHOUT ever ca
 	const has = await mgr.callAgentHasUnlandedWork("a2");
 	expect(has).toBe(true);
 	expect(calls).toEqual([]); // dirty check short-circuits BEFORE the arithmetic
+});
+
+test("agentHasUnlandedWork: a recorded DoneProof short-circuits false even though aheadOfBase reports ahead>0 (out-of-band squash-merge)", async () => {
+	canned = 5; // arithmetic alone would say "still ahead" — the squash-merge case DoneProof exists for
+	const stateDir = await tmpDir("ahw-proof-");
+	const mgr = new TestManager({ stateDir });
+	seed(mgr, "a1", { repo: "/r", worktree: "/nonexistent-clean-dir-xyz", branch: "squad/a1" });
+	recordDoneProof(stateDir, {
+		branch: "squad/a1",
+		repo: "name:r",
+		mode: "pr",
+		method: "squash",
+		commit: "deadbeef",
+		baseRef: "origin/main",
+		verified: "green",
+		detail: "merged out-of-band via GitHub UI (squash)",
+		provenAt: Date.now(),
+	});
+
+	expect(await mgr.callAgentHasUnlandedWork("a1")).toBe(false);
+	expect(calls).toEqual([]); // proof short-circuits BEFORE the arithmetic ever runs
 });
 
 // ── reapDeadWorktrees routes through the shared primitive ──────────────────────────────────────

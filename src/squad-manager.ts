@@ -56,7 +56,7 @@ import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, wit
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, recordDoneProof } from "./done-proof.ts";
-import { assertMerged, ensurePr, landAgentPr, listPendingPrs, mergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
+import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
@@ -570,7 +570,15 @@ export class SquadManager extends EventEmitter {
 		// PR vs local mode without digging ("all 5 probes passed" or the exact reason it forced local).
 		for (const repo of observeRepos) {
 			void resolveLandMode(repo)
-				.then((r) => this.log("info", `land mode for ${repo}: ${r.mode.toUpperCase()} (${r.reason})`))
+				.then((r) => {
+					this.log("info", `land mode for ${repo}: ${r.mode.toUpperCase()} (${r.reason})`);
+					// The divergence probe (probe 5) forced local mode — give the operator the actual
+					// runbook here, since the probe's own reason string just points back at this log line.
+					if (r.mode === "local" && r.reason.includes("diverged")) {
+						this.log("warn", `${repo}: local default branch has diverged from origin — reconcile it by either (a) pushing the local commits to origin if they're real forward progress the remote is missing, or (b) confirming they're already merged upstream some other way and then resetting the local checkout onto origin/<default> (e.g. \`git reset --hard origin/<default>\`)`);
+						this.log("info", `${repo}: PR mode re-enables automatically once the two branches converge — no restart needed, the next resolved probe picks it up`);
+					}
+				})
 				.catch((e) => this.log("warn", `land mode probe failed for ${repo}: ${String(e)}`));
 		}
 		if (process.env.OMP_SQUAD_OBSERVE !== "0" && observeRepos.length > 0) {
@@ -890,12 +898,16 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Does a persisted (pre-adoption) agent still have local work to resume — uncommitted edits or commits
-	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster. */
+	 *  ahead of base? Mirrors agentHasUnlandedWork for a record not yet in the roster.
+	 *  DoneProof is consulted before the arithmetic (same proof-first idiom as agentHasUnlandedWork /
+	 *  observer.ts's hasDoneProof): a squash/rebase merge landed out-of-band while the daemon was down
+	 *  would otherwise permanently re-adopt an already-landed branch as "has work" on every restart. */
 	private async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
 		if (!p.worktree) return false;
 		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		if (!p.branch) return false;
+		if (getDoneProofByBranch(this.stateDir, p.branch) !== undefined) return false;
 		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
 		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
 		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
@@ -1998,12 +2010,20 @@ export class SquadManager extends EventEmitter {
 	 * Cheap "has unlanded work" probe for the auto-land loop — uncommitted edits, or commits ahead
 	 * of the repo's checked-out base. Gates the costly acceptance run so it never fires on an idle
 	 * agent with nothing to merge.
+	 *
+	 * DoneProof is consulted FIRST, before any ahead-count arithmetic, mirroring observer.ts's
+	 * `hasDoneProof` idiom: a squash/rebase (or out-of-band) merge makes rev-list arithmetic
+	 * permanently nonzero even though the work is safely in origin/default, so a recorded proof for
+	 * the branch means "no unlanded work" regardless of what the arithmetic says. Uncommitted dirty
+	 * edits are checked first regardless of proof — a proof only speaks to the committed branch tip
+	 * it was recorded against, never to edits made since.
 	 */
 	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
+		if (getDoneProofByBranch(this.stateDir, rec.dto.branch) !== undefined) return false;
 		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
 	}
 
@@ -3101,20 +3121,31 @@ export class SquadManager extends EventEmitter {
 		// at all yet — covers both a crash between push and `gh pr create`, and a floated push (concern
 		// 06's `floatPrOnLandReady`) that silently failed.
 		const pushCandidates = [...this.agents.values()].filter((r) => r.dto.landReady && r.dto.branch && r.dto.worktree !== r.dto.repo && !existingBranches.has(r.dto.branch));
-		// ff-heal repo set: ONLY repos with actual PR-mode reconciliation work this tick — a repo named
-		// by a ledger entry, or a push-retry candidate's repo — NOT every repo a live agent happens to be
-		// in. DESIGN's ruling is "active only when ledger non-empty"; healing every roster repo on every
-		// tick (regardless of ledger activity) would probe `gh`/`git` for pure local-mode agents too.
+		// ff-heal repo set: repos named by a push-retry candidate, or by an entry NOT YET fully confirmed
+		// (open, unconfirmed-merged, or CLOSED-unmerged — a closed-without-merging PR still deliberately
+		// keeps its repo "in ledger scope" per the design, since that entry is never retired). A FULLY
+		// CONFIRMED merged entry (see `isFullyConfirmedPendingPr`) no longer counts — this is the fix for
+		// "every repo that ever landed a PR gets an ff-heal `git fetch` every tick, indefinitely": once an
+		// entry is retired below, its repo drops out of scope too.
+		const activeEntries = allEntries.filter((e) => !isFullyConfirmedPendingPr(e));
 		const healRepos = new Set<string>();
 		for (const rec of pushCandidates) healRepos.add(rec.dto.repo);
-		for (const e of allEntries) {
+		for (const e of activeEntries) {
 			const p = this.repoPathForIdentity(e.repo);
 			if (p) healRepos.add(p);
 		}
-		if (unconfirmed.length === 0 && pushCandidates.length === 0 && healRepos.size === 0) return; // nothing to do — zero gh/git calls this tick
+		// Retirement: entries ALREADY fully confirmed as of the START of this tick (from a prior tick, or
+		// left over from before this fix shipped) are swept at the end. An entry that becomes fully
+		// confirmed DURING this same tick's reconcile pass (proof + close both landing together) is left
+		// alone this tick — its fields stay visible for this tick's callers — and retires on the next tick
+		// once a fresh read of the ledger shows it confirmed. Counted into the activity gate so a ledger
+		// holding only stale confirmed entries still gets swept even when there is nothing else to do.
+		const retirable = allEntries.filter(isFullyConfirmedPendingPr);
+		if (unconfirmed.length === 0 && pushCandidates.length === 0 && healRepos.size === 0 && retirable.length === 0) return; // nothing to do — zero gh/git calls this tick
 		for (const entry of unconfirmed) await this.reconcileOnePr(entry).catch((e) => this.log("warn", `pr-reconcile: ${entry.branch} failed: ${e instanceof Error ? e.message : String(e)}`));
 		for (const rec of pushCandidates) await this.retryPushFloat(rec).catch((e) => this.log("warn", `pr-reconcile: push retry threw for ${rec.dto.branch}: ${e instanceof Error ? e.message : String(e)}`));
 		for (const repo of healRepos) await this.ffHealOne(repo).catch((e) => this.log("warn", `pr-reconcile: ff-heal failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`));
+		for (const e of retirable) deletePendingPr(this.stateDir, e.branch);
 	}
 
 	/** Map a PendingPr entry's `repoIdentity()` key back to a local filesystem repo path — checked
@@ -3133,8 +3164,9 @@ export class SquadManager extends EventEmitter {
 
 	/**
 	 * Attempt (or confirm) the Plane close for `entry`'s tracked issue. Returns true when there is
-	 * nothing left to confirm: the entry never had a tracked issue, it was already closed (idempotent
-	 * via `closedIssues`), or this call just closed it successfully. False ⇒ retry on a later tick.
+	 * nothing left to confirm: the entry never had a tracked issue, autoclose is off (so there is
+	 * nothing to retry — a disabled close is done, not failed), it was already closed (idempotent via
+	 * `closedIssues`), or this call just closed it successfully. False ⇒ retry on a later tick.
 	 *
 	 * Prefers the live agent's full `dto.issue` (carries `projectId`, which Plane's close call needs to
 	 * route the request) when the agent is still on the roster. `PendingPr` also carries `issueProjectId`
@@ -3144,6 +3176,14 @@ export class SquadManager extends EventEmitter {
 	 */
 	private async attemptCloseFor(entry: PendingPr, repo: string): Promise<boolean> {
 		if (!entry.issueId) return true; // no Plane issue was ever tracked for this land — nothing to confirm
+		if (!this.closeOnDone) {
+			// OMP_SQUAD_AUTOCLOSE=0: `closeLandedIssue` will refuse to close on every tick forever, which
+			// used to read as an unconfirmed close the reconciler kept retrying (a no-op churn: the SAME
+			// gh/Plane state re-checked every tick with no path to ever progress). "Disabled" is not
+			// "failed" — there is nothing to retry, so this entry is done, just never actually closed.
+			this.log("info", `pr-reconcile: not closing ${entry.issueIdentifier ?? entry.issueId} for ${entry.branch} — autoclose is off (OMP_SQUAD_AUTOCLOSE=0); treating the close as done (skipped)`);
+			return true;
+		}
 		const rec = this.agentByBranch(entry.branch);
 		const issue: IssueRef = rec?.dto.issue ?? { id: entry.issueId, identifier: entry.issueIdentifier, name: entry.issueIdentifier ?? entry.issueId, projectId: entry.issueProjectId };
 		if (!this.closedIssues.has(issue.id)) await this.closeLandedIssue(issue, { branch: entry.branch, repo });
@@ -3217,7 +3257,7 @@ export class SquadManager extends EventEmitter {
 				commit: assertion.commit ?? branchTip,
 				mergeCommit: assertion.mergeCommit,
 				baseRef: `origin/${defaultBranch}`,
-				verified: "green",
+				verified: "unverified",
 				detail: "merged out-of-band via GitHub UI; gate not re-verified by the daemon",
 				provenAt: Date.now(),
 				prNumber: entry.prNumber,

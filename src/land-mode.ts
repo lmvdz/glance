@@ -79,7 +79,7 @@ async function probe(repo: string): Promise<ResolvedLandMode> {
 	await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
 	const localSha = (await hardenedGit(["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
 	const ancestor = await isAncestor(localSha, `origin/${defaultBranch}`, repo);
-	if (!ancestor) return { mode: "local", reason: `local ${defaultBranch} is NOT an ancestor of origin/${defaultBranch} — diverged, forcing local mode until reconciled (see boot warning)` };
+	if (!ancestor) return { mode: "local", reason: `local ${defaultBranch} is NOT an ancestor of origin/${defaultBranch} — diverged, forcing local mode until reconciled (see the operator runbook logged at boot for this repo)` };
 
 	return { mode: "pr", defaultBranch, reason: `all 5 probes passed (slug ${slug}, default ${defaultBranch})` };
 }

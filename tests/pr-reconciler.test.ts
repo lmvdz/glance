@@ -80,6 +80,16 @@ beforeEach(() => {
 	ghCalls.length = 0;
 });
 
+const AUTOCLOSE_ENV = ["OMP_SQUAD_AUTOCLOSE"] as const;
+const savedAutoclose: Record<string, string | undefined> = {};
+for (const k of AUTOCLOSE_ENV) savedAutoclose[k] = process.env[k];
+afterEach(() => {
+	for (const k of AUTOCLOSE_ENV) {
+		if (savedAutoclose[k] === undefined) delete process.env[k];
+		else process.env[k] = savedAutoclose[k];
+	}
+});
+
 const tmps: string[] = [];
 afterEach(async () => {
 	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
@@ -235,7 +245,9 @@ test("prReconcileTick: out-of-band GitHub-UI merge writes DoneProof, clears land
 		await mgr.tick();
 
 		const proof = getDoneProofByBranch(stateDir, "squad/a1");
-		expect(proof?.verified).toBe("green");
+		// Honest tri-state: the daemon's own gate never re-ran for a merge that happened outside it, so
+		// this must NOT read "green" (which would claim a re-verified gate that didn't happen).
+		expect(proof?.verified).toBe("unverified");
 		expect(proof?.mode).toBe("pr");
 		expect(proof?.detail).toContain("out-of-band");
 		expect(mgr.agents.get("a1")?.dto.landReady).toBe(false);
@@ -509,4 +521,141 @@ test("prReconcileTick: an empty ledger with a live (non-landReady) agent is stil
 
 	expect(spawnedGit).toBe(false);
 	expect(ghCalls.length).toBe(0);
+});
+
+// ── Ledger retirement (fully-confirmed entries) ────────────────────────────────────────────────
+
+test("prReconcileTick: retires a fully-confirmed merged entry left over from a prior tick, and stops ff-healing its repo", async () => {
+	// A pre-existing entry that is ALREADY fully confirmed (mergedAt + proofAt + issueClosedAt all set)
+	// before this tick even runs — e.g. confirmed on a previous tick, or a leftover from before this fix
+	// shipped. It must be swept even though there is nothing else in the ledger to reconcile this tick
+	// (the activity gate must still open for a stale-confirmed-only ledger).
+	const stateDir = await tmpDir("reconcile-retire-state-");
+	const { repo } = await convergedRepo("reconcile-retire-");
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a10", repo, repo, undefined as unknown as string);
+	recordPendingPr(stateDir, {
+		branch: "squad/a10-done",
+		repo: repoIdentity(repo),
+		prNumber: 10,
+		prUrl: "https://github.com/acme/app/pull/10",
+		issueId: "iss-10",
+		issueIdentifier: "PROJ-10",
+		createdAt: Date.now(),
+		state: "merged",
+		mergedAt: Date.now(),
+		proofAt: Date.now(),
+		issueClosedAt: Date.now(),
+	});
+
+	await mgr.tick();
+
+	expect(getPendingPr(stateDir, "squad/a10-done")).toBeUndefined(); // retired — no longer in the ledger
+	expect(ghCalls.length).toBe(0); // fully confirmed ⇒ never even an ff-heal `gh`/`git` probe for its repo
+});
+
+test("prReconcileTick: an entry fully confirmed DURING this tick stays visible this tick, then retires next tick", async () => {
+	await withPlane(async () => {
+		const stateDir = await tmpDir("reconcile-retire-lag-state-");
+		const { repo, origin } = await convergedRepo("reconcile-retire-lag-");
+		const wt = await branchWorktree(repo, "squad/a11", { "feature.txt": "new\n" });
+		const issue: IssueRef = { id: "iss-11", identifier: "PROJ-11", name: "do the thing", projectId: "proj-9" };
+		const mgr = new TestManager({ stateDir });
+		seedAgent(mgr, "a11", repo, wt, "squad/a11", { landReady: true, issue });
+
+		const { mergeCommit, headOid } = await mergeOutOfBand(repo, origin, "squad/a11");
+		recordPendingPr(stateDir, {
+			branch: "squad/a11",
+			repo: repoIdentity(repo),
+			prNumber: 43,
+			prUrl: "https://github.com/acme/app/pull/43",
+			issueId: issue.id,
+			issueIdentifier: issue.identifier,
+			agentId: "a11",
+			createdAt: Date.now(),
+			state: "open",
+		});
+		prViewByNumber.set(43, { state: "MERGED", headRefOid: headOid, mergeCommit: { oid: mergeCommit } });
+
+		await mgr.tick(); // this tick both confirms AND would otherwise be eligible for retirement
+		const afterFirstTick = getPendingPr(stateDir, "squad/a11");
+		expect(afterFirstTick?.state).toBe("merged");
+		expect(afterFirstTick?.issueClosedAt).toBeDefined(); // fully confirmed already...
+
+		await mgr.tick(); // ...but only retired on the NEXT tick's fresh read
+		expect(getPendingPr(stateDir, "squad/a11")).toBeUndefined();
+	});
+});
+
+test("prReconcileTick: a CLOSED-unmerged entry is never retired and keeps its repo in ff-heal scope", async () => {
+	const stateDir = await tmpDir("reconcile-noretire-closed-state-");
+	const { repo, origin } = await convergedRepo("reconcile-noretire-closed-");
+	const scratch = path.join(await tmpDir("noretire-advance-"), "s");
+	await git(repo, "worktree", "add", "-q", "--detach", scratch, "main");
+	await fs.writeFile(path.join(scratch, "advanced.txt"), "advanced\n");
+	await git(scratch, "add", "-A");
+	await git(scratch, "commit", "-qm", "advance origin");
+	await git(scratch, "push", "-q", "origin", "HEAD:main");
+	await git(repo, "worktree", "remove", "--force", scratch);
+	const originMain = await gitOut(origin, "rev-parse", "main");
+
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a12", repo, repo, undefined as unknown as string);
+	recordPendingPr(stateDir, { branch: "squad/a12-closed", repo: repoIdentity(repo), prNumber: 12, prUrl: "https://github.com/acme/app/pull/12", createdAt: Date.now(), state: "closed" });
+
+	await mgr.tick();
+
+	expect(getPendingPr(stateDir, "squad/a12-closed")).toBeDefined(); // kept — carries surfaced state
+	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(originMain); // still ff-healed — repo stayed in scope
+});
+
+// ── Autoclose disabled (OMP_SQUAD_AUTOCLOSE=0) ─────────────────────────────────────────────────
+
+test("prReconcileTick: with autoclose off, a stranded merged entry stamps issueClosedAt (done, not retried) instead of retrying a no-op close forever", async () => {
+	await withPlane(async (patches) => {
+		process.env.OMP_SQUAD_AUTOCLOSE = "0"; // read at construction → closeOnDone false
+		const stateDir = await tmpDir("reconcile-noautoclose-state-");
+		const { repo } = await convergedRepo("reconcile-noautoclose-");
+		const wt = await branchWorktree(repo, "squad/a13", { "feature.txt": "new\n" });
+		const issue: IssueRef = { id: "iss-13", identifier: "PROJ-13", name: "do another thing", projectId: "proj-9" };
+		const mgr = new TestManager({ stateDir });
+		seedAgent(mgr, "a13", repo, wt, "squad/a13", { issue });
+
+		recordDoneProof(stateDir, {
+			branch: "squad/a13",
+			repo: repoIdentity(repo),
+			issueId: issue.id,
+			issueIdentifier: issue.identifier,
+			mode: "pr",
+			method: "merge",
+			commit: "c13",
+			baseRef: "origin/main",
+			verified: "green",
+			detail: "PR merged, scratch gate green",
+			provenAt: Date.now(),
+			prNumber: 45,
+			prUrl: "https://github.com/acme/app/pull/45",
+		});
+		recordPendingPr(stateDir, {
+			branch: "squad/a13",
+			repo: repoIdentity(repo),
+			prNumber: 45,
+			prUrl: "https://github.com/acme/app/pull/45",
+			issueId: issue.id,
+			issueIdentifier: issue.identifier,
+			agentId: "a13",
+			createdAt: Date.now(),
+			state: "merged",
+			mergedAt: Date.now(),
+			proofAt: Date.now(), // proof written, close never confirmed — the stranded case, with autoclose off
+		});
+
+		await mgr.tick();
+		expect(patches()).toBe(0); // autoclose off ⇒ never actually calls Plane
+		const afterFirstTick = getPendingPr(stateDir, "squad/a13");
+		expect(afterFirstTick?.issueClosedAt).toBeDefined(); // stamped as done, not left stranded
+
+		await mgr.tick(); // second tick: no more retrying (already stamped), only retirement
+		expect(patches()).toBe(0); // still never touched Plane — confirms "disabled" isn't retried as "failed"
+	});
 });

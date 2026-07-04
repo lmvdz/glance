@@ -163,6 +163,26 @@ export function listPendingPrs(stateDir: string): PendingPr[] {
 	return Object.values(readPendingPrLedger(stateDir).byBranch);
 }
 
+/** Retire one entry from the ledger. No-op if the branch has no entry. Used only for entries the
+ *  reconciler has determined are fully confirmed (see `isFullyConfirmedPendingPr`) — keeping them
+ *  forever would grow the ledger file unboundedly AND make every repo that ever landed a PR an
+ *  ff-heal candidate on every tick, indefinitely. */
+export function deletePendingPr(stateDir: string, branch: string): void {
+	const ledger = readPendingPrLedger(stateDir);
+	if (!(branch in ledger.byBranch)) return;
+	delete ledger.byBranch[branch];
+	writePendingPrLedger(stateDir, ledger);
+}
+
+/** A "merged" entry is fully confirmed — nothing a later tick could still use it for — once its
+ *  DoneProof is written (`mergedAt`+`proofAt`) and, when it tracked a Plane issue, that issue's close
+ *  is confirmed too (`issueClosedAt`); an entry with no `issueId` never gates on a close at all.
+ *  CLOSED-unmerged entries are deliberately excluded from retirement — they carry surfaced state (a
+ *  human closed the PR without merging) worth keeping visible in the ledger, per the design's ruling. */
+export function isFullyConfirmedPendingPr(e: PendingPr): boolean {
+	return e.state === "merged" && !!e.mergedAt && !!e.proofAt && (!e.issueId || !!e.issueClosedAt);
+}
+
 // ── ensurePr — idempotent PR-ensure ─────────────────────────────────────────────────────────────
 
 export interface EnsurePrInput {
