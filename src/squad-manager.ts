@@ -876,8 +876,10 @@ export class SquadManager extends EventEmitter {
 		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		if (!p.branch) return false;
-		const r = Bun.spawnSync(["git", "-C", p.repo, "rev-list", "--count", `HEAD..${p.branch}`], { stdout: "pipe", stderr: "ignore" });
-		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
+		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
+		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
+		return (await computeAheadOfBase({ repo: p.repo, branch: p.branch, cwd: p.repo })) > 0;
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */

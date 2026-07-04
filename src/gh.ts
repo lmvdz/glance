@@ -12,9 +12,18 @@ export interface GhRun {
 }
 
 async function ghRaw(args: string[], cwd: string): Promise<GhRun> {
-	const proc = Bun.spawn(["gh", ...args], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" });
-	const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+	// `Bun.spawn` throws SYNCHRONOUSLY (not a rejected exit code) when the `gh` binary itself is
+	// missing from $PATH — every caller (ghJson, ghAvailable, land-mode.ts's probe()) treats a
+	// non-zero `code` as "gh unavailable" but none of them expect a throw, so an uncaught spawn
+	// failure here would crash `resolveLandMode` and, transitively, `SquadManager.create()` on any
+	// host without `gh` installed. Degrade to a synthetic non-zero result instead — never throw.
+	try {
+		const proc = Bun.spawn(["gh", ...args], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" });
+		const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+		return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+	} catch (err) {
+		return { code: 127, stdout: "", stderr: `gh unavailable: ${err instanceof Error ? err.message : String(err)}` };
+	}
 }
 
 export async function gh(args: string[], cwd: string): Promise<GhRun> {

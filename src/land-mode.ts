@@ -107,6 +107,11 @@ export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: st
 		const r = await hardenedGit(["rev-list", "--count", `origin/${mode.defaultBranch}..${opts.branch}`], { cwd });
 		return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
 	}
-	const r = await hardenedGit(["rev-list", "--count", `HEAD..${opts.branch}`], { cwd });
+	// Local mode measures against the repo's OWN checked-out HEAD, never `opts.cwd` — a caller
+	// commonly passes the agent's worktree here, and inside that worktree HEAD *is* `opts.branch`,
+	// which makes `HEAD..branch` permanently 0 regardless of how many commits are actually unlanded.
+	// Branch refs are shared across worktrees of the same repo, so running this at `opts.repo`
+	// costs nothing and restores the pre-refactor `-C <main checkout>` semantics.
+	const r = await hardenedGit(["rev-list", "--count", `HEAD..${opts.branch}`], { cwd: opts.repo });
 	return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
 }
