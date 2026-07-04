@@ -56,6 +56,7 @@ import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, wit
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, recordDoneProof } from "./done-proof.ts";
+import { landAgentPr } from "./land-pr.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
@@ -1639,15 +1640,56 @@ export class SquadManager extends EventEmitter {
 		for (const w of landOrder(wts)) {
 			const rec = w.agentId ? this.agents.get(w.agentId) : undefined;
 			const busy = rec ? rec.dto.status === "working" || rec.dto.status === "starting" || rec.dto.status === "input" : false;
-			const res = await landAgent({ repo: pf.repo, worktree: w.worktree, branch: w.branch, message: `feature(${pf.title}): land ${w.branch ?? "changes"}`, commitWip: !busy, requireProof: !force, staleGate: !force, verify: pf.acceptance ?? undefined });
+			// Reroute through the SAME mode-dispatching seam land() uses (concern 06) — landFeature used
+			// to call landAgent directly here, which meant PR mode would keep local-merging every
+			// multi-branch feature land regardless of the resolved mode (the "two worlds inside the
+			// daemon" hole). Issue fields thread through so PR mode's DoneProof/PendingPr ledger entries
+			// are retrievable by issue identifier, same as the single-agent path.
+			const res = await this.landBranch({
+				repo: pf.repo,
+				worktree: w.worktree,
+				branch: w.branch,
+				message: `feature(${pf.title}): land ${w.branch ?? "changes"}`,
+				commitWip: !busy,
+				requireProof: !force,
+				staleGate: !force,
+				verify: pf.acceptance ?? undefined,
+				issueId: rec?.dto.issue?.id,
+				issueIdentifier: rec?.dto.issue?.identifier,
+				agentId: w.agentId,
+			});
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			// Forced member land without a passing proof gate — audit the override per branch.
 			if (res.forcedWithoutProof) {
 				recordForcedLand(this.stateDir, w.branch, actor.id, `${reason ? `${reason}: ` : ""}${res.detail ?? ""}`);
 				void this.store.appendAudit({ actor: actor.id, action: "land.forced-unproven", target: id, detail: { branch: w.branch, reason, at: Date.now() } }).catch(() => {});
 			}
+			if (res.mode === "pr" && rec) {
+				rec.dto.prUrl = res.prUrl;
+				rec.dto.prNumber = res.prNumber;
+				rec.dto.prState = res.prState;
+				this.emitAgent(rec);
+			}
 			if (!res.ok) { this.emitFeaturesChanged(); void this.recordAudit(LOCAL_ACTOR, "land", id, "error", `feature land failed on ${w.branch}`); void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: "error", branch: w.branch } }).catch(() => {}); return { ok: false, stopped: `land failed on ${w.branch}`, results }; }
-			if (res.merged) void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
+			if (res.merged) {
+				// PR mode already wrote its own (richer) DoneProof inside landAgentPr — only the local
+				// path needs one written here, mirroring land()'s manager-layer write.
+				if (res.mode !== "pr") {
+					recordDoneProof(this.stateDir, {
+						branch: w.branch ?? "",
+						repo: repoIdentity(pf.repo),
+						issueId: rec?.dto.issue?.id,
+						issueIdentifier: rec?.dto.issue?.identifier,
+						mode: "local",
+						commit: w.branch ? await headCommit(w.worktree) : "",
+						baseRef: "HEAD",
+						verified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
+						detail: res.detail ?? "",
+						provenAt: Date.now(),
+					});
+				}
+				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
+			}
 		}
 		this.emitFeaturesChanged();
 		void this.recordAudit(LOCAL_ACTOR, "land", id, "ok", `landed ${results.length} branch(es)`);
@@ -1696,7 +1738,18 @@ export class SquadManager extends EventEmitter {
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
 			requireProof: !opts.force,
 			staleGate: !opts.force,
+			issueId: dto.issue?.id,
+			issueIdentifier: dto.issue?.identifier,
+			agentId: dto.id,
 		});
+		// PR-mode metadata (concern 06): set directly on the dto at push/merge time, the same pattern
+		// `landReady` already uses. Absent (mode !== "pr") ⇒ local mode, untouched.
+		if (result.mode === "pr") {
+			rec.dto.prUrl = result.prUrl;
+			rec.dto.prNumber = result.prNumber;
+			rec.dto.prState = result.prState;
+			this.emitAgent(rec);
+		}
 		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
 		// (never bump the fail streak) and not landed — surface the ready-to-land flag and return.
 		if (result.staged) {
@@ -1721,24 +1774,28 @@ export class SquadManager extends EventEmitter {
 			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
 			if (result.merged) {
-				// Retrievable proof that this branch's work is now in main — the ONE artifact later
-				// consumers (closeLandedIssue's proof gate, plan-sync, Observer arithmetic) can trust
-				// instead of re-deriving truth from rev-list math. Best-effort, additive: never blocks land().
-				// TODO: land.ts's LandResult carries no explicit tri-state flag for the red-baseline escape
-				// (verifyMerged :390-414) — this substring match on its own detail wording is the only signal
-				// today. If that wording ever changes, this silently stops matching and falls back to "green".
-				recordDoneProof(this.stateDir, {
-					branch: dto.branch ?? "",
-					repo: repoIdentity(dto.repo),
-					issueId: dto.issue?.id,
-					issueIdentifier: dto.issue?.identifier,
-					mode: "local",
-					commit: dto.branch ? await headCommit(dto.worktree) : "",
-					baseRef: "HEAD",
-					verified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
-					detail: result.detail ?? result.message,
-					provenAt: Date.now(),
-				});
+				// PR mode already wrote its own (richer, method/mergeCommit-aware) DoneProof inside
+				// landAgentPr — writing a generic "mode: local" one here too would clobber it.
+				if (result.mode !== "pr") {
+					// Retrievable proof that this branch's work is now in main — the ONE artifact later
+					// consumers (closeLandedIssue's proof gate, plan-sync, Observer arithmetic) can trust
+					// instead of re-deriving truth from rev-list math. Best-effort, additive: never blocks land().
+					// TODO: land.ts's LandResult carries no explicit tri-state flag for the red-baseline escape
+					// (verifyMerged :390-414) — this substring match on its own detail wording is the only signal
+					// today. If that wording ever changes, this silently stops matching and falls back to "green".
+					recordDoneProof(this.stateDir, {
+						branch: dto.branch ?? "",
+						repo: repoIdentity(dto.repo),
+						issueId: dto.issue?.id,
+						issueIdentifier: dto.issue?.identifier,
+						mode: "local",
+						commit: dto.branch ? await headCommit(dto.worktree) : "",
+						baseRef: "HEAD",
+						verified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
+						detail: result.detail ?? result.message,
+						provenAt: Date.now(),
+					});
+				}
 				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
@@ -1791,8 +1848,30 @@ export class SquadManager extends EventEmitter {
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
 		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
 	}
-	/** Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake land). */
-	protected landBranch(opts: LandOpts): Promise<LandResult> {
+	/**
+	 * Thin, overridable wrapper around land-mode.ts's `resolveLandMode` — exists so tests can force
+	 * PR/local mode deterministically without fighting `bun test`'s PROCESS-WIDE `mock.module`
+	 * semantics: a different test file module-mocking `land-mode.ts` for an unrelated reason (e.g.
+	 * `aheadOfBase`-isolation) permanently rebinds squad-manager.ts's own `resolveLandMode` import for
+	 * the rest of the test process the moment this module is first evaluated, regardless of import
+	 * order in any OTHER file. Injecting through a method sidesteps that entirely.
+	 */
+	protected resolveLandModeFor(repo: string): ReturnType<typeof resolveLandMode> {
+		return resolveLandMode(repo);
+	}
+
+	/**
+	 * Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake
+	 * land). Also the universal mode-dispatching point (concern 06): PR mode routes through
+	 * `landAgentPr` (push → ensure PR → scratch-merge gate → `gh pr merge` → assert → DoneProof), local
+	 * mode is the unchanged passthrough to `landAgent`. `land()` and `landFeature()` both call this
+	 * seam, so PR mode inherits proofGate/fail-cap/forced-land-audit/closeLandedIssue for free.
+	 */
+	protected async landBranch(opts: LandOpts): Promise<LandResult> {
+		const mode = await this.resolveLandModeFor(opts.repo);
+		if (mode.mode === "pr" && mode.defaultBranch) {
+			return landAgentPr({ ...opts, defaultBranch: mode.defaultBranch }, this.stateDir);
+		}
 		return landAgent(opts);
 	}
 

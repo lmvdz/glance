@@ -40,6 +40,15 @@ export interface LandResult {
 	 * says so too. Absent/false on a normal land or a forced land that happened to have a fresh proof.
 	 */
 	forcedWithoutProof?: boolean;
+	/** PR mode only (concern 06): which land path produced this result. Absent ⇒ local mode. */
+	mode?: "local" | "pr";
+	/** PR mode only: the branch was pushed and a PR ensured (open/adopted), regardless of merge outcome. */
+	pushed?: boolean;
+	prUrl?: string;
+	prNumber?: number;
+	/** PR mode only: the PR's lifecycle state at the moment this result was produced. `merged` is set
+	 *  ONLY after the post-merge reachability assertion passes — never optimistically on `gh pr merge`'s exit code alone. */
+	prState?: "draft" | "open" | "merged" | "closed";
 }
 
 /**
@@ -105,6 +114,14 @@ export interface LandOpts {
 	 * (mirrors how force skips the proof gate). OMP_SQUAD_STALE_GATE=0 disables it globally.
 	 */
 	staleGate?: boolean;
+	/**
+	 * PR-mode plumbing (concern 06): threaded into `ensurePr`'s ledger entry and the DoneProof a
+	 * PR-mode merge records, so `closeLandedIssue`'s issue-identifier lookup finds it same as the
+	 * local path's manager-layer write does. Completely ignored by the local-mode path (`landAgent`).
+	 */
+	issueId?: string;
+	issueIdentifier?: string;
+	agentId?: string;
 }
 
 /**
@@ -216,7 +233,7 @@ function regressionGateEnabled(): boolean {
  * also fails on base, decideRegressionGate() compares the extracted failure sets — only strictly
  * new failures block; pre-existing red baseline failures allow a re-merge.
  */
-async function applyRegressionGate(p: {
+export async function applyRegressionGate(p: {
 	repo: string;
 	head0: string;
 	committed: boolean;

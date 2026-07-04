@@ -516,6 +516,10 @@ export interface AgentDTO {
 	availableActions?: AgentAction[];
 	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
 	landReady?: boolean;
+	/** PR-mode landing metadata (concern 06), set at push/merge time. Absent in local mode. */
+	prUrl?: string;
+	prNumber?: number;
+	prState?: "draft" | "open" | "merged" | "closed";
 	/** Re-adopted from a surviving worktree on relaunch and not yet re-run (OMPSQ-164): its work was
 	 *  complete before the stop, so the event-driven auto-land never fires. The orchestrator lands such
 	 *  an agent directly (merge→gate→rollback) instead of an isolated worktree pre-verify. Cleared the
