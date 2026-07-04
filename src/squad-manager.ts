@@ -52,6 +52,8 @@ import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, s
 export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
+import { recordDoneProof } from "./done-proof.ts";
+import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
@@ -1686,8 +1688,27 @@ export class SquadManager extends EventEmitter {
 		if (result.ok) {
 			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
 			this.emitAgent(rec);
-			if (result.merged) await this.closeLandedIssue(dto.issue); // real merge ⇒ close its tracking issue (idempotent, best-effort)
-			else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
+			if (result.merged) {
+				// Retrievable proof that this branch's work is now in main — the ONE artifact later
+				// consumers (closeLandedIssue's proof gate, plan-sync, Observer arithmetic) can trust
+				// instead of re-deriving truth from rev-list math. Best-effort, additive: never blocks land().
+				// TODO: land.ts's LandResult carries no explicit tri-state flag for the red-baseline escape
+				// (verifyMerged :390-414) — this substring match on its own detail wording is the only signal
+				// today. If that wording ever changes, this silently stops matching and falls back to "green".
+				recordDoneProof(this.stateDir, {
+					branch: dto.branch ?? "",
+					repo: repoIdentity(dto.repo),
+					issueId: dto.issue?.id,
+					issueIdentifier: dto.issue?.identifier,
+					mode: "local",
+					commit: dto.branch ? await headCommit(dto.worktree) : "",
+					baseRef: "HEAD",
+					verified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
+					detail: result.detail ?? result.message,
+					provenAt: Date.now(),
+				});
+				await this.closeLandedIssue(dto.issue); // real merge ⇒ close its tracking issue (idempotent, best-effort)
+			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
