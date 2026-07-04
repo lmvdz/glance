@@ -7,10 +7,11 @@
  */
 
 import type { RpcExtensionUIRequest, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import type { WorkflowRunState } from "./workflow/types.ts";
+import type { WorkflowGraphSnapshot, WorkflowRunState } from "./workflow/types.ts";
 import type { Span } from "./spans.ts";
 import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts";
 import type { TransitionReason } from "./agent-lifecycle.ts";
+import type { SubagentNode } from "./subagents.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -472,6 +473,17 @@ export interface AgentDTO {
 	kind: AgentKind;
 	/** Parent workflow agent id, when this agent is a spawned fan-out branch. */
 	parentId?: string;
+	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
+	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
+	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
+	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
+	subagents?: SubagentNode[];
+	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
+	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
+	workflowGraph?: WorkflowGraphSnapshot;
 	/** flue-service only: passed the acceptance gate at onboard time. */
 	verified?: boolean;
 	/** Repo root the worktree was cut from (host-local path; for display). */
@@ -649,6 +661,17 @@ export interface PersistedAgent {
 	workflowState?: WorkflowRunState;
 	/** Parent workflow agent id, when this is a spawned fan-out branch. */
 	parentId?: string;
+	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
+	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
+	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
+	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
+	subagents?: SubagentNode[];
+	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
+	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
+	workflowGraph?: WorkflowGraphSnapshot;
 	/** When set, run this agent inside a container instead of locally. */
 	sandbox?: SandboxConfig;
 	/** Repo-relative path prefixes this agent reads — restored so read/write hazards survive a restart. */
@@ -726,6 +749,17 @@ export interface CreateAgentOptions {
 	autonomyMode?: AutonomyMode;
 	/** Parent workflow agent id, when spawning a fan-out branch. */
 	parentId?: string;
+	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
+	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
+	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
+	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
+	subagents?: SubagentNode[];
+	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
+	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
+	workflowGraph?: WorkflowGraphSnapshot;
 	/** Run this agent inside a container (sandboxed execution); mounts the worktree by default. */
 	sandbox?: SandboxConfig;
 	/** Auto-pick a process (verify / plan-approve / fan-out) from the task. Default on; false = plain agent. */

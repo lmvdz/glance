@@ -122,7 +122,8 @@ export interface WorkflowJournalEvent {
 		| "workflow.verification.start"
 		| "workflow.verification.end"
 		| "workflow.land.start"
-		| "workflow.land.end";
+		| "workflow.land.end"
+		| "workflow.graph";
 	at: number;
 	workflow: string;
 	runId: string;
@@ -136,6 +137,40 @@ export interface WorkflowJournalEvent {
 	selected?: string;
 	proof?: WorkflowProofState;
 	detail?: string;
+	/** Present on a "workflow.graph" event: the static topology snapshot. Concern 03 emits/consumes it;
+	 *  this concern only needs the union member + field to exist so its round-trip fixtures type-check. */
+	graph?: WorkflowGraphSnapshot;
+}
+
+/** One node in a journaled workflow graph snapshot (mirrors WorkflowNode's renderable subset). */
+export interface WorkflowGraphNode {
+	id: string;
+	kind: NodeKind;
+	label?: string;
+	maxVisits?: number;
+	overflow?: string;
+	goalGate?: boolean;
+	retryTarget?: string;
+}
+
+/** One edge in a journaled workflow graph snapshot (mirrors WorkflowEdge). */
+export interface WorkflowGraphEdge {
+	from: string;
+	to: string;
+	label?: string;
+	condition?: string;
+}
+
+/** Static topology snapshot of a workflow's DOT graph, journaled once per run so the UI can render
+ *  intended structure with live progress overlaid. version:1 lets future shape changes be additive. */
+export interface WorkflowGraphSnapshot {
+	version: 1;
+	name: string;
+	nodes: WorkflowGraphNode[];
+	edges: WorkflowGraphEdge[];
+	start: string;
+	exit: string;
+	maxNodeVisits?: number;
 }
 
 

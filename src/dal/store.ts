@@ -97,6 +97,10 @@ export interface Store {
 	appendAudit(entry: AuditEntry): Promise<void>;
 	/** Append/replace one run usage row (no-op for file mode — receipts already on disk). */
 	appendUsage(receipt: RunReceipt): Promise<void>;
+	/** Cumulative save() failures this process, when the store tracks them (FileStore only — DbStore's
+	 *  per-write failures throw rather than swallow, so there's nothing to count). Surfaced through
+	 *  factory-status since the topology guarantee now rests on this write actually landing. */
+	saveFailures?(): number;
 }
 
 const EMPTY: StateSnapshot = { agents: [], transcripts: {}, features: [] };
@@ -105,6 +109,8 @@ const EMPTY: StateSnapshot = { agents: [], transcripts: {}, features: [] };
 export class FileStore implements Store {
 	private readonly stateFile: string;
 	private readonly feedbackFile: string;
+	private saveFailureCount = 0;
+	private lastSaveWarnAt = 0;
 	constructor(private readonly stateDir: string) {
 		this.stateFile = path.join(stateDir, "state.json");
 		this.feedbackFile = path.join(stateDir, "feedback.json");
@@ -130,7 +136,9 @@ export class FileStore implements Store {
 
 	async save(snapshot: StateSnapshot): Promise<void> {
 		// Durable atomic write (temp → fsync → rename → fsync dir). Behavior-preserving:
-		// swallow write errors as the old inline temp+rename did, leaving no stray `.tmp`.
+		// swallow write errors as the old inline temp+rename did, leaving no stray `.tmp` — but no longer
+		// SILENTLY: a rate-limited warn plus a cumulative counter (surfaced via factory-status) since the
+		// topology guarantee this store backs now rests on this write actually landing.
 		try {
 			const { feedback, ...state } = snapshot;
 			const cap = normalizeCapabilitySnapshot(snapshot.capabilities);
@@ -138,7 +146,20 @@ export class FileStore implements Store {
 			if (cap.sources.length || cap.packs.length || cap.installs.length || cap.verifications.length || cap.audit.length) body.capabilities = cap;
 			await writeFileDurable(this.stateFile, JSON.stringify(body, null, 2));
 			if (feedback) await this.saveFeedback(feedback);
-		} catch {}
+		} catch (err) {
+			this.saveFailureCount++;
+			const now = Date.now();
+			if (now - this.lastSaveWarnAt > 60_000) {
+				this.lastSaveWarnAt = now;
+				console.error(`[FileStore] state.json save failed (${this.saveFailureCount} total this run): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+
+	/** Cumulative save() failures this process — surfaced via factory-status since the topology
+	 *  guarantee (this concern's headline) now rests on this write actually landing. */
+	saveFailures(): number {
+		return this.saveFailureCount;
 	}
 
 	async loadFeedback(): Promise<FeedbackSnapshot> {

@@ -1020,6 +1020,10 @@ export class SquadManager extends EventEmitter {
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
+				parentNodeId: p.parentNodeId,
+				branchIndex: p.branchIndex,
+				subagents: p.subagents,
+				workflowGraph: p.workflowGraph,
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,
@@ -1165,6 +1169,10 @@ export class SquadManager extends EventEmitter {
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
+			parentNodeId: p.parentNodeId,
+			branchIndex: p.branchIndex,
+			subagents: p.subagents,
+			workflowGraph: p.workflowGraph,
 			featureId: p.featureId,
 			owns: p.owns,
 			requires: p.requires,
@@ -1268,6 +1276,10 @@ export class SquadManager extends EventEmitter {
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
 			parentId: p.parentId,
+			parentNodeId: p.parentNodeId,
+			branchIndex: p.branchIndex,
+			subagents: p.subagents,
+			workflowGraph: p.workflowGraph,
 			featureId: p.featureId,
 			owns: p.owns,
 			requires: p.requires,
@@ -2741,6 +2753,10 @@ export class SquadManager extends EventEmitter {
 			workflowState: opts.workflowState,
 			sandbox: opts.sandbox,
 			parentId: opts.parentId,
+			parentNodeId: opts.parentNodeId,
+			branchIndex: opts.branchIndex,
+			subagents: opts.subagents,
+			workflowGraph: opts.workflowGraph,
 			featureId: opts.featureId,
 			owns: opts.owns,
 			requires: opts.requires,
@@ -2765,6 +2781,10 @@ export class SquadManager extends EventEmitter {
 			issue: opts.issue,
 			kind,
 			parentId: opts.parentId,
+			parentNodeId: opts.parentNodeId,
+			branchIndex: opts.branchIndex,
+			subagents: opts.subagents,
+			workflowGraph: opts.workflowGraph,
 			featureId: opts.featureId,
 			owns: opts.owns,
 			requires: opts.requires,
@@ -4412,6 +4432,7 @@ export class SquadManager extends EventEmitter {
 			rollup: this.automation.rollup(windowMs, now),
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
+			persistFailures: this.store.saveFailures?.() ?? 0,
 		});
 	}
 
@@ -5104,6 +5125,8 @@ export class SquadManager extends EventEmitter {
 	// ── Persistence ───────────────────────────────────────────────────────────
 
 	private writeChain: Promise<void> = Promise.resolve();
+	private queuedWrite?: Promise<void>;
+	private writeInFlight = false;
 
 	/** Per-agent debounce timers coalescing bursts of `pending[]` mutations (concern 04: durable pause)
 	 *  into one full-roster persist ~1s after the last change, instead of a persist per mutation (which
@@ -5126,17 +5149,35 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Serialized + atomic writer. Each call chains its write after the previous one (so two writes
-	 * never interleave), and resolves only once ITS write completes — making `await persist()` a real
-	 * durability barrier that stop()/upgrade depend on. persistNow()'s temp+rename prevents partials.
+	 * Chain-deduped writer: a burst of N persist() calls produces at most 2 store.save() invocations (the
+	 * in-flight one, plus one queued one that starts after it). Every caller's promise resolves only once a
+	 * write that snapshots state AFTER their call has completed — persistNow() reads live agent state at
+	 * write time, not at enqueue time, so the queued write durably contains every joiner's state. This keeps
+	 * `await persist()` a real durability barrier (stop() depends on it) while collapsing the per-checkpoint
+	 * chattiness a naive always-chain implementation has. Replaces a considered-and-rejected trailing-timer
+	 * coalesce: a timer firing after stop()'s durability barrier could clobber a successor daemon's
+	 * state.json (cross-process last-writer-wins race) — this introduces no post-stop() write path at all.
 	 */
 	private async persist(): Promise<void> {
-		const next = this.writeChain.then(
-			() => this.persistNow(),
-			() => this.persistNow(),
-		);
-		this.writeChain = next.catch(() => {});
-		return next;
+		if (this.queuedWrite) return this.queuedWrite;
+		if (!this.writeInFlight) {
+			this.writeInFlight = true;
+			const p = this.persistNow().finally(() => {
+				this.writeInFlight = false;
+			});
+			this.writeChain = p.catch(() => {});
+			return p;
+		}
+		const queued: Promise<void> = this.writeChain.then(() => {
+			this.queuedWrite = undefined;
+			this.writeInFlight = true;
+			return this.persistNow().finally(() => {
+				this.writeInFlight = false;
+			});
+		});
+		this.queuedWrite = queued;
+		this.writeChain = queued.catch(() => {});
+		return queued;
 	}
 
 	/** Atomic write through the store: file mode → state.json temp+rename; DB mode → roster/feature tables + on-disk transcripts. */
@@ -5211,6 +5252,10 @@ export class SquadManager extends EventEmitter {
 				thinking: p.thinking,
 				issue: p.issue,
 				parentId: p.parentId,
+				parentNodeId: p.parentNodeId,
+				branchIndex: p.branchIndex,
+				subagents: p.subagents,
+				workflowGraph: p.workflowGraph,
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,
