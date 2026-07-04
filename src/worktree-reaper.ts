@@ -37,6 +37,11 @@ export interface WorktreeInfo {
 	dirty: boolean;
 	/** The repo's primary worktree (the main checkout) — never reaped. */
 	isPrimary: boolean;
+	/** A recorded DoneProof exists for this branch — treated as equivalent to `aheadOfBase === 0`
+	 *  (provably landed) regardless of what the arithmetic reports. Squash/rebase merges make
+	 *  `aheadOfBase` permanently nonzero even once the work is safely in origin/default, so without
+	 *  this a proven-landed branch's worktree would never be reaped via the "merged" reason. */
+	proven?: boolean;
 }
 
 export interface ReapInput {
@@ -82,8 +87,10 @@ export function selectReapable(input: ReapInput): ReapDecision[] {
 		if (input.owned.has(w.worktree)) continue; // a live agent owns it
 		if (w.dirty) continue; // OMPSQ-41: uncommitted work — never reap, even once its issue closes
 		if (input.now - w.mtimeMs < input.graceMs) continue; // mid-spawn / recently active — leave it
-		// Clean + past grace. "merged" = every commit already in base (aheadOfBase 0); <0 (unknown) is NOT merged.
-		const merged = w.aheadOfBase === 0;
+		// Clean + past grace. "merged" = every commit already in base (aheadOfBase 0) OR a recorded
+		// DoneProof (proven landed despite a nonzero/unknown count — squash/rebase merges); <0 with no
+		// proof is NOT merged.
+		const merged = w.aheadOfBase === 0 || w.proven === true;
 		const ident = parseIssueIdentifier(w.branch);
 		const issueClosed = input.openIdentifiers !== null && ident !== undefined && !input.openIdentifiers.has(ident);
 		if (!merged && !issueClosed) continue; // has unique work and issue still open ⇒ keep

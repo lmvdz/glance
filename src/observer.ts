@@ -30,6 +30,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
+import { getDoneProofByBranch } from "./done-proof.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
@@ -65,8 +66,9 @@ export interface ObserverDeps {
 	removeAgent: (id: string) => Promise<void>;
 	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
 	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }>;
-	/** Commits on the agent's branch not in main: 0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown. */
-	gitAheadOfMain: (agent: AgentDTO) => number;
+	/** Commits on the agent's branch not in main (origin-aware in PR mode — see `aheadOfBase`):
+	 *  0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown. Async: PR mode fetches the origin default branch. */
+	gitAheadOfMain: (agent: AgentDTO) => Promise<number>;
 	/** Untracked file paths in the main checkout. */
 	untrackedInMain: () => string[];
 	/** Tracked files on an agent's branch (for the untracked-collision check); `[]` when no branch. */
@@ -159,20 +161,33 @@ export function auditTestsGreen(gate: { ok: boolean; firstFailure?: string }): F
 	];
 }
 
-/** Check 2 — a finished (idle OR stopped) agent ahead=0 of main whose Plane issue is Done ⇒ reap the
- *  landed survivor (autofixable). Covers `stopped` too: a cleanly-landed agent's host exits, so it
- *  ends up stopped, not idle — the common done-state. Reaping frees the roster slot + host + worktree
- *  so the next ticket has room. `error` is excluded (a crash needs a human). */
-export function auditLandedSurvivors(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => number, removeAgent: (id: string) => Promise<void>): Finding[] {
+/** Check 2 — a finished (idle OR stopped) agent whose Plane issue is Done AND whose branch is
+ *  proven-landed (a recorded DoneProof, OR ahead=0 of main when no proof exists) ⇒ reap the landed
+ *  survivor (autofixable). DoneProof is consulted FIRST, before any arithmetic (squash/rebase merges
+ *  make the rev-list count permanently nonzero even when the work is safely in origin/default — a
+ *  proof only ever makes MORE things look landed, never fewer, so this never regresses the ahead=0
+ *  path). Covers `stopped` too: a cleanly-landed agent's host exits, so it ends up stopped, not idle —
+ *  the common done-state. Reaping frees the roster slot + host + worktree so the next ticket has room.
+ *  `error` is excluded (a crash needs a human). */
+export async function auditLandedSurvivors(
+	agents: AgentDTO[],
+	openIds: Set<string>,
+	aheadOf: (a: AgentDTO) => Promise<number>,
+	removeAgent: (id: string) => Promise<void>,
+	hasProof: (a: AgentDTO) => boolean,
+): Promise<Finding[]> {
 	const out: Finding[] = [];
 	for (const a of agents) {
 		if ((a.status !== "idle" && a.status !== "stopped") || !a.issue) continue;
 		if (openIds.has(a.issue.id)) continue; // issue still open ⇒ not Done
-		if (aheadOf(a) !== 0) continue; // >0 ⇒ unlanded (stale-done); <0 ⇒ unknown — leave it
+		const proven = hasProof(a);
+		if (!proven && (await aheadOf(a)) !== 0) continue; // >0 ⇒ unlanded (stale-done); <0 ⇒ unknown — leave it
 		out.push({
 			fingerprint: `survivor:${a.issue.identifier ?? a.issue.id}`,
 			title: `reap landed survivor ${a.id}`,
-			detail: `${a.status} agent ${a.id} — branch ${a.branch ?? "?"} is ahead=0 of main and issue ${a.issue.identifier ?? a.issue.id} is Done; safe to reap`,
+			detail: proven
+				? `${a.status} agent ${a.id} — branch ${a.branch ?? "?"} has a recorded DoneProof and issue ${a.issue.identifier ?? a.issue.id} is Done; safe to reap`
+				: `${a.status} agent ${a.id} — branch ${a.branch ?? "?"} is ahead=0 of main and issue ${a.issue.identifier ?? a.issue.id} is Done; safe to reap`,
 			severity: "low",
 			autoFixable: true,
 			fix: () => removeAgent(a.id),
@@ -192,9 +207,19 @@ const STALE_DONE_SYSTEMIC = 3;
  * These are false-Dones: reopen the original issue instead of filing a reconcile issue, so the
  * dispatcher re-runs the source ticket and Plane history stays on the real work item. N≥threshold
  * still emits one structural observer finding because that names an auto-land mechanism failure.
+ *
+ * DoneProof is consulted FIRST, before the arithmetic: a proven-landed branch is never "stale" no
+ * matter what `aheadOf` reports — squash/rebase merges make that count permanently nonzero even
+ * once the work is safely in origin/default, so trusting the rev-list count alone would reopen
+ * already-landed work forever (a false-positive re-dispatch storm).
  */
-export function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => number): Finding[] {
-	const stale = agents.filter((a) => a.issue && !openIds.has(a.issue.id) && aheadOf(a) > 0);
+export async function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, aheadOf: (a: AgentDTO) => Promise<number>, hasProof: (a: AgentDTO) => boolean): Promise<Finding[]> {
+	const stale: AgentDTO[] = [];
+	for (const a of agents) {
+		if (!a.issue || openIds.has(a.issue.id)) continue; // no issue, or issue still open ⇒ not a Done candidate
+		if (hasProof(a)) continue; // proven landed ⇒ never stale, regardless of the arithmetic
+		if ((await aheadOf(a)) > 0) stale.push(a);
+	}
 	if (stale.length === 0) return [];
 	const ident = (a: AgentDTO): string => a.issue!.identifier ?? a.issue!.id;
 	const reopenFindings = stale.map((a) => ({
@@ -439,14 +464,21 @@ export class Observer {
 		return { ok: true };
 	}
 
+	/** Consulted FIRST — before any ahead-count arithmetic — everywhere checks 2/4 ask "is this branch
+	 *  landed". A recorded DoneProof survives squash/rebase merges that make rev-list arithmetic wrong. */
+	private hasDoneProof(a: AgentDTO): boolean {
+		return !!a.branch && getDoneProofByBranch(this.deps.stateDir, a.branch) !== undefined;
+	}
+
 	/** Run every audit check over the current injected state. */
 	private async collect(open: IssueRef[]): Promise<Finding[]> {
 		const agents = this.deps.listAgents();
 		const openIds = new Set(open.map((i) => i.id));
+		const hasProof = (a: AgentDTO): boolean => this.hasDoneProof(a);
 		const findings: Finding[] = [];
 		findings.push(...auditTestsGreen(await this.confirmedGate()));
-		findings.push(...auditLandedSurvivors(agents, openIds, this.deps.gitAheadOfMain, this.deps.removeAgent));
-		findings.push(...auditStaleDone(agents, openIds, this.deps.gitAheadOfMain));
+		findings.push(...(await auditLandedSurvivors(agents, openIds, this.deps.gitAheadOfMain, this.deps.removeAgent, hasProof)));
+		findings.push(...(await auditStaleDone(agents, openIds, this.deps.gitAheadOfMain, hasProof)));
 		// Union of files across in-flight agent branches — the set an auto-land would touch.
 		// ponytail: one git ls-tree per branched agent per tick; fine for a normal roster.
 		const branchFiles = new Set<string>();

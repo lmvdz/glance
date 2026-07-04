@@ -52,6 +52,9 @@ import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, s
 export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
+// Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
+// under the same bare name would read as if that field and this function were the same thing.
+import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, recordDoneProof } from "./done-proof.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
@@ -107,7 +110,7 @@ import type {
 import { type SubagentNode, SubagentTracker } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, socketPathFor } from "./agent-host.ts";
-import { addWorktree, branchAhead, deleteBranchIfMerged, isGitRepo, listWorktrees, primaryBranch, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
+import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
@@ -555,6 +558,14 @@ export class SquadManager extends EventEmitter {
 		// seen-map (the first keeps the legacy filename for upgrade continuity; the rest are suffixed).
 		const observeRepos = planeRepos();
 		const slug = (repo: string) => repo.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+		// Land-mode probe — resolved + logged per repo at boot so an operator sees WHY a repo landed in
+		// PR vs local mode without digging ("all 5 probes passed" or the exact reason it forced local).
+		for (const repo of observeRepos) {
+			void resolveLandMode(repo)
+				.then((r) => this.log("info", `land mode for ${repo}: ${r.mode.toUpperCase()} (${r.reason})`))
+				.catch((e) => this.log("warn", `land mode probe failed for ${repo}: ${String(e)}`));
+		}
 		if (process.env.OMP_SQUAD_OBSERVE !== "0" && observeRepos.length > 0) {
 			observeRepos.forEach((repo, i) => {
 				const observer = new Observer({
@@ -1841,22 +1852,21 @@ export class SquadManager extends EventEmitter {
 	 * of the repo's checked-out base. Gates the costly acceptance run so it never fires on an idle
 	 * agent with nothing to merge.
 	 */
-	private async agentHasUnlandedWork(id: string): Promise<boolean> {
+	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
-		const r = Bun.spawnSync(["git", "-C", rec.dto.repo, "rev-list", "--count", `HEAD..${rec.dto.branch}`], { stdout: "pipe", stderr: "ignore" });
-		return r.exitCode === 0 && Number(r.stdout.toString().trim()) > 0;
+		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
 	}
 
 	// ── Observer edges (OMPSQ-52) — read-only git probes + the main gate, injected into Observer. ──
 
-	/** Commits on an agent's branch not in main's HEAD: 0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
-	private aheadOfMain(a: AgentDTO): number {
+	/** Commits on an agent's branch not in main (origin-aware in PR mode via `aheadOfBase`):
+	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
+	protected async aheadOfMain(a: AgentDTO): Promise<number> {
 		if (!a.branch) return -1;
-		const r = hardenedGitSync(["-C", a.repo, "rev-list", "--count", `HEAD..${a.branch}`]);
-		return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+		return computeAheadOfBase({ repo: a.repo, branch: a.branch, cwd: a.worktree });
 	}
 
 	/** Count of uncommitted TRACKED files in a checkout — the land-blocking set (matches the land path's
@@ -2116,7 +2126,15 @@ export class SquadManager extends EventEmitter {
 			repo = opts.repo;
 			resolvedBranch = (await worktreeStatus(cwd).catch(() => ({ branch: undefined }))).branch;
 		} else {
-			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir);
+			// PR-mode agents fork from a freshly-fetched origin default branch, not the local checkout's
+			// (possibly stale, though the mode probe already checked convergence) HEAD.
+			const landMode = await resolveLandMode(opts.repo);
+			let startPoint: string | undefined;
+			if (landMode.mode === "pr" && landMode.defaultBranch) {
+				await hardenedGit(["fetch", "origin", landMode.defaultBranch], { cwd: opts.repo }).catch(() => undefined);
+				startPoint = `origin/${landMode.defaultBranch}`;
+			}
+			const wt = await resolveWorktree(opts.repo, branch, addWorktree, isGitRepo, this.worktreeBaseDir, startPoint);
 			cwd = wt.cwd;
 			repo = wt.repo;
 			resolvedBranch = wt.inPlace ? undefined : wt.branch;
@@ -3409,7 +3427,7 @@ export class SquadManager extends EventEmitter {
 	 *  per attempt. Lossless (abandoned WIP committed to its branch; only merged+clean branches deleted)
 	 *  and never touches a live agent's worktree or one created within the spawn grace. Opt out with
 	 *  OMP_SQUAD_WORKTREE_REAP=0; tune the freshness window with OMP_SQUAD_WORKTREE_GRACE_MS. */
-	private async reapDeadWorktrees(): Promise<void> {
+	protected async reapDeadWorktrees(): Promise<void> {
 		if (process.env.OMP_SQUAD_WORKTREE_REAP === "0") return;
 		const graceMs = Number(process.env.OMP_SQUAD_WORKTREE_GRACE_MS) || 120_000;
 		const owned = new Set([...this.agents.values()].map((r) => r.options.worktree).filter((w): w is string => !!w));
@@ -3418,16 +3436,19 @@ export class SquadManager extends EventEmitter {
 			if (!repo || repo.startsWith("(")) continue; // synthetic / no-repo agents have no worktrees to reap
 			try {
 				const root = await repoRoot(repo);
-				const base = await primaryBranch(root);
 				const wts = await listWorktrees(root);
 				const infos: WorktreeInfo[] = await Promise.all(
 					wts.map(async (w) => {
 						const stat = await fs.stat(w.worktree).catch(() => undefined);
+						// DoneProof consulted FIRST: a proven-landed branch is reap-eligible regardless of
+						// what the ahead-count reports (squash/rebase merges make it permanently nonzero).
+						const proven = !w.isPrimary && !!w.branch && getDoneProofByBranch(this.stateDir, w.branch) !== undefined;
 						return {
 							worktree: w.worktree,
 							branch: w.branch ?? "",
 							isPrimary: w.isPrimary,
-							aheadOfBase: w.isPrimary || !w.branch ? 0 : await branchAhead(root, w.branch, base),
+							aheadOfBase: w.isPrimary || !w.branch ? 0 : await computeAheadOfBase({ repo: root, branch: w.branch, cwd: root }),
+							proven,
 							dirty: !w.isPrimary && (await worktreeStatus(w.worktree)).dirtyFiles.length > 0,
 							mtimeMs: stat ? stat.mtimeMs : 0, // dir gone ⇒ ancient ⇒ eligible (removeWorktree prunes the stale entry)
 						};
