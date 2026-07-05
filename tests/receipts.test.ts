@@ -87,6 +87,34 @@ test("readReceipts returns [] for an unknown agent", async () => {
 	expect(await readReceipts(baseDir, "nope")).toEqual([]);
 });
 
+test("a RunReceipt carrying a validation record (Epic 3) round-trips through JSONL persistence", async () => {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipts-"));
+	tmps.push(baseDir);
+
+	const acc = new RunAccumulator({ agentId: "ag4", name: "delta", repo: "/repo", branch: "feat" });
+	feed(acc, [{ type: "agent_start" }, { type: "agent_end" }]);
+	acc.finish("idle", []);
+	const receipt = acc.snapshot();
+	receipt.validation = {
+		verdict: "veto",
+		agreement: 0.5,
+		confidence: 0.8,
+		perCriterion: [
+			{ id: "c1", satisfied: true },
+			{ id: "c2", satisfied: false, note: "auth missing" },
+		],
+		rationale: "auth criterion not met",
+		model: "opus",
+		ranAt: 1000,
+	};
+
+	await appendReceipt(baseDir, receipt);
+	const back = await readReceipts(baseDir, "ag4");
+	expect(back.length).toBe(1);
+	expect(back[0].validation).toEqual(receipt.validation);
+	expect(back[0].validation?.verdict).toBe("veto");
+});
+
 test("graceful no-usage case: tokens/costUsd omitted", () => {
 	const acc = new RunAccumulator({ agentId: "ag3", name: "gamma", repo: "/repo" });
 	feed(acc, [{ type: "agent_start" }, { type: "tool_execution_start", toolName: "search" }, { type: "agent_end" }]);

@@ -32,6 +32,7 @@ import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
+import type { ComplianceFinding } from "./compliance.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
@@ -2009,6 +2010,7 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 	health: Awaited<ReturnType<SquadManager["sampleHealth"]>>;
 	federation: { coordinator: boolean; dbRegistry: boolean };
 	audit: { available: true };
+	compliance: { findings: ComplianceFinding[]; evaluatedAt: number };
 }> {
 	return {
 		authMode: dbMode ? "db" : "file",
@@ -2018,6 +2020,8 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 		health: await manager.sampleHealth(),
 		federation: { coordinator: !!process.env.OMP_SQUAD_COORDINATOR, dbRegistry },
 		audit: { available: true },
+		// Epic 3 (leaf 05): real policy findings over the audit + land ledgers, not just RBAC/capacity.
+		compliance: { findings: await manager.complianceFindings(), evaluatedAt: Date.now() },
 	};
 }
 async function actionItemsPayload(manager: SquadManager, url: URL): Promise<{ items: ActionItem[]; generatedAt: number }> {

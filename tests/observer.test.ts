@@ -12,8 +12,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
-import { Observer, type ObserverDeps, auditLandedSurvivors, auditStaleDone, auditStrandedUncommitted, auditTestsGreen, landFailureFindings, stripAnsi } from "../src/observer.ts";
+import { Observer, type ObserverDeps, auditCompliance, auditLandedSurvivors, auditStaleDone, auditStrandedUncommitted, auditTestsGreen, landFailureFindings, stripAnsi } from "../src/observer.ts";
 import { recordDoneProof } from "../src/done-proof.ts";
+import type { ComplianceFinding } from "../src/compliance.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
@@ -437,6 +438,35 @@ test("(b) the observer files exactly one bug for a branch whose auto-land keeps 
 	await new Observer(deps).tick();
 	expect(filed.length).toBe(1);
 	expect(filed[0]).toContain("auto-land failing for squad/a1");
+});
+
+// ── Epic 3 compliance findings (leaf 06) — an additional finding source over the SAME loop ─────────
+
+test("auditCompliance maps a ComplianceFinding to a stable, dedup-able Observer Finding", () => {
+	const findings: ComplianceFinding[] = [{ code: "forced-land-without-proof", severity: "high", subject: "squad/a1", detail: "no proof", at: 1 }];
+	const mapped = auditCompliance(findings);
+	expect(mapped).toEqual([{ fingerprint: "compliance:forced-land-without-proof:squad/a1", title: "compliance: forced-land-without-proof — squad/a1", detail: "no proof", severity: "high" }]);
+});
+
+test("(b)/(f) a tick files exactly one issue for an injected compliance finding, then dedups it on the next tick", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const finding: ComplianceFinding = { code: "forced-land-without-proof", severity: "high", subject: "squad/a1", detail: "no proof", at: 1 };
+	const { deps, filed } = makeDeps(tmpDir(), { complianceFindings: async () => [finding] });
+	const observer = new Observer(deps);
+	await observer.tick();
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("do-not-auto-land"); // structural ⇒ always needs-triage
+	expect(filed[0]).toContain("forced-land-without-proof");
+
+	await observer.tick(); // same finding reproduces ⇒ deduped, not re-filed
+	expect(filed.length).toBe(1);
+});
+
+test("an Observer constructed WITHOUT complianceFindings behaves exactly as before (no crash, nothing filed for it)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const { deps, filed } = makeDeps(tmpDir()); // no complianceFindings override — dep absent
+	await new Observer(deps).tick();
+	expect(filed).toEqual([]);
 });
 
 const noProof = () => false;

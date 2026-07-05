@@ -65,6 +65,8 @@ import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
+import { type Judge, validatorGate } from "./validator.ts";
+import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
@@ -112,6 +114,7 @@ import type {
 	FeedbackItem,
 	FeedbackReward,
 	FeedbackValidationResponse,
+	ValidationRecord,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
@@ -125,7 +128,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
-import { landFailureCount, readLandLedger, recordForcedLand, recordLandOutcome } from "./land-ledger.ts";
+import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { redact } from "./redact.ts";
@@ -722,6 +725,7 @@ export class SquadManager extends EventEmitter {
 					filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
 					uncommittedInWorktree: (a) => this.uncommittedInWorktree(a),
 					landLedger: () => readLandLedger(this.stateDir),
+					complianceFindings: () => this.complianceFindings(),
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `observer-seen.${slug(repo)}.json`,
 					log: (m) => this.log("info", `observer[${repo}]: ${m}`),
@@ -2080,6 +2084,7 @@ export class SquadManager extends EventEmitter {
 				issueIdentifier: rec?.dto.issue?.identifier,
 				issueProjectId: rec?.dto.issue?.projectId,
 				agentId: w.agentId,
+				featureId: id,
 			});
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			// Forced member land without a passing proof gate — audit the override per branch.
@@ -2127,7 +2132,7 @@ export class SquadManager extends EventEmitter {
 	 * is guaranteed for the single-agent path too — not only the multi-branch `landFeature`. Close is
 	 * idempotent (`closedIssues`) and best-effort. Busy-aware `commitWip` mirrors the feature path.
 	 */
-	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string } = {}): Promise<LandResult> {
+	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
@@ -2152,6 +2157,7 @@ export class SquadManager extends EventEmitter {
 			void this.store.appendAudit({ actor: actor.id, action: "land.force", target: id, detail: { reason: opts.reason } }).catch(() => {});
 		}
 		const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
+		const overrideReasonClass = opts.validatorOverride?.reasonClass?.trim();
 		const result = await this.landBranch({
 			repo: dto.repo,
 			worktree: dto.worktree,
@@ -2165,7 +2171,19 @@ export class SquadManager extends EventEmitter {
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
 			agentId: dto.id,
+			featureId: dto.featureId,
+			validatorOverride: !!overrideReasonClass,
 		});
+		// Validator-override audit (Epic 3, leaf 03): a real veto was bypassed by an explicit,
+		// non-empty reason class — a STRONGER act than a proof-force, logged separately (never folded
+		// into recordForcedLand). A reasonClass supplied on a land the gate never vetoed records nothing
+		// (there was no veto to override).
+		if (overrideReasonClass && rec.dto.validation?.verdict === "veto") {
+			const overrideActor = opts.actor ?? LOCAL_ACTOR;
+			recordValidatorOverride(this.stateDir, dto.branch, overrideActor.id, overrideReasonClass, rec.dto.validation.rationale || "validator override");
+			void this.recordAudit(overrideActor, "land", id, "ok", `validator override (${overrideReasonClass})`);
+			void this.store.appendAudit({ actor: overrideActor.id, action: "land.validator-override", target: id, detail: { reasonClass: overrideReasonClass } }).catch(() => {});
+		}
 		// PR-mode metadata (concern 06): set directly on the dto at push/merge time, the same pattern
 		// `landReady` already uses. Absent (mode !== "pr") ⇒ local mode, untouched.
 		if (result.mode === "pr") {
@@ -2372,13 +2390,50 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (mirrors `resolveLandModeFor` above) so tests can supply a fake independent
+	 * judge without a real `omp` binary on PATH. `undefined` ⇒ `validatorGate`'s own default judge
+	 * (an independent one-shot `omp -p --model opus` call).
+	 */
+	protected validatorJudgeOverride(): Judge | undefined {
+		return undefined;
+	}
+
+	/**
+	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
+	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
+	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
+	 * `acceptanceCriteria` (resolved via `opts.featureId`, or `opts.criteria` directly); a real veto
+	 * blocks unless `opts.validatorOverride` is set (leaf 03's logged override — read here only as a
+	 * boolean-ish gate). Always stamps the resulting `ValidationRecord` onto the agent's DTO so it
+	 * rides the roster broadcast and (via `finalizeRun`, leaf 04) the durable run receipt.
+	 */
+	private async runValidatorGate(opts: LandOpts): Promise<LandResult | undefined> {
+		const pf = opts.featureId ? this.featureStore.get(opts.featureId) : undefined;
+		const criteria = opts.criteria ?? pf?.acceptanceCriteria ?? [];
+		const proof = await proofFor(opts.repo, opts.worktree);
+		const { record, veto } = await validatorGate({ criteria, repo: opts.repo, worktree: opts.worktree, branch: opts.branch, proof, judge: this.validatorJudgeOverride() });
+		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
+		if (rec) {
+			rec.dto.validation = record;
+			this.emitAgent(rec);
+		}
+		if (veto && !opts.validatorOverride) {
+			return { ok: false, committed: false, merged: false, message: opts.message, detail: veto };
+		}
+		return undefined;
+	}
+
+	/**
 	 * Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake
 	 * land). Also the universal mode-dispatching point (concern 06): PR mode routes through
 	 * `landAgentPr` (push → ensure PR → scratch-merge gate → `gh pr merge` → assert → DoneProof), local
 	 * mode is the unchanged passthrough to `landAgent`. `land()` and `landFeature()` both call this
-	 * seam, so PR mode inherits proofGate/fail-cap/forced-land-audit/closeLandedIssue for free.
+	 * seam, so PR mode inherits proofGate/fail-cap/forced-land-audit/closeLandedIssue for free — and,
+	 * as of Epic 3, so does the independent-validator veto, run once here for every land path.
 	 */
 	protected async landBranch(opts: LandOpts): Promise<LandResult> {
+		const validatorBlocked = await this.runValidatorGate(opts);
+		if (validatorBlocked) return validatorBlocked;
 		const mode = await this.resolveLandModeFor(opts.repo);
 		if (mode.mode === "pr") {
 			if (!mode.defaultBranch) {
@@ -4366,6 +4421,9 @@ export class SquadManager extends EventEmitter {
 		run.finalized = true;
 		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
 		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
+		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it
+		// survives the run — the input Epic 5's confidence scorer reads via buildDigest.
+		if (rec.dto.validation) receipt.validation = rec.dto.validation;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
@@ -4530,6 +4588,20 @@ export class SquadManager extends EventEmitter {
 	/** Fleet-action audit log, newest first (server reads this; keeps stateDir private). */
 	async auditLog(query: AuditQuery = {}): Promise<AuditEntry[]> {
 		return readAudit(this.stateDir, query);
+	}
+
+	/**
+	 * Compliance findings (Epic 3, leaf 05) over the audit log + the two land ledgers — server reads
+	 * this for `/api/governance`'s `compliance` key, and the Observer loop (leaf 06) reads it as an
+	 * additional finding source. Keeps `stateDir` private (same pattern as `auditLog`/`receipts`).
+	 */
+	async complianceFindings(): Promise<ComplianceFinding[]> {
+		return evaluateCompliance({
+			readAudit: (q) => readAudit(this.stateDir, q),
+			forcedLands: () => readForcedLands(this.stateDir),
+			validatorOverrides: () => readValidatorOverrides(this.stateDir),
+			landLedger: () => readLandLedger(this.stateDir),
+		});
 	}
 
 	/**

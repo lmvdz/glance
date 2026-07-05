@@ -56,6 +56,18 @@ export interface FeatureCriterionDTO {
   source?: "plan" | "ticket" | "workflow" | "manual";
 }
 
+/** Mirrors backend `ValidationRecord` (src/types.ts) — Epic 3's independent-validator verdict for an
+ *  agent's most recent land attempt. */
+export interface ValidationRecordDTO {
+  verdict: "pass" | "veto" | "abstain" | "skipped";
+  agreement: number;
+  confidence: number;
+  perCriterion: { id: string; satisfied: boolean; note?: string }[];
+  rationale: string;
+  model?: string;
+  ranAt: number;
+}
+
 export interface FeatureDecisionDTO {
   id: string;
   text: string;
@@ -340,6 +352,8 @@ export interface AgentDTO {
   effectiveMode: AutonomyMode;
   verificationState: VerificationState;
   proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+  /** Epic 3 independent-validator verdict for this agent's most recent land attempt. */
+  validation?: ValidationRecordDTO;
   blockedReason?: string;
   availableActions: AgentAction[];
   landReady?: boolean;

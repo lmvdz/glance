@@ -30,6 +30,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
+import type { ComplianceFinding } from "./compliance.ts";
 import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
@@ -78,6 +79,10 @@ export interface ObserverDeps {
 	/** Branch → auto-land failure streak (the persisted ledger). Absent ⇒ the land-failure check is
 	 *  skipped — keeps the loop usable in tests / before any land. */
 	landLedger?: () => LandLedger;
+	/** Epic 3's compliance evaluator (src/compliance.ts) — real policy findings (forced lands,
+	 *  overridden validator vetoes, repeatedly-failing branches) fed into the SAME observe → file →
+	 *  confirm loop as the structural checks below. Absent ⇒ disabled — keeps old tests/embedders green. */
+	complianceFindings?: () => Promise<ComplianceFinding[]>;
 	/** Where to persist seen fingerprints. */
 	stateDir: string;
 	/** Seen-map filename within stateDir (default "observer-seen.json"). Per-repo observers pass distinct
@@ -287,6 +292,23 @@ export function landFailureFindings(ledger: LandLedger, liveBranches: Set<string
 		});
 	}
 	return out;
+}
+
+/**
+ * Compliance findings (Epic 3, leaf 06) — a pure mapper from `src/compliance.ts`'s policy findings
+ * into Observer `Finding`s, so a policy violation (forced land, overridden veto, repeatedly-failing
+ * branch) rides the SAME dedup/file/confirm loop as the structural checks above, not just an
+ * on-demand `/api/governance` read. `fingerprint` is stable per (code, subject) so a re-tick with the
+ * same violation is never re-filed; `severity` passes through unchanged (compliance's
+ * `low|high|structural` already matches Observer's `Severity`).
+ */
+export function auditCompliance(findings: ComplianceFinding[]): Finding[] {
+	return findings.map((f) => ({
+		fingerprint: `compliance:${f.code}:${f.subject}`,
+		title: `compliance: ${f.code} — ${f.subject}`,
+		detail: f.detail,
+		severity: f.severity,
+	}));
 }
 
 /** Check 6 — a stopped/idle agent with local uncommitted edits has stranded work that cannot be
@@ -544,6 +566,9 @@ export class Observer {
 			const liveBranches = new Set(agents.map((a) => a.branch).filter((b): b is string => !!b));
 			findings.push(...landFailureFindings(this.deps.landLedger(), liveBranches, landFailCap()));
 		}
+		// Epic 3 compliance findings (forced lands, overridden vetoes, repeatedly-failing branches) —
+		// the same policy state /api/governance exposes on demand, now filed/deduped automatically.
+		if (this.deps.complianceFindings) findings.push(...auditCompliance(await this.deps.complianceFindings()));
 		return findings;
 	}
 
