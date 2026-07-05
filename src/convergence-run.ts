@@ -24,26 +24,47 @@
 
 import "./env-compat.ts"; // GLANCE_* ↔ OMP_SQUAD_* aliasing — must run before any env read
 import * as path from "node:path";
-import { arm, disarm, writeOracle as persistOracle } from "./convergence-oracle.ts";
+import { arm, disarm, readOracle, writeOracle as persistOracle } from "./convergence-oracle.ts";
 import { ratchet } from "./convergence-ratchet.ts";
-import { runToConvergence, type ConvergenceDeps, type DispatchOutcome, type PlanFrontier } from "./convergence.ts";
+import { runIteration, runToConvergence, type ConvergenceDeps, type DispatchOutcome, type PlanFrontier } from "./convergence.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import type { FeatureCriterion, VerifiedState } from "./types.ts";
 
 interface RunArgs {
 	goal: string;
 	fixture: boolean;
+	/** Single-iteration mode (S2): run EXACTLY ONE `runIteration` against the current oracle and
+	 *  exit. This is the command the Stop hook's re-injected prompt drives each warm turn — real
+	 *  `dispatch` is a no-op (the live session did the work between turns), so `runToConvergence`
+	 *  spinning in-process is the wrong production driver; `--once` is the right one. Optional at the
+	 *  API boundary (default false); `parseArgs` always sets it explicitly. */
+	once?: boolean;
 }
 
 function parseArgs(argv: string[]): RunArgs {
 	let goal: string | undefined;
 	let fixture = false;
+	let once = false;
 	for (let i = 0; i < argv.length; i++) {
 		if (argv[i] === "--goal") goal = argv[++i];
 		else if (argv[i] === "--fixture") fixture = true;
+		else if (argv[i] === "--once") once = true;
 	}
-	if (!goal) throw new Error("usage: bun src/convergence-run.ts --goal <id> [--fixture]");
-	return { goal, fixture };
+	if (!goal) throw new Error("usage: bun src/convergence-run.ts --goal <id> [--fixture] [--once]");
+	return { goal, fixture, once };
+}
+
+/**
+ * The owning session's identity stamped into the arm sentinel (S1). The Stop hook (leaf 04)
+ * compares the harness's turn-end `session_id` against this, blocking only on a match — so a
+ * shared env flag + sentinel can never hijack an UNRELATED session. Resolved from the operator/
+ * session-provided id (`OMP_SQUAD_LOOP_SESSION`, or Claude Code's `CLAUDE_SESSION_ID` when the
+ * harness exports it); empty ⇒ the sentinel degrades to presence-gating (still safe, but the
+ * identity guard is inert — export one of these to the SAME value the harness reports for the
+ * robust guarantee).
+ */
+function loopSessionId(): string {
+	return process.env.OMP_SQUAD_LOOP_SESSION || process.env.CLAUDE_SESSION_ID || "";
 }
 
 function envNumber(key: string, fallback: number): number {
@@ -164,17 +185,17 @@ async function gitDiffAgainstHead(repo: string): Promise<string> {
  * (Epic 3's `scoreAgainstCriteria`) against the working tree's uncommitted diff. `gap` is the count
  * of unsatisfied criteria — the independent oracle DESIGN.md §3 requires, never raw STATUS.
  *
- * `failures` (the ratchet's regression signal) is deliberately returned empty here: it is meant to
- * be an actual verify/test-suite failure set (DESIGN.md §3 — "the same monotonicity logic the
- * post-merge regression gate already uses"), which is a DIFFERENT signal from "criteria not yet
- * satisfied". Conflating the two would make the ratchet fire on iteration 1 of any goal that isn't
- * already 100% done (an unmet criterion looks "new" against the empty prior-failures seed
- * `runToConvergence` starts with) — escalating every fresh multi-criterion goal before it ever gets
- * a chance to iterate, which defeats the loop's purpose. Wiring a real per-iteration suite run here
- * would also mean re-running this repo's FULL verify command every cycle, which is out of this
- * leaf's declared scope (leaf 05 only requires the plan/validate ADAPTERS; leaf 03 already delivers
- * the pure `ratchet()`/`ratchetFromOutput()` functions a caller with real suite output can use).
- * Reporting no known regressions here is the conservative, safe default until that wiring lands.
+ * `failures` (the ratchet's regression signal) is deliberately returned empty here — which means
+ * THE RATCHET GUARANTEE IS DORMANT in the shipped paths (S3; recorded in DESIGN.md "Known
+ * limitations"). `failures` is meant to be an actual verify/test-suite failure set (DESIGN.md §3 —
+ * "the same monotonicity logic the post-merge regression gate already uses"), a DIFFERENT signal
+ * from "criteria not yet satisfied". Feeding the unmet-criteria list here instead would misfire the
+ * ratchet on iteration 1 of any goal that isn't already 100% done (an unmet criterion looks "new"
+ * against the empty prior-failures seed) — escalating every fresh multi-criterion goal before it
+ * can iterate. A real suite failure-set only exists once real `dispatch` runs (the deferred
+ * warm-loop/real-dispatch scope), so the ratchet stays wired + unit-tested (`convergence-ratchet.ts`)
+ * but unfed until a real single-iteration `validate` supplies it. Reporting no known regressions is
+ * the conservative, safe default until then.
  */
 function realValidate(repo: string): ConvergenceDeps["validate"] {
 	return async (goalId: string) => {
@@ -209,11 +230,9 @@ async function buildDeps(args: RunArgs, repo: string): Promise<ConvergenceDeps> 
 	};
 }
 
-/** `repo` defaults to `process.cwd()` (the CLI's real usage); tests inject a throwaway repo dir so
- *  the real Epic 1/3 adapters never read or write the actual working tree's `plans/` directory. */
-export async function runConvergence(args: RunArgs, repo: string = process.cwd()): Promise<VerifiedState> {
-	const deps = await buildDeps(args, repo);
-	const initial: VerifiedState = {
+/** The fresh initial `VerifiedState` for a not-yet-started goal — a continuable seed at iteration 0. */
+function seedState(args: RunArgs, deps: ConvergenceDeps): VerifiedState {
+	return {
 		goalId: args.goal,
 		iteration: 0,
 		gap: Number.POSITIVE_INFINITY,
@@ -223,8 +242,15 @@ export async function runConvergence(args: RunArgs, repo: string = process.cwd()
 		decision: "continue",
 		updatedAt: Date.now(),
 	};
+}
 
-	await arm();
+/** `repo` defaults to `process.cwd()` (the CLI's real usage); tests inject a throwaway repo dir so
+ *  the real Epic 1/3 adapters never read or write the actual working tree's `plans/` directory. */
+export async function runConvergence(args: RunArgs, repo: string = process.cwd()): Promise<VerifiedState> {
+	const deps = await buildDeps(args, repo);
+	const initial = seedState(args, deps);
+
+	await arm(undefined, loopSessionId());
 	// Belt with the sentinel (DESIGN.md §5) — set for this process AND any child turn it spawns.
 	process.env.OMP_SQUAD_LOOP_ARMED = "1";
 	try {
@@ -236,12 +262,54 @@ export async function runConvergence(args: RunArgs, repo: string = process.cwd()
 	}
 }
 
+/**
+ * Single-iteration driver (S2) — the command the Stop hook's re-injected prompt runs each warm
+ * turn. Reads the current oracle (seeding a fresh continuable state if none exists), runs EXACTLY
+ * ONE `runIteration` (real `plan` + real `validate` against the tree the live session just
+ * modified), rewrites the oracle, and exits. Unlike `runToConvergence` it never spins in-process —
+ * in real mode `dispatch` is a no-op, so one process = one iteration = one turn of work.
+ *
+ * Sentinel lifecycle across the multi-process hook flow: each `--once` (re)stamps the sentinel with
+ * this session's identity so the NEXT turn's Stop hook still sees an armed, identity-matched
+ * sentinel; when an iteration reaches a TERMINAL decision, it disarms so the loop cleans up after
+ * itself. Idempotent w.r.t. the hook contract: called on an already-terminal oracle it advances
+ * nothing (the hook would not have re-injected in that case) and disarms.
+ *
+ * Prior-iteration `failures` are NOT carried across the process boundary (the oracle schema, the
+ * cross-process contract, deliberately omits them per DESIGN.md §1) — passed as `[]`. This is inert
+ * today because real `validate` returns `failures: []` regardless (S3, the dormant ratchet); if a
+ * real single-iteration suite failure-set is ever wired in, persisting it becomes part of that same
+ * follow-up scope (DESIGN.md "Known limitations").
+ */
+export async function runOnceIteration(args: RunArgs, repo: string = process.cwd()): Promise<VerifiedState> {
+	const deps = await buildDeps(args, repo);
+	const current = (await readOracle()) ?? seedState(args, deps);
+
+	// Idempotent: an already-terminal oracle is left untouched (the hook would not have re-injected),
+	// and the sentinel is cleaned up.
+	if (current.decision !== "continue") {
+		await disarm();
+		return current;
+	}
+
+	// (Re)arm with this session's identity so the next turn's Stop hook stays gated to us.
+	await arm(undefined, loopSessionId());
+	const { next } = await runIteration(current, deps, []);
+	// A terminal outcome ends the loop — disarm so no stale sentinel survives the run.
+	if (next.decision !== "continue") await disarm();
+	return next;
+}
+
 if (import.meta.main) {
 	const args = parseArgs(process.argv.slice(2));
-	runConvergence(args)
+	const run = args.once ? runOnceIteration(args) : runConvergence(args);
+	run
 		.then((terminal) => {
 			console.log(JSON.stringify(terminal, null, 2));
-			process.exit(terminal.decision === "converged" ? 0 : 1);
+			// --once is a single step: exit 0 unless it produced a hard-stop (escalate/budget). A
+			// still-continuing oracle is a successful step (0). A converged oracle is success (0).
+			const ok = terminal.decision === "converged" || terminal.decision === "continue";
+			process.exit(ok ? 0 : 1);
 		})
 		.catch((err) => {
 			console.error(err instanceof Error ? err.message : String(err));

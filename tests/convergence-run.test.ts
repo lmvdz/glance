@@ -5,11 +5,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { isArmed, readOracle } from "../src/convergence-oracle.ts";
-import { runConvergence } from "../src/convergence-run.ts";
+import { armPath, isArmed, readOracle, writeOracle } from "../src/convergence-oracle.ts";
+import { runConvergence, runOnceIteration } from "../src/convergence-run.ts";
+import type { VerifiedState } from "../src/types.ts";
 
 function tmpStateDir(): string {
 	return mkdtempSync(path.join(tmpdir(), "convergence-run-"));
@@ -70,6 +71,82 @@ describe("runConvergence --fixture", () => {
 			// arm/disarm finally directly via a fixture run, then assert the sentinel never survives.
 			await runConvergence({ goal: "demo", fixture: true }).catch(() => undefined);
 			expect(isArmed(dir)).toBe(false);
+		});
+	});
+});
+
+describe("runOnceIteration --once (S2 — the hook-driven single step)", () => {
+	function oracle(overrides: Partial<VerifiedState> = {}): VerifiedState {
+		return {
+			goalId: "demo",
+			iteration: 5,
+			gap: 4,
+			epsilon: 0,
+			pendingEscalation: false,
+			budget: { spent: 5, cap: 50 },
+			decision: "continue",
+			updatedAt: 0,
+			...overrides,
+		};
+	}
+
+	test("advances the oracle by EXACTLY one iteration against the current on-disk state", async () => {
+		await withStateDir(async (dir) => {
+			await writeOracle(oracle({ iteration: 5 }), dir);
+			const next = await runOnceIteration({ goal: "demo", fixture: true, once: true });
+			expect(next.iteration).toBe(6);
+			expect(next.decision).toBe("continue"); // fixture gap 3 > epsilon 0
+			expect((await readOracle(dir))?.iteration).toBe(6);
+		});
+	});
+
+	test("is idempotent w.r.t. the hook contract: an already-terminal oracle advances nothing and disarms", async () => {
+		await withStateDir(async (dir) => {
+			await writeOracle(oracle({ iteration: 9, gap: 0, decision: "converged" }), dir);
+			const result = await runOnceIteration({ goal: "demo", fixture: true, once: true });
+			expect(result.iteration).toBe(9); // unchanged
+			expect(result.decision).toBe("converged");
+			expect(isArmed(dir)).toBe(false); // cleaned up
+		});
+	});
+
+	test("seeds a fresh continuable state when no oracle exists yet, then advances by one", async () => {
+		await withStateDir(async (dir) => {
+			const next = await runOnceIteration({ goal: "demo", fixture: true, once: true });
+			expect(next.iteration).toBe(1);
+			expect((await readOracle(dir))?.iteration).toBe(1);
+		});
+	});
+
+	test("keeps the sentinel armed (identity-stamped) between turns so the next Stop hook can still block", async () => {
+		await withStateDir(async (dir) => {
+			const prevSession = process.env.OMP_SQUAD_LOOP_SESSION;
+			process.env.OMP_SQUAD_LOOP_SESSION = "session-A";
+			try {
+				await writeOracle(oracle({ iteration: 2 }), dir);
+				await runOnceIteration({ goal: "demo", fixture: true, once: true });
+				expect(isArmed(dir)).toBe(true);
+				expect(readFileSync(armPath(dir), "utf8")).toBe("session-A"); // identity carried for the hook's match
+			} finally {
+				if (prevSession === undefined) delete process.env.OMP_SQUAD_LOOP_SESSION;
+				else process.env.OMP_SQUAD_LOOP_SESSION = prevSession;
+			}
+		});
+	});
+
+	test("disarms when an iteration reaches a terminal decision (budget cap)", async () => {
+		await withStateDir(async (dir) => {
+			const prevCap = process.env.OMP_SQUAD_CONVERGENCE_BUDGET_CAP;
+			process.env.OMP_SQUAD_CONVERGENCE_BUDGET_CAP = "3";
+			try {
+				await writeOracle(oracle({ iteration: 2, budget: { spent: 2, cap: 3 } }), dir);
+				const next = await runOnceIteration({ goal: "demo", fixture: true, once: true });
+				expect(next.decision).toBe("budget-exhausted");
+				expect(isArmed(dir)).toBe(false);
+			} finally {
+				if (prevCap === undefined) delete process.env.OMP_SQUAD_CONVERGENCE_BUDGET_CAP;
+				else process.env.OMP_SQUAD_CONVERGENCE_BUDGET_CAP = prevCap;
+			}
 		});
 	});
 });
