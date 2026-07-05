@@ -188,9 +188,31 @@ function classify(stmt: string): StmtKind {
 		if (/^(?:node|edge)\s*\[/.test(stmt)) return "reserved";
 	}
 	if (scanTopLevel(stmt, (s, i) => s[i] === "-" && s[i + 1] === ">")) return "edge";
-	if (stmt.includes("[")) return "node";
+	// An UNQUOTED `[` opens a node's attribute block. `stmt.includes("[")` matched a `[` inside a quoted
+	// value too (e.g. a graph attr `label="Release [beta]"`), misclassifying it as a node — parseNode then
+	// slices the id at that `[` and throws "invalid node id", failing the whole DOT parse on valid input.
+	if (containsUnquoted(stmt, "[")) return "node";
 	if (scanTopLevel(stmt, (s, i) => s[i] === "=")) return "assign";
 	return "empty";
+}
+
+/** True if `ch` appears outside any double-quoted string in `s` (respecting `\` escapes). */
+function containsUnquoted(s: string, ch: string): boolean {
+	let inString = false;
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i]!;
+		if (inString) {
+			if (c === "\\") {
+				i++;
+				continue;
+			}
+			if (c === '"') inString = false;
+			continue;
+		}
+		if (c === '"') inString = true;
+		else if (c === ch) return true;
+	}
+	return false;
 }
 
 /** True if `pred` matches at any index outside strings and `[ ]` blocks. */
