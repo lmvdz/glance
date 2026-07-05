@@ -132,6 +132,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
+import { recordModelOutcome, tierOf } from "./model-outcomes.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
@@ -2319,7 +2320,18 @@ export class SquadManager extends EventEmitter {
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
 		// never bump the streak for it, else transient dirty windows park a healthy branch.
-		if (!result.retryable && (auto || result.ok)) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
+		if (!result.retryable && (auto || result.ok)) {
+			recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
+			// Model-outcome ledger (Epic 6 concern 06): a cheap, always-on statistic — like land-ledger
+			// itself — so concern 07's default-shift has data on day one even before it's turned on.
+			// Never gates the land above; purely record-only, after the outcome is already known.
+			try {
+				recordModelOutcome(this.stateDir, dto.model, tierOf(rec.options.thinking), result.ok);
+				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
+			} catch (err) {
+				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
 		// Forced land that merged WITHOUT a passing proof gate — audit it so the override is never invisible trust.
 		if (result.forcedWithoutProof) {
 			const forceActor = opts.actor ?? LOCAL_ACTOR;
