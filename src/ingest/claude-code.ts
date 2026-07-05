@@ -45,6 +45,18 @@ export function normalizeRepo(cwd: string): string {
 	return i === -1 ? cwd : cwd.slice(0, i);
 }
 
+/**
+ * True when a session `cwd` belongs to `repo` — the repo itself or a directory under it. Boundary-safe:
+ * a bare `startsWith` matches a name-prefixed SIBLING (`myrepo-backup` under `myrepo`) and would ingest a
+ * foreign repo's sessions into this repo's receipts (cross-repo contamination). Matches the `${root}${sep}`
+ * discipline already used in dispatch.ts / features.ts / agent-guard.ts / worktree-reaper.ts.
+ */
+export function cwdBelongsToRepo(cwd: string, repo: string): boolean {
+	const norm = normalizeRepo(cwd);
+	const root = path.resolve(repo);
+	return norm === root || norm.startsWith(root + path.sep);
+}
+
 /** Summarize transcript lines [from..end). Pure. Returns null when nothing usable. */
 export function parseSession(lines: string[], sessionIdHint = "", from = 0): SessionSummary | null {
 	let sessionId = sessionIdHint;
@@ -220,7 +232,7 @@ export async function ingestClaudeCode(opts: {
 			cursor[full] = { lines: lines.length, size: stat.size };
 			if (!summary) continue;
 			// sessions that never worked in this repo (stray cwd) are skipped
-			if (!normalizeRepo(summary.cwd).startsWith(path.resolve(opts.repo))) continue;
+			if (!cwdBelongsToRepo(summary.cwd, opts.repo)) continue;
 			await appendReceipt(opts.stateDir, sessionToReceipt(summary, { continuation: from > 0 }));
 			ingested++;
 		}

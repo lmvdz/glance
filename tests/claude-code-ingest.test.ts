@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { encodeProjectDir, ingestClaudeCode, normalizeRepo, parseSession, sessionToReceipt } from "../src/ingest/claude-code.ts";
+import { cwdBelongsToRepo, encodeProjectDir, ingestClaudeCode, normalizeRepo, parseSession, sessionToReceipt } from "../src/ingest/claude-code.ts";
 import { estimateCost } from "../src/omp-graph/rates.ts";
 import { readAllReceipts } from "../src/receipts.ts";
 
@@ -123,4 +123,14 @@ describe("ingestClaudeCode", () => {
 		const r = await ingestClaudeCode({ stateDir, repo, claudeProjectsDir: projects });
 		expect(r).toMatchObject({ scanned: 1, ingested: 0 });
 	});
+});
+
+test("cwdBelongsToRepo: a name-prefixed sibling repo is NOT a member (boundary, not bare startsWith)", () => {
+	const repo = path.resolve("/x/myrepo");
+	expect(cwdBelongsToRepo(path.resolve("/x/myrepo"), "/x/myrepo")).toBe(true); // the repo itself
+	expect(cwdBelongsToRepo(path.resolve("/x/myrepo/pkg/a"), "/x/myrepo")).toBe(true); // a subdir
+	expect(cwdBelongsToRepo(path.resolve("/x/myrepo/.claude/worktrees/wt1"), "/x/myrepo")).toBe(true); // worktree normalizes back
+	expect(cwdBelongsToRepo(path.resolve("/x/myrepo-backup"), "/x/myrepo")).toBe(false); // sibling — was wrongly true
+	expect(cwdBelongsToRepo(path.resolve("/other/dir"), "/x/myrepo")).toBe(false);
+	void repo;
 });
