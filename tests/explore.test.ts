@@ -7,7 +7,7 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type FileNode, worktreeDiff, worktreeTree } from "../src/explore.ts";
+import { type FileNode, worktreeDiff, worktreeDiffSinceFork, worktreeTree } from "../src/explore.ts";
 
 const tmps: string[] = [];
 
@@ -68,6 +68,50 @@ test("worktreeDiff surfaces tracked modifications and untracked additions", asyn
 	const nested = byFile.get("nested/added.txt")!;
 	expect(nested.status[0]).toBe("?");
 	expect(nested.diff).toContain("nested brand new");
+});
+
+test("worktreeDiffSinceFork surfaces COMMITTED work that worktreeDiff blanks on", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "exp-fork-"));
+	tmps.push(repo);
+	const git = async (args: string[], cwd = repo) => {
+		const p = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "ignore" });
+		await p.exited;
+	};
+	await git(["init", "-q", "-b", "main"]);
+	await git(["config", "user.email", "t@t"]);
+	await git(["config", "user.name", "t"]);
+	await git(["config", "commit.gpgsign", "false"]);
+	await fs.writeFile(path.join(repo, "app.ts"), "line1\nline2\n");
+	await git(["add", "."]);
+	await git(["commit", "-qm", "init"]);
+
+	// Fork a unit worktree from main and COMMIT work into it — the state that
+	// leaves `git diff HEAD` (hence worktreeDiff) empty and blanks the panel.
+	const wt = path.join(repo, "..", `wt-${path.basename(repo)}`);
+	tmps.push(wt);
+	await git(["worktree", "add", "-q", wt, "-b", "squad/unit", "main"]);
+	await fs.writeFile(path.join(wt, "app.ts"), "line1\nline2 changed\nline3\n");
+	await fs.writeFile(path.join(wt, "feature.ts"), "new file\n");
+	await git(["add", "."], wt);
+	await git(["commit", "-qm", "unit work"], wt);
+
+	// The bug: a committed worktree looks clean to worktreeDiff → blank review.
+	expect(await worktreeDiff(wt)).toEqual([]);
+
+	// The fix: the fork-point diff still shows the unit's committed changes.
+	const committed = new Map((await worktreeDiffSinceFork(wt)).map((d) => [d.file, d]));
+	expect(committed.get("app.ts")?.diff).toContain("line3");
+	expect(committed.get("feature.ts")?.diff).toContain("new file");
+	expect(committed.get("feature.ts")?.status[0]).toBe("A");
+
+	// A further uncommitted edit folds into the same file entry (committed +
+	// working-tree changes in one pass, no double-counting).
+	await fs.writeFile(path.join(wt, "app.ts"), "line1\nline2 changed\nline3\nline4 uncommitted\n");
+	const mixed = await worktreeDiffSinceFork(wt);
+	expect(mixed.filter((d) => d.file === "app.ts")).toHaveLength(1);
+	const app = mixed.find((d) => d.file === "app.ts")!;
+	expect(app.diff).toContain("line3"); // committed
+	expect(app.diff).toContain("line4 uncommitted"); // uncommitted
 });
 
 test("worktreeTree lists files dirs-first and skips .git / node_modules", async () => {

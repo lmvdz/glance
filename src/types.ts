@@ -292,7 +292,9 @@ export interface FeatureWorktreeStatus {
 	agentName?: string;
 	branch?: string;
 	worktree: string;
-	/** Unlanded changed files in the worktree (same count as /api/agents/:id/diff). */
+	/** Uncommitted changed files in the worktree (drives the `uncommitted` readiness state).
+	 *  Distinct from /api/agents/:id/diff, which shows everything changed since the fork point
+	 *  (committed + uncommitted) so the review panel survives the unit committing. */
 	changedFiles: number;
 	/** Commits on the branch not in main. */
 	ahead: number;
