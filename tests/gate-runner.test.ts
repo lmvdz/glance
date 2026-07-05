@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_SANDBOX_IMAGE, GateSandboxUnavailableError, gateExec } from "../src/gate-runner.ts";
+import { DEFAULT_SANDBOX_IMAGE, execGatedCommand, GateSandboxUnavailableError, gateExec } from "../src/gate-runner.ts";
 
 const HOST_SRC = { PATH: "/usr/bin", HOME: "/home/t", CI: "1", ANTHROPIC_API_KEY: "sk" } as NodeJS.ProcessEnv;
 
@@ -102,4 +102,25 @@ test("OMP_SQUAD_GATE_SANDBOX_DISABLE=1 forces host exec even when docker is pres
 	const plan = await gateExec("true", "/repo", { source: { OMP_SQUAD_GATE_SANDBOX_DISABLE: "1" } as NodeJS.ProcessEnv, dockerProbe: hasDocker });
 	expect(plan.argv).toEqual(["bash", "-lc", "true"]);
 	expect(plan.sandboxed).toBe(false);
+});
+
+test("execGatedCommand runs the command with daemon secrets scrubbed from its env", async () => {
+	// The workflow `verify` gate and the main regression gate both run agent-authored scripts through
+	// this helper. Force host mode so the assertion is docker-independent; plant a daemon secret and
+	// prove the executed child never sees it (gateEnv scrub) while still capturing its output.
+	const prevSecret = process.env.PLANE_API_KEY;
+	const prevMode = process.env.OMP_SQUAD_GATE_SANDBOX;
+	process.env.PLANE_API_KEY = "plane-live-SECRET-must-not-leak";
+	process.env.OMP_SQUAD_GATE_SANDBOX = "host";
+	try {
+		const res = await execGatedCommand("printenv PLANE_API_KEY || true; echo done", process.cwd());
+		expect(res.code).toBe(0);
+		expect(res.stdout).toContain("done"); // output is captured
+		expect(res.stdout).not.toContain("SECRET"); // the daemon secret was scrubbed before exec
+	} finally {
+		if (prevSecret === undefined) delete process.env.PLANE_API_KEY;
+		else process.env.PLANE_API_KEY = prevSecret;
+		if (prevMode === undefined) delete process.env.OMP_SQUAD_GATE_SANDBOX;
+		else process.env.OMP_SQUAD_GATE_SANDBOX = prevMode;
+	}
 });

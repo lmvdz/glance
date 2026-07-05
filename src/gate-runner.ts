@@ -193,3 +193,20 @@ export async function gateExec(
 	warnHostFallbackOnce("docker is unavailable");
 	return hostPlan(command, env);
 }
+
+/**
+ * Plan (via {@link gateExec}) AND run `command` in `cwd`, returning its captured result — the single
+ * path every gate that executes agent-authored scripts should use, so the scrubbed env + sandbox are
+ * never accidentally skipped. `mounts` forwards extra dirs the command needs (pass the main repo for a
+ * worktree cwd). Used by the main regression gate and the workflow `verify` command node.
+ */
+export async function execGatedCommand(
+	command: string,
+	cwd: string,
+	opts: { mounts?: string[] } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+	const plan = await gateExec(command, cwd, { mounts: opts.mounts });
+	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
+	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	return { code: await proc.exited, stdout, stderr };
+}
