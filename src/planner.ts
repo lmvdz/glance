@@ -28,14 +28,43 @@ export interface ConcernDraft {
 	complexity: "mechanical" | "architectural" | "research";
 	/** TOUCHES: line — file paths this concern is expected to touch. */
 	touches: string[];
-	/** Concern numbers (within this same decompose call, or an existing plan concern's
-	 *  number) this concern is blocked by — feeds the "## Dependency graph" table. */
+	/**
+	 * IN-BATCH sibling concern numbers (in this same decompose call's dense 1..N space) this
+	 * concern is blocked by. These FOLLOW every renumbering — parseConcernDrafts's dense
+	 * renumbering AND the writer's reserved-collision remap — because they name other drafts.
+	 * Kept numerically SEPARATE from `blockedByExternal` on purpose: once both are flattened to
+	 * plain numbers they become indistinguishable, and the writer can no longer tell a sibling
+	 * edge that must be remapped from an external edge that must stay fixed (the SIG-1 bug).
+	 */
 	blockedBy: number[];
+	/**
+	 * EXTERNAL blocker refs: numbers pointing at concerns that already exist on disk (a verified /
+	 * existing concern the decompose prompt named by its real number). These are FIXED — never
+	 * touched by any draft renumbering, because they don't name a draft. The DAG gate
+	 * (validatePlanConcerns) is the backstop for a hallucinated external ref that resolves to
+	 * nothing.
+	 */
+	blockedByExternal: number[];
 	/** "## Goal" prose. */
 	goal: string;
 	/** "## Approach" prose. */
 	approach: string;
 	/** "## Acceptance Criteria" bullets. */
+	acceptance: string[];
+}
+
+/** A structurally-valid draft straight off the model, BEFORE the in-batch/external split and the
+ *  dense topological renumber. `blockedBy` here is the raw, un-split model number list. */
+interface RawDraft {
+	num: number;
+	slug: string;
+	title: string;
+	priority: ConcernDraft["priority"];
+	complexity: ConcernDraft["complexity"];
+	touches: string[];
+	blockedBy: number[];
+	goal: string;
+	approach: string;
 	acceptance: string[];
 }
 
@@ -131,8 +160,9 @@ function numberArray(v: unknown): number[] | undefined {
 	return v as number[];
 }
 
-/** Structurally validate + normalize one raw JSON item into a `ConcernDraft` (num not yet renumbered). */
-function normalizeDraft(raw: unknown): ConcernDraft | undefined {
+/** Structurally validate + normalize one raw JSON item into a `RawDraft` (num not yet renumbered,
+ *  blockedBy not yet split into in-batch vs external). */
+function normalizeDraft(raw: unknown): RawDraft | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const r = raw as Record<string, unknown>;
 
@@ -198,7 +228,7 @@ export function parseConcernDrafts(raw: string): ConcernDraft[] | undefined {
 	const arr = extractJsonArray(raw);
 	if (!arr) return undefined;
 
-	const drafts: ConcernDraft[] = [];
+	const drafts: RawDraft[] = [];
 	for (const item of arr) {
 		const d = normalizeDraft(item);
 		if (!d) return undefined;
@@ -221,14 +251,30 @@ export function parseConcernDrafts(raw: string): ConcernDraft[] | undefined {
 	const byOldNum = new Map(drafts.map((d) => [d.num, d] as const));
 	return order.map((oldNum) => {
 		const d = byOldNum.get(oldNum)!;
+		// Partition every blocker at the ONE place we can still tell the two apart: refs to another
+		// draft in this batch (in-batch — remap to its new dense number) vs refs to a concern that
+		// already exists on disk (external — the model named its real number; keep it verbatim).
+		// Carrying this split forward is what stops the writer from having to numerically guess.
+		const inBatchRefs = uniqueNums(d.blockedBy.filter((b) => inBatch.has(b)).map((b) => renumber.get(b)!));
+		const externalRefs = uniqueNums(d.blockedBy.filter((b) => !inBatch.has(b)));
 		return {
-			...d,
 			num: renumber.get(oldNum)!,
-			// remap in-batch refs to their new dense number; leave external refs (e.g. an already-
-			// numbered existing/verified concern) exactly as the model gave them.
-			blockedBy: d.blockedBy.map((b) => (inBatch.has(b) ? (renumber.get(b) ?? b) : b)),
+			slug: d.slug,
+			title: d.title,
+			priority: d.priority,
+			complexity: d.complexity,
+			touches: d.touches,
+			blockedBy: inBatchRefs,
+			blockedByExternal: externalRefs,
+			goal: d.goal,
+			approach: d.approach,
+			acceptance: d.acceptance,
 		};
 	});
+}
+
+function uniqueNums(nums: number[]): number[] {
+	return [...new Set(nums)].sort((a, b) => a - b);
 }
 
 /**

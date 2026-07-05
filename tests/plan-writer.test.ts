@@ -28,7 +28,8 @@ function draft(partial: Partial<ConcernDraft> & Pick<ConcernDraft, "num" | "slug
 		priority: "p1",
 		complexity: "mechanical",
 		touches: ["src/example.ts"],
-		blockedBy: [],
+		blockedBy: [], // in-batch sibling refs (follow renumbering)
+		blockedByExternal: [], // refs to already-resident concerns (fixed)
 		goal: "Do the thing.",
 		approach: "Just do it.",
 		acceptance: ["it is done"],
@@ -145,18 +146,17 @@ test("writeConcernDrafts: protectedNums shields a still-open-on-disk concern fro
 	expect(await validatePlanConcerns(repo, "plans/demo")).toEqual([]);
 });
 
-test("writeConcernDrafts: a solo draft whose dense-renumbered num AND external blockedBy both coincide with a reserved number does not manufacture a self-loop", async () => {
-	// Regression for a real bug hit end-to-end: parseConcernDrafts (planner.ts) densely renumbers a
-	// single-item batch to num=1; if that same batch's blockedBy=[1] was actually an EXTERNAL
-	// reference (to a reserved/terminal concern also numbered 1), naively remapping the draft's own
-	// colliding num=1→2 and ALSO remapping its blockedBy=[1]→2 turns a legitimate external
-	// dependency into a numeric self-loop, and the whole write is discarded at the DAG gate.
+test("writeConcernDrafts: a solo draft that collides with a reserved number keeps its EXTERNAL blocker fixed (no self-loop)", async () => {
+	// A single-item batch dense-renumbers to num=1; it carries a genuine EXTERNAL dependency on the
+	// reserved/terminal concern also numbered 1. The draft's own num-1 collision is remapped to 2, but
+	// its blockedByExternal=[1] must stay pointing at the frozen concern (never remapped along with the
+	// draft, which would manufacture a self-loop and get the whole write discarded at the DAG gate).
 	const repo = await scratchRepo();
 	const dirAbs = path.join(repo, "plans", "demo");
 	await fs.mkdir(dirAbs, { recursive: true });
 	await fs.writeFile(path.join(dirAbs, "01-subcommand.md"), "# Add hello subcommand\n\nSTATUS: done\nPRIORITY: p0\nCOMPLEXITY: mechanical\nTOUCHES: src/cli.ts\n\n## Goal\n\nDone.\n\n## Approach\n\nn/a\n\n## Acceptance Criteria\n\n- shipped\n");
 
-	const solo: ConcernDraft = draft({ num: 1, slug: "test-subcommand", title: "Add unit test for hello subcommand", blockedBy: [1] });
+	const solo: ConcernDraft = draft({ num: 1, slug: "test-subcommand", title: "Add unit test for hello subcommand", blockedByExternal: [1] });
 	const result = await writeConcernDrafts(repo, "plans/demo", [solo], { protectedNums: [1] });
 
 	expect(result.ok).toBe(true);
@@ -164,7 +164,39 @@ test("writeConcernDrafts: a solo draft whose dense-renumbered num AND external b
 	const files = (await fs.readdir(dirAbs)).sort();
 	expect(files).toEqual(["00-overview.md", "01-subcommand.md", "02-test-subcommand.md"]);
 	const overview = await fs.readFile(path.join(dirAbs, "00-overview.md"), "utf8");
-	expect(overview).toContain("| 2 Add unit test for hello subcommand | 1 |"); // blockedBy stayed the EXTERNAL 1
+	expect(overview).toContain("| 2 Add unit test for hello subcommand | 1 |"); // external blocker stayed 1
+	expect(await validatePlanConcerns(repo, "plans/demo")).toEqual([]);
+});
+
+test("writeConcernDrafts: SIG-1 — an IN-BATCH dependency on a number a terminal concern also owns follows the remap, not the terminal (real edge kept, false edge not manufactured)", async () => {
+	// The coordinator's exact repro. Disk has terminal concern #2. The draft batch (dense 1..3) is
+	// First#1, Middle#2 (blocked by First), Last#3 (blocked by Middle — an IN-BATCH edge on #2). #2 is
+	// reserved (terminal), so Middle remaps 2→4. Last's dependency on Middle must follow to 4 — the old
+	// buggy heuristic ("blockedBy value == a reserved number ⇒ external") kept it at 2, silently losing
+	// the real Last←Middle edge and manufacturing a false Last←(done #2) edge that validatePlanConcerns
+	// can't catch because it resolves to a real (done) concern, so Last would dispatch before Middle.
+	const repo = await scratchRepo();
+	const dirAbs = path.join(repo, "plans", "demo");
+	await fs.mkdir(dirAbs, { recursive: true });
+	await fs.writeFile(path.join(dirAbs, "02-middle-done.md"), "# Already-done middle\n\nSTATUS: done\nPRIORITY: p1\nCOMPLEXITY: mechanical\nTOUCHES: src/done.ts\n\n## Goal\n\nDone.\n\n## Approach\n\nn/a\n\n## Acceptance Criteria\n\n- shipped\n");
+
+	const drafts: ConcernDraft[] = [
+		draft({ num: 1, slug: "first", title: "First" }),
+		draft({ num: 2, slug: "middle", title: "Middle", blockedBy: [1] }), // in-batch: Middle ← First
+		draft({ num: 3, slug: "last", title: "Last", blockedBy: [2] }), // in-batch: Last ← Middle(#2)
+	];
+	const result = await writeConcernDrafts(repo, "plans/demo", drafts);
+	expect(result.ok).toBe(true);
+	expect(result.issues).toEqual([]);
+
+	// Terminal #2 preserved untouched; Middle remapped to the first free slot (4); Last still at 3.
+	const files = (await fs.readdir(dirAbs)).sort();
+	expect(files).toEqual(["00-overview.md", "01-first.md", "02-middle-done.md", "03-last.md", "04-middle.md"]);
+
+	const overview = await fs.readFile(path.join(dirAbs, "00-overview.md"), "utf8");
+	expect(overview).toContain("| 3 Last | 4 |"); // Last blocked by Middle's NEW number 4 — the real edge
+	expect(overview).not.toMatch(/\|\s*3 Last\s*\|\s*2\s*\|/); // NOT the false edge onto the done concern
+	expect(overview).toContain("| 4 Middle | 1 |"); // Middle still blocked by First
 	expect(await validatePlanConcerns(repo, "plans/demo")).toEqual([]);
 });
 

@@ -133,23 +133,20 @@ async function rollback(dirAbs: string, before: Map<string, string>): Promise<vo
 
 /**
  * Shift any drafted concern number that collides with a `reserved` number onto the lowest free
- * slot, remapping in-batch `blockedBy` refs along with it. A number is "reserved" once anything
- * frozen (a terminal concern, or a caller-protected one) already owns it — no draft may ever be
- * mistaken for "refining" it. `parseConcernDrafts` (planner.ts) densely renumbers the model's
- * ENTIRE batch from 1 on every call, blind to what's already resident on disk; without this,
- * a shrinking frontier routinely renumbers back down onto a concern number that a still-open
- * (or already-terminal) existing file owns, and a naive "same number ⇒ same concern" match would
- * silently overwrite it with unrelated content. A blockedBy value equal to a RESERVED number is
- * ALWAYS read as an external reference to that frozen concern's own (unchanged) file — never
- * remapped, even when it also happens to be some sibling draft's pre-remap number. (planner.ts's
- * prompt tells the model verified concerns' real numbers precisely so it can set up this kind of
- * reference.) The alternative — preferring the in-batch reading — was tried and breaks in
- * practice: parseConcernDrafts's own dense renumbering can independently land a draft's NEW
- * number on the very number an external blockedBy value already legitimately points at, and
- * remapping that value right along with the draft manufactures a numeric self-loop out of pure
- * coincidence, which then gets discarded wholesale at the DAG gate. A rare wrong-blocker edge in
- * the opposite (true in-batch collision) case is a strictly smaller failure than a hard rollback
- * of the whole tick's work. Pure — no I/O. */
+ * slot, remapping its IN-BATCH `blockedBy` refs (which name other drafts) along with it. A number
+ * is "reserved" once anything frozen (a terminal concern, or a caller-protected one) already owns
+ * it — no draft may ever be mistaken for "refining" it. `parseConcernDrafts` (planner.ts) densely
+ * renumbers the model's ENTIRE batch from 1 on every call, blind to what's already resident on
+ * disk; without this remap, a shrinking frontier routinely renumbers back down onto a concern
+ * number a still-open (or already-terminal) existing file owns, and a naive "same number ⇒ same
+ * concern" match would silently overwrite it with unrelated content.
+ *
+ * `blockedByExternal` is NEVER touched here: those refs name concerns that already exist on disk,
+ * not drafts, so they must stay fixed. This is the SIG-1 fix — the in-batch vs external
+ * distinction is carried through from parseConcernDrafts as two separate number lists rather than
+ * guessed from the number here, so a genuine sibling edge whose number happens to equal a
+ * reserved concern's number still follows the remap (it lives in `blockedBy`) while a true
+ * external edge to that reserved concern stays put (it lives in `blockedByExternal`). Pure — no I/O. */
 function remapAroundReserved(drafts: ConcernDraft[], reserved: Set<number>): ConcernDraft[] {
 	if (reserved.size === 0) return drafts;
 	const used = new Set(reserved);
@@ -168,8 +165,16 @@ function remapAroundReserved(drafts: ConcernDraft[], reserved: Set<number>): Con
 	return drafts.map((d) => ({
 		...d,
 		num: remap.get(d.num) ?? d.num,
-		blockedBy: d.blockedBy.map((b) => (reserved.has(b) ? b : (remap.get(b) ?? b))),
+		blockedBy: d.blockedBy.map((b) => remap.get(b) ?? b),
+		// external refs name on-disk concerns, never drafts — remapping a draft must never move them.
+		blockedByExternal: d.blockedByExternal,
 	}));
+}
+
+/** The full blocker set a concern's overview row must list: its in-batch sibling refs plus its
+ *  external (on-disk concern) refs, deduped + sorted. Both resolve to real concern numbers. */
+function allBlockers(d: ConcernDraft): number[] {
+	return [...new Set([...d.blockedBy, ...d.blockedByExternal])].sort((a, b) => a - b);
 }
 
 export async function writeConcernDrafts(repo: string, planDir: string, rawDrafts: ConcernDraft[], opts: WriteConcernDraftsOpts = {}): Promise<WriteResult> {
@@ -207,7 +212,12 @@ export async function writeConcernDrafts(repo: string, planDir: string, rawDraft
 	for (const draft of drafts) {
 		const existingConcern = existingByNum.get(draft.num);
 		const filename = draftFilename(draft);
-		const content = renderConcern(draft, "open", existingConcern?.planeId);
+		// Only inherit the PLANE pointer when this draft is GENUINELY the same concern being refined
+		// in place — same file (num+slug), not merely a different concern that landed on the same
+		// number after renumbering. Otherwise a new concern reusing a to-be-replaced slot would
+		// silently claim the old concern's Plane issue (m2).
+		const inheritedPlaneId = existingConcern && existingConcern.file === filename ? existingConcern.planeId : undefined;
+		const content = renderConcern(draft, "open", inheritedPlaneId);
 		const targetPath = path.join(dirAbs, filename);
 		const current = await fs.readFile(targetPath, "utf8").catch(() => undefined);
 		if (current !== content) {
@@ -234,7 +244,7 @@ export async function writeConcernDrafts(repo: string, planDir: string, rawDraft
 	// 3. Overview: a row for every concern that exists after this write — drafted ones plus
 	// preserved terminal/protected ones the drafts didn't touch (so the DAG gate can resolve
 	// blockedBy refs pointing at them). A preserved row keeps its previous blockers verbatim.
-	const rows: { num: number; title: string; blockedBy: number[] }[] = drafts.map((d) => ({ num: d.num, title: d.title, blockedBy: d.blockedBy }));
+	const rows: { num: number; title: string; blockedBy: number[] }[] = drafts.map((d) => ({ num: d.num, title: d.title, blockedBy: allBlockers(d) }));
 	for (const c of existing) {
 		const n = concernNumFromFile(c.file);
 		if (n == null || draftNums.has(n) || !reserved.has(n)) continue;

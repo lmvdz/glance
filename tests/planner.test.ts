@@ -25,9 +25,11 @@ test("parseConcernDrafts: decodes a fenced JSON array with trailing prose into d
 	expect(drafts!.map((d) => d.num)).toEqual([1, 2, 3]);
 	expect(drafts!.map((d) => d.slug)).toEqual(["core", "writer", "wiring"]);
 	const writer = drafts!.find((d) => d.slug === "writer")!;
-	expect(writer.blockedBy).toEqual([1]);
+	expect(writer.blockedBy).toEqual([1]); // in-batch sibling ref
+	expect(writer.blockedByExternal).toEqual([]);
 	const wiring = drafts!.find((d) => d.slug === "wiring")!;
 	expect(wiring.blockedBy.sort()).toEqual([1, 2]);
+	expect(wiring.blockedByExternal).toEqual([]);
 });
 
 test("parseConcernDrafts: renumbers out-of-order input into dependency-topological dense order", () => {
@@ -72,12 +74,29 @@ test("parseConcernDrafts: a multi-node cycle within the batch returns undefined"
 	expect(parseConcernDrafts(raw)).toBeUndefined();
 });
 
-test("parseConcernDrafts: an external blockedBy ref (outside the batch) is preserved, not treated as dangling", () => {
+test("parseConcernDrafts: an external blockedBy ref (outside the batch) is split into blockedByExternal, kept verbatim", () => {
 	const raw = JSON.stringify([{ num: 1, slug: "x", title: "X", priority: "p1", complexity: "mechanical", touches: [], blockedBy: [99], goal: "g", approach: "a", acceptance: ["y"] }]);
 	const drafts = parseConcernDrafts(raw);
 	expect(drafts).toBeDefined();
 	expect(drafts![0].num).toBe(1);
-	expect(drafts![0].blockedBy).toEqual([99]); // left as-is: refers to something outside this batch
+	expect(drafts![0].blockedBy).toEqual([]); // no in-batch sibling refs
+	expect(drafts![0].blockedByExternal).toEqual([99]); // external ref preserved verbatim
+});
+
+test("parseConcernDrafts: a mixed blocker list splits into in-batch (remapped) vs external (fixed)", () => {
+	// Drafts #7 and #9; #9 blockedBy [7, 42] — 7 is an in-batch sibling (→ remaps), 42 is external.
+	const raw = JSON.stringify([
+		{ num: 7, slug: "a", title: "A", priority: "p1", complexity: "mechanical", touches: [], blockedBy: [], goal: "g", approach: "a", acceptance: ["y"] },
+		{ num: 9, slug: "b", title: "B", priority: "p1", complexity: "mechanical", touches: [], blockedBy: [7, 42], goal: "g", approach: "a", acceptance: ["y"] },
+	]);
+	const drafts = parseConcernDrafts(raw);
+	expect(drafts).toBeDefined();
+	const a = drafts!.find((d) => d.slug === "a")!;
+	const b = drafts!.find((d) => d.slug === "b")!;
+	expect(a.num).toBe(1);
+	expect(b.num).toBe(2);
+	expect(b.blockedBy).toEqual([1]); // in-batch ref 7 → A's new dense num 1
+	expect(b.blockedByExternal).toEqual([42]); // external ref 42 untouched
 });
 
 test("buildDecomposePrompt: contains the objective, marks verified concerns do-not-re-emit, and demands a JSON array", () => {
