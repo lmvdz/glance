@@ -52,6 +52,22 @@ const taskFilters: Array<{ key: TaskFilter; label: string }> = [
 
 const categories: Array<'all' | Task['category']> = ['all', 'frontend', 'backend', 'devops', 'mcp', 'database'];
 
+/**
+ * Task-rail search predicate — matches the placeholder's promise ("by title or ID"). Tests the title,
+ * the internal feature id, AND `displayId` (the Plane ticket like OMPSQ-306 that `taskRef` actually
+ * renders as the row's ID handle) — the old predicate omitted displayId, so typing the exact ID a user
+ * sees on the row returned zero results. Exported + pure so the match rule is unit-tested.
+ */
+export function matchesTaskSearch(task: Task, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return (
+    task.title.toLowerCase().includes(q) ||
+    task.id.toLowerCase().includes(q) ||
+    (task.displayId?.toLowerCase().includes(q) ?? false)
+  );
+}
+
 /** Grouped VERTICAL navigation — a list that grows down instead of tab rows that
  *  overflow sideways. Sections give structure (the reference-timeline sidebar idiom). */
 const NAV_SECTIONS: { title: string; items: { view: AppView; label: string; icon: LucideIcon }[] }[] = [
@@ -276,8 +292,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const filteredTasks = tasks.filter((task) => {
     const showInCurrentView = taskFilter === 'all' || (taskFilter === 'done' ? task.status === 'done' : taskFilter === 'active' ? task.status === 'active' : task.status !== 'done');
     if (!showInCurrentView) return false;
-    const query = searchQuery.toLowerCase();
-    const matchesSearch = task.title.toLowerCase().includes(query) || task.id.toLowerCase().includes(query);
+    const matchesSearch = matchesTaskSearch(task, searchQuery);
     const matchesCategory = categoryFilter === 'all' || task.category === categoryFilter;
     const matchesTags = selectedTags.length === 0 || selectedTags.every((tag) => task.tags?.includes(tag));
     return matchesSearch && matchesCategory && matchesTags;
