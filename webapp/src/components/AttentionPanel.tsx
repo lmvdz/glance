@@ -20,7 +20,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Inbox, RefreshCw, Send, X, CheckCircle2 } from 'lucide-react';
 import { apiJson, jsonInit } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
-import { answerCommand, restartCommand } from '../lib/agent-control';
+import { answerCommand, restartCommand, steerCommand } from '../lib/agent-control';
 import {
   attentionItems,
   detectCollisions,
@@ -100,9 +100,18 @@ export const AttentionPanel: React.FC = () => {
   // ── actions ──────────────────────────────────────────────────────────────
 
   const submitAnswer = useCallback(() => {
-    if (!answering?.agentId || !answering.requestId || !answerText.trim()) return;
-    sendConsoleCommand(answerCommand(answering.agentId, answering.requestId, answerText.trim()));
-    showToast(`Answer sent to ${answering.title.replace(/ is waiting.*/, '')}`, 'success');
+    if (!answering?.agentId || !answerText.trim()) return;
+    const isSteer = answering.action?.kind === 'steer';
+    // Steer redirects a live agent with a fresh turn — unlike Answer, it has no pending request to
+    // resolve, so `requestId` is only required off the answer path.
+    if (!isSteer && !answering.requestId) return;
+    if (isSteer) {
+      sendConsoleCommand(steerCommand(answering.agentId, answerText.trim()));
+      showToast(`Steer sent to ${answering.title.replace(/ has gone quiet.*/, '')}`, 'success');
+    } else {
+      sendConsoleCommand(answerCommand(answering.agentId, answering.requestId!, answerText.trim()));
+      showToast(`Answer sent to ${answering.title.replace(/ is waiting.*/, '')}`, 'success');
+    }
     setAnswering(null);
     setAnswerText('');
     void load();
@@ -135,6 +144,7 @@ export const AttentionPanel: React.FC = () => {
     (item: AttentionItem) => {
       switch (item.action?.kind) {
         case 'answer':
+        case 'steer':
           setAnswering(item);
           setAnswerText('');
           break;
@@ -242,15 +252,17 @@ export const AttentionPanel: React.FC = () => {
                   {rows.map((item) => (
                     <div key={item.id}>
                       <AttentionRow item={item} onAction={onAction} busy={busyId === item.id} />
-                      {/* Inline answer composer, opened by the Answer action. */}
+                      {/* Inline composer, opened by the Answer or Steer action. */}
                       {answering?.id === item.id && (
                         <div className="border-t border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/60 px-4 py-3">
                           <div className="mb-1.5 flex items-center justify-between">
-                            <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">Your answer</span>
+                            <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">
+                              {answering.action?.kind === 'steer' ? 'Steer this agent' : 'Your answer'}
+                            </span>
                             <button
                               onClick={() => { setAnswering(null); setAnswerText(''); }}
                               className="rounded p-0.5 text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
-                              aria-label="Cancel answer"
+                              aria-label="Cancel"
                             >
                               <X className="h-3.5 w-3.5" aria-hidden="true" />
                             </button>
@@ -264,7 +276,7 @@ export const AttentionPanel: React.FC = () => {
                               if (e.key === 'Escape') { setAnswering(null); setAnswerText(''); }
                             }}
                             rows={2}
-                            placeholder="Type your reply to unblock this agent…"
+                            placeholder={answering.action?.kind === 'steer' ? 'Type a redirect for this agent…' : 'Type your reply to unblock this agent…'}
                             className="w-full resize-y rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-2.5 py-1.5 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                           />
                           <div className="mt-2 flex items-center justify-between">
