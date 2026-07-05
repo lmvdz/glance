@@ -1243,6 +1243,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
+			executionRole: p.executionRole,
 			parentId: p.parentId,
 			...lineageFieldsFrom(p),
 			featureId: p.featureId,
@@ -1365,6 +1366,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: transcript.length,
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
+			executionRole: p.executionRole,
 			parentId: p.parentId,
 			...lineageFieldsFrom(p),
 			featureId: p.featureId,
@@ -3787,6 +3789,7 @@ export class SquadManager extends EventEmitter {
 						workflow: rec.options.workflow?.path,
 						verify: rec.options.workflow?.verify?.command,
 						verifyMode: rec.options.workflow?.verify?.mode,
+						executionRole: rec.options.executionRole,
 						workflowState: forkedState,
 						// Fork inherits the issue (DESIGN.md RT1#13: one issue, one active claimant) — the original
 						// is marked supersededBy below and excluded from adoption/dispatch, so this is never a
