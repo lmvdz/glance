@@ -35,6 +35,25 @@ test("gateEnv strips every OMP_SQUAD_* var (bearer, coordinator token, flags)", 
 	expect(Object.keys(env).some((k) => k.startsWith("OMP_SQUAD_"))).toBe(false);
 });
 
+test("gateEnv strips every GLANCE_* twin and non-prefixed key-secrets (env-compat mirrors OMP_SQUAD_* → GLANCE_*)", () => {
+	const env = gateEnv({
+		PATH: "/usr/bin",
+		CARGO_HOME: "/home/t/.cargo",
+		GLANCE_TLS_KEY: "-----BEGIN PRIVATE KEY-----leak-----END-----", // GLANCE_ twin of OMP_SQUAD_TLS_KEY — _TLS_KEY misses the old shape regex
+		GLANCE_TRACE_EXPORT_LANGFUSE_SECRET_KEY: "sk-lf-secret",
+		GLANCE_AUTOLAND: "1",
+		SOME_SERVICE_TLS_KEY: "tls-nonprefixed", // non-prefixed _TLS_KEY — SECRET_NAME must catch
+		X_SECRET_KEY: "sk-nonprefixed", // non-prefixed _SECRET_KEY — SECRET_NAME must catch
+		OMP_SQUAD_GATE_ENV: "",
+	});
+	expect(env.PATH).toBe("/usr/bin");
+	expect(env.CARGO_HOME).toBe("/home/t/.cargo"); // a legit toolchain var still passes through (no over-strip)
+	expect(Object.keys(env).some((k) => k.startsWith("GLANCE_"))).toBe(false);
+	for (const gone of ["GLANCE_TLS_KEY", "GLANCE_TRACE_EXPORT_LANGFUSE_SECRET_KEY", "SOME_SERVICE_TLS_KEY", "X_SECRET_KEY"]) {
+		expect(env[gone]).toBeUndefined();
+	}
+});
+
 test("OMP_SQUAD_GATE_ENV re-admits explicitly named vars for suites that need them", () => {
 	const env = gateEnv({
 		OMP_SQUAD_GATE_ENV: "STRIPE_TEST_API_KEY, INTEGRATION_TOKEN",

@@ -18,7 +18,7 @@
  */
 
 const SECRET_NAME =
-	/(_API_KEY|_APIKEY|_TOKEN|_SECRET|_PASSWORD|_PASSWD|_CREDENTIALS?|_PRIVATE_KEY|_ACCESS_KEY|_SESSION_KEY|_AUTH)$/i;
+	/(_API_KEY|_APIKEY|_TOKEN|_SECRET|_SECRET_KEY|_PASSWORD|_PASSWD|_CREDENTIALS?|_PRIVATE_KEY|_ACCESS_KEY|_SESSION_KEY|_SIGNING_KEY|_ENCRYPTION_KEY|_TLS_KEY|_AUTH)$/i;
 
 /** Daemon credentials whose names the shape regex misses. */
 const SECRET_EXACT = new Set(["DATABASE_URL", "PLANE_API_KEY"]);
@@ -34,7 +34,9 @@ export function gateEnv(source: NodeJS.ProcessEnv = process.env): Record<string,
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(source)) {
 		if (typeof value !== "string") continue;
-		if (!allow.has(key) && (key.startsWith("OMP_SQUAD_") || SECRET_NAME.test(key) || SECRET_EXACT.has(key))) continue;
+		// Strip BOTH prefixes: env-compat.ts mirrors every OMP_SQUAD_* secret into a canonical GLANCE_
+		// twin, so scrubbing only OMP_SQUAD_ would leak the twin (e.g. GLANCE_TLS_KEY) to gate test code.
+		if (!allow.has(key) && (key.startsWith("OMP_SQUAD_") || key.startsWith("GLANCE_") || SECRET_NAME.test(key) || SECRET_EXACT.has(key))) continue;
 		env[key] = value;
 	}
 	return env;
