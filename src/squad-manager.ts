@@ -133,6 +133,7 @@ import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollu
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
 import { recordModelOutcome, tierOf } from "./model-outcomes.ts";
+import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
@@ -255,9 +256,15 @@ function autoLandFailCap(): number {
  * Epic 5 (HITL safeguards, DESIGN.md D1): below this run-end confidence score, `syncAuthority`
  * caps the agent's effective mode to `assist` (propose-only) regardless of requested/approval/
  * autoLand policy. Read fresh (not cached) so tests can flip it per-case. Default 0.4.
+ *
+ * Epic 6 concern 08 (confidence-threshold tuner): when OMP_SQUAD_THRESHOLD_TUNER is on, the floor
+ * is read from the tuner's persisted, evidence-adjusted value instead of the bare env default — the
+ * tuner only ever loosens it (see threshold-tuner.ts), so this can never end up MORE restrictive
+ * than the operator's own setting, only less. Flag off (default) ⇒ byte-identical to before.
  */
 function confidenceFloor(): number {
-	return Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4;
+	const base = Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4;
+	return isOn(learningFlags().thresholdTuner) ? tunedConfidenceFloor(base) : base;
 }
 
 /**
@@ -591,6 +598,7 @@ export class SquadManager extends EventEmitter {
 		this.leaseGossipIntervalMs = opts.leaseGossipIntervalMs ?? (Number(process.env.OMP_SQUAD_LEASE_GOSSIP_MS) || LEASE_GOSSIP_INTERVAL_MS);
 		this.stateDir = opts.stateDir ?? resolveStateDir();
 		setProofRoot(this.stateDir);
+		setThresholdTunerRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
@@ -2330,6 +2338,16 @@ export class SquadManager extends EventEmitter {
 				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
 				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+			// Confidence-threshold tuner (Epic 6 concern 08): record the SAME land outcome against this
+			// run's Epic 5 confidence score. `dto.confidence` is undefined for a run that never finished a
+			// turn (e.g. re-adopted/direct land) — recordConfidenceOutcome treats that as no evidence, never
+			// a penalty. Recording is unconditional (cheap, like model-outcomes); only the READ (confidenceFloor
+			// above) is flag-gated, so the tuner has data from day one even before it's turned on.
+			try {
+				recordConfidenceOutcome(this.stateDir, Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4, dto.confidence, result.ok);
+			} catch (err) {
+				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
 		// Forced land that merged WITHOUT a passing proof gate — audit it so the override is never invisible trust.
