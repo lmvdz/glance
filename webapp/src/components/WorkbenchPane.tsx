@@ -51,6 +51,17 @@ const taskFilters: Array<{ key: TaskFilter; label: string }> = [
 
 const categories: Array<'all' | Task['category']> = ['all', 'frontend', 'backend', 'devops', 'mcp', 'database'];
 
+/**
+ * Task-rail sort comparator. 'attention' floats what-needs-you up via `rankFor` (lower rank first);
+ * 'creation' orders by the feature's real `createdAt`, most recent first (undated sorts last). Pure +
+ * exported so the ordering is unit-tested — the old comparator returned 0 for 'creation' (dead) and had
+ * a 'dueDate' branch keyed on a field nothing ever populated (also dead).
+ */
+export function compareTaskRail(a: Task, b: Task, sortBy: 'attention' | 'creation', rankFor: (t: Task) => number): number {
+  if (sortBy === 'attention') return rankFor(a) - rankFor(b);
+  return (b.properties.createdAt ?? 0) - (a.properties.createdAt ?? 0);
+}
+
 /** Grouped VERTICAL navigation — a list that grows down instead of tab rows that
  *  overflow sideways. Sections give structure (the reference-timeline sidebar idiom). */
 const NAV_SECTIONS: { title: string; items: { view: AppView; label: string; icon: LucideIcon }[] }[] = [
@@ -226,7 +237,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<'all' | Task['category']>('all');
-  const [sortBy, setSortBy] = useState<'attention' | 'creation' | 'dueDate'>('attention');
+  const [sortBy, setSortBy] = useState<'attention' | 'creation'>('attention');
   const [isListening, setIsListening] = useState(false);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
 
@@ -264,17 +275,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     const matchesCategory = categoryFilter === 'all' || task.category === categoryFilter;
     const matchesTags = selectedTags.length === 0 || selectedTags.every((tag) => task.tags?.includes(tag));
     return matchesSearch && matchesCategory && matchesTags;
-  }).sort((a, b) => {
-    if (sortBy === 'attention') {
-      // stable: equal ranks keep their existing order, so this only re-floats what needs you
-      return taskListRank(statusFor(a), a.status === 'done') - taskListRank(statusFor(b), b.status === 'done');
-    }
-    if (sortBy !== 'dueDate') return 0;
-    if (!a.dueDate && !b.dueDate) return 0;
-    if (!a.dueDate) return 1;
-    if (!b.dueDate) return -1;
-    return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
-  });
+  }).sort((a, b) => compareTaskRail(a, b, sortBy, (t) => taskListRank(statusFor(t), t.status === 'done')));
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -598,10 +599,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                     </label>
                     <label className="space-y-1">
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Sort</span>
-                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation' | 'dueDate')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
                         <option value="attention">Attention</option>
                         <option value="creation">Creation</option>
-                        <option value="dueDate">Due date</option>
                       </select>
                     </label>
                   </div>
