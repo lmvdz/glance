@@ -3163,7 +3163,11 @@ export class SquadManager extends EventEmitter {
 			// unconditionally regardless of `terminal` — so a terminal run never gets a resumable
 			// resumeState here either, even if some future caller forgets the exclusion upstream.
 			const resumeState = p.workflowState?.terminal ? undefined : p.workflowState;
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, cold });
+			// Reflexion (concern 04): only meaningful for a SYNTHESIZED verify loop (buildVerifyLoop's
+			// "fixup" node id is the one it targets); wiring it is cheap (no LLM call unless the flag is
+			// on AND the run actually reaches its 2nd+ fixup), so it's always passed for a verify-mode run.
+			const reflection = workflow ? { stateDir: this.stateDir, repo: p.repo, agentId: p.id } : undefined;
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, cold, reflection });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });

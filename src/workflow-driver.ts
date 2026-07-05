@@ -24,6 +24,7 @@ import * as path from "node:path";
 import type { AgentDriver } from "./agent-driver.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
+import type { ReflectLlm } from "./reflection.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
 import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
@@ -141,6 +142,9 @@ export interface WorkflowDriverOptions {
 	/** True when resuming on a FRESH inner thread (the adopt path, prior host dead) → the in-flight node
 	 *  re-executes and re-primes the goal. Absent/false = warm reattach (reconnect), which never re-prompts. */
 	cold?: boolean;
+	/** Reflexion (concern 04) wiring, forwarded to the executor with `runId` bound to THIS driver's
+	 *  (lazily-minted) runId. Absent ⇒ the executor's fixup node never reflects (mirrors `fleet`). */
+	reflection?: { stateDir: string; repo: string; agentId: string; llm?: ReflectLlm };
 }
 
 interface PendingGate {
@@ -205,6 +209,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
 			cold: this.opts.cold,
+			reflection: this.opts.reflection ? { ...this.opts.reflection, runId: () => this.runId } : undefined,
 		});
 		const baseOnStage = this.executor.onStage.bind(this.executor);
 		this.executor.onStage = (ev) => {

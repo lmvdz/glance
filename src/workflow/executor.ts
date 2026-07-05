@@ -13,6 +13,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "../agent-driver.ts";
+import { fenceUntrusted } from "../digest.ts";
+import { isOn, learningFlags } from "../metrics.ts";
+import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
 import type { NodeExecutor, NodeResult, RunContext, StageEvent, WorkflowNode } from "./types.ts";
 
 export interface CommandResult {
@@ -65,6 +68,13 @@ export interface SingleAgentExecutorOptions {
 	 * where the original turn is still in flight and must NOT be re-prompted.
 	 */
 	cold?: boolean;
+	/**
+	 * Reflexion (agentic-learning-loop concern 04) wiring for the "fixup" node — best-effort, gated
+	 * behind `OMP_SQUAD_REFLEXION` at call time (this config is always passed for a verify-loop workflow;
+	 * the flag decides whether it actually fires). `runId` is a getter since the driver mints its runId
+	 * lazily at `execRun` time, after this options object is built.
+	 */
+	reflection?: { stateDir: string; repo: string; agentId: string; runId?: () => string; llm?: ReflectLlm };
 }
 
 /**
@@ -140,6 +150,10 @@ export class SingleAgentExecutor implements NodeExecutor {
 		if (ctx.vars.lastOutput) {
 			parts.push(`--- Recent command output ---\n${ctx.vars.lastOutput}`);
 		}
+		if (!isolated) {
+			const reflection = await this.reflectionNote(node, ctx);
+			if (reflection) parts.push(fenceUntrusted("reflection", reflection));
+		}
 		// Feed-forward: on the FIRST agent node after a gate resolves, fold in the reviewer's comments once
 		// (agent nodes share one thread, so re-injecting every turn would spam the same notes). The trigger
 		// is OR'd with a persisted checkpoint var so a COLD restart landing on this node still folds the
@@ -174,6 +188,44 @@ export class SingleAgentExecutor implements NodeExecutor {
 			return { outcome: "succeeded", text };
 		} catch (err) {
 			return { outcome: "failed", text: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	/**
+	 * Reflexion (concern 04): between fixup attempts, generate a short root-cause note from the LATEST
+	 * failing command output and inject it — turning a blind retry into a learning retry. Scoped
+	 * strictly to the "fixup" node of a verify loop (`verify → codefix → fixup → escalate`), the ONLY
+	 * node this concern targets. Best-effort by contract: `reflect()` never throws, and any failure
+	 * here degrades to "no note this round" — reflexion is an aid, never load-bearing.
+	 *
+	 * Only fires from the node's 2nd visit onward (the first fixup with raw output is often enough,
+	 * and this halves LLM cost), and never on the LAST visit before the node's overflow tier (escalate)
+	 * — there is no point reflecting right before giving up on this tier. The attempt counter rides
+	 * `ctx.vars` (like `GATE_FOLD_VAR` above) so it survives a daemon restart mid-run.
+	 *
+	 * Refutation, not accumulation: if the current failing output hashes identically to the reflection
+	 * the LAST attempt was generated from, that hypothesis provably didn't fix anything — say so
+	 * plainly (no new LLM call) instead of re-guessing on the same evidence.
+	 */
+	private async reflectionNote(node: WorkflowNode, ctx: RunContext): Promise<string | undefined> {
+		const cfg = this.opts.reflection;
+		if (node.id !== "fixup" || !cfg || !ctx.vars.lastOutput) return undefined;
+		if (!isOn(learningFlags(cfg.agentId).reflexion)) return undefined;
+		const attemptKey = `__reflectAttempt:${node.id}`;
+		const attempt = (Number(ctx.vars[attemptKey]) || 0) + 1;
+		ctx.vars[attemptKey] = String(attempt);
+		if (attempt < 2) return undefined; // first fixup: raw output alone is often enough
+		if (node.maxVisits !== undefined && attempt >= node.maxVisits) return undefined; // last try before overflow — no point reflecting
+		try {
+			const prior = await latestReflection(cfg.stateDir, cfg.repo, this.opts.cwd);
+			const outputHash = hashOutput(ctx.vars.lastOutput);
+			if (prior && prior.outputHash === outputHash) return renderRefutationNote(prior); // unchanged failure ⇒ the last guess didn't fix it
+			const r = await reflect({ output: ctx.vars.lastOutput, prior: prior ? { rootCause: prior.rootCause, whatToDoDifferently: prior.whatToDoDifferently, outputHash: prior.outputHash } : undefined }, cfg.llm);
+			if (!r) return undefined;
+			await appendReflection(cfg.stateDir, cfg.repo, this.opts.cwd, { ...r, agentId: cfg.agentId, runId: cfg.runId?.(), repo: cfg.repo, at: Date.now() });
+			return renderReflectionNote(r);
+		} catch {
+			return undefined; // never let reflexion block a fixup turn
 		}
 	}
 
