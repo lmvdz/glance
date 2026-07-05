@@ -97,6 +97,7 @@ import type {
 	ClientCommand,
 	CreateAgentOptions,
 	CommissionResult,
+	AgentReport,
 	CommissionSpec,
 	FlueMemberConfig,
 	GateReport,
@@ -134,6 +135,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
@@ -181,6 +183,8 @@ const POLL_MS = 2500;
 const PEER_MESSAGE_TOOL = "squad_message";
 const PEER_MESSAGE_MAX_CHARS = 2000;
 const KB_SEARCH_TOOL = "squad_kb_search";
+/** Epic 5 (HITL safeguards, DESIGN.md D2): NON-blocking — responds immediately, never rides `pending`. */
+const REPORT_TOOL = "squad_report";
 
 /**
  * Reserved host tools advertised to every omp-backed agent via `set_host_tools` on ready (the
@@ -215,6 +219,20 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 			required: ["to", "text"],
 		},
 	},
+	{
+		name: REPORT_TOOL,
+		description:
+			"Raise a proposal or flag uncertainty WITHOUT stopping — non-blocking, unlike a confirm/input host call. Use when you're unsure about an approach and want a human to weigh in at their own pace while you keep working. It appears as a 'Needs you' row, not a gate.",
+		parameters: {
+			type: "object",
+			properties: {
+				summary: { type: "string", description: "One line: what you're unsure about, or the proposal." },
+				proposal: { type: "string", description: "Optional: the proposed diff/approach/next step in more detail." },
+				confidence: { type: "number", description: "Optional: your own 0..1 confidence in the current approach." },
+			},
+			required: ["summary"],
+		},
+	},
 ];
 
 function peerMessageBudget(): number {
@@ -227,6 +245,15 @@ function commandTarget(cmd: ClientCommand): string | undefined {
 
 function autoLandFailCap(): number {
 	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
+}
+
+/**
+ * Epic 5 (HITL safeguards, DESIGN.md D1): below this run-end confidence score, `syncAuthority`
+ * caps the agent's effective mode to `assist` (propose-only) regardless of requested/approval/
+ * autoLand policy. Read fresh (not cached) so tests can flip it per-case. Default 0.4.
+ */
+function confidenceFloor(): number {
+	return Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4;
 }
 
 /**
@@ -587,6 +614,8 @@ export class SquadManager extends EventEmitter {
 			autoLand: this.autoLand,
 			landConfirm: this.landConfirm,
 			blockedReason,
+			confidence: dto.confidence,
+			confidenceFloor: confidenceFloor(),
 		});
 		dto.effectiveMode = effectiveMode;
 		dto.blockedReason = blockedReason;
@@ -4503,6 +4532,16 @@ export class SquadManager extends EventEmitter {
 		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it
 		// survives the run — the input Epic 5's confidence scorer reads via buildDigest.
 		if (rec.dto.validation) receipt.validation = rec.dto.validation;
+		// Epic 5 (HITL safeguards, DESIGN.md D1): pure, deterministic run-end self-confidence from
+		// signals already on the record — the proof state and the blast-radius proxy (files touched).
+		// `validator` folds in Epic 3's independent-validator verdict when one ran: "pass" (all declared
+		// criteria satisfied) or "veto" (fail-closed, at least one unsatisfied) map to pass/fail;
+		// "abstain" (judge unreachable, fail-open) and "skipped" (no declared criteria) map to
+		// `undefined` — absence never penalizes.
+		const validator: "pass" | "fail" | undefined =
+			rec.dto.validation?.verdict === "pass" ? "pass" : rec.dto.validation?.verdict === "veto" ? "fail" : undefined;
+		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator });
+		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
@@ -4528,6 +4567,28 @@ export class SquadManager extends EventEmitter {
 		// branch diff (not the receipt). Advisory low-sev finding only — never blocks a land.
 		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
+		rec.dto.confidence = conf;
+		// Epic 5 (HITL safeguards, DESIGN.md D2): low-confidence auto-escalation — the join of leaves
+		// 02 (score)+03 (cap)+05 (report channel). A run finishing below the floor gets a NON-blocking
+		// report appended so it surfaces as a "Needs you" row instead of silently sitting land-ready;
+		// the leaf-03 cap (recomputed below by emitAgent's syncAuthority call) has already dropped it
+		// to assist/propose-only. De-duped by runId so a re-finalize (finalized guard above makes this
+		// defensive, not load-bearing) never doubles the report.
+		if (conf < confidenceFloor()) {
+			const reportId = `auto-${receipt.runId}`;
+			if (!(rec.dto.reports ?? []).some((r) => r.id === reportId)) {
+				const touched = receipt.filesTouched;
+				const proposal = touched.length ? `${touched.length} file${touched.length === 1 ? "" : "s"} touched: ${touched.slice(0, 10).join(", ")}${touched.length > 10 ? `, +${touched.length - 10} more` : ""}` : "no files touched";
+				const report: AgentReport = {
+					id: reportId,
+					summary: `Low confidence (${conf.toFixed(2)}) — verify before landing`,
+					proposal,
+					confidence: conf,
+					createdAt: Date.now(),
+				};
+				rec.dto.reports = [...(rec.dto.reports ?? []), report];
+			}
+		}
 		rec.dto.traceId = run.traceId || rec.dto.traceId; // same sticky rule as the turn-progress site above
 		rec.options.traceId = rec.dto.traceId; // topology review finding 7: mirror onto PersistedAgent so a restart never drops the trace link
 		// Run-end closure: stamp any subagent left non-terminal (started but never got a terminal frame
@@ -4842,6 +4903,10 @@ export class SquadManager extends EventEmitter {
 			void this.handlePeerMessageTool(rec, call);
 			return;
 		}
+		if (call.toolName === REPORT_TOOL) {
+			void this.handleReportTool(rec, call);
+			return;
+		}
 		// Capability tool-grant enforcement (#3): if this agent was spawned from a capability profile that
 		// declared a tool allow-list, hard-deny any host tool call outside it instead of surfacing it for
 		// approval. The built-in peer-message tool above is exempt (it's not a capability tool).
@@ -4911,6 +4976,30 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			rec.agent.respondHostTool(call.id, err instanceof Error ? err.message : String(err), true);
 		}
+	}
+
+	/**
+	 * squad_report (Epic 5 HITL safeguards, DESIGN.md D2): "I'm unsure — here's a proposal" WITHOUT
+	 * stopping. Modeled on `handlePeerMessageTool` above, NOT on the blocking `onHostTool` pending
+	 * path — it responds to the agent immediately (the agent keeps running) and appends to the
+	 * separate, non-blocking `AgentDTO.reports` channel. Never calls `setPending`: that would flip
+	 * status to "input" and cap authority to observe, the exact opposite of this primitive's purpose.
+	 */
+	private async handleReportTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+		const summary = typeof args.summary === "string" ? args.summary.trim() : "";
+		if (!summary) {
+			rec.agent.respondHostTool(call.id, `usage: ${REPORT_TOOL}({ summary: string, proposal?: string, confidence?: number })`, true);
+			return;
+		}
+		const proposal = typeof args.proposal === "string" ? args.proposal : undefined;
+		const confidence = typeof args.confidence === "number" && Number.isFinite(args.confidence) ? Math.max(0, Math.min(1, args.confidence)) : undefined;
+		const report: AgentReport = { id: randomUUID(), summary, proposal, confidence, createdAt: Date.now() };
+		rec.dto.reports = [...(rec.dto.reports ?? []), report];
+		this.append(rec, "system", `📝 report: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: REPORT_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+		rec.agent.respondHostTool(call.id, "report recorded — continue working, a human will review it when they can");
+		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncate(summary, 120));
+		this.emitAgent(rec);
 	}
 
 	private derive(rec: AgentRecord): AgentStatus {
