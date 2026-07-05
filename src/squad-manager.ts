@@ -42,6 +42,8 @@ import { Scout, unscannedReasoning } from "./scout.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
 import { gateExec } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
+import { ResidentPlanner } from "./resident-planner.ts";
+import { DECOMPOSE_TIMEOUT_MS } from "./planner.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
@@ -483,6 +485,9 @@ export class SquadManager extends EventEmitter {
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
+	/** Resident planners — one per configured Plane repo; gated OMP_SQUAD_RESIDENT_PLANNER (default OFF,
+	 *  opt-in unlike the loops above — an LLM-cost-bearing writer of source-tree files). */
+	private readonly residentPlanners: ResidentPlanner[] = [];
 	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning.
 	 *  Persisted (scout-cursor.json) so a warm daemon restart doesn't re-scan whole transcripts —
 	 *  each re-scan was a redundant Scout LLM call per reattached agent. Loaded in the constructor. */
@@ -815,6 +820,26 @@ export class SquadManager extends EventEmitter {
 			});
 			this.log("info", `opportunity on (clustering scout patterns → ${observeRepos.join(", ")})`);
 		}
+
+		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and
+		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
+		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
+		if (process.env.OMP_SQUAD_RESIDENT_PLANNER === "1" && observeRepos.length > 0) {
+			for (const repo of observeRepos) {
+				const planner = new ResidentPlanner({
+					repo,
+					stateDir: this.stateDir,
+					classify: ompClassify(this.bin, DECOMPOSE_TIMEOUT_MS),
+					hasProof: (identifier) => hasProof(this.stateDir, identifier),
+					onChanged: () => this.emitFeaturesChanged(),
+					log: (m) => this.log("info", `resident-planner[${repo}]: ${m}`),
+					record: this.automation.for("resident-planner", repo),
+				});
+				planner.start();
+				this.residentPlanners.push(planner);
+			}
+			this.log("info", `resident-planner on (decomposing objectives → ${observeRepos.join(", ")})`);
+		}
 	}
 
 	/**
@@ -924,6 +949,7 @@ export class SquadManager extends EventEmitter {
 		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
+		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
@@ -4629,6 +4655,7 @@ export class SquadManager extends EventEmitter {
 			observer: this.observers.length > 0,
 			scout: this.scouts.size > 0,
 			opportunity: this.opportunities.length > 0,
+			residentPlanner: this.residentPlanners.length > 0,
 			// orchestrator is always built, but its control loop only arms the timer when AUTODRIVE is on.
 			autodrive: !!this.orchestrator && process.env.OMP_SQUAD_AUTODRIVE !== "0",
 			autoland: this.autoLand,

@@ -88,9 +88,15 @@ function extractDecision(text: string): { process?: string; effort?: string } | 
 	return { process, effort };
 }
 
-/** A `Classify` backed by a one-shot omp call on the fast/smol model (no tools). */
-export function ompClassify(bin = "omp"): Classify {
-	return async (prompt: string): Promise<string> => (await ompOneShot(["-p", "--no-tools", "--smol", "--hide-thinking", prompt], { bin })).out;
+/**
+ * A `Classify` backed by a one-shot omp call on the fast/smol model (no tools). `timeoutMs`
+ * defaults to `ompOneShot`'s own 1s budget (fine for routeIntake's/Scout's short classification
+ * prompts) — a substantive generation call (e.g. the resident planner's decompose, which asks
+ * for a full multi-concern JSON plan with prose) needs a much larger budget or it silently times
+ * out on every real call; pass one explicitly for those.
+ */
+export function ompClassify(bin = "omp", timeoutMs?: number): Classify {
+	return async (prompt: string): Promise<string> => (await ompOneShot(["-p", "--no-tools", "--smol", "--hide-thinking", prompt], { bin, timeoutMs })).out;
 }
 
 /** Infer the repo's verification command from its toolchain manifests. */

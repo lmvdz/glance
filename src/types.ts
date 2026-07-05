@@ -964,7 +964,7 @@ export type SquadEvent =
  *  automation log, invisible. Scout reads agent reasoning (the only token-spending loop); Observer and
  *  Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
 // "scope" is event-driven (scope-contract audit findings), not a periodic loop like the others.
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync";
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner";
 
 /**
  * Structured reason an automation loop intentionally skipped a unit without doing work.
