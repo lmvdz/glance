@@ -88,6 +88,11 @@ const MAX_CONTEXT_OUTPUT = 4000;
 const IDLE_POLL_MS = 5_000;
 /** Idle polls (~30s) with the inner loop reporting not-streaming, after it was seen active, before we treat a missing agent_end as turn-end. */
 const IDLE_TICKS = 6;
+/** Reflexion "last attempt" fallback cap — mirrors the engine's DEFAULT_NODE_VISITS (engine.ts) so a
+ *  hand-authored `fixup` node that sets no explicit `maxVisits` still gets its final visit skipped,
+ *  matching what the engine's own shared.cap default would bound it to. Kept in sync manually (the
+ *  executor can't reach the engine's `shared.cap`); if the engine default changes, change this too. */
+const DEFAULT_FIXUP_VISIT_CAP = 50;
 
 export class SingleAgentExecutor implements NodeExecutor {
 	/** Stage rollup for the driver's synthetic getState (done/total + active). */
@@ -215,7 +220,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 		const attempt = (Number(ctx.vars[attemptKey]) || 0) + 1;
 		ctx.vars[attemptKey] = String(attempt);
 		if (attempt < 2) return undefined; // first fixup: raw output alone is often enough
-		if (node.maxVisits !== undefined && attempt >= node.maxVisits) return undefined; // last try before overflow — no point reflecting
+		if (attempt >= (node.maxVisits ?? DEFAULT_FIXUP_VISIT_CAP)) return undefined; // last try before overflow — no point reflecting (defensive: hand-authored nodes may set no maxVisits)
 		try {
 			const prior = await latestReflection(cfg.stateDir, cfg.repo, this.opts.cwd);
 			const outputHash = hashOutput(ctx.vars.lastOutput);

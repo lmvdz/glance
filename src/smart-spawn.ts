@@ -44,16 +44,25 @@ function landedRate(o: ModelOutcomeCounts): number {
  * Boost-only, floored, never-overriding default shift (DESIGN.md's outcome-driven model default):
  *  1. An explicit model already set (the LLM planner returned one) is NEVER overridden.
  *  2. Off unless `OMP_SQUAD_MODEL_OUTCOMES=1` AND an `outcomes` reader is injected.
- *  3. Exploration floor: a candidate with fewer than `MIN_SAMPLES` total outcomes is not eligible
- *     to WIN — but nothing here ever excludes it from the baseline heuristic's own traffic.
- *  4. The best ELIGIBLE candidate replaces the default only if it beats the incumbent ("default")
- *     rate by at least `MIN_EDGE`; otherwise the default stands, unchanged.
+ *  3. Exploration floor is SYMMETRIC — it protects BOTH sides of the comparison from a small sample:
+ *     - a WINNER candidate with fewer than `MIN_SAMPLES` total outcomes is not eligible to win;
+ *     - the INCUMBENT ("default") must ALSO clear `MIN_SAMPLES` before its rate is trusted. An
+ *       unmeasured incumbent is `{0,0}` → `landedRate` 0, which would otherwise read as "0% land
+ *       rate" and let a thin/mediocre winner flip the default purely because the incumbent was never
+ *       measured — starving the cold incumbent, the never-penalize rule inverted. So a cold
+ *       incumbent means NO shift (the base heuristic stands), never a free win for the challenger.
+ *  4. The best ELIGIBLE candidate replaces the default only if it beats the (trusted) incumbent rate
+ *     by at least `MIN_EDGE`; otherwise the default stands, unchanged.
  * Returns the (possibly) shifted model + an optional reason suffix; never mutates its input.
  */
 function shiftedModel(currentModel: string | undefined, tier: ComplexityTier, outcomes: OutcomesReader | undefined): { model?: string; reasonSuffix?: string } {
 	if (currentModel !== undefined) return {}; // never override an explicit choice
 	if (process.env.OMP_SQUAD_MODEL_OUTCOMES !== "1" || !outcomes) return {};
-	const incumbentRate = landedRate(outcomes("default", tier));
+	// Cold incumbent ⇒ no basis for comparison ⇒ no shift. Trusting an unmeasured incumbent's 0%
+	// rate would penalize it exactly the way the winner-side floor forbids for a cold challenger.
+	const incumbent = outcomes("default", tier);
+	if (incumbent.landed + incumbent.rejected < MIN_SAMPLES) return {};
+	const incumbentRate = landedRate(incumbent);
 	let best: { model: string; rate: number } | undefined;
 	for (const model of SHIFT_CANDIDATES) {
 		const o = outcomes(model, tier);

@@ -180,6 +180,25 @@ describe("reflexion — fixup node, flag on", () => {
 		}
 	});
 
+	test("(M1) a fixup node with NO explicit maxVisits still reflects on the 2nd attempt (guard falls back to the engine cap, not undefined)", async () => {
+		process.env.OMP_SQUAD_REFLEXION = "1";
+		const dir = tmp();
+		try {
+			const agent = new RecordingDriver();
+			const ex = makeExecutor(agent, dir);
+			const node = fixupNode(undefined); // hand-authored: no maxVisits — must NOT fall through to "reflect forever incl. last visit"
+			const ctx = newCtx();
+			await ex.runAgent(node, withOutput(ctx, "v1"));
+			await ex.runAgent(node, withOutput(ctx, "v2"));
+			// The defensive fallback (?? DEFAULT_FIXUP_VISIT_CAP=50) leaves attempts 2..49 eligible, so the
+			// 2nd attempt here still reflects — the fix only bounds the FAR end (attempt 50), which a sane
+			// loop never reaches; it never regresses the common early attempts.
+			expect(agent.messages[1]).toContain("Likely root cause");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("never fires for a non-fixup node id, even with identical shape", async () => {
 		process.env.OMP_SQUAD_REFLEXION = "1";
 		const dir = tmp();

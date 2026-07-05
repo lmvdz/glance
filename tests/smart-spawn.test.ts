@@ -121,6 +121,24 @@ describe("assemblePlan — outcome-driven model default shift", () => {
 		expect(plan.model).toBeUndefined();
 	});
 
+	test("(S1 regression) a fat winner vs a COLD/unseen incumbent yields NO shift — the incumbent floor is symmetric with the winner's", () => {
+		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+		// opus clears MIN_SAMPLES (8) at a mediocre 0.25 land rate; "default" was NEVER measured ({0,0}).
+		// Trusting the incumbent's unmeasured 0% rate would flip EVERY mid-tier omitted-model spawn to
+		// opus (0.25 - 0 = 0.25 >= MIN_EDGE) despite opus's own poor record — starving the cold incumbent.
+		const outcomes = outcomesFrom({ "opus::mid": { landed: 2, rejected: 6 }, "default::mid": { landed: 0, rejected: 0 } });
+		const plan = assemblePlan("do it", candidates, cwd, {}, { outcomes });
+		expect(plan.model).toBeUndefined(); // cold incumbent ⇒ no basis for comparison ⇒ base heuristic stands
+	});
+
+	test("(S1 regression) a thinly-measured incumbent (below MIN_SAMPLES) also blocks the shift", () => {
+		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+		// opus: 8 samples @ 0.875; default: only 3 samples (below the floor) — even a strong winner must wait.
+		const outcomes = outcomesFrom({ "opus::heavy": { landed: 7, rejected: 1 }, "default::heavy": { landed: 3, rejected: 0 } });
+		const plan = assemblePlan("do it", candidates, cwd, { thinking: "high" }, { outcomes });
+		expect(plan.model).toBeUndefined();
+	});
+
 	test("record/read bucketing agree: a 'medium'/undefined thinking task reads the 'mid' tier", () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
 		const outcomes = outcomesFrom({ "opus::mid": { landed: 8, rejected: 0 }, "default::mid": { landed: 0, rejected: 8 } });
