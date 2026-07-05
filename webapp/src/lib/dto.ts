@@ -15,6 +15,16 @@ export interface PendingRequest {
   gateClass?: boolean;
 }
 
+/** Mirrors backend `AgentReport` (src/types.ts) — a non-blocking "I'm unsure, here's a proposal"
+ *  note. NOT a `PendingRequest`: it never blocks the agent or flips status to "input" (Epic 5 D2). */
+export interface AgentReport {
+  id: string;
+  summary: string;
+  proposal?: string;
+  confidence?: number;
+  createdAt: number;
+}
+
 /** Mirrors backend `TransitionEntry` (src/types.ts). One recorded (or denied) `{from,to,reason,at}`
  *  lifecycle transition. */
 export interface TransitionEntry {
@@ -351,6 +361,9 @@ export interface AgentDTO {
   todo?: { done: number; total: number; active?: string };
   todoPhases?: TodoPhaseDTO[];
   pending: PendingRequest[];
+  /** Non-blocking proposals raised via `squad_report`, or auto-emitted on a low-confidence run
+   *  (Epic 5 D2). Surfaced as a warn "Needs you" row — never affects `status`/`effectiveMode`. */
+  reports?: AgentReport[];
   transitions?: TransitionEntry[];
   errorTransitions1h?: number;
   lastActivity: number;
@@ -366,6 +379,9 @@ export interface AgentDTO {
   validation?: ValidationRecordDTO;
   blockedReason?: string;
   availableActions: AgentAction[];
+  /** Run-end self-confidence 0..1; absent until a run has finished. Below the daemon's confidence
+   *  floor caps `effectiveMode` to `assist` (propose-only). */
+  confidence?: number;
   landReady?: boolean;
   /** PR-mode landing metadata, set at push (draft/open) and merge (merged) time. Absent in local mode. */
   prUrl?: string;

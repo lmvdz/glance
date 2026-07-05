@@ -82,6 +82,22 @@ export interface PendingRequest {
 	replayed?: true;
 }
 
+/**
+ * A non-blocking "I'm unsure — here's a proposal" note (Epic 5 DESIGN §D2). Raised by the agent via
+ * the `squad_report` host tool, or auto-synthesized by the manager when a run finalizes below the
+ * confidence floor. Appended to `AgentDTO.reports` — deliberately NOT a `PendingRequest`, so it never
+ * blocks the agent or flips its status to "input".
+ */
+export interface AgentReport {
+	id: string;
+	summary: string;
+	/** Optional proposed diff/summary of what the agent would do next, for a human to review. */
+	proposal?: string;
+	/** The confidence score (if any) that prompted this report; absent for a manually-raised report. */
+	confidence?: number;
+	createdAt: number;
+}
+
 export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";
 
 export type TranscriptStatus = "running" | "ok" | "error" | "cancelled";
@@ -571,6 +587,11 @@ export interface AgentDTO {
 	todoPhases?: RpcSessionState["todoPhases"];
 	/** Pending human-input requests (status === "input" when non-empty). */
 	pending: PendingRequest[];
+	/** Non-blocking "I'm unsure, here's a proposal" notes the agent raised via `squad_report` (Epic 5
+	 *  DESIGN §D2). Deliberately NOT a `PendingRequest` — `pending.length` is load-bearing for
+	 *  `blockedReason`/`effectiveAutonomyMode`'s observe cap, and a report must never block the agent.
+	 *  Live/run-scoped only (not persisted to state.json), append-only across a run. */
+	reports?: AgentReport[];
 	/** Last 5 SIGNIFICANT lifecycle transitions (turn-progress excluded) — a compact inline strip.
 	 *  Full history via GET /api/agents/:id/transitions. Capped deliberately: this rides emitAgent's
 	 *  broadcast (per RPC-frame on the hot path), so it must never carry the full ring. */
@@ -622,6 +643,10 @@ export interface AgentDTO {
 	blockedReason?: string;
 	/** Actions this surface may offer for the current effective mode. */
 	availableActions?: AgentAction[];
+	/** Run-end self-confidence 0..1, stamped by `scoreConfidence` (src/confidence.ts) at `finalizeRun`.
+	 *  Absent until a run has actually finished. Below `OMP_SQUAD_CONFIDENCE_FLOOR` caps
+	 *  `effectiveAutonomyMode` to `assist` (propose-only) — see autonomy.ts. */
+	confidence?: number;
 	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
 	landReady?: boolean;
 	/** PR-mode landing metadata (concern 06), set at push/merge time. Absent in local mode. */
@@ -673,6 +698,8 @@ export interface RunReceipt {
 	/** Epic 3 independent-validator verdict for this run's land attempt, copied from `AgentDTO.validation`
 	 *  at finalize time so it survives the run durably (Epic 5's confidence input, DESIGN §5). */
 	validation?: ValidationRecord;
+	/** Run-end self-confidence 0..1 (src/confidence.ts); absent until computed. */
+	confidence?: number;
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
