@@ -352,6 +352,30 @@ export interface ValidationRecord {
 	ranAt: number;
 }
 
+/**
+ * Epic 7 (convergence loop) — the disk-persisted boundary object between the TS state machine
+ * (writer, `src/convergence.ts`) and the bash Stop hook (reader, `scripts/continue-loop.sh`).
+ * `gap` is computed from the INDEPENDENT validator (`ValidationRecord`/`hasProof`), never raw
+ * STATUS — see `plans/meta-autonomous-fleet/epic-7-convergence-loop/DESIGN.md` §1/§3.
+ */
+export interface VerifiedState {
+	/** Meta-goal identifier (e.g. a plan dir like "plans/demo"). */
+	goalId: string;
+	/** 0-based cycle count. */
+	iteration: number;
+	/** Unmet-criteria count/score from the independent validator; 0 = done. */
+	gap: number;
+	/** Convergence threshold; the loop continues only while `gap > epsilon`. */
+	epsilon: number;
+	/** A low-confidence proposal is waiting on a human — the loop must STOP, never grind. */
+	pendingEscalation: boolean;
+	/** Turns (or token-proxy) consumed vs. the hard cap. */
+	budget: { spent: number; cap: number };
+	decision: "continue" | "converged" | "escalate" | "budget-exhausted";
+	/** Epoch ms. */
+	updatedAt: number;
+}
+
 export interface FeatureDecision {
 	id: string;
 	text: string;

@@ -1,0 +1,81 @@
+/**
+ * Verified-state oracle (Epic 7, leaf 01) — the disk contract shared by the TS convergence state
+ * machine (writer, `src/convergence.ts`) and the bash Stop hook (reader, `scripts/continue-loop.sh`,
+ * which cannot import TS and re-implements this module's path resolution inline). Purely the
+ * persisted boundary object: no iteration/planning logic lives here.
+ *
+ * Paths derive from `resolveStateDir()` (`src/state-dir.ts:51`) so they land in the one canonical
+ * glance state root. Writes are atomic (temp file + rename, mirroring the attachment write in
+ * `src/squad-manager.ts:1640-1642`) so the hook never observes a half-written file.
+ *
+ * Two independent arm gates live here too (`arm`/`disarm`/`isArmed`): a sentinel FILE under
+ * `<stateDir>/convergence/armed`. The hook additionally requires `OMP_SQUAD_LOOP_ARMED=1` — belt
+ * and suspenders against an immortal session (see DESIGN.md §4/§5). This module only owns the file
+ * half of that gate.
+ */
+
+import { existsSync } from "node:fs";
+import * as fs from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import * as path from "node:path";
+import { resolveStateDir } from "./state-dir.ts";
+import type { VerifiedState } from "./types.ts";
+
+export type { VerifiedState } from "./types.ts";
+
+/** `<stateDir>/convergence` — the directory both the oracle file and the arm sentinel live under. */
+export function convergenceDir(stateDir: string = resolveStateDir()): string {
+	return path.join(stateDir, "convergence");
+}
+
+/** `<stateDir>/convergence/oracle.json` — mirrored inline by `scripts/continue-loop.sh`. */
+export function oraclePath(stateDir: string = resolveStateDir()): string {
+	return path.join(convergenceDir(stateDir), "oracle.json");
+}
+
+/** `<stateDir>/convergence/armed` — mirrored inline by `scripts/continue-loop.sh`. */
+export function armPath(stateDir: string = resolveStateDir()): string {
+	return path.join(convergenceDir(stateDir), "armed");
+}
+
+/**
+ * Persist `state` atomically: write to a temp file in the same directory, then `rename` onto
+ * `oraclePath` — a reader (the bash hook) never observes a partial write. Creates the convergence
+ * dir if absent.
+ */
+export async function writeOracle(state: VerifiedState, stateDir: string = resolveStateDir()): Promise<void> {
+	const dir = convergenceDir(stateDir);
+	await fs.mkdir(dir, { recursive: true });
+	const dest = oraclePath(stateDir);
+	const tmp = path.join(dir, `.oracle.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+	await fs.writeFile(tmp, JSON.stringify(state));
+	await fs.rename(tmp, dest);
+}
+
+/** Fail-safe read: `undefined`/missing file or unparseable JSON both return `null` rather than throw. */
+export async function readOracle(stateDir: string = resolveStateDir()): Promise<VerifiedState | null> {
+	try {
+		const raw = await fs.readFile(oraclePath(stateDir), "utf8");
+		return JSON.parse(raw) as VerifiedState;
+	} catch {
+		return null;
+	}
+}
+
+/** Write the arm sentinel — one half of the dual arm gate (the other is `OMP_SQUAD_LOOP_ARMED=1`,
+ *  checked only by the hook/entrypoint, never here). */
+export async function arm(stateDir: string = resolveStateDir()): Promise<void> {
+	const dir = convergenceDir(stateDir);
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(armPath(stateDir), String(Date.now()));
+}
+
+/** Remove the arm sentinel. Idempotent — disarming an already-unarmed state never throws. */
+export async function disarm(stateDir: string = resolveStateDir()): Promise<void> {
+	await fs.rm(armPath(stateDir), { force: true });
+}
+
+/** Whether the arm sentinel file is present. Synchronous (mirrors the hook's `[[ -f "$armed" ]]` check). */
+export function isArmed(stateDir: string = resolveStateDir()): boolean {
+	return existsSync(armPath(stateDir));
+}
