@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
-import { worktreeDiff, worktreeTree } from "./explore.ts";
+import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
@@ -1309,7 +1309,7 @@ export class SquadServer {
 		if (mdiff) {
 			const dto = manager.getAgent(decodeURIComponent(mdiff[1]));
 			if (!dto) return new Response("no such agent", { status: 404 });
-			return Response.json(mdiff[2] === "diff" ? await worktreeDiff(dto.worktree) : await worktreeTree(dto.worktree));
+			return Response.json(mdiff[2] === "diff" ? await worktreeDiffSinceFork(dto.worktree) : await worktreeTree(dto.worktree));
 		}
 		const mland = url.pathname.match(/^\/api\/agents\/([^/]+)\/land$/);
 		if (mland && req.method === "POST") {
