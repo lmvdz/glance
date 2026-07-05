@@ -2887,8 +2887,9 @@ export class SquadManager extends EventEmitter {
 			};
 		}
 		// Cold-start KB primer (OMPSQ #8): a fresh agent on a feature inherits the most relevant prior
-		// decisions / hot files / peer context with ZERO turn cost, drawn from the context fabric and
-		// fenced as untrusted (same discipline as the resume digest). Best-effort — never blocks a spawn.
+		// decisions / hot files / peer context with ZERO turn cost, drawn from the context fabric.
+		// buildContextPrimer fences its own output as untrusted (concern 02) — do NOT re-fence here.
+		// Best-effort — never blocks a spawn.
 		if (opts.featureId && (opts.task || opts.name)) {
 			try {
 				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
@@ -2897,7 +2898,7 @@ export class SquadManager extends EventEmitter {
 				if (primer) {
 					opts = {
 						...opts,
-						appendSystemPrompt: [opts.appendSystemPrompt, fenceUntrusted("context primer", primer)].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+						appendSystemPrompt: [opts.appendSystemPrompt, primer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 					};
 				}
 			} catch (err) {

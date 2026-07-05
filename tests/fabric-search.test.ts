@@ -107,4 +107,42 @@ describe("buildContextPrimer", () => {
 	test("returns empty string when nothing is relevant (caller injects nothing)", () => {
 		expect(buildContextPrimer(snapshot(), "kubernetes helm chart")).toBe("");
 	});
+
+	test("output is always fenced as untrusted internally — no unfenced path (concern 02)", () => {
+		const primer = buildContextPrimer(snapshot(), "refresh token rotation");
+		expect(primer.startsWith("===== BEGIN context primer (untrusted data) =====")).toBe(true);
+		expect(primer.trim().endsWith("===== END context primer =====")).toBe(true);
+	});
+
+	test("a hit carries provenance (source + age) when the underlying fact has a timestamp (concern 02)", () => {
+		const now = 10_000_000;
+		const snap = snapshot({
+			decisions: [{ type: "decision", source: { repo: "/r", featureId: "feat-auth" }, featureTitle: "Auth tokens", text: "Use a 15-minute access token TTL with rotating refresh tokens.", decisionSource: "human", createdAt: now - 2 * 60 * 60 * 1000 }],
+		});
+		const primer = buildContextPrimer(snap, "refresh token ttl", { now });
+		expect(primer).toContain("src: human decision");
+		expect(primer).toContain("2h ago");
+	});
+
+	test("a hit scoring far below the top match is labelled weak, not dropped", () => {
+		// "token" hits the decision strongly and the lease only incidentally via its file path.
+		const results = buildContextPrimer(snapshot(), "token rotation ttl 15-minute access", { topK: 6 });
+		expect(results).toContain("weak match");
+	});
+});
+
+describe("searchFabric provenance", () => {
+	test("results carry source/ranAt from the underlying fact", () => {
+		const results = searchFabric(snapshot(), "refresh token ttl");
+		const decision = results.find((r) => r.type === "decision");
+		expect(decision?.source).toBe("human decision");
+		expect(decision?.ranAt).toBe(0);
+	});
+
+	test("a fact type with no timestamp (e.g. an agent) carries no fabricated ranAt", () => {
+		const results = searchFabric(snapshot(), "auth-bot");
+		const agent = results.find((r) => r.type === "agent");
+		expect(agent?.ranAt).toBeUndefined();
+		expect(agent?.source).toBe("agent a1");
+	});
 });

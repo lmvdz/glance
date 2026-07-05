@@ -25,6 +25,9 @@ export interface FabricDigestFact {
 	type: "digest";
 	source: FactSource;
 	digest: string;
+	/** Epoch ms the underlying run ended (retrieval-provenance concern 02) — the latest receipt's
+	 *  `endedAt`, falling back to `startedAt`. Absent when no receipt was found for the agent. */
+	ts?: number;
 }
 
 export interface FabricHotAreaFact {
@@ -205,7 +208,10 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 	const digests: FabricDigestFact[] = [];
 	for (const a of scopedAgents) {
 		const digest = await readDigest(deps.stateDir, a.id).catch(() => "");
-		if (digest) digests.push({ type: "digest", source: { agentId: a.id, runId: latestRun.get(a.id)?.runId, repo: a.repo }, digest });
+		if (digest) {
+			const run = latestRun.get(a.id);
+			digests.push({ type: "digest", source: { agentId: a.id, runId: run?.runId, repo: a.repo }, digest, ts: run?.endedAt ?? run?.startedAt });
+		}
 	}
 
 	const repos = [...new Set(deps.repos?.length ? deps.repos : scopedAgents.map((a) => a.repo))];
