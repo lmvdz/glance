@@ -1,6 +1,6 @@
 # Convergence state machine
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

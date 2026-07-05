@@ -1,6 +1,6 @@
 # Session handoff at context-window pressure
 
-STATUS: open
+STATUS: blocked
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

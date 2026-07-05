@@ -1,6 +1,6 @@
 # Epic 7 — Convergence loop (sub-plan overview)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 PARENT: plans/meta-autonomous-fleet/07-convergence-loop.md
@@ -63,3 +63,17 @@ pattern), so every leaf here is buildable and unit-testable *now* against fakes,
   A global Stop hook with either gate missing must be a clean no-op.
 - The hook is **project-scoped** in `.claude/settings.json` (committed), not the user's global
   settings — a global Stop hook would make every unrelated Claude session immortal.
+
+## Completion note (2026-07-05)
+
+Leaves 01-05 shipped: `src/convergence-oracle.ts`, `src/convergence.ts`, `src/convergence-ratchet.ts`,
+`scripts/continue-loop.sh`, `src/convergence-run.ts` + `.claude/settings.json` + the
+`OMP_SQUAD_LOOP_ARMED` flag — 37 new tests, all green, zero regressions (server suite 1457→1494,
+webapp untouched at 529). Real `plan`/`validate` wire to the now-landed Epic 1
+(`planner.ts`/`features.ts`/`plan-writer.ts`) and Epic 3 (`validator.ts`); real `dispatch` is a
+documented no-op (the live driving session does the work between Stop-hook turns, not this
+process); real `validate`'s ratchet-facing `failures` is deliberately left empty rather than wired
+to unmet acceptance criteria (see `src/convergence-run.ts`'s doc comment — conflating the two would
+escalate every fresh multi-criterion goal on iteration 1). Leaf 06 (session handoff) stays
+`STATUS: blocked` exactly as designed — it was flagged `ISLEAF: false` from the start and needs its
+own sub-plan before implementation.

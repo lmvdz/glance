@@ -1,6 +1,6 @@
 # Ratchet dep (no-regression monotonicity)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

@@ -1,6 +1,6 @@
 # Stop-hook driver script
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
