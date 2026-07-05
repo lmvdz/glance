@@ -13,8 +13,57 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ApprovalMode, CreateAgentOptions, ThinkingLevel } from "./types.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
+import { tierOf, type ComplexityTier, type ModelOutcomeCounts } from "./model-outcomes.ts";
 
 const INFER_TIMEOUT_MS = 20_000;
+
+/**
+ * Outcome-driven model default (Epic 6 concern 07) — reads landed-vs-rejected per `(model, tier)`
+ * and reuses `tierOf` from concern 06 so record-time and read-time bucketing can never drift apart.
+ */
+export type OutcomesReader = (model: string, tier: ComplexityTier) => ModelOutcomeCounts;
+
+/** A cold/unseen candidate is not eligible to WIN the shift — but is never starved below the
+ *  baseline heuristic's traffic either; the shift only ADDS a preference toward a proven winner. */
+export const MIN_SAMPLES = 8;
+/** The eligible candidate must beat the incumbent default's landed-rate by at least this much
+ *  before the shift fires — otherwise the default heuristic stands unchanged. */
+export const MIN_EDGE = 0.15;
+
+/** The two models the current spawn heuristic picks between (SYSTEM_PROMPT's "opus for hard work,
+ *  omit otherwise" — "omit" maps to the `"default"` bucket `model-outcomes.ts` keys undefined runs
+ *  under). Not a capability classifier — a fixed, small candidate set for an outcome comparison. */
+const SHIFT_CANDIDATES = ["opus", "default"] as const;
+
+function landedRate(o: ModelOutcomeCounts): number {
+	const total = o.landed + o.rejected;
+	return total > 0 ? o.landed / total : 0;
+}
+
+/**
+ * Boost-only, floored, never-overriding default shift (DESIGN.md's outcome-driven model default):
+ *  1. An explicit model already set (the LLM planner returned one) is NEVER overridden.
+ *  2. Off unless `OMP_SQUAD_MODEL_OUTCOMES=1` AND an `outcomes` reader is injected.
+ *  3. Exploration floor: a candidate with fewer than `MIN_SAMPLES` total outcomes is not eligible
+ *     to WIN — but nothing here ever excludes it from the baseline heuristic's own traffic.
+ *  4. The best ELIGIBLE candidate replaces the default only if it beats the incumbent ("default")
+ *     rate by at least `MIN_EDGE`; otherwise the default stands, unchanged.
+ * Returns the (possibly) shifted model + an optional reason suffix; never mutates its input.
+ */
+function shiftedModel(currentModel: string | undefined, tier: ComplexityTier, outcomes: OutcomesReader | undefined): { model?: string; reasonSuffix?: string } {
+	if (currentModel !== undefined) return {}; // never override an explicit choice
+	if (process.env.OMP_SQUAD_MODEL_OUTCOMES !== "1" || !outcomes) return {};
+	const incumbentRate = landedRate(outcomes("default", tier));
+	let best: { model: string; rate: number } | undefined;
+	for (const model of SHIFT_CANDIDATES) {
+		const o = outcomes(model, tier);
+		if (o.landed + o.rejected < MIN_SAMPLES) continue; // cold — not eligible to win, never starved either
+		const rate = landedRate(o);
+		if (!best || rate > best.rate) best = { model, rate };
+	}
+	if (!best || best.model === "default" || best.rate - incumbentRate < MIN_EDGE) return {};
+	return { model: best.model, reasonSuffix: `model shifted to ${best.model} (${best.rate.toFixed(2)} land-rate, ${tier} tier)` };
+}
 
 export interface SpawnPlan extends CreateAgentOptions {
 	/** One-line rationale for the chosen repo/name, surfaced in the UI. */
@@ -144,13 +193,16 @@ async function infer(prompt: string, candidates: string[]): Promise<RawPlan | un
 	});
 }
 
-/** Resolve a free-text task into a complete, valid spawn plan. Never throws; always returns a usable plan. */
-export async function planSpawn(prompt: string, opts: { cwd: string; candidates: string[] }): Promise<SpawnPlan> {
-	const candidates = opts.candidates.length > 0 ? opts.candidates : [path.resolve(opts.cwd)];
-	const raw = await infer(prompt, candidates);
-
+/**
+ * Pure assembly: turn the model's raw (possibly absent/junk) plan into a complete, valid
+ * `SpawnPlan`, then apply the outcome-driven default shift (concern 07). Factored out of
+ * `planSpawn` so it's unit-testable without a live `omp` binary — `infer()`'s LLM call has no
+ * injection seam of its own, but the assembly + shift logic (the part concern 07 actually adds)
+ * is fully deterministic given `raw`, so it doesn't need one.
+ */
+export function assemblePlan(prompt: string, candidates: string[], cwd: string, raw: RawPlan | undefined, opts: { outcomes?: OutcomesReader } = {}): SpawnPlan {
 	const claimed = raw?.repo === undefined ? undefined : path.resolve(raw.repo);
-	const repo = claimed !== undefined && candidates.includes(claimed) ? claimed : pickRepoHeuristic(prompt, candidates, opts.cwd);
+	const repo = claimed !== undefined && candidates.includes(claimed) ? claimed : pickRepoHeuristic(prompt, candidates, cwd);
 
 	const plan: SpawnPlan = { repo, name: raw?.name ? slug(raw.name) : slug(prompt), task: prompt };
 	if (raw?.model !== undefined) plan.model = raw.model;
@@ -163,5 +215,21 @@ export async function planSpawn(prompt: string, opts: { cwd: string; candidates:
 	if (raw?.owns?.length) plan.owns = raw.owns;
 	if (raw?.produces?.length) plan.produces = raw.produces;
 	if (raw?.requires?.length || raw?.owns?.length || raw?.produces?.length) plan.scopeSource = "inferred";
+
+	// Outcome-driven model default (Epic 6 concern 07) — never overrides an explicit `plan.model`
+	// (checked first thing inside `shiftedModel`); off unless OMP_SQUAD_MODEL_OUTCOMES=1 AND an
+	// `outcomes` reader was injected.
+	const shift = shiftedModel(plan.model, tierOf(thinking), opts.outcomes);
+	if (shift.model !== undefined) {
+		plan.model = shift.model;
+		plan.reason = [plan.reason, shift.reasonSuffix].filter((s): s is string => !!s).join(" + ");
+	}
 	return plan;
+}
+
+/** Resolve a free-text task into a complete, valid spawn plan. Never throws; always returns a usable plan. */
+export async function planSpawn(prompt: string, opts: { cwd: string; candidates: string[]; outcomes?: OutcomesReader }): Promise<SpawnPlan> {
+	const candidates = opts.candidates.length > 0 ? opts.candidates : [path.resolve(opts.cwd)];
+	const raw = await infer(prompt, candidates);
+	return assemblePlan(prompt, candidates, opts.cwd, raw, { outcomes: opts.outcomes });
 }
