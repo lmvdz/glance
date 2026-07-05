@@ -83,6 +83,10 @@ export interface ObserverDeps {
 	/** Branch → auto-land failure streak (the persisted ledger). Absent ⇒ the land-failure check is
 	 *  skipped — keeps the loop usable in tests / before any land. */
 	landLedger?: () => LandLedger;
+	/** Learning-loop baseline (agentic-learning-loop concern 01): how many branches are CURRENTLY over
+	 *  the land-failure-streak cap this tick (0 when none). Fired every tick the landLedger check runs,
+	 *  so "land-failure-streak frequency" is measurable even when nothing is filed (e.g. already-open). */
+	recordLandFailureStreak?: (count: number) => void;
 	/** Epic 3's compliance evaluator (src/compliance.ts) — real policy findings (forced lands,
 	 *  overridden validator vetoes, repeatedly-failing branches) fed into the SAME observe → file →
 	 *  confirm loop as the structural checks below. Absent ⇒ disabled — keeps old tests/embedders green. */
@@ -593,7 +597,9 @@ export class Observer {
 		// becomes a dedup'd bug issue the dispatcher can pick up to re-do the work on a fresh branch.
 		if (this.deps.landLedger) {
 			const liveBranches = new Set(agents.map((a) => a.branch).filter((b): b is string => !!b));
-			findings.push(...landFailureFindings(this.deps.landLedger(), liveBranches, landFailCap()));
+			const lf = landFailureFindings(this.deps.landLedger(), liveBranches, landFailCap());
+			this.deps.recordLandFailureStreak?.(lf.length);
+			findings.push(...lf);
 		}
 		// Epic 3 compliance findings (forced lands, overridden vetoes, repeatedly-failing branches) —
 		// the same policy state /api/governance exposes on demand, now filed/deduped automatically.

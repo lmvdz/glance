@@ -1255,6 +1255,13 @@ export class SquadServer {
 				}),
 			);
 		}
+		if (url.pathname === "/api/metrics/learning-loop") {
+			// Agentic-learning-loop baseline (concern 01): current flag resolution + per-metric rollups
+			// (first-try-green, fixups-to-green, escalation, land-failure-streak, primer-empty), so every
+			// later concept in the loop can be A/B-compared against this. ?windowMs= sizes the rollup window.
+			const windowMs = Number(url.searchParams.get("windowMs"));
+			return Response.json(manager.learningMetricsSnapshot(Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
+		}
 		if (url.pathname === "/api/factory/status") {
 			// First-glance liveness: per autonomous loop, whether it's flag-enabled, actually armed, the
 			// reason it didn't arm (the authoritative no-backlog gate), heartbeat freshness, and a status

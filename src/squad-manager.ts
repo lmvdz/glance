@@ -129,6 +129,7 @@ import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
+import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
@@ -536,6 +537,10 @@ export class SquadManager extends EventEmitter {
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
 	private readonly automation: AutomationLog;
+	/** Agentic-learning-loop baseline (concern 01) — the five metrics (first-try-green, fixups-to-green,
+	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
+	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
+	private readonly learningMetrics: LearningMetrics;
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -585,6 +590,7 @@ export class SquadManager extends EventEmitter {
 		setProofRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
+		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -783,6 +789,7 @@ export class SquadManager extends EventEmitter {
 					filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
 					uncommittedInWorktree: (a) => this.uncommittedInWorktree(a),
 					landLedger: () => readLandLedger(this.stateDir),
+					recordLandFailureStreak: (count) => this.learningMetrics.record("land-failure-streak", count),
 					complianceFindings: () => this.complianceFindings(),
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `observer-seen.${slug(repo)}.json`,
@@ -2351,6 +2358,32 @@ export class SquadManager extends EventEmitter {
 		return result;
 	}
 
+	/**
+	 * Learning-loop baseline (agentic-learning-loop concern 01): derive first-try-green / fixups-to-green
+	 * / escalation from the run's already-persisted engine visit counts (`WorkflowRunState.visits`) — no
+	 * new tracking, just reads what the engine already recorded. Fires for EVERY workflow_done regardless
+	 * of autoLand/landConfirm mode (unlike `autoLandWorkflow`, which only fires when actually auto-landing)
+	 * so the baseline stays populated even when auto-land is off. Best-effort: a metrics failure must
+	 * never break run completion.
+	 */
+	private recordWorkflowOutcomeMetrics(rec: AgentRecord, outcome: string | undefined): void {
+		try {
+			const visits = rec.options.workflowState?.visits ?? {};
+			const fixupVisits = visits.fixup ?? 0;
+			const escalated = (visits.escalate ?? 0) > 0;
+			const succeeded = outcome === "succeeded";
+			// Tag with the reflexion arm — concern 04 is the one most likely to move these three numbers,
+			// so this is the natural A/B slice; `learningFlags` is read fresh (per-run, per-id) like every
+			// other flag check in the codebase.
+			const tags = { flag: "reflexion", variant: learningFlags(rec.dto.id).reflexion };
+			this.learningMetrics.record("first-try-green", isFirstTryGreen(succeeded, fixupVisits) ? 1 : 0, tags);
+			if (succeeded) this.learningMetrics.record("fixups-to-green", fixupVisits, tags);
+			this.learningMetrics.record("escalation", escalated ? 1 : 0, tags);
+		} catch (err) {
+			this.log("warn", `learning metrics record failed for ${rec.dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
 	private async autoLandWorkflow(rec: AgentRecord, outcome: string | undefined, proof?: { state?: string }): Promise<void> {
 		if (!this.autoLand || this.landConfirm || outcome !== "succeeded") return;
 		this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "workflow.land.start", target: rec.dto.id, detail: { proof: proof?.state ?? "unknown" } }).catch(() => {});
@@ -2860,6 +2893,7 @@ export class SquadManager extends EventEmitter {
 			try {
 				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
 				const primer = buildContextPrimer(snapshot, [opts.task, opts.name].filter(Boolean).join(" "));
+				this.learningMetrics.record("primer-empty", primer ? 0 : 1);
 				if (primer) {
 					opts = {
 						...opts,
@@ -4118,6 +4152,9 @@ export class SquadManager extends EventEmitter {
 				break;
 			}
 			case "workflow_done":
+				// Baseline (concern 01): first-try-green / fixups-to-green / escalation, unconditional —
+				// the measurement the rest of the learning loop is A/B'd against. Never gates anything.
+				this.recordWorkflowOutcomeMetrics(rec, frame.outcome as string | undefined);
 				// Workflow auto-land must satisfy the same fresh-proof invariant surfaced by Land all.
 				// The final land still goes through land(), so merge verification/rollback and issue-close stay one seam.
 				void this.autoLandWorkflow(rec, frame.outcome as string | undefined, frame.proof as { state?: string } | undefined);
@@ -4788,6 +4825,15 @@ export class SquadManager extends EventEmitter {
 	 */
 	automationActivity(query: AutomationQuery & { windowMs?: number } = {}): { events: AutomationEvent[]; rollup: ReturnType<AutomationLog["rollup"]> } {
 		return { events: this.automation.recent(query), rollup: this.automation.rollup(query.windowMs) };
+	}
+
+	/**
+	 * Agentic-learning-loop baseline (concern 01, server reads this for GET /api/metrics/learning-loop):
+	 * per-metric rollups (count/sum/avg, broken down by tag) over a trailing window, plus the CURRENT
+	 * flag resolution so an operator can see both "what's on" and "what effect it's had" in one call.
+	 */
+	learningMetricsSnapshot(windowMs?: number): { flags: ReturnType<typeof learningFlags>; rollup: MetricRollupRow[] } {
+		return { flags: learningFlags(), rollup: this.learningMetrics.rollup(windowMs) };
 	}
 
 	/**
