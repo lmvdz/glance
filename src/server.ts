@@ -1715,8 +1715,12 @@ async function usagePayload(manager: SquadManager, url: URL): Promise<{
 	const repo = url.searchParams.get("repo") ?? undefined;
 	const agentId = url.searchParams.get("agentId") ?? undefined;
 	const since = boundedNumber(url.searchParams.get("since"), 0, 0, Number.MAX_SAFE_INTEGER) || undefined;
-	const agents = manager.list().filter((a) => (!repo || a.repo === repo) && (!agentId || a.id === agentId));
-	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat().filter((r) => !since || (r.endedAt ?? r.startedAt) >= since);
+	// Source the persisted ledger (like attributionPayload/trace), not the live roster: receipts outlive
+	// the agents that produced them — reaped agents, and every agent after a daemon restart — so
+	// roster-scoping hid all but the currently-live runs' history.
+	const receipts = (await manager.allReceipts()).filter(
+		(r) => (!repo || r.repo === repo) && (!agentId || r.agentId === agentId) && (!since || (r.endedAt ?? r.startedAt) >= since),
+	);
 	const runs = receipts.sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt)).slice(0, limit);
 	const totals = runs.reduce((acc, r) => {
 		acc.toolCalls += r.toolCalls;
@@ -1732,7 +1736,7 @@ async function usagePayload(manager: SquadManager, url: URL): Promise<{
 		costUsd: totals.costUsd || undefined,
 		tokens: totals.tokens || undefined,
 		durationMs: totals.durationMs || undefined,
-		agents: agents.length,
+		agents: new Set(receipts.map((r) => r.agentId)).size,
 		since,
 	};
 }
@@ -1754,8 +1758,9 @@ async function heatPayload(manager: SquadManager, url: URL): Promise<{
 		return d.toISOString().slice(0, 10);
 	});
 	const indexByDay = new Map(days.map((d, i) => [d, i]));
-	const agents = manager.list().filter((a) => !repo || a.repo === repo);
-	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat();
+	// Persisted ledger, not the live roster (see usagePayload) — otherwise reaped agents and post-restart
+	// history vanish and the panel falsely reads "No receipt-backed file writes in this window".
+	const receipts = (await manager.allReceipts()).filter((r) => !repo || r.repo === repo);
 	const byFile = new Map<string, number[]>();
 	for (const r of receipts) {
 		const day = new Date(r.endedAt ?? r.startedAt).toISOString().slice(0, 10);
@@ -1815,8 +1820,8 @@ async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<
 		return localDay(d);
 	});
 	const rowByDay = new Map(days.map((d) => [d, new Array<number>(24).fill(0)]));
-	const agents = manager.list().filter((a) => !repo || a.repo === repo);
-	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat();
+	// Persisted ledger, not the live roster (see usagePayload), so the rhythm survives restarts + reaps.
+	const receipts = (await manager.allReceipts()).filter((r) => !repo || r.repo === repo);
 	let max = 0;
 	let total = 0;
 	for (const r of receipts) {
