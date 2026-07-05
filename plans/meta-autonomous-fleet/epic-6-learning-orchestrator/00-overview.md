@@ -1,6 +1,6 @@
 # Epic 6 — Learning orchestrator (sub-plan)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 PARENT: plans/meta-autonomous-fleet/06-learning-orchestrator.md

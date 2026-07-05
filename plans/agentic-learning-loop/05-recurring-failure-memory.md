@@ -1,5 +1,5 @@
 # Recurring-failure memory (downscoped)
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

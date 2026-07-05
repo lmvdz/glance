@@ -1,5 +1,5 @@
 # Learning-loop metrics + flag scaffolding
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

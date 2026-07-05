@@ -1,6 +1,6 @@
 # Outcome-driven model default (boost-only, floored)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

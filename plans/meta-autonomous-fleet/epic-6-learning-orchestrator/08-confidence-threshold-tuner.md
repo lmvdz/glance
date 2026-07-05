@@ -1,14 +1,13 @@
 # Confidence-threshold tuner
 
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
-ISLEAF: false
-BLOCKED-BY: Epic 5 (HITL safeguards) — confidence field + confidence cap in maxEffectiveMode
-NEEDS-DEEPER: yes — decompose into leaves once Epic 5's confidence seam exists
+ISLEAF: true
+BLOCKED-BY: Epic 5 (HITL safeguards) — confidence field + confidence cap in maxEffectiveMode — SHIPPED, precondition re-verified 2026-07 (src/confidence.ts, AgentDTO.confidence, autonomy.ts's confidenceFloor cap all present); implemented as a real leaf, not a stub.
 
-TOUCHES: src/autonomy.ts, src/metrics.ts, src/model-outcomes.ts
+TOUCHES: src/threshold-tuner.ts (new), src/squad-manager.ts, src/metrics.ts, tests/threshold-tuner.test.ts
 
 ## Why this is a branch, not a Sonnet-ready leaf
 
