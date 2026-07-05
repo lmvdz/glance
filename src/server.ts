@@ -1267,6 +1267,15 @@ export class SquadServer {
 			if (trace.receipts.length === 0 && trace.root.children.length === 0) return new Response("trace not found", { status: 404 });
 			return Response.json(trace);
 		}
+		// D3: the reachable reasoning/IO a trace node's `attrs.digest` links to — compact, already
+		// fenced/redacted markdown (src/digest.ts), never raw prompts/outputs. Read-only + non-sensitive,
+		// so no extra RBAC beyond this block's existing auth gate.
+		const mdigest = url.pathname.match(/^\/api\/digest\/([^/]+)$/);
+		if (mdigest && req.method === "GET") {
+			const md = await manager.getDigest(decodeURIComponent(mdigest[1]));
+			if (!md) return new Response("digest not found", { status: 404 });
+			return new Response(md, { headers: { "content-type": "text/markdown; charset=utf-8" } });
+		}
 		if (url.pathname === "/api/spawn" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
 			const prompt = body && typeof body === "object" && "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";

@@ -653,8 +653,12 @@ export interface RunReceipt {
 	filesTouched: string[];
 	/** Trace grouping id: `feat:<featureId>` for feature work, else `run:<agentId>:<runId>`. */
 	traceId?: string;
-	/** Fine-grained run spans. Tail-sampled; receipt rollups above are never sampled. */
+	/** Fine-grained run spans. The structural spine (kind !== "tool") is always present on a finalized
+	 *  receipt (D1); only `tool` spans are tail-sampled. Receipt rollups above are never sampled. */
 	spans?: Span[];
+	/** True when tool-level spans were tail-sampled out; the structural spine is still present. An
+	 *  honest "tool detail sampled" signal distinct from `TraceResponse.partial` ("spine missing"). */
+	sampled?: boolean;
 	/** Feature/parent ids copied onto receipts so trace trees survive agent removal. */
 	featureId?: string;
 	parentId?: string;

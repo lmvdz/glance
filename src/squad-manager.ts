@@ -547,7 +547,7 @@ export class SquadManager extends EventEmitter {
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.skipGlobalJanitors = opts.skipGlobalJanitors ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
-		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m));
+		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m), this.stateDir);
 		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
 		this.replaySettleTimeoutMs = opts.replaySettleTimeoutMs ?? 2000;
 	}

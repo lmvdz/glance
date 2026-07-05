@@ -9,6 +9,7 @@
  * The git lookup is injectable so tests run against fixture logs.
  */
 
+import { readAudit } from "../audit.ts";
 import { listPlanDirs, parsePlanConcerns } from "../features.ts";
 import { readAllReceipts } from "../receipts.ts";
 import type { RunReceipt } from "../types.ts";
@@ -32,6 +33,9 @@ export interface ProvenanceDoc {
 	concern?: { planDir: string; file: string; title: string; status: string };
 	feature?: { id: string; title: string };
 	runs: ProvenanceRun[];
+	/** Most recent `verify` audit entry targeting one of this thread's run agents (D2). Best-effort —
+	 *  absent on older receipts predating the audit weave, or when the audit log is unreadable. */
+	verify?: { at: number; actor: string; outcome: string };
 	land?: { sha: string; subject: string; dateMs: number; author: string };
 	generatedAt: number;
 }
@@ -128,6 +132,15 @@ export async function buildProvenance(opts: {
 
 	const receipts = await readAllReceipts(stateDir).catch(() => [] as RunReceipt[]);
 	doc.runs = threadRuns(receipts, ticket, feature?.id);
+
+	try {
+		const agentIds = new Set(doc.runs.map((r) => r.agentId));
+		const verifyAudits = await readAudit(stateDir, { action: "verify", limit: 0 });
+		const hit = verifyAudits.find((a) => a.target && agentIds.has(a.target));
+		if (hit) doc.verify = { at: hit.at, actor: hit.actor, outcome: hit.outcome };
+	} catch {
+		// best-effort — a missing/unreadable audit log must never break provenance
+	}
 
 	const log = await (opts.gitLog ?? defaultGitLog)(repo).catch(() => []);
 	doc.land = findLandCommit(log, ticket, doc.runs.map((r) => r.branch).filter((b): b is string => !!b));
