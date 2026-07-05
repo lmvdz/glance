@@ -12,7 +12,6 @@ import { TaskProvider, useTaskContext } from './context/TaskContext';
 import { GlobalShortcuts } from './components/GlobalShortcuts';
 import { ToastContainer } from './components/ToastContainer';
 import { ThemeProvider } from './context/ThemeContext';
-import { NotificationManager } from './components/NotificationManager';
 import { AssistantChat } from './components/AssistantChat';
 import { CapabilityPanel } from './components/CapabilityPanel';
 import { AutomationPanel } from './components/AutomationPanel';
@@ -127,7 +126,6 @@ export default function App() {
       <AuthProvider>
         <AuthGate>
           <TaskProvider>
-            <NotificationManager />
             <GlobalShortcuts />
             <AppContent />
             <ToastContainer />
