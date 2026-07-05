@@ -77,3 +77,20 @@ to unmet acceptance criteria (see `src/convergence-run.ts`'s doc comment — con
 escalate every fresh multi-criterion goal on iteration 1). Leaf 06 (session handoff) stays
 `STATUS: blocked` exactly as designed — it was flagged `ISLEAF: false` from the start and needs its
 own sub-plan before implementation.
+
+## Review-fix note (2026-07-05)
+
+Three fixes from the Epic 7 review, landed on top of leaves 01-05:
+- **S1** (dual gate eroding to single when the flag is enabled): `OMP_SQUAD_LOOP_ARMED` is now
+  `ephemeral` — surfaced in settings but never applied to daemon env by `applyFeatureFlags`, so it
+  can't leak into spawned agents. AND the arm sentinel is identity-stamped (owning session id);
+  `continue-loop.sh` blocks only on a matching turn-end `session_id`, so a shared env+sentinel can't
+  hijack an unrelated session. See DESIGN.md §5.
+- **M1** (infinite-loop guard failing OPEN on bad stdin): `continue-loop.sh` now fails CLOSED —
+  empty/unparseable stdin ⇒ no block.
+- **S2** (no runnable one-shot for the warm loop): added `convergence-run --once` — reads the
+  oracle, runs exactly ONE `runIteration`, rewrites the oracle, exits; the command the hook's
+  re-injected prompt drives. `runToConvergence` stays for `--fixture`/headless. See DESIGN.md §5.
+- **S3** (dormant ratchet + leaf 06): documented, not faked — DESIGN.md "Known limitations" records
+  both as the explicit next sub-plan; `validate().failures` stays `[]` (feeding a wrong signal would
+  misfire the empty-baseline).

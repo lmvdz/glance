@@ -104,8 +104,56 @@ Decision table the hook implements:
 The run entrypoint (`src/convergence-run.ts`) `arm()`s the sentinel at loop start and `disarm()`s
 it in a `finally` on any terminal decision (`converged` / `escalate` / `budget-exhausted`) or
 crash. Dual gate (file + `OMP_SQUAD_LOOP_ARMED`) means a stale sentinel alone cannot immortalize a
-session, and the env flag alone cannot either. `OMP_SQUAD_LOOP_ARMED` is registered in
-`src/runtime-settings.ts` `FEATURE_FLAGS` (default OFF) so it appears in the settings surface.
+session, and the env flag alone cannot either. Two hardening measures make "the env flag alone
+cannot immortalize" actually hold under a shared state dir (S1 review fix):
+
+- **The arm flag is `ephemeral`** (`src/runtime-settings.ts`): surfaced/persisted for visibility but
+  NEVER written into `process.env` by `applyFeatureFlags` at daemon boot. A persisted-and-applied
+  arm flag would leak into every daemon-spawned agent session, eroding the dual gate to a single
+  (env-only) gate. Arming happens strictly per-process, in the run entrypoint.
+- **The sentinel is identity-stamped.** `arm()` writes the owning session's identity
+  (`OMP_SQUAD_LOOP_SESSION` / Claude Code's `CLAUDE_SESSION_ID`) into the sentinel file, and
+  `continue-loop.sh` blocks ONLY when the harness's turn-end `session_id` matches it. So even if an
+  unrelated concurrent fleet session inherits both gates (a stale env flag + the shared sentinel), a
+  mismatched `session_id` makes the hook a no-op for it — it can never be hijacked with the
+  convergence prompt. An empty identity degrades to presence-gating (backward compatible), which is
+  still safe under the two measures above.
+
+### Single-iteration driver (`--once`, S2)
+
+The Stop hook re-injects "run the next iteration against the oracle," and `convergence-run --once`
+is the command that prompt drives: it reads the current oracle, runs EXACTLY ONE `runIteration`
+(real `plan` + real `validate` against the tree the live session just modified), rewrites the
+oracle, and exits — one process per warm turn. `runToConvergence` stays for `--fixture`/headless
+in-process runs. In real mode `dispatch` is a documented no-op (the live session does the work
+between turns), so spinning `runToConvergence` in-process would be the wrong production driver.
+`--once` (re)stamps the identity sentinel each turn so the next Stop hook stays gated to this
+session, and disarms once an iteration reaches a terminal decision; it is idempotent on an
+already-terminal oracle (advances nothing, disarms).
+
+## Known limitations (recorded from the Epic 7 review — the explicit next sub-plan)
+
+Leaves 01–05 deliver a bounded, single-session convergence loop that is useful and fully tested,
+but two capabilities are deliberately deferred and MUST be the content of the follow-up sub-plan:
+
+1. **The ratchet guarantee is DORMANT** (S3). `src/convergence-ratchet.ts` is wired and unit-tested
+   (`ratchet`/`ratchetFromOutput` delegate correctly to `land.ts`'s `decideRegressionGate`), but the
+   real `validate` adapter returns `failures: []` in every shipped path, so the ratchet never fires.
+   Its input is meant to be an actual verify/test-suite failure set (the same signal the post-merge
+   `OMP_SQUAD_REGRESSION_GATE` uses) — a DIFFERENT thing from "acceptance criteria not yet
+   satisfied." Feeding the unmet-criteria list instead would misfire the ratchet on iteration 1 of
+   any not-yet-done goal (an unmet criterion looks "new" against the empty prior-failures seed),
+   escalating every fresh goal before it can iterate. A real per-iteration suite failure-set only
+   exists once **real `dispatch`** runs — the deferred warm-loop/real-dispatch scope. Until then the
+   no-regression monotonicity guarantee is present in code but inert. Wiring it means: a real
+   single-iteration `validate` that runs the suite and returns its failure-set, AND persisting the
+   prior-iteration failures across the `--once` process boundary (the oracle schema deliberately
+   omits them today, per §1).
+
+2. **Session handoff at context-window pressure** (leaf 06, `NEEDS-DEEPER`). The warm loop keeps one
+   session alive; a single session eventually hits the context ceiling. Chaining warm segments across
+   a cold seam carries a genuine unresolved design decision (see §6 and `06-session-handoff.md`) and
+   is not implemented. It is the second half of the same follow-up sub-plan.
 
 ## 6. Session handoff (leaf 06 — deferred)
 
