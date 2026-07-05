@@ -190,6 +190,9 @@ export type AgentAction = "prompt" | "answer" | "interrupt" | "verify" | "land" 
 /** Mirrors src/types.ts's AgentKind — which runtime backs this agent. */
 export type AgentKind = "omp-operator" | "flue-service" | "workflow";
 
+/** Mirrors src/types.ts's ExecutionRole — role specialization, orthogonal to kind. */
+export type ExecutionRole = "tester" | "observer";
+
 /** One node in a journaled workflow graph snapshot (mirrors src/workflow/types.ts's WorkflowGraphNode). */
 export interface WorkflowGraphNodeDTO {
   id: string;
@@ -314,6 +317,9 @@ export interface AgentDTO {
   status: AgentStatus;
   /** Which runtime backs this agent. */
   kind?: AgentKind;
+  /** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+   *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+  executionRole?: ExecutionRole;
   /** Parent agent id, when this agent is a spawned fan-out branch (workflow) or task subagent. */
   parentId?: string;
   /** The node in the PARENT's workflow graph this branch executes — structural lineage, distinct

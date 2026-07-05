@@ -17,12 +17,13 @@ import type { RpcSessionState } from "../src/types.ts";
 import { type BranchSpec, WorkflowDriver } from "../src/workflow-driver.ts";
 import { parseWorkflow, WorkflowParseError } from "../src/workflow/dot.ts";
 import { evalCondition, WorkflowEngine } from "../src/workflow/engine.ts";
-import type { NodeExecutor, NodeResult, RunContext, WorkflowNode, WorkflowRunState } from "../src/workflow/types.ts";
+import type { NodeExecutor, NodeResult, RunContext, Workflow, WorkflowNode, WorkflowRunState } from "../src/workflow/types.ts";
 import { CommissionExecutor } from "../src/workflow/commission-executor.ts";
-import type { AgentDTO, GateReport } from "../src/types.ts";
-import { buildTddVerifyWorkflow, buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
+import type { AgentDTO, GateReport, PersistedAgent } from "../src/types.ts";
+import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
 import { parseStylesheet, resolveNodeStyle } from "../src/workflow/stylesheet.ts";
 import { pickModel } from "../src/rpc-agent.ts";
+import { SquadManager } from "../src/squad-manager.ts";
 
 const BUNDLED = path.join(import.meta.dir, "..", "workflows", "plan-implement", "workflow.fabro");
 const BUNDLED_COMMISSION = path.join(import.meta.dir, "..", "workflows", "commission", "workflow.fabro");
@@ -429,6 +430,47 @@ test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps
 	expect(wf.edges.find((e) => e.from === "verify" && e.to === "exit")?.condition).toBe("outcome=succeeded");
 	expect(wf.start).toBe("start");
 	expect(wf.exit).toBe("exit");
+});
+
+test("buildObserveWorkflow: reproduces the gate command and reports on failure, never fixes", () => {
+	const wf = buildObserveWorkflow({ command: "bun test 2>&1" });
+	expect(wf.nodes.get("reproduce")?.kind).toBe("command");
+	expect(wf.nodes.get("reproduce")?.script).toBe("bun test 2>&1");
+	// A green (non-reproducing) gate must not be treated as a run failure.
+	expect(wf.nodes.get("reproduce")?.goalGate).toBeFalsy();
+	expect(wf.nodes.get("report")?.kind).toBe("agent");
+	expect(wf.nodes.get("report")?.prompt).toMatch(/reproduc|report/i);
+	// Instructs NOT fixing (the observer only reproduces + reports) — never a bare fix instruction.
+	expect(wf.nodes.get("report")?.prompt).toMatch(/do not fix/i);
+	const reproduceToReport = wf.edges.find((e) => e.from === "reproduce" && e.to === "report");
+	expect(reproduceToReport?.condition).toBe("outcome=failed");
+	expect(wf.edges.find((e) => e.from === "reproduce" && e.to === "exit")).toBeTruthy();
+	expect(wf.edges.find((e) => e.from === "report" && e.to === "exit")).toBeTruthy();
+	expect(wf.start).toBe("start");
+	expect(wf.exit).toBe("exit");
+});
+
+test("makeDriver: VerifySpec.mode selects the builder — the ONE mode→builder mapping the fork path mirrors", () => {
+	// makeDriver is private; calling it directly (never start()) constructs the driver without spawning
+	// anything — WorkflowDriver stores its ctor options verbatim on `this.opts`, so reading `.opts.workflow`
+	// back out gives the exact graph makeDriver built, with no real process ever touched.
+	const mgr = new SquadManager({ stateDir: path.join(os.tmpdir(), `verify-mode-mapping-${process.pid}`) });
+	const makeDriver = (mgr as unknown as { makeDriver: (p: PersistedAgent, cold?: boolean) => WorkflowDriver }).makeDriver.bind(mgr);
+	const base: PersistedAgent = { id: "a", name: "a", repo: "/r", worktree: "/w", approvalMode: "yolo", kind: "workflow" };
+	const wfFor = (mode?: "verify" | "tdd" | "observe"): Workflow | undefined =>
+		(makeDriver({ ...base, workflow: { verify: { command: "true", mode } } }) as unknown as { opts: { workflow?: Workflow } }).opts.workflow;
+
+	expect(wfFor("tdd")?.nodes.has("write-test")).toBe(true);
+	expect(wfFor("tdd")?.nodes.has("reproduce")).toBe(false);
+
+	expect(wfFor("observe")?.nodes.has("reproduce")).toBe(true);
+	expect(wfFor("observe")?.nodes.has("write-test")).toBe(false);
+
+	// mode unset ⇒ byte-for-byte today's plain verify graph — no write-test, no reproduce.
+	const plain = wfFor(undefined);
+	expect(plain?.name).toBe("verify");
+	expect(plain?.nodes.has("write-test")).toBe(false);
+	expect(plain?.nodes.has("reproduce")).toBe(false);
 });
 
 test("verify loop: a failing gate routes through codefix, then a fixup turn, until it passes", async () => {

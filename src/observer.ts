@@ -65,6 +65,10 @@ export interface ObserverDeps {
 	reopenIssue?: (ref: IssueRef) => Promise<boolean>;
 	/** Reap a landed-survivor agent (the only autofix; never touches main/code). */
 	removeAgent: (id: string) => Promise<void>;
+	/** Spawn an observing agent to reproduce a confirmed regression in its own worktree, instead of
+	 *  only filing an issue. Absent ⇒ regressions are only filed (today's behavior). Only ever called
+	 *  for a `regression:`-fingerprinted finding, and only under OMP_SQUAD_OBSERVE_REPRODUCE=1. */
+	spawnObserver?: (finding: Finding) => Promise<boolean>;
 	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
 	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }>;
 	/** Commits on the agent's branch not in main (origin-aware in PR mode — see `aheadOfBase`):
@@ -116,6 +120,10 @@ function autoDispatch(): boolean {
 /** Opt-in: action autoFixable findings directly (reap-survivor) instead of filing. */
 function autoFix(): boolean {
 	return process.env.OMP_SQUAD_OBSERVE_AUTOFIX === "1";
+}
+/** Opt-in: dispatch an observing agent to reproduce a confirmed regression instead of only filing it. */
+function observeReproduce(): boolean {
+	return process.env.OMP_SQUAD_OBSERVE_REPRODUCE === "1";
 }
 /** Consecutive failed auto-lands before the observer files a bug for a branch (mirrors the manager's
  *  AUTO_LAND_FAIL_CAP so a parked branch is exactly the one that gets a bug filed). */
@@ -404,6 +412,27 @@ export class Observer {
 
 			for (const f of findings) {
 				reproduced.add(f.fingerprint);
+
+				// A confirmed regression (confirmedGate's double-confirmed gate-red, minted by
+				// auditTestsGreen) can be dispatched to an observing agent that reproduces it in its own
+				// worktree, instead of only filing an issue — opt-in and additive: OMP_SQUAD_OBSERVE_REPRODUCE
+				// unset preserves today's file-only behavior exactly. A successful spawn marks the finding
+				// handled for this tick (skips filing below); a failed/absent spawn falls through to the
+				// normal file path unchanged. Never applies to survivors/false-dones/untracked/land-failure —
+				// only a `regression:`-fingerprinted finding.
+				if (f.fingerprint.startsWith("regression:") && observeReproduce() && this.deps.spawnObserver && !this.seen[f.fingerprint]) {
+					const dispatched = await this.deps.spawnObserver(f).catch((e) => {
+						log(`spawnObserver failed for ${f.fingerprint}: ${msg(e)}`);
+						return false;
+					});
+					if (dispatched) {
+						this.seen[f.fingerprint] = { title: f.title, filedAt: clock() };
+						log(`dispatched observing agent for ${f.fingerprint}: ${f.title}`);
+						continue;
+					}
+					log(`spawnObserver declined for ${f.fingerprint} — falling back to filing`);
+				}
+
 				// Autofixable findings are safe operational housekeeping (reap a landed survivor), never backlog
 				// noise: reap when OMP_SQUAD_OBSERVE_AUTOFIX=1, otherwise just log — but NEVER file them as a
 				// Plane issue (that floods the tracker with do-not-auto-land churn). Checked BEFORE the dedup

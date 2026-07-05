@@ -18,7 +18,7 @@ import type { ComplianceFinding } from "../src/compliance.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
-const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX", "OMP_SQUAD_AUTOLAND_FAIL_CAP"] as const;
+const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX", "OMP_SQUAD_OBSERVE_REPRODUCE", "OMP_SQUAD_AUTOLAND_FAIL_CAP"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -197,6 +197,67 @@ test("(b) a reproduced red gate (red twice) files exactly one regression, named 
 	expect(calls).toBe(2);
 	expect(filed.length).toBe(1);
 	expect(filed[0]).toContain("regression: real-regression"); // the reproduced run names the finding
+});
+
+// ── (05) observer → dispatch seam: spawn an observing agent instead of only filing ────────────────
+
+test("(05) OMP_SQUAD_OBSERVE_REPRODUCE=1 + a reproducing regression dispatches an observing agent instead of filing", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_REPRODUCE = "1";
+	const spawned: string[] = [];
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }), // red twice ⇒ confirmedGate reproduces
+		spawnObserver: async (f) => {
+			spawned.push(f.fingerprint);
+			return true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(spawned).toEqual(["regression:auth.test.ts > login"]);
+	expect(filed).toEqual([]); // dispatch replaces filing this tick
+});
+
+test("(05) spawnObserver returning false falls back to filing the finding", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_REPRODUCE = "1";
+	const spawned: string[] = [];
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }),
+		spawnObserver: async (f) => {
+			spawned.push(f.fingerprint);
+			return false;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(spawned).toEqual(["regression:auth.test.ts > login"]);
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("regression: auth.test.ts > login");
+});
+
+test("(05) OMP_SQUAD_OBSERVE_REPRODUCE unset (default) never calls spawnObserver — today's file-only behavior", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	delete process.env.OMP_SQUAD_OBSERVE_REPRODUCE;
+	let spawnCalled = false;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }),
+		spawnObserver: async () => {
+			spawnCalled = true;
+			return true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(spawnCalled).toBe(false);
+	expect(filed.length).toBe(1);
+});
+
+test("(05) no spawnObserver dep configured — today's file-only behavior even with the flag on", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_REPRODUCE = "1";
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }),
+	});
+	await new Observer(deps).tick();
+	expect(filed.length).toBe(1);
 });
 
 test("(b) an idle ahead=0 agent whose issue is Done does NOT file a reap (housekeeping, not backlog)", async () => {

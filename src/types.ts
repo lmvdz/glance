@@ -54,6 +54,9 @@ export interface TransitionEntry {
  */
 export type AgentKind = "omp-operator" | "flue-service" | "workflow";
 
+/** Specialization of a coding unit, orthogonal to AgentKind. Absent = general coder. */
+export type ExecutionRole = "tester" | "observer";
+
 /** A request from the agent that a human must answer before it can proceed. */
 export interface PendingRequest {
 	/** Correlates with the answer the surface sends back. */
@@ -509,6 +512,9 @@ export interface AgentDTO {
 	status: AgentStatus;
 	/** Which runtime backs this agent. */
 	kind: AgentKind;
+	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+	executionRole?: ExecutionRole;
 	/** Parent workflow agent id, when this agent is a spawned fan-out branch. */
 	parentId?: string;
 	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
@@ -706,6 +712,9 @@ export interface PersistedAgent {
 	featureId?: string;
 	/** Runtime class; defaults to "omp-operator" when absent (back-compat). */
 	kind?: AgentKind;
+	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+	executionRole?: ExecutionRole;
 	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
 	runtime?: "omp" | "acp";
 	/** flue-service only: worker invocation config. */
@@ -806,6 +815,11 @@ export interface CreateAgentOptions {
 	workflowState?: WorkflowRunState;
 	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
 	verify?: string;
+	/** Selects the synthesized loop variant for `verify` (tester/observer roles). Default "verify". */
+	verifyMode?: "verify" | "tdd" | "observe";
+	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+	executionRole?: ExecutionRole;
 	autonomyMode?: AutonomyMode;
 	/** Parent workflow agent id, when spawning a fan-out branch. */
 	parentId?: string;
@@ -879,6 +893,8 @@ export interface VerifySpec {
 	command: string;
 	/** Max fix-up turns before giving up (default 3). */
 	maxFixups?: number;
+	/** Which synthesized loop to build. Default "verify". */
+	mode?: "verify" | "tdd" | "observe";
 }
 
 /** workflow only: the graph backing a workflow run — an authored file or a synthesized verify loop. */

@@ -31,13 +31,13 @@ import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowRunState } from "./workflow/types.ts";
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
-import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
+import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
-import { Observer } from "./observer.ts";
+import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
 import { gateExec } from "./gate-runner.ts";
@@ -117,6 +117,7 @@ import type {
 	FeedbackReward,
 	FeedbackValidationResponse,
 	ValidationRecord,
+	VerifySpec,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
@@ -319,6 +320,18 @@ function lineageFieldsFrom(p: {
 		workflowGraph: p.workflowGraph,
 		traceId: p.traceId,
 	};
+}
+
+/**
+ * The ONE place a `VerifySpec.mode` maps to a synthesized workflow builder. `makeDriver` and the
+ * fork-resume re-parse (createFork) both call this identical expression so the two paths can never
+ * drift apart on which mode selects which graph. Default (mode unset, or "verify") is byte-for-byte
+ * today's `buildVerifyWorkflow` — no behavior change for existing verify-routed runs.
+ */
+function buildVerifyLoop(spec: VerifySpec): Workflow {
+	if (spec.mode === "tdd") return buildTddVerifyWorkflow(spec);
+	if (spec.mode === "observe") return buildObserveWorkflow(spec);
+	return buildVerifyWorkflow(spec);
 }
 
 interface AgentRecord {
@@ -724,6 +737,7 @@ export class SquadManager extends EventEmitter {
 					closeIssue: (ref) => closePlaneIssue(ref),
 					reopenIssue: (ref) => reopenPlaneIssue(ref),
 					removeAgent: (id) => this.remove(id, false),
+					spawnObserver: (f) => this.dispatchObserver(repo, f),
 					runGate: () => this.runMainGate(repo),
 					gitAheadOfMain: (a) => this.aheadOfMain(a),
 					untrackedInMain: () => this.untrackedInMain(repo),
@@ -2488,6 +2502,7 @@ export class SquadManager extends EventEmitter {
 			status: "starting",
 			queued: true,
 			kind: opts.workflow || opts.verify ? "workflow" : "omp-operator",
+			executionRole: opts.executionRole,
 			repo: opts.repo,
 			worktree: opts.existingPath ?? opts.repo,
 			branch: opts.branch ?? `squad/${name}`,
@@ -2708,6 +2723,25 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * The Observer's dispatch seam (leaf 05): spawn an observing agent to reproduce a confirmed
+	 * regression in its own worktree, instead of the Observer only filing an issue. Opt-in via
+	 * OMP_SQUAD_OBSERVE_REPRODUCE (checked by the Observer itself before calling this); this method is
+	 * just the mechanics — resolve the repo's gate command, spawn a `verifyMode:"observe"` agent, and
+	 * report success/failure so the Observer can fall back to filing. Never throws.
+	 */
+	private async dispatchObserver(repo: string, f: Finding): Promise<boolean> {
+		try {
+			const verify = await detectVerify(repo);
+			if (!verify) return false; // nothing to reproduce against
+			const task = `Reproduce and report on: ${f.title}${f.detail ? `\n\n${f.detail}` : ""}`;
+			await this.create({ repo, task, verify, verifyMode: "observe", executionRole: "observer", autoRoute: false, track: false, approvalMode: "yolo" });
+			return true;
+		} catch (e) {
+			this.log("warn", `dispatchObserver failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`);
+			return false; // WIP cap / spawn failure — Observer falls back to filing
+		}
+	}
 
 	private emitFeaturesChanged(): void {
 		void this.persist();
@@ -2816,7 +2850,15 @@ export class SquadManager extends EventEmitter {
 		const branch = opts.branch ?? `squad/${id}`;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
-			opts = { ...opts, workflow: decision.workflow, verify: decision.verify, thinking: decision.thinking ?? opts.thinking };
+			opts = {
+				...opts,
+				workflow: decision.workflow,
+				verify: decision.verify,
+				verifyMode: decision.mode,
+				thinking: decision.thinking ?? opts.thinking,
+				// Stamp the tester role for observability — the router only ever selects "tdd".
+				executionRole: decision.mode === "tdd" ? "tester" : opts.executionRole,
+			};
 			this.log("info", `routed "${name}": ${decision.reason}`);
 		}
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
@@ -2882,9 +2924,10 @@ export class SquadManager extends EventEmitter {
 			appendSystemPrompt: opts.appendSystemPrompt,
 			issue: opts.issue,
 			kind,
+			executionRole: opts.executionRole,
 			runtime: opts.runtime,
 			flue: opts.flue,
-			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify } } : undefined,
+			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify, mode: opts.verifyMode } } : undefined,
 			// Carry the resumable checkpoint so an adopted/restored workflow continues its graph from the
 			// last node boundary instead of re-running completed stages (and duplicating their commits).
 			workflowState: opts.workflowState,
@@ -2914,6 +2957,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 			issue: opts.issue,
 			kind,
+			executionRole: opts.executionRole,
 			parentId: opts.parentId,
 			...lineageFieldsFrom(opts),
 			featureId: opts.featureId,
@@ -3003,7 +3047,7 @@ export class SquadManager extends EventEmitter {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
 		}
 		if (p.kind === "workflow" && p.workflow) {
-			const workflow = p.workflow.verify ? buildVerifyWorkflow(p.workflow.verify) : undefined;
+			const workflow = p.workflow.verify ? buildVerifyLoop(p.workflow.verify) : undefined;
 			const fleet: WorkflowFleet = { runBranch: (spec) => this.spawnFleetBranch(p.repo, p.id, spec) };
 			// Feed-forward: a workflow tied to a feature folds that feature's unresolved plan-review
 			// comments into the first agent node after the approve gate (Revise → re-plan, Approve → file/implement).
@@ -3675,7 +3719,7 @@ export class SquadManager extends EventEmitter {
 			// `verify:`-only runs, which have no file to re-parse/branch from but ARE terminal-markable). This
 			// also supplies the goalGate/retryTarget/overflow chain the visit reset below walks.
 			const wf: Workflow | undefined = rec.options.workflow?.verify
-				? buildVerifyWorkflow(rec.options.workflow.verify)
+				? buildVerifyLoop(rec.options.workflow.verify)
 				: rec.options.workflow?.path
 					? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
 					: undefined;
@@ -3737,6 +3781,7 @@ export class SquadManager extends EventEmitter {
 						approvalMode: rec.options.approvalMode,
 						workflow: rec.options.workflow?.path,
 						verify: rec.options.workflow?.verify?.command,
+						verifyMode: rec.options.workflow?.verify?.mode,
 						workflowState: forkedState,
 						// Fork inherits the issue (DESIGN.md RT1#13: one issue, one active claimant) — the original
 						// is marked supersededBy below and excluded from adoption/dispatch, so this is never a
