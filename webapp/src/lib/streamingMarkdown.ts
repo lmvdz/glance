@@ -377,5 +377,16 @@ export function trimStreamingArtifacts(tail: string): string {
   if (tail === "") return tail;
   // Inside an unclosed fence the "tail" is code content — never rewrite it.
   if (endsInsideFence(tail)) return tail;
-  return trimUnsettledStructural(trimInlineArtifacts(tail));
+  // Fixpoint: the structural pass can DELETE the last line, exposing a NEW final line that still
+  // carries an inline artifact the (already-run) inline pass never saw — e.g. "…link [\n- " drops the
+  // bare "- ", leaving "…link [" open. Re-run both passes until stable so the newly-exposed line is
+  // cleaned too. Each pass is individually idempotent and monotone (removes lines / closes or strips an
+  // opener, never reopening), so this converges; the bound is a paranoia backstop.
+  let out = tail;
+  for (let i = 0; i < 64; i++) {
+    const next = trimUnsettledStructural(trimInlineArtifacts(out));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }

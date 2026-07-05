@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CircleDashed, Flag, User, Layers, Clock, Briefcase, Plus, X, ChevronDown } from 'lucide-react';
+import { CircleDashed, Flag, User, Layers, Clock, Briefcase, Plus, X } from 'lucide-react';
 import { getCategoryBadge } from '../utils';
 import { Task } from '../types';
 import { useTaskContext } from '../context/TaskContext';
@@ -35,23 +35,23 @@ export const TaskProperties = ({ task }: TaskPropertiesProps) => {
       <div className="mb-8">
         <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-4">Properties</div>
         <div className="space-y-3">
-          <div className="flex items-center justify-between group">
+          <div className="flex items-center justify-between">
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <CircleDashed className="w-3.5 h-3.5" /> Status
             </div>
-            <button className="px-2 py-1 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-xs text-gray-600 dark:text-gray-300 font-medium flex items-center gap-1 border border-gray-200 dark:border-gray-700 transition-colors">
-              {task.properties.status} <ChevronDown className="w-3 h-3" />
-            </button>
+            <span className="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-xs text-gray-600 dark:text-gray-300 font-medium border border-gray-200 dark:border-gray-700">
+              {task.properties.status}
+            </span>
           </div>
-          
-          <div className="flex items-center justify-between group cursor-pointer">
+
+          <div className="flex items-center justify-between">
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <Flag className="w-3.5 h-3.5" /> Priority
             </div>
             <div className="text-gray-400 dark:text-gray-500 text-xs flex-1 text-right">{task.properties.priority || '—'}</div>
           </div>
-          
-          <div className="flex items-center justify-between group cursor-pointer">
+
+          <div className="flex items-center justify-between">
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <User className="w-3.5 h-3.5" /> Assignee
             </div>
@@ -60,31 +60,31 @@ export const TaskProperties = ({ task }: TaskPropertiesProps) => {
               <span className="text-gray-400 dark:text-gray-500 text-xs">{task.properties.assignee || '—'}</span>
             </div>
           </div>
-          
-          <div className="flex items-center justify-between group cursor-pointer">
+
+          <div className="flex items-center justify-between">
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <Layers className="w-3.5 h-3.5" /> Category
             </div>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex items-center gap-1 ${getCategoryBadge(task.category)}`}>
-              {task.category} <ChevronDown className="w-2.5 h-2.5 opacity-50" />
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${getCategoryBadge(task.category)}`}>
+              {task.category}
             </span>
           </div>
-          
-          <div className="flex items-center justify-between group cursor-pointer">
+
+          <div className="flex items-center justify-between">
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <Clock className="w-3.5 h-3.5" /> Due Date
             </div>
             <div className="text-gray-400 dark:text-gray-500 text-xs flex-1 text-right">{task.dueDate || '—'}</div>
           </div>
-          
-          <div className="flex items-center justify-between group cursor-pointer">
+
+          <div className="flex items-center justify-between">
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <Clock className="w-3.5 h-3.5" /> Estimate
             </div>
             <div className="text-gray-400 dark:text-gray-500 text-xs flex-1 text-right">{task.properties.estimate || '—'}</div>
           </div>
-          
-          <div className="flex items-center justify-between group cursor-pointer">
+
+          <div className="flex items-center justify-between">
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <Briefcase className="w-3.5 h-3.5" /> Project
             </div>
@@ -142,16 +142,23 @@ export const TaskProperties = ({ task }: TaskPropertiesProps) => {
         </div>
       </div>
 
-      {/* Dependencies Section */}
-      <div className="mb-8">
-        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3">Dependencies</div>
-        <div className="text-gray-400 text-xs italic">No files yet.</div>
-      </div>
-
-      {/* Files Section */}
+      {/* Dependencies Section — the task's real linked work (relationships), not a placeholder. */}
       <div>
-        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3">Files Touched</div>
-        <div className="text-gray-400 text-xs italic">No files yet.</div>
+        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+          Dependencies <span className="font-normal">{task.relationships.length}</span>
+        </div>
+        {task.relationships.length === 0 ? (
+          <div className="text-gray-400 text-xs italic">No linked work.</div>
+        ) : (
+          <div className="space-y-1.5">
+            {task.relationships.map((rel) => (
+              <div key={rel.id} className="flex items-baseline gap-1.5 text-xs" title={rel.targetTitle}>
+                <span className="flex-shrink-0 font-medium text-gray-500 dark:text-gray-400">{rel.targetId}</span>
+                <span className="min-w-0 truncate text-gray-700 dark:text-gray-300">{rel.targetTitle}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </aside>
   );

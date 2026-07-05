@@ -13,9 +13,11 @@
  * already see. Trivially unit-testable, mirroring insights.ts / heatmap.ts.
  */
 
+import { fenceUntrusted, parseDigestReward, rewardWeight } from "./digest.ts";
 import type { FabricSnapshot } from "./fabric.ts";
+import { isOn, learningFlags } from "./metrics.ts";
 
-export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision";
+export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure";
 
 /** A flattened, searchable unit of knowledge. */
 export interface KbDoc {
@@ -29,6 +31,13 @@ export interface KbDoc {
 	ref?: string;
 	/** intrinsic importance (e.g. hot-area recency score) used as a mild prior. */
 	weight?: number;
+	/** Retrieval provenance (concern 02): a short human "where this came from" label, e.g. "agent a1",
+	 *  "scout", "human decision". Additive/optional — never used for ranking, only surfaced. */
+	source?: string;
+	/** Retrieval provenance (concern 02): epoch ms the underlying fact was produced, when known
+	 *  (a decision's `createdAt`, a scout finding's `filedAt`, a digest's run `endedAt`). Absent when
+	 *  no timestamp exists for this fact type — never fabricated. */
+	ts?: number;
 }
 
 export interface FabricSearchResult {
@@ -39,6 +48,9 @@ export interface FabricSearchResult {
 	score: number;
 	repo?: string;
 	ref?: string;
+	/** Provenance (concern 02) — see `KbDoc.source`/`KbDoc.ts`. Additive; absent is not an error. */
+	source?: string;
+	ranAt?: number;
 }
 
 // ───────────────────────────── tokenization ─────────────────────────────
@@ -64,27 +76,42 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 	for (const a of snapshot.agents) {
 		const g = a.agent;
 		const bits = [g.name, g.status, g.activity, g.todo?.active, g.issue?.identifier, g.issue?.name, g.repo].filter(Boolean);
-		docs.push({ type: "agent", id: `agent:${g.id}`, title: `${g.name} · ${g.status}`, text: bits.join(" "), repo: g.repo, ref: g.id });
+		docs.push({ type: "agent", id: `agent:${g.id}`, title: `${g.name} · ${g.status}`, text: bits.join(" "), repo: g.repo, ref: g.id, source: `agent ${g.id}` });
 	}
 
+	// Reward-boost (concern 03, OMP_SQUAD_REWARD_BOOST): a digest tagged fresh-checked-green ranks
+	// higher in retrieval — boost-only, folded through the SAME KbDoc.weight BM25 prior hot-area
+	// already uses (searchFabric), never a new ranking path. Flag off (default) ⇒ every digest keeps
+	// its untouched baseline (weight undefined), i.e. today's behaviour exactly.
+	const boostDigests = isOn(learningFlags().rewardBoost);
 	for (const d of snapshot.digests) {
-		docs.push({ type: "digest", id: `digest:${d.source.agentId ?? d.source.runId ?? docs.length}`, title: `Session memory · ${d.source.agentId ?? "agent"}`, text: d.digest, repo: d.source.repo, ref: d.source.agentId });
+		const weight = boostDigests ? rewardWeight(parseDigestReward(d.digest)) : undefined;
+		docs.push({ type: "digest", id: `digest:${d.source.agentId ?? d.source.runId ?? docs.length}`, title: `Session memory · ${d.source.agentId ?? "agent"}`, text: d.digest, repo: d.source.repo, ref: d.source.agentId, source: `agent ${d.source.agentId ?? "?"}`, ts: d.ts, weight });
 	}
 
 	for (const h of snapshot.hotAreas) {
-		docs.push({ type: "hot-area", id: `hot:${h.repo}:${h.file}`, title: h.file, text: `${h.file} ${h.repo}`, repo: h.repo, ref: h.file, weight: h.score });
+		docs.push({ type: "hot-area", id: `hot:${h.repo}:${h.file}`, title: h.file, text: `${h.file} ${h.repo}`, repo: h.repo, ref: h.file, weight: h.score, source: `repo ${h.repo}` });
 	}
 
 	for (const s of snapshot.scout) {
-		docs.push({ type: "scout", id: `scout:${s.issue.identifier ?? s.issue.id}`, title: s.title, text: `${s.title} ${s.issue.identifier ?? ""}`, repo: s.source.repo, ref: s.issue.url ?? s.issue.identifier });
+		docs.push({ type: "scout", id: `scout:${s.issue.identifier ?? s.issue.id}`, title: s.title, text: `${s.title} ${s.issue.identifier ?? ""}`, repo: s.source.repo, ref: s.issue.url ?? s.issue.identifier, source: "scout", ts: s.filedAt });
 	}
 
 	for (const l of snapshot.leases) {
-		docs.push({ type: "lease", id: `lease:${l.lease.repo}:${l.lease.file}`, title: `${l.lease.file} (held by ${l.lease.session})`, text: `${l.lease.file} ${l.lease.session} ${l.lease.repo}`, repo: l.lease.repo, ref: l.lease.file });
+		docs.push({ type: "lease", id: `lease:${l.lease.repo}:${l.lease.file}`, title: `${l.lease.file} (held by ${l.lease.session})`, text: `${l.lease.file} ${l.lease.session} ${l.lease.repo}`, repo: l.lease.repo, ref: l.lease.file, source: `held by ${l.lease.session}` });
 	}
 
 	for (const [i, dec] of snapshot.decisions.entries()) {
-		docs.push({ type: "decision", id: `decision:${dec.source.featureId ?? i}:${i}`, title: `Decision · ${dec.featureTitle}`, text: `${dec.text} ${dec.featureTitle}`, repo: dec.source.repo, ref: dec.source.featureId });
+		docs.push({ type: "decision", id: `decision:${dec.source.featureId ?? i}:${i}`, title: `Decision · ${dec.featureTitle}`, text: `${dec.text} ${dec.featureTitle}`, repo: dec.source.repo, ref: dec.source.featureId, source: dec.decisionSource ? `${dec.decisionSource} decision` : "decision", ts: dec.createdAt });
+	}
+
+	// Recurring-failure memory (concern 05, OMP_SQUAD_FAILURE_MEMORY): warn the next agent it's about
+	// to retry a KNOWN-recurring failure. Flag off (default) ⇒ no failure docs surface even if some
+	// were annotated while the flag was previously on (consistent with reward-boost's off-means-off).
+	if (isOn(learningFlags().failureMemory)) {
+		for (const fl of snapshot.failures) {
+			docs.push({ type: "failure", id: `failure:${fl.fingerprint}`, title: `Recurring failure · ${fl.branch}`, text: `${fl.rootCause} ${fl.branch}`, repo: fl.source.repo, ref: fl.fingerprint, source: "recurring failure", ts: fl.at });
+		}
 	}
 
 	return docs;
@@ -167,7 +194,7 @@ export function searchFabric(
 		.filter((s) => s.score > 0)
 		.sort((a, b) => b.score - a.score || a.doc.id.localeCompare(b.doc.id))
 		.slice(0, opts.topK ?? 20)
-		.map(({ doc, score }) => ({ type: doc.type, id: doc.id, title: doc.title, snippet: snippetFor(doc, terms), score, repo: doc.repo, ref: doc.ref }));
+		.map(({ doc, score }) => ({ type: doc.type, id: doc.id, title: doc.title, snippet: snippetFor(doc, terms), score, repo: doc.repo, ref: doc.ref, source: doc.source, ranAt: doc.ts }));
 }
 
 // ───────────────────────────── agent cold-start primer ─────────────────────────────
@@ -179,18 +206,48 @@ const PRIMER_LABEL: Record<KbDocType, string> = {
 	agent: "Active agent",
 	scout: "Latent work",
 	lease: "Being edited",
+	failure: "Recurring failure",
 };
 
+/** Coarse "how long ago" label for a provenance timestamp. Undefined input ⇒ undefined output
+ *  (never fabricates an age for a fact with no timestamp). */
+function agoLabel(ts: number | undefined, now: number): string | undefined {
+	if (!ts) return undefined;
+	const mins = Math.round(Math.max(0, now - ts) / 60_000);
+	if (mins < 1) return "just now";
+	if (mins < 60) return `${mins}m ago`;
+	const hours = Math.round(mins / 60);
+	if (hours < 24) return `${hours}h ago`;
+	return `${Math.round(hours / 24)}d ago`;
+}
+
 /**
- * Distill the top KB hits for `query` into a compact, fenced markdown primer for
- * a freshly-spawned agent — so it inherits prior decisions, hot files, and peer
- * context with ZERO cold-start turn cost. Returns "" when nothing is relevant
- * (callers should then inject nothing). Caller is responsible for fencing as
- * untrusted, same as the resume-digest path.
+ * Distill the top KB hits for `query` into a compact markdown primer for a freshly-spawned agent
+ * — so it inherits prior decisions, hot files, and peer context with ZERO cold-start turn cost.
+ * Returns "" when nothing is relevant (callers inject nothing in that case — never an empty
+ * fence). Every non-empty result is wrapped in `fenceUntrusted` INTERNALLY (concern 02): the
+ * caller must NOT fence it again — this is the one place that guarantee is enforced, so no future
+ * injector of primer content can forget it.
+ *
+ * Provenance (concern 02, additive only): each line carries its source + rough age when known
+ * (`(src: agent a1, 2h ago)`), and a hit scoring well below the top match for this query is
+ * labelled `(weak match)` rather than dropped — a novel task with only weak leads must still get
+ * a primer; a hard confidence floor would silently empty it exactly when orientation matters most.
  */
-export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number } = {}): string {
+export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number; now?: number } = {}): string {
 	const results = searchFabric(snapshot, query, { topK: opts.topK ?? 6 });
 	if (results.length === 0) return "";
-	const lines = results.map((r) => `- **${PRIMER_LABEL[r.type]}** — ${trim(`${r.title}: ${r.snippet}`.replace(/\s+/g, " ").trim(), 200)}`);
-	return ["### Related context from prior work (read-only, may be stale):", ...lines].join("\n");
+	const now = opts.now ?? Date.now();
+	const topScore = results[0]!.score;
+	const lines = results.map((r) => {
+		const provenance: string[] = [];
+		if (r.source) provenance.push(`src: ${r.source}`);
+		const ago = agoLabel(r.ranAt, now);
+		if (ago) provenance.push(ago);
+		if (topScore > 0 && r.score < topScore * 0.4) provenance.push("weak match");
+		const suffix = provenance.length ? ` (${provenance.join(", ")})` : "";
+		return `- **${PRIMER_LABEL[r.type]}** — ${trim(`${r.title}: ${r.snippet}`.replace(/\s+/g, " ").trim(), 200)}${suffix}`;
+	});
+	const body = ["### Related context from prior work (read-only, may be stale):", ...lines].join("\n");
+	return fenceUntrusted("context primer", body);
 }

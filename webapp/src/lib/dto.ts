@@ -15,6 +15,16 @@ export interface PendingRequest {
   gateClass?: boolean;
 }
 
+/** Mirrors backend `AgentReport` (src/types.ts) — a non-blocking "I'm unsure, here's a proposal"
+ *  note. NOT a `PendingRequest`: it never blocks the agent or flips status to "input" (Epic 5 D2). */
+export interface AgentReport {
+  id: string;
+  summary: string;
+  proposal?: string;
+  confidence?: number;
+  createdAt: number;
+}
+
 /** Mirrors backend `TransitionEntry` (src/types.ts). One recorded (or denied) `{from,to,reason,at}`
  *  lifecycle transition. */
 export interface TransitionEntry {
@@ -54,6 +64,18 @@ export interface FeatureCriterionDTO {
   text: string;
   completed: boolean;
   source?: "plan" | "ticket" | "workflow" | "manual";
+}
+
+/** Mirrors backend `ValidationRecord` (src/types.ts) — Epic 3's independent-validator verdict for an
+ *  agent's most recent land attempt. */
+export interface ValidationRecordDTO {
+  verdict: "pass" | "veto" | "abstain" | "skipped";
+  agreement: number;
+  confidence: number;
+  perCriterion: { id: string; satisfied: boolean; note?: string }[];
+  rationale: string;
+  model?: string;
+  ranAt: number;
 }
 
 export interface FeatureDecisionDTO {
@@ -178,6 +200,9 @@ export type AgentAction = "prompt" | "answer" | "interrupt" | "verify" | "land" 
 /** Mirrors src/types.ts's AgentKind — which runtime backs this agent. */
 export type AgentKind = "omp-operator" | "flue-service" | "workflow";
 
+/** Mirrors src/types.ts's ExecutionRole — role specialization, orthogonal to kind. */
+export type ExecutionRole = "tester" | "observer";
+
 /** One node in a journaled workflow graph snapshot (mirrors src/workflow/types.ts's WorkflowGraphNode). */
 export interface WorkflowGraphNodeDTO {
   id: string;
@@ -249,7 +274,7 @@ export interface TraceRollupDTO {
   errors: number;
 }
 
-export type TraceSpanKindDTO = 'run' | 'node' | 'tool' | 'subagent' | 'verify' | 'land' | 'resolve';
+export type TraceSpanKindDTO = 'run' | 'node' | 'tool' | 'subagent' | 'verify' | 'spawn' | 'validate' | 'land' | 'resolve';
 export type TraceSpanStatusDTO = 'ok' | 'error' | 'running';
 
 /** One span in the trace tree — mirrors src/spans.ts's TraceNode. Fine spans are tail-sampled, so a
@@ -287,9 +312,13 @@ export interface TraceResponseDTO {
   root: TraceNodeDTO;
   rollup: TraceRollupDTO;
   receipts: TraceReceiptSummaryDTO[];
-  /** True when at least one receipt kept only its rollup because fine spans were sampled out —
-   *  the span waterfall below `rollup` is then labeled "sampled — partial". */
+  /** True when at least one receipt has NO spans at all (legacy/pre-sampling-fix rows) — the decision
+   *  spine is genuinely missing. A finalized run always carries its structural spine, so this is false
+   *  for normal runs regardless of tool-level sampling; see `sampled` for that softer signal. */
   partial: boolean;
+  /** True when at least one contributing receipt had its tool-level spans tail-sampled out. Renders as
+   *  a muted "tool detail sampled" chip, distinct from the alarming `partial` badge. */
+  sampled?: boolean;
 }
 
 export interface AgentDTO {
@@ -298,6 +327,9 @@ export interface AgentDTO {
   status: AgentStatus;
   /** Which runtime backs this agent. */
   kind?: AgentKind;
+  /** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+   *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+  executionRole?: ExecutionRole;
   /** Parent agent id, when this agent is a spawned fan-out branch (workflow) or task subagent. */
   parentId?: string;
   /** The node in the PARENT's workflow graph this branch executes — structural lineage, distinct
@@ -329,6 +361,9 @@ export interface AgentDTO {
   todo?: { done: number; total: number; active?: string };
   todoPhases?: TodoPhaseDTO[];
   pending: PendingRequest[];
+  /** Non-blocking proposals raised via `squad_report`, or auto-emitted on a low-confidence run
+   *  (Epic 5 D2). Surfaced as a warn "Needs you" row — never affects `status`/`effectiveMode`. */
+  reports?: AgentReport[];
   transitions?: TransitionEntry[];
   errorTransitions1h?: number;
   lastActivity: number;
@@ -340,8 +375,13 @@ export interface AgentDTO {
   effectiveMode: AutonomyMode;
   verificationState: VerificationState;
   proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+  /** Epic 3 independent-validator verdict for this agent's most recent land attempt. */
+  validation?: ValidationRecordDTO;
   blockedReason?: string;
   availableActions: AgentAction[];
+  /** Run-end self-confidence 0..1; absent until a run has finished. Below the daemon's confidence
+   *  floor caps `effectiveMode` to `assist` (propose-only). */
+  confidence?: number;
   landReady?: boolean;
   /** PR-mode landing metadata, set at push (draft/open) and merge (merged) time. Absent in local mode. */
   prUrl?: string;

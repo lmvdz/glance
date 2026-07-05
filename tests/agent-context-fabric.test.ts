@@ -13,7 +13,7 @@ import { appendReceipt } from "../src/receipts.ts";
 import { writeDigest } from "../src/digest.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SubagentTracker } from "../src/subagents.ts";
-import type { AgentDTO, IssueRef, PersistedAgent, TranscriptEntry } from "../src/types.ts";
+import type { AgentDTO, IssueRef, PersistedAgent, PersistedFeature, TranscriptEntry } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 const savedPeerBudget = process.env.OMP_SQUAD_PEERMSG_BUDGET;
@@ -175,6 +175,39 @@ test("fabric snapshot is scoped and returns distilled facts with receipt provena
 	expect(snapshot.hotAreas.map((h) => h.file)).not.toContain("src/secret.ts");
 	expect(snapshot.hotAreas[0].touchedBy.map((s) => s.runId).sort()).toEqual(["run-a", "run-p"]);
 	expect(snapshot.scout.map((s) => s.issue.id)).toEqual(["i-a"]);
+});
+
+test("fabric decisions are repo-scoped even when the caller omits `repos` (no cross-repo leak)", async () => {
+	const dir = await tmpDir("acf-dec-");
+	const agents = [dto("a", { repo: "/repo-a" }), dto("other", { repo: "/repo-other" })];
+	const feature = (id: string, repo: string, text: string) =>
+		({ id, repo, title: `feat-${id}`, archived: false, decisions: [{ text }] }) as unknown as PersistedFeature;
+
+	const snapshot = await buildFabricSnapshot({
+		actor: agentActor("a"),
+		agents,
+		stateDir: dir,
+		// `repos` intentionally omitted — exactly how /api/fabric invokes it with no ?repo. The decision
+		// filter must fall back to the actor's scoped repos, not leak every feature's decisions.
+		features: [feature("f1", "/repo-a", "IN-SCOPE decision"), feature("f2", "/repo-other", "OUT-OF-SCOPE decision")],
+	});
+
+	expect(snapshot.scope.sort()).toEqual(["a"]); // agent scope is correct (the leak is not here)
+	expect(snapshot.decisions.map((d) => d.source.repo)).toEqual(["/repo-a"]);
+	expect(snapshot.decisions.some((d) => d.text.includes("OUT-OF-SCOPE"))).toBe(false);
+});
+
+test("(concern 05) fabric snapshot surfaces a recurring-failure annotation, repo-scoped", async () => {
+	const dir = await tmpDir("acf-failure-");
+	const { recordFailureAnnotation } = await import("../src/failure-memory.ts");
+	recordFailureAnnotation(dir, { fingerprint: "land-failing:squad/a1", repo: "/repo", branch: "squad/a1", rootCause: "flaky retry backoff", at: 500 });
+	recordFailureAnnotation(dir, { fingerprint: "land-failing:squad/other-repo", repo: "/other-repo", branch: "squad/other-repo", rootCause: "unrelated", at: 500 });
+
+	const agents = [dto("a", { featureId: "f" })];
+	const snapshot = await buildFabricSnapshot({ actor: agentActor("a"), agents, stateDir: dir, repos: ["/repo"], includeLeases: false, now: () => 1000, listIssues: async () => [] });
+
+	expect(snapshot.failures).toHaveLength(1); // the other-repo annotation is excluded — repo-scoped, never an unscoped global leak
+	expect(snapshot.failures[0]).toEqual({ type: "failure", source: { repo: "/repo" }, fingerprint: "land-failing:squad/a1", branch: "squad/a1", rootCause: "flaky retry backoff", at: 500 });
 });
 
 function scoutFact(id: string, title: string, agentId: string, runId: string, filedAt: number): FabricScoutFact {

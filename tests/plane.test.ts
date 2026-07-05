@@ -188,3 +188,41 @@ test("listPlaneIssues builds identifier from the project prefix (list endpoint o
 		server.stop(true);
 	}
 });
+
+test("listPlaneIssues paginates past page 1 so open work isn't hidden behind a page of closed issues", async () => {
+	// 55 issues: page 1 is 50 completed, page 2 is 5 open. A single-page poll filtered to open would
+	// return 0 — the open-work poll must fetch as deeply as the all-states reconciler (default 4 pages).
+	const server = Bun.serve({
+		port: 0,
+		fetch: (req) => {
+			const url = new URL(req.url);
+			const p = url.pathname;
+			if (p.endsWith("/relations/")) return Response.json({ blocked_by: [], blocking: [], relates_to: [] });
+			if (p.endsWith("/states/")) return Response.json({ results: [] });
+			if (p.endsWith("/projects/proj-pag/")) return Response.json({ identifier: "PAG" });
+			if (p.endsWith("/issues/")) {
+				const page = Number(url.searchParams.get("page") ?? "1");
+				const items =
+					page === 1
+						? Array.from({ length: 50 }, (_, i) => ({ id: `done-${i}`, sequence_id: i + 1, name: `done ${i}`, state_detail: { group: "completed" } }))
+						: page === 2
+							? Array.from({ length: 5 }, (_, i) => ({ id: `open-${i}`, sequence_id: 100 + i, name: `open ${i}`, state_detail: { group: "unstarted" } }))
+							: [];
+				return Response.json({ results: items });
+			}
+			return new Response("no", { status: 404 });
+		},
+	});
+	try {
+		process.env.PLANE_API_KEY = "secret";
+		process.env.PLANE_WORKSPACE = "acme";
+		process.env.PLANE_BASE_URL = `http://127.0.0.1:${server.port}`;
+		process.env.PLANE_PROJECT_MAP = JSON.stringify({ "/repo/pag": "proj-pag" });
+
+		const issues = await listPlaneIssues("/repo/pag");
+		expect(issues?.length).toBe(5); // the 5 open on page 2 — 0 before the fix
+		expect(issues?.every((i) => i.state === "unstarted")).toBe(true);
+	} finally {
+		server.stop(true);
+	}
+});

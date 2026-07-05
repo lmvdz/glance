@@ -24,6 +24,7 @@ import * as path from "node:path";
 import type { AgentDriver } from "./agent-driver.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
+import type { ReflectLlm } from "./reflection.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
 import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
@@ -126,8 +127,9 @@ export interface WorkflowDriverOptions {
 	autonomy?: WorkflowAutonomyMode;
 	sessionId?: string;
 	proof?: WorkflowProofState;
-	/** Override inner-thread creation (tests). Default: a real RpcAgent. */
-	createInnerDriver?: () => AgentDriver;
+	/** Override inner-thread creation (tests). Default: a real RpcAgent. `role` distinguishes the shared
+	 *  coder thread from the separate `tester` lineage that runs isolatedLineage nodes (TDD write-test). */
+	createInnerDriver?: (role: "coder" | "tester") => AgentDriver;
 	/** Override command execution (tests). */
 	execCommand?: (script: string, cwd: string) => Promise<CommandResult>;
 	/** Spawn parallel-branch nodes as real roster agents. Absent → branches run sequentially on the inner thread. */
@@ -140,6 +142,9 @@ export interface WorkflowDriverOptions {
 	/** True when resuming on a FRESH inner thread (the adopt path, prior host dead) → the in-flight node
 	 *  re-executes and re-primes the goal. Absent/false = warm reattach (reconnect), which never re-prompts. */
 	cold?: boolean;
+	/** Reflexion (concern 04) wiring, forwarded to the executor with `runId` bound to THIS driver's
+	 *  (lazily-minted) runId. Absent ⇒ the executor's fixup node never reflects (mirrors `fleet`). */
+	reflection?: { stateDir: string; repo: string; agentId: string; llm?: ReflectLlm };
 }
 
 interface PendingGate {
@@ -154,6 +159,9 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	private engine?: WorkflowEngine;
 	private executor?: SingleAgentExecutor;
 	private inner?: AgentDriver;
+	/** Separate agent/context for isolatedLineage nodes (the TDD write-test author), distinct from `inner`
+	 *  so the test author and the implementer are genuinely different lineages that cannot co-reason. */
+	private tester?: AgentDriver;
 	private ready = false;
 	private alive = true;
 	private runActive = false;
@@ -191,7 +199,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		const rules = parseStylesheet(this.wf.modelStylesheet ?? "");
 		this.executor = new SingleAgentExecutor({
 			cwd: this.opts.cwd,
-			acquireAgent: () => this.acquireInner(),
+			acquireAgent: (node) => this.acquireInner(node),
 			emit: (frame) => this.emit("event", frame),
 			gate: (node, options) => this.raiseGate(node, options),
 			execCommand: this.opts.execCommand,
@@ -201,6 +209,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			initialRollup: this.opts.resumeState?.rollup,
 			decoratePrompt: this.opts.decoratePrompt,
 			cold: this.opts.cold,
+			reflection: this.opts.reflection ? { ...this.opts.reflection, runId: () => this.runId } : undefined,
 		});
 		const baseOnStage = this.executor.onStage.bind(this.executor);
 		this.executor.onStage = (ev) => {
@@ -262,11 +271,13 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		this.pendingGate?.reject(new Error("workflow stopped"));
 		this.pendingGate = undefined;
 		await this.inner?.stop();
+		await this.tester?.stop();
 	}
 
 	/** Leave the inner host running across a daemon restart (the run itself is not resumed in Phase A). */
 	detach(): void {
 		this.inner?.detach?.();
+		this.tester?.detach?.();
 	}
 
 	/** First prompt starts the run with the goal; later prompts steer the live agent. */
@@ -394,27 +405,56 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		if (isVerification) this.emitJournal({ type: `workflow.verification.${ev.phase}`, nodeId: ev.nodeId, label: ev.label, kind: ev.kind, phase: ev.phase, outcome: ev.outcome, text: ev.text, proof: this.opts.proof });
 	}
 
-	private async acquireInner(): Promise<AgentDriver> {
+	private async acquireInner(node?: WorkflowNode): Promise<AgentDriver> {
+		// isolatedLineage nodes (the TDD write-test author) run on a SEPARATE agent/context so the author
+		// and the implementer cannot co-reason — the implementer inherits only the on-disk red test.
+		if (node?.isolatedLineage) return this.acquireTester();
 		if (this.inner?.isAlive) return this.inner;
 		const inner = this.opts.createInnerDriver
-			? this.opts.createInnerDriver()
+			? this.opts.createInnerDriver("coder")
 			: new RpcAgent({ id: `${this.opts.id}-wf`, cwd: this.opts.cwd, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking, bin: this.opts.bin });
-		// Forward the inner thread's signal to surfaces, but swallow its per-turn
-		// agent_start/agent_end so the manager sees one continuous working session.
-		inner.on("event", (frame: { type?: string }) => {
-			if (frame.type === "agent_start" || frame.type === "turn_start" || frame.type === "agent_end") return;
-			this.emit("event", frame);
-		});
-		inner.on("ui", (req: RpcExtensionUIRequest) => this.emit("ui", req));
-		inner.on("hosttool", (call: unknown) => this.emit("hosttool", call));
-		inner.on("stderr", (line: string) => this.emit("stderr", line));
-		inner.on("exit", ({ code }: { code: number }) => {
-			if (this.runActive) this.emit("stderr", `inner agent exited (code ${code}) mid-run`);
-		});
+		this.wireInner(inner);
 		this.inner = inner;
 		await inner.start();
 		if (inner.setSessionName) await inner.setSessionName(`workflow:${this.wf?.name}`).catch(() => {});
 		return inner;
+	}
+
+	/**
+	 * The isolated test-author thread — a DISTINCT agent/context from the shared coder `inner`, so the TDD
+	 * write-test author and the implementer are genuinely separate lineages that cannot co-reason (the
+	 * implementer inherits only the committed red test on disk, not the author's conversation — the whole
+	 * point of the tester role). Given its own (optionally stronger) model via OMP_SQUAD_TDD_TESTER_MODEL
+	 * when set. Cached for the run and torn down with the driver, like `inner`.
+	 */
+	private async acquireTester(): Promise<AgentDriver> {
+		if (this.tester?.isAlive) return this.tester;
+		const model = process.env.OMP_SQUAD_TDD_TESTER_MODEL || this.opts.model;
+		const tester = this.opts.createInnerDriver
+			? this.opts.createInnerDriver("tester")
+			: new RpcAgent({ id: `${this.opts.id}-tester`, cwd: this.opts.cwd, model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking, bin: this.opts.bin });
+		this.wireInner(tester);
+		this.tester = tester;
+		await tester.start();
+		if (tester.setSessionName) await tester.setSessionName(`workflow:${this.wf?.name}:test-author`).catch(() => {});
+		return tester;
+	}
+
+	/**
+	 * Forward an inner thread's signal to surfaces, but swallow its per-turn agent_start/agent_end so the
+	 * manager sees one continuous working session. Shared by the coder `inner` and the `tester` lineage.
+	 */
+	private wireInner(agent: AgentDriver): void {
+		agent.on("event", (frame: { type?: string }) => {
+			if (frame.type === "agent_start" || frame.type === "turn_start" || frame.type === "agent_end") return;
+			this.emit("event", frame);
+		});
+		agent.on("ui", (req: RpcExtensionUIRequest) => this.emit("ui", req));
+		agent.on("hosttool", (call: unknown) => this.emit("hosttool", call));
+		agent.on("stderr", (line: string) => this.emit("stderr", line));
+		agent.on("exit", ({ code }: { code: number }) => {
+			if (this.runActive) this.emit("stderr", `inner agent exited (code ${code}) mid-run`);
+		});
 	}
 
 	private raiseGate(node: WorkflowNode, options: string[]): Promise<string> {

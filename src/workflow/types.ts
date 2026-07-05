@@ -44,6 +44,14 @@ export interface WorkflowNode {
 	maxVisits?: number;
 	/** On visit-cap exhaustion, route here instead of hard-failing (e.g. fix-up → escalate). */
 	overflow?: string;
+	/**
+	 * Run this agent node on a SEPARATE agent/context from the shared inner thread — a distinct lineage.
+	 * Set on the TDD `write-test` author so the test author and the implementer cannot co-reason: the
+	 * implementer inherits only the on-disk red test, never the author's conversation (defeating the
+	 * "coder grades its own homework" failure the TDD role exists to prevent). The isolated agent can also
+	 * carry a distinct (stronger) model. Only meaningful for `agent`/`prompt` nodes.
+	 */
+	isolatedLineage?: boolean;
 	/** All raw DOT attributes, for forward-compatibility. */
 	attrs: Record<string, string>;
 }

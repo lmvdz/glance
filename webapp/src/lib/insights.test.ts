@@ -419,8 +419,49 @@ describe('attentionItems', () => {
   });
 
   test('nothing actionable → empty list', () => {
-    const items = attentionItems({ agents: [agent('a', 'working'), agent('b', 'idle')], capacity: { used: 2, cap: 5, roomFor: 3, verdict: 'healthy', headline: 'ok', memPct: 10, loadPct: 10 } });
+    const items = attentionItems({
+      agents: [agent('a', 'working', { lastActivity: Date.now() }), agent('b', 'idle')],
+      capacity: { used: 2, cap: 5, roomFor: 3, verdict: 'healthy', headline: 'ok', memPct: 10, loadPct: 10 },
+    });
     expect(items).toEqual([]);
+  });
+
+  test('a working agent gone quiet past the stall threshold → warn stalled item with a steer action', () => {
+    const items = attentionItems({ agents: [agent('a', 'working', { lastActivity: Date.now() - 20 * 60_000 })] });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('stalled');
+    expect(items[0].severity).toBe('warn');
+    expect(items[0].action?.kind).toBe('steer');
+  });
+
+  test('a working agent with recent activity is not flagged stalled', () => {
+    const items = attentionItems({ agents: [agent('a', 'working', { lastActivity: Date.now() - 1000 })] });
+    expect(items).toEqual([]);
+  });
+
+  test('a report on a working (non-input) agent surfaces as a non-blocking warn view item', () => {
+    const a = agent('a', 'working', {
+      lastActivity: Date.now(),
+      reports: [{ id: 'r1', summary: 'unsure about X', proposal: 'proposed Y instead', createdAt: Date.now() }],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('report');
+    expect(items[0].severity).toBe('warn');
+    expect(items[0].action?.kind).toBe('view');
+    expect(items[0].detail).toContain('unsure about X');
+    expect(items[0].detail).toContain('proposed Y instead');
+    // Non-blocking: the report must never be modeled as/alongside a blocked row, and the agent's own
+    // status/effectiveMode (not read by attentionItems at all) are untouched by this function.
+    expect(a.status).toBe('working');
+  });
+
+  test('a blocked agent with a report only emits the blocked item (priority order, not a double row)', () => {
+    const items = attentionItems({
+      agents: [agent('a', 'input', { reports: [{ id: 'r1', summary: 'unsure', createdAt: Date.now() }] })],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('blocked');
   });
 });
 

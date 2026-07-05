@@ -14,7 +14,6 @@ import {
   Download,
   Filter,
   GitBranch,
-  GripVertical,
   Inbox,
   Library,
   RotateCcw,
@@ -66,6 +65,17 @@ export function matchesTaskSearch(task: Task, query: string): boolean {
     task.id.toLowerCase().includes(q) ||
     (task.displayId?.toLowerCase().includes(q) ?? false)
   );
+}
+
+/**
+ * Task-rail sort comparator. 'attention' floats what-needs-you up via `rankFor` (lower rank first);
+ * 'creation' orders by the feature's real `createdAt`, most recent first (undated sorts last). Pure +
+ * exported so the ordering is unit-tested — the old comparator returned 0 for 'creation' (dead) and had
+ * a 'dueDate' branch keyed on a field nothing ever populated (also dead).
+ */
+export function compareTaskRail(a: Task, b: Task, sortBy: 'attention' | 'creation', rankFor: (t: Task) => number): number {
+  if (sortBy === 'attention') return rankFor(a) - rankFor(b);
+  return (b.properties.createdAt ?? 0) - (a.properties.createdAt ?? 0);
 }
 
 /** Grouped VERTICAL navigation — a list that grows down instead of tab rows that
@@ -122,16 +132,10 @@ export const TaskRailRow: React.FC<{
   isActive: boolean;
   isDone: boolean;
   dueSoon: boolean;
-  isDraggable: boolean;
-  dragging: boolean;
   priorityColor: string;
   onSelect: () => void;
   onDelete: () => void;
-  onDragStart?: (event: React.DragEvent) => void;
-  onDragOver?: (event: React.DragEvent) => void;
-  onDragEnd?: () => void;
-  onDrop?: (event: React.DragEvent) => void;
-}> = ({ task, status, isActive, isDone, dueSoon, isDraggable, dragging, priorityColor, onSelect, onDelete, onDragStart, onDragOver, onDragEnd, onDrop }) => {
+}> = ({ task, status, isActive, isDone, dueSoon, priorityColor, onSelect, onDelete }) => {
   // Float-worthy = anything that wants a decision: blocked/errored (critical) or
   // land-ready / stopped (warn). Working is alive but needs nothing.
   const attention = !isDone && (status?.posture === 'needs-you' || status?.posture === 'idle');
@@ -142,17 +146,9 @@ export const TaskRailRow: React.FC<{
   const ref = taskRef(task);
   return (
     <div
-      draggable={isDraggable}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDragEnd={onDragEnd}
-      onDrop={onDrop}
-      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-amber-500 bg-amber-50 dark:bg-amber-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'} ${dragging ? 'opacity-50' : 'opacity-100'}`}
+      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-amber-500 bg-amber-50 dark:bg-amber-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'}`}
     >
       <button onClick={onSelect} className="flex min-w-0 flex-1 items-center py-1 pl-2 text-left focus-visible:ring-2 focus-visible:ring-amber-500">
-        <span className={`flex w-3 justify-center ${isDraggable ? 'cursor-grab text-gray-300 opacity-0 group-hover:opacity-100 group-active:cursor-grabbing' : 'opacity-0'}`}>
-          <GripVertical className="h-3 w-3" aria-hidden="true" />
-        </span>
         <span className="ml-0.5 flex w-5 flex-shrink-0 justify-center" title={status && status.total > 0 ? status.headline : `Status: ${task.properties.status}`}>
           {isDone ? (
             <CheckCircle2 className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
@@ -220,7 +216,6 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     hardDeleteFeature,
     loadArchivedFeatures,
     addTask,
-    reorderTasks,
     showToast,
     view,
     setView,
@@ -258,9 +253,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<'all' | Task['category']>('all');
-  const [sortBy, setSortBy] = useState<'attention' | 'creation' | 'dueDate'>('attention');
+  const [sortBy, setSortBy] = useState<'attention' | 'creation'>('attention');
   const [isListening, setIsListening] = useState(false);
-  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
 
   const totalTasks = tasks.length;
@@ -296,17 +290,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     const matchesCategory = categoryFilter === 'all' || task.category === categoryFilter;
     const matchesTags = selectedTags.length === 0 || selectedTags.every((tag) => task.tags?.includes(tag));
     return matchesSearch && matchesCategory && matchesTags;
-  }).sort((a, b) => {
-    if (sortBy === 'attention') {
-      // stable: equal ranks keep their existing order, so this only re-floats what needs you
-      return taskListRank(statusFor(a), a.status === 'done') - taskListRank(statusFor(b), b.status === 'done');
-    }
-    if (sortBy !== 'dueDate') return 0;
-    if (!a.dueDate && !b.dueDate) return 0;
-    if (!a.dueDate) return 1;
-    if (!b.dueDate) return -1;
-    return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
-  });
+  }).sort((a, b) => compareTaskRail(a, b, sortBy, (t) => taskListRank(statusFor(t), t.status === 'done')));
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -630,10 +614,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                     </label>
                     <label className="space-y-1">
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Sort</span>
-                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation' | 'dueDate')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
                         <option value="attention">Attention</option>
                         <option value="creation">Creation</option>
-                        <option value="dueDate">Due date</option>
                       </select>
                     </label>
                   </div>
@@ -743,23 +726,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                       isActive={task.id === selectedTaskId}
                       isDone={task.status === 'done'}
                       dueSoon={isDueSoon(task.dueDate) && task.status !== 'done'}
-                      isDraggable={sortBy === 'creation' && categoryFilter === 'all' && !searchQuery}
-                      dragging={draggedTaskId === task.id}
                       priorityColor={getPriorityColor(task.priority)}
                       onSelect={() => selectTask(task.id)}
                       onDelete={() => deleteTask(task.id)}
-                      onDragStart={(event) => { setDraggedTaskId(task.id); event.dataTransfer.effectAllowed = 'move'; }}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDragEnd={() => setDraggedTaskId(null)}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        if (draggedTaskId && draggedTaskId !== task.id) {
-                          const draggedIdx = tasks.findIndex((item) => item.id === draggedTaskId);
-                          const targetIdx = tasks.findIndex((item) => item.id === task.id);
-                          if (draggedIdx !== -1 && targetIdx !== -1) reorderTasks(draggedIdx, targetIdx);
-                        }
-                        setDraggedTaskId(null);
-                      }}
                     />
                   ))
                 )}

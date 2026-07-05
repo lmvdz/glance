@@ -12,12 +12,13 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
-import { Observer, type ObserverDeps, auditLandedSurvivors, auditStaleDone, auditStrandedUncommitted, auditTestsGreen, landFailureFindings, stripAnsi } from "../src/observer.ts";
+import { Observer, type ObserverDeps, auditCompliance, auditLandedSurvivors, auditStaleDone, auditStrandedUncommitted, auditTestsGreen, landFailureFindings, stripAnsi } from "../src/observer.ts";
 import { recordDoneProof } from "../src/done-proof.ts";
+import type { ComplianceFinding } from "../src/compliance.ts";
 import type { LandLedger } from "../src/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
-const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX", "OMP_SQUAD_AUTOLAND_FAIL_CAP"] as const;
+const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX", "OMP_SQUAD_OBSERVE_REPRODUCE", "OMP_SQUAD_AUTOLAND_FAIL_CAP"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -196,6 +197,67 @@ test("(b) a reproduced red gate (red twice) files exactly one regression, named 
 	expect(calls).toBe(2);
 	expect(filed.length).toBe(1);
 	expect(filed[0]).toContain("regression: real-regression"); // the reproduced run names the finding
+});
+
+// ── (05) observer → dispatch seam: spawn an observing agent instead of only filing ────────────────
+
+test("(05) OMP_SQUAD_OBSERVE_REPRODUCE=1 + a reproducing regression dispatches an observing agent instead of filing", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_REPRODUCE = "1";
+	const spawned: string[] = [];
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }), // red twice ⇒ confirmedGate reproduces
+		spawnObserver: async (f) => {
+			spawned.push(f.fingerprint);
+			return true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(spawned).toEqual(["regression:auth.test.ts > login"]);
+	expect(filed).toEqual([]); // dispatch replaces filing this tick
+});
+
+test("(05) spawnObserver returning false falls back to filing the finding", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_REPRODUCE = "1";
+	const spawned: string[] = [];
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }),
+		spawnObserver: async (f) => {
+			spawned.push(f.fingerprint);
+			return false;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(spawned).toEqual(["regression:auth.test.ts > login"]);
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("regression: auth.test.ts > login");
+});
+
+test("(05) OMP_SQUAD_OBSERVE_REPRODUCE unset (default) never calls spawnObserver — today's file-only behavior", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	delete process.env.OMP_SQUAD_OBSERVE_REPRODUCE;
+	let spawnCalled = false;
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }),
+		spawnObserver: async () => {
+			spawnCalled = true;
+			return true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(spawnCalled).toBe(false);
+	expect(filed.length).toBe(1);
+});
+
+test("(05) no spawnObserver dep configured — today's file-only behavior even with the flag on", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_OBSERVE_REPRODUCE = "1";
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => ({ ok: false, firstFailure: "auth.test.ts > login" }),
+	});
+	await new Observer(deps).tick();
+	expect(filed.length).toBe(1);
 });
 
 test("(b) an idle ahead=0 agent whose issue is Done does NOT file a reap (housekeeping, not backlog)", async () => {
@@ -439,6 +501,35 @@ test("(b) the observer files exactly one bug for a branch whose auto-land keeps 
 	expect(filed[0]).toContain("auto-land failing for squad/a1");
 });
 
+// ── Epic 3 compliance findings (leaf 06) — an additional finding source over the SAME loop ─────────
+
+test("auditCompliance maps a ComplianceFinding to a stable, dedup-able Observer Finding", () => {
+	const findings: ComplianceFinding[] = [{ code: "forced-land-without-proof", severity: "high", subject: "squad/a1", detail: "no proof", at: 1 }];
+	const mapped = auditCompliance(findings);
+	expect(mapped).toEqual([{ fingerprint: "compliance:forced-land-without-proof:squad/a1", title: "compliance: forced-land-without-proof — squad/a1", detail: "no proof", severity: "high" }]);
+});
+
+test("(b)/(f) a tick files exactly one issue for an injected compliance finding, then dedups it on the next tick", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const finding: ComplianceFinding = { code: "forced-land-without-proof", severity: "high", subject: "squad/a1", detail: "no proof", at: 1 };
+	const { deps, filed } = makeDeps(tmpDir(), { complianceFindings: async () => [finding] });
+	const observer = new Observer(deps);
+	await observer.tick();
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("do-not-auto-land"); // structural ⇒ always needs-triage
+	expect(filed[0]).toContain("forced-land-without-proof");
+
+	await observer.tick(); // same finding reproduces ⇒ deduped, not re-filed
+	expect(filed.length).toBe(1);
+});
+
+test("an Observer constructed WITHOUT complianceFindings behaves exactly as before (no crash, nothing filed for it)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const { deps, filed } = makeDeps(tmpDir()); // no complianceFindings override — dep absent
+	await new Observer(deps).tick();
+	expect(filed).toEqual([]);
+});
+
 const noProof = () => false;
 
 test("survivor fingerprint is keyed on the stable Plane identifier, not the ephemeral agent id", async () => {
@@ -659,4 +750,56 @@ test("(proof-first, unit-level) auditLandedSurvivors/auditStaleDone never call a
 	const stale = await auditStaleDone([agent("a", "stopped", issue)], new Set<string>(), aheadOf, () => true);
 	expect(stale).toHaveLength(0);
 	expect(aheadCalls).toBe(0); // proof consulted FIRST — the arithmetic never runs
+});
+
+// ── Recurring-failure memory (concern 05, downscoped) ──────────────────────────────────────────
+
+test("(concern 05) a land-failure streak triggers exactly one annotateFailure call per tick per fingerprint", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const ledger: LandLedger = { "squad/a1": { fails: 5, lastDetail: "assertion failed: retry backoff", at: 1 } };
+	const calls: { fingerprint: string; branch: string }[] = [];
+	const { deps } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("a1", "idle", undefined, "squad/a1")],
+		landLedger: () => ledger,
+		annotateFailure: async (finding, branch) => {
+			calls.push({ fingerprint: finding.fingerprint, branch });
+		},
+	});
+	await new Observer(deps).tick();
+	expect(calls).toEqual([{ fingerprint: "land-failing:squad/a1", branch: "squad/a1" }]);
+
+	// A SECOND tick (the streak persists — nothing fixed it) calls the hook again; the hook itself
+	// (squad-manager's annotateRecurringFailure) is what makes reflect() idempotent per fingerprint,
+	// NOT the observer — that's the whole point of the "callee is responsible" contract.
+	await new Observer(deps).tick();
+	expect(calls).toHaveLength(2);
+});
+
+test("(concern 05) no landLedger dep ⇒ annotateFailure is never called", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	let called = false;
+	const { deps } = makeDeps(tmpDir(), {
+		listAgents: () => [],
+		annotateFailure: async () => {
+			called = true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(called).toBe(false);
+});
+
+test("(concern 05) a branch under the cap never triggers annotateFailure (not yet a recurring failure)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP = "3";
+	const ledger: LandLedger = { "squad/a1": { fails: 1, lastDetail: "x", at: 1 } };
+	let called = false;
+	const { deps } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("a1", "idle", undefined, "squad/a1")],
+		landLedger: () => ledger,
+		annotateFailure: async () => {
+			called = true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(called).toBe(false);
 });

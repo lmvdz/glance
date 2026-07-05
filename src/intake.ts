@@ -19,6 +19,9 @@ export interface IntakeDecision {
 	workflow?: string;
 	/** Verification command to wrap the task in (implement → verify → fixup). */
 	verify?: string;
+	/** Selects the TDD variant of the verify loop — write the acceptance test first. Only ever
+	 *  emitted alongside `verify`; "observe" is Observer-initiated, never router-initiated. */
+	mode?: "tdd";
 	/** Reasoning effort for the run. */
 	thinking?: ThinkingLevel;
 	/** Why this process was chosen — logged so the operator sees the OS's reasoning. */
@@ -32,6 +35,19 @@ const HIGH_RISK = /\b(migrat\w+|deletion|drop\s|rewrit\w+|redesign\w*|re-?archit
 const FANOUT_SIGNAL = /\b(in parallel|fan ?out|several approaches|multiple approaches|compare approaches|\d+\s+approaches|\d+\s+ways|brainstorm)\b/i;
 const HARD = /\b(complex|carefully|tricky|subtle|thorough|deep dive)\b/i;
 const TRIVIAL = /\b(typo|rename|comment|bump|whitespace|reformat|format)\b/i;
+const TDD_SIGNAL = /\b(add|implement|feature|support|endpoint|api|handler|route|behaviou?r|new )\b/i;
+
+/**
+ * Whether a verify-routed task should run the TDD variant (write the acceptance test first).
+ * `OMP_SQUAD_TDD=0` disables globally; `=force` emits tdd on every verify-routed task; unset
+ * falls back to the behavior-adding signal heuristic (never on a TRIVIAL task).
+ */
+function tddMode(task: string): "tdd" | undefined {
+	const env = process.env.OMP_SQUAD_TDD;
+	if (env === "0") return undefined;
+	if (env === "force") return "tdd";
+	return !TRIVIAL.test(task) && TDD_SIGNAL.test(task) ? "tdd" : undefined;
+}
 
 /** A one-shot LLM classification call (e.g. omp `-p --no-tools --smol`). Returns raw text. */
 export type Classify = (prompt: string) => Promise<string>;
@@ -54,7 +70,10 @@ async function heuristicRoute(task: string, repo: string): Promise<IntakeDecisio
 	if (HIGH_RISK.test(task)) return { workflow: PLAN_IMPLEMENT, reason: "high-risk change → plan + human approval before implementing" };
 	const thinking: ThinkingLevel | undefined = HARD.test(task) ? "high" : TRIVIAL.test(task) ? "minimal" : undefined;
 	const verify = await detectVerify(repo);
-	if (verify) return { verify, thinking, reason: `code change → auto-verify with \`${verify}\`` };
+	if (verify) {
+		const mode = tddMode(task);
+		return { verify, thinking, mode, reason: `code change → auto-verify with \`${verify}\`${mode === "tdd" ? " (TDD: test first)" : ""}` };
+	}
 	return { thinking, reason: "no verification command detected → plain agent" };
 }
 
@@ -74,7 +93,9 @@ async function llmRoute(task: string, repo: string, classify: Classify): Promise
 	if (parsed.process === "plan") return { workflow: PLAN_IMPLEMENT, thinking: effort, reason: "LLM router → plan + human approval (high-risk)" };
 	if (parsed.process === "verify") {
 		const verify = await detectVerify(repo);
-		return verify ? { verify, thinking: effort, reason: `LLM router → auto-verify with \`${verify}\`` } : { thinking: effort, reason: "LLM router → plain (no verify command)" };
+		if (!verify) return { thinking: effort, reason: "LLM router → plain (no verify command)" };
+		const mode = tddMode(task);
+		return { verify, thinking: effort, mode, reason: `LLM router → auto-verify with \`${verify}\`${mode === "tdd" ? " (TDD: test first)" : ""}` };
 	}
 	return { thinking: effort, reason: "LLM router → plain agent" };
 }
@@ -88,9 +109,15 @@ function extractDecision(text: string): { process?: string; effort?: string } | 
 	return { process, effort };
 }
 
-/** A `Classify` backed by a one-shot omp call on the fast/smol model (no tools). */
-export function ompClassify(bin = "omp"): Classify {
-	return async (prompt: string): Promise<string> => (await ompOneShot(["-p", "--no-tools", "--smol", "--hide-thinking", prompt], { bin })).out;
+/**
+ * A `Classify` backed by a one-shot omp call on the fast/smol model (no tools). `timeoutMs`
+ * defaults to `ompOneShot`'s own 1s budget (fine for routeIntake's/Scout's short classification
+ * prompts) — a substantive generation call (e.g. the resident planner's decompose, which asks
+ * for a full multi-concern JSON plan with prose) needs a much larger budget or it silently times
+ * out on every real call; pass one explicitly for those.
+ */
+export function ompClassify(bin = "omp", timeoutMs?: number): Classify {
+	return async (prompt: string): Promise<string> => (await ompOneShot(["-p", "--no-tools", "--smol", "--hide-thinking", prompt], { bin, timeoutMs })).out;
 }
 
 /** Infer the repo's verification command from its toolchain manifests. */

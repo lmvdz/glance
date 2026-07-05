@@ -98,3 +98,41 @@ test("routeIntake (LLM): unparseable output falls back to heuristics", async () 
 	expect(r.workflow).toContain("plan-implement"); // heuristic high-risk path
 	expect(r.reason).not.toContain("LLM router");
 });
+
+// ── TDD routing (Epic 2 leaf 04): the router selects mode:"tdd" for behavior-adding verify tasks ──
+
+test("routeIntake: behavior-adding code change → verify + mode:tdd (write the test first)", async () => {
+	const d = await repo({ "package.json": JSON.stringify({ scripts: { test: "vitest" } }) });
+	const r = await routeIntake("add a /health endpoint", d);
+	expect(r.verify).toBe("npm run test");
+	expect(r.mode).toBe("tdd");
+	expect(r.reason).toContain("TDD");
+});
+
+test("routeIntake: trivial task never gets mode:tdd even with a TDD signal word", async () => {
+	const d = await repo({ "package.json": JSON.stringify({ scripts: { test: "vitest" } }) });
+	const r = await routeIntake("fix typo in README", d);
+	expect(r.mode).toBeUndefined();
+});
+
+test("routeIntake: OMP_SQUAD_TDD=0 disables tdd globally; =force emits it on every verify-routed task", async () => {
+	const d = await repo({ "package.json": JSON.stringify({ scripts: { test: "vitest" } }) });
+	const prior = process.env.OMP_SQUAD_TDD;
+	try {
+		process.env.OMP_SQUAD_TDD = "0";
+		expect((await routeIntake("add a /health endpoint", d)).mode).toBeUndefined();
+
+		process.env.OMP_SQUAD_TDD = "force";
+		expect((await routeIntake("fix the failing auth test", d)).mode).toBe("tdd");
+	} finally {
+		if (prior === undefined) delete process.env.OMP_SQUAD_TDD;
+		else process.env.OMP_SQUAD_TDD = prior;
+	}
+});
+
+test("routeIntake (LLM): 'verify' classification also carries mode:tdd for a behavior-adding task", async () => {
+	const d = await repo({ "package.json": JSON.stringify({ scripts: { test: "vitest" } }) });
+	const r = await routeIntake("implement a new caching handler", d, classify('{"process":"verify","effort":"low"}'));
+	expect(r.verify).toBe("npm run test");
+	expect(r.mode).toBe("tdd");
+});

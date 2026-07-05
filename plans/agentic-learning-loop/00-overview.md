@@ -1,6 +1,6 @@
 # Agentic learning loop
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 

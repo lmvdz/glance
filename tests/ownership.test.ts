@@ -63,6 +63,18 @@ test("ownershipConflict: a terminal (stopped/error) or claimless holder doesn't 
 	expect(ownershipConflict([owner({ owns: [] })], "/r", ["src/web"])).toBeUndefined();
 });
 
+test("ownershipConflict: a holder that declared writes via produces (owns undefined) still blocks", () => {
+	// The live spawn path stores agents produces-first (create() sets produces = opts.produces ?? opts.owns,
+	// owns = opts.owns verbatim), so a modern scope has owns undefined. The write-vs-write guard must resolve
+	// produces like requiresConflict does, or two agents write the same tree — the collision it exists to stop.
+	const holder = owner({ owns: undefined, produces: ["src/web"] });
+	expect(ownershipConflict([holder], "/r", ["src/web/index.html"])).toEqual({ agent: "alpha", paths: ["src/web/index.html"] });
+	// produces takes precedence over owns when both are present (matches requiresConflict's resolution)
+	const both = owner({ owns: ["docs"], produces: ["src/web"] });
+	expect(ownershipConflict([both], "/r", ["src/web/app.ts"])).toEqual({ agent: "alpha", paths: ["src/web/app.ts"] });
+	expect(ownershipConflict([both], "/r", ["docs/readme.md"])).toBeUndefined(); // owns is NOT the write claim when produces is set
+});
+
 test("ownershipConflict: returns the FIRST overlapping holder among many", () => {
 	const live: Owner[] = [owner({ name: "idle-other", owns: ["docs"] }), owner({ name: "beta", owns: ["src/web/app"] })];
 	expect(ownershipConflict(live, "/r", ["src/web"])?.agent).toBe("beta");

@@ -222,6 +222,15 @@ describe("trimStreamingArtifacts: structural rules", () => {
     expect(trimStreamingArtifacts("```\n- ")).toBe("```\n- ");
     expect(trimStreamingArtifacts("```\n| not | a | table")).toBe("```\n| not | a | table");
   });
+
+  test("regression: an inline artifact exposed by dropping a trailing bare marker is still cleaned", () => {
+    // The structural pass deletes the bare "- " / "1. "; the inline artifact on the NEWLY-EXPOSED final
+    // line must be cleaned too, not leak through raw (the inline pass ran before the line was exposed).
+    expect(trimStreamingArtifacts("Here is a link [\n- ")).toBe("Here is a link ");
+    expect(trimStreamingArtifacts("a **bold\n- ")).toBe("a **bold**");
+    expect(trimStreamingArtifacts("text [link](\n1. ")).toBe("text ");
+    expect(trimStreamingArtifacts("img ![\n- ")).toBe("img ");
+  });
 });
 
 const WELL_FORMED = [
@@ -253,6 +262,11 @@ const TORN = [
   "|---|",
   "```\nconst a = b * c",
   "**done**\nsee [x",
+  // combined shape: an inline artifact whose line is exposed only after a trailing bare marker is dropped
+  "see [exam\n- ",
+  "this is **bold\n- ",
+  "text [link](\n1. ",
+  "photo ![al\n- ",
   "",
 ];
 

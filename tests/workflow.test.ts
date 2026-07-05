@@ -17,12 +17,13 @@ import type { RpcSessionState } from "../src/types.ts";
 import { type BranchSpec, WorkflowDriver } from "../src/workflow-driver.ts";
 import { parseWorkflow, WorkflowParseError } from "../src/workflow/dot.ts";
 import { evalCondition, WorkflowEngine } from "../src/workflow/engine.ts";
-import type { NodeExecutor, NodeResult, RunContext, WorkflowNode, WorkflowRunState } from "../src/workflow/types.ts";
+import type { NodeExecutor, NodeResult, RunContext, Workflow, WorkflowNode, WorkflowRunState } from "../src/workflow/types.ts";
 import { CommissionExecutor } from "../src/workflow/commission-executor.ts";
-import type { AgentDTO, GateReport } from "../src/types.ts";
-import { buildTddVerifyWorkflow, buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
+import type { AgentDTO, GateReport, PersistedAgent } from "../src/types.ts";
+import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "../src/workflow/verify-workflow.ts";
 import { parseStylesheet, resolveNodeStyle } from "../src/workflow/stylesheet.ts";
 import { pickModel } from "../src/rpc-agent.ts";
+import { SquadManager } from "../src/squad-manager.ts";
 
 const BUNDLED = path.join(import.meta.dir, "..", "workflows", "plan-implement", "workflow.fabro");
 const BUNDLED_COMMISSION = path.join(import.meta.dir, "..", "workflows", "commission", "workflow.fabro");
@@ -90,6 +91,19 @@ cargo build 2>&1 && echo 'ok' || exit 1"]   // trailing comment
 	expect(script).toContain("|| exit 1");
 	// `start -> build -> exit` expands into two edges
 	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->build", "build->exit"]);
+});
+
+test("parser: a quoted `[` in a graph attr or node label is not misread as a node attr block", () => {
+	// A top-level graph attribute whose quoted value contains `[` used to be misclassified as a node —
+	// parseNode sliced the id at that `[` and threw "invalid node id", failing the whole DOT parse.
+	const wf = parseWorkflow(`digraph T {
+		label="Release [beta]"
+		start [shape=Mdiamond]
+		exit  [shape=Msquare, label="Done [ok]"]
+		start -> exit
+	}`);
+	expect([...wf.nodes.keys()].sort()).toEqual(["exit", "start"]); // the graph attr did NOT become a node
+	expect(wf.nodes.get("exit")?.label).toBe("Done [ok]"); // a node label value with `[` still parses
 });
 
 test("parser: rejects missing start/exit, unknown shapes, and subgraphs", () => {
@@ -429,6 +443,104 @@ test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps
 	expect(wf.edges.find((e) => e.from === "verify" && e.to === "exit")?.condition).toBe("outcome=succeeded");
 	expect(wf.start).toBe("start");
 	expect(wf.exit).toBe("exit");
+	// the CRITICAL independence marker: the test author runs on a SEPARATE lineage from implement/fixup.
+	expect(wf.nodes.get("write-test")?.isolatedLineage).toBe(true);
+	expect(wf.nodes.get("implement")?.isolatedLineage).toBeFalsy();
+	expect(wf.nodes.get("fixup")?.isolatedLineage).toBeFalsy();
+});
+
+test("TDD lineage: the write-test author and the implementer run on DISTINCT inner agents (not self-grading)", async () => {
+	// The make-or-break criterion of the tester role: independent authorship. A shared thread would let the
+	// coder grade its own homework. Drive the real WorkflowDriver+engine with a per-role fake inner and prove
+	// the write-test node landed on the `tester` instance while implement landed on the `coder` instance —
+	// different objects, different conversations. Also proves the implementer was still primed with the goal
+	// (the priming bug: write-test priming the SHARED thread would have starved the coder of the goal).
+	const turns: { role: "coder" | "tester"; instance: number; message: string }[] = [];
+	class RoleDriver extends FakeInnerDriver {
+		constructor(
+			readonly role: "coder" | "tester",
+			readonly instance: number,
+		) {
+			super();
+		}
+		async prompt(message: string): Promise<void> {
+			turns.push({ role: this.role, instance: this.instance, message });
+			await super.prompt(message);
+		}
+	}
+	let coderN = 0;
+	let testerN = 0;
+	const created: RoleDriver[] = [];
+	const driver = new WorkflowDriver({
+		id: "tdd",
+		workflow: buildTddVerifyWorkflow({ command: "check" }),
+		cwd: os.tmpdir(),
+		createInnerDriver: (role) => {
+			const d = new RoleDriver(role, role === "tester" ? ++testerN : ++coderN);
+			created.push(d);
+			return d;
+		},
+		execCommand: async () => ({ code: 0, stdout: "ok", stderr: "" }), // gate green on the first verify ⇒ no fixup
+	});
+	const done = new Promise<void>((resolve) => driver.on("event", (f: Frame) => f.type === "agent_end" && resolve()));
+	await driver.start();
+	await driver.prompt("add a /health endpoint");
+	await done;
+
+	const writeTurn = turns.find((t) => /acceptance test/i.test(t.message));
+	const implTurn = turns.find((t) => /Complete the goal above/i.test(t.message));
+	expect(writeTurn?.role).toBe("tester"); // the author ran on the isolated tester lineage
+	expect(implTurn?.role).toBe("coder"); // the implementer ran on the shared coder lineage
+	// distinct objects — genuinely different conversations, not two nodes on one thread.
+	const testerInstances = created.filter((d) => d.role === "tester");
+	const coderInstances = created.filter((d) => d.role === "coder");
+	expect(testerInstances.length).toBe(1);
+	expect(coderInstances.length).toBe(1);
+	expect(testerInstances[0]).not.toBe(coderInstances[0]);
+	// the implementer WAS primed with the goal despite write-test running on a separate thread (priming guard).
+	expect(implTurn?.message).toContain("Goal: add a /health endpoint");
+	await driver.stop();
+});
+
+test("buildObserveWorkflow: reproduces the gate command and reports on failure, never fixes", () => {
+	const wf = buildObserveWorkflow({ command: "bun test 2>&1" });
+	expect(wf.nodes.get("reproduce")?.kind).toBe("command");
+	expect(wf.nodes.get("reproduce")?.script).toBe("bun test 2>&1");
+	// A green (non-reproducing) gate must not be treated as a run failure.
+	expect(wf.nodes.get("reproduce")?.goalGate).toBeFalsy();
+	expect(wf.nodes.get("report")?.kind).toBe("agent");
+	expect(wf.nodes.get("report")?.prompt).toMatch(/reproduc|report/i);
+	// Instructs NOT fixing (the observer only reproduces + reports) — never a bare fix instruction.
+	expect(wf.nodes.get("report")?.prompt).toMatch(/do not fix/i);
+	const reproduceToReport = wf.edges.find((e) => e.from === "reproduce" && e.to === "report");
+	expect(reproduceToReport?.condition).toBe("outcome=failed");
+	expect(wf.edges.find((e) => e.from === "reproduce" && e.to === "exit")).toBeTruthy();
+	expect(wf.edges.find((e) => e.from === "report" && e.to === "exit")).toBeTruthy();
+	expect(wf.start).toBe("start");
+	expect(wf.exit).toBe("exit");
+});
+
+test("makeDriver: VerifySpec.mode selects the builder — the ONE mode→builder mapping the fork path mirrors", () => {
+	// makeDriver is private; calling it directly (never start()) constructs the driver without spawning
+	// anything — WorkflowDriver stores its ctor options verbatim on `this.opts`, so reading `.opts.workflow`
+	// back out gives the exact graph makeDriver built, with no real process ever touched.
+	const mgr = new SquadManager({ stateDir: path.join(os.tmpdir(), `verify-mode-mapping-${process.pid}`) });
+	const makeDriver = (mgr as unknown as { makeDriver: (p: PersistedAgent, cold?: boolean) => WorkflowDriver }).makeDriver.bind(mgr);
+	const base: PersistedAgent = { id: "a", name: "a", repo: "/r", worktree: "/w", approvalMode: "yolo", kind: "workflow" };
+	const wfFor = (mode?: "verify" | "tdd" | "observe"): Workflow | undefined =>
+		(makeDriver({ ...base, workflow: { verify: { command: "true", mode } } }) as unknown as { opts: { workflow?: Workflow } }).opts.workflow;
+
+	expect(wfFor("tdd")?.nodes.has("write-test")).toBe(true);
+	expect(wfFor("tdd")?.nodes.has("reproduce")).toBe(false);
+
+	expect(wfFor("observe")?.nodes.has("reproduce")).toBe(true);
+	expect(wfFor("observe")?.nodes.has("write-test")).toBe(false);
+
+	// mode unset ⇒ byte-for-byte today's plain verify graph — no write-test, no reproduce.
+	const plain = wfFor(undefined);
+	expect(plain?.name).toBe("verify");
+	expect(plain?.nodes.has("write-test")).toBe(false);
+	expect(plain?.nodes.has("reproduce")).toBe(false);
 });
 
 test("verify loop: a failing gate routes through codefix, then a fixup turn, until it passes", async () => {

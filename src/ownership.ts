@@ -106,8 +106,13 @@ export interface Owner {
 export function ownershipConflict(live: readonly Owner[], repo: string, owns: readonly string[]): { agent: string; paths: string[] } | undefined {
 	if (owns.length === 0) return undefined;
 	for (const o of live) {
-		if (o.repo !== repo || o.status === "stopped" || o.status === "error" || !o.owns?.length) continue;
-		const hits = ownershipOverlap(owns, o.owns);
+		if (o.repo !== repo || o.status === "stopped" || o.status === "error") continue;
+		// Resolve the holder's write claim exactly as requiresConflict does: `produces` is the primary
+		// field, `owns` the legacy fallback. A holder created produces-first (owns undefined — the modern
+		// form the live spawn path stores) would otherwise slip past this write-vs-write guard entirely.
+		const writes = o.produces?.length ? o.produces : o.owns;
+		if (!writes?.length) continue;
+		const hits = ownershipOverlap(owns, writes);
 		if (hits.length) return { agent: o.name, paths: hits };
 	}
 	return undefined;

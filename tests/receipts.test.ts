@@ -8,7 +8,7 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { appendReceipt, ingest, readReceipts, receiptPath, RunAccumulator } from "../src/receipts.ts";
+import { appendReceipt, ingest, readAllReceipts, readReceipts, receiptPath, RunAccumulator } from "../src/receipts.ts";
 
 const tmps: string[] = [];
 
@@ -81,10 +81,60 @@ test("JSONL persistence round-trip", async () => {
 	expect(JSON.parse(lines[lines.length - 1])).toEqual(second);
 });
 
+test("readReceipts tolerates a crash-torn tail line instead of throwing", async () => {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipts-"));
+	tmps.push(baseDir);
+
+	const acc = new RunAccumulator({ agentId: "ag3", name: "gamma", repo: "/repo" });
+	feed(acc, [{ type: "agent_start" }, { type: "agent_end" }]);
+	acc.finish("idle", []);
+	const good = acc.snapshot();
+	await appendReceipt(baseDir, good);
+
+	// Simulate a host crash mid-append: a half-written JSONL line with no trailing newline.
+	await fs.appendFile(receiptPath(baseDir, "ag3"), '{"agentId":"ag3","runId":"torn","started');
+
+	// Must NOT throw — a single torn line otherwise 500s every receipts-backed endpoint.
+	const back = await readReceipts(baseDir, "ag3");
+	expect(back.length).toBe(1);
+	expect(back[0].runId).toBe(good.runId);
+
+	const all = await readAllReceipts(baseDir);
+	expect(all.length).toBe(1);
+});
+
 test("readReceipts returns [] for an unknown agent", async () => {
 	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipts-"));
 	tmps.push(baseDir);
 	expect(await readReceipts(baseDir, "nope")).toEqual([]);
+});
+
+test("a RunReceipt carrying a validation record (Epic 3) round-trips through JSONL persistence", async () => {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipts-"));
+	tmps.push(baseDir);
+
+	const acc = new RunAccumulator({ agentId: "ag4", name: "delta", repo: "/repo", branch: "feat" });
+	feed(acc, [{ type: "agent_start" }, { type: "agent_end" }]);
+	acc.finish("idle", []);
+	const receipt = acc.snapshot();
+	receipt.validation = {
+		verdict: "veto",
+		agreement: 0.5,
+		confidence: 0.8,
+		perCriterion: [
+			{ id: "c1", satisfied: true },
+			{ id: "c2", satisfied: false, note: "auth missing" },
+		],
+		rationale: "auth criterion not met",
+		model: "opus",
+		ranAt: 1000,
+	};
+
+	await appendReceipt(baseDir, receipt);
+	const back = await readReceipts(baseDir, "ag4");
+	expect(back.length).toBe(1);
+	expect(back[0].validation).toEqual(receipt.validation);
+	expect(back[0].validation?.verdict).toBe("veto");
 });
 
 test("graceful no-usage case: tokens/costUsd omitted", () => {

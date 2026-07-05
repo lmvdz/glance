@@ -1,5 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { OtlpHttpExporter, TraceExportQueue, traceCollectorAllow, type Exporter } from "../src/trace-exporter.ts";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { LocalFileExporter, OtlpHttpExporter, TraceExportQueue, traceCollectorAllow, traceExporterFromEnv, type Exporter } from "../src/trace-exporter.ts";
 import type { Span } from "../src/spans.ts";
 
 const span = (id: string): Span => ({ traceId: "t", spanId: id, name: id, kind: "tool", startedAt: 1, endedAt: 2, status: "ok" });
@@ -87,4 +90,90 @@ test("TraceExportQueue is bounded and drops oldest without throwing", async () =
 	gate.resolve();
 	await done.promise;
 	expect(seen).toEqual(["first", "third", "fourth"]);
+});
+
+// ── D4: durable local export sink + bounded retry ─────────────────────────────────────────────
+
+test("(D4) LocalFileExporter appends an NDJSON line that round-trips back to the input spans", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "trace-local-"));
+	try {
+		const file = path.join(dir, "nested", "traces.jsonl");
+		const exporter = new LocalFileExporter(file);
+		const spans = [span("s1"), span("s2")];
+		await exporter.export(spans, { service: "omp-squad", repo: "/repo" });
+		const text = await fs.readFile(file, "utf8");
+		const lines = text.split("\n").filter((l) => l.trim());
+		expect(lines.length).toBe(1);
+		const parsed = JSON.parse(lines[0]) as { at: number; resource: { service: string }; spans: Span[] };
+		expect(parsed.resource.service).toBe("omp-squad");
+		expect(parsed.spans).toEqual(spans);
+		expect(typeof parsed.at).toBe("number");
+
+		// A second export appends rather than overwriting.
+		await exporter.export([span("s3")], { service: "omp-squad" });
+		const lines2 = (await fs.readFile(file, "utf8")).split("\n").filter((l) => l.trim());
+		expect(lines2.length).toBe(2);
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("(D4) TraceExportQueue retries a failing exporter before counting it failed", async () => {
+	let calls = 0;
+	const exporter: Exporter = {
+		name: "flaky",
+		export: async () => {
+			calls++;
+			if (calls < 3) throw new Error("transient");
+		},
+	};
+	const q = new TraceExportQueue([exporter]);
+	q.enqueue([span("s1")], { service: "test" });
+	await Promise.resolve();
+	await new Promise((r) => setTimeout(r, 300));
+	expect(calls).toBe(3);
+	expect(q.stats.exported).toBe(1);
+	expect(q.stats.failed).toBe(0);
+});
+
+test("(D4) TraceExportQueue counts a batch failed only after RETRY_MAX attempts are all exhausted", async () => {
+	let calls = 0;
+	const exporter: Exporter = {
+		name: "always-fails",
+		export: async () => {
+			calls++;
+			throw new Error("down");
+		},
+	};
+	const q = new TraceExportQueue([exporter], { log: () => {} });
+	q.enqueue([span("s1")], { service: "test" });
+	await new Promise((r) => setTimeout(r, 300));
+	expect(calls).toBe(3);
+	expect(q.stats.failed).toBe(1);
+	expect(q.stats.exported).toBe(0);
+});
+
+test("(D4) traceExporterFromEnv(undefined, stateDir) with no OTLP/Langfuse/Datadog env returns a defined queue (local sink default-on)", async () => {
+	for (const k of ["OMP_SQUAD_TRACE_EXPORT_OTLP_URL", "OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL", "OMP_SQUAD_TRACE_EXPORT_DATADOG_URL", "OMP_SQUAD_TRACE_LOCAL"]) delete process.env[k];
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "trace-local-env-"));
+	try {
+		const queue = traceExporterFromEnv(undefined, dir);
+		expect(queue).toBeDefined();
+		queue!.enqueue([span("s1")], { service: "omp-squad" });
+		await new Promise((r) => setTimeout(r, 50));
+		const text = await fs.readFile(path.join(dir, "traces.jsonl"), "utf8");
+		expect(text.trim().length).toBeGreaterThan(0);
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("(D4) OMP_SQUAD_TRACE_LOCAL=0 opts out of the local sink; no other exporters configured ⇒ undefined", () => {
+	for (const k of ["OMP_SQUAD_TRACE_EXPORT_OTLP_URL", "OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL", "OMP_SQUAD_TRACE_EXPORT_DATADOG_URL"]) delete process.env[k];
+	process.env.OMP_SQUAD_TRACE_LOCAL = "0";
+	try {
+		expect(traceExporterFromEnv(undefined, "/tmp/whatever")).toBeUndefined();
+	} finally {
+		delete process.env.OMP_SQUAD_TRACE_LOCAL;
+	}
 });
