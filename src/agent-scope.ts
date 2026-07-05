@@ -26,17 +26,23 @@ export function scopeFor(actor: Actor, roster: AgentDTO[]): Set<string> {
 		parent = p.parentId;
 	}
 
-	// ponytail: this is an in-memory roster walk. Ceiling is O(n²) for very large fan-out trees;
-	// upgrade to a parentId index if a single manager routinely holds thousands of agents.
+	// Self's OWN descendant subtree — an agent may address/inspect the agents IT spawned, but not its
+	// siblings or cousins. Seed the closure from the actor ALONE, then union in: seeding from `out`
+	// (which already holds the ancestor chain) would pull in every child of every ancestor — the whole
+	// cross-branch subtree — leaking sibling/cousin agents into the message allowlist and the fabric scope.
+	// ponytail: in-memory roster walk, O(n²) worst case for very large fan-out; index parentId if a single
+	// manager routinely holds thousands of agents.
+	const descendants = new Set<string>([actor.id]);
 	let changed = true;
 	while (changed) {
 		changed = false;
 		for (const a of roster) {
-			if (a.parentId && out.has(a.parentId) && !out.has(a.id)) {
-				out.add(a.id);
+			if (a.parentId && descendants.has(a.parentId) && !descendants.has(a.id)) {
+				descendants.add(a.id);
 				changed = true;
 			}
 		}
 	}
+	for (const id of descendants) out.add(id);
 	return out;
 }
