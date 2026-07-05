@@ -100,4 +100,18 @@ describe("provenance pure parts", () => {
 		expect(findLandCommit(log, "ZZZ-1", ["squad/ompsq-336-link"])?.sha).toBe("bbb");
 		expect(findLandCommit(log, "ZZZ-1", [])).toBeUndefined();
 	});
+
+	test("regression: a ticket does not match a prefix-colliding sibling (OMPSQ-3 vs OMPSQ-30)", () => {
+		const log = [{ sha: "l30", author: "x", dateMs: 2, subject: "squad(worker): land squad/ompsq-30-add-widget" }];
+		// OMPSQ-3 was never landed — it must NOT borrow OMPSQ-30's land commit via a substring match.
+		expect(findLandCommit(log, "OMPSQ-3", [])).toBeUndefined();
+		expect(findLandCommit(log, "OMPSQ-30", [])?.sha).toBe("l30"); // its own still matches
+
+		const receipts = [
+			receipt({ agentId: "r30", branch: "squad/ompsq-30-add-widget", startedAt: 2 }),
+			receipt({ agentId: "r3", branch: "squad/ompsq-3-login-fix", startedAt: 1 }),
+		];
+		expect(threadRuns(receipts, "OMPSQ-3").map((r) => r.agentId)).toEqual(["r3"]);
+		expect(threadRuns(receipts, "OMPSQ-30").map((r) => r.agentId)).toEqual(["r30"]);
+	});
 });
