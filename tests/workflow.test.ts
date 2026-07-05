@@ -430,6 +430,63 @@ test("buildTddVerifyWorkflow: prepends a write-test node before implement, keeps
 	expect(wf.edges.find((e) => e.from === "verify" && e.to === "exit")?.condition).toBe("outcome=succeeded");
 	expect(wf.start).toBe("start");
 	expect(wf.exit).toBe("exit");
+	// the CRITICAL independence marker: the test author runs on a SEPARATE lineage from implement/fixup.
+	expect(wf.nodes.get("write-test")?.isolatedLineage).toBe(true);
+	expect(wf.nodes.get("implement")?.isolatedLineage).toBeFalsy();
+	expect(wf.nodes.get("fixup")?.isolatedLineage).toBeFalsy();
+});
+
+test("TDD lineage: the write-test author and the implementer run on DISTINCT inner agents (not self-grading)", async () => {
+	// The make-or-break criterion of the tester role: independent authorship. A shared thread would let the
+	// coder grade its own homework. Drive the real WorkflowDriver+engine with a per-role fake inner and prove
+	// the write-test node landed on the `tester` instance while implement landed on the `coder` instance —
+	// different objects, different conversations. Also proves the implementer was still primed with the goal
+	// (the priming bug: write-test priming the SHARED thread would have starved the coder of the goal).
+	const turns: { role: "coder" | "tester"; instance: number; message: string }[] = [];
+	class RoleDriver extends FakeInnerDriver {
+		constructor(
+			readonly role: "coder" | "tester",
+			readonly instance: number,
+		) {
+			super();
+		}
+		async prompt(message: string): Promise<void> {
+			turns.push({ role: this.role, instance: this.instance, message });
+			await super.prompt(message);
+		}
+	}
+	let coderN = 0;
+	let testerN = 0;
+	const created: RoleDriver[] = [];
+	const driver = new WorkflowDriver({
+		id: "tdd",
+		workflow: buildTddVerifyWorkflow({ command: "check" }),
+		cwd: os.tmpdir(),
+		createInnerDriver: (role) => {
+			const d = new RoleDriver(role, role === "tester" ? ++testerN : ++coderN);
+			created.push(d);
+			return d;
+		},
+		execCommand: async () => ({ code: 0, stdout: "ok", stderr: "" }), // gate green on the first verify ⇒ no fixup
+	});
+	const done = new Promise<void>((resolve) => driver.on("event", (f: Frame) => f.type === "agent_end" && resolve()));
+	await driver.start();
+	await driver.prompt("add a /health endpoint");
+	await done;
+
+	const writeTurn = turns.find((t) => /acceptance test/i.test(t.message));
+	const implTurn = turns.find((t) => /Complete the goal above/i.test(t.message));
+	expect(writeTurn?.role).toBe("tester"); // the author ran on the isolated tester lineage
+	expect(implTurn?.role).toBe("coder"); // the implementer ran on the shared coder lineage
+	// distinct objects — genuinely different conversations, not two nodes on one thread.
+	const testerInstances = created.filter((d) => d.role === "tester");
+	const coderInstances = created.filter((d) => d.role === "coder");
+	expect(testerInstances.length).toBe(1);
+	expect(coderInstances.length).toBe(1);
+	expect(testerInstances[0]).not.toBe(coderInstances[0]);
+	// the implementer WAS primed with the goal despite write-test running on a separate thread (priming guard).
+	expect(implTurn?.message).toContain("Goal: add a /health endpoint");
+	await driver.stop();
 });
 
 test("buildObserveWorkflow: reproduces the gate command and reports on failure, never fixes", () => {

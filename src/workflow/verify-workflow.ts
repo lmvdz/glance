@@ -69,13 +69,21 @@ export function buildVerifyWorkflow(spec: VerifySpec): Workflow {
  * buildVerifyWorkflow except for a `write-test` agent node prepended ahead of
  * `implement`, so a passing run proves the test was authored first.
  *
+ * The `write-test` node carries `isolatedLineage` — it runs on a SEPARATE
+ * agent/context from `implement`, so the test author and the implementer are
+ * distinct lineages that cannot co-reason. The implementer inherits only the
+ * committed red test on disk, never the author's conversation — that separation
+ * is what stops the coder from grading its own homework.
+ *
  *   start → write-test → implement → verify ─(pass)→ exit
  *                                       └────(fail)→ codefix → fixup → escalate → verify
  */
 export function buildTddVerifyWorkflow(spec: VerifySpec): Workflow {
 	const nodes = new Map<string, WorkflowNode>([
 		["start", { id: "start", kind: "start", label: "Start", attrs: {} }],
-		["write-test", { id: "write-test", kind: "agent", label: "Write test", prompt: WRITE_TEST_PROMPT, attrs: {} }],
+		// isolatedLineage: the test author runs on a SEPARATE agent/context from `implement`, so the coder
+		// cannot grade its own homework — it inherits only the committed red test, not the author's thread.
+		["write-test", { id: "write-test", kind: "agent", label: "Write test", prompt: WRITE_TEST_PROMPT, isolatedLineage: true, attrs: {} }],
 		["implement", { id: "implement", kind: "agent", label: "Implement", prompt: IMPLEMENT_PROMPT, attrs: {} }],
 		["verify", { id: "verify", kind: "command", label: "Verify", script: spec.command, goalGate: true, retryTarget: "codefix", attrs: {} }],
 		["codefix", { id: "codefix", kind: "command", label: "Codefix", script: CODEFIX_CMD, maxVisits: 1, overflow: "fixup", attrs: {} }],

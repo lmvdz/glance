@@ -31,8 +31,10 @@ export type IdleScheduler = (check: () => void, intervalMs: number) => IdleCheck
 export interface SingleAgentExecutorOptions {
 	/** Worktree the run operates in (command cwd, prompt-ref base). */
 	cwd: string;
-	/** Lazily obtain (and start) the agent thread for agent/prompt nodes. */
-	acquireAgent: () => Promise<AgentDriver>;
+	/** Lazily obtain (and start) the agent thread for agent/prompt nodes. `node` lets the driver route an
+	 *  `isolatedLineage` node (e.g. the TDD write-test author) to a SEPARATE agent/context from the shared
+	 *  inner thread; absent/ordinary nodes get the one persistent thread. */
+	acquireAgent: (node?: WorkflowNode) => Promise<AgentDriver>;
 	/** Forward an omp-shaped frame to surfaces (the manager). */
 	emit: (frame: Record<string, unknown>) => void;
 	/** Raise a human gate; resolve with the chosen edge label. */
@@ -122,10 +124,17 @@ export class SingleAgentExecutor implements NodeExecutor {
 			await fs.writeFile(path.join(this.opts.cwd, "parallel_results.json"), ctx.vars.parallelResults);
 		}
 
+		// An isolatedLineage node (the TDD write-test author) runs on a SEPARATE agent/context from the
+		// shared inner, so the author and the implementer cannot co-reason. Its fresh thread never received
+		// the goal, so it always gets its own "Goal:" prime — but it must NOT flip the shared thread's
+		// `primed` (or the implementer, running next as the first node on the shared inner, would never be
+		// primed with the goal) or its model/effort tracking (that follows the shared coder thread).
+		const isolated = node.isolatedLineage === true;
+
 		const parts: string[] = [];
-		if (!this.primed) {
+		if (isolated || !this.primed) {
 			parts.push(`Goal: ${ctx.goal}`);
-			this.primed = true;
+			if (!isolated) this.primed = true;
 		}
 		parts.push(body);
 		if (ctx.vars.lastOutput) {
@@ -135,7 +144,8 @@ export class SingleAgentExecutor implements NodeExecutor {
 		// (agent nodes share one thread, so re-injecting every turn would spam the same notes). The trigger
 		// is OR'd with a persisted checkpoint var so a COLD restart landing on this node still folds the
 		// comments in — a fresh executor has gateJustPassed=false and would otherwise run blind (RTC-F7).
-		if (this.gateJustPassed || ctx.vars[GATE_FOLD_VAR]) {
+		// Never on an isolated author — reviewer feedback is for the implementer, not the test author.
+		if (!isolated && (this.gateJustPassed || ctx.vars[GATE_FOLD_VAR])) {
 			this.gateJustPassed = false;
 			delete ctx.vars[GATE_FOLD_VAR];
 			const extra = await this.opts.decoratePrompt?.(node, ctx);
@@ -144,15 +154,20 @@ export class SingleAgentExecutor implements NodeExecutor {
 		const message = parts.join("\n\n");
 
 		try {
-			const agent = await this.opts.acquireAgent();
-			const style = this.opts.resolveStyle?.(node);
-			if (style?.reasoningEffort && style.reasoningEffort !== this.lastEffort && agent.setThinkingLevel) {
-				await agent.setThinkingLevel(style.reasoningEffort).catch(() => {});
-				this.lastEffort = style.reasoningEffort;
-			}
-			if (style?.model && style.model !== this.lastModel && agent.setModel) {
-				await agent.setModel(style.model).catch(() => {});
-				this.lastModel = style.model;
+			const agent = await this.opts.acquireAgent(node);
+			// Style (model/effort) tracking follows the shared coder thread only — an isolated agent carries
+			// its own model chosen at creation, so applying the stylesheet to it (and mutating lastModel/
+			// lastEffort) would leak across lineages and desync the coder's own next comparison.
+			if (!isolated) {
+				const style = this.opts.resolveStyle?.(node);
+				if (style?.reasoningEffort && style.reasoningEffort !== this.lastEffort && agent.setThinkingLevel) {
+					await agent.setThinkingLevel(style.reasoningEffort).catch(() => {});
+					this.lastEffort = style.reasoningEffort;
+				}
+				if (style?.model && style.model !== this.lastModel && agent.setModel) {
+					await agent.setModel(style.model).catch(() => {});
+					this.lastModel = style.model;
+				}
 			}
 			const timeoutMs = Number(node.attrs.timeout_ms) || this.opts.turnTimeoutMs || 600_000;
 			const text = await this.awaitTurn(agent, message, timeoutMs);
@@ -173,7 +188,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 		// `primed` is false on a cold resume), instead of skipping it — the D2 soundness fix.
 		if (this.opts.cold) return this.runAgent(node, ctx);
 		try {
-			const agent = await this.opts.acquireAgent();
+			const agent = await this.opts.acquireAgent(node);
 			const st = await agent.getState();
 			if (!st.isStreaming) return { outcome: "succeeded", text: "" };
 			const timeoutMs = Number(node.attrs.timeout_ms) || this.opts.turnTimeoutMs || 600_000;
