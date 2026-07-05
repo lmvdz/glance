@@ -177,6 +177,19 @@ test("fabric snapshot is scoped and returns distilled facts with receipt provena
 	expect(snapshot.scout.map((s) => s.issue.id)).toEqual(["i-a"]);
 });
 
+test("(concern 05) fabric snapshot surfaces a recurring-failure annotation, repo-scoped", async () => {
+	const dir = await tmpDir("acf-failure-");
+	const { recordFailureAnnotation } = await import("../src/failure-memory.ts");
+	recordFailureAnnotation(dir, { fingerprint: "land-failing:squad/a1", repo: "/repo", branch: "squad/a1", rootCause: "flaky retry backoff", at: 500 });
+	recordFailureAnnotation(dir, { fingerprint: "land-failing:squad/other-repo", repo: "/other-repo", branch: "squad/other-repo", rootCause: "unrelated", at: 500 });
+
+	const agents = [dto("a", { featureId: "f" })];
+	const snapshot = await buildFabricSnapshot({ actor: agentActor("a"), agents, stateDir: dir, repos: ["/repo"], includeLeases: false, now: () => 1000, listIssues: async () => [] });
+
+	expect(snapshot.failures).toHaveLength(1); // the other-repo annotation is excluded — repo-scoped, never an unscoped global leak
+	expect(snapshot.failures[0]).toEqual({ type: "failure", source: { repo: "/repo" }, fingerprint: "land-failing:squad/a1", branch: "squad/a1", rootCause: "flaky retry backoff", at: 500 });
+});
+
 function scoutFact(id: string, title: string, agentId: string, runId: string, filedAt: number): FabricScoutFact {
 	return { type: "scout", title, filedAt, source: { agentId, runId, issueId: id }, issue: { id, name: `[scout] do-not-auto-land: ${title}` } };
 }

@@ -87,6 +87,11 @@ export interface ObserverDeps {
 	 *  the land-failure-streak cap this tick (0 when none). Fired every tick the landLedger check runs,
 	 *  so "land-failure-streak frequency" is measurable even when nothing is filed (e.g. already-open). */
 	recordLandFailureStreak?: (count: number) => void;
+	/** Recurring-failure memory (concern 05, downscoped): annotate a land-failure streak's root cause
+	 *  ONCE per fingerprint (the callee is responsible for its own idempotency — a fingerprint already
+	 *  annotated is a no-op) so a later cold-start on the same branch can warn the next agent. Absent
+	 *  ⇒ disabled (no annotation, matches OMP_SQUAD_FAILURE_MEMORY default off). */
+	annotateFailure?: (finding: Finding, branch: string) => Promise<void>;
 	/** Epic 3's compliance evaluator (src/compliance.ts) — real policy findings (forced lands,
 	 *  overridden validator vetoes, repeatedly-failing branches) fed into the SAME observe → file →
 	 *  confirm loop as the structural checks below. Absent ⇒ disabled — keeps old tests/embedders green. */
@@ -599,6 +604,16 @@ export class Observer {
 			const liveBranches = new Set(agents.map((a) => a.branch).filter((b): b is string => !!b));
 			const lf = landFailureFindings(this.deps.landLedger(), liveBranches, landFailCap());
 			this.deps.recordLandFailureStreak?.(lf.length);
+			// Recurring-failure memory (concern 05): annotate each currently-streaking branch's root
+			// cause. The callee (squad-manager) skips its own reflect() call for a fingerprint already
+			// annotated, so this fires ONE genuine LLM call per recurring failure, not once per tick.
+			if (this.deps.annotateFailure) {
+				const log = this.deps.log ?? (() => {});
+				for (const f of lf) {
+					const branch = f.fingerprint.slice("land-failing:".length);
+					await this.deps.annotateFailure(f, branch).catch((e) => log(`annotateFailure failed for ${f.fingerprint}: ${msg(e)}`));
+				}
+			}
 			findings.push(...lf);
 		}
 		// Epic 3 compliance findings (forced lands, overridden vetoes, repeatedly-failing branches) —

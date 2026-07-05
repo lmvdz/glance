@@ -130,6 +130,8 @@ import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
+import { reflect } from "./reflection.ts";
+import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
@@ -790,6 +792,7 @@ export class SquadManager extends EventEmitter {
 					uncommittedInWorktree: (a) => this.uncommittedInWorktree(a),
 					landLedger: () => readLandLedger(this.stateDir),
 					recordLandFailureStreak: (count) => this.learningMetrics.record("land-failure-streak", count),
+					annotateFailure: (finding, branch) => this.annotateRecurringFailure(repo, finding, branch),
 					complianceFindings: () => this.complianceFindings(),
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `observer-seen.${slug(repo)}.json`,
@@ -2382,6 +2385,21 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			this.log("warn", `learning metrics record failed for ${rec.dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 		}
+	}
+
+	/**
+	 * Recurring-failure memory (agentic-learning-loop concern 05, downscoped): annotate a land-failure
+	 * streak's root cause ONCE per fingerprint, reusing concern 04's `reflect()` (no second LLM path).
+	 * Idempotency lives HERE (not in the caller's timing) — a fingerprint already annotated short-
+	 * circuits before ever calling `reflect()`, so a capped/retried observer tick can call this every
+	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default off).
+	 */
+	private async annotateRecurringFailure(repo: string, finding: Finding, branch: string): Promise<void> {
+		if (!isOn(learningFlags().failureMemory)) return;
+		if (failureAnnotation(this.stateDir, finding.fingerprint)) return; // already annotated — no-op
+		const r = await reflect({ output: finding.detail ?? finding.title });
+		if (!r) return;
+		recordFailureAnnotation(this.stateDir, { fingerprint: finding.fingerprint, repo, branch, rootCause: r.rootCause, at: Date.now() });
 	}
 
 	private async autoLandWorkflow(rec: AgentRecord, outcome: string | undefined, proof?: { state?: string }): Promise<void> {

@@ -751,3 +751,55 @@ test("(proof-first, unit-level) auditLandedSurvivors/auditStaleDone never call a
 	expect(stale).toHaveLength(0);
 	expect(aheadCalls).toBe(0); // proof consulted FIRST — the arithmetic never runs
 });
+
+// ── Recurring-failure memory (concern 05, downscoped) ──────────────────────────────────────────
+
+test("(concern 05) a land-failure streak triggers exactly one annotateFailure call per tick per fingerprint", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	const ledger: LandLedger = { "squad/a1": { fails: 5, lastDetail: "assertion failed: retry backoff", at: 1 } };
+	const calls: { fingerprint: string; branch: string }[] = [];
+	const { deps } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("a1", "idle", undefined, "squad/a1")],
+		landLedger: () => ledger,
+		annotateFailure: async (finding, branch) => {
+			calls.push({ fingerprint: finding.fingerprint, branch });
+		},
+	});
+	await new Observer(deps).tick();
+	expect(calls).toEqual([{ fingerprint: "land-failing:squad/a1", branch: "squad/a1" }]);
+
+	// A SECOND tick (the streak persists — nothing fixed it) calls the hook again; the hook itself
+	// (squad-manager's annotateRecurringFailure) is what makes reflect() idempotent per fingerprint,
+	// NOT the observer — that's the whole point of the "callee is responsible" contract.
+	await new Observer(deps).tick();
+	expect(calls).toHaveLength(2);
+});
+
+test("(concern 05) no landLedger dep ⇒ annotateFailure is never called", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	let called = false;
+	const { deps } = makeDeps(tmpDir(), {
+		listAgents: () => [],
+		annotateFailure: async () => {
+			called = true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(called).toBe(false);
+});
+
+test("(concern 05) a branch under the cap never triggers annotateFailure (not yet a recurring failure)", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP = "3";
+	const ledger: LandLedger = { "squad/a1": { fails: 1, lastDetail: "x", at: 1 } };
+	let called = false;
+	const { deps } = makeDeps(tmpDir(), {
+		listAgents: () => [agent("a1", "idle", undefined, "squad/a1")],
+		landLedger: () => ledger,
+		annotateFailure: async () => {
+			called = true;
+		},
+	});
+	await new Observer(deps).tick();
+	expect(called).toBe(false);
+});

@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scopeFor } from "./agent-scope.ts";
 import { readDigest } from "./digest.ts";
+import { readFailureAnnotations } from "./failure-memory.ts";
 import { leasesFor, type LeaseEntry } from "./leases.ts";
 import { readReceipts } from "./receipts.ts";
 import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "./types.ts";
@@ -62,6 +63,21 @@ export interface FabricDecisionFact {
 	createdAt?: number;
 }
 
+/**
+ * Recurring-failure memory (agentic-learning-loop concern 05, downscoped) — a root-cause annotation
+ * for a failure the observer's fingerprint streak confirmed is RECURRING (not a BM25-similarity
+ * guess; see failure-memory.ts). Repo-scoped like `FabricDecisionFact` (annotations aren't tied to
+ * any one agent/worktree's lifetime, so there is no `agentId` to scope through `scopeFor`).
+ */
+export interface FabricFailureFact {
+	type: "failure";
+	source: FactSource;
+	fingerprint: string;
+	branch: string;
+	rootCause: string;
+	at: number;
+}
+
 export interface FabricSnapshot {
 	actor: string;
 	generatedAt: number;
@@ -72,6 +88,7 @@ export interface FabricSnapshot {
 	scout: FabricScoutFact[];
 	leases: FabricLeaseFact[];
 	decisions: FabricDecisionFact[];
+	failures: FabricFailureFact[];
 }
 
 interface ScoutSeenEntry {
@@ -179,6 +196,22 @@ export async function loadScoutFacts(stateDir: string, issues: IssueRef[], scope
 	return facts;
 }
 
+/**
+ * Recurring-failure facts, repo-scoped (copy of `loadScoutFacts`'s scope-filtering INTENT, adapted:
+ * an annotation carries no `agentId` — it survives past the worktree that tripped it — so it is
+ * filtered by REPO membership instead, exactly like `FabricDecisionFact` above). Never an unscoped
+ * global store leak: a repo not in `repos` (when the caller passed one) never surfaces its failures.
+ */
+export function loadFailureFacts(stateDir: string, repos?: string[]): FabricFailureFact[] {
+	const store = readFailureAnnotations(stateDir);
+	const facts: FabricFailureFact[] = [];
+	for (const a of Object.values(store)) {
+		if (repos?.length && !repos.includes(a.repo)) continue;
+		facts.push({ type: "failure", source: { repo: a.repo }, fingerprint: a.fingerprint, branch: a.branch, rootCause: a.rootCause, at: a.at });
+	}
+	return facts;
+}
+
 export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnapshot> {
 	const generatedAt = deps.now?.() ?? Date.now();
 	const scope = scopeFor(deps.actor, deps.agents);
@@ -248,6 +281,8 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		}
 	}
 
+	const failures = loadFailureFacts(deps.stateDir, deps.repos);
+
 	return {
 		actor: deps.actor.id,
 		generatedAt,
@@ -258,5 +293,6 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		scout,
 		leases,
 		decisions,
+		failures,
 	};
 }

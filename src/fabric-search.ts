@@ -17,7 +17,7 @@ import { fenceUntrusted, parseDigestReward, rewardWeight } from "./digest.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { isOn, learningFlags } from "./metrics.ts";
 
-export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision";
+export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure";
 
 /** A flattened, searchable unit of knowledge. */
 export interface KbDoc {
@@ -103,6 +103,15 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 
 	for (const [i, dec] of snapshot.decisions.entries()) {
 		docs.push({ type: "decision", id: `decision:${dec.source.featureId ?? i}:${i}`, title: `Decision · ${dec.featureTitle}`, text: `${dec.text} ${dec.featureTitle}`, repo: dec.source.repo, ref: dec.source.featureId, source: dec.decisionSource ? `${dec.decisionSource} decision` : "decision", ts: dec.createdAt });
+	}
+
+	// Recurring-failure memory (concern 05, OMP_SQUAD_FAILURE_MEMORY): warn the next agent it's about
+	// to retry a KNOWN-recurring failure. Flag off (default) ⇒ no failure docs surface even if some
+	// were annotated while the flag was previously on (consistent with reward-boost's off-means-off).
+	if (isOn(learningFlags().failureMemory)) {
+		for (const fl of snapshot.failures) {
+			docs.push({ type: "failure", id: `failure:${fl.fingerprint}`, title: `Recurring failure · ${fl.branch}`, text: `${fl.rootCause} ${fl.branch}`, repo: fl.source.repo, ref: fl.fingerprint, source: "recurring failure", ts: fl.at });
+		}
 	}
 
 	return docs;
@@ -197,6 +206,7 @@ const PRIMER_LABEL: Record<KbDocType, string> = {
 	agent: "Active agent",
 	scout: "Latent work",
 	lease: "Being edited",
+	failure: "Recurring failure",
 };
 
 /** Coarse "how long ago" label for a provenance timestamp. Undefined input ⇒ undefined output

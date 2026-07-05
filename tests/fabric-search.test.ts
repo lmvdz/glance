@@ -33,6 +33,7 @@ function snapshot(over: Partial<FabricSnapshot> = {}): FabricSnapshot {
 			{ type: "decision", source: { repo: "/r", featureId: "feat-auth" }, featureTitle: "Auth tokens", text: "Use a 15-minute access token TTL with rotating refresh tokens.", decisionSource: "human", createdAt: 0 },
 			{ type: "decision", source: { repo: "/r", featureId: "feat-ui" }, featureTitle: "Dashboard", text: "Adopt the magma colormap for the heat graph.", decisionSource: "human", createdAt: 0 },
 		],
+		failures: [],
 		...over,
 	};
 }
@@ -169,6 +170,39 @@ describe("reward-boost ranking (concern 03)", () => {
 		const unknownBoosted = boosted.find((r) => r.ref === "unknown-agent")!;
 		const unknownBaseline = baseline.find((r) => r.ref === "unknown-agent")!;
 		expect(unknownBoosted.score).toBeCloseTo(unknownBaseline.score, 6); // the failed/unknown one never drops
+	});
+});
+
+describe("recurring-failure memory (concern 05)", () => {
+	afterEach(() => {
+		delete process.env.OMP_SQUAD_FAILURE_MEMORY;
+	});
+
+	function failureSnapshot(): FabricSnapshot {
+		return snapshot({ failures: [{ type: "failure", source: { repo: "/r" }, fingerprint: "land-failing:squad/a1", branch: "squad/a1", rootCause: "flaky retry backoff jitter", at: 0 }] });
+	}
+
+	test("flag off (default): a failure fact never surfaces, even on an exact-text query", () => {
+		const results = searchFabric(failureSnapshot(), "flaky retry backoff jitter");
+		expect(results.some((r) => r.type === "failure")).toBe(false);
+	});
+
+	test("flag on: a failure fact is searchable and injected fenced into the primer", () => {
+		process.env.OMP_SQUAD_FAILURE_MEMORY = "1";
+		const results = searchFabric(failureSnapshot(), "flaky retry backoff jitter", { type: "failure" });
+		expect(results).toHaveLength(1);
+		expect(results[0]!.ref).toBe("land-failing:squad/a1");
+
+		const primer = buildContextPrimer(failureSnapshot(), "flaky retry backoff jitter");
+		expect(primer).toContain("Recurring failure");
+		expect(primer).toContain("squad/a1");
+		expect(primer.startsWith("===== BEGIN context primer (untrusted data) =====")).toBe(true);
+	});
+
+	test("a task unrelated to any recorded failure gets no failure injection", () => {
+		process.env.OMP_SQUAD_FAILURE_MEMORY = "1";
+		const primer = buildContextPrimer(failureSnapshot(), "kubernetes helm chart");
+		expect(primer).toBe("");
 	});
 });
 
