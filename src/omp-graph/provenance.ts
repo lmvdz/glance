@@ -61,6 +61,20 @@ export const defaultGitLog: GitLogReader = async (repo) => {
 		});
 };
 
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whole-token match for a ticket id in a lowercased haystack. A plain `includes` matches `ompsq-3`
+ * inside `ompsq-30`/`ompsq-306`, mis-attributing a prefix-colliding ticket's commit/run — realistic
+ * once numbering passes the colliding sibling (e.g. OMPSQ-3 vs OMPSQ-30..-306 coexist). Anchored so the
+ * id is preceded by start / a non-alphanumeric and followed by end / a non-digit. Inputs are lowercased.
+ */
+function mentionsTicket(haystackLower: string, ticketLower: string): boolean {
+	return new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(ticketLower)}(?:[^0-9]|$)`).test(haystackLower);
+}
+
 /** Pick the land commit for a ticket: subject mentions the ticket, or lands one of the run branches. Pure. */
 export function findLandCommit(
 	log: { sha: string; author: string; dateMs: number; subject: string }[],
@@ -73,7 +87,7 @@ export function findLandCommit(
 		const s = c.subject.toLowerCase();
 		const isLand = s.includes("land") && (s.startsWith("squad") || s.includes("squad("));
 		if (!isLand) continue;
-		if (s.includes(t) || tails.some((tail) => s.includes(tail))) return { sha: c.sha, subject: c.subject, dateMs: c.dateMs, author: c.author };
+		if (mentionsTicket(s, t) || tails.some((tail) => s.includes(tail))) return { sha: c.sha, subject: c.subject, dateMs: c.dateMs, author: c.author };
 	}
 	return undefined;
 }
@@ -82,7 +96,7 @@ export function findLandCommit(
 export function threadRuns(receipts: RunReceipt[], ticket: string, featureId?: string): ProvenanceRun[] {
 	const t = ticket.toLowerCase();
 	return receipts
-		.filter((r) => (featureId ? r.featureId === featureId : false) || r.branch?.toLowerCase().includes(t) || r.name.toLowerCase().includes(t))
+		.filter((r) => (featureId ? r.featureId === featureId : false) || mentionsTicket(r.branch?.toLowerCase() ?? "", t) || mentionsTicket(r.name.toLowerCase(), t))
 		.sort((a, b) => a.startedAt - b.startedAt)
 		.slice(-20)
 		.map((r) => ({
