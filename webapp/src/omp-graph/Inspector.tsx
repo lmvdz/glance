@@ -96,6 +96,9 @@ const TicketBody: React.FC<{ ticket: string; onTrace: (d: ProvenanceDoc) => void
       ) : (
         <Step color="#565C68" k="AGENT" v="no receipts matched this ticket" />
       )}
+      {doc.verify && (
+        <Step color="#E8B24A" k="VERIFY" v={doc.verify.outcome} s={`${fmtWhen(doc.verify.at)} · ${doc.verify.actor}`} />
+      )}
       {doc.land ? (
         <Step color="#4CAF7A" k="LAND" v={doc.land.subject} s={`${doc.land.sha.slice(0, 7)} · ${fmtWhen(doc.land.dateMs)} · ${doc.land.author}`} />
       ) : (

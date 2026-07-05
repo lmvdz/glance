@@ -261,7 +261,7 @@ export interface TraceRollupDTO {
   errors: number;
 }
 
-export type TraceSpanKindDTO = 'run' | 'node' | 'tool' | 'subagent' | 'verify' | 'land' | 'resolve';
+export type TraceSpanKindDTO = 'run' | 'node' | 'tool' | 'subagent' | 'verify' | 'spawn' | 'validate' | 'land' | 'resolve';
 export type TraceSpanStatusDTO = 'ok' | 'error' | 'running';
 
 /** One span in the trace tree — mirrors src/spans.ts's TraceNode. Fine spans are tail-sampled, so a
@@ -299,9 +299,13 @@ export interface TraceResponseDTO {
   root: TraceNodeDTO;
   rollup: TraceRollupDTO;
   receipts: TraceReceiptSummaryDTO[];
-  /** True when at least one receipt kept only its rollup because fine spans were sampled out —
-   *  the span waterfall below `rollup` is then labeled "sampled — partial". */
+  /** True when at least one receipt has NO spans at all (legacy/pre-sampling-fix rows) — the decision
+   *  spine is genuinely missing. A finalized run always carries its structural spine, so this is false
+   *  for normal runs regardless of tool-level sampling; see `sampled` for that softer signal. */
   partial: boolean;
+  /** True when at least one contributing receipt had its tool-level spans tail-sampled out. Renders as
+   *  a muted "tool detail sampled" chip, distinct from the alarming `partial` badge. */
+  sampled?: boolean;
 }
 
 export interface AgentDTO {
