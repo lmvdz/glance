@@ -248,6 +248,7 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 	}
 
 	const repos = [...new Set(deps.repos?.length ? deps.repos : scopedAgents.map((a) => a.repo))];
+	const repoSet = new Set(repos);
 	const issueLists = await Promise.all(repos.map((repo) => (deps.listIssues ? deps.listIssues(repo).catch(() => null) : Promise.resolve(null))));
 	const scout = await loadScoutFacts(deps.stateDir, issueLists.flatMap((x) => x ?? []), scope);
 
@@ -267,7 +268,11 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 	const decisions: FabricDecisionFact[] = [];
 	for (const f of deps.features ?? []) {
 		if (f.archived) continue;
-		if (deps.repos?.length && !deps.repos.includes(f.repo)) continue;
+		// Scope decisions to the SAME computed repo set every other fact type uses (agents, digests,
+		// leases, issues) — NOT the raw `deps.repos`. When the caller omits `repos` (the default
+		// /api/fabric path with no ?repo), filtering on `deps.repos?.length` short-circuits false and
+		// leaks decisions from every repo/tenant into an actor's scoped fabric + cold-start primer.
+		if (!repoSet.has(f.repo)) continue;
 		for (const d of f.decisions ?? []) {
 			if (!d.text?.trim()) continue;
 			decisions.push({
