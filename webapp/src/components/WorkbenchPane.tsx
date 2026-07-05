@@ -14,7 +14,6 @@ import {
   Download,
   Filter,
   GitBranch,
-  GripVertical,
   Inbox,
   Library,
   RotateCcw,
@@ -106,16 +105,10 @@ export const TaskRailRow: React.FC<{
   isActive: boolean;
   isDone: boolean;
   dueSoon: boolean;
-  isDraggable: boolean;
-  dragging: boolean;
   priorityColor: string;
   onSelect: () => void;
   onDelete: () => void;
-  onDragStart?: (event: React.DragEvent) => void;
-  onDragOver?: (event: React.DragEvent) => void;
-  onDragEnd?: () => void;
-  onDrop?: (event: React.DragEvent) => void;
-}> = ({ task, status, isActive, isDone, dueSoon, isDraggable, dragging, priorityColor, onSelect, onDelete, onDragStart, onDragOver, onDragEnd, onDrop }) => {
+}> = ({ task, status, isActive, isDone, dueSoon, priorityColor, onSelect, onDelete }) => {
   // Float-worthy = anything that wants a decision: blocked/errored (critical) or
   // land-ready / stopped (warn). Working is alive but needs nothing.
   const attention = !isDone && (status?.posture === 'needs-you' || status?.posture === 'idle');
@@ -126,17 +119,9 @@ export const TaskRailRow: React.FC<{
   const ref = taskRef(task);
   return (
     <div
-      draggable={isDraggable}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDragEnd={onDragEnd}
-      onDrop={onDrop}
-      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-amber-500 bg-amber-50 dark:bg-amber-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'} ${dragging ? 'opacity-50' : 'opacity-100'}`}
+      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-amber-500 bg-amber-50 dark:bg-amber-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'}`}
     >
       <button onClick={onSelect} className="flex min-w-0 flex-1 items-center py-1 pl-2 text-left focus-visible:ring-2 focus-visible:ring-amber-500">
-        <span className={`flex w-3 justify-center ${isDraggable ? 'cursor-grab text-gray-300 opacity-0 group-hover:opacity-100 group-active:cursor-grabbing' : 'opacity-0'}`}>
-          <GripVertical className="h-3 w-3" aria-hidden="true" />
-        </span>
         <span className="ml-0.5 flex w-5 flex-shrink-0 justify-center" title={status && status.total > 0 ? status.headline : `Status: ${task.properties.status}`}>
           {isDone ? (
             <CheckCircle2 className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
@@ -204,7 +189,6 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     hardDeleteFeature,
     loadArchivedFeatures,
     addTask,
-    reorderTasks,
     showToast,
     view,
     setView,
@@ -244,7 +228,6 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const [categoryFilter, setCategoryFilter] = useState<'all' | Task['category']>('all');
   const [sortBy, setSortBy] = useState<'attention' | 'creation' | 'dueDate'>('attention');
   const [isListening, setIsListening] = useState(false);
-  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
 
   const totalTasks = tasks.length;
@@ -728,23 +711,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                       isActive={task.id === selectedTaskId}
                       isDone={task.status === 'done'}
                       dueSoon={isDueSoon(task.dueDate) && task.status !== 'done'}
-                      isDraggable={sortBy === 'creation' && categoryFilter === 'all' && !searchQuery}
-                      dragging={draggedTaskId === task.id}
                       priorityColor={getPriorityColor(task.priority)}
                       onSelect={() => selectTask(task.id)}
                       onDelete={() => deleteTask(task.id)}
-                      onDragStart={(event) => { setDraggedTaskId(task.id); event.dataTransfer.effectAllowed = 'move'; }}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDragEnd={() => setDraggedTaskId(null)}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        if (draggedTaskId && draggedTaskId !== task.id) {
-                          const draggedIdx = tasks.findIndex((item) => item.id === draggedTaskId);
-                          const targetIdx = tasks.findIndex((item) => item.id === task.id);
-                          if (draggedIdx !== -1 && targetIdx !== -1) reorderTasks(draggedIdx, targetIdx);
-                        }
-                        setDraggedTaskId(null);
-                      }}
                     />
                   ))
                 )}

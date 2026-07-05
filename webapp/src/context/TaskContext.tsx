@@ -73,7 +73,6 @@ interface TaskContextType {
   loadArchivedFeatures: (repo?: string) => Promise<ArchivedFeature[]>;
   toggleTaskComplete: (id: string) => void;
   updateTask: (id: string, updates: Partial<Task>) => void;
-  reorderTasks: (startIndex: number, endIndex: number) => void;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   sendConsoleCommand: (command: ClientCommand) => void;
   subscribeConsole: (id: string) => void;
@@ -141,10 +140,6 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     const id = Math.random().toString(36).substr(2, 9);
     setToasts(prev => [...prev, { id, message, type }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
-  };
-
-  const reorderTasks = (_startIndex: number, _endIndex: number) => {
-    showToast('Live glance ordering is driven by the daemon', 'info');
   };
 
   const openConsole = (agentId: string | undefined) => {
@@ -279,7 +274,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, reorderTasks, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );
