@@ -40,9 +40,11 @@ Estimated 4 batches at the epic level; each epic expands into its own batched su
 | 02 Execution roles | — | `grep -n "buildTddVerifyWorkflow" src/workflow/verify-workflow.ts` (dormant role exists) |
 | 03 Independent validator | — | `grep -n "acceptanceCriteria" webapp/src/data.ts` (criteria field exists to score against) |
 | 04 Replayable traceability | — | `grep -n "traceSampleRatio" src/spans.ts` (returns 0.1 default) |
-| 05 HITL safeguards | 03 | validator emits a per-run agreement signal (Epic 3 leaf shipped) |
+| 05 HITL safeguards | — (03 enriches, does not block) | confidence scorer is pure (verificationState + filesTouched); validator agreement is an *optional* input, so 05 ships before 03 — decoupling found at decomposition |
 | 06 Learning orchestrator | 05 | confidence score exists on the run record (Epic 5 leaf shipped) |
 | 07 Convergence loop | 01, 02, 03, 05, 06 | validator veto + confidence propose-only both live; `grep` for the confidence cap in `src/autonomy.ts` |
+
+**Grounded-ordering corrections from recursive decomposition** (the sub-plans are authoritative on per-leaf deps): Epic 1's verified-state oracle already exists (`done-proof.ts` `hasProof`) so it has no 3/7 dependency; Epic 5's confidence is computable without the validator so 05 no longer hard-blocks on 03 (03 only enriches it); Epic 3's veto attaches at `landBranch` (all lands, incl. forced) not a verify-workflow node; Epic 2 uses `ExecutionRole` (name clash with RBAC `Role`) and does not extend `AgentKind`.
 
 ## Notes
 
