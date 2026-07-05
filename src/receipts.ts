@@ -215,10 +215,20 @@ export async function readReceipts(baseDir: string, agentId: string): Promise<Ru
 	} catch {
 		return [];
 	}
-	return text
-		.split("\n")
-		.filter((line) => line.trim())
-		.map((line) => JSON.parse(line) as RunReceipt);
+	// Per-line tolerant, as appendReceipt's fsync comment promises: a host crash can leave a torn tail
+	// line (a half-written append). Skip anything unparseable rather than throwing — an uncaught throw
+	// here 500s every receipts-backed endpoint (/api/usage, /api/heat, /api/activity, /api/trace,
+	// /api/graph/attribution), none of which guards this call, on a single corrupt line.
+	const out: RunReceipt[] = [];
+	for (const line of text.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			out.push(JSON.parse(line) as RunReceipt);
+		} catch {
+			// torn/corrupt line (crash mid-append) — drop it and keep the rest
+		}
+	}
+	return out;
 }
 
 
