@@ -1272,7 +1272,12 @@ export class SquadServer {
 		// so no extra RBAC beyond this block's existing auth gate.
 		const mdigest = url.pathname.match(/^\/api\/digest\/([^/]+)$/);
 		if (mdigest && req.method === "GET") {
-			const md = await manager.getDigest(decodeURIComponent(mdigest[1]));
+			const digestId = decodeURIComponent(mdigest[1]);
+			// The id becomes `<stateDir>/digests/<id>.md` (src/digest.ts) — reject any id that could escape
+			// that dir (`..`, path separators via %2F) before it touches the filesystem. Agent ids are
+			// always plain `[A-Za-z0-9._-]`, so a stricter allowlist is safe and closes the traversal.
+			if (!/^[A-Za-z0-9._-]+$/.test(digestId) || digestId.includes("..")) return new Response("invalid digest id", { status: 400 });
+			const md = await manager.getDigest(digestId);
 			if (!md) return new Response("digest not found", { status: 404 });
 			return new Response(md, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 		}

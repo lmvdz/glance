@@ -60,4 +60,10 @@ test("(D3) a run node's attrs.digest links to its agentId, and GET /api/digest/:
 	expect(await res.text()).toContain("do the thing");
 
 	expect((await fetch(`${url}/api/digest/nobody`)).status).toBe(404);
+
+	// Path-traversal guard: an id that would escape `<stateDir>/digests/` is rejected (400) and never read.
+	await fs.writeFile(path.join(dir, "secret.md"), "TOP SECRET");
+	const evil = await fetch(`${url}/api/digest/..%2F..%2Fsecret`);
+	expect(evil.status).toBe(400);
+	expect(await evil.text()).not.toContain("TOP SECRET");
 });
