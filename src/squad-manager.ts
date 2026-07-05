@@ -40,7 +40,7 @@ import { Orchestrator } from "./orchestrator.ts";
 import { Observer } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
-import { gateExec } from "./gate-runner.ts";
+import { execGatedCommand } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
@@ -2612,10 +2612,8 @@ export class SquadManager extends EventEmitter {
 		try {
 			const command = await detectVerify(repo);
 			if (!command) return { ok: true };
-			// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a legible host fallback).
-			const plan = await gateExec(command, repo);
-			const proc = Bun.spawn(plan.argv, { cwd: repo, stdout: "pipe", stderr: "pipe", env: plan.env });
-			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			// execGatedCommand: scrubbed env always; hermetic docker container by default when docker is usable (else a legible host fallback).
+			const { code, stdout: out, stderr: err } = await execGatedCommand(command, repo);
 			if (code === 0) return { ok: true };
 			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
 			const text = `${out}\n${err}`;
@@ -2939,7 +2937,14 @@ export class SquadManager extends EventEmitter {
 			// unconditionally regardless of `terminal` — so a terminal run never gets a resumable
 			// resumeState here either, even if some future caller forgets the exclusion upstream.
 			const resumeState = p.workflowState?.terminal ? undefined : p.workflowState;
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, cold });
+			// Command nodes (the `verify` gate) run agent-authored scripts. Route them through the shared
+			// gated-exec path so they get the SAME scrubbed env + docker sandbox as every other gate
+			// (proof/land/main gate). Without this the executor's defaultExecCommand runs them with the full
+			// daemon env (Plane/LLM keys, dashboard bearer) and no sandbox: the one gate that skipped the
+			// hardening every other gate enforces. Mount p.repo so the worktree's shared git object store
+			// stays reachable inside the sandbox.
+			const execCommand = (script: string, cwd: string) => execGatedCommand(script, cwd, { mounts: [p.repo] });
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
