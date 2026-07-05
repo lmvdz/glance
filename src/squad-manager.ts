@@ -4484,6 +4484,13 @@ export class SquadManager extends EventEmitter {
 		return readReceipts(this.stateDir, id);
 	}
 
+	/** Every persisted receipt on disk (the append-only ledger), regardless of whether its agent is
+	 *  still in the live roster. The receipt-backed dashboard panels (usage/heat/activity) read this so
+	 *  reaped agents and post-restart history stay visible — a per-live-agent read hides all of it. */
+	async allReceipts(): Promise<RunReceipt[]> {
+		return readAllReceipts(this.stateDir);
+	}
+
 	async trace(id: string): Promise<TraceResponse> {
 		const receipts = await readAllReceipts(this.stateDir);
 		for (const rec of this.agents.values()) {
