@@ -120,7 +120,10 @@ export class RunAccumulator {
 
 	/** Immutable copy of the current run state. */
 	snapshot(opts: { includeSpans?: boolean; sampleRatio?: number; maxSpans?: number; random?: () => number } = {}): RunReceipt {
-		const includeSpans =
+		// D1: sampling is per-layer, not per-run. `tools` is the vote on whether TOOL-level detail
+		// survives; the structural spine (run/node/subagent) is never sampled and is always attached
+		// below, so a finalized receipt is never `partial` for lack of spans.
+		const tools =
 			opts.includeSpans ??
 			shouldKeepSpans(this.status, this.spans.hasError(), opts.sampleRatio ?? traceSampleRatio(), opts.random);
 		const receipt: RunReceipt = {
@@ -144,7 +147,8 @@ export class RunAccumulator {
 			parentId: this.seed.parentId,
 			harness: this.seed.harness ?? "omp",
 		};
-		if (includeSpans) receipt.spans = this.spans.snapshot(opts.maxSpans ?? traceMaxSpans());
+		receipt.spans = tools ? this.spans.snapshot(opts.maxSpans ?? traceMaxSpans()) : this.spans.structuralSnapshot();
+		receipt.sampled = !tools && this.spans.hasToolSpans();
 		return receipt;
 	}
 
@@ -215,10 +219,20 @@ export async function readReceipts(baseDir: string, agentId: string): Promise<Ru
 	} catch {
 		return [];
 	}
-	return text
-		.split("\n")
-		.filter((line) => line.trim())
-		.map((line) => JSON.parse(line) as RunReceipt);
+	// Per-line tolerant, as appendReceipt's fsync comment promises: a host crash can leave a torn tail
+	// line (a half-written append). Skip anything unparseable rather than throwing — an uncaught throw
+	// here 500s every receipts-backed endpoint (/api/usage, /api/heat, /api/activity, /api/trace,
+	// /api/graph/attribution), none of which guards this call, on a single corrupt line.
+	const out: RunReceipt[] = [];
+	for (const line of text.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			out.push(JSON.parse(line) as RunReceipt);
+		} catch {
+			// torn/corrupt line (crash mid-append) — drop it and keep the rest
+		}
+	}
+	return out;
 }
 
 

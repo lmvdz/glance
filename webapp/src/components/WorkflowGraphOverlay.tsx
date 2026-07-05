@@ -11,14 +11,17 @@
  * `/api/trace/:id` (server-side cached, see src/server.ts's tracePayload). The trace is per-run,
  * not per-node — every node opens the same run trace — so the click target is "show me what this
  * run actually did", not a per-node breakdown. `trace.rollup` (never sampled) is the primary view;
- * `trace.root`'s span waterfall renders underneath, labeled "sampled — partial" when
- * `trace.partial` is true.
+ * `trace.root`'s span waterfall renders underneath, showing the woven `verify`/`spawn`/`validate`
+ * causal steps (Epic 4 D2) alongside `land`/`resolve`. The waterfall is unlabeled when the spine is
+ * complete, shows a muted "tool detail sampled" chip when `trace.sampled` is set (tool-level spans
+ * were tail-sampled, but the decision spine survived — D1), and only the alarming "partial" badge
+ * when `trace.partial` is true (a receipt genuinely has no spans at all).
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { buildWorkflowFlow, type WorkflowFlowNode } from '../lib/workflowGraph';
-import type { WorkflowGraphSnapshotDTO, WorkflowRunStateDTO, TraceResponseDTO, TraceNodeDTO } from '../lib/dto';
-import { apiJson } from '../lib/api';
+import type { WorkflowGraphSnapshotDTO, WorkflowRunStateDTO, TraceResponseDTO, TraceNodeDTO, TraceSpanKindDTO } from '../lib/dto';
+import { apiFetch, apiJson } from '../lib/api';
 import { formatDurationMs, formatUsd } from '../lib/trace';
 
 export interface WorkflowGraphOverlayProps {
@@ -178,8 +181,10 @@ export const WorkflowGraphOverlay: React.FC<WorkflowGraphOverlayProps> = ({ grap
 };
 
 /** Primary view: `trace.rollup` (never sampled — cost/duration/tool counts always present).
- *  Secondary: the span waterfall under `trace.root`, labeled "sampled — partial" when
- *  `trace.partial` is true (fine spans were tail-sampled out of at least one receipt). */
+ *  Secondary: the span waterfall under `trace.root`. No badge when the spine is complete; a muted
+ *  "tool detail sampled" chip when `trace.sampled` is set (D1 — the decision spine is intact, only
+ *  tool-level detail was tail-sampled); the amber "partial" badge only when `trace.partial` is true
+ *  (a receipt genuinely has no spans at all — legacy/pre-D1 rows). */
 const TraceDrilldown: React.FC<{ data: TraceResponseDTO | null; loading: boolean; error: string | null; onClose: () => void }> = ({
   data,
   loading,
@@ -190,10 +195,16 @@ const TraceDrilldown: React.FC<{ data: TraceResponseDTO | null; loading: boolean
     <div className="mt-1 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3 text-xs">
       <div className="mb-2 flex items-center gap-2">
         <span className="font-medium text-gray-700 dark:text-gray-200">Trace</span>
-        {data?.partial && (
+        {data?.partial ? (
           <span className="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-400">
-            sampled — partial
+            partial
           </span>
+        ) : (
+          data?.sampled && (
+            <span className="rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              tool detail sampled
+            </span>
+          )
         )}
         <button
           type="button"
@@ -235,18 +246,79 @@ const Stat: React.FC<{ label: string; value: string }> = ({ label, value }) => (
 
 const SPAN_STATUS_DOT: Record<string, string> = { ok: 'bg-emerald-500', error: 'bg-red-500', running: 'bg-blue-500' };
 
-const TraceSpanRow: React.FC<{ node: TraceNodeDTO; depth: number }> = ({ node, depth }) => (
-  <div>
-    <div className="flex items-center gap-1.5 py-0.5" style={{ paddingLeft: depth * 14 }}>
-      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${SPAN_STATUS_DOT[node.status] ?? 'bg-gray-300'}`} aria-hidden="true" />
-      <span className="truncate text-gray-700 dark:text-gray-300">{node.name}</span>
-      <span className="text-[10px] text-gray-400">{node.kind}</span>
-      <span className="ml-auto shrink-0 text-[10px] text-gray-400">
-        {node.endedAt !== undefined ? formatDurationMs(node.endedAt - node.startedAt) : 'running'}
-      </span>
+/** Woven causal-spine kinds (Epic 4 D2) get their OWN dot color (by kind, not run status) so
+ *  run→verify→(validate)→land→(resolve) reads as a spine at a glance instead of blending into the
+ *  ordinary run/node/tool/subagent rows, which keep their status-colored dot. */
+const KIND_TINT: Partial<Record<TraceSpanKindDTO, string>> = {
+  spawn: 'bg-violet-500',
+  verify: 'bg-cyan-500',
+  validate: 'bg-teal-500',
+  land: 'bg-amber-500',
+  resolve: 'bg-lime-500',
+};
+
+/** D3: the reachable reasoning/IO for a trace node whose `attrs.digest` is set (the agentId). Fetches
+ *  `/api/digest/:id` on mount — the markdown is already fenced/redacted server-side, so it renders as
+ *  plain preformatted text (no markdown-to-HTML, no dangerouslySetInnerHTML). */
+const DigestPeek: React.FC<{ agentId: string }> = ({ agentId }) => {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setText(null);
+    setError(null);
+    apiFetch(`/api/digest/${encodeURIComponent(agentId)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then((md) => {
+        if (live) setText(md);
+      })
+      .catch((err) => {
+        if (live) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      live = false;
+    };
+  }, [agentId]);
+
+  return (
+    <div className="mt-1 max-h-48 overflow-auto rounded border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950 p-2" style={{ marginLeft: 14 }}>
+      {error && <div className="text-[10px] text-red-500 dark:text-red-400">Failed to load reasoning: {error}</div>}
+      {!error && text === null && <div className="text-[10px] text-gray-500 dark:text-gray-400">Loading reasoning…</div>}
+      {!error && text !== null && <pre className="whitespace-pre-wrap text-[10px] text-gray-700 dark:text-gray-300">{text}</pre>}
     </div>
-    {node.children.map((c) => (
-      <TraceSpanRow key={c.spanId} node={c} depth={depth + 1} />
-    ))}
-  </div>
-);
+  );
+};
+
+const TraceSpanRow: React.FC<{ node: TraceNodeDTO; depth: number }> = ({ node, depth }) => {
+  const [digestOpen, setDigestOpen] = useState(false);
+  const digestAgent = node.attrs?.digest;
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 py-0.5" style={{ paddingLeft: depth * 14 }}>
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_TINT[node.kind] ?? SPAN_STATUS_DOT[node.status] ?? 'bg-gray-300'}`} aria-hidden="true" />
+        <span className="truncate text-gray-700 dark:text-gray-300">{node.name}</span>
+        <span className="text-[10px] text-gray-400">{node.kind}</span>
+        {digestAgent && (
+          <button
+            type="button"
+            onClick={() => setDigestOpen((v) => !v)}
+            className="text-[10px] text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 focus:outline-none focus-visible:underline"
+          >
+            reasoning
+          </button>
+        )}
+        <span className="ml-auto shrink-0 text-[10px] text-gray-400">
+          {node.endedAt !== undefined ? formatDurationMs(node.endedAt - node.startedAt) : 'running'}
+        </span>
+      </div>
+      {digestOpen && digestAgent && <DigestPeek agentId={digestAgent} />}
+      {node.children.map((c) => (
+        <TraceSpanRow key={c.spanId} node={c} depth={depth + 1} />
+      ))}
+    </div>
+  );
+};

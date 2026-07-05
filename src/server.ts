@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
-import { worktreeDiff, worktreeTree } from "./explore.ts";
+import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
@@ -32,6 +32,7 @@ import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
+import type { ComplianceFinding } from "./compliance.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
@@ -1254,6 +1255,13 @@ export class SquadServer {
 				}),
 			);
 		}
+		if (url.pathname === "/api/metrics/learning-loop") {
+			// Agentic-learning-loop baseline (concern 01): current flag resolution + per-metric rollups
+			// (first-try-green, fixups-to-green, escalation, land-failure-streak, primer-empty), so every
+			// later concept in the loop can be A/B-compared against this. ?windowMs= sizes the rollup window.
+			const windowMs = Number(url.searchParams.get("windowMs"));
+			return Response.json(manager.learningMetricsSnapshot(Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
+		}
 		if (url.pathname === "/api/factory/status") {
 			// First-glance liveness: per autonomous loop, whether it's flag-enabled, actually armed, the
 			// reason it didn't arm (the authoritative no-backlog gate), heartbeat freshness, and a status
@@ -1265,6 +1273,20 @@ export class SquadServer {
 			const trace = await tracePayload(manager, decodeURIComponent(mtrace[1]));
 			if (trace.receipts.length === 0 && trace.root.children.length === 0) return new Response("trace not found", { status: 404 });
 			return Response.json(trace);
+		}
+		// D3: the reachable reasoning/IO a trace node's `attrs.digest` links to — compact, already
+		// fenced/redacted markdown (src/digest.ts), never raw prompts/outputs. Read-only + non-sensitive,
+		// so no extra RBAC beyond this block's existing auth gate.
+		const mdigest = url.pathname.match(/^\/api\/digest\/([^/]+)$/);
+		if (mdigest && req.method === "GET") {
+			const digestId = decodeURIComponent(mdigest[1]);
+			// The id becomes `<stateDir>/digests/<id>.md` (src/digest.ts) — reject any id that could escape
+			// that dir (`..`, path separators via %2F) before it touches the filesystem. Agent ids are
+			// always plain `[A-Za-z0-9._-]`, so a stricter allowlist is safe and closes the traversal.
+			if (!/^[A-Za-z0-9._-]+$/.test(digestId) || digestId.includes("..")) return new Response("invalid digest id", { status: 400 });
+			const md = await manager.getDigest(digestId);
+			if (!md) return new Response("digest not found", { status: 404 });
+			return new Response(md, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 		}
 		if (url.pathname === "/api/spawn" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
@@ -1309,7 +1331,7 @@ export class SquadServer {
 		if (mdiff) {
 			const dto = manager.getAgent(decodeURIComponent(mdiff[1]));
 			if (!dto) return new Response("no such agent", { status: 404 });
-			return Response.json(mdiff[2] === "diff" ? await worktreeDiff(dto.worktree) : await worktreeTree(dto.worktree));
+			return Response.json(mdiff[2] === "diff" ? await worktreeDiffSinceFork(dto.worktree) : await worktreeTree(dto.worktree));
 		}
 		const mland = url.pathname.match(/^\/api\/agents\/([^/]+)\/land$/);
 		if (mland && req.method === "POST") {
@@ -1693,8 +1715,12 @@ async function usagePayload(manager: SquadManager, url: URL): Promise<{
 	const repo = url.searchParams.get("repo") ?? undefined;
 	const agentId = url.searchParams.get("agentId") ?? undefined;
 	const since = boundedNumber(url.searchParams.get("since"), 0, 0, Number.MAX_SAFE_INTEGER) || undefined;
-	const agents = manager.list().filter((a) => (!repo || a.repo === repo) && (!agentId || a.id === agentId));
-	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat().filter((r) => !since || (r.endedAt ?? r.startedAt) >= since);
+	// Source the persisted ledger (like attributionPayload/trace), not the live roster: receipts outlive
+	// the agents that produced them — reaped agents, and every agent after a daemon restart — so
+	// roster-scoping hid all but the currently-live runs' history.
+	const receipts = (await manager.allReceipts()).filter(
+		(r) => (!repo || r.repo === repo) && (!agentId || r.agentId === agentId) && (!since || (r.endedAt ?? r.startedAt) >= since),
+	);
 	const runs = receipts.sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt)).slice(0, limit);
 	const totals = runs.reduce((acc, r) => {
 		acc.toolCalls += r.toolCalls;
@@ -1710,7 +1736,7 @@ async function usagePayload(manager: SquadManager, url: URL): Promise<{
 		costUsd: totals.costUsd || undefined,
 		tokens: totals.tokens || undefined,
 		durationMs: totals.durationMs || undefined,
-		agents: agents.length,
+		agents: new Set(receipts.map((r) => r.agentId)).size,
 		since,
 	};
 }
@@ -1732,8 +1758,9 @@ async function heatPayload(manager: SquadManager, url: URL): Promise<{
 		return d.toISOString().slice(0, 10);
 	});
 	const indexByDay = new Map(days.map((d, i) => [d, i]));
-	const agents = manager.list().filter((a) => !repo || a.repo === repo);
-	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat();
+	// Persisted ledger, not the live roster (see usagePayload) — otherwise reaped agents and post-restart
+	// history vanish and the panel falsely reads "No receipt-backed file writes in this window".
+	const receipts = (await manager.allReceipts()).filter((r) => !repo || r.repo === repo);
 	const byFile = new Map<string, number[]>();
 	for (const r of receipts) {
 		const day = new Date(r.endedAt ?? r.startedAt).toISOString().slice(0, 10);
@@ -1793,8 +1820,8 @@ async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<
 		return localDay(d);
 	});
 	const rowByDay = new Map(days.map((d) => [d, new Array<number>(24).fill(0)]));
-	const agents = manager.list().filter((a) => !repo || a.repo === repo);
-	const receipts = (await Promise.all(agents.map((a) => manager.receipts(a.id)))).flat();
+	// Persisted ledger, not the live roster (see usagePayload), so the rhythm survives restarts + reaps.
+	const receipts = (await manager.allReceipts()).filter((r) => !repo || r.repo === repo);
 	let max = 0;
 	let total = 0;
 	for (const r of receipts) {
@@ -2009,6 +2036,7 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 	health: Awaited<ReturnType<SquadManager["sampleHealth"]>>;
 	federation: { coordinator: boolean; dbRegistry: boolean };
 	audit: { available: true };
+	compliance: { findings: ComplianceFinding[]; evaluatedAt: number };
 }> {
 	return {
 		authMode: dbMode ? "db" : "file",
@@ -2018,6 +2046,8 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 		health: await manager.sampleHealth(),
 		federation: { coordinator: !!process.env.OMP_SQUAD_COORDINATOR, dbRegistry },
 		audit: { available: true },
+		// Epic 3 (leaf 05): real policy findings over the audit + land ledgers, not just RBAC/capacity.
+		compliance: { findings: await manager.complianceFindings(), evaluatedAt: Date.now() },
 	};
 }
 async function actionItemsPayload(manager: SquadManager, url: URL): Promise<{ items: ActionItem[]; generatedAt: number }> {

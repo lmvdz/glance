@@ -161,6 +161,15 @@ function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string, prefix
  *  observer, reaper, and scout all polling the same repo into ONE API refresh. Cleared on any write. */
 const issueListCache = makeCache<IssueRef[] | null>();
 
+/** How many 50-issue pages the issue polls fetch (≈`×50` newest issues). The open-work poll
+ *  (listPlaneIssues) MUST fetch as deeply as the all-states reconciler: it filters to open AFTER
+ *  fetching, so a single page silently drops open work that sorts past page 1 on any project whose
+ *  newest 50 issues are mostly closed. Override with OMP_SQUAD_PLANE_MAX_PAGES for very large backlogs. */
+function maxIssuePages(): number {
+	const n = Number(process.env.OMP_SQUAD_PLANE_MAX_PAGES);
+	return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 4;
+}
+
 /** Open issues for the Plane project mapped to `repo`. `null` ⇒ Plane not configured / unreachable. */
 export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> {
 	// Cache successful reads (not null/failure) so repeated polls within the TTL share a single call.
@@ -168,7 +177,7 @@ export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> 
 }
 
 async function listPlaneIssuesUncached(repo: string): Promise<IssueRef[] | null> {
-	const all = await fetchIssueRefs(repo, 1);
+	const all = await fetchIssueRefs(repo, maxIssuePages());
 	if (all === null) return null;
 	const open = all.filter((i) => i.state !== "completed" && i.state !== "cancelled");
 	const ctx = planeContext(repo);
@@ -213,12 +222,12 @@ const allStatesCache = makeCache<IssueRef[] | null>();
 
 /**
  * Issues in EVERY state (Done/Cancelled included) — what a reconciler needs; the open-only
- * `listPlaneIssues` never sees a closure. Bounded to 4 pages (200 newest issues) and cached
- * longer than the open list (reconciliation is a slow loop). No blockedBy enrichment.
+ * `listPlaneIssues` never sees a closure. Bounded to maxIssuePages() (default 4 ⇒ 200 newest issues)
+ * and cached longer than the open list (reconciliation is a slow loop). No blockedBy enrichment.
  */
 export async function listPlaneIssuesAllStates(repo: string): Promise<IssueRef[] | null> {
 	const ttl = Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000;
-	return allStatesCache.get(repo, Math.max(ttl, 60_000), () => fetchIssueRefs(repo, 4), (v) => v !== null);
+	return allStatesCache.get(repo, Math.max(ttl, 60_000), () => fetchIssueRefs(repo, maxIssuePages()), (v) => v !== null);
 }
 
 interface PlaneIssueDetail {

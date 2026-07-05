@@ -9,7 +9,9 @@
 import { redact } from "./redact.ts";
 import type { AgentStatus, AuditEntry, RunReceipt } from "./types.ts";
 
-export type SpanKind = "run" | "node" | "tool" | "subagent" | "verify" | "land" | "resolve";
+// "spawn" covers audit create/commission/fork actions (D2 — "why spawned"); "validate" is a
+// forward-declaration for Epic 3's independent-validator audit action, woven if/when it exists.
+export type SpanKind = "run" | "node" | "tool" | "subagent" | "verify" | "spawn" | "validate" | "land" | "resolve";
 export type SpanStatus = "ok" | "error" | "running";
 
 export interface Span {
@@ -58,11 +60,16 @@ export interface TraceResponse {
 	root: TraceNode;
 	rollup: TraceRollup;
 	receipts: RunReceipt[];
-	/** True when at least one receipt kept only its rollup because fine spans were sampled out. */
+	/** True when at least one receipt has NO spans at all (legacy/pre-D1 rows) — the decision spine is
+	 *  genuinely missing, not just tool-level detail. A finalized post-D1 receipt always has its
+	 *  structural spine, so this stays false for it regardless of tool sampling. */
 	partial: boolean;
+	/** True when at least one contributing receipt had its tool-level spans tail-sampled out (D1). A
+	 *  softer, honest signal than `partial` — "full spine, tool detail sampled" vs. "spine missing." */
+	sampled: boolean;
 }
 
-const ATTR_KEYS: Record<string, true> = { model: true, repo: true, feature: true, operator: true, org: true, issue: true, branch: true, agent: true, parent: true };
+const ATTR_KEYS: Record<string, true> = { model: true, repo: true, feature: true, operator: true, org: true, issue: true, branch: true, agent: true, parent: true, digest: true };
 
 export function traceIdFor(seed: { agentId: string; runId: string; featureId?: string }): string {
 	return seed.featureId ? `feat:${seed.featureId}` : `run:${seed.agentId}:${seed.runId}`;
@@ -155,7 +162,9 @@ export class SpanCollector {
 			kind: "run",
 			startedAt: at,
 			status: "running",
-			attrs: attrs({ repo: this.seed.repo, branch: this.seed.branch, model: this.seed.model, feature: this.seed.featureId, parent: this.seed.parentId, issue: this.seed.issue, operator: this.seed.operator, org: this.seed.org, agent: this.seed.agentId }),
+			// `digest` (D3) links this run span to `GET /api/digest/:id` — the compact, already-fenced
+			// reasoning/IO for this agent — without inlining raw prompts/outputs into span attrs.
+			attrs: attrs({ repo: this.seed.repo, branch: this.seed.branch, model: this.seed.model, feature: this.seed.featureId, parent: this.seed.parentId, issue: this.seed.issue, operator: this.seed.operator, org: this.seed.org, agent: this.seed.agentId, digest: this.seed.agentId }),
 		});
 	}
 
@@ -231,6 +240,19 @@ export class SpanCollector {
 		return capSpans(this.spans.map((s) => ({ ...s, attrs: s.attrs ? { ...s.attrs } : undefined })), maxSpans);
 	}
 
+	/** D1: the structural spine only (everything but `tool`) — never sampled, no cap needed (the spine
+	 *  is small by construction). Lets a finalized receipt always carry run/node/subagent spans even
+	 *  when tool-level detail is tail-sampled away. */
+	structuralSnapshot(): Span[] {
+		return this.spans.filter((s) => s.kind !== "tool").map((s) => ({ ...s, attrs: s.attrs ? { ...s.attrs } : undefined }));
+	}
+
+	/** True when this run produced at least one `tool` span — distinguishes "tool detail was sampled
+	 *  out" from "there was never any tool detail to sample" for `RunReceipt.sampled` (D1). */
+	hasToolSpans(): boolean {
+		return this.spans.some((s) => s.kind === "tool");
+	}
+
 	hasError(): boolean {
 		return this.spans.some((s) => s.status === "error");
 	}
@@ -303,23 +325,44 @@ function fallbackRunSpan(r: RunReceipt, traceId: string): Span {
 		startedAt: r.startedAt,
 		endedAt: r.endedAt,
 		status: statusOf(r.status) === "running" ? "ok" : statusOf(r.status),
-		attrs: attrs({ repo: r.repo, branch: r.branch, model: r.model, feature: r.featureId, parent: r.parentId, agent: r.agentId }),
+		attrs: attrs({ repo: r.repo, branch: r.branch, model: r.model, feature: r.featureId, parent: r.parentId, agent: r.agentId, digest: r.agentId }),
 	};
+}
+
+/** D2: map an audit action to the causal-spine span kind it weaves as, or `undefined` for actions
+ *  that aren't part of the spine (e.g. "prompt", "restart"). `validate` is forward-declared for
+ *  Epic 3's independent validator — woven only if/when that action is actually recorded. */
+function auditSpanKind(action: string): SpanKind | undefined {
+	if (action === "land") return "land";
+	if (action.includes("resolve")) return "resolve";
+	if (action === "verify") return "verify";
+	if (action === "validate") return "validate";
+	if (action === "create" || action === "commission" || action === "fork") return "spawn";
+	return undefined;
 }
 
 function auditSpans(traceId: string, receipts: RunReceipt[], audits: AuditEntry[]): Span[] {
 	const featureId = traceId.startsWith("feat:") ? traceId.slice(5) : undefined;
 	const targets = new Set(receipts.map((r) => r.agentId));
 	if (featureId) targets.add(featureId);
+	// D2: parent each verify/spawn/validate/land/resolve span under the RUN span of its target agent
+	// (composite key `${agentId}:${runSpanId}`, matching how buildTrace keys receipt-span nodes) so the
+	// tree reads run→verify→land instead of a flat sibling list. No match (target unknown, a feature-id
+	// target, or an agent whose receipt carries no run span) ⇒ parentSpanId stays unset, falling back to
+	// root exactly as before this weave existed.
+	const runSpanIdByAgent = new Map<string, string>();
+	for (const r of receipts) runSpanIdByAgent.set(r.agentId, r.spans?.find((s) => s.kind === "run")?.spanId ?? `${r.runId}:0`);
 	return audits
 		.slice()
 		.reverse()
-		.filter((a) => (a.action === "land" || a.action.includes("resolve")) && (!a.target || targets.has(a.target)))
+		.filter((a) => auditSpanKind(a.action) && (!a.target || targets.has(a.target)))
 		.map((a): Span => {
-			const kind: SpanKind = a.action === "land" ? "land" : "resolve";
+			const kind = auditSpanKind(a.action)!;
+			const runSpanId = a.target ? runSpanIdByAgent.get(a.target) : undefined;
 			return {
 				traceId,
 				spanId: `audit:${a.id}`,
+				parentSpanId: runSpanId ? `${a.target}:${runSpanId}` : undefined,
 				name: a.action,
 				kind,
 				startedAt: a.at,
@@ -368,7 +411,13 @@ export function buildTrace(rawTraceId: string, allReceipts: RunReceipt[], audits
 		}
 	}
 
-	for (const s of auditSpans(traceId, receipts, audits)) nodes.set(s.spanId, { ...s, children: [], rollup: emptyRollup() });
+	for (const s of auditSpans(traceId, receipts, audits)) {
+		nodes.set(s.spanId, { ...s, children: [], rollup: emptyRollup() });
+		// auditSpans already resolved parentSpanId to the composite `${agentId}:${runSpanId}` key
+		// receipt-span nodes are keyed by, so this parents the audit span directly under its target's
+		// run node — no unset parentSpanId means it falls through to root as before.
+		if (s.parentSpanId) parentKeyByNodeKey.set(s.spanId, s.parentSpanId);
+	}
 
 	for (const [key, node] of nodes) {
 		if (node === root) continue;
@@ -389,5 +438,5 @@ export function buildTrace(rawTraceId: string, allReceipts: RunReceipt[], audits
 	};
 	sort(root);
 	fold(root);
-	return { traceId, root, rollup: root.rollup, receipts, partial };
+	return { traceId, root, rollup: root.rollup, receipts, partial, sampled: receipts.some((r) => r.sampled === true) };
 }

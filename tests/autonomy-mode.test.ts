@@ -20,6 +20,20 @@ test("effective autonomy caps contradictory approval and env combinations", () =
 	expect(effectiveAutonomyMode({ requested: "autodrive", approvalMode: "yolo", autoLand: true, landConfirm: false, blockedReason: "waiting" })).toBe("observe");
 });
 
+test("Epic 5: a confidence score below the floor caps the effective mode to assist (never blocks)", () => {
+	const base = { requested: "autodrive" as const, approvalMode: "yolo" as const, autoLand: true, landConfirm: false };
+	expect(effectiveAutonomyMode({ ...base, confidence: 0.2, confidenceFloor: 0.4 })).toBe("assist"); // capped
+	expect(effectiveAutonomyMode({ ...base, confidence: 0.9, confidenceFloor: 0.4 })).toBe("autodrive"); // uncapped
+	expect(effectiveAutonomyMode({ ...base })).toBe("autodrive"); // confidence/floor absent → cap inert
+	expect(effectiveAutonomyMode({ ...base, confidence: 0.2 })).toBe("autodrive"); // floor absent → cap inert
+	expect(effectiveAutonomyMode({ ...base, confidenceFloor: 0.4 })).toBe("autodrive"); // confidence absent → cap inert
+	// The cap never blocks — blockedReason still owns "observe" exclusively.
+	expect(effectiveAutonomyMode({ ...base, confidence: 0, confidenceFloor: 0.4, blockedReason: "waiting" })).toBe("observe");
+	// The cap never LOOSENS an already-tighter policy cap (approvalMode "always-ask" already caps to
+	// observe) — a low confidence score must not upgrade that to assist.
+	expect(effectiveAutonomyMode({ requested: "autodrive", approvalMode: "always-ask", autoLand: true, landConfirm: false, confidence: 0.2, confidenceFloor: 0.4 })).toBe("observe");
+});
+
 test("available actions expose proof-gated manual land only outside observe", () => {
 	expect(availableActions("observe", "fresh")).toEqual(["set-mode"]);
 	expect(availableActions("assist", "stale")).toEqual(["set-mode", "prompt", "answer", "interrupt", "verify"]);

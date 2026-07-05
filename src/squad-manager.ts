@@ -31,17 +31,19 @@ import { WorkflowEngine } from "./workflow/engine.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowRunState } from "./workflow/types.ts";
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
-import { buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
+import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
-import { Observer } from "./observer.ts";
+import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
-import { gateExec } from "./gate-runner.ts";
+import { execGatedCommand } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
+import { ResidentPlanner } from "./resident-planner.ts";
+import { DECOMPOSE_TIMEOUT_MS } from "./planner.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
@@ -65,6 +67,8 @@ import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
+import { type Judge, validatorGate } from "./validator.ts";
+import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
@@ -93,6 +97,7 @@ import type {
 	ClientCommand,
 	CreateAgentOptions,
 	CommissionResult,
+	AgentReport,
 	CommissionSpec,
 	FlueMemberConfig,
 	GateReport,
@@ -112,6 +117,8 @@ import type {
 	FeedbackItem,
 	FeedbackReward,
 	FeedbackValidationResponse,
+	ValidationRecord,
+	VerifySpec,
 } from "./types.ts";
 import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
@@ -122,12 +129,18 @@ import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
+import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
+import { reflect } from "./reflection.ts";
+import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
+import { recordModelOutcome, tierOf } from "./model-outcomes.ts";
+import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
-import { landFailureCount, readLandLedger, recordForcedLand, recordLandOutcome } from "./land-ledger.ts";
+import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
@@ -175,6 +188,8 @@ const POLL_MS = 2500;
 const PEER_MESSAGE_TOOL = "squad_message";
 const PEER_MESSAGE_MAX_CHARS = 2000;
 const KB_SEARCH_TOOL = "squad_kb_search";
+/** Epic 5 (HITL safeguards, DESIGN.md D2): NON-blocking — responds immediately, never rides `pending`. */
+const REPORT_TOOL = "squad_report";
 
 /**
  * Reserved host tools advertised to every omp-backed agent via `set_host_tools` on ready (the
@@ -209,6 +224,20 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 			required: ["to", "text"],
 		},
 	},
+	{
+		name: REPORT_TOOL,
+		description:
+			"Raise a proposal or flag uncertainty WITHOUT stopping — non-blocking, unlike a confirm/input host call. Use when you're unsure about an approach and want a human to weigh in at their own pace while you keep working. It appears as a 'Needs you' row, not a gate.",
+		parameters: {
+			type: "object",
+			properties: {
+				summary: { type: "string", description: "One line: what you're unsure about, or the proposal." },
+				proposal: { type: "string", description: "Optional: the proposed diff/approach/next step in more detail." },
+				confidence: { type: "number", description: "Optional: your own 0..1 confidence in the current approach." },
+			},
+			required: ["summary"],
+		},
+	},
 ];
 
 function peerMessageBudget(): number {
@@ -221,6 +250,21 @@ function commandTarget(cmd: ClientCommand): string | undefined {
 
 function autoLandFailCap(): number {
 	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
+}
+
+/**
+ * Epic 5 (HITL safeguards, DESIGN.md D1): below this run-end confidence score, `syncAuthority`
+ * caps the agent's effective mode to `assist` (propose-only) regardless of requested/approval/
+ * autoLand policy. Read fresh (not cached) so tests can flip it per-case. Default 0.4.
+ *
+ * Epic 6 concern 08 (confidence-threshold tuner): when OMP_SQUAD_THRESHOLD_TUNER is on, the floor
+ * is read from the tuner's persisted, evidence-adjusted value instead of the bare env default — the
+ * tuner only ever loosens it (see threshold-tuner.ts), so this can never end up MORE restrictive
+ * than the operator's own setting, only less. Flag off (default) ⇒ byte-identical to before.
+ */
+function confidenceFloor(): number {
+	const base = Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4;
+	return isOn(learningFlags().thresholdTuner) ? tunedConfidenceFloor(base) : base;
 }
 
 /**
@@ -314,6 +358,18 @@ function lineageFieldsFrom(p: {
 		workflowGraph: p.workflowGraph,
 		traceId: p.traceId,
 	};
+}
+
+/**
+ * The ONE place a `VerifySpec.mode` maps to a synthesized workflow builder. `makeDriver` and the
+ * fork-resume re-parse (createFork) both call this identical expression so the two paths can never
+ * drift apart on which mode selects which graph. Default (mode unset, or "verify") is byte-for-byte
+ * today's `buildVerifyWorkflow` — no behavior change for existing verify-routed runs.
+ */
+function buildVerifyLoop(spec: VerifySpec): Workflow {
+	if (spec.mode === "tdd") return buildTddVerifyWorkflow(spec);
+	if (spec.mode === "observe") return buildObserveWorkflow(spec);
+	return buildVerifyWorkflow(spec);
 }
 
 interface AgentRecord {
@@ -480,6 +536,9 @@ export class SquadManager extends EventEmitter {
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
+	/** Resident planners — one per configured Plane repo; gated OMP_SQUAD_RESIDENT_PLANNER (default OFF,
+	 *  opt-in unlike the loops above — an LLM-cost-bearing writer of source-tree files). */
+	private readonly residentPlanners: ResidentPlanner[] = [];
 	/** Per-agent scout scan cursor (agentId → last-scanned transcript ts); advanced by takeScoutReasoning.
 	 *  Persisted (scout-cursor.json) so a warm daemon restart doesn't re-scan whole transcripts —
 	 *  each re-scan was a redundant Scout LLM call per reattached agent. Loaded in the constructor. */
@@ -488,6 +547,10 @@ export class SquadManager extends EventEmitter {
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
 	private readonly automation: AutomationLog;
+	/** Agentic-learning-loop baseline (concern 01) — the five metrics (first-try-green, fixups-to-green,
+	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
+	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
+	private readonly learningMetrics: LearningMetrics;
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -535,8 +598,10 @@ export class SquadManager extends EventEmitter {
 		this.leaseGossipIntervalMs = opts.leaseGossipIntervalMs ?? (Number(process.env.OMP_SQUAD_LEASE_GOSSIP_MS) || LEASE_GOSSIP_INTERVAL_MS);
 		this.stateDir = opts.stateDir ?? resolveStateDir();
 		setProofRoot(this.stateDir);
+		setThresholdTunerRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
+		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -544,7 +609,7 @@ export class SquadManager extends EventEmitter {
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.skipGlobalJanitors = opts.skipGlobalJanitors ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
-		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m));
+		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m), this.stateDir);
 		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
 		this.replaySettleTimeoutMs = opts.replaySettleTimeoutMs ?? 2000;
 	}
@@ -552,6 +617,16 @@ export class SquadManager extends EventEmitter {
 	private blockedReason(dto: Pick<AgentDTO, "pending" | "error">): string | undefined {
 		if (dto.error) return dto.error;
 		return dto.pending.length ? "waiting for operator input" : undefined;
+	}
+
+	/**
+	 * Epic 5 propose-only: is this run's confidence below the operator's floor? Mirrors the EXACT
+	 * condition `effectiveAutonomyMode` (autonomy.ts) uses to cap the mode to `assist`, so the
+	 * autonomous-land hold in `land()` and the UI/authority cap can never drift apart. Undefined
+	 * confidence (no run has finished — a fresh agent) never holds.
+	 */
+	private confidenceBelowFloor(dto: Pick<AgentDTO, "confidence">): boolean {
+		return dto.confidence !== undefined && dto.confidence < confidenceFloor();
 	}
 
 	private syncAuthority(dto: AgentDTO): void {
@@ -566,6 +641,8 @@ export class SquadManager extends EventEmitter {
 			autoLand: this.autoLand,
 			landConfirm: this.landConfirm,
 			blockedReason,
+			confidence: dto.confidence,
+			confidenceFloor: confidenceFloor(),
 		});
 		dto.effectiveMode = effectiveMode;
 		dto.blockedReason = blockedReason;
@@ -716,12 +793,16 @@ export class SquadManager extends EventEmitter {
 					closeIssue: (ref) => closePlaneIssue(ref),
 					reopenIssue: (ref) => reopenPlaneIssue(ref),
 					removeAgent: (id) => this.remove(id, false),
+					spawnObserver: (f) => this.dispatchObserver(repo, f),
 					runGate: () => this.runMainGate(repo),
 					gitAheadOfMain: (a) => this.aheadOfMain(a),
 					untrackedInMain: () => this.untrackedInMain(repo),
 					filesOnAgentBranch: (a) => this.filesOnAgentBranch(a),
 					uncommittedInWorktree: (a) => this.uncommittedInWorktree(a),
 					landLedger: () => readLandLedger(this.stateDir),
+					recordLandFailureStreak: (count) => this.learningMetrics.record("land-failure-streak", count),
+					annotateFailure: (finding, branch) => this.annotateRecurringFailure(repo, finding, branch),
+					complianceFindings: () => this.complianceFindings(),
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `observer-seen.${slug(repo)}.json`,
 					log: (m) => this.log("info", `observer[${repo}]: ${m}`),
@@ -810,6 +891,31 @@ export class SquadManager extends EventEmitter {
 				this.opportunities.push(opportunity);
 			});
 			this.log("info", `opportunity on (clustering scout patterns → ${observeRepos.join(", ")})`);
+		}
+
+		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and
+		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
+		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
+		if (process.env.OMP_SQUAD_RESIDENT_PLANNER === "1" && observeRepos.length > 0) {
+			observeRepos.forEach((repo, i) => {
+				const planner = new ResidentPlanner({
+					repo,
+					stateDir: this.stateDir,
+					// Per-repo state file (first repo keeps the bare name for upgrade continuity, the rest are
+					// repo-suffixed): the state map is keyed by repo-RELATIVE planDir, so two repos each with a
+					// `plans/<same-name>/` would otherwise share one entry and clobber each other's hash after
+					// a restart (m1) — matching the scout/opportunity/observer per-repo seen-file convention.
+					seenFile: i === 0 ? undefined : `resident-planner.${slug(repo)}.json`,
+					classify: ompClassify(this.bin, DECOMPOSE_TIMEOUT_MS),
+					hasProof: (identifier) => hasProof(this.stateDir, identifier),
+					onChanged: () => this.emitFeaturesChanged(),
+					log: (m) => this.log("info", `resident-planner[${repo}]: ${m}`),
+					record: this.automation.for("resident-planner", repo),
+				});
+				planner.start();
+				this.residentPlanners.push(planner);
+			});
+			this.log("info", `resident-planner on (decomposing objectives → ${observeRepos.join(", ")})`);
 		}
 	}
 
@@ -920,6 +1026,7 @@ export class SquadManager extends EventEmitter {
 		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
+		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
@@ -1194,6 +1301,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
+			executionRole: p.executionRole,
 			parentId: p.parentId,
 			...lineageFieldsFrom(p),
 			featureId: p.featureId,
@@ -1316,6 +1424,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: transcript.length,
 			issue: p.issue,
 			kind: p.kind ?? "omp-operator",
+			executionRole: p.executionRole,
 			parentId: p.parentId,
 			...lineageFieldsFrom(p),
 			featureId: p.featureId,
@@ -2080,6 +2189,7 @@ export class SquadManager extends EventEmitter {
 				issueIdentifier: rec?.dto.issue?.identifier,
 				issueProjectId: rec?.dto.issue?.projectId,
 				agentId: w.agentId,
+				featureId: id,
 			});
 			results.push({ agentId: w.agentId, branch: w.branch, ok: res.ok, detail: res.detail });
 			// Forced member land without a passing proof gate — audit the override per branch.
@@ -2127,7 +2237,7 @@ export class SquadManager extends EventEmitter {
 	 * is guaranteed for the single-agent path too — not only the multi-branch `landFeature`. Close is
 	 * idempotent (`closedIssues`) and best-effort. Busy-aware `commitWip` mirrors the feature path.
 	 */
-	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string } = {}): Promise<LandResult> {
+	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
@@ -2151,7 +2261,26 @@ export class SquadManager extends EventEmitter {
 			void this.recordAudit(actor, "land", id, "ok", `force land: ${opts.reason}`);
 			void this.store.appendAudit({ actor: actor.id, action: "land.force", target: id, detail: { reason: opts.reason } }).catch(() => {});
 		}
+		// Epic 5 propose-only ENFORCEMENT (review SIGNIFICANT). The leaf-03 cap set effectiveMode="assist"
+		// and stripped "land" from availableActions, but those gate ONLY the UI land-ready row + operator
+		// verify — the AUTONOMOUS land path (autoLandWorkflow and the orchestrator's landAgentWork, both
+		// via `land(id)` with auto:true) never consulted them, so a sub-floor run got auto-merged anyway,
+		// silently bypassing the operator's configured brake. Hold it here instead: proof is already
+		// GREEN (proofGate passed above), so this is a genuine "verified but low-confidence" state —
+		// stage it for a one-tap operator Land (staged ⇒ the orchestrator HOLDS, never parks/fails; a
+		// hold is not a land failure, so it must return BEFORE recordLandOutcome below). An OPERATOR land
+		// (auto:false) deliberately bypasses this: explicitly clicking Land in assist mode IS the intended
+		// propose-only approval flow. A force land also bypasses (an explicit human override).
+		if (auto && !opts.force && this.confidenceBelowFloor(dto)) {
+			rec.dto.landReady = true;
+			this.emitAgent(rec);
+			this.floatPrOnLandReady(rec);
+			this.log("info", `auto-land held for ${dto.name}: confidence ${dto.confidence?.toFixed(2)} below floor ${confidenceFloor()} — awaiting operator approval (propose-only)`);
+			void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land.held-low-confidence", target: id, detail: { confidence: dto.confidence, floor: confidenceFloor() } }).catch(() => {});
+			return { ok: false, committed: false, merged: false, staged: true, message: "auto-land held (low confidence)", detail: `held for operator approval: confidence ${dto.confidence?.toFixed(2)} is below the ${confidenceFloor()} floor` };
+		}
 		const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
+		const overrideReasonClass = opts.validatorOverride?.reasonClass?.trim();
 		const result = await this.landBranch({
 			repo: dto.repo,
 			worktree: dto.worktree,
@@ -2165,7 +2294,19 @@ export class SquadManager extends EventEmitter {
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
 			agentId: dto.id,
+			featureId: dto.featureId,
+			validatorOverride: !!overrideReasonClass,
 		});
+		// Validator-override audit (Epic 3, leaf 03): a real veto was bypassed by an explicit,
+		// non-empty reason class — a STRONGER act than a proof-force, logged separately (never folded
+		// into recordForcedLand). A reasonClass supplied on a land the gate never vetoed records nothing
+		// (there was no veto to override).
+		if (overrideReasonClass && rec.dto.validation?.verdict === "veto") {
+			const overrideActor = opts.actor ?? LOCAL_ACTOR;
+			recordValidatorOverride(this.stateDir, dto.branch, overrideActor.id, overrideReasonClass, rec.dto.validation.rationale || "validator override");
+			void this.recordAudit(overrideActor, "land", id, "ok", `validator override (${overrideReasonClass})`);
+			void this.store.appendAudit({ actor: overrideActor.id, action: "land.validator-override", target: id, detail: { reasonClass: overrideReasonClass } }).catch(() => {});
+		}
 		// PR-mode metadata (concern 06): set directly on the dto at push/merge time, the same pattern
 		// `landReady` already uses. Absent (mode !== "pr") ⇒ local mode, untouched.
 		if (result.mode === "pr") {
@@ -2187,7 +2328,28 @@ export class SquadManager extends EventEmitter {
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
 		// never bump the streak for it, else transient dirty windows park a healthy branch.
-		if (!result.retryable && (auto || result.ok)) recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
+		if (!result.retryable && (auto || result.ok)) {
+			recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
+			// Model-outcome ledger (Epic 6 concern 06): a cheap, always-on statistic — like land-ledger
+			// itself — so concern 07's default-shift has data on day one even before it's turned on.
+			// Never gates the land above; purely record-only, after the outcome is already known.
+			try {
+				recordModelOutcome(this.stateDir, dto.model, tierOf(rec.options.thinking), result.ok);
+				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
+			} catch (err) {
+				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+			// Confidence-threshold tuner (Epic 6 concern 08): record the SAME land outcome against this
+			// run's Epic 5 confidence score. `dto.confidence` is undefined for a run that never finished a
+			// turn (e.g. re-adopted/direct land) — recordConfidenceOutcome treats that as no evidence, never
+			// a penalty. Recording is unconditional (cheap, like model-outcomes); only the READ (confidenceFloor
+			// above) is flag-gated, so the tuner has data from day one even before it's turned on.
+			try {
+				recordConfidenceOutcome(this.stateDir, Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4, dto.confidence, result.ok);
+			} catch (err) {
+				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
 		// Forced land that merged WITHOUT a passing proof gate — audit it so the override is never invisible trust.
 		if (result.forcedWithoutProof) {
 			const forceActor = opts.actor ?? LOCAL_ACTOR;
@@ -2227,6 +2389,47 @@ export class SquadManager extends EventEmitter {
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
 		return result;
+	}
+
+	/**
+	 * Learning-loop baseline (agentic-learning-loop concern 01): derive first-try-green / fixups-to-green
+	 * / escalation from the run's already-persisted engine visit counts (`WorkflowRunState.visits`) — no
+	 * new tracking, just reads what the engine already recorded. Fires for EVERY workflow_done regardless
+	 * of autoLand/landConfirm mode (unlike `autoLandWorkflow`, which only fires when actually auto-landing)
+	 * so the baseline stays populated even when auto-land is off. Best-effort: a metrics failure must
+	 * never break run completion.
+	 */
+	private recordWorkflowOutcomeMetrics(rec: AgentRecord, outcome: string | undefined): void {
+		try {
+			const visits = rec.options.workflowState?.visits ?? {};
+			const fixupVisits = visits.fixup ?? 0;
+			const escalated = (visits.escalate ?? 0) > 0;
+			const succeeded = outcome === "succeeded";
+			// Tag with the reflexion arm — concern 04 is the one most likely to move these three numbers,
+			// so this is the natural A/B slice; `learningFlags` is read fresh (per-run, per-id) like every
+			// other flag check in the codebase.
+			const tags = { flag: "reflexion", variant: learningFlags(rec.dto.id).reflexion };
+			this.learningMetrics.record("first-try-green", isFirstTryGreen(succeeded, fixupVisits) ? 1 : 0, tags);
+			if (succeeded) this.learningMetrics.record("fixups-to-green", fixupVisits, tags);
+			this.learningMetrics.record("escalation", escalated ? 1 : 0, tags);
+		} catch (err) {
+			this.log("warn", `learning metrics record failed for ${rec.dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	/**
+	 * Recurring-failure memory (agentic-learning-loop concern 05, downscoped): annotate a land-failure
+	 * streak's root cause ONCE per fingerprint, reusing concern 04's `reflect()` (no second LLM path).
+	 * Idempotency lives HERE (not in the caller's timing) — a fingerprint already annotated short-
+	 * circuits before ever calling `reflect()`, so a capped/retried observer tick can call this every
+	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default off).
+	 */
+	private async annotateRecurringFailure(repo: string, finding: Finding, branch: string): Promise<void> {
+		if (!isOn(learningFlags().failureMemory)) return;
+		if (failureAnnotation(this.stateDir, finding.fingerprint)) return; // already annotated — no-op
+		const r = await reflect({ output: finding.detail ?? finding.title });
+		if (!r) return;
+		recordFailureAnnotation(this.stateDir, { fingerprint: finding.fingerprint, repo, branch, rootCause: r.rootCause, at: Date.now() });
 	}
 
 	private async autoLandWorkflow(rec: AgentRecord, outcome: string | undefined, proof?: { state?: string }): Promise<void> {
@@ -2372,13 +2575,50 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (mirrors `resolveLandModeFor` above) so tests can supply a fake independent
+	 * judge without a real `omp` binary on PATH. `undefined` ⇒ `validatorGate`'s own default judge
+	 * (an independent one-shot `omp -p --model opus` call).
+	 */
+	protected validatorJudgeOverride(): Judge | undefined {
+		return undefined;
+	}
+
+	/**
+	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
+	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
+	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
+	 * `acceptanceCriteria` (resolved via `opts.featureId`, or `opts.criteria` directly); a real veto
+	 * blocks unless `opts.validatorOverride` is set (leaf 03's logged override — read here only as a
+	 * boolean-ish gate). Always stamps the resulting `ValidationRecord` onto the agent's DTO so it
+	 * rides the roster broadcast and (via `finalizeRun`, leaf 04) the durable run receipt.
+	 */
+	private async runValidatorGate(opts: LandOpts): Promise<LandResult | undefined> {
+		const pf = opts.featureId ? this.featureStore.get(opts.featureId) : undefined;
+		const criteria = opts.criteria ?? pf?.acceptanceCriteria ?? [];
+		const proof = await proofFor(opts.repo, opts.worktree);
+		const { record, veto } = await validatorGate({ criteria, repo: opts.repo, worktree: opts.worktree, branch: opts.branch, proof, judge: this.validatorJudgeOverride() });
+		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
+		if (rec) {
+			rec.dto.validation = record;
+			this.emitAgent(rec);
+		}
+		if (veto && !opts.validatorOverride) {
+			return { ok: false, committed: false, merged: false, message: opts.message, detail: veto };
+		}
+		return undefined;
+	}
+
+	/**
 	 * Seam over the land.ts primitive so the single-agent land path is unit-testable (inject a fake
 	 * land). Also the universal mode-dispatching point (concern 06): PR mode routes through
 	 * `landAgentPr` (push → ensure PR → scratch-merge gate → `gh pr merge` → assert → DoneProof), local
 	 * mode is the unchanged passthrough to `landAgent`. `land()` and `landFeature()` both call this
-	 * seam, so PR mode inherits proofGate/fail-cap/forced-land-audit/closeLandedIssue for free.
+	 * seam, so PR mode inherits proofGate/fail-cap/forced-land-audit/closeLandedIssue for free — and,
+	 * as of Epic 3, so does the independent-validator veto, run once here for every land path.
 	 */
 	protected async landBranch(opts: LandOpts): Promise<LandResult> {
+		const validatorBlocked = await this.runValidatorGate(opts);
+		if (validatorBlocked) return validatorBlocked;
 		const mode = await this.resolveLandModeFor(opts.repo);
 		if (mode.mode === "pr") {
 			if (!mode.defaultBranch) {
@@ -2407,6 +2647,7 @@ export class SquadManager extends EventEmitter {
 			status: "starting",
 			queued: true,
 			kind: opts.workflow || opts.verify ? "workflow" : "omp-operator",
+			executionRole: opts.executionRole,
 			repo: opts.repo,
 			worktree: opts.existingPath ?? opts.repo,
 			branch: opts.branch ?? `squad/${name}`,
@@ -2612,10 +2853,8 @@ export class SquadManager extends EventEmitter {
 		try {
 			const command = await detectVerify(repo);
 			if (!command) return { ok: true };
-			// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a legible host fallback).
-			const plan = await gateExec(command, repo);
-			const proc = Bun.spawn(plan.argv, { cwd: repo, stdout: "pipe", stderr: "pipe", env: plan.env });
-			const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			// execGatedCommand: scrubbed env always; hermetic docker container by default when docker is usable (else a legible host fallback).
+			const { code, stdout: out, stderr: err } = await execGatedCommand(command, repo);
 			if (code === 0) return { ok: true };
 			// First failing test name from bun's "(fail) <name>" lines; fall back to the tsc/first error line.
 			const text = `${out}\n${err}`;
@@ -2627,6 +2866,25 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * The Observer's dispatch seam (leaf 05): spawn an observing agent to reproduce a confirmed
+	 * regression in its own worktree, instead of the Observer only filing an issue. Opt-in via
+	 * OMP_SQUAD_OBSERVE_REPRODUCE (checked by the Observer itself before calling this); this method is
+	 * just the mechanics — resolve the repo's gate command, spawn a `verifyMode:"observe"` agent, and
+	 * report success/failure so the Observer can fall back to filing. Never throws.
+	 */
+	private async dispatchObserver(repo: string, f: Finding): Promise<boolean> {
+		try {
+			const verify = await detectVerify(repo);
+			if (!verify) return false; // nothing to reproduce against
+			const task = `Reproduce and report on: ${f.title}${f.detail ? `\n\n${f.detail}` : ""}`;
+			await this.create({ repo, task, verify, verifyMode: "observe", executionRole: "observer", autoRoute: false, track: false, approvalMode: "yolo" });
+			return true;
+		} catch (e) {
+			this.log("warn", `dispatchObserver failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`);
+			return false; // WIP cap / spawn failure — Observer falls back to filing
+		}
+	}
 
 	private emitFeaturesChanged(): void {
 		void this.persist();
@@ -2675,16 +2933,18 @@ export class SquadManager extends EventEmitter {
 			};
 		}
 		// Cold-start KB primer (OMPSQ #8): a fresh agent on a feature inherits the most relevant prior
-		// decisions / hot files / peer context with ZERO turn cost, drawn from the context fabric and
-		// fenced as untrusted (same discipline as the resume digest). Best-effort — never blocks a spawn.
+		// decisions / hot files / peer context with ZERO turn cost, drawn from the context fabric.
+		// buildContextPrimer fences its own output as untrusted (concern 02) — do NOT re-fence here.
+		// Best-effort — never blocks a spawn.
 		if (opts.featureId && (opts.task || opts.name)) {
 			try {
 				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
 				const primer = buildContextPrimer(snapshot, [opts.task, opts.name].filter(Boolean).join(" "));
+				this.learningMetrics.record("primer-empty", primer ? 0 : 1);
 				if (primer) {
 					opts = {
 						...opts,
-						appendSystemPrompt: [opts.appendSystemPrompt, fenceUntrusted("context primer", primer)].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+						appendSystemPrompt: [opts.appendSystemPrompt, primer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 					};
 				}
 			} catch (err) {
@@ -2735,7 +2995,15 @@ export class SquadManager extends EventEmitter {
 		const branch = opts.branch ?? `squad/${id}`;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
-			opts = { ...opts, workflow: decision.workflow, verify: decision.verify, thinking: decision.thinking ?? opts.thinking };
+			opts = {
+				...opts,
+				workflow: decision.workflow,
+				verify: decision.verify,
+				verifyMode: decision.mode,
+				thinking: decision.thinking ?? opts.thinking,
+				// Stamp the tester role for observability — the router only ever selects "tdd".
+				executionRole: decision.mode === "tdd" ? "tester" : opts.executionRole,
+			};
 			this.log("info", `routed "${name}": ${decision.reason}`);
 		}
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
@@ -2801,9 +3069,10 @@ export class SquadManager extends EventEmitter {
 			appendSystemPrompt: opts.appendSystemPrompt,
 			issue: opts.issue,
 			kind,
+			executionRole: opts.executionRole,
 			runtime: opts.runtime,
 			flue: opts.flue,
-			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify } } : undefined,
+			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify, mode: opts.verifyMode } } : undefined,
 			// Carry the resumable checkpoint so an adopted/restored workflow continues its graph from the
 			// last node boundary instead of re-running completed stages (and duplicating their commits).
 			workflowState: opts.workflowState,
@@ -2833,6 +3102,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 			issue: opts.issue,
 			kind,
+			executionRole: opts.executionRole,
 			parentId: opts.parentId,
 			...lineageFieldsFrom(opts),
 			featureId: opts.featureId,
@@ -2922,7 +3192,7 @@ export class SquadManager extends EventEmitter {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
 		}
 		if (p.kind === "workflow" && p.workflow) {
-			const workflow = p.workflow.verify ? buildVerifyWorkflow(p.workflow.verify) : undefined;
+			const workflow = p.workflow.verify ? buildVerifyLoop(p.workflow.verify) : undefined;
 			const fleet: WorkflowFleet = { runBranch: (spec) => this.spawnFleetBranch(p.repo, p.id, spec) };
 			// Feed-forward: a workflow tied to a feature folds that feature's unresolved plan-review
 			// comments into the first agent node after the approve gate (Revise → re-plan, Approve → file/implement).
@@ -2939,7 +3209,18 @@ export class SquadManager extends EventEmitter {
 			// unconditionally regardless of `terminal` — so a terminal run never gets a resumable
 			// resumeState here either, even if some future caller forgets the exclusion upstream.
 			const resumeState = p.workflowState?.terminal ? undefined : p.workflowState;
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, cold });
+			// Reflexion (concern 04): only meaningful for a SYNTHESIZED verify loop (buildVerifyLoop's
+			// "fixup" node id is the one it targets); wiring it is cheap (no LLM call unless the flag is
+			// on AND the run actually reaches its 2nd+ fixup), so it's always passed for a verify-mode run.
+			const reflection = workflow ? { stateDir: this.stateDir, repo: p.repo, agentId: p.id } : undefined;
+			// Command nodes (the `verify` gate) run agent-authored scripts. Route them through the shared
+			// gated-exec path so they get the SAME scrubbed env + docker sandbox as every other gate
+			// (proof/land/main gate). Without this the executor's defaultExecCommand runs them with the full
+			// daemon env (Plane/LLM keys, dashboard bearer) and no sandbox: the one gate that skipped the
+			// hardening every other gate enforces. Mount p.repo so the worktree's shared git object store
+			// stays reachable inside the sandbox.
+			const execCommand = (script: string, cwd: string) => execGatedCommand(script, cwd, { mounts: [p.repo] });
+			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold, reflection });
 		}
 		if (p.sandbox) {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
@@ -3594,7 +3875,7 @@ export class SquadManager extends EventEmitter {
 			// `verify:`-only runs, which have no file to re-parse/branch from but ARE terminal-markable). This
 			// also supplies the goalGate/retryTarget/overflow chain the visit reset below walks.
 			const wf: Workflow | undefined = rec.options.workflow?.verify
-				? buildVerifyWorkflow(rec.options.workflow.verify)
+				? buildVerifyLoop(rec.options.workflow.verify)
 				: rec.options.workflow?.path
 					? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
 					: undefined;
@@ -3656,6 +3937,8 @@ export class SquadManager extends EventEmitter {
 						approvalMode: rec.options.approvalMode,
 						workflow: rec.options.workflow?.path,
 						verify: rec.options.workflow?.verify?.command,
+						verifyMode: rec.options.workflow?.verify?.mode,
+						executionRole: rec.options.executionRole,
 						workflowState: forkedState,
 						// Fork inherits the issue (DESIGN.md RT1#13: one issue, one active claimant) — the original
 						// is marked supersededBy below and excluded from adoption/dispatch, so this is never a
@@ -3927,6 +4210,9 @@ export class SquadManager extends EventEmitter {
 				break;
 			}
 			case "workflow_done":
+				// Baseline (concern 01): first-try-green / fixups-to-green / escalation, unconditional —
+				// the measurement the rest of the learning loop is A/B'd against. Never gates anything.
+				this.recordWorkflowOutcomeMetrics(rec, frame.outcome as string | undefined);
 				// Workflow auto-land must satisfy the same fresh-proof invariant surfaced by Land all.
 				// The final land still goes through land(), so merge verification/rollback and issue-close stay one seam.
 				void this.autoLandWorkflow(rec, frame.outcome as string | undefined, frame.proof as { state?: string } | undefined);
@@ -4356,6 +4642,23 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Reward-boost tag (agentic-learning-loop concern 03) for this run's digest — boost-only, read-only
+	 * on the deterministic proof (never a gate, never rewritten here). `null` (not `undefined`) as soon
+	 * as the flag is off or no proof exists, so `buildDigest` omits the tag entirely: absence is
+	 * "unknown", never "bad". `firstTryGreen` reads the SAME `visits.fixup` count concern 01's baseline
+	 * metric derives from, so both stay in agreement about what "first try" means.
+	 */
+	private async digestReward(rec: AgentRecord): Promise<DigestReward | null> {
+		if (!isOn(learningFlags(rec.dto.id).rewardBoost)) return null;
+		const proof = await proofFor(rec.dto.repo, rec.dto.worktree).catch(() => undefined);
+		if (!proof) return null; // no proof ran ⇒ unknown, not a tag
+		const head = await headCommit(rec.dto.worktree).catch(() => "");
+		const fresh = isFresh(proof, head);
+		const fixupVisits = rec.options.workflowState?.visits?.fixup ?? 0;
+		return { ok: proof.ok, fresh, firstTryGreen: proof.ok && fresh && fixupVisits === 0 };
+	}
+
+	/**
 	 * Persist one JSONL receipt line for a completed/terminated run, then clear
 	 * the accumulator so the next turn starts fresh. Idempotent per run via the
 	 * accumulator's `finalized` flag (agent_end + exit can both fire).
@@ -4366,13 +4669,27 @@ export class SquadManager extends EventEmitter {
 		run.finalized = true;
 		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
 		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
+		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it
+		// survives the run — the input Epic 5's confidence scorer reads via buildDigest.
+		if (rec.dto.validation) receipt.validation = rec.dto.validation;
+		// Epic 5 (HITL safeguards, DESIGN.md D1): pure, deterministic run-end self-confidence from
+		// signals already on the record — the proof state and the blast-radius proxy (files touched).
+		// `validator` folds in Epic 3's independent-validator verdict when one ran: "pass" (all declared
+		// criteria satisfied) or "veto" (fail-closed, at least one unsatisfied) map to pass/fail;
+		// "abstain" (judge unreachable, fail-open) and "skipped" (no declared criteria) map to
+		// `undefined` — absence never penalizes.
+		const validator: "pass" | "fail" | undefined =
+			rec.dto.validation?.verdict === "pass" ? "pass" : rec.dto.validation?.verdict === "veto" ? "fail" : undefined;
+		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator });
+		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
 		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		// Best-effort cold-start digest: a failure here must never break run completion.
 		try {
-			const md = buildDigest({ transcript: rec.transcript, receipts: await readReceipts(this.stateDir, rec.dto.id) });
+			const reward = await this.digestReward(rec);
+			const md = buildDigest({ transcript: rec.transcript, receipts: await readReceipts(this.stateDir, rec.dto.id), reward });
 			await writeDigest(this.stateDir, rec.dto.id, md);
 		} catch (err) {
 			this.log("warn", `digest failed for ${rec.dto.name}: ${err}`);
@@ -4391,6 +4708,37 @@ export class SquadManager extends EventEmitter {
 		// branch diff (not the receipt). Advisory low-sev finding only — never blocks a land.
 		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
+		rec.dto.confidence = conf;
+		// A NEW run's outcome supersedes any PRIOR run's auto-report — prune the stale `auto-*` notes so a
+		// now-lifted low-confidence flag stops nagging in "Needs you" (review MINOR). Only auto-emitted
+		// reports (id `auto-*`) are pruned; agent-raised `squad_report` notes (uuid ids) persist until the
+		// human dismisses them by viewing. If this run is ALSO low-confidence, a fresh auto-report is added
+		// just below; if it recovered (≥ floor), the channel simply clears.
+		if (rec.dto.reports?.length) {
+			const kept = rec.dto.reports.filter((r) => !r.id.startsWith("auto-"));
+			rec.dto.reports = kept.length ? kept : undefined;
+		}
+		// Epic 5 (HITL safeguards, DESIGN.md D2): low-confidence auto-escalation — the join of leaves
+		// 02 (score)+03 (cap)+05 (report channel). A run finishing below the floor gets a NON-blocking
+		// report appended so it surfaces as a "Needs you" row instead of silently sitting land-ready;
+		// the leaf-03 cap (recomputed below by emitAgent's syncAuthority call) has already dropped it
+		// to assist/propose-only. De-duped by runId so a re-finalize (finalized guard above makes this
+		// defensive, not load-bearing) never doubles the report.
+		if (conf < confidenceFloor()) {
+			const reportId = `auto-${receipt.runId}`;
+			if (!(rec.dto.reports ?? []).some((r) => r.id === reportId)) {
+				const touched = receipt.filesTouched;
+				const proposal = touched.length ? `${touched.length} file${touched.length === 1 ? "" : "s"} touched: ${touched.slice(0, 10).join(", ")}${touched.length > 10 ? `, +${touched.length - 10} more` : ""}` : "no files touched";
+				const report: AgentReport = {
+					id: reportId,
+					summary: `Low confidence (${conf.toFixed(2)}) — verify before landing`,
+					proposal,
+					confidence: conf,
+					createdAt: Date.now(),
+				};
+				rec.dto.reports = [...(rec.dto.reports ?? []), report];
+			}
+		}
 		rec.dto.traceId = run.traceId || rec.dto.traceId; // same sticky rule as the turn-progress site above
 		rec.options.traceId = rec.dto.traceId; // topology review finding 7: mirror onto PersistedAgent so a restart never drops the trace link
 		// Run-end closure: stamp any subagent left non-terminal (started but never got a terminal frame
@@ -4484,6 +4832,13 @@ export class SquadManager extends EventEmitter {
 		return readReceipts(this.stateDir, id);
 	}
 
+	/** Every persisted receipt on disk (the append-only ledger), regardless of whether its agent is
+	 *  still in the live roster. The receipt-backed dashboard panels (usage/heat/activity) read this so
+	 *  reaped agents and post-restart history stay visible — a per-live-agent read hides all of it. */
+	async allReceipts(): Promise<RunReceipt[]> {
+		return readAllReceipts(this.stateDir);
+	}
+
 	async trace(id: string): Promise<TraceResponse> {
 		const receipts = await readAllReceipts(this.stateDir);
 		for (const rec of this.agents.values()) {
@@ -4533,12 +4888,35 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Compliance findings (Epic 3, leaf 05) over the audit log + the two land ledgers — server reads
+	 * this for `/api/governance`'s `compliance` key, and the Observer loop (leaf 06) reads it as an
+	 * additional finding source. Keeps `stateDir` private (same pattern as `auditLog`/`receipts`).
+	 */
+	async complianceFindings(): Promise<ComplianceFinding[]> {
+		return evaluateCompliance({
+			readAudit: (q) => readAudit(this.stateDir, q),
+			forcedLands: () => readForcedLands(this.stateDir),
+			validatorOverrides: () => readValidatorOverrides(this.stateDir),
+			landLedger: () => readLandLedger(this.stateDir),
+		});
+	}
+
+	/**
 	 * Background-loop activity (scout/observer/opportunity/dispatch): the recent event feed plus per-loop
 	 * rollups over a trailing window. The observability surface the audit log never carried — it answers
 	 * "what is running in the background, how often, and what is it costing" (server reads this for /api/automation).
 	 */
 	automationActivity(query: AutomationQuery & { windowMs?: number } = {}): { events: AutomationEvent[]; rollup: ReturnType<AutomationLog["rollup"]> } {
 		return { events: this.automation.recent(query), rollup: this.automation.rollup(query.windowMs) };
+	}
+
+	/**
+	 * Agentic-learning-loop baseline (concern 01, server reads this for GET /api/metrics/learning-loop):
+	 * per-metric rollups (count/sum/avg, broken down by tag) over a trailing window, plus the CURRENT
+	 * flag resolution so an operator can see both "what's on" and "what effect it's had" in one call.
+	 */
+	learningMetricsSnapshot(windowMs?: number): { flags: ReturnType<typeof learningFlags>; rollup: MetricRollupRow[] } {
+		return { flags: learningFlags(), rollup: this.learningMetrics.rollup(windowMs) };
 	}
 
 	/**
@@ -4557,6 +4935,7 @@ export class SquadManager extends EventEmitter {
 			observer: this.observers.length > 0,
 			scout: this.scouts.size > 0,
 			opportunity: this.opportunities.length > 0,
+			residentPlanner: this.residentPlanners.length > 0,
 			// orchestrator is always built, but its control loop only arms the timer when AUTODRIVE is on.
 			autodrive: !!this.orchestrator && process.env.OMP_SQUAD_AUTODRIVE !== "0",
 			autoland: this.autoLand,
@@ -4690,6 +5069,10 @@ export class SquadManager extends EventEmitter {
 			void this.handlePeerMessageTool(rec, call);
 			return;
 		}
+		if (call.toolName === REPORT_TOOL) {
+			void this.handleReportTool(rec, call);
+			return;
+		}
 		// Capability tool-grant enforcement (#3): if this agent was spawned from a capability profile that
 		// declared a tool allow-list, hard-deny any host tool call outside it instead of surfacing it for
 		// approval. The built-in peer-message tool above is exempt (it's not a capability tool).
@@ -4759,6 +5142,30 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			rec.agent.respondHostTool(call.id, err instanceof Error ? err.message : String(err), true);
 		}
+	}
+
+	/**
+	 * squad_report (Epic 5 HITL safeguards, DESIGN.md D2): "I'm unsure — here's a proposal" WITHOUT
+	 * stopping. Modeled on `handlePeerMessageTool` above, NOT on the blocking `onHostTool` pending
+	 * path — it responds to the agent immediately (the agent keeps running) and appends to the
+	 * separate, non-blocking `AgentDTO.reports` channel. Never calls `setPending`: that would flip
+	 * status to "input" and cap authority to observe, the exact opposite of this primitive's purpose.
+	 */
+	private async handleReportTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+		const summary = typeof args.summary === "string" ? args.summary.trim() : "";
+		if (!summary) {
+			rec.agent.respondHostTool(call.id, `usage: ${REPORT_TOOL}({ summary: string, proposal?: string, confidence?: number })`, true);
+			return;
+		}
+		const proposal = typeof args.proposal === "string" ? args.proposal : undefined;
+		const confidence = typeof args.confidence === "number" && Number.isFinite(args.confidence) ? Math.max(0, Math.min(1, args.confidence)) : undefined;
+		const report: AgentReport = { id: randomUUID(), summary, proposal, confidence, createdAt: Date.now() };
+		rec.dto.reports = [...(rec.dto.reports ?? []), report];
+		this.append(rec, "system", `📝 report: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: REPORT_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+		rec.agent.respondHostTool(call.id, "report recorded — continue working, a human will review it when they can");
+		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncate(summary, 120));
+		this.emitAgent(rec);
 	}
 
 	private derive(rec: AgentRecord): AgentStatus {

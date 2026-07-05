@@ -1,5 +1,5 @@
 # Retrieval provenance + fence-in-builder
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

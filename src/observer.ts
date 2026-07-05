@@ -30,6 +30,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
+import type { ComplianceFinding } from "./compliance.ts";
 import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
@@ -64,6 +65,10 @@ export interface ObserverDeps {
 	reopenIssue?: (ref: IssueRef) => Promise<boolean>;
 	/** Reap a landed-survivor agent (the only autofix; never touches main/code). */
 	removeAgent: (id: string) => Promise<void>;
+	/** Spawn an observing agent to reproduce a confirmed regression in its own worktree, instead of
+	 *  only filing an issue. Absent ⇒ regressions are only filed (today's behavior). Only ever called
+	 *  for a `regression:`-fingerprinted finding, and only under OMP_SQUAD_OBSERVE_REPRODUCE=1. */
+	spawnObserver?: (finding: Finding) => Promise<boolean>;
 	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
 	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }>;
 	/** Commits on the agent's branch not in main (origin-aware in PR mode — see `aheadOfBase`):
@@ -78,6 +83,19 @@ export interface ObserverDeps {
 	/** Branch → auto-land failure streak (the persisted ledger). Absent ⇒ the land-failure check is
 	 *  skipped — keeps the loop usable in tests / before any land. */
 	landLedger?: () => LandLedger;
+	/** Learning-loop baseline (agentic-learning-loop concern 01): how many branches are CURRENTLY over
+	 *  the land-failure-streak cap this tick (0 when none). Fired every tick the landLedger check runs,
+	 *  so "land-failure-streak frequency" is measurable even when nothing is filed (e.g. already-open). */
+	recordLandFailureStreak?: (count: number) => void;
+	/** Recurring-failure memory (concern 05, downscoped): annotate a land-failure streak's root cause
+	 *  ONCE per fingerprint (the callee is responsible for its own idempotency — a fingerprint already
+	 *  annotated is a no-op) so a later cold-start on the same branch can warn the next agent. Absent
+	 *  ⇒ disabled (no annotation, matches OMP_SQUAD_FAILURE_MEMORY default off). */
+	annotateFailure?: (finding: Finding, branch: string) => Promise<void>;
+	/** Epic 3's compliance evaluator (src/compliance.ts) — real policy findings (forced lands,
+	 *  overridden validator vetoes, repeatedly-failing branches) fed into the SAME observe → file →
+	 *  confirm loop as the structural checks below. Absent ⇒ disabled — keeps old tests/embedders green. */
+	complianceFindings?: () => Promise<ComplianceFinding[]>;
 	/** Where to persist seen fingerprints. */
 	stateDir: string;
 	/** Seen-map filename within stateDir (default "observer-seen.json"). Per-repo observers pass distinct
@@ -111,6 +129,10 @@ function autoDispatch(): boolean {
 /** Opt-in: action autoFixable findings directly (reap-survivor) instead of filing. */
 function autoFix(): boolean {
 	return process.env.OMP_SQUAD_OBSERVE_AUTOFIX === "1";
+}
+/** Opt-in: dispatch an observing agent to reproduce a confirmed regression instead of only filing it. */
+function observeReproduce(): boolean {
+	return process.env.OMP_SQUAD_OBSERVE_REPRODUCE === "1";
 }
 /** Consecutive failed auto-lands before the observer files a bug for a branch (mirrors the manager's
  *  AUTO_LAND_FAIL_CAP so a parked branch is exactly the one that gets a bug filed). */
@@ -289,6 +311,23 @@ export function landFailureFindings(ledger: LandLedger, liveBranches: Set<string
 	return out;
 }
 
+/**
+ * Compliance findings (Epic 3, leaf 06) — a pure mapper from `src/compliance.ts`'s policy findings
+ * into Observer `Finding`s, so a policy violation (forced land, overridden veto, repeatedly-failing
+ * branch) rides the SAME dedup/file/confirm loop as the structural checks above, not just an
+ * on-demand `/api/governance` read. `fingerprint` is stable per (code, subject) so a re-tick with the
+ * same violation is never re-filed; `severity` passes through unchanged (compliance's
+ * `low|high|structural` already matches Observer's `Severity`).
+ */
+export function auditCompliance(findings: ComplianceFinding[]): Finding[] {
+	return findings.map((f) => ({
+		fingerprint: `compliance:${f.code}:${f.subject}`,
+		title: `compliance: ${f.code} — ${f.subject}`,
+		detail: f.detail,
+		severity: f.severity,
+	}));
+}
+
 /** Check 6 — a stopped/idle agent with local uncommitted edits has stranded work that cannot be
  * inferred from commits-ahead. Surface it as an observer issue instead of letting it rot invisibly in
  * the worktree. Live working/input agents are excluded: their dirty files are in-progress, not stranded. */
@@ -382,6 +421,27 @@ export class Observer {
 
 			for (const f of findings) {
 				reproduced.add(f.fingerprint);
+
+				// A confirmed regression (confirmedGate's double-confirmed gate-red, minted by
+				// auditTestsGreen) can be dispatched to an observing agent that reproduces it in its own
+				// worktree, instead of only filing an issue — opt-in and additive: OMP_SQUAD_OBSERVE_REPRODUCE
+				// unset preserves today's file-only behavior exactly. A successful spawn marks the finding
+				// handled for this tick (skips filing below); a failed/absent spawn falls through to the
+				// normal file path unchanged. Never applies to survivors/false-dones/untracked/land-failure —
+				// only a `regression:`-fingerprinted finding.
+				if (f.fingerprint.startsWith("regression:") && observeReproduce() && this.deps.spawnObserver && !this.seen[f.fingerprint]) {
+					const dispatched = await this.deps.spawnObserver(f).catch((e) => {
+						log(`spawnObserver failed for ${f.fingerprint}: ${msg(e)}`);
+						return false;
+					});
+					if (dispatched) {
+						this.seen[f.fingerprint] = { title: f.title, filedAt: clock() };
+						log(`dispatched observing agent for ${f.fingerprint}: ${f.title}`);
+						continue;
+					}
+					log(`spawnObserver declined for ${f.fingerprint} — falling back to filing`);
+				}
+
 				// Autofixable findings are safe operational housekeeping (reap a landed survivor), never backlog
 				// noise: reap when OMP_SQUAD_OBSERVE_AUTOFIX=1, otherwise just log — but NEVER file them as a
 				// Plane issue (that floods the tracker with do-not-auto-land churn). Checked BEFORE the dedup
@@ -542,8 +602,23 @@ export class Observer {
 		// becomes a dedup'd bug issue the dispatcher can pick up to re-do the work on a fresh branch.
 		if (this.deps.landLedger) {
 			const liveBranches = new Set(agents.map((a) => a.branch).filter((b): b is string => !!b));
-			findings.push(...landFailureFindings(this.deps.landLedger(), liveBranches, landFailCap()));
+			const lf = landFailureFindings(this.deps.landLedger(), liveBranches, landFailCap());
+			this.deps.recordLandFailureStreak?.(lf.length);
+			// Recurring-failure memory (concern 05): annotate each currently-streaking branch's root
+			// cause. The callee (squad-manager) skips its own reflect() call for a fingerprint already
+			// annotated, so this fires ONE genuine LLM call per recurring failure, not once per tick.
+			if (this.deps.annotateFailure) {
+				const log = this.deps.log ?? (() => {});
+				for (const f of lf) {
+					const branch = f.fingerprint.slice("land-failing:".length);
+					await this.deps.annotateFailure(f, branch).catch((e) => log(`annotateFailure failed for ${f.fingerprint}: ${msg(e)}`));
+				}
+			}
+			findings.push(...lf);
 		}
+		// Epic 3 compliance findings (forced lands, overridden vetoes, repeatedly-failing branches) —
+		// the same policy state /api/governance exposes on demand, now filed/deduped automatically.
+		if (this.deps.complianceFindings) findings.push(...auditCompliance(await this.deps.complianceFindings()));
 		return findings;
 	}
 

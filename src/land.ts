@@ -14,6 +14,7 @@ import { detectVerify } from "./intake.ts";
 import { gateExec } from "./gate-runner.ts";
 import { proofGate, recordProof } from "./proof.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
+import type { FeatureCriterion } from "./types.ts";
 
 export interface LandResult {
 	ok: boolean;
@@ -126,6 +127,16 @@ export interface LandOpts {
 	 *  the roster) after this issue's dto is gone. Completely ignored by the local-mode path. */
 	issueProjectId?: string;
 	agentId?: string;
+	/**
+	 * Epic 3 independent-validator plumbing (leaf 02) — read by `SquadManager.landBranch` BEFORE it
+	 * dispatches to this module's `landAgent`/PR's `landAgentPr`; land.ts itself stays criteria-agnostic
+	 * (these fields are ignored by `landAgentLocked`/`landAgentImpl`). `featureId` is what `landBranch`
+	 * resolves acceptance criteria from; `criteria` is an optional direct override. `validatorOverride`
+	 * is the boolean-ish bypass a real veto needs — the logged reason class behind it is leaf 03's job.
+	 */
+	featureId?: string;
+	criteria?: FeatureCriterion[];
+	validatorOverride?: boolean;
 }
 
 /**
