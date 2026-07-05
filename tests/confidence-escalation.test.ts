@@ -129,3 +129,33 @@ test("a high-confidence run (fresh proof, no files) produces zero auto-reports a
 
 	await mgr.stop();
 });
+
+test("a later high-confidence run SUPERSEDES the prior run's auto-report (it stops nagging), but keeps agent-raised reports", async () => {
+	const { mgr, repo } = await makeMgr();
+	const dto = await mgr.create({ name: "supersede", repo, approvalMode: "yolo", autoRoute: false });
+	const internals = mgr as unknown as ManagerInternals;
+	const rec = internals.agents.get(dto.id)!;
+
+	// Run 1: low confidence → one auto-report appended.
+	internals.onAgentEvent(rec, { type: "agent_start" });
+	rec.dto.verificationState = "failed";
+	await internals.finalizeRun(rec);
+	expect(rec.dto.reports).toHaveLength(1);
+	expect(rec.dto.reports?.[0]?.id).toMatch(/^auto-/);
+
+	// An agent-raised (non-auto) report also sits on the channel — it must NOT be pruned by a later run.
+	rec.dto.reports = [...(rec.dto.reports ?? []), { id: "manual-1", summary: "I flagged something myself", createdAt: Date.now() }];
+
+	// Run 2: the agent re-runs and now finishes GREEN (fresh proof, high confidence). The stale auto-report
+	// from run 1 is superseded — the low-confidence flag stops nagging — while the manual report survives.
+	internals.onAgentEvent(rec, { type: "agent_start" });
+	rec.dto.verificationState = "fresh";
+	await internals.finalizeRun(rec);
+
+	expect(rec.dto.confidence).toBeGreaterThanOrEqual(0.4);
+	const ids = (rec.dto.reports ?? []).map((r) => r.id);
+	expect(ids).toEqual(["manual-1"]); // the auto-report is gone; the agent-raised one remains
+	expect(rec.dto.effectiveMode).toBe("autodrive"); // cap lifted with the recovered confidence
+
+	await mgr.stop();
+});

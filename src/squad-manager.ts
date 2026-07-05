@@ -602,6 +602,16 @@ export class SquadManager extends EventEmitter {
 		return dto.pending.length ? "waiting for operator input" : undefined;
 	}
 
+	/**
+	 * Epic 5 propose-only: is this run's confidence below the operator's floor? Mirrors the EXACT
+	 * condition `effectiveAutonomyMode` (autonomy.ts) uses to cap the mode to `assist`, so the
+	 * autonomous-land hold in `land()` and the UI/authority cap can never drift apart. Undefined
+	 * confidence (no run has finished — a fresh agent) never holds.
+	 */
+	private confidenceBelowFloor(dto: Pick<AgentDTO, "confidence">): boolean {
+		return dto.confidence !== undefined && dto.confidence < confidenceFloor();
+	}
+
 	private syncAuthority(dto: AgentDTO): void {
 		const blockedReason = this.blockedReason(dto);
 		const requested = dto.autonomyMode ?? modeFromApproval(dto.approvalMode);
@@ -2231,6 +2241,24 @@ export class SquadManager extends EventEmitter {
 			const actor = opts.actor ?? LOCAL_ACTOR;
 			void this.recordAudit(actor, "land", id, "ok", `force land: ${opts.reason}`);
 			void this.store.appendAudit({ actor: actor.id, action: "land.force", target: id, detail: { reason: opts.reason } }).catch(() => {});
+		}
+		// Epic 5 propose-only ENFORCEMENT (review SIGNIFICANT). The leaf-03 cap set effectiveMode="assist"
+		// and stripped "land" from availableActions, but those gate ONLY the UI land-ready row + operator
+		// verify — the AUTONOMOUS land path (autoLandWorkflow and the orchestrator's landAgentWork, both
+		// via `land(id)` with auto:true) never consulted them, so a sub-floor run got auto-merged anyway,
+		// silently bypassing the operator's configured brake. Hold it here instead: proof is already
+		// GREEN (proofGate passed above), so this is a genuine "verified but low-confidence" state —
+		// stage it for a one-tap operator Land (staged ⇒ the orchestrator HOLDS, never parks/fails; a
+		// hold is not a land failure, so it must return BEFORE recordLandOutcome below). An OPERATOR land
+		// (auto:false) deliberately bypasses this: explicitly clicking Land in assist mode IS the intended
+		// propose-only approval flow. A force land also bypasses (an explicit human override).
+		if (auto && !opts.force && this.confidenceBelowFloor(dto)) {
+			rec.dto.landReady = true;
+			this.emitAgent(rec);
+			this.floatPrOnLandReady(rec);
+			this.log("info", `auto-land held for ${dto.name}: confidence ${dto.confidence?.toFixed(2)} below floor ${confidenceFloor()} — awaiting operator approval (propose-only)`);
+			void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land.held-low-confidence", target: id, detail: { confidence: dto.confidence, floor: confidenceFloor() } }).catch(() => {});
+			return { ok: false, committed: false, merged: false, staged: true, message: "auto-land held (low confidence)", detail: `held for operator approval: confidence ${dto.confidence?.toFixed(2)} is below the ${confidenceFloor()} floor` };
 		}
 		const busy = dto.status === "working" || dto.status === "starting" || dto.status === "input";
 		const overrideReasonClass = opts.validatorOverride?.reasonClass?.trim();
@@ -4568,6 +4596,15 @@ export class SquadManager extends EventEmitter {
 		this.auditProduces(rec);
 		rec.dto.receipt = run.rollup();
 		rec.dto.confidence = conf;
+		// A NEW run's outcome supersedes any PRIOR run's auto-report — prune the stale `auto-*` notes so a
+		// now-lifted low-confidence flag stops nagging in "Needs you" (review MINOR). Only auto-emitted
+		// reports (id `auto-*`) are pruned; agent-raised `squad_report` notes (uuid ids) persist until the
+		// human dismisses them by viewing. If this run is ALSO low-confidence, a fresh auto-report is added
+		// just below; if it recovered (≥ floor), the channel simply clears.
+		if (rec.dto.reports?.length) {
+			const kept = rec.dto.reports.filter((r) => !r.id.startsWith("auto-"));
+			rec.dto.reports = kept.length ? kept : undefined;
+		}
 		// Epic 5 (HITL safeguards, DESIGN.md D2): low-confidence auto-escalation — the join of leaves
 		// 02 (score)+03 (cap)+05 (report channel). A run finishing below the floor gets a NON-blocking
 		// report appended so it surfaces as a "Needs you" row instead of silently sitting land-ready;
