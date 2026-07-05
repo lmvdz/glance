@@ -1,5 +1,8 @@
-/** Bounded trace export seam. No SDK, no durable retry: receipts are source of truth. */
+/** Bounded trace export seam. No SDK; receipts remain the durable source of truth — this is an
+ *  external-tool-friendly copy, with a bounded retry so a transient collector blip doesn't drop it. */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { allowlistOrigins, checkVisionUrl } from "./ssrf.ts";
 import type { Span } from "./spans.ts";
 
@@ -150,6 +153,27 @@ export class DatadogExporter implements Exporter {
 	}
 }
 
+/**
+ * D4: spans leave the daemon by default. Appends every exported batch as one NDJSON line to
+ * `<stateDir>/traces.jsonl` — a local, dependency-free, external-tool-friendly copy. Not a read
+ * path: `manager.trace()` never reads this file back; receipts + audit remain the source of truth.
+ */
+export class LocalFileExporter implements Exporter {
+	readonly name = "local-file";
+	constructor(private readonly file: string) {}
+
+	async export(spans: Span[], resource: TraceResource): Promise<void> {
+		await fs.mkdir(path.dirname(this.file), { recursive: true });
+		await fs.appendFile(this.file, `${JSON.stringify({ at: Date.now(), resource, spans })}\n`);
+	}
+}
+
+/** Bounded retry before a batch counts as failed — a transient collector blip (or a momentarily
+ *  full disk for the local sink) shouldn't silently drop spans. The queue's overflow-drop (below)
+ *  remains the last-resort bound for an unbounded backlog; retry only covers transient failures. */
+const RETRY_MAX = 3;
+const RETRY_BACKOFF_MS = 50;
+
 export class TraceExportQueue {
 	readonly stats = { dropped: 0, failed: 0, exported: 0 };
 	private readonly queue: { spans: Span[]; resource: TraceResource }[] = [];
@@ -174,12 +198,22 @@ export class TraceExportQueue {
 		try {
 			for (let item = this.queue.shift(); item; item = this.queue.shift()) {
 				for (const exporter of this.exporters) {
-					try {
-						await exporter.export(item.spans, item.resource);
+					let ok = false;
+					let lastErr: unknown;
+					for (let attempt = 1; attempt <= RETRY_MAX && !ok; attempt++) {
+						try {
+							await exporter.export(item.spans, item.resource);
+							ok = true;
+						} catch (err) {
+							lastErr = err;
+							if (attempt < RETRY_MAX) await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * attempt));
+						}
+					}
+					if (ok) {
 						this.stats.exported += item.spans.length;
-					} catch (err) {
+					} else {
 						this.stats.failed += item.spans.length;
-						if (this.stats.failed === item.spans.length || this.stats.failed % 100 === 0) this.opts.log?.(`trace exporter ${exporter.name} failed: ${err instanceof Error ? err.message : String(err)}`);
+						if (this.stats.failed === item.spans.length || this.stats.failed % 100 === 0) this.opts.log?.(`trace exporter ${exporter.name} failed: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 					}
 				}
 			}
@@ -190,11 +224,17 @@ export class TraceExportQueue {
 	}
 }
 
-export function traceExporterFromEnv(log?: (message: string) => void): TraceExportQueue | undefined {
+/**
+ * `stateDir`, when given, always adds the durable local NDJSON sink (D4) unless the operator opts
+ * out with `OMP_SQUAD_TRACE_LOCAL=0` — so this now rarely returns `undefined` in the default config;
+ * spans leave the daemon (to disk, at least) without requiring an OTLP/Langfuse/Datadog collector.
+ */
+export function traceExporterFromEnv(log?: (message: string) => void, stateDir?: string): TraceExportQueue | undefined {
 	const exporters: Exporter[] = [];
 	if (process.env.OMP_SQUAD_TRACE_EXPORT_OTLP_URL) exporters.push(new OtlpHttpExporter(process.env.OMP_SQUAD_TRACE_EXPORT_OTLP_URL));
 	if (process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL) exporters.push(new LangfuseExporter(process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL, process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_PUBLIC_KEY, process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_SECRET_KEY));
 	if (process.env.OMP_SQUAD_TRACE_EXPORT_DATADOG_URL) exporters.push(new DatadogExporter(process.env.OMP_SQUAD_TRACE_EXPORT_DATADOG_URL, process.env.OMP_SQUAD_TRACE_EXPORT_DATADOG_API_KEY));
+	if (stateDir && process.env.OMP_SQUAD_TRACE_LOCAL !== "0") exporters.push(new LocalFileExporter(path.join(stateDir, "traces.jsonl")));
 	if (!exporters.length) return undefined;
 	const max = Number(process.env.OMP_SQUAD_TRACE_EXPORT_QUEUE);
 	return new TraceExportQueue(exporters, { max: Number.isFinite(max) && max > 0 ? Math.floor(max) : 1000, log });

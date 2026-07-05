@@ -17,7 +17,7 @@ import "./env-compat.ts";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readFileSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { PushService } from "./push.ts";
@@ -38,7 +38,10 @@ import { DbStore } from "./dal/store.ts";
 import type { OrgContext } from "./dal/context.ts";
 import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
 import { curatePlaneIssues, renderClusterReport } from "./plane-curator.ts";
-import { validatePlanConcerns } from "./features.ts";
+import { concernNumFromFile, parsePlanConcerns, validatePlanConcerns } from "./features.ts";
+import { decompose, DECOMPOSE_TIMEOUT_MS, type VerifiedConcern } from "./planner.ts";
+import { writeConcernDrafts } from "./plan-writer.ts";
+import { ompClassify } from "./intake.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
@@ -72,6 +75,7 @@ USAGE
   glance open                                   Print the dashboard URL
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
   glance plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
+  glance plan-decompose <dir> [--json]          One-shot: decompose <dir>/OBJECTIVE.md into a concern-DAG (needs \`omp\`)
 
 ADD FLAGS
   --name <s>        Agent name (default: agent-N)
@@ -620,6 +624,64 @@ async function cmdPlanValidate(args: string[]): Promise<void> {
 	process.exit(1);
 }
 
+/** STATUS values that mean "finished" — mirrors plan-sync.ts's own local TERMINAL set. */
+const TERMINAL_STATUSES = new Set(["done", "complete", "completed", "closed", "cancelled", "canceled"]);
+
+/**
+ * One-shot decompose→write→validate cycle against a plans/<name>/OBJECTIVE.md — the manual
+ * dogfood path for the resident planner (resident-planner.ts) AND the deterministic end-to-end
+ * harness for its epic's top-level Verify, without standing up the daemon loop. The verified set
+ * here is local-terminal-STATUS only: the DoneProof ledger (done-proof.ts) that lets the live
+ * daemon loop react to a land BEFORE plan-sync catches STATUS up is only available inside a
+ * running SquadManager (resident-planner.ts, wired in squad-manager.ts) — this off-daemon path
+ * has no ledger to consult, so it falls back to whatever STATUS is already on disk.
+ */
+async function cmdPlanDecompose(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const dir = positional[0];
+	if (!dir) {
+		process.stderr.write("usage: omp-squad plan-decompose <plan-dir> [--json]\n");
+		process.exit(1);
+		return;
+	}
+	const abs = path.resolve(dir);
+	const objective = await readFile(path.join(abs, "OBJECTIVE.md"), "utf8").catch(() => undefined);
+	if (objective === undefined || !objective.trim()) {
+		const msg = `no OBJECTIVE.md found in ${abs} (create one to seed the resident planner)`;
+		if (flags.json) process.stdout.write(`${JSON.stringify({ dir: abs, error: msg })}\n`);
+		else process.stderr.write(`✗ ${msg}\n`);
+		process.exit(1);
+		return;
+	}
+
+	const existing = await parsePlanConcerns("", abs);
+	const verified: VerifiedConcern[] = existing.filter((c) => TERMINAL_STATUSES.has(c.status)).map((c) => ({ num: concernNumFromFile(c.file) ?? undefined, title: c.title, planeId: c.planeId }));
+	const openExisting = existing.filter((c) => !TERMINAL_STATUSES.has(c.status));
+	const drafts = await decompose({ objective, verified, existing: openExisting, classify: ompClassify(undefined, DECOMPOSE_TIMEOUT_MS) });
+
+	if (drafts.length === 0) {
+		// Never attempt a destructive empty write (that would prune every open concern) — a failed
+		// or empty decompose is a no-op, not a gate failure. Exit 0: nothing was wrong, nothing changed.
+		if (flags.json) process.stdout.write(`${JSON.stringify({ dir: abs, written: [], removed: [], issues: [], ok: true, concernsWritten: 0 }, null, 2)}\n`);
+		else process.stdout.write(`${path.basename(abs)} — decompose produced no concerns this pass (objective may already be fully planned, or the model call failed)\n`);
+		return;
+	}
+
+	const result = await writeConcernDrafts("", abs, drafts);
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify({ dir: abs, written: result.written, removed: result.removed, issues: result.issues, ok: result.ok, concernsWritten: result.ok ? drafts.length : 0 }, null, 2)}\n`);
+		if (!result.ok) process.exit(1);
+		return;
+	}
+	if (!result.ok) {
+		process.stdout.write(`✗ ${path.basename(abs)} — dependency graph gate refused (${result.issues.length} issue${result.issues.length === 1 ? "" : "s"}):\n`);
+		for (const issue of result.issues) process.stdout.write(`  • [${issue.kind}] ${issue.message}\n`);
+		process.exit(1);
+		return;
+	}
+	process.stdout.write(`✓ ${drafts.length} concern${drafts.length === 1 ? "" : "s"} written to ${path.basename(abs)}\n`);
+}
+
 async function cmdCuratePlane(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	loadEnvFile(path.join(os.homedir(), ".claude", "secrets", "plane.env"));
@@ -745,6 +807,9 @@ async function main(): Promise<void> {
 		case "plan-validate":
 		case "validate-plan":
 			await cmdPlanValidate(rest);
+			break;
+		case "plan-decompose":
+			await cmdPlanDecompose(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

@@ -13,6 +13,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "../agent-driver.ts";
+import { fenceUntrusted } from "../digest.ts";
+import { isOn, learningFlags } from "../metrics.ts";
+import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
 import type { NodeExecutor, NodeResult, RunContext, StageEvent, WorkflowNode } from "./types.ts";
 
 export interface CommandResult {
@@ -31,8 +34,10 @@ export type IdleScheduler = (check: () => void, intervalMs: number) => IdleCheck
 export interface SingleAgentExecutorOptions {
 	/** Worktree the run operates in (command cwd, prompt-ref base). */
 	cwd: string;
-	/** Lazily obtain (and start) the agent thread for agent/prompt nodes. */
-	acquireAgent: () => Promise<AgentDriver>;
+	/** Lazily obtain (and start) the agent thread for agent/prompt nodes. `node` lets the driver route an
+	 *  `isolatedLineage` node (e.g. the TDD write-test author) to a SEPARATE agent/context from the shared
+	 *  inner thread; absent/ordinary nodes get the one persistent thread. */
+	acquireAgent: (node?: WorkflowNode) => Promise<AgentDriver>;
 	/** Forward an omp-shaped frame to surfaces (the manager). */
 	emit: (frame: Record<string, unknown>) => void;
 	/** Raise a human gate; resolve with the chosen edge label. */
@@ -63,6 +68,13 @@ export interface SingleAgentExecutorOptions {
 	 * where the original turn is still in flight and must NOT be re-prompted.
 	 */
 	cold?: boolean;
+	/**
+	 * Reflexion (agentic-learning-loop concern 04) wiring for the "fixup" node — best-effort, gated
+	 * behind `OMP_SQUAD_REFLEXION` at call time (this config is always passed for a verify-loop workflow;
+	 * the flag decides whether it actually fires). `runId` is a getter since the driver mints its runId
+	 * lazily at `execRun` time, after this options object is built.
+	 */
+	reflection?: { stateDir: string; repo: string; agentId: string; runId?: () => string; llm?: ReflectLlm };
 }
 
 /**
@@ -76,6 +88,11 @@ const MAX_CONTEXT_OUTPUT = 4000;
 const IDLE_POLL_MS = 5_000;
 /** Idle polls (~30s) with the inner loop reporting not-streaming, after it was seen active, before we treat a missing agent_end as turn-end. */
 const IDLE_TICKS = 6;
+/** Reflexion "last attempt" fallback cap — mirrors the engine's DEFAULT_NODE_VISITS (engine.ts) so a
+ *  hand-authored `fixup` node that sets no explicit `maxVisits` still gets its final visit skipped,
+ *  matching what the engine's own shared.cap default would bound it to. Kept in sync manually (the
+ *  executor can't reach the engine's `shared.cap`); if the engine default changes, change this too. */
+const DEFAULT_FIXUP_VISIT_CAP = 50;
 
 export class SingleAgentExecutor implements NodeExecutor {
 	/** Stage rollup for the driver's synthetic getState (done/total + active). */
@@ -122,20 +139,32 @@ export class SingleAgentExecutor implements NodeExecutor {
 			await fs.writeFile(path.join(this.opts.cwd, "parallel_results.json"), ctx.vars.parallelResults);
 		}
 
+		// An isolatedLineage node (the TDD write-test author) runs on a SEPARATE agent/context from the
+		// shared inner, so the author and the implementer cannot co-reason. Its fresh thread never received
+		// the goal, so it always gets its own "Goal:" prime — but it must NOT flip the shared thread's
+		// `primed` (or the implementer, running next as the first node on the shared inner, would never be
+		// primed with the goal) or its model/effort tracking (that follows the shared coder thread).
+		const isolated = node.isolatedLineage === true;
+
 		const parts: string[] = [];
-		if (!this.primed) {
+		if (isolated || !this.primed) {
 			parts.push(`Goal: ${ctx.goal}`);
-			this.primed = true;
+			if (!isolated) this.primed = true;
 		}
 		parts.push(body);
 		if (ctx.vars.lastOutput) {
 			parts.push(`--- Recent command output ---\n${ctx.vars.lastOutput}`);
 		}
+		if (!isolated) {
+			const reflection = await this.reflectionNote(node, ctx);
+			if (reflection) parts.push(fenceUntrusted("reflection", reflection));
+		}
 		// Feed-forward: on the FIRST agent node after a gate resolves, fold in the reviewer's comments once
 		// (agent nodes share one thread, so re-injecting every turn would spam the same notes). The trigger
 		// is OR'd with a persisted checkpoint var so a COLD restart landing on this node still folds the
 		// comments in — a fresh executor has gateJustPassed=false and would otherwise run blind (RTC-F7).
-		if (this.gateJustPassed || ctx.vars[GATE_FOLD_VAR]) {
+		// Never on an isolated author — reviewer feedback is for the implementer, not the test author.
+		if (!isolated && (this.gateJustPassed || ctx.vars[GATE_FOLD_VAR])) {
 			this.gateJustPassed = false;
 			delete ctx.vars[GATE_FOLD_VAR];
 			const extra = await this.opts.decoratePrompt?.(node, ctx);
@@ -144,21 +173,64 @@ export class SingleAgentExecutor implements NodeExecutor {
 		const message = parts.join("\n\n");
 
 		try {
-			const agent = await this.opts.acquireAgent();
-			const style = this.opts.resolveStyle?.(node);
-			if (style?.reasoningEffort && style.reasoningEffort !== this.lastEffort && agent.setThinkingLevel) {
-				await agent.setThinkingLevel(style.reasoningEffort).catch(() => {});
-				this.lastEffort = style.reasoningEffort;
-			}
-			if (style?.model && style.model !== this.lastModel && agent.setModel) {
-				await agent.setModel(style.model).catch(() => {});
-				this.lastModel = style.model;
+			const agent = await this.opts.acquireAgent(node);
+			// Style (model/effort) tracking follows the shared coder thread only — an isolated agent carries
+			// its own model chosen at creation, so applying the stylesheet to it (and mutating lastModel/
+			// lastEffort) would leak across lineages and desync the coder's own next comparison.
+			if (!isolated) {
+				const style = this.opts.resolveStyle?.(node);
+				if (style?.reasoningEffort && style.reasoningEffort !== this.lastEffort && agent.setThinkingLevel) {
+					await agent.setThinkingLevel(style.reasoningEffort).catch(() => {});
+					this.lastEffort = style.reasoningEffort;
+				}
+				if (style?.model && style.model !== this.lastModel && agent.setModel) {
+					await agent.setModel(style.model).catch(() => {});
+					this.lastModel = style.model;
+				}
 			}
 			const timeoutMs = Number(node.attrs.timeout_ms) || this.opts.turnTimeoutMs || 600_000;
 			const text = await this.awaitTurn(agent, message, timeoutMs);
 			return { outcome: "succeeded", text };
 		} catch (err) {
 			return { outcome: "failed", text: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	/**
+	 * Reflexion (concern 04): between fixup attempts, generate a short root-cause note from the LATEST
+	 * failing command output and inject it — turning a blind retry into a learning retry. Scoped
+	 * strictly to the "fixup" node of a verify loop (`verify → codefix → fixup → escalate`), the ONLY
+	 * node this concern targets. Best-effort by contract: `reflect()` never throws, and any failure
+	 * here degrades to "no note this round" — reflexion is an aid, never load-bearing.
+	 *
+	 * Only fires from the node's 2nd visit onward (the first fixup with raw output is often enough,
+	 * and this halves LLM cost), and never on the LAST visit before the node's overflow tier (escalate)
+	 * — there is no point reflecting right before giving up on this tier. The attempt counter rides
+	 * `ctx.vars` (like `GATE_FOLD_VAR` above) so it survives a daemon restart mid-run.
+	 *
+	 * Refutation, not accumulation: if the current failing output hashes identically to the reflection
+	 * the LAST attempt was generated from, that hypothesis provably didn't fix anything — say so
+	 * plainly (no new LLM call) instead of re-guessing on the same evidence.
+	 */
+	private async reflectionNote(node: WorkflowNode, ctx: RunContext): Promise<string | undefined> {
+		const cfg = this.opts.reflection;
+		if (node.id !== "fixup" || !cfg || !ctx.vars.lastOutput) return undefined;
+		if (!isOn(learningFlags(cfg.agentId).reflexion)) return undefined;
+		const attemptKey = `__reflectAttempt:${node.id}`;
+		const attempt = (Number(ctx.vars[attemptKey]) || 0) + 1;
+		ctx.vars[attemptKey] = String(attempt);
+		if (attempt < 2) return undefined; // first fixup: raw output alone is often enough
+		if (attempt >= (node.maxVisits ?? DEFAULT_FIXUP_VISIT_CAP)) return undefined; // last try before overflow — no point reflecting (defensive: hand-authored nodes may set no maxVisits)
+		try {
+			const prior = await latestReflection(cfg.stateDir, cfg.repo, this.opts.cwd);
+			const outputHash = hashOutput(ctx.vars.lastOutput);
+			if (prior && prior.outputHash === outputHash) return renderRefutationNote(prior); // unchanged failure ⇒ the last guess didn't fix it
+			const r = await reflect({ output: ctx.vars.lastOutput, prior: prior ? { rootCause: prior.rootCause, whatToDoDifferently: prior.whatToDoDifferently, outputHash: prior.outputHash } : undefined }, cfg.llm);
+			if (!r) return undefined;
+			await appendReflection(cfg.stateDir, cfg.repo, this.opts.cwd, { ...r, agentId: cfg.agentId, runId: cfg.runId?.(), repo: cfg.repo, at: Date.now() });
+			return renderReflectionNote(r);
+		} catch {
+			return undefined; // never let reflexion block a fixup turn
 		}
 	}
 
@@ -173,7 +245,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 		// `primed` is false on a cold resume), instead of skipping it — the D2 soundness fix.
 		if (this.opts.cold) return this.runAgent(node, ctx);
 		try {
-			const agent = await this.opts.acquireAgent();
+			const agent = await this.opts.acquireAgent(node);
 			const st = await agent.getState();
 			if (!st.isStreaming) return { outcome: "succeeded", text: "" };
 			const timeoutMs = Number(node.attrs.timeout_ms) || this.opts.turnTimeoutMs || 600_000;

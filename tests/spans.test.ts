@@ -17,12 +17,29 @@ test("RunAccumulator attaches traceId and tail-sampled spans while rollup stays 
 	expect(sampledOut.traceId).toBe("feat:feat-1");
 	expect(sampledOut.toolCalls).toBe(2);
 	expect(sampledOut.tokens?.total).toBe(3);
-	expect(sampledOut.spans).toBeUndefined();
+	// D1: the structural spine (run/node) always survives sampling; only `tool` spans are dropped, and
+	// `sampled` records that honestly instead of leaving the receipt spanless.
+	expect(sampledOut.spans?.map((s) => s.kind)).toContain("run");
+	expect(sampledOut.spans?.some((s) => s.name === "node:plan")).toBe(true);
+	expect(sampledOut.spans?.some((s) => s.kind === "tool")).toBe(false);
+	expect(sampledOut.sampled).toBe(true);
 
 	const kept = acc.snapshot({ includeSpans: true });
 	expect(kept.spans?.map((s) => s.kind)).toContain("run");
 	expect(kept.spans?.some((s) => s.name === "node:plan")).toBe(true);
 	expect(kept.spans?.some((s) => s.name === "tool:read" && s.status === "ok")).toBe(true);
+});
+
+test("D1: a tail-sampled receipt still makes buildTrace's partial flip to false (structural spine present)", () => {
+	const acc = new RunAccumulator({ agentId: "a2", name: "beta", repo: "/repo" });
+	ingest(acc, { type: "agent_start" });
+	ingest(acc, { type: "tool_execution_start", toolName: "read" });
+	acc.finish("idle", []);
+	const receipt = acc.snapshot({ sampleRatio: 0, random: () => 0.99 });
+	expect(receipt.sampled).toBe(true);
+
+	const trace = buildTrace(`run:a2:${receipt.runId}`, [receipt], []);
+	expect(trace.partial).toBe(false);
 });
 
 test("errors force keeping spans and cap sheds old ok tools before errors/backbone", () => {
@@ -52,4 +69,49 @@ test("buildTrace stitches parent runs, audit lifecycle spans, and rolled-up cost
 	const parentNode = trace.root.children.find((n) => n.receipt?.agentId === "parent");
 	expect(parentNode?.children.some((n) => n.receipt?.agentId === "child")).toBe(true);
 	expect(trace.root.children.some((n) => n.kind === "land" && n.attrs?.operator === "op")).toBe(true);
+});
+
+test("(D2) buildTrace weaves verify/spawn audit actions under their target's run node, not as flat root siblings", () => {
+	const receipt: RunReceipt = {
+		agentId: "a1",
+		name: "alpha",
+		repo: "/repo",
+		runId: "r1",
+		startedAt: 1,
+		endedAt: 5,
+		durationMs: 4,
+		status: "idle",
+		toolCalls: 0,
+		toolTally: {},
+		filesTouched: [],
+		traceId: "run:a1:r1",
+		sampled: false,
+		spans: [{ traceId: "run:a1:r1", spanId: "r1:0", name: "run:alpha", kind: "run", startedAt: 1, endedAt: 5, status: "ok" }],
+	};
+	const spawnAudit: AuditEntry = { id: 1, at: 1, actor: "op", action: "create", target: "a1", outcome: "ok" };
+	const verifyAudit: AuditEntry = { id: 2, at: 2, actor: "op", action: "verify", target: "a1", outcome: "ok" };
+	const landAudit: AuditEntry = { id: 3, at: 3, actor: "op", action: "land", target: "a1", outcome: "ok" };
+
+	const trace = buildTrace("run:a1:r1", [receipt], [spawnAudit, verifyAudit, landAudit]);
+	expect(trace.partial).toBe(false); // D1: structural spine present
+	expect(trace.sampled).toBe(false);
+
+	const runNode = trace.root.children.find((n) => n.receipt?.agentId === "a1");
+	expect(runNode).toBeDefined();
+	expect(runNode?.children.some((n) => n.kind === "spawn")).toBe(true);
+	expect(runNode?.children.some((n) => n.kind === "verify")).toBe(true);
+	expect(runNode?.children.some((n) => n.kind === "land")).toBe(true);
+	// The woven steps are children of the run node, NOT flat root-level siblings.
+	expect(trace.root.children.some((n) => n.kind === "verify" || n.kind === "spawn")).toBe(false);
+});
+
+test("(D1+D2) TraceResponse.sampled is true when any contributing receipt tail-sampled its tool spans", () => {
+	const receipt: RunReceipt = {
+		agentId: "a1", name: "alpha", repo: "/repo", runId: "r1", startedAt: 1, endedAt: 2, durationMs: 1,
+		status: "idle", toolCalls: 1, toolTally: { read: 1 }, filesTouched: [], traceId: "run:a1:r1", sampled: true,
+		spans: [{ traceId: "run:a1:r1", spanId: "r1:0", name: "run:alpha", kind: "run", startedAt: 1, endedAt: 2, status: "ok" }],
+	};
+	const trace = buildTrace("run:a1:r1", [receipt], []);
+	expect(trace.partial).toBe(false);
+	expect(trace.sampled).toBe(true);
 });

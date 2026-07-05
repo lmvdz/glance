@@ -224,6 +224,9 @@ export interface ProvenanceDoc {
   concern?: { planDir: string; file: string; title: string; status: string };
   feature?: { id: string; title: string };
   runs: ProvenanceRun[];
+  /** Most recent `verify` audit entry targeting one of this thread's run agents — mirrors
+   *  src/omp-graph/provenance.ts's `ProvenanceDoc.verify` (D2). Absent on older receipts. */
+  verify?: { at: number; actor: string; outcome: string };
   land?: { sha: string; subject: string; dateMs: number; author: string };
   generatedAt: number;
 }

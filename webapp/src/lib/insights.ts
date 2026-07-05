@@ -431,8 +431,13 @@ function fmtIdle(ms: number): string {
 // ───────────────────────────── attention items ─────────────────────────────
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
-export type AttentionKind = 'blocked' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping';
-export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap';
+export type AttentionKind = 'blocked' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report';
+export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer';
+
+/** Epic 5 (HITL safeguards, DESIGN.md D3): a working agent is considered drifting once it's gone
+ *  this long without any activity — the only robustly-computable, always-present staleness signal
+ *  on the DTO. Surfaces a "stalled" row whose action redirects it with a fresh steering turn. */
+const STALL_MS = 15 * 60_000;
 
 export interface AttentionAction {
   label: string;
@@ -546,6 +551,37 @@ export function attentionItems(input: AttentionInput): AttentionItem[] {
         action: canLand ? { label: 'Land', kind: 'land' } : { label: 'View', kind: 'view' },
       });
       mark(a.id, 'land-ready');
+    }
+
+    // Gone quiet mid-flight (DESIGN.md D3: activity-staleness) → steer it back on track.
+    if (a.status === 'working' && Date.now() - a.lastActivity > STALL_MS) {
+      items.push({
+        id: `stalled:${a.id}`,
+        severity: 'warn',
+        kind: 'stalled',
+        title: `${a.name} has gone quiet`,
+        detail: 'No activity for a while — it may be stuck or drifting. Steer it back on track.',
+        agentId: a.id,
+        since: a.lastActivity,
+        action: { label: 'Steer', kind: 'steer' },
+      });
+      mark(a.id, 'stalled');
+    }
+
+    // Non-blocking proposals (DESIGN.md D2: squad_report / low-confidence auto-escalation) → view.
+    // Deliberately independent of `status` — a report never blocks, so it can appear on a `working`
+    // agent exactly as intended.
+    for (const r of a.reports ?? []) {
+      items.push({
+        id: `report:${a.id}:${r.id}`,
+        severity: 'warn',
+        kind: 'report',
+        title: `${a.name} raised a proposal`,
+        detail: r.proposal ? `${r.summary} — ${r.proposal}` : r.summary,
+        agentId: a.id,
+        since: r.createdAt,
+        action: { label: 'View', kind: 'view' },
+      });
     }
   }
 

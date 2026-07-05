@@ -32,6 +32,7 @@ import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
+import type { ComplianceFinding } from "./compliance.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
@@ -1254,6 +1255,13 @@ export class SquadServer {
 				}),
 			);
 		}
+		if (url.pathname === "/api/metrics/learning-loop") {
+			// Agentic-learning-loop baseline (concern 01): current flag resolution + per-metric rollups
+			// (first-try-green, fixups-to-green, escalation, land-failure-streak, primer-empty), so every
+			// later concept in the loop can be A/B-compared against this. ?windowMs= sizes the rollup window.
+			const windowMs = Number(url.searchParams.get("windowMs"));
+			return Response.json(manager.learningMetricsSnapshot(Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
+		}
 		if (url.pathname === "/api/factory/status") {
 			// First-glance liveness: per autonomous loop, whether it's flag-enabled, actually armed, the
 			// reason it didn't arm (the authoritative no-backlog gate), heartbeat freshness, and a status
@@ -1265,6 +1273,20 @@ export class SquadServer {
 			const trace = await tracePayload(manager, decodeURIComponent(mtrace[1]));
 			if (trace.receipts.length === 0 && trace.root.children.length === 0) return new Response("trace not found", { status: 404 });
 			return Response.json(trace);
+		}
+		// D3: the reachable reasoning/IO a trace node's `attrs.digest` links to — compact, already
+		// fenced/redacted markdown (src/digest.ts), never raw prompts/outputs. Read-only + non-sensitive,
+		// so no extra RBAC beyond this block's existing auth gate.
+		const mdigest = url.pathname.match(/^\/api\/digest\/([^/]+)$/);
+		if (mdigest && req.method === "GET") {
+			const digestId = decodeURIComponent(mdigest[1]);
+			// The id becomes `<stateDir>/digests/<id>.md` (src/digest.ts) — reject any id that could escape
+			// that dir (`..`, path separators via %2F) before it touches the filesystem. Agent ids are
+			// always plain `[A-Za-z0-9._-]`, so a stricter allowlist is safe and closes the traversal.
+			if (!/^[A-Za-z0-9._-]+$/.test(digestId) || digestId.includes("..")) return new Response("invalid digest id", { status: 400 });
+			const md = await manager.getDigest(digestId);
+			if (!md) return new Response("digest not found", { status: 404 });
+			return new Response(md, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 		}
 		if (url.pathname === "/api/spawn" && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => null);
@@ -2009,6 +2031,7 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 	health: Awaited<ReturnType<SquadManager["sampleHealth"]>>;
 	federation: { coordinator: boolean; dbRegistry: boolean };
 	audit: { available: true };
+	compliance: { findings: ComplianceFinding[]; evaluatedAt: number };
 }> {
 	return {
 		authMode: dbMode ? "db" : "file",
@@ -2018,6 +2041,8 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 		health: await manager.sampleHealth(),
 		federation: { coordinator: !!process.env.OMP_SQUAD_COORDINATOR, dbRegistry },
 		audit: { available: true },
+		// Epic 3 (leaf 05): real policy findings over the audit + land ledgers, not just RBAC/capacity.
+		compliance: { findings: await manager.complianceFindings(), evaluatedAt: Date.now() },
 	};
 }
 async function actionItemsPayload(manager: SquadManager, url: URL): Promise<{ items: ActionItem[]; generatedAt: number }> {

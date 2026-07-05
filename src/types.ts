@@ -54,6 +54,9 @@ export interface TransitionEntry {
  */
 export type AgentKind = "omp-operator" | "flue-service" | "workflow";
 
+/** Specialization of a coding unit, orthogonal to AgentKind. Absent = general coder. */
+export type ExecutionRole = "tester" | "observer";
+
 /** A request from the agent that a human must answer before it can proceed. */
 export interface PendingRequest {
 	/** Correlates with the answer the surface sends back. */
@@ -77,6 +80,22 @@ export interface PendingRequest {
 	 *  settle window, not a fresh live request. Used ONLY by the two ghost-expiry rules below — never
 	 *  gates answerability (a replayed pending IS answerable; the waiter lives in the surviving host). */
 	replayed?: true;
+}
+
+/**
+ * A non-blocking "I'm unsure — here's a proposal" note (Epic 5 DESIGN §D2). Raised by the agent via
+ * the `squad_report` host tool, or auto-synthesized by the manager when a run finalizes below the
+ * confidence floor. Appended to `AgentDTO.reports` — deliberately NOT a `PendingRequest`, so it never
+ * blocks the agent or flips its status to "input".
+ */
+export interface AgentReport {
+	id: string;
+	summary: string;
+	/** Optional proposed diff/summary of what the agent would do next, for a human to review. */
+	proposal?: string;
+	/** The confidence score (if any) that prompted this report; absent for a manually-raised report. */
+	confidence?: number;
+	createdAt: number;
 }
 
 export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";
@@ -312,6 +331,53 @@ export interface FeatureCriterion {
 	source?: "plan" | "ticket" | "workflow" | "manual";
 }
 
+/**
+ * Epic 3 (independent validator) — the result of scoring a landed diff against its unit's DECLARED
+ * `FeatureCriterion[]` with an INDEPENDENT judge lineage (never the executor grading its own work).
+ * "skipped" ⇐ no declared criteria (DESIGN §4, scores declared criteria only — never invents them).
+ * "abstain" ⇐ the judge was unreachable/unparseable (fail-open, DESIGN §3). "veto"/"pass" ⇐ the judge
+ * ran and found at least one unsatisfied / all satisfied criterion respectively (fail-closed on veto).
+ * Epic 5's confidence scorer reads `agreement` as one input to the aggregate `confidence` it computes
+ * separately — this record never computes that aggregate itself (DESIGN §5).
+ */
+export interface ValidationRecord {
+	verdict: "pass" | "veto" | "abstain" | "skipped";
+	/** 0..1 fraction of declared criteria the judge marked satisfied. */
+	agreement: number;
+	/** 0..1 the judge's own confidence in its verdict. */
+	confidence: number;
+	perCriterion: { id: string; satisfied: boolean; note?: string }[];
+	/** Short overall rationale; truncated to ~600 chars. */
+	rationale: string;
+	/** The judge lineage that ran (e.g. "opus"), independent of the executor's model. */
+	model?: string;
+	ranAt: number;
+}
+
+/**
+ * Epic 7 (convergence loop) — the disk-persisted boundary object between the TS state machine
+ * (writer, `src/convergence.ts`) and the bash Stop hook (reader, `scripts/continue-loop.sh`).
+ * `gap` is computed from the INDEPENDENT validator (`ValidationRecord`/`hasProof`), never raw
+ * STATUS — see `plans/meta-autonomous-fleet/epic-7-convergence-loop/DESIGN.md` §1/§3.
+ */
+export interface VerifiedState {
+	/** Meta-goal identifier (e.g. a plan dir like "plans/demo"). */
+	goalId: string;
+	/** 0-based cycle count. */
+	iteration: number;
+	/** Unmet-criteria count/score from the independent validator; 0 = done. */
+	gap: number;
+	/** Convergence threshold; the loop continues only while `gap > epsilon`. */
+	epsilon: number;
+	/** A low-confidence proposal is waiting on a human — the loop must STOP, never grind. */
+	pendingEscalation: boolean;
+	/** Turns (or token-proxy) consumed vs. the hard cap. */
+	budget: { spent: number; cap: number };
+	decision: "continue" | "converged" | "escalate" | "budget-exhausted";
+	/** Epoch ms. */
+	updatedAt: number;
+}
+
 export interface FeatureDecision {
 	id: string;
 	text: string;
@@ -488,6 +554,9 @@ export interface AgentDTO {
 	status: AgentStatus;
 	/** Which runtime backs this agent. */
 	kind: AgentKind;
+	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+	executionRole?: ExecutionRole;
 	/** Parent workflow agent id, when this agent is a spawned fan-out branch. */
 	parentId?: string;
 	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
@@ -544,6 +613,11 @@ export interface AgentDTO {
 	todoPhases?: RpcSessionState["todoPhases"];
 	/** Pending human-input requests (status === "input" when non-empty). */
 	pending: PendingRequest[];
+	/** Non-blocking "I'm unsure, here's a proposal" notes the agent raised via `squad_report` (Epic 5
+	 *  DESIGN §D2). Deliberately NOT a `PendingRequest` — `pending.length` is load-bearing for
+	 *  `blockedReason`/`effectiveAutonomyMode`'s observe cap, and a report must never block the agent.
+	 *  Live/run-scoped only (not persisted to state.json), append-only across a run. */
+	reports?: AgentReport[];
 	/** Last 5 SIGNIFICANT lifecycle transitions (turn-progress excluded) — a compact inline strip.
 	 *  Full history via GET /api/agents/:id/transitions. Capped deliberately: this rides emitAgent's
 	 *  broadcast (per RPC-frame on the hot path), so it must never carry the full ring. */
@@ -587,10 +661,18 @@ export interface AgentDTO {
 	verificationState?: VerificationState;
 	/** Stable proof reference/fingerprint for display and audit correlation. */
 	proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+	/** Epic 3 independent-validator verdict for this agent's most recent land attempt (DESIGN §5) —
+	 *  the input Epic 5's confidence scorer reads via `validation.agreement`. Absent until a land
+	 *  attempt has run the validator gate. */
+	validation?: ValidationRecord;
 	/** Why authority is currently capped to observe. */
 	blockedReason?: string;
 	/** Actions this surface may offer for the current effective mode. */
 	availableActions?: AgentAction[];
+	/** Run-end self-confidence 0..1, stamped by `scoreConfidence` (src/confidence.ts) at `finalizeRun`.
+	 *  Absent until a run has actually finished. Below `OMP_SQUAD_CONFIDENCE_FLOOR` caps
+	 *  `effectiveAutonomyMode` to `assist` (propose-only) — see autonomy.ts. */
+	confidence?: number;
 	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
 	landReady?: boolean;
 	/** PR-mode landing metadata (concern 06), set at push/merge time. Absent in local mode. */
@@ -628,13 +710,22 @@ export interface RunReceipt {
 	filesTouched: string[];
 	/** Trace grouping id: `feat:<featureId>` for feature work, else `run:<agentId>:<runId>`. */
 	traceId?: string;
-	/** Fine-grained run spans. Tail-sampled; receipt rollups above are never sampled. */
+	/** Fine-grained run spans. The structural spine (kind !== "tool") is always present on a finalized
+	 *  receipt (D1); only `tool` spans are tail-sampled. Receipt rollups above are never sampled. */
 	spans?: Span[];
+	/** True when tool-level spans were tail-sampled out; the structural spine is still present. An
+	 *  honest "tool detail sampled" signal distinct from `TraceResponse.partial` ("spine missing"). */
+	sampled?: boolean;
 	/** Feature/parent ids copied onto receipts so trace trees survive agent removal. */
 	featureId?: string;
 	parentId?: string;
 	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
 	harness?: string;
+	/** Epic 3 independent-validator verdict for this run's land attempt, copied from `AgentDTO.validation`
+	 *  at finalize time so it survives the run durably (Epic 5's confidence input, DESIGN §5). */
+	validation?: ValidationRecord;
+	/** Run-end self-confidence 0..1 (src/confidence.ts); absent until computed. */
+	confidence?: number;
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
@@ -674,6 +765,9 @@ export interface PersistedAgent {
 	featureId?: string;
 	/** Runtime class; defaults to "omp-operator" when absent (back-compat). */
 	kind?: AgentKind;
+	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+	executionRole?: ExecutionRole;
 	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
 	runtime?: "omp" | "acp";
 	/** flue-service only: worker invocation config. */
@@ -774,6 +868,11 @@ export interface CreateAgentOptions {
 	workflowState?: WorkflowRunState;
 	/** Verification command: wrap `task` in an implement → verify → fixup loop. */
 	verify?: string;
+	/** Selects the synthesized loop variant for `verify` (tester/observer roles). Default "verify". */
+	verifyMode?: "verify" | "tdd" | "observe";
+	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+	executionRole?: ExecutionRole;
 	autonomyMode?: AutonomyMode;
 	/** Parent workflow agent id, when spawning a fan-out branch. */
 	parentId?: string;
@@ -847,6 +946,8 @@ export interface VerifySpec {
 	command: string;
 	/** Max fix-up turns before giving up (default 3). */
 	maxFixups?: number;
+	/** Which synthesized loop to build. Default "verify". */
+	mode?: "verify" | "tdd" | "observe";
 }
 
 /** workflow only: the graph backing a workflow run — an authored file or a synthesized verify loop. */
@@ -932,7 +1033,7 @@ export type SquadEvent =
  *  automation log, invisible. Scout reads agent reasoning (the only token-spending loop); Observer and
  *  Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
 // "scope" is event-driven (scope-contract audit findings), not a periodic loop like the others.
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync";
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner";
 
 /**
  * Structured reason an automation loop intentionally skipped a unit without doing work.

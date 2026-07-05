@@ -120,7 +120,10 @@ export class RunAccumulator {
 
 	/** Immutable copy of the current run state. */
 	snapshot(opts: { includeSpans?: boolean; sampleRatio?: number; maxSpans?: number; random?: () => number } = {}): RunReceipt {
-		const includeSpans =
+		// D1: sampling is per-layer, not per-run. `tools` is the vote on whether TOOL-level detail
+		// survives; the structural spine (run/node/subagent) is never sampled and is always attached
+		// below, so a finalized receipt is never `partial` for lack of spans.
+		const tools =
 			opts.includeSpans ??
 			shouldKeepSpans(this.status, this.spans.hasError(), opts.sampleRatio ?? traceSampleRatio(), opts.random);
 		const receipt: RunReceipt = {
@@ -144,7 +147,8 @@ export class RunAccumulator {
 			parentId: this.seed.parentId,
 			harness: this.seed.harness ?? "omp",
 		};
-		if (includeSpans) receipt.spans = this.spans.snapshot(opts.maxSpans ?? traceMaxSpans());
+		receipt.spans = tools ? this.spans.snapshot(opts.maxSpans ?? traceMaxSpans()) : this.spans.structuralSnapshot();
+		receipt.sampled = !tools && this.spans.hasToolSpans();
 		return receipt;
 	}
 
