@@ -87,6 +87,12 @@ export async function scoreAgainstCriteria(criteria: FeatureCriterion[], diff: s
 	if (criteria.length === 0) {
 		return { verdict: "skipped", agreement: 1, confidence: 0, perCriterion: [], rationale: "no declared criteria", ranAt };
 	}
+	// An empty diff means there is nothing to inspect — declared criteria cannot be judged against no
+	// change. Abstain (fail-open) rather than fabricating a veto for a change the judge never saw. This
+	// covers the in-place (worktree === repo) case where the base collapses to HEAD, plus any no-op land.
+	if (!diff.trim()) {
+		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "empty diff — nothing to validate (in-place or no-op land); not scored", model: validatorModel(), ranAt };
+	}
 	let raw: RawVerdict | undefined;
 	try {
 		raw = await judge({ criteria, diff, proof });
@@ -140,9 +146,11 @@ function validatorEnabled(): boolean {
 	return process.env.OMP_SQUAD_VALIDATOR !== "0";
 }
 
-/** Verdict cache keyed by `${proof.commit}:${proof.tree}` so repeated land attempts on the same tree
- *  (a retry after an unrelated block, a re-land after fixing something else) reuse the judge's verdict
- *  instead of re-firing an LLM call per attempt. Mirrors `proofRoot`-style module state in proof.ts. */
+/** Verdict cache keyed by `${proof.commit}:${proof.tree}:${criteriaHash}` so repeated land attempts on
+ *  the same tree (a retry after an unrelated block, a re-land after fixing something else) reuse the
+ *  judge's verdict instead of re-firing an LLM call — but a change to the declared criteria (a genuine
+ *  input to the verdict) busts the entry rather than reusing a stale one. Mirrors `proofRoot`-style
+ *  module state in proof.ts. */
 const gateCache = new Map<string, ValidationRecord>();
 
 async function gitOut(args: string[], cwd: string): Promise<string> {
@@ -153,13 +161,29 @@ async function gitOut(args: string[], cwd: string): Promise<string> {
 
 /** The diff a land would merge: `<base>...HEAD` inside the worktree. `base` prefers the proof's
  *  recorded target-repo HEAD (the exact base the proof ran against); absent a proof, falls back to
- *  the repo's current HEAD. Never throws — an unreadable worktree yields an empty diff (the judge
- *  then has nothing to go on, which is a legitimate abstain/veto input, not a crash). */
+ *  the repo's current HEAD. Never throws — an unreadable worktree yields an empty diff, which
+ *  `scoreAgainstCriteria` treats as an abstain (never a veto), not a crash. */
 async function computeLandDiff(repo: string, worktree: string, baseCommit?: string): Promise<string> {
 	try {
 		const base = baseCommit || (await gitOut(["rev-parse", "HEAD"], repo));
 		if (!base) return "";
-		return await gitOut(["diff", `${base}...HEAD`], worktree);
+		// `--no-ext-diff` is load-bearing: GIT_HARDEN_ARGS sets `-c diff.external=` (empty), which makes
+		// git try to exec "" as an external differ and die with EMPTY output for every diff. `--no-ext-diff`
+		// forces the builtin diff (and still ignores any malicious repo-level diff.external — the harden intent).
+		let diff = await gitOut(["diff", "--no-ext-diff", `${base}...HEAD`], worktree);
+		// In-place (worktree === repo) the base collapses to HEAD, so `base...HEAD` is empty even though
+		// the unit made real commits. Recover the true change set via the merge-base with the tracked
+		// upstream / default branch when one is resolvable; otherwise leave it empty (→ honest abstain).
+		if (!diff && worktree === repo) {
+			const upstream =
+				(await gitOut(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)) ||
+				(await gitOut(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo));
+			if (upstream) {
+				const mergeBase = await gitOut(["merge-base", upstream, "HEAD"], repo);
+				if (mergeBase && mergeBase !== base) diff = await gitOut(["diff", "--no-ext-diff", `${mergeBase}...HEAD`], worktree);
+			}
+		}
+		return diff;
 	} catch {
 		return "";
 	}
@@ -175,7 +199,8 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 	if (!validatorEnabled()) {
 		return { record: { verdict: "skipped", agreement: 1, confidence: 0, perCriterion: [], rationale: "validator disabled (OMP_SQUAD_VALIDATOR=0)", ranAt: Date.now() } };
 	}
-	const cacheKey = opts.proof?.commit && opts.proof?.tree ? `${opts.proof.commit}:${opts.proof.tree}` : undefined;
+	const criteriaSig = opts.criteria.map((c) => `${c.id}=${c.text}`).join("|");
+	const cacheKey = opts.proof?.commit && opts.proof?.tree ? `${opts.proof.commit}:${opts.proof.tree}:${Bun.hash(criteriaSig)}` : undefined;
 	const cached = cacheKey ? gateCache.get(cacheKey) : undefined;
 	const record = cached ?? (await scoreAgainstCriteria(opts.criteria, await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit), opts.proof, opts.judge));
 	if (cacheKey && !cached) gateCache.set(cacheKey, record);

@@ -216,12 +216,15 @@ test("validatorGate: computes a real diff and vetoes on a fixture feature whose 
 
 test("validatorGate: caches the verdict by (commit,tree) — a second call with the SAME proof does not re-invoke the judge", async () => {
 	const { repo, worktree } = await repoWithBranch("vgate-cache-");
+	// A real base commit so `computeLandDiff` produces a non-empty diff and the judge is actually invoked
+	// (an unresolvable base ⇒ empty diff ⇒ abstain without ever calling the judge — can't test caching).
+	const baseCommit = (await new Response(Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout).text()).trim();
 	let calls = 0;
 	const countingJudge: Judge = async () => {
 		calls++;
 		return { perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: true }] };
 	};
-	const proof = { ok: true, commit: "deadbeef", tree: "cafef00d", branch: "b", dirty: false, baseCommit: "base", repo, worktree, command: "test", commandHash: "h", ranAt: 1, ttlMs: 1000, detail: "", artifacts: [] };
+	const proof = { ok: true, commit: "deadbeef", tree: "cafef00d", branch: "b", dirty: false, baseCommit, repo, worktree, command: "test", commandHash: "h", ranAt: 1, ttlMs: 1000, detail: "", artifacts: [] };
 	const first = await validatorGate({ criteria: CRITERIA, repo, worktree, proof, judge: countingJudge });
 	const second = await validatorGate({ criteria: CRITERIA, repo, worktree, proof, judge: countingJudge });
 	expect(first.record.verdict).toBe("pass");

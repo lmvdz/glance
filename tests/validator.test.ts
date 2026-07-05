@@ -83,6 +83,23 @@ test("empty declared criteria ⇒ skipped, never invents criteria to grade again
 	expect(result.perCriterion).toEqual([]);
 });
 
+test("empty diff ⇒ abstain and the judge is never called (no fabricated veto for a change it never saw)", async () => {
+	// Regression for the in-place (worktree === repo) empty-diff bug: the base collapses to HEAD, so the
+	// judge would otherwise be handed an empty diff with real criteria and mark them unmet ⇒ a fabricated
+	// veto. An empty diff must abstain (fail-open) without ever invoking the judge.
+	let called = false;
+	const judge = async (): Promise<RawVerdict | undefined> => {
+		called = true;
+		return { perCriterion: [{ id: "c1", satisfied: false }, { id: "c2", satisfied: false }], rationale: "would veto" };
+	};
+	for (const diff of ["", "   \n\t  "]) {
+		const result = await scoreAgainstCriteria(CRITERIA, diff, undefined, judge);
+		expect(result.verdict).toBe("abstain");
+		expect(result.verdict).not.toBe("veto");
+	}
+	expect(called).toBe(false);
+});
+
 test("rationale is truncated to ~600 chars", async () => {
 	const judge = fakeJudge({ perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: true }], rationale: "x".repeat(900) });
 	const result = await scoreAgainstCriteria(CRITERIA, "diff", undefined, judge);
