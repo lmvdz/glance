@@ -62,12 +62,22 @@ export async function readOracle(stateDir: string = resolveStateDir()): Promise<
 	}
 }
 
-/** Write the arm sentinel — one half of the dual arm gate (the other is `OMP_SQUAD_LOOP_ARMED=1`,
- *  checked only by the hook/entrypoint, never here). */
-export async function arm(stateDir: string = resolveStateDir()): Promise<void> {
+/**
+ * Write the arm sentinel — one half of the dual arm gate (the other is `OMP_SQUAD_LOOP_ARMED=1`,
+ * checked only by the hook/entrypoint, never here).
+ *
+ * The sentinel CONTENT is the owning session's identity (S1): `scripts/continue-loop.sh` compares
+ * the harness's `session_id` (turn-end stdin) against this stamped identity and blocks ONLY on a
+ * match — so even if an unrelated concurrent fleet session in the same state dir inherits both
+ * gates (a stale env flag + this shared sentinel), a mismatched `session_id` makes the hook a no-op
+ * for it, closing the "the env flag alone cannot immortalize" hole (DESIGN.md §5). An empty
+ * identity degrades to presence-gating (backward compatible), which is still safe under the
+ * project-scoped hook + non-persisted env flag; pass the real session id for the robust guarantee.
+ */
+export async function arm(stateDir: string = resolveStateDir(), identity = ""): Promise<void> {
 	const dir = convergenceDir(stateDir);
 	await fs.mkdir(dir, { recursive: true });
-	await fs.writeFile(armPath(stateDir), String(Date.now()));
+	await fs.writeFile(armPath(stateDir), identity);
 }
 
 /** Remove the arm sentinel. Idempotent — disarming an already-unarmed state never throws. */

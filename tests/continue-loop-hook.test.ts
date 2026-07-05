@@ -36,20 +36,27 @@ function writeOracle(stateDir: string, oracle: Oracle): void {
 	writeFileSync(path.join(stateDir, "convergence", "oracle.json"), JSON.stringify(oracle));
 }
 
-function armSentinel(stateDir: string): void {
+/** `identity` is the sentinel content the hook matches the harness `session_id` against (S1).
+ *  Defaults to "" (empty ⇒ presence-gated, the backward-compatible path). */
+function armSentinel(stateDir: string, identity = ""): void {
 	mkdirSync(path.join(stateDir, "convergence"), { recursive: true });
-	writeFileSync(path.join(stateDir, "convergence", "armed"), "1");
+	writeFileSync(path.join(stateDir, "convergence", "armed"), identity);
 }
 
-async function runHook(stateDir: string, input: object, envOverrides: Record<string, string | undefined> = {}): Promise<{ stdout: string; code: number }> {
+/** Drive the hook with a RAW stdin string (used for the M1 empty/malformed-stdin fail-closed tests). */
+async function runHookRaw(stateDir: string, stdin: string, envOverrides: Record<string, string | undefined> = {}): Promise<{ stdout: string; code: number }> {
 	const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 	for (const [k, v] of Object.entries(envOverrides)) if (v !== undefined) env[k] = v;
 	env.OMP_SQUAD_STATE_DIR = stateDir;
 	const proc = Bun.spawn(["bash", HOOK], { cwd: REPO_ROOT, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-	proc.stdin.write(JSON.stringify(input));
+	proc.stdin.write(stdin);
 	proc.stdin.end();
 	const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 	return { stdout: stdout.trim(), code };
+}
+
+async function runHook(stateDir: string, input: object, envOverrides: Record<string, string | undefined> = {}): Promise<{ stdout: string; code: number }> {
+	return runHookRaw(stateDir, JSON.stringify(input), envOverrides);
 }
 
 const CONTINUABLE_ORACLE: Oracle = { goalId: "g", iteration: 2, gap: 3, epsilon: 0, pendingEscalation: false, budget: { spent: 2, cap: 50 }, decision: "continue", updatedAt: 0 };
@@ -206,6 +213,77 @@ describe("continue-loop.sh — UNARMED session is a strict no-op (the critical s
 			armSentinel(dir);
 			writeOracle(dir, CONTINUABLE_ORACLE);
 			const { stdout, code } = await runHook(dir, { stop_hook_active: false }, { OMP_SQUAD_LOOP_ARMED: "0" });
+			expect(stdout).toBe("");
+			expect(code).toBe(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("continue-loop.sh — identity gate (S1): a session_id that doesn't match the sentinel is a no-op", () => {
+	test("armed + env set + oracle continuable, but sentinel identity ≠ stdin session_id ⇒ empty stdout (never hijacks an unrelated session)", async () => {
+		const dir = tmp();
+		try {
+			armSentinel(dir, "session-A"); // the convergence run's own identity
+			writeOracle(dir, CONTINUABLE_ORACLE);
+			// A DIFFERENT concurrent fleet session in the same state dir that inherited the env flag +
+			// shares the sentinel — its turn-end session_id does not match, so the hook must not block it.
+			const { stdout, code } = await runHook(dir, { stop_hook_active: false, session_id: "session-B" }, { OMP_SQUAD_LOOP_ARMED: "1" });
+			expect(stdout).toBe("");
+			expect(code).toBe(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("matching sentinel identity + session_id ⇒ still blocks (the guard doesn't over-block the owner)", async () => {
+		const dir = tmp();
+		try {
+			armSentinel(dir, "session-A");
+			writeOracle(dir, CONTINUABLE_ORACLE);
+			const { stdout, code } = await runHook(dir, { stop_hook_active: false, session_id: "session-A" }, { OMP_SQUAD_LOOP_ARMED: "1" });
+			expect(code).toBe(0);
+			expect(JSON.parse(stdout).decision).toBe("block");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("empty sentinel identity (no stamp) + a stdin session_id ⇒ presence-gated block (backward compatible)", async () => {
+		const dir = tmp();
+		try {
+			armSentinel(dir, ""); // legacy / no-identity sentinel
+			writeOracle(dir, CONTINUABLE_ORACLE);
+			const { stdout, code } = await runHook(dir, { stop_hook_active: false, session_id: "session-Z" }, { OMP_SQUAD_LOOP_ARMED: "1" });
+			expect(code).toBe(0);
+			expect(JSON.parse(stdout).decision).toBe("block");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("continue-loop.sh — M1: the infinite-loop guard fails CLOSED on bad stdin", () => {
+	test("empty stdin while armed ⇒ empty stdout (no block)", async () => {
+		const dir = tmp();
+		try {
+			armSentinel(dir);
+			writeOracle(dir, CONTINUABLE_ORACLE);
+			const { stdout, code } = await runHookRaw(dir, "", { OMP_SQUAD_LOOP_ARMED: "1" });
+			expect(stdout).toBe("");
+			expect(code).toBe(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("malformed (non-JSON) stdin while armed ⇒ empty stdout (no block)", async () => {
+		const dir = tmp();
+		try {
+			armSentinel(dir);
+			writeOracle(dir, CONTINUABLE_ORACLE);
+			const { stdout, code } = await runHookRaw(dir, "not json {{{", { OMP_SQUAD_LOOP_ARMED: "1" });
 			expect(stdout).toBe("");
 			expect(code).toBe(0);
 		} finally {

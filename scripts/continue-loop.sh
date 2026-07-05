@@ -4,10 +4,12 @@
 # oracle file, and either emits a block-and-continue decision (re-injecting the next-iteration
 # prompt into the SAME session) or exits clean to let the session stop.
 #
-# SAFETY (non-negotiable, see plans/meta-autonomous-fleet/epic-7-convergence-loop/DESIGN.md §4):
+# SAFETY (non-negotiable, see plans/meta-autonomous-fleet/epic-7-convergence-loop/DESIGN.md §4/§5):
 # this script is a STRICT NO-OP (exit 0, empty stdout) unless the session is explicitly armed via
-# BOTH the sentinel file AND OMP_SQUAD_LOOP_ARMED=1. A global Stop hook that auto-continues would
-# make EVERY Claude Code session immortal — every early-exit path below defends against that.
+# BOTH the sentinel file AND OMP_SQUAD_LOOP_ARMED=1, AND — when the sentinel carries a session
+# identity — the harness's turn-end `session_id` MATCHES that identity. A global Stop hook that
+# auto-continues would make EVERY Claude Code session immortal, and a shared env flag + sentinel
+# must not let it hijack an UNRELATED session — every early-exit path below defends against that.
 #
 # Read-only: this script never writes the oracle or the arm sentinel — src/convergence-oracle.ts
 # (leaf 01) is the sole writer; src/convergence-run.ts (leaf 05) owns arm()/disarm() lifecycle.
@@ -30,8 +32,13 @@ armed="$STATE_DIR/convergence/armed"
 input="$(cat)"
 
 # 1. Infinite-loop guard: never re-block a turn that ITSELF resulted from a prior Stop-hook
-#    continuation. Without this, a bug anywhere below could wedge a session forever.
-stop_hook_active="$(jq -r '.stop_hook_active // false' <<<"$input" 2>/dev/null || echo false)"
+#    continuation. Without this, a bug anywhere below could wedge a session forever. FAIL CLOSED
+#    (M1): empty OR unparseable stdin is treated as stop_hook_active=true (exit 0, no block) — an
+#    armed session must never re-block on garbage input, only on a well-formed turn-end that
+#    explicitly says stop_hook_active=false.
+if [ -z "$input" ] || ! stop_hook_active="$(jq -r '.stop_hook_active // false' <<<"$input" 2>/dev/null)"; then
+	exit 0
+fi
 if [ "$stop_hook_active" = "true" ]; then
 	exit 0
 fi
@@ -39,6 +46,17 @@ fi
 # 2. Dual arm gate: BOTH the sentinel file and the env flag must be present. A global Stop hook
 #    with either gate missing is a no-op — this is what makes it safe to register project-wide.
 if [ "${OMP_SQUAD_LOOP_ARMED:-}" != "1" ] || [ ! -f "$armed" ]; then
+	exit 0
+fi
+
+# 2b. Identity gate (S1): the sentinel content is the OWNING convergence session's identity. When it
+#     is non-empty and the harness handed us a session_id, they MUST match — otherwise this is an
+#     unrelated session that merely shares the state dir + a leaked env flag, and re-blocking it
+#     would hijack it with the convergence prompt. An empty sentinel (no stamped identity) degrades
+#     to presence-gating (safe under the project-scoped hook + non-persisted env flag).
+sentinel_id="$(cat "$armed" 2>/dev/null || true)"
+session_id="$(jq -r '.session_id // ""' <<<"$input" 2>/dev/null || true)"
+if [ -n "$sentinel_id" ] && [ -n "$session_id" ] && [ "$sentinel_id" != "$session_id" ]; then
 	exit 0
 fi
 

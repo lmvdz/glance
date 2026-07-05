@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { arm, armPath, convergenceDir, disarm, isArmed, oraclePath, readOracle, writeOracle } from "../src/convergence-oracle.ts";
@@ -110,6 +110,18 @@ describe("arm / disarm / isArmed", () => {
 		const dir = tmp();
 		try {
 			expect(armPath(dir)).toBe(path.join(dir, "convergence", "armed"));
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("arm() stamps the sentinel with the given session identity (S1), default empty", async () => {
+		const dir = tmp();
+		try {
+			await arm(dir, "session-A");
+			expect(readFileSync(armPath(dir), "utf8")).toBe("session-A");
+			await arm(dir); // default identity is empty (presence-gated, backward compatible)
+			expect(readFileSync(armPath(dir), "utf8")).toBe("");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
