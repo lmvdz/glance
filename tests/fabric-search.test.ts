@@ -3,8 +3,9 @@
  * BM25 ranking, and the agent cold-start primer. Pure (no fs/fetch/spawn).
  */
 
-import { expect, test, describe } from "bun:test";
+import { afterEach, expect, test, describe } from "bun:test";
 import { tokenize, fabricDocuments, searchFabric, buildContextPrimer } from "../src/fabric-search.ts";
+import { formatRewardTag } from "../src/digest.ts";
 import type { FabricSnapshot } from "../src/fabric.ts";
 
 function snapshot(over: Partial<FabricSnapshot> = {}): FabricSnapshot {
@@ -128,6 +129,46 @@ describe("buildContextPrimer", () => {
 		// "token" hits the decision strongly and the lease only incidentally via its file path.
 		const results = buildContextPrimer(snapshot(), "token rotation ttl 15-minute access", { topK: 6 });
 		expect(results).toContain("weak match");
+	});
+});
+
+describe("reward-boost ranking (concern 03)", () => {
+	afterEach(() => {
+		delete process.env.OMP_SQUAD_REWARD_BOOST;
+	});
+
+	function rewardSnapshot(): FabricSnapshot {
+		const body = "## Goal\nFix the flaky retry backoff test\n\n## Summary\n- fixed retry backoff jitter\n";
+		return snapshot({
+			digests: [
+				{ type: "digest", source: { agentId: "unknown-agent", repo: "/r" }, digest: `${body}\n${formatRewardTag({ ok: false, fresh: false, firstTryGreen: false })}\n` },
+				{ type: "digest", source: { agentId: "green-agent", repo: "/r" }, digest: `${body}\n${formatRewardTag({ ok: true, fresh: true, firstTryGreen: true })}\n` },
+			],
+		});
+	}
+
+	test("flag off: an unknown digest and a first-try-green digest rank equally on equal BM25", () => {
+		const results = searchFabric(rewardSnapshot(), "flaky retry backoff", { type: "digest" });
+		expect(results).toHaveLength(2);
+		expect(results[0]!.score).toBeCloseTo(results[1]!.score, 6);
+	});
+
+	test("flag on: the first-try-green digest out-ranks the unknown one on equal BM25", () => {
+		process.env.OMP_SQUAD_REWARD_BOOST = "1";
+		const results = searchFabric(rewardSnapshot(), "flaky retry backoff", { type: "digest" });
+		expect(results).toHaveLength(2);
+		expect(results[0]!.ref).toBe("green-agent");
+		expect(results[0]!.score).toBeGreaterThan(results[1]!.score);
+	});
+
+	test("flag on: no digest is ever weighted below the equal-BM25 baseline (boost-only)", () => {
+		process.env.OMP_SQUAD_REWARD_BOOST = "1";
+		const boosted = searchFabric(rewardSnapshot(), "flaky retry backoff", { type: "digest" });
+		delete process.env.OMP_SQUAD_REWARD_BOOST;
+		const baseline = searchFabric(rewardSnapshot(), "flaky retry backoff", { type: "digest" });
+		const unknownBoosted = boosted.find((r) => r.ref === "unknown-agent")!;
+		const unknownBaseline = baseline.find((r) => r.ref === "unknown-agent")!;
+		expect(unknownBoosted.score).toBeCloseTo(unknownBaseline.score, 6); // the failed/unknown one never drops
 	});
 });
 

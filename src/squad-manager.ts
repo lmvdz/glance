@@ -135,7 +135,7 @@ import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
@@ -4585,6 +4585,23 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Reward-boost tag (agentic-learning-loop concern 03) for this run's digest — boost-only, read-only
+	 * on the deterministic proof (never a gate, never rewritten here). `null` (not `undefined`) as soon
+	 * as the flag is off or no proof exists, so `buildDigest` omits the tag entirely: absence is
+	 * "unknown", never "bad". `firstTryGreen` reads the SAME `visits.fixup` count concern 01's baseline
+	 * metric derives from, so both stay in agreement about what "first try" means.
+	 */
+	private async digestReward(rec: AgentRecord): Promise<DigestReward | null> {
+		if (!isOn(learningFlags(rec.dto.id).rewardBoost)) return null;
+		const proof = await proofFor(rec.dto.repo, rec.dto.worktree).catch(() => undefined);
+		if (!proof) return null; // no proof ran ⇒ unknown, not a tag
+		const head = await headCommit(rec.dto.worktree).catch(() => "");
+		const fresh = isFresh(proof, head);
+		const fixupVisits = rec.options.workflowState?.visits?.fixup ?? 0;
+		return { ok: proof.ok, fresh, firstTryGreen: proof.ok && fresh && fixupVisits === 0 };
+	}
+
+	/**
 	 * Persist one JSONL receipt line for a completed/terminated run, then clear
 	 * the accumulator so the next turn starts fresh. Idempotent per run via the
 	 * accumulator's `finalized` flag (agent_end + exit can both fire).
@@ -4614,7 +4631,8 @@ export class SquadManager extends EventEmitter {
 		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
 		// Best-effort cold-start digest: a failure here must never break run completion.
 		try {
-			const md = buildDigest({ transcript: rec.transcript, receipts: await readReceipts(this.stateDir, rec.dto.id) });
+			const reward = await this.digestReward(rec);
+			const md = buildDigest({ transcript: rec.transcript, receipts: await readReceipts(this.stateDir, rec.dto.id), reward });
 			await writeDigest(this.stateDir, rec.dto.id, md);
 		} catch (err) {
 			this.log("warn", `digest failed for ${rec.dto.name}: ${err}`);

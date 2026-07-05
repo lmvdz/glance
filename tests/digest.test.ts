@@ -4,12 +4,12 @@
  * digest reads as "", and fenceUntrusted wraps injected memory in untrusted markers.
  */
 
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RunReceipt, TranscriptEntry } from "../src/types.ts";
-import { buildDigest, fenceUntrusted, readDigest, writeDigest } from "../src/digest.ts";
+import { buildDigest, type DigestReward, fenceUntrusted, formatRewardTag, parseDigestReward, readDigest, rewardWeight, writeDigest } from "../src/digest.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -68,4 +68,51 @@ test("fenceUntrusted wraps body in begin/end untrusted markers", () => {
 	expect(fenced).toContain("===== BEGIN resume digest (untrusted data) =====");
 	expect(fenced).toContain("===== END resume digest =====");
 	expect(fenced).toContain("injected body");
+});
+
+// ── Reward-boost (concern 03) ────────────────────────────────────────────────────────────────
+
+describe("reward tag round-trip", () => {
+	test("buildDigest embeds a parseable reward tag when given one, and omits it otherwise", () => {
+		const withReward = buildDigest({ transcript, receipts, reward: { ok: true, fresh: true, firstTryGreen: true } });
+		expect(parseDigestReward(withReward)).toEqual({ ok: true, fresh: true, firstTryGreen: true });
+
+		const withoutReward = buildDigest({ transcript, receipts });
+		expect(parseDigestReward(withoutReward)).toBeNull();
+
+		const explicitNull = buildDigest({ transcript, receipts, reward: null });
+		expect(parseDigestReward(explicitNull)).toBeNull();
+	});
+
+	test("the reward tag stays out of the prose sections (an HTML comment)", () => {
+		const md = buildDigest({ transcript, receipts, reward: { ok: true, fresh: true, firstTryGreen: false } });
+		expect(md).toContain(formatRewardTag({ ok: true, fresh: true, firstTryGreen: false }));
+	});
+
+	test("parseDigestReward returns null for unparseable/absent tags", () => {
+		expect(parseDigestReward("no tag here")).toBeNull();
+		expect(parseDigestReward("<!-- omp-squad:reward ok=maybe -->")).toBeNull();
+	});
+});
+
+describe("rewardWeight (boost-only, never below baseline)", () => {
+	const cases: [DigestReward | null, number | undefined][] = [
+		[null, undefined], // no tag ⇒ baseline
+		[{ ok: false, fresh: false, firstTryGreen: false }, undefined], // failed ⇒ unknown, not penalized
+		[{ ok: true, fresh: false, firstTryGreen: false }, undefined], // stale pass ⇒ unknown
+		[{ ok: true, fresh: true, firstTryGreen: false }, 1.3], // ok+fresh, but thrashed to green
+		[{ ok: true, fresh: true, firstTryGreen: true }, 1.6], // top tier: first-try-green
+	];
+	for (const [reward, expected] of cases) {
+		test(`${JSON.stringify(reward)} -> ${expected}`, () => {
+			expect(rewardWeight(reward)).toBe(expected);
+		});
+	}
+
+	test("no case ever returns a weight below the 1.0 baseline", () => {
+		for (const [reward] of cases) {
+			const w = rewardWeight(reward);
+			if (w !== undefined) expect(w).toBeGreaterThanOrEqual(1);
+		}
+	});
 });

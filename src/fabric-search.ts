@@ -13,8 +13,9 @@
  * already see. Trivially unit-testable, mirroring insights.ts / heatmap.ts.
  */
 
-import { fenceUntrusted } from "./digest.ts";
+import { fenceUntrusted, parseDigestReward, rewardWeight } from "./digest.ts";
 import type { FabricSnapshot } from "./fabric.ts";
+import { isOn, learningFlags } from "./metrics.ts";
 
 export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision";
 
@@ -78,8 +79,14 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 		docs.push({ type: "agent", id: `agent:${g.id}`, title: `${g.name} · ${g.status}`, text: bits.join(" "), repo: g.repo, ref: g.id, source: `agent ${g.id}` });
 	}
 
+	// Reward-boost (concern 03, OMP_SQUAD_REWARD_BOOST): a digest tagged fresh-checked-green ranks
+	// higher in retrieval — boost-only, folded through the SAME KbDoc.weight BM25 prior hot-area
+	// already uses (searchFabric), never a new ranking path. Flag off (default) ⇒ every digest keeps
+	// its untouched baseline (weight undefined), i.e. today's behaviour exactly.
+	const boostDigests = isOn(learningFlags().rewardBoost);
 	for (const d of snapshot.digests) {
-		docs.push({ type: "digest", id: `digest:${d.source.agentId ?? d.source.runId ?? docs.length}`, title: `Session memory · ${d.source.agentId ?? "agent"}`, text: d.digest, repo: d.source.repo, ref: d.source.agentId, source: `agent ${d.source.agentId ?? "?"}`, ts: d.ts });
+		const weight = boostDigests ? rewardWeight(parseDigestReward(d.digest)) : undefined;
+		docs.push({ type: "digest", id: `digest:${d.source.agentId ?? d.source.runId ?? docs.length}`, title: `Session memory · ${d.source.agentId ?? "agent"}`, text: d.digest, repo: d.source.repo, ref: d.source.agentId, source: `agent ${d.source.agentId ?? "?"}`, ts: d.ts, weight });
 	}
 
 	for (const h of snapshot.hotAreas) {
