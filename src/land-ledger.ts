@@ -120,3 +120,57 @@ export function recordForcedLand(stateDir: string, branch: string | undefined, a
 	}
 	return list.length;
 }
+
+/**
+ * Validator-override audit trail (Epic 3, leaf 03) — bypassing a validator VETO is a strictly
+ * stronger act than a proof-force (a proof-force skips a stale exit-code gate; an override
+ * bypasses a semantic judgment that the declared acceptance criteria were NOT met), so it gets its
+ * own record type in its own file — never folded into `ForcedLand`/`land-forced.json`. The two
+ * override classes must stay separately auditable by the compliance evaluator (src/compliance.ts).
+ * Append-only JSON list under <stateDir>; best-effort (a disk failure must never break the land).
+ */
+export interface ValidatorOverride {
+	/** The branch whose validator veto was overridden. */
+	branch: string;
+	/** The actor id that overrode it. */
+	actor: string;
+	/** Required, non-empty reason class (e.g. "criteria-wrong" | "judge-hallucination" | "emergency"). */
+	reasonClass: string;
+	/** Truncated context — typically the veto's own rationale. */
+	detail: string;
+	/** ms epoch of the override. */
+	at: number;
+}
+
+function overridePath(stateDir: string): string {
+	return path.join(stateDir, "land-validator-override.json");
+}
+
+/** Every validator-override recorded, oldest first. Corrupt/missing ⇒ empty. */
+export function readValidatorOverrides(stateDir: string): ValidatorOverride[] {
+	try {
+		const p = overridePath(stateDir);
+		if (!existsSync(p)) return [];
+		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		return Array.isArray(raw) ? (raw as ValidatorOverride[]) : [];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Append one validator-override record. Refuses (no write, no-op) when `branch` is undefined OR
+ * `reasonClass` is empty/whitespace — an override without a reason class is not recorded and must
+ * not be honored (the veto stands). Returns the new record count (or the current count on refusal).
+ */
+export function recordValidatorOverride(stateDir: string, branch: string | undefined, actor: string, reasonClass: string, detail: string, now = Date.now()): number {
+	if (!branch || !reasonClass.trim()) return readValidatorOverrides(stateDir).length;
+	const list = readValidatorOverrides(stateDir);
+	list.push({ branch, actor, reasonClass: reasonClass.trim(), detail: detail.slice(0, 600), at: now });
+	try {
+		writeFileSync(overridePath(stateDir), JSON.stringify(list));
+	} catch {
+		/* best-effort: a disk failure must never break the land it records */
+	}
+	return list.length;
+}

@@ -8,7 +8,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { landFailureCount, readForcedLands, readLandLedger, recordForcedLand, recordLandOutcome } from "../src/land-ledger.ts";
+import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "../src/land-ledger.ts";
 
 async function tmpDir(): Promise<string> {
 	return fs.mkdtemp(path.join(os.tmpdir(), "ledger-"));
@@ -76,4 +76,39 @@ test("recordForcedLand is a no-op for an undefined branch and survives a corrupt
 	await fs.writeFile(path.join(dir, "land-forced.json"), "{not json");
 	expect(readForcedLands(dir)).toEqual([]); // corrupt ⇒ empty, never throws
 	expect(recordForcedLand(dir, "squad/z", "a", "b", 5)).toBe(1); // and recovers
+});
+
+// ── Validator-override (Epic 3, leaf 03) — a strictly stronger, SEPARATE override class ───────────
+
+test("recordValidatorOverride with a non-empty reasonClass writes and round-trips via readValidatorOverrides", async () => {
+	const dir = await tmpDir();
+	expect(readValidatorOverrides(dir)).toEqual([]);
+	expect(recordValidatorOverride(dir, "squad/x", "operator@local", "judge-hallucination", "the judge misread the diff", 1000)).toBe(1);
+	const list = readValidatorOverrides(dir);
+	expect(list.length).toBe(1);
+	expect(list[0]).toEqual({ branch: "squad/x", actor: "operator@local", reasonClass: "judge-hallucination", detail: "the judge misread the diff", at: 1000 });
+});
+
+test("an empty (or whitespace-only) reasonClass is a no-op — the veto stands, nothing is written", async () => {
+	const dir = await tmpDir();
+	expect(recordValidatorOverride(dir, "squad/x", "a", "", "detail")).toBe(0);
+	expect(recordValidatorOverride(dir, "squad/x", "a", "   ", "detail")).toBe(0);
+	expect(readValidatorOverrides(dir)).toEqual([]);
+});
+
+test("recordValidatorOverride is a no-op for an undefined branch and never touches the proof-force ledger", async () => {
+	const dir = await tmpDir();
+	recordForcedLand(dir, "squad/a", "actor", "force detail", 1);
+	expect(recordValidatorOverride(dir, undefined, "x", "reason", "y")).toBe(0);
+	recordValidatorOverride(dir, "squad/b", "actor", "emergency", "bypass", 2);
+	// The proof-force ledger is completely untouched by an override write.
+	expect(readForcedLands(dir)).toEqual([{ branch: "squad/a", actor: "actor", detail: "force detail", at: 1 }]);
+	expect(readValidatorOverrides(dir)).toEqual([{ branch: "squad/b", actor: "actor", reasonClass: "emergency", detail: "bypass", at: 2 }]);
+});
+
+test("readValidatorOverrides survives a corrupt file", async () => {
+	const dir = await tmpDir();
+	await fs.writeFile(path.join(dir, "land-validator-override.json"), "{not json");
+	expect(readValidatorOverrides(dir)).toEqual([]);
+	expect(recordValidatorOverride(dir, "squad/z", "a", "criteria-wrong", "b", 5)).toBe(1); // and recovers
 });

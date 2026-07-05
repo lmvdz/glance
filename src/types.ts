@@ -310,6 +310,29 @@ export interface FeatureCriterion {
 	source?: "plan" | "ticket" | "workflow" | "manual";
 }
 
+/**
+ * Epic 3 (independent validator) — the result of scoring a landed diff against its unit's DECLARED
+ * `FeatureCriterion[]` with an INDEPENDENT judge lineage (never the executor grading its own work).
+ * "skipped" ⇐ no declared criteria (DESIGN §4, scores declared criteria only — never invents them).
+ * "abstain" ⇐ the judge was unreachable/unparseable (fail-open, DESIGN §3). "veto"/"pass" ⇐ the judge
+ * ran and found at least one unsatisfied / all satisfied criterion respectively (fail-closed on veto).
+ * Epic 5's confidence scorer reads `agreement` as one input to the aggregate `confidence` it computes
+ * separately — this record never computes that aggregate itself (DESIGN §5).
+ */
+export interface ValidationRecord {
+	verdict: "pass" | "veto" | "abstain" | "skipped";
+	/** 0..1 fraction of declared criteria the judge marked satisfied. */
+	agreement: number;
+	/** 0..1 the judge's own confidence in its verdict. */
+	confidence: number;
+	perCriterion: { id: string; satisfied: boolean; note?: string }[];
+	/** Short overall rationale; truncated to ~600 chars. */
+	rationale: string;
+	/** The judge lineage that ran (e.g. "opus"), independent of the executor's model. */
+	model?: string;
+	ranAt: number;
+}
+
 export interface FeatureDecision {
 	id: string;
 	text: string;
@@ -585,6 +608,10 @@ export interface AgentDTO {
 	verificationState?: VerificationState;
 	/** Stable proof reference/fingerprint for display and audit correlation. */
 	proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+	/** Epic 3 independent-validator verdict for this agent's most recent land attempt (DESIGN §5) —
+	 *  the input Epic 5's confidence scorer reads via `validation.agreement`. Absent until a land
+	 *  attempt has run the validator gate. */
+	validation?: ValidationRecord;
 	/** Why authority is currently capped to observe. */
 	blockedReason?: string;
 	/** Actions this surface may offer for the current effective mode. */
@@ -633,6 +660,9 @@ export interface RunReceipt {
 	parentId?: string;
 	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
 	harness?: string;
+	/** Epic 3 independent-validator verdict for this run's land attempt, copied from `AgentDTO.validation`
+	 *  at finalize time so it survives the run durably (Epic 5's confidence input, DESIGN §5). */
+	validation?: ValidationRecord;
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
