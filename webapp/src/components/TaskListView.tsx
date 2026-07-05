@@ -6,9 +6,10 @@
  * so adding a column is one entry in the array. Grouped PINNED → IN PROGRESS →
  * PLANNED → DONE.
  *
- * The Status slot is a dropdown of Plane's canonical state groups (Backlog · Todo
- * · In Progress · Done · Cancelled). Selecting one updates the task optimistically;
- * persisting the change back to Plane for issue-backed tasks is a backend follow-up.
+ * The Status slot is a dropdown of the state groups that ACTUALLY round-trip through the backend
+ * (Backlog · In Progress · Done). Todo and Cancelled were removed: the write path collapses status to
+ * three FeatureStages (planned/in-progress/done), so those two silently reverted to Backlog on reload —
+ * offering them was a lie. Adding real Todo/Cancelled feature stages is a backend follow-up.
  *
  * Reuses the exact task→agent→status mapping the WorkbenchPane rail uses.
  */
@@ -24,12 +25,12 @@ import type { AgentDTO } from '../lib/dto';
 
 // ── Plane's canonical state groups — the status dropdown options ───────────────
 interface StatusOption { group: string; label: string; dot: string; text: string }
-const TASK_STATUSES: StatusOption[] = [
+// Only the groups that survive a reload: the write path maps status → 3 FeatureStages, so backlog,
+// unstarted (Todo) and cancelled all collapse to 'planned' and reload as Backlog. Offer the 3 distinct ones.
+export const TASK_STATUSES: StatusOption[] = [
   { group: 'backlog', label: 'Backlog', dot: 'bg-gray-400', text: 'text-gray-500 dark:text-gray-400' },
-  { group: 'unstarted', label: 'Todo', dot: 'bg-blue-400', text: 'text-blue-500 dark:text-blue-400' },
   { group: 'started', label: 'In Progress', dot: 'bg-amber-500', text: 'text-amber-500' },
   { group: 'completed', label: 'Done', dot: 'bg-emerald-500', text: 'text-emerald-500' },
-  { group: 'cancelled', label: 'Cancelled', dot: 'bg-red-400', text: 'text-red-400 dark:text-red-400' },
 ];
 const byGroup = (g: string): StatusOption => TASK_STATUSES.find((s) => s.group === g) ?? TASK_STATUSES[0];
 const currentStatus = (task: Task): StatusOption => {
@@ -37,7 +38,7 @@ const currentStatus = (task: Task): StatusOption => {
   if (byLabel) return byLabel;
   return task.status === 'done' ? byGroup('completed') : task.status === 'active' ? byGroup('started') : byGroup('backlog');
 };
-const taskStatusForGroup = (g: string): Task['status'] => (g === 'completed' ? 'done' : g === 'started' ? 'active' : 'todo');
+export const taskStatusForGroup = (g: string): Task['status'] => (g === 'completed' ? 'done' : g === 'started' ? 'active' : 'todo');
 
 // ── avatars ──────────────────────────────────────────────────────────────────
 const AVATAR_COLORS = ['bg-rose-500', 'bg-sky-500', 'bg-amber-500', 'bg-emerald-500', 'bg-violet-500', 'bg-pink-500', 'bg-cyan-500'];
