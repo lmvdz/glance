@@ -146,6 +146,57 @@ test("tick(): flipping hasProof re-triggers decompose, passes the concern as ver
 	expect(concerns.map((c) => c.title).sort()).toEqual(["Core module", "Wire it up"]);
 });
 
+test("tick(): a gate-failing objective is decomposed at most once and never blocks a second, valid objective (SIG-2)", async () => {
+	process.env.OMP_SQUAD_RESIDENT_PLANNER = "1";
+	// Two objectives — "aaa-bad" sorts BEFORE "zzz-good", so the bad one is processed first: if a failing
+	// objective break'd the loop (the old bug), the good one would never be reached, and if state weren't
+	// persisted on failure the bad one would be re-decomposed every tick forever.
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "resident-planner-sig2-"));
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "resident-planner-sig2-state-"));
+	tmps.push(repo, stateDir);
+	await fs.mkdir(path.join(repo, "plans", "aaa-bad"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "aaa-bad", "OBJECTIVE.md"), "This objective always fails the dependency gate.\n");
+	await fs.mkdir(path.join(repo, "plans", "zzz-good"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "zzz-good", "OBJECTIVE.md"), "This objective decomposes cleanly.\n");
+
+	// The bad plan's draft carries a dangling EXTERNAL blocker (#99) → validatePlanConcerns refuses → rollback.
+	// (Title deliberately avoids the word "concern" — the shared overview-table parser treats any row whose
+	// first cell contains "concern" as a header row, which would silently drop the blocker and pass the gate.)
+	const BAD_JSON = JSON.stringify([{ num: 1, slug: "broken", title: "Broken widget", priority: "p1", complexity: "mechanical", touches: [], blockedBy: [99], goal: "g", approach: "a", acceptance: ["x"] }]);
+	let badCalls = 0;
+	let goodCalls = 0;
+	const events: { skipReason?: string; level?: string; found?: number; filed?: number }[] = [];
+	const planner = new ResidentPlanner({
+		repo,
+		stateDir,
+		classify: async (prompt) => {
+			if (prompt.includes("always fails the dependency gate")) {
+				badCalls++;
+				return BAD_JSON;
+			}
+			goodCalls++;
+			return DRAFT_JSON;
+		},
+		hasProof: () => false,
+		record: (r) => events.push(r),
+	});
+
+	await planner.tick();
+	// Both objectives were attempted this tick: the bad one failed the gate (rolled back), the good one planned.
+	expect(badCalls).toBe(1);
+	expect(goodCalls).toBe(1);
+	expect(await validatePlanConcerns(repo, "plans/zzz-good")).toEqual([]);
+	expect((await fs.readdir(path.join(repo, "plans", "zzz-good"))).sort()).toContain("01-core.md");
+	// The bad plan was rolled back to just its OBJECTIVE.md — no partial/cyclic tree left on disk.
+	expect(await fs.readdir(path.join(repo, "plans", "aaa-bad"))).toEqual(["OBJECTIVE.md"]);
+
+	await planner.tick();
+	// Second tick: both objectives' inputs are unchanged, so BOTH hash-skip — the bad one is NOT
+	// re-decomposed (no LLM cost leak), the good one is already planned. Neither classify fires again.
+	expect(badCalls).toBe(1);
+	expect(goodCalls).toBe(1);
+});
+
 test("start()/tick(): with OMP_SQUAD_RESIDENT_PLANNER unset, start() installs no timer and tick() is a no-op", async () => {
 	delete process.env.OMP_SQUAD_RESIDENT_PLANNER;
 	const { repo, stateDir } = await scratchRepo();

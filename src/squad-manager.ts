@@ -839,10 +839,15 @@ export class SquadManager extends EventEmitter {
 		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
 		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
 		if (process.env.OMP_SQUAD_RESIDENT_PLANNER === "1" && observeRepos.length > 0) {
-			for (const repo of observeRepos) {
+			observeRepos.forEach((repo, i) => {
 				const planner = new ResidentPlanner({
 					repo,
 					stateDir: this.stateDir,
+					// Per-repo state file (first repo keeps the bare name for upgrade continuity, the rest are
+					// repo-suffixed): the state map is keyed by repo-RELATIVE planDir, so two repos each with a
+					// `plans/<same-name>/` would otherwise share one entry and clobber each other's hash after
+					// a restart (m1) — matching the scout/opportunity/observer per-repo seen-file convention.
+					seenFile: i === 0 ? undefined : `resident-planner.${slug(repo)}.json`,
 					classify: ompClassify(this.bin, DECOMPOSE_TIMEOUT_MS),
 					hasProof: (identifier) => hasProof(this.stateDir, identifier),
 					onChanged: () => this.emitFeaturesChanged(),
@@ -851,7 +856,7 @@ export class SquadManager extends EventEmitter {
 				});
 				planner.start();
 				this.residentPlanners.push(planner);
-			}
+			});
 			this.log("info", `resident-planner on (decomposing objectives → ${observeRepos.join(", ")})`);
 		}
 	}
