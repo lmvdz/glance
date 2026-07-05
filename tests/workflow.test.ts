@@ -93,6 +93,19 @@ cargo build 2>&1 && echo 'ok' || exit 1"]   // trailing comment
 	expect(wf.edges.map((e) => `${e.from}->${e.to}`)).toEqual(["start->build", "build->exit"]);
 });
 
+test("parser: a quoted `[` in a graph attr or node label is not misread as a node attr block", () => {
+	// A top-level graph attribute whose quoted value contains `[` used to be misclassified as a node —
+	// parseNode sliced the id at that `[` and threw "invalid node id", failing the whole DOT parse.
+	const wf = parseWorkflow(`digraph T {
+		label="Release [beta]"
+		start [shape=Mdiamond]
+		exit  [shape=Msquare, label="Done [ok]"]
+		start -> exit
+	}`);
+	expect([...wf.nodes.keys()].sort()).toEqual(["exit", "start"]); // the graph attr did NOT become a node
+	expect(wf.nodes.get("exit")?.label).toBe("Done [ok]"); // a node label value with `[` still parses
+});
+
 test("parser: rejects missing start/exit, unknown shapes, and subgraphs", () => {
 	expect(() => parseWorkflow("digraph A {\n\texit [shape=Msquare]\n}")).toThrow(WorkflowParseError);
 	expect(() => parseWorkflow("digraph A {\n\tstart [shape=Mdiamond]\n\texit [shape=Msquare]\n\tn [shape=octagon]\n}")).toThrow(/unknown node shape/);
