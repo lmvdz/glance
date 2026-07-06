@@ -24,7 +24,7 @@
 
 import "./env-compat.ts"; // GLANCE_* ↔ OMP_SQUAD_* aliasing — must run before any env read
 import * as path from "node:path";
-import { arm, clearFailures, disarm, readFailures, readOracle, writeFailures, writeOracle as persistOracle } from "./convergence-oracle.ts";
+import { arm, clearFailures, disarm, handoffDoc, readFailures, readOracle, writeFailures, writeOracle as persistOracle } from "./convergence-oracle.ts";
 import { ratchet } from "./convergence-ratchet.ts";
 import { runIteration, runToConvergence, type ConvergenceDeps, type DispatchOutcome, type PlanFrontier } from "./convergence.ts";
 import { detectVerify } from "./intake.ts";
@@ -42,19 +42,54 @@ interface RunArgs {
 	 *  spinning in-process is the wrong production driver; `--once` is the right one. Optional at the
 	 *  API boundary (default false); `parseArgs` always sets it explicitly. */
 	once?: boolean;
+	/** Read-only: print the current oracle's `handoffDoc` (the seed prompt the outer `converge.sh`
+	 *  passes to a fresh `claude -p` after a context-window handoff), then exit. Never mutates state. */
+	handoff?: boolean;
+	/** Read-only: print just the current oracle's `decision` word (so the outer loop can gate on
+	 *  terminality without parsing the full state), then exit. */
+	status?: boolean;
 }
 
 function parseArgs(argv: string[]): RunArgs {
 	let goal: string | undefined;
 	let fixture = false;
 	let once = false;
+	let handoff = false;
+	let status = false;
 	for (let i = 0; i < argv.length; i++) {
 		if (argv[i] === "--goal") goal = argv[++i];
 		else if (argv[i] === "--fixture") fixture = true;
 		else if (argv[i] === "--once") once = true;
+		else if (argv[i] === "--handoff") handoff = true;
+		else if (argv[i] === "--status") status = true;
 	}
-	if (!goal) throw new Error("usage: bun src/convergence-run.ts --goal <id> [--fixture] [--once]");
-	return { goal, fixture, once };
+	if (!goal) throw new Error("usage: bun src/convergence-run.ts --goal <id> [--fixture] [--once] [--handoff] [--status]");
+	return { goal, fixture, once, handoff, status };
+}
+
+/** The current verified state for the READ-ONLY flags — the persisted oracle, or a fresh continuable
+ *  seed at iteration 0 if none exists yet. Deliberately avoids `buildDeps` (which imports the real
+ *  Epic 1/3 modules): `--handoff`/`--status` must work before a run has ever started.
+ *
+ *  `stateDir` is threaded explicitly (not left to the ambient `resolveStateDir()`) so a caller — a
+ *  test, or the outer loop — reads the SAME oracle it wrote even when a concurrent process has a
+ *  different `GLANCE_STATE_DIR`/`OMP_SQUAD_STATE_DIR` in its environment. The seed's `gap` is a
+ *  finite sentinel, not `Infinity`: `Infinity` serializes to `null` in the handoff doc's JSON block
+ *  and would make `seedFromHandoff` reject a pre-oracle `--handoff` as unparseable. */
+export function currentState(args: RunArgs, stateDir?: string): Promise<VerifiedState> {
+	return readOracle(stateDir).then(
+		(oracle): VerifiedState =>
+			oracle ?? {
+				goalId: args.goal,
+				iteration: 0,
+				gap: Number.MAX_SAFE_INTEGER,
+				epsilon: epsilon(),
+				pendingEscalation: false,
+				budget: { spent: 0, cap: budgetCap() },
+				decision: "continue",
+				updatedAt: Date.now(),
+			},
+	);
 }
 
 /**
@@ -330,8 +365,21 @@ export async function runOnceIteration(args: RunArgs, repo: string = process.cwd
 
 if (import.meta.main) {
 	const args = parseArgs(process.argv.slice(2));
-	const run = args.once ? runOnceIteration(args) : runConvergence(args);
-	run
+	if (args.handoff || args.status) {
+		// Read-only handoff/status: never arm, never mutate — the outer converge.sh loop calls these
+		// between warm segments to gate on terminality and to seed the next cold session.
+		currentState(args)
+			.then((state) => {
+				console.log(args.status ? state.decision : handoffDoc(state));
+				process.exit(0);
+			})
+			.catch((err) => {
+				console.error(err instanceof Error ? err.message : String(err));
+				process.exit(1);
+			});
+	} else {
+		const run = args.once ? runOnceIteration(args) : runConvergence(args);
+		run
 		.then((terminal) => {
 			console.log(JSON.stringify(terminal, null, 2));
 			// --once is a single step: exit 0 unless it produced a hard-stop (escalate/budget). A
@@ -343,4 +391,5 @@ if (import.meta.main) {
 			console.error(err instanceof Error ? err.message : String(err));
 			process.exit(1);
 		});
+	}
 }

@@ -1,12 +1,42 @@
 # Session handoff at context-window pressure
 
-STATUS: blocked
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
 ISLEAF: false
-NEEDS-DEEPER: yes
-TOUCHES: src/convergence-oracle.ts, scripts/continue-loop.sh, src/convergence-run.ts
+NEEDS-DEEPER: no
+TOUCHES: src/convergence-oracle.ts, scripts/converge.sh, src/convergence-run.ts, tests/convergence-handoff.test.ts
+
+## RESOLUTION (shipped)
+
+The unresolved design decision below is settled and built. The chosen relaunch mechanism is the
+**outer `scripts/converge.sh` `while` loop** (candidate 1): each `claude -p "$(…--handoff)"` run is
+ONE warm segment whose in-session Stop hook drives many `--once` iterations; when a segment ends
+non-terminally (context pressure ended the session, not the goal), the loop relaunches a FRESH
+session seeded by ONLY the handoff doc. The reconciliation the parent DESIGN flagged — warm WITHIN a
+segment (Stop hook), cold ONLY at the seam (this loop) — is realized: the cold-restart cost is paid
+once per segment, not per turn.
+
+What shipped:
+- `handoffDoc(state)` / `seedFromHandoff(doc)` on `src/convergence-oracle.ts` — the payload contract.
+  The doc is a human-readable continuation prompt with an embedded JSON block, so it seeds a cold
+  session for a human reader AND round-trips programmatically.
+- `--handoff` / `--status` read-only flags on `src/convergence-run.ts` (over an exported
+  `currentState()` that reads the persisted oracle, or a continuable seed if none exists yet) — the
+  two gates the outer loop calls between segments: `--status` → terminality, `--handoff` → the seed.
+- `scripts/converge.sh` — the outer loop. Read-only orchestrator: it shells out to `--status`
+  (gate on terminality), `--handoff` (seed the next segment), and `claude -p` (the warm segment);
+  `src/convergence-run.ts` owns all state writes.
+- Watermark policy (item 2): the watermark is the harness's own context-window ceiling — a segment
+  simply ends when the session can no longer continue; the outer loop then decides via the persisted
+  oracle's `decision` whether to relaunch. No separate token counter is needed; the oracle IS the
+  source of truth, and it persists across the cold seam (leaf 01 contract + the failures sidecar).
+- Acceptance (item 4) is covered by `tests/convergence-handoff.test.ts`: a mid-progress oracle
+  persisted by one segment is read back by a fresh `currentState()` (proving state survives the cold
+  seam), the handoff doc round-trips that state, and a terminal oracle makes `--status` report the
+  terminal decision so the loop stops relaunching. Sufficiency holds because Epics 1/3 read the
+  oracle + on-disk artifacts, not session memory — a cold session resumes from the doc + disk alone.
 
 ## Why this is a branch, not a leaf
 
@@ -49,11 +79,20 @@ carries a genuine **unresolved design decision** that leaves 01-05 deliberately 
 
 ## Scope boundary
 
-Nothing ships from this file until it is decomposed into its own sub-plan. Leaves 01-05 stand
-alone as a bounded single-session convergence loop; do not block them on this. When decomposed,
-this becomes `plans/meta-autonomous-fleet/epic-7-convergence-loop/06-session-handoff/` (or folds
-into a revised Epic 7 once the harness relaunch mechanism is settled).
+Historical (pre-resolution): leaves 01-05 stood alone as a bounded single-session convergence loop
+and were never blocked on this branch. This branch is now resolved and shipped in place (no separate
+sub-plan directory was needed once the mechanism was chosen — see RESOLUTION).
 
 ## Verify
 
-N/A until decomposed — this is a flagged branch, not a runnable leaf.
+```bash
+export PATH="$PWD/node_modules/.bin:$PATH"
+bun run check
+bun test tests/convergence-handoff.test.ts        # round-trip + cold-seam continuity + terminality gate
+
+# Live: --status/--handoff over an isolated state dir with a persisted mid-progress oracle
+SD=$(mktemp -d); mkdir -p "$SD/convergence"
+printf '{"goalId":"plans/demo","iteration":5,"gap":3,"epsilon":0,"pendingEscalation":false,"budget":{"spent":5,"cap":50},"decision":"continue","updatedAt":0}' > "$SD/convergence/oracle.json"
+OMP_SQUAD_STATE_DIR="$SD" bun src/convergence-run.ts --goal plans/demo --status   # → continue
+OMP_SQUAD_STATE_DIR="$SD" bun src/convergence-run.ts --goal plans/demo --handoff  # → seed doc carrying iteration 5, gap 3
+```
