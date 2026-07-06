@@ -150,18 +150,21 @@ but two capabilities are deliberately deferred and MUST be the content of the fo
    prior-iteration failures across the `--once` process boundary (the oracle schema deliberately
    omits them today, per §1).
 
-2. **Session handoff at context-window pressure** (leaf 06, `NEEDS-DEEPER`). The warm loop keeps one
-   session alive; a single session eventually hits the context ceiling. Chaining warm segments across
-   a cold seam carries a genuine unresolved design decision (see §6 and `06-session-handoff.md`) and
-   is not implemented. It is the second half of the same follow-up sub-plan.
+2. **Session handoff at context-window pressure** (leaf 06). RESOLVED and shipped — see §6.
 
-## 6. Session handoff (leaf 06 — deferred)
+## 6. Session handoff (leaf 06 — shipped)
 
 At the context-window ceiling one warm session cannot continue. The DESIGN calls for "long warm
-sessions chained by a clean handoff seeded with the verified-state doc." This carries a genuine
-unresolved decision — spawning a fresh session is inherently cache-*cold*, contradicting the
-warm-loop premise, so *when* to pay that cost and *how* the harness re-launches (operator-mediated
-vs a `scripts/converge.sh` outer `while` loop calling `claude -p "$(handoffDoc)"`) must be
-designed against the real harness. Left as a branch (see `06-session-handoff.md`,
-`flaggedNeedsDeeper`). Leaves 01–05 deliver a bounded, single-session convergence loop that is
-already useful and fully testable.
+sessions chained by a clean handoff seeded with the verified-state doc." The unresolved decision —
+*when* to pay the cold-restart cost and *how* the harness re-launches — is settled: the mechanism is
+the **outer `scripts/converge.sh` `while` loop** calling `claude -p "$(…--handoff)"`. Each run is one
+warm *segment* (the Stop hook drives `--once` iterations within it); when a segment ends
+non-terminally the loop relaunches a fresh session seeded by ONLY the handoff doc. Warm WITHIN a
+segment, cold ONLY at the seam — the cost is paid once per segment, not per turn. The watermark is
+the harness's own context ceiling (a segment ends when the session can't continue); the persisted
+oracle's `decision` — not a token counter — is the source of truth the outer loop gates on, and it
+survives the cold seam (leaf 01 contract + the failures sidecar). `handoffDoc`/`seedFromHandoff` on
+`src/convergence-oracle.ts` carry the payload; `--handoff`/`--status` on `src/convergence-run.ts`
+(over the exported `currentState()`) are the read-only gates; `tests/convergence-handoff.test.ts`
+proves the cold-seam round-trip and the terminality gate. Cold-session sufficiency holds because
+Epics 1/3 read the oracle + on-disk artifacts, not session memory. See `06-session-handoff.md`.

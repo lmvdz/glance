@@ -62,6 +62,47 @@ export async function readOracle(stateDir: string = resolveStateDir()): Promise<
 	}
 }
 
+/** The verified-state fields a cold session needs to resume — a compact subset of VerifiedState. */
+export type HandoffSummary = Pick<VerifiedState, "goalId" | "iteration" | "gap" | "budget" | "decision">;
+
+/**
+ * Session-handoff doc (Epic 7, leaf 06). A warm session eventually hits the context-window ceiling;
+ * the outer `scripts/converge.sh` while-loop then relaunches a FRESH `claude -p "$(…--handoff)"`
+ * session seeded by ONLY this doc. The on-disk oracle (+ the failures sidecar) persists across the
+ * cold seam, so no verified gain is lost and the ratchet still holds. The doc is a human-readable
+ * continuation prompt with an embedded JSON block so it also round-trips programmatically
+ * (`seedFromHandoff`) for tests and any machine reader.
+ */
+export function handoffDoc(state: VerifiedState): string {
+	const summary: HandoffSummary = { goalId: state.goalId, iteration: state.iteration, gap: state.gap, budget: state.budget, decision: state.decision };
+	return [
+		`You are continuing an autonomous convergence loop toward the goal "${state.goalId}".`,
+		`A prior warm session made progress and handed off at the context-window boundary — resume seamlessly; do NOT restart from scratch.`,
+		``,
+		`Verified state so far — iteration ${state.iteration}, gap ${state.gap}, budget ${state.budget.spent}/${state.budget.cap}:`,
+		"```json",
+		JSON.stringify(summary),
+		"```",
+		``,
+		`Each turn, run exactly:  bun src/convergence-run.ts --goal ${state.goalId} --once`,
+		`then do the single unit of work its planned frontier names, and let the Stop hook re-inject you.`,
+		`The loop ends when the oracle reaches a terminal decision (converged / escalate / budget-exhausted).`,
+	].join("\n");
+}
+
+/** Inverse of `handoffDoc` — extract the embedded verified-state summary; `null` if the doc carries no valid block. */
+export function seedFromHandoff(doc: string): HandoffSummary | null {
+	const m = doc.match(/```json\s*(\{[\s\S]*?\})\s*```/);
+	if (!m) return null;
+	try {
+		const p = JSON.parse(m[1]) as Partial<HandoffSummary>;
+		if (typeof p.goalId === "string" && typeof p.iteration === "number" && typeof p.gap === "number" && p.budget && p.decision) return p as HandoffSummary;
+	} catch {
+		/* fall through */
+	}
+	return null;
+}
+
 /**
  * Write the arm sentinel — one half of the dual arm gate (the other is `OMP_SQUAD_LOOP_ARMED=1`,
  * checked only by the hook/entrypoint, never here).
