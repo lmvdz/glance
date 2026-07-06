@@ -1,5 +1,5 @@
 # Harness registry + first-class `harness` field + migration
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

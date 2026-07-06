@@ -1,5 +1,5 @@
 # pi harness — the offline plug-and-play proof
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

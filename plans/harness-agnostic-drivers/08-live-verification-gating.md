@@ -1,5 +1,5 @@
 # Live verification + honest harness gating
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

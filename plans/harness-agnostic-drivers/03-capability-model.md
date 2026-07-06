@@ -1,5 +1,5 @@
 # Capability model + graceful degradation
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

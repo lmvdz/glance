@@ -1,5 +1,5 @@
 # Binary/harness config end-to-end
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical

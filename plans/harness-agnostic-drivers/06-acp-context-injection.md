@@ -1,5 +1,5 @@
 # ACP context-injection decision (the system-prompt blocker)
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: research

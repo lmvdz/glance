@@ -4,6 +4,16 @@
 Units run on any coding-agent harness (omp, pi, claude-code, codex, opencode, gemini-cli) behind
 one driver seam, chosen by config, with per-harness capabilities known and degraded gracefully.
 
+## Status — SHIPPED (2026-07-06)
+**8/8 code concerns closed** (01-08); 09 = deferred follow-ons (documented). Full suite **1576 pass /
+0 fail**, typecheck clean. **Live-verified on this box**: `opencode acp` (real ACP handshake, advertised
+{loadSession, mcp, prompt} caps) and `pi --mode rpc` (get_state + the `{"type":"prompt"}` command speak
+omp's protocol end-to-end through the manager) — both flipped `verified:true`. The live drive caught 3
+real bugs unit tests missed: pi has no `--no-approve` flag (v0.56.3), pi emits no ready frame (added a
+harness-aware get_state ready-probe), and cold restore/adopt dropped the harness (audit — reverted pi/ACP
+to omp). claude-code-acp handshakes but refuses nested Claude Code sessions (env). gemini/codex binaries
+absent → honestly unverified. Branch `worktree-harness-agnostic-drivers` (PR #80).
+
 ## Work
 | Concern | Why it exists | Complexity | Touches |
 | **Phase 1 — foundation + pi (ships, offline-verifiable)** | | | |

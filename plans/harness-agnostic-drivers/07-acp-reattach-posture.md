@@ -1,5 +1,5 @@
 # ACP reattach posture (daemon-restart survival)
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
