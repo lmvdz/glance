@@ -138,6 +138,7 @@ import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
+import { landingRosterOf } from "./is-landing-unit.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { scoreConfidence } from "./confidence.ts";
@@ -1448,6 +1449,19 @@ export class SquadManager extends EventEmitter {
 
 	list(): AgentDTO[] {
 		return [...this.agents.values()].map((r) => r.dto);
+	}
+
+	/**
+	 * Denominator honesty (Epic 6 concern 02): the merge-rate denominator population, anchored on the
+	 * durable dispatched-unit roster rather than land receipts (a unit that dies before `finalizeRun`
+	 * never appends a receipt, so a receipts-based count structurally excludes the worst failures).
+	 * Every unit in `this.agents` survived its own `create()`'s `persist()` — including one killed a
+	 * moment later — so it stays a denominator member (a failure, if it never lands) unless
+	 * `isLandingUnit` says its kind/role/mode never lands by design (concern 05 consumes this to
+	 * compute `landed / landingRoster().length`).
+	 */
+	landingRoster(): AgentDTO[] {
+		return landingRosterOf(this.list());
 	}
 
 	getTranscript(id: string): TranscriptEntry[] {
