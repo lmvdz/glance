@@ -42,6 +42,14 @@ export const OmpGraphPanel: React.FC = () => {
   const [viz, setViz] = useState<'flat' | 'depth'>('flat');
   const [depthMetric, setDepthMetric] = useState<DepthMetric>('commits');
   const [depthWeeks, setDepthWeeks] = useState<DepthWeek[] | null>(null);
+  // Older history, kept SEPARATE from the polled recent window. It is fetched once per drag-back
+  // and never re-polled, and the recent `doc` covers a disjoint (later) range — so merging the two
+  // never double-counts. Critically, this is why the cumulative is stable: the recent window is
+  // REPLACED each poll (not accumulated). GraphDoc cost bins are bucketed relative to range.start
+  // (src/omp-graph/schema.ts `bucketSums`), which advances ~20s per poll, so re-merging a fresh
+  // recent window into a prior one every poll would stack shifted-but-duplicate cost bins and make
+  // the cumulative climb without bound.
+  const [older, setOlder] = useState<GraphDocWire | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   // Bumped only on deliberate view changes (preset switch / refresh) so the canvas
   // re-centers then — NOT on the 20s poll or a lazy history extend, which must leave
@@ -52,7 +60,7 @@ export const OmpGraphPanel: React.FC = () => {
   const reqId = useRef(0);
   const loadingOlderRef = useRef(false);
   const load = useCallback(
-    async (opts?: { force?: boolean; replace?: boolean }) => {
+    async (opts?: { force?: boolean }) => {
       const id = ++reqId.current;
       if (opts?.force) setRefreshing(true);
       try {
@@ -65,10 +73,10 @@ export const OmpGraphPanel: React.FC = () => {
         // which parses fine but omits required fields. Coerce at the boundary so a partial
         // doc becomes null (→ empty state) instead of crashing buildPulseModel on doc.range.
         const nd = normalizeGraphDoc(d);
-        // Merge the fresh recent window over any accumulated history (poll), or replace
-        // outright on a preset switch. `replace` drops previously-stitched older windows —
-        // a new preset is a fresh starting window the user can drag back from again.
-        setDoc((prev) => (nd && prev && !opts?.replace ? mergeGraphDocs(prev, nd) : nd));
+        // REPLACE, never accumulate: the recent window is authoritative each poll. Accumulating it
+        // would double-count range-relative cost bins (see the `older` note above). Loaded history
+        // lives in `older` and is merged in only at render.
+        setDoc(nd);
         setAttribution(normalizeAttribution(a));
         setEmpty(nd ? '' : 'No graph data for this workspace yet — add a repo to your workspace to populate the pulse.');
         setError('');
@@ -83,9 +91,10 @@ export const OmpGraphPanel: React.FC = () => {
   );
 
   useEffect(() => {
-    // A preset change is a fresh window: replace the accumulation and re-center the view.
-    void load({ replace: true });
+    // A preset change is a fresh window: drop any stitched history and re-center the view.
+    setOlder(null);
     setResetKey((k) => k + 1);
+    void load();
     const iv = setInterval(() => void load(), 20_000);
     return () => {
       clearInterval(iv);
@@ -93,28 +102,28 @@ export const OmpGraphPanel: React.FC = () => {
     };
   }, [load]);
 
-  // Lazy history: called when a leftward drag reaches the loaded start edge. Fetches one
-  // bounded older window and stitches it onto the front of the doc, WITHOUT touching the
-  // view — so the user keeps dragging straight into the newly-available past.
-  const earliestLoaded = doc?.range.start;
+  // Lazy history: called when a leftward drag reaches the loaded start edge. Fetches one bounded
+  // older window and stitches it onto the FRONT of `older` (a range strictly before the recent
+  // window), without touching the view — so the user keeps dragging into the newly-available past.
+  const earliestLoaded = older?.range.start ?? doc?.range.start;
   const atHistoryLimit = earliestLoaded != null && earliestLoaded <= Date.now() - MAX_HISTORY_MS;
   const loadOlder = useCallback(async () => {
     if (loadingOlderRef.current) return;
-    const end = doc?.range.start;
+    const end = older?.range.start ?? doc?.range.start;
     if (end == null || end <= Date.now() - MAX_HISTORY_MS) return;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     const start = Math.max(Date.now() - MAX_HISTORY_MS, end - OLDER_CHUNK_MS);
     try {
-      const older = normalizeGraphDoc(await apiJson<GraphDocWire>(`/api/graph?start=${Math.round(start)}&end=${Math.round(end)}`));
-      if (older) setDoc((prev) => (prev ? mergeGraphDocs(older, prev) : older));
+      const chunk = normalizeGraphDoc(await apiJson<GraphDocWire>(`/api/graph?start=${Math.round(start)}&end=${Math.round(end)}`));
+      if (chunk) setOlder((prev) => (prev ? mergeGraphDocs(chunk, prev) : chunk));
     } catch {
       /* transient — the drag can retry */
     } finally {
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-  }, [doc?.range.start]);
+  }, [older?.range.start, doc?.range.start]);
 
   // DEPTH lazily fetches one real /api/graph window per week row
   useEffect(() => {
@@ -148,7 +157,13 @@ export const OmpGraphPanel: React.FC = () => {
     };
   }, [viz, depthWeeks]);
 
-  const model = useMemo(() => (doc ? buildPulseModel(doc, agents) : null), [doc, agents]);
+  // Merge loaded history under the fresh recent window ONLY here, at render. `older` covers a
+  // strictly-earlier, disjoint range, so this never double-counts — and because `doc` is replaced
+  // (not accumulated) each poll, the cumulative stays stable.
+  const model = useMemo(() => {
+    if (!doc) return null;
+    return buildPulseModel(older ? mergeGraphDocs(older, doc) : doc, agents);
+  }, [older, doc, agents]);
 
   const onInspect = useCallback((s: InspectSel) => {
     setSel(s);
