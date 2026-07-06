@@ -1,7 +1,7 @@
 import React from 'react';
 import { apiFetch, jsonInit } from '../../lib/api';
 import { canLand, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../../lib/agent-control';
-import { landButtonLabel } from '../../lib/agent-badges';
+import { confidenceBadge, landButtonLabel, validationBadge } from '../../lib/agent-badges';
 import type { AgentDTO } from '../../lib/dto';
 import { fmtDuration } from './ToolCallGroup';
 
@@ -20,10 +20,14 @@ const gitSummary = (agent?: AgentDTO, changedFiles?: number | null) => {
 
 export const AgentMetaBar = ({ agent, changedFiles, children }: { agent?: AgentDTO; changedFiles?: number | null; children?: React.ReactNode }) => {
   if (!agent) return null;
+  const validation = validationBadge(agent);
+  const confidence = confidenceBadge(agent);
   return (
     <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-1.5 text-[11px] text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400" aria-label="Agent mode and git status">
       <span className="rounded-full border border-gray-200 px-1.5 py-0.5 uppercase text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.blockedReason ? `Blocked: ${agent.blockedReason}` : `Requested ${agent.autonomyMode ?? 'assist'}; effective ${agent.effectiveMode ?? 'assist'}`}>{agent.effectiveMode ?? 'assist'}</span>
       <span className="rounded-full border border-gray-200 px-1.5 py-0.5 text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.proof?.fingerprint ?? 'No proof fingerprint'}>proof: {agent.verificationState ?? 'unknown'}</span>
+      {validation && <span className={`rounded-full px-1.5 py-0.5 ${validation.cls}`} title={validation.title}>{validation.label}</span>}
+      {confidence && <span className={`rounded-full px-1.5 py-0.5 ${confidence.cls}`} title={confidence.title}>{confidence.label}</span>}
       <span className="truncate font-mono" title={`${agent.repo}${agent.branch ? ` · ${agent.branch}` : ''}`}>{gitSummary(agent, changedFiles)}</span>
       {children ? <div className="ml-auto flex flex-shrink-0 items-center gap-1">{children}</div> : null}
     </div>

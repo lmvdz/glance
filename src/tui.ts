@@ -74,13 +74,23 @@ export interface BoardState {
 	frame: number;
 }
 
-function statusRank(s: AgentStatus): number {
-	const rank: Record<AgentStatus, number> = { input: 0, working: 1, idle: 2, starting: 3, error: 4, stopped: 5 };
-	return rank[s];
+/**
+ * Exception-first ordering — the whole point of the board is "glance and know where to look", so
+ * the rows that need a human float up. Ranks on the AGENT, not just its lifecycle status, so an
+ * errored agent (previously buried *below* idle), a validator VETO, and a one-tap-landable agent
+ * each rise above calm work instead of hiding in the middle.
+ */
+function agentRank(a: AgentDTO): number {
+	if (a.status === "input") return 0; // blocked on your answer
+	if (a.status === "error") return 1; // crashed — must not sink below idle
+	if (a.landReady && a.validation?.verdict === "veto") return 2; // green but the judge said no → review
+	if (a.landReady) return 3; // one keystroke from landing
+	const rest: Record<AgentStatus, number> = { working: 4, idle: 5, starting: 6, stopped: 7, input: 0, error: 1 };
+	return rest[a.status] ?? 5;
 }
 
 function sortAgents(agents: AgentDTO[]): AgentDTO[] {
-	return [...agents].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
+	return [...agents].sort((a, b) => agentRank(a) - agentRank(b) || a.name.localeCompare(b.name));
 }
 
 /** Nest spawned fan-out branches under their parent workflow; everything else sorts as usual. */
@@ -145,16 +155,50 @@ function statHeader(sel: AgentDTO, now: number): string {
 	return parts.join(c("gray", " · "));
 }
 
+/** Landing + authority line for the agent view — the trust state the board used to discard: proof
+ *  freshness, the INDEPENDENT validator verdict (a VETO must never be silent), run confidence (and
+ *  the propose-only cap it triggers), effective mode, and land-readiness. Empty until there's
+ *  anything to say, so a fresh agent's view stays uncluttered. */
+function landHeader(sel: AgentDTO): string {
+	const parts: string[] = [];
+	const vs = sel.verificationState;
+	if (vs && vs !== "unknown") parts.push(c(vs === "fresh" ? "green" : vs === "failed" ? "red" : "yellow", `proof ${vs}`));
+	const v = sel.validation;
+	if (v && v.verdict !== "skipped") {
+		if (v.verdict === "veto") parts.push(c("red", `⛔ VETOED${v.rationale ? `: ${v.rationale}` : ""}`));
+		else if (v.verdict === "pass") parts.push(c("green", "validated ✓"));
+		else parts.push(c("dim", "unjudged"));
+	}
+	if (sel.confidence != null) {
+		const low = sel.confidence < 0.4; // mirrors backend confidenceFloor() default
+		parts.push(c(low ? "yellow" : "dim", `conf ${Math.round(sel.confidence * 100)}%${low ? " · propose-only" : ""}`));
+	}
+	if (sel.effectiveMode) parts.push(c("dim", sel.effectiveMode));
+	if (sel.landReady && v?.verdict !== "veto") parts.push(c("green", "· ready to land"));
+	else if (sel.blockedReason) parts.push(c("yellow", `· held: ${sel.blockedReason}`));
+	return parts.join(c("gray", " · "));
+}
+
+/** Compact right-of-status marker for a list row — the one exception token that most wants a human. */
+function rowBadge(a: AgentDTO): string {
+	if (a.landReady && a.validation?.verdict === "veto") return c("red", "⛔VETO ");
+	if (a.landReady) return c("green", "✓LAND ");
+	if (a.blockedReason) return c("yellow", "‖HELD ");
+	return "";
+}
+
 /** Pure renderer: produce exactly `height` width-safe lines for the current state. */
 export function buildBoard(state: BoardState): string[] {
 	const { width, height, view } = state;
 	const agents = sortAgents(state.agents);
 	const need = agents.filter((a) => a.status === "input").length;
+	const vetoed = agents.filter((a) => a.landReady && a.validation?.verdict === "veto").length;
+	const ready = agents.filter((a) => a.landReady && a.validation?.verdict !== "veto").length;
 	const lines: string[] = [];
 
 	const title = `${c("bold", c("cyan", "omp-squad"))}  ${c("dim", `${agents.length} agents`)}${
 		need ? c("red", ` · ${need} need input`) : ""
-	}${state.connected ? "" : c("red", "  [disconnected]")}`;
+	}${vetoed ? c("red", ` · ${vetoed} vetoed`) : ""}${ready ? c("green", ` · ${ready} ready`) : ""}${state.connected ? "" : c("red", "  [disconnected]")}`;
 	lines.push(pad(title, width));
 	lines.push(c("gray", "─".repeat(width)));
 
@@ -172,7 +216,7 @@ export function buildBoard(state: BoardState): string[] {
 			const kindMark = g ? c(KIND_COLOR[a.kind] ?? "dim", g) : " ";
 			const name = pad((depth ? "└ " : "") + a.name, nameW);
 			const branch = c("dim", pad(a.branch ?? "—", branchW));
-			const act = pad((stalled ? "⏳ " : "") + (a.activity ?? a.todo?.active ?? (a.error ? `⚠ ${a.error}` : "—")), actW);
+			const act = pad(rowBadge(a) + (stalled ? "⏳ " : "") + (a.activity ?? a.todo?.active ?? (a.error ? `⚠ ${a.error}` : "—")), actW);
 			const meta = c("dim", pad(`${a.todo ? `${a.todo.done}/${a.todo.total}` : ""}  ${a.contextPct != null ? `${Math.round(a.contextPct * 100)}%` : ""}`, metaW));
 			const row = `${dot} ${kindMark} ${selRow ? c("bold", name) : name} ${branch} ${act} ${meta}`;
 			lines.push(selRow ? `${ESC}7m${pad(stripAnsi(row), width)}${RESET}` : pad(row, width));
@@ -195,6 +239,8 @@ export function buildBoard(state: BoardState): string[] {
 			const head = `${c("bold", sel.name)} ${c(STATUS_COLOR[sel.status], `[${sel.status}]`)}${issue}`;
 			lines.push(pad(head, width));
 			lines.push(pad(statHeader(sel, state.now), width));
+			const lh = landHeader(sel);
+			if (lh) lines.push(pad(lh, width));
 			const transcriptRows = Math.max(1, height - lines.length - sel.pending.length - 2);
 			const end = Math.max(0, state.transcript.length - state.scroll);
 			const start = Math.max(0, end - transcriptRows);

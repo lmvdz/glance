@@ -12,7 +12,7 @@
  */
 
 import React, { useState } from 'react';
-import { Bot, RotateCcw, CornerDownLeft, CircleDot } from 'lucide-react';
+import { Bot, RotateCcw, CornerDownLeft, CircleDot, ShieldAlert } from 'lucide-react';
 import { VerdictBadge, toneClasses } from './ui';
 import type { TaskStatus } from '../lib/taskStatus';
 
@@ -176,8 +176,24 @@ export const AgentStatusStrip: React.FC<AgentStatusStripProps> = ({ status, hasP
         </div>
       )}
 
-      {/* land-ready hint (action lives in the agent console) */}
-      {status.primaryAction === 'land' && (
+      {/* land-ready hint (action lives in the agent console) — a validator veto reframes it from
+          a calm "verification passed" to a red "review the veto", since the proof is green but a
+          separate judge rejected the change. */}
+      {status.primaryAction === 'land' && status.vetoed.length > 0 && (
+        <div className="space-y-1 border-t border-red-200/70 bg-white/60 px-4 py-3 text-xs text-red-700 dark:border-red-900/40 dark:bg-gray-950/40 dark:text-red-400">
+          <div className="flex items-center gap-2 font-semibold">
+            <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+            Validator vetoed a green change — review before landing.
+          </div>
+          {status.vetoed.map((a) => (
+            <div key={a.id} className="pl-6 text-gray-600 dark:text-gray-400">
+              <span className="font-medium text-gray-800 dark:text-gray-200">{a.name}</span>
+              {a.validation?.rationale ? ` — ${a.validation.rationale}` : ' — open the console for the rationale and a deliberate force.'}
+            </div>
+          ))}
+        </div>
+      )}
+      {status.primaryAction === 'land' && status.vetoed.length === 0 && (
         <div className="flex items-center gap-2 border-t border-amber-200/70 bg-white/60 px-4 py-3 text-xs text-gray-600 dark:border-amber-900/40 dark:bg-gray-950/40 dark:text-gray-400">
           <CircleDot className="h-3.5 w-3.5 text-amber-500" aria-hidden="true" />
           Verification passed — open the agent console to review the proof and land.

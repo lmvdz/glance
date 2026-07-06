@@ -50,3 +50,42 @@ export function landButtonLabel(agent: Pick<AgentDTO, 'prState' | 'landReady'>):
   if (agent.landReady) return 'Land ✓';
   return 'Land';
 }
+
+/**
+ * The independent validator (Epic 3) explicitly rejected this change — a `veto` verdict on the
+ * DTO. It is a *semantic* rejection that stands even when the deterministic proof is green, so it
+ * must never read as "ready to land": every surface that shows a land decision derives it from here
+ * so they can't drift. `abstain`/`skipped` are non-verdicts (no criteria, or judge unreachable) and
+ * are deliberately NOT treated as a veto.
+ */
+export function isVetoed(agent: Pick<AgentDTO, 'validation'>): boolean {
+  return agent.validation?.verdict === 'veto';
+}
+
+/** A rendered pill for the independent-validator verdict, or `null` when there's no verdict worth
+ *  showing (`skipped` = no declared criteria to judge against). Title carries the judge's rationale. */
+export function validationBadge(agent: Pick<AgentDTO, 'validation'>): { label: string; cls: string; title: string } | null {
+  const v = agent.validation;
+  if (!v || v.verdict === 'skipped') return null;
+  const title = v.rationale || 'Independent validator verdict';
+  switch (v.verdict) {
+    case 'veto':
+      return { label: 'vetoed', cls: 'bg-red-100 font-semibold text-red-700 dark:bg-red-950/50 dark:text-red-400', title };
+    case 'pass':
+      return { label: 'validated', cls: 'bg-emerald-100 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400', title };
+    case 'abstain':
+      return { label: 'unjudged', cls: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400', title };
+  }
+}
+
+/** Run-end self-confidence as a pill. Below the daemon's default floor (0.4) a run is capped to
+ *  propose-only, so the pill turns amber and says so — the reason an agent can be verified yet held.
+ *  `null` until a run has finished (no confidence yet). */
+export function confidenceBadge(agent: Pick<AgentDTO, 'confidence'>): { label: string; cls: string; title: string } | null {
+  if (agent.confidence == null) return null;
+  const pct = Math.round(agent.confidence * 100);
+  const low = agent.confidence < 0.4; // mirrors backend confidenceFloor() default
+  return low
+    ? { label: `conf ${pct}% · propose-only`, cls: 'bg-amber-100 font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-400', title: 'Below the confidence floor — authority is capped to assist (propose-only); land is held for a human.' }
+    : { label: `conf ${pct}%`, cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300', title: 'Run-end self-confidence' };
+}

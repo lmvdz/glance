@@ -12,6 +12,7 @@
  */
 
 import type { AgentDTO, PendingRequest } from './dto';
+import { isVetoed } from './agent-badges';
 
 export type TaskPosture = 'needs-you' | 'working' | 'idle' | 'unstaffed';
 
@@ -34,6 +35,9 @@ export interface TaskStatus {
   working: AgentDTO[];
   idle: AgentDTO[];
   landReady: AgentDTO[];
+  /** land-ready agents the independent validator VETOED — a green proof but a semantic rejection,
+   *  so they surface as "review", never "ready to land". Subset of `landReady`. */
+  vetoed: AgentDTO[];
   total: number;
   /** the single action that resolves the current posture. */
   primaryAction: 'answer' | 'restart' | 'land' | 'implement' | 'none';
@@ -82,6 +86,7 @@ export function summarizeTask(
   const working = list.filter((a) => a.status === 'working' || a.status === 'starting');
   const idle = list.filter((a) => a.status === 'idle' && !blockedIds.has(a.id));
   const landReady = list.filter((a) => a.landReady);
+  const vetoed = landReady.filter(isVetoed);
 
   let posture: TaskPosture;
   let verdict: TaskStatus['verdict'];
@@ -99,6 +104,13 @@ export function summarizeTask(
     } else {
       headline = `${plural(errored.length, 'agent')} errored — needs a restart`;
     }
+  } else if (vetoed.length) {
+    // A green proof the INDEPENDENT validator rejected — the one land state that must read as
+    // critical, not calm: it looks "verified" but a separate judge said no.
+    posture = 'needs-you';
+    verdict = 'critical';
+    primaryAction = 'land'; // routes to the console, where the veto rationale + a deliberate force live
+    headline = `${plural(vetoed.length, 'agent')} vetoed by the validator — review before landing`;
   } else if (landReady.length) {
     posture = 'needs-you';
     verdict = 'warn';
@@ -136,6 +148,7 @@ export function summarizeTask(
     working,
     idle,
     landReady,
+    vetoed,
     total: list.length,
     primaryAction,
     criteria: opts.criteria,
