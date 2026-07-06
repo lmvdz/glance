@@ -41,7 +41,8 @@ Staged observe → learn → act loop for omp-squad model selection. From `/rese
 
 ## Progress
 - **Batch 1 SHIPPED** (2026-07-06): C01 + C02 closed, opus-reviewed, one review-fix applied (denominator must count errored/blocked units — keyed off static `autonomyMode`, not `effectiveMode`). Full suite 1554/1554, tsc clean. On PR #71.
-- **Batch 2 SHIPPED** (2026-07-06): C03 closed, opus-reviewed, one review-fix applied (`resolveAgentIdForBranch` must pick most-recent by run time, not `readdir` order, or a reused branch misattributes a reconciled outcome). Full suite 1561/1561, tsc clean. On PR #71. Remaining: C04 → C05 → C06.
+- **Batch 2 SHIPPED** (2026-07-06): C03 closed, opus-reviewed, one review-fix applied (`resolveAgentIdForBranch` must pick most-recent by run time, not `readdir` order, or a reused branch misattributes a reconciled outcome). Full suite 1561/1561, tsc clean. On PR #71.
+- **Batch 3 SHIPPED** (2026-07-06): C04 + C05 closed — the honest task-class × model **scoreboard is live** (`buildTaskClassMatrix` + `/api/graph/task-class` + `TaskClassMatrixPanel`, non-causal label + insufficient-data gate). Opus review caught two COUPLED criticals: (1) the outcome row read `dto.model` (undefined for dispatched units) not C01's effective `RunReceipt.model` → model axis collapsed to "unknown"; fixed to `lastReceipt?.model ?? dto.model`. (2) that fix would double-count a landed unit across "unknown" + its real-model cell; fixed by resolving each agentId to ONE cell (row wins). +1 regression test for the divergence. Full suite 1578/1578, webapp build+tsc clean. On PR #71. Remaining: **C06** (routing action arm — behavior-changing, env-gated).
 - Follow-up surfaced by C01 (not blocking): `squad-manager.ts` has a duplicated inline frame switch that shadows `receipts.ts`'s `ingest()`; de-dup so future frame-field additions can't drift silently.
 
 ## Notes

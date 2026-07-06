@@ -1,5 +1,5 @@
 # Independent difficulty signal on the outcome row
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -28,3 +28,6 @@ None. Additive fields on the task-outcome row; readers ignore unknown fields.
 - Land a unit that needed ≥1 fixup cycle; confirm the row carries `fixupCount ≥ 1` and `filesTouched > 0`.
 - Land a first-try-green unit; confirm `fixupCount == 0`.
 - Confirm the surface/label for rework explicitly says in-run (no false claim of post-merge regression).
+
+## Resolution
+Closed — added `filesTouched?`/`fixupCount?` to `TaskOutcomeRow`, populated at the `land()` row-write. Correctness catch: `dto.receipt` is a `ReceiptRollup` with NO `filesTouched` field (the spec's draft was wrong) — read from `readReceipts(stateDir, dto.id)` last entry instead (the confidence scorer's own blast-radius source). `fixupCount` from `rec.options.workflowState?.visits?.fixup` (identical access to the fixups-to-green metric). `diffLoc` omitted (would need new git --numstat plumbing). Documented as in-run churn, not post-merge regression (no such signal exists). +3 tests; tsc clean; full suite 1564/1564.

@@ -138,7 +138,7 @@ import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
-import { landingRosterOf } from "./is-landing-unit.ts";
+import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
@@ -1465,6 +1465,28 @@ export class SquadManager extends EventEmitter {
 		return landingRosterOf(this.list());
 	}
 
+	/**
+	 * The `landingRoster()` population enriched with each unit's routing decision + model — concern
+	 * 05's task-class matrix denominator. `routing` (`{mode, tier}`, concern 03) lives on the durable
+	 * `PersistedAgent` (`rec.options`), NOT on `AgentDTO` — it was deliberately never added to the
+	 * wire-facing DTO (a field only this one server-side aggregator needs isn't worth touching the
+	 * five `AgentDTO` literal construction sites in this already load-bearing file for). Same
+	 * membership as `landingRoster()` (filters `isLandingUnit` on the same `dto`), just read from the
+	 * record's stored options instead of the DTO. A unit dispatched before routing existed, or via a
+	 * path that never stamped it, falls back to `{mode:"unknown", tier:"unknown"}` — it still counts
+	 * in the denominator (that's the whole point of C02), just bucketed honestly as unrouted rather
+	 * than silently dropped.
+	 */
+	landingRosterRouting(): { agentId: string; taskClass: { mode: string; tier: string }; model?: string }[] {
+		return [...this.agents.values()]
+			.filter((r) => isLandingUnit(r.dto))
+			.map((r) => ({
+				agentId: r.dto.id,
+				taskClass: { mode: r.options.routing?.mode ?? "unknown", tier: r.options.routing?.tier ?? "unknown" },
+				model: r.dto.model,
+			}));
+	}
+
 	getTranscript(id: string): TranscriptEntry[] {
 		return this.agents.get(id)?.transcript ?? [];
 	}
@@ -2396,7 +2418,12 @@ export class SquadManager extends EventEmitter {
 					agentId: dto.id,
 					branch: dto.branch,
 					routing: rec.options.routing ?? { mode: "none", tier: tierOf(rec.options.thinking) },
-					model: dto.model,
+					// Effective model from the finalized receipt (concern 01's noteModel writes the model
+					// omp ACTUALLY ran onto RunReceipt.model), NOT dto.model — dispatch sets no model and
+					// nothing back-stamps dto.model for a dispatched fleet unit, so bare dto.model would be
+					// undefined here and collapse the whole scoreboard model axis to "unknown". Fall back to
+					// dto.model only for the rare explicit-model path where no receipt landed on disk.
+					model: lastReceipt?.model ?? dto.model,
 					costUsd: dto.receipt?.costUsd,
 					confidence: dto.confidence,
 					validation: rec.dto.validation?.verdict,
