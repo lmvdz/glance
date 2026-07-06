@@ -1,6 +1,6 @@
 # Non-blocking report primitive (squad_report host tool → report row)
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

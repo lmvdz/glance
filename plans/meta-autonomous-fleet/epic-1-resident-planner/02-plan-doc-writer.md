@@ -1,6 +1,6 @@
 # Plan-doc writer + DAG validation gate (idempotent)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

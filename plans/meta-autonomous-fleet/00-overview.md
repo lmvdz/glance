@@ -1,6 +1,6 @@
 # Autonomous AI Fleet System — meta-plan
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -8,6 +8,26 @@ COMPLEXITY: architectural
 ## Outcome
 
 The fleet gains the trust layer that lets it run a meta-goal unattended without amplifying its own errors: an independent validator with veto, a replayable end-to-end audit trail, confidence-gated human-in-the-loop, a learning orchestrator, and a convergence loop that iterates `plan → implement → validate → ratchet → escalate` against a fixed definition of done. Each epic below is a **branch** that decomposes into its own sub-plan until every leaf is a Sonnet-ready unit.
+
+## Readiness — code-verified (2026-07-06)
+
+All seven epics are **built and landed**; the trust layer that makes unattended meta-goal execution safe now exists in code. This table reflects a per-leaf audit of each leaf's `TOUCHES`/acceptance against actual source (not its `STATUS:` line, which had drifted stale — every Epic 1–5 leaf still read `open` despite being shipped; corrected in this pass).
+
+| Epic | State | Verified in code |
+|---|---|---|
+| 01 Resident planner | done | `src/planner.ts` (decompose/parseConcernDrafts), `plan-writer.ts`, `resident-planner.ts` (opt-in loop), `squad-manager.ts` wiring, `index.ts` `plan decompose` CLI |
+| 02 Execution roles | done | `ExecutionRole` (`types.ts`), `buildObserveWorkflow` (`verify-workflow.ts`), `VerifySpec.mode` + `buildVerifyLoop`, TDD route (`intake.ts`), observer-dispatch seam (`observer.ts`) |
+| 03 Independent validator | done¹ | `validator.ts` (`scoreAgainstCriteria`/`validatorGate`), `land-ledger.ts` override class, `compliance.ts`, observer compliance check, `server.ts` governance payload |
+| 04 Replayable traceability | done | `spans.ts` structural spine + woven verify/spawn/validate kinds, `trace-exporter.ts` durable `LocalFileExporter` (not SSRF-blocked), `/api/digest`, webapp overlay/Inspector |
+| 05 HITL safeguards | done² | `confidence.ts` scorer, `autonomy.ts` confidence cap, steering lane (`insights.ts`/`agent-control.ts`), `squad_report` primitive, low-confidence auto-escalation |
+| 06 Learning orchestrator | done | `threshold-tuner.ts` (model-outcome ledger, outcome-driven default, confidence-threshold tuner) — already `done` |
+| 07 Convergence loop | done³ | oracle + state machine + ratchet + Stop hook + run entrypoint (leaves 01–05); ratchet-live wiring (PR #64) and session handoff (leaf 06, PR #65) |
+
+¹ Epic 3 leaf 07 (adversarial-refute-before-land) is a **deferred research branch** (`leaf:no`) — intentionally not built; kept `open`.
+² Epic 5 leaf 07 (learning-to-agents-STUB) is a **deferred handoff stub** (`ISLEAF:false`) — kept `open`; its Epic 6 consumer has since partially materialized (`threshold-tuner.ts`).
+³ Epic 7's ratchet-live and session-handoff (leaf 06) land via PRs #64 and #65 respectively; leaf 06's STATUS is corrected there, not here, to keep these PRs non-overlapping.
+
+The only remaining `open` leaves across all seven epics are the two explicitly-deferred research branches above — neither is on the autonomous-fleet critical path. **Goal-readiness: the fleet has its full trust layer in code.**
 
 ## Work
 

@@ -1,6 +1,6 @@
 # VerifySpec.mode + 3-way driver selection
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

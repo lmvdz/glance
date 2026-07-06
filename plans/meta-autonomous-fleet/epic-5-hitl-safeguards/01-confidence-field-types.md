@@ -1,6 +1,6 @@
 # Confidence field on RunReceipt + AgentDTO (+ DTO mirror)
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical

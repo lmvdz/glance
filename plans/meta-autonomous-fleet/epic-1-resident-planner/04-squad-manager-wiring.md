@@ -1,6 +1,6 @@
 # Wire ResidentPlanner into SquadManager start()/stop()
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

@@ -1,5 +1,5 @@
 # Durable-by-default local export + bounded retry
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

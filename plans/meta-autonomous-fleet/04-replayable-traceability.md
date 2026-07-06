@@ -1,5 +1,5 @@
 # Epic 4 — Replayable traceability
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

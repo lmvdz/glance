@@ -1,5 +1,5 @@
 # Validation signal on the run record — the Epic 5 confidence input
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
