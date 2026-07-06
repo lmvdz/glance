@@ -554,6 +554,11 @@ export interface AgentDTO {
 	status: AgentStatus;
 	/** Which runtime backs this agent. */
 	kind: AgentKind;
+	/** Which coding-agent harness backs this unit (omp/pi/claude-code/…) — for trust legibility so a
+	 *  surface never renders, e.g., "always-ask" over a harness that can't ask. Absent ⇒ "omp". */
+	harness?: string;
+	/** Harness capability summary surfaced for the UI (approval channel + restart survival). */
+	harnessCaps?: { toolApproval: "native" | "none" | "preauth-allowlist"; resumable: boolean; hostTools: boolean; contextInjection: "native" | "none" | "mcp" };
 	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
 	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
 	executionRole?: ExecutionRole;
@@ -768,8 +773,15 @@ export interface PersistedAgent {
 	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
 	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
 	executionRole?: ExecutionRole;
-	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
+	/** DEPRECATED — superseded by `harness`. Legacy on-disk records carry "omp"|"acp"; the manager
+	 *  normalizes it to a harness name at the single makeDriver choke point (runtimeToHarness). */
 	runtime?: "omp" | "acp";
+	/** Coding-agent harness backing this unit (registry key: omp/pi/claude-code/codex/opencode/gemini/…).
+	 *  Absent ⇒ resolved from GLANCE_HARNESS then "omp". Supersedes `runtime`. */
+	harness?: string;
+	/** Per-agent binary (argv[0]) override for the resolved harness (else the descriptor's bin, or
+	 *  GLANCE_BIN for the default harness). */
+	bin?: string;
 	/** flue-service only: worker invocation config. */
 	flue?: FlueMemberConfig;
 	/** workflow only: graph file backing this run. */
@@ -841,8 +853,13 @@ export interface PersistedFeature {
 export interface CreateAgentOptions {
 	name?: string;
 	repo: string;
-	/** Agent runtime: "omp" (omp --mode rpc, default) or "acp" (an ACP runtime, e.g. auggie --acp). */
+	/** DEPRECATED — superseded by `harness` (kept for back-compat / legacy callers). */
 	runtime?: "omp" | "acp";
+	/** Coding-agent harness to run this unit on (registry key: omp/pi/claude-code/codex/opencode/gemini/…).
+	 *  Absent ⇒ GLANCE_HARNESS then "omp". */
+	harness?: string;
+	/** Per-agent binary (argv[0]) override for the resolved harness. */
+	bin?: string;
 	/** Branch to create/checkout for the worktree. Defaults to a unique `squad/<agent-id>` branch. */
 	branch?: string;
 	/** Reuse an existing path as the cwd instead of cutting a worktree. */

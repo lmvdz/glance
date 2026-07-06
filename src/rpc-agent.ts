@@ -27,6 +27,9 @@ export interface RpcAgentOptions {
 	appendSystemPrompt?: string;
 	/** Override the omp binary the host launches (defaults to `omp` on PATH). */
 	bin?: string;
+	/** Harness name (omp-rpc family: "omp" | "pi" | …). Threaded to the host so it builds the right
+	 *  approval-flag dialect (`--approval-mode` vs `--approve`) and extension set for this binary. */
+	harness?: string;
 	/** Socket path override (defaults to socketPathFor(id)). */
 	socket?: string;
 }
@@ -142,6 +145,7 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		if (this.opts.thinking) cmd.push("--thinking", this.opts.thinking);
 		if (this.opts.appendSystemPrompt) cmd.push("--append-system-prompt", this.opts.appendSystemPrompt);
 		if (this.opts.bin) cmd.push("--bin", this.opts.bin);
+		if (this.opts.harness) cmd.push("--harness", this.opts.harness);
 		const proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
 		proc.unref();
 	}

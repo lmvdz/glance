@@ -48,6 +48,11 @@ import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, Com
 
 const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
 
+/** Global default binary override for the default harness (a custom omp/pi fork at a nonstandard path).
+ *  Wires the `bin` field that existed on SquadManager/ManagerRegistry but was never populated in the
+ *  bootstrap — so `GLANCE_BIN` now actually reaches WorkflowDriver + the omp-rpc drivers. */
+const glanceBin = (): string | undefined => process.env.GLANCE_BIN?.trim() || undefined;
+
 /**
  * Gating for the DB-mode root/operator factory (opt-in). In multi-tenant DB mode the per-org managers
  * behind the registry are lazy + org-scoped, so the operator's OWN autonomous factory (Plane
@@ -311,6 +316,7 @@ async function cmdUp(args: string[]): Promise<void> {
 			store: (orgId) => new DbStore(ctx, orgId, path.join(stateDir, "orgs", orgId)),
 			operator,
 			autoLand,
+			bin: glanceBin(),
 			listOrgIds: () => listOrgIds(stateDir),
 		});
 		registry.start();
@@ -326,7 +332,7 @@ async function cmdUp(args: string[]): Promise<void> {
 		// PLANE_PROJECT_MAP). Federation stays inert (NullFederationBus): the WS supervisor + cross-host
 		// lease sync are file-mode-only for auth reasons (below), and the root factory is operator-local.
 		if (rootFactoryEnabled()) {
-			manager = new SquadManager({ bus: new NullFederationBus(), operator, stateDir, autoLand });
+			manager = new SquadManager({ bus: new NullFederationBus(), operator, stateDir, autoLand, bin: glanceBin() });
 			await manager.start();
 			process.stderr.write(`root factory: on — operator autonomous factory active for ${planeRepos().join(", ")}\n`);
 		} else if (process.env.OMP_SQUAD_ROOT_FACTORY === "1") {
@@ -345,7 +351,7 @@ async function cmdUp(args: string[]): Promise<void> {
 			.split(",")
 			.map((s) => s.trim())
 			.filter((s) => s.length > 0);
-		manager = new SquadManager({ bus, operator, stateDir, autoLand, fedRepos });
+		manager = new SquadManager({ bus, operator, stateDir, autoLand, fedRepos, bin: glanceBin() });
 		await manager.start();
 		if (federationOff) process.stderr.write("federation: disabled (OMP_SQUAD_FEDERATION=0)\n");
 		else if (coordinator) process.stderr.write(`federation: joined ${coordinator} as ${operator.id}\n`);
@@ -428,6 +434,10 @@ async function cmdAdd(args: string[]): Promise<void> {
 	if (typeof flags.verify === "string") options.verify = flags.verify;
 	if (typeof flags.sandbox === "string") options.sandbox = { image: flags.sandbox };
 	if (flags.acp === true || flags.runtime === "acp") options.runtime = "acp";
+	// Any registered harness by name (omp/pi/claude-code/codex/opencode/gemini/…). Supersedes --acp;
+	// --bin overrides the harness's binary for this one agent.
+	if (typeof flags.harness === "string") options.harness = flags.harness;
+	if (typeof flags.bin === "string") options.bin = flags.bin;
 	if (flags.plain === true) options.autoRoute = false;
 
 	// Discoverability: warn if anyone (squad agent or raw omp session) is already on this repo.

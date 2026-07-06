@@ -27,6 +27,7 @@ import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
 import type { Socket } from "bun";
 import type { ApprovalMode, ThinkingLevel } from "./types.ts";
+import { getHarness } from "./harness-registry.ts";
 import { gitNoSignEnv } from "./git-harden.ts";
 
 export interface AgentHostOptions {
@@ -38,6 +39,8 @@ export interface AgentHostOptions {
 	thinking?: ThinkingLevel;
 	appendSystemPrompt?: string;
 	bin?: string;
+	/** Harness name (omp-rpc family). Selects the approval-flag dialect + extension set for the binary. */
+	harness?: string;
 }
 
 const RING_MAX = 4000;
@@ -144,13 +147,20 @@ export async function reapOrphanHosts(liveIds: Set<string>, dir = squadSocketDir
 
 /** Run the host until the omp child exits. Resolves on exit (process should then exit). */
 export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
+	// Resolve the harness dialect (omp: `--approval-mode`; pi: `--approve`/`--no-approve`). Absent/unknown
+	// harness falls back to omp's flags so nothing regresses.
+	const harness = opts.harness ? getHarness(opts.harness) : undefined;
 	const args = ["--mode", "rpc", "--cwd", opts.cwd];
 	if (opts.model) args.push("--model", opts.model);
-	if (opts.approvalMode) args.push("--approval-mode", opts.approvalMode);
+	if (opts.approvalMode) {
+		const approvalArgs = harness?.approvalArgs ?? ((m: string): string[] => ["--approval-mode", m]);
+		args.push(...approvalArgs(opts.approvalMode));
+	}
 	if (opts.thinking) args.push("--thinking", opts.thinking);
 	if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
-	// Squad agents participate in soft file leasing (claim on edit, ⚠ on conflict).
-	args.push("-e", path.join(import.meta.dir, "lease-hook.ts"));
+	// Squad agents participate in soft file leasing (claim on edit, ⚠ on conflict) — on for omp, off for
+	// harnesses whose `-e` extension support is unverified (pi runs without soft-leasing; documented).
+	if (harness?.leaseHook ?? true) args.push("-e", path.join(import.meta.dir, "lease-hook.ts"));
 
 	// Force commit/tag signing OFF (see gitNoSignEnv) so a global
 	// commit.gpgsign=true can't block the agent on a pinentry prompt.

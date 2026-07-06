@@ -24,6 +24,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
+import { type HarnessDescriptor, resolveBin, resolveHarness } from "./harness-registry.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
@@ -376,6 +377,9 @@ interface AgentRecord {
 	dto: AgentDTO;
 	agent: AgentDriver;
 	options: PersistedAgent;
+	/** Resolved harness descriptor backing this unit — the single source for capability gating
+	 *  (hostTools/toolApproval/resumable/contextInjection) instead of `runtime === "acp"` string checks. */
+	harness?: HarnessDescriptor;
 	transcript: TranscriptEntry[];
 	/** Accumulated streaming text since the last flush. */
 	assistantBuf: string;
@@ -1317,7 +1321,7 @@ export class SquadManager extends EventEmitter {
 		};
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
-		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		const rec: AgentRecord = { dto, agent, options: p, harness: this.harnessFor(p), transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		// Reseed the fresh tracker from persisted history BEFORE wiring, so a reconnect starts warm instead
 		// of empty — otherwise the first live frame for an already-known subagent id would look like a brand
 		// new node (defaulted fields) and the next flush's merge would drop everything the frame didn't carry.
@@ -1440,7 +1444,7 @@ export class SquadManager extends EventEmitter {
 		const agent = this.makeDriver(p); // constructed but never started — this record has no live connection
 		// Review finding 9: transcript threaded through (was hardcoded `[]`) — a terminal run's history is
 		// exactly what the operator needs to decide whether to fork, and `attachExisting` already does this.
-		const rec: AgentRecord = { dto, agent, options: p, transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs, toolEntries: new Map() };
+		const rec: AgentRecord = { dto, agent, options: p, harness: this.harnessFor(p), transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs, toolEntries: new Map() };
 		this.agents.set(p.id, rec);
 		this.wire(rec); // no-op until/unless something ever starts `agent`, which this path never does
 		this.markCatastrophe(p.id, p.workflowState!.terminal!.reason);
@@ -3025,6 +3029,25 @@ export class SquadManager extends EventEmitter {
 		const thinking = opts.thinking ?? "low";
 		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
+		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
+		// worktree (fail fast, no leaked worktree). flue/workflow kinds use their own drivers, so the
+		// harness concept doesn't apply to them.
+		const harnessDesc = kind === "omp-operator" ? resolveHarness({ harness: opts.harness, runtime: opts.runtime }) : undefined;
+		if (harnessDesc) {
+			// A no-approval harness (pi: host perms, no approval channel) cannot enforce anything stricter
+			// than yolo — refuse rather than silently granting full autonomy under an "always-ask"/"write"
+			// label (the "inverted safety" failure mode). Surfaced, never coerced.
+			if (harnessDesc.capabilities.toolApproval === "none" && approvalMode !== "yolo") {
+				throw new Error(`harness "${harnessDesc.name}" has no approval channel — only approvalMode "yolo" is supported (got "${approvalMode}")`);
+			}
+			// sandbox × non-omp is unbuildable today: SandboxAgentDriver is an omp-RPC client over
+			// docker-exec stdio. Reject rather than silently produce a broken driver (Phase 3 makes
+			// containment protocol-aware so any harness can be sandboxed).
+			if (opts.sandbox && harnessDesc.protocol !== "omp-rpc") {
+				throw new Error(`harness "${harnessDesc.name}" cannot run sandboxed yet — sandbox currently supports only omp-rpc harnesses`);
+			}
+		}
+
 		let cwd: string;
 		let resolvedBranch: string | undefined;
 		let repo: string;
@@ -3071,6 +3094,8 @@ export class SquadManager extends EventEmitter {
 			kind,
 			executionRole: opts.executionRole,
 			runtime: opts.runtime,
+			harness: harnessDesc?.name,
+			bin: opts.bin,
 			flue: opts.flue,
 			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify, mode: opts.verifyMode } } : undefined,
 			// Carry the resumable checkpoint so an adopted/restored workflow continues its graph from the
@@ -3102,6 +3127,8 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 			issue: opts.issue,
 			kind,
+			harness: harnessDesc?.name,
+			harnessCaps: harnessDesc ? { toolApproval: harnessDesc.capabilities.toolApproval, resumable: harnessDesc.capabilities.resumable, hostTools: harnessDesc.capabilities.hostTools, contextInjection: harnessDesc.capabilities.contextInjection } : undefined,
 			executionRole: opts.executionRole,
 			parentId: opts.parentId,
 			...lineageFieldsFrom(opts),
@@ -3118,7 +3145,7 @@ export class SquadManager extends EventEmitter {
 		this.seedAuthority(dto, requestedMode);
 
 		const agent = this.makeDriver(persisted, opts.cold);
-		const rec: AgentRecord = { dto, agent, options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
+		const rec: AgentRecord = { dto, agent, options: persisted, harness: harnessDesc, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
 		// create() is shared by fresh spawns (no prior subagents) and the adoptOrphanedAgents/loadPersisted
 		// restore paths (opts.subagents carries the persisted history) — reseed the tracker so a restored
 		// workflow/agent's subagent tree starts warm instead of empty, same rationale as attachExisting.
@@ -3187,6 +3214,13 @@ export class SquadManager extends EventEmitter {
 		return rec.dto;
 	}
 
+	/** The harness descriptor backing a plain-agent record — undefined for workflow/flue kinds, which use
+	 *  their own drivers. Same resolution choke point makeDriver uses, so reattach/reconnect records get the
+	 *  same capability gating as freshly-created ones. */
+	private harnessFor(p: PersistedAgent): HarnessDescriptor | undefined {
+		return (p.kind ?? "omp-operator") === "omp-operator" ? resolveHarness(p) : undefined;
+	}
+
 	private makeDriver(p: PersistedAgent, cold = false): AgentDriver {
 		if (p.kind === "flue-service" && p.flue) {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
@@ -3222,13 +3256,24 @@ export class SquadManager extends EventEmitter {
 			const execCommand = (script: string, cwd: string) => execGatedCommand(script, cwd, { mounts: [p.repo] });
 			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold, reflection });
 		}
+		// Plain-agent path: resolve the harness (explicit `harness`, else the legacy `runtime` alias,
+		// else GLANCE_HARNESS/"omp"). This is the single migration choke point — a persisted `runtime:"acp"`
+		// record restores an ACP driver here instead of silently respawning as omp on a daemon upgrade.
+		const harness = resolveHarness(p);
+		const bin = resolveBin(harness, p.bin);
 		if (p.sandbox) {
+			// sandbox × non-omp is a matrix, not a list: SandboxAgentDriver is an omp-RPC client over
+			// `docker exec` stdio and can only speak to omp. create() rejects sandbox+non-omp; this is the
+			// belt-and-suspenders floor (Phase 3 makes containment protocol-aware).
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
 		}
-		if (p.runtime === "acp") {
-			return new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model });
+		if (harness.protocol === "acp") {
+			const command = harness.acpCommand ? [...harness.acpCommand, ...(p.model ? ["--model", p.model] : [])] : undefined;
+			return new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command });
 		}
-		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, appendSystemPrompt: p.appendSystemPrompt, bin: this.bin });
+		// omp-rpc protocol family (omp, pi, …): same detached agent-host transport, harness name threaded
+		// so the host builds the right approval-flag dialect + extension set for this binary.
+		return new RpcAgent({ id: p.id, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, appendSystemPrompt: p.appendSystemPrompt, bin, harness: harness.name });
 	}
 
 	/**
@@ -3466,7 +3511,7 @@ export class SquadManager extends EventEmitter {
 			messageCount: 0,
 		};
 		this.seedAuthority(dto, "autodrive");
-		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, harness: this.harnessFor(persisted), transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(id, rec);
 		this.wire(rec);
 		await rec.agent.start();
@@ -3492,7 +3537,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 		};
-		const rec: AgentRecord = { dto, agent: this.makeDriver(p), options: p, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
+		const rec: AgentRecord = { dto, agent: this.makeDriver(p), options: p, harness: this.harnessFor(p), transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(p.id, rec);
 		this.wire(rec);
 		await rec.agent.start();
@@ -5052,7 +5097,12 @@ export class SquadManager extends EventEmitter {
 	/** Advertise the reserved squad host tools to an omp-backed agent once it's ready (and on each
 	 *  reconnect/respawn, since omp loses them). Best-effort — never throws into the ready path. */
 	private registerHostTools(rec: AgentRecord): void {
-		if (rec.options.runtime === "acp") return; // non-omp runtime: no host-tool channel
+		// Capability gate (not a `runtime === "acp"` string check): skip advertisement for any harness whose
+		// runtime has no host-tool channel (ACP harnesses, pi). Resolve from the record's own harness field,
+		// falling back to the persisted options (so a rec built off any path is gated authoritatively). An
+		// absent descriptor (workflow/flue kinds) keeps today's behavior — host tools advertised.
+		const caps = (rec.harness ?? this.harnessFor(rec.options))?.capabilities;
+		if (caps && !caps.hostTools) return;
 		try {
 			rec.agent.setHostTools?.(SQUAD_HOST_TOOLS);
 		} catch (err) {

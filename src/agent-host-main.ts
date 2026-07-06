@@ -31,5 +31,6 @@ await runAgentHost({
 	thinking: flag("thinking") as ThinkingLevel | undefined,
 	appendSystemPrompt: flag("append-system-prompt"),
 	bin: flag("bin"),
+	harness: flag("harness"),
 });
 process.exit(0);
