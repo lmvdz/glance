@@ -54,11 +54,14 @@ export interface ConvergenceDeps {
  * contract of its deps (a dep that can fail should resolve to a safe value — e.g. validate()
  * returning a high gap/low confidence — rather than reject; this function does not itself catch).
  */
-export async function runIteration(state: VerifiedState, deps: ConvergenceDeps, prevFailures: string[]): Promise<{ next: VerifiedState; failures: string[] }> {
+export async function runIteration(state: VerifiedState, deps: ConvergenceDeps, prevFailures: string[] | null): Promise<{ next: VerifiedState; failures: string[] }> {
 	const frontier = await deps.plan(state.goalId, state);
 	await deps.dispatch(frontier);
 	const { gap, confidence, failures } = await deps.validate(state.goalId);
-	const { allow } = deps.ratchet(prevFailures, failures);
+	// `prevFailures === null` is the BASELINE turn (no prior set to compare) — record this turn's
+	// failures without ratcheting, so a red starting tree isn't mistaken for a regression. Every later
+	// turn ratchets against the previous turn: a failure that's strictly NEW breaks monotonicity.
+	const { allow } = prevFailures === null ? { allow: true } : deps.ratchet(prevFailures, failures);
 
 	const spent = state.budget.spent + 1;
 	let decision: VerifiedState["decision"];
@@ -94,7 +97,8 @@ export async function runIteration(state: VerifiedState, deps: ConvergenceDeps, 
  *  Stop-hook-driven production loop calls `runIteration` once per turn instead (DESIGN.md §2). */
 export async function runToConvergence(initial: VerifiedState, deps: ConvergenceDeps): Promise<VerifiedState> {
 	let state = initial;
-	let failures: string[] = [];
+	// First iteration is the baseline (null → no ratchet); thereafter carry the prior turn's failures.
+	let failures: string[] | null = null;
 	while (state.decision === "continue") {
 		const result = await runIteration(state, deps, failures);
 		state = result.next;

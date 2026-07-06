@@ -104,6 +104,41 @@ export function seedFromHandoff(doc: string): HandoffSummary | null {
 }
 
 /**
+ * Failures SIDECAR — carries the PRIOR iteration's suite failure-set across the `--once` process
+ * boundary so the ratchet can compare turn-over-turn. Kept OUT of the oracle deliberately: the oracle
+ * is the pinned cross-process schema (§1) that the bash hook re-implements, and it must not carry a
+ * variable-length failure list. `readFailures` returning `null` (missing) marks the BASELINE turn —
+ * the first turn establishes the set and is never ratcheted (a red starting tree is not a regression).
+ */
+export function failuresPath(stateDir: string = resolveStateDir()): string {
+	return path.join(convergenceDir(stateDir), "failures.json");
+}
+
+export async function writeFailures(failures: string[], stateDir: string = resolveStateDir()): Promise<void> {
+	const dir = convergenceDir(stateDir);
+	await fs.mkdir(dir, { recursive: true });
+	const dest = failuresPath(stateDir);
+	const tmp = path.join(dir, `.failures.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+	await fs.writeFile(tmp, JSON.stringify(failures));
+	await fs.rename(tmp, dest);
+}
+
+/** `null` when no prior turn recorded a set (the baseline turn) or on any read/parse error. */
+export async function readFailures(stateDir: string = resolveStateDir()): Promise<string[] | null> {
+	try {
+		const parsed = JSON.parse(await fs.readFile(failuresPath(stateDir), "utf8"));
+		return Array.isArray(parsed) ? (parsed as string[]) : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Drop the sidecar when a loop terminates so the NEXT goal starts at its own baseline. */
+export async function clearFailures(stateDir: string = resolveStateDir()): Promise<void> {
+	await fs.rm(failuresPath(stateDir), { force: true });
+}
+
+/**
  * Write the arm sentinel — one half of the dual arm gate (the other is `OMP_SQUAD_LOOP_ARMED=1`,
  * checked only by the hook/entrypoint, never here).
  *
