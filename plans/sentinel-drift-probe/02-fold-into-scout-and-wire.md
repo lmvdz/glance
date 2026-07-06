@@ -1,5 +1,5 @@
 # Fold the drift lens into Scout's scan + wire the action-free sink
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -33,3 +33,6 @@ None outside omp-squad. If the working-tree-diff helper is extracted from `conve
 - Manual/daemon check: run the daemon with `OMP_SQUAD_SENTINEL=1` on a unit that has acceptance criteria, drive it to visibly pursue an off-criteria tangent, and confirm a line appears in `<stateDir>/sentinel-audit.jsonl` with a `judgeVerdict`; confirm a criteria-less unit produces no line; confirm the flag unset produces no line and no extra LLM calls.
 - Contract re-check: `grep -nE "from \"\./(validator|rpc-agent)" src/scout.ts` returns nothing (Scout still cannot judge or steer — it only relays via `onHypothesis`).
 - `git grep -n confidence src/drift-lens.ts src/drift-audit.ts` returns nothing — drift never touches the confidence score.
+
+## Resolution
+Shipped. Drift lens folded into `src/scout.ts`'s `runScan` on the shared cursor (own `driftRecord` automation channel + own budget); `gitDiffSinceBase` exported from `src/convergence-run.ts` (fork-base diff: committed + uncommitted, so the judge doesn't abstain on incrementally-committed work); manager wires `onDriftHypothesis` sink + `monitorCriteriaFor`/`sentinelDenied` eligibility, default OFF and independent of `OMP_SQUAD_SCOUT`. Full suite 1585 pass / 0 fail across 209 files; `tsc` clean; all contract greps clean. Audit: opus cross-batch (6/6 contract points hold, goal-completion YES) + `/code-review` high (5 defects, all fixed) — see the audit-fix commit.

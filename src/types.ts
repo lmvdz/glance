@@ -1030,10 +1030,12 @@ export type SquadEvent =
 	| { type: "transition"; entry: TransitionEntry };
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
- *  automation log, invisible. Scout reads agent reasoning (the only token-spending loop); Observer and
- *  Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
+ *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0
+ *  default-off) rides the SAME reasoning read for a second, cheap drift classification, but reports
+ *  on its OWN "sentinel" channel so its LLM spend/finds never inflate Scout's backlog numbers; Observer
+ *  and Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
 // "scope" is event-driven (scope-contract audit findings), not a periodic loop like the others.
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner";
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel";
 
 /**
  * Structured reason an automation loop intentionally skipped a unit without doing work.

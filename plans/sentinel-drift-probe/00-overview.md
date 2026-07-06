@@ -21,6 +21,9 @@ When enabled (`OMP_SQUAD_SENTINEL=1`), the daemon reads each eligible working ag
 | 01 | — | — |
 | 02 | 01 | `test -f src/drift-lens.ts && grep -q "export.*Hypothesis" src/drift-lens.ts` |
 
+## Status
+**Closed — 2/2 concerns shipped** (2026-07-06). Full suite 1585 pass / 0 fail across 209 files; `tsc` clean; interpretability contract greps clean. Audited by an opus cross-batch pass (6/6 contract points hold) + `/code-review` high (5 defects found and fixed, incl. the committed-work abstain bug that would have biased the precision measurement). Sentinel is default-OFF (`OMP_SQUAD_SENTINEL=1` to enable; now independent of `OMP_SQUAD_SCOUT`); v0 emits only to `<stateDir>/sentinel-audit.jsonl` — no surface, no steer. Deferred: the deterministic landing-readiness lints (sibling plan), the surface/escalator/steer machinery (gated on the v0 precision number).
+
 ## Notes
 - **WIP snapshot at plan time** (proceeded per the research→plan pipeline): 90 plans, 36 with open concerns, 146 open (oldest `meta-plan-autonomous-fleet` 2026-07-05). Debt logged, not hidden; the forcing function fires at the next interactive `/plan` or `/wip`.
 - Scope was cut from a six-kind epic to this single probe by an adversarial design pass (DESIGN.md). The deterministic landing-readiness lints (scope-creep, proof-state-at-landing) are a **separate sibling plan**, not decomposed here.

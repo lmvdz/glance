@@ -14,10 +14,11 @@ import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AutomationReport } from "../src/automation-log.ts";
+import type { Hypothesis } from "../src/drift-lens.ts";
 import { DEFAULT_SCOUT_MAX_CALLS_PER_HOUR, MIN_SCAN_CHARS, Scout, ScoutCallBudget, type ScoutDeps, jaccard, parseTickets, scoutMaxCallsPerHour, titleTokens, unscannedReasoning } from "../src/scout.ts";
-import type { IssueRef, TranscriptEntry } from "../src/types.ts";
+import type { FeatureCriterion, IssueRef, TranscriptEntry } from "../src/types.ts";
 
-const ENV_KEYS = ["OMP_SQUAD_SCOUT", "OMP_SQUAD_SCOUT_MAX", "OMP_SQUAD_SCOUT_PER_RUN", "OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR"] as const;
+const ENV_KEYS = ["OMP_SQUAD_SCOUT", "OMP_SQUAD_SCOUT_MAX", "OMP_SQUAD_SCOUT_PER_RUN", "OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR", "OMP_SQUAD_SENTINEL", "OMP_SQUAD_SENTINEL_MAX_CALLS_PER_HOUR"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -396,4 +397,241 @@ test("(record) a no-live-reasoning tick emits an idle skip heartbeat with a reas
 		if (prev === undefined) delete process.env.OMP_SQUAD_SCOUT;
 		else process.env.OMP_SQUAD_SCOUT = prev;
 	}
+});
+
+// ── Sentinel v0 (plans/sentinel-drift-probe) — the drift lens folded into this same scan ────────
+
+const CRITERIA: FeatureCriterion[] = [{ id: "c1", text: "must satisfy the declared criterion", completed: false, source: "plan" }];
+const driftJson = (drift: { severity?: string; evidence: string; rationale: string } | null): string => JSON.stringify({ drift });
+
+test("(sentinel) OMP_SQUAD_SENTINEL unset ⇒ driftExtract is NEVER called (Scout unchanged when disabled)", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	delete process.env.OMP_SQUAD_SENTINEL;
+	let driftCalls = 0;
+	const hyps: Hypothesis[] = [];
+	const h = makeDeps(tmpDir(), {
+		tickets: json([{ title: "Fix the reconnect leak" }]),
+		driftExtract: async () => {
+			driftCalls++;
+			return driftJson({ evidence: "went off track", rationale: "chasing an unrelated tangent" });
+		},
+		onHypothesis: (hh) => hyps.push(hh),
+	});
+	await new Scout(h.deps).scan(BIG, { agent: "ag1", criteria: CRITERIA });
+	expect(driftCalls).toBe(0); // default OFF ⇒ zero extra LLM calls
+	expect(hyps).toEqual([]);
+	expect(h.filed.length).toBe(1); // backlog path is byte-for-byte unaffected
+});
+
+test("(sentinel) enabled + drifting reasoning + criteria-bearing ScanInput ⇒ onHypothesis fires exactly once, backlog path unaffected", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	let driftCalls = 0;
+	const hyps: Hypothesis[] = [];
+	const h = makeDeps(tmpDir(), {
+		tickets: json([{ title: "Fix the reconnect leak" }]),
+		driftExtract: async () => {
+			driftCalls++;
+			return driftJson({ severity: "high", evidence: "went off track", rationale: "chasing an unrelated tangent" });
+		},
+		onHypothesis: (hh) => hyps.push(hh),
+	});
+	await new Scout(h.deps).scan(BIG, { agent: "ag1", runId: "run-1", criteria: CRITERIA });
+	expect(driftCalls).toBe(1);
+	expect(hyps.length).toBe(1);
+	expect(hyps[0]).toMatchObject({ kind: "wrong-direction", severity: "high", agent: "ag1", runId: "run-1", evidence: "went off track", rationale: "chasing an unrelated tangent" });
+	expect(h.filed.length).toBe(1); // backlog ticket still filed — the two lenses are independent
+});
+
+test("(sentinel) a criteria-less ScanInput never calls driftExtract, even when enabled", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	let driftCalls = 0;
+	const h = makeDeps(tmpDir(), {
+		tickets: json([]),
+		driftExtract: async () => {
+			driftCalls++;
+			return driftJson({ evidence: "x", rationale: "y" });
+		},
+		onHypothesis: () => {},
+	});
+	await new Scout(h.deps).scan(BIG, { agent: "ag1" }); // no `criteria` on the ScanContext
+	expect(driftCalls).toBe(0);
+
+	// An empty (declared-but-zero-length) criteria array is equally ineligible.
+	const h2 = makeDeps(tmpDir(), { tickets: json([]), driftExtract: h.deps.driftExtract, onHypothesis: () => {} });
+	await new Scout(h2.deps).scan(BIG, { agent: "ag1", criteria: [] });
+	expect(driftCalls).toBe(0);
+});
+
+test("(sentinel) `{drift:null}` (on-track reasoning) never calls onHypothesis", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	const hyps: Hypothesis[] = [];
+	const h = makeDeps(tmpDir(), {
+		tickets: json([]),
+		driftExtract: async () => driftJson(null),
+		onHypothesis: (hh) => hyps.push(hh),
+	});
+	await new Scout(h.deps).scan(BIG, { agent: "ag1", criteria: CRITERIA });
+	expect(hyps).toEqual([]);
+});
+
+test("(sentinel) a drift-extract error is contained — never throws, backlog path unaffected", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	const h = makeDeps(tmpDir(), {
+		tickets: json([{ title: "Fix the reconnect leak" }]),
+		driftExtract: async () => {
+			throw new Error("drift model unreachable");
+		},
+		onHypothesis: () => {},
+	});
+	await expect(new Scout(h.deps).scan(BIG, { agent: "ag1", criteria: CRITERIA })).resolves.toBeUndefined();
+	expect(h.filed.length).toBe(1);
+});
+
+test("(sentinel) the drift budget is SEPARATE from Scout's own backlog budget — an exhausted backlog budget doesn't block drift", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	let extractCalls = 0;
+	let driftCalls = 0;
+	const hyps: Hypothesis[] = [];
+	const h = makeDeps(tmpDir(), {
+		extract: async () => {
+			extractCalls++;
+			return json([]);
+		},
+		driftExtract: async () => {
+			driftCalls++;
+			return driftJson({ evidence: "went off track", rationale: "chasing an unrelated tangent" });
+		},
+		onHypothesis: (hh) => hyps.push(hh),
+		now: () => 1,
+	});
+	// Manually exhaust Scout's own backlog budget by hand — the drift block must still run.
+	const scout = new Scout(h.deps);
+	// @ts-expect-error — reach into the private budget to simulate exhaustion deterministically.
+	scout.budget.tryConsume = () => false;
+	await scout.scan(BIG, { agent: "ag1", criteria: CRITERIA });
+	expect(extractCalls).toBe(0); // backlog extraction skipped (budget exhausted)
+	expect(driftCalls).toBe(1); // drift's SEPARATE budget still admits the call
+	expect(hyps.length).toBe(1);
+});
+
+// ── review fix #3: Sentinel must not be inert when OMP_SQUAD_SCOUT=0 ────────────────────────────
+
+test("(fix #3) OMP_SQUAD_SCOUT=0 + OMP_SQUAD_SENTINEL=1: backlog extract is NOT called, but runDrift IS", async () => {
+	process.env.OMP_SQUAD_SCOUT = "0";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	let driftCalls = 0;
+	const hyps: Hypothesis[] = [];
+	const h = makeDeps(tmpDir(), {
+		tickets: json([{ title: "Fix the reconnect leak" }]), // would file if the backlog path ran at all
+		driftExtract: async () => {
+			driftCalls++;
+			return driftJson({ evidence: "went off track", rationale: "chasing an unrelated tangent" });
+		},
+		onHypothesis: (hh) => hyps.push(hh),
+	});
+	await new Scout(h.deps).scan(BIG, { agent: "ag1", runId: "run-1", criteria: CRITERIA });
+	expect(h.calls.extract).toBe(0); // backlog extraction disabled ⇒ never called
+	expect(h.filed).toEqual([]); // and nothing filed
+	expect(driftCalls).toBe(1); // Sentinel's drift path is INDEPENDENT of OMP_SQUAD_SCOUT
+	expect(hyps.length).toBe(1);
+	expect(hyps[0]).toMatchObject({ agent: "ag1", runId: "run-1" });
+});
+
+test("(fix #3) start() arms the shared sweep timer for Sentinel ALONE (OMP_SQUAD_SCOUT=0, OMP_SQUAD_SENTINEL=1)", () => {
+	const real = globalThis.setInterval;
+	let armed = 0;
+	// @ts-expect-error — spy stand-in for the timer factory.
+	globalThis.setInterval = () => {
+		armed++;
+		return { unref() {} } as unknown as Timer;
+	};
+	try {
+		process.env.OMP_SQUAD_SCOUT = "0";
+		process.env.OMP_SQUAD_SENTINEL = "1";
+		new Scout(makeDeps(tmpDir(), { liveReasoning: () => [] }).deps).start();
+		expect(armed).toBe(1); // Sentinel alone is enough to arm the shared timer
+	} finally {
+		globalThis.setInterval = real;
+	}
+});
+
+test("(fix #3) tick() runs the drift sweep when Sentinel is on even though the backlog harvest is off", async () => {
+	process.env.OMP_SQUAD_SCOUT = "0";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	let driftCalls = 0;
+	const hyps: Hypothesis[] = [];
+	const h = makeDeps(tmpDir(), {
+		liveReasoning: () => [{ agent: "ag1", text: BIG, criteria: CRITERIA }],
+		driftExtract: async () => {
+			driftCalls++;
+			return driftJson({ evidence: "went off track", rationale: "chasing an unrelated tangent" });
+		},
+		onHypothesis: (hh) => hyps.push(hh),
+	});
+	await new Scout(h.deps).tick();
+	expect(h.calls.extract).toBe(0); // backlog harvest still off
+	expect(driftCalls).toBe(1); // drift sweep still ran
+	expect(hyps.length).toBe(1);
+});
+
+// ── review fix #4: drift telemetry must go to its OWN automation channel ───────────────────────
+
+test("(fix #4) a drift hypothesis is reported via driftRecord, NEVER via the scout backlog record sink", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	const scoutEvents: AutomationReport[] = [];
+	const driftEvents: AutomationReport[] = [];
+	const h = makeDeps(tmpDir(), {
+		tickets: json([]),
+		record: (r) => scoutEvents.push(r),
+		driftRecord: (r) => driftEvents.push(r),
+		driftExtract: async () => driftJson({ severity: "high", evidence: "went off track", rationale: "chasing an unrelated tangent" }),
+		onHypothesis: () => {},
+	});
+	await new Scout(h.deps).scan(BIG, { agent: "ag1", criteria: CRITERIA });
+	expect(driftEvents.length).toBe(1);
+	expect(driftEvents[0]).toMatchObject({ agent: "ag1", llmCalls: 1, found: 1 });
+	// The scout channel only ever saw the backlog scan's own event (llmCalls:1, found:0 tickets) — never
+	// a second event for the drift scan (which would double-count spend on the scout loop's rollup).
+	expect(scoutEvents.length).toBe(1);
+	expect(scoutEvents[0]).toMatchObject({ agent: "ag1", llmCalls: 1, found: 0 });
+});
+
+test("(fix #4) a drift-extract error still reports on driftRecord (not the scout channel), and never throws", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	const scoutEvents: AutomationReport[] = [];
+	const driftEvents: AutomationReport[] = [];
+	const h = makeDeps(tmpDir(), {
+		tickets: json([]),
+		record: (r) => scoutEvents.push(r),
+		driftRecord: (r) => driftEvents.push(r),
+		driftExtract: async () => {
+			throw new Error("drift model unreachable");
+		},
+		onHypothesis: () => {},
+	});
+	await expect(new Scout(h.deps).scan(BIG, { agent: "ag1", criteria: CRITERIA })).resolves.toBeUndefined();
+	expect(driftEvents.length).toBe(1);
+	expect(driftEvents[0].level).toBe("error");
+	expect(scoutEvents.every((e) => e.level !== "error")).toBe(true); // the drift error never lands on the scout channel
+});
+
+test("(fix #4) driftRecord absent ⇒ drift telemetry is silently dropped, but the drift path still runs", async () => {
+	process.env.OMP_SQUAD_SCOUT = "1";
+	process.env.OMP_SQUAD_SENTINEL = "1";
+	const hyps: Hypothesis[] = [];
+	const h = makeDeps(tmpDir(), {
+		tickets: json([]),
+		driftExtract: async () => driftJson({ evidence: "went off track", rationale: "chasing an unrelated tangent" }),
+		onHypothesis: (hh) => hyps.push(hh),
+		// no driftRecord supplied
+	});
+	await expect(new Scout(h.deps).scan(BIG, { agent: "ag1", criteria: CRITERIA })).resolves.toBeUndefined();
+	expect(hyps.length).toBe(1); // the hypothesis still fires — only its OWN observability is silent
 });

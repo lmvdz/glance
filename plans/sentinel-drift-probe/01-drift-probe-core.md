@@ -1,5 +1,5 @@
 # Drift probe core — action-free lens + durable judge-confirmed audit record
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -53,3 +53,6 @@ None. Two new files + their tests. No existing file changes.
 - `bun test test/drift-lens.test.ts test/drift-audit.test.ts` green (ensure `node_modules/.bin` on PATH per the known bun-test gotcha).
 - Tests must cover: on-track reasoning → `parseDriftHypothesis` returns null; drifting reasoning → a `wrong-direction` hypothesis with evidence; `sentinelEnabled()` false unless env=1; the sentinel budget is a distinct instance from Scout's; `confirmDrift` aborts (returns null, writes nothing) when `stillLive()` is false BEFORE the judge runs; `confirmDrift` records `abstain` on empty diff and `veto`/`pass` on a fake judge; `sentinel-audit.jsonl` gets one appended line per confirmed hypothesis and the file survives independent of any run object.
 - Static check (the contract): `grep -nE "from \"\./(validator|rpc-agent|squad-manager)" src/drift-lens.ts` returns **nothing** — the monitor is structurally action-free.
+
+## Resolution
+Shipped. `src/drift-lens.ts` (action-free monitor: `Hypothesis`, `buildDriftPrompt`, `parseDriftHypothesis`, `sentinelEnabled` default-off, separate `newSentinelCallBudget`) + `src/drift-audit.ts` (append-only `sentinel-audit.jsonl`, `confirmDrift` with the two-point runId guard reusing `scoreAgainstCriteria`). 21 unit tests green; contract grep clean; `tsc` clean. Commits on branch `worktree-research-global-workspace` (a868559 plan → implementation + audit-fix commit below).
