@@ -15,6 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
+import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
@@ -497,6 +498,16 @@ export class SquadServer {
 		if (req.method !== "GET") return new Response("no active organization", { status: 403 });
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
+		// Available coding-agent harnesses for the create surfaces. Unverified ones appear only when
+		// OMP_SQUAD_UNVERIFIED_HARNESS=1 (honest gating — a harness not smoke-tested against a live binary
+		// isn't offered by default). `?all=1` includes them regardless so an operator can inspect the roster.
+		if (url.pathname === "/api/harnesses") {
+			const all = url.searchParams.get("all") === "1";
+			return Response.json({
+				default: globalDefaultHarness(),
+				harnesses: listHarnesses(all || undefined).map((h) => ({ name: h.name, protocol: h.protocol, verified: h.verified, capabilities: h.capabilities, note: h.note })),
+			});
+		}
 		return Response.json([]);
 	}
 

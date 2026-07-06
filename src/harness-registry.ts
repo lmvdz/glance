@@ -55,6 +55,10 @@ export interface HarnessDescriptor {
 	/** omp-rpc-only: whether omp-squad's soft-lease extension (`-e lease-hook.ts`) loads on this
 	 *  harness. omp: yes; pi: unverified, so off (pi runs without soft-leasing — documented degradation). */
 	leaseHook?: boolean;
+	/** omp-rpc-only: whether the child emits an unsolicited `{"type":"ready"}` frame on startup. omp does;
+	 *  pi does NOT (it's ready-on-first-command). When false, the agent-host probes with a get_state after
+	 *  spawn and marks the child ready on the first response frame. Default true. */
+	emitsReadyFrame?: boolean;
 	capabilities: CapabilityDescriptor;
 	/** false = registered but NOT smoke-verified against a live binary. Hidden from the create surfaces
 	 *  unless `OMP_SQUAD_UNVERIFIED_HARNESS=1`. Only a live smoke flips this true — a green fake-server
@@ -169,18 +173,27 @@ registerHarness({
 	name: "pi",
 	protocol: "omp-rpc",
 	bin: "pi",
-	// pi only supports yolo here (toolApproval:"none" ⇒ create() rejects stricter modes). yolo maps to
-	// --no-approve; any other mode never reaches here, but map defensively to --no-approve too.
-	approvalArgs: () => ["--no-approve"],
+	// VERIFIED against pi v0.56.3 --help: pi has NO --approve/--no-approve/--approval-mode flag at all
+	// (tools are gated via --tools/--no-tools, not per-call approval). So pi emits no approval flag — it
+	// runs with its default tool permissions, matching toolApproval:"none". (create() only lets yolo
+	// through for pi anyway.) `--mode rpc`, `--model`, `--thinking`, `--append-system-prompt` all confirmed.
+	approvalArgs: () => [],
 	leaseHook: false,
+	emitsReadyFrame: false, // VERIFIED: pi v0.56.3 --mode rpc emits nothing on startup (ready-on-first-command)
 	capabilities: {
 		...NATIVE_CAPS,
 		hostTools: false, // pi has no set_host_tools channel — squad_message/squad_kb_search vanish
 		toolApproval: "none", // no approval channel — runs with host perms
 		// resumable stays true: pi rides the same detached agent-host over a socket as omp.
 	},
-	verified: false,
-	note: "same --mode rpc protocol as omp; no host-tool channel, no approval primitive (yolo only)",
+	// LIVE-VERIFIED 2026-07-06 end-to-end through the manager against pi v0.56.3: `--mode rpc` speaks omp's
+	// RPC protocol — get_state returns an RpcSessionState-shaped frame AND the `{"type":"prompt","message"}`
+	// command is accepted (`response/prompt/success:true`), same schema omp uses. Arg table (--mode rpc/
+	// --model/--thinking/--append-system-prompt, no --approval flag) confirmed via --help. pi emits no ready
+	// frame (host probes it). No host-tool channel, no approval primitive (yolo only). (The one turn that
+	// ran failed on EXPIRED anthropic creds — environmental, not a protocol defect.)
+	verified: true,
+	note: "same --mode rpc protocol as omp (live-verified); no host-tool channel, no approval primitive (yolo only)",
 });
 
 /** auggie (Augment) — the harness the legacy `runtime:"acp"` pointed at (`auggie --acp`). */
@@ -189,11 +202,14 @@ registerHarness({ name: "auggie", protocol: "acp", bin: "auggie", acpCommand: ["
 /** gemini-cli — native first-party ACP. */
 registerHarness({ name: "gemini", protocol: "acp", bin: "gemini", acpCommand: ["gemini", "--acp"], capabilities: ACP_CAPS, verified: false });
 
-/** opencode — native first-party ACP. */
-registerHarness({ name: "opencode", protocol: "acp", bin: "opencode", acpCommand: ["opencode", "acp"], capabilities: ACP_CAPS, verified: false });
+/** opencode — native first-party ACP. LIVE-VERIFIED 2026-07-06 against opencode v1.1.8: `opencode acp`
+ *  completes the initialize + session/new handshake and advertises {loadSession, mcpCapabilities:{http,sse},
+ *  promptCapabilities:{embeddedContext,image}} — so ACP framing + handshake + the MCP context route (concern
+ *  06) are all real here. (resumable stays false at the omp-squad level: we don't drive session/load yet.) */
+registerHarness({ name: "opencode", protocol: "acp", bin: "opencode", acpCommand: ["opencode", "acp"], capabilities: ACP_CAPS, verified: true, note: "native first-party ACP; handshake live-verified" });
 
 /** claude-code — via the mature `claude-code-acp` adapter (built on Anthropic's official Agent SDK). */
-registerHarness({ name: "claude-code", protocol: "acp", bin: "npx", acpCommand: ["npx", "-y", "@zed-industries/claude-code-acp"], capabilities: ACP_CAPS, verified: false, note: "third-party ACP adapter over the official Claude Agent SDK" });
+registerHarness({ name: "claude-code", protocol: "acp", bin: "npx", acpCommand: ["npx", "-y", "@zed-industries/claude-code-acp"], capabilities: ACP_CAPS, verified: false, note: "third-party ACP adapter over the official Claude Agent SDK; initialize handshake works but refuses to run nested inside another Claude Code session (unset CLAUDECODE)" });
 
 /** codex — via the `codex-acp` adapter over `codex app-server`. Adapter is mid-migration between
  *  orgs; pin a version before relying on it. */

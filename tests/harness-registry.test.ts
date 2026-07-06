@@ -80,7 +80,7 @@ test("resolveBin: per-agent override > GLANCE_BIN (default harness only) > descr
 
 test("pi's approval dialect is --no-approve (not omp's --approval-mode); omp keeps --approval-mode", () => {
 	expect(getHarness("omp")!.approvalArgs!("yolo")).toEqual(["--approval-mode", "yolo"]);
-	expect(getHarness("pi")!.approvalArgs!("yolo")).toEqual(["--no-approve"]);
+	expect(getHarness("pi")!.approvalArgs!("yolo")).toEqual([]); // pi v0.56.3 has no approval flag (verified)
 	expect(getHarness("omp")!.leaseHook).toBe(true);
 	expect(getHarness("pi")!.leaseHook).toBe(false); // pi runs without soft-leasing (documented)
 });
@@ -89,9 +89,10 @@ test("listHarnesses hides unverified harnesses unless OMP_SQUAD_UNVERIFIED_HARNE
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
 	const visible = listHarnesses().map((d) => d.name);
-	expect(visible).toContain("omp"); // verified
-	expect(visible).not.toContain("pi"); // unverified — hidden
-	expect(visible).not.toContain("gemini");
+	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode"])); // live-verified
+	expect(visible).not.toContain("gemini"); // unverified (binary absent) — hidden
+	expect(visible).not.toContain("codex");
+	expect(visible).not.toContain("claude-code");
 	const all = listHarnesses(true).map((d) => d.name);
 	expect(all).toEqual(expect.arrayContaining(["omp", "pi", "gemini", "opencode", "claude-code", "codex", "auggie"]));
 });
@@ -163,18 +164,32 @@ async function makeRepo(): Promise<string> {
 	return repo;
 }
 
+test("create() refuses an unverified harness unless OMP_SQUAD_UNVERIFIED_HARNESS=1", async () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-unver-"));
+	tmps.push(stateDir);
+	const repo = await makeRepo();
+	const mgr = mgrFor(stateDir);
+	// gemini's binary isn't installed here, so it stays unverified — the honest gate refuses it.
+	await expect(mgr.create({ name: "u", repo, harness: "gemini", approvalMode: "yolo", autoRoute: false })).rejects.toThrow(/unverified/);
+	await mgr.stop();
+});
+
 test("create() rejects a no-approval harness (pi) under a non-yolo approvalMode", async () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1"; // opt past the unverified gate to reach the approval gate
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-gate-"));
 	tmps.push(stateDir);
 	const repo = await makeRepo();
 	const mgr = mgrFor(stateDir);
 	await expect(mgr.create({ name: "p", repo, harness: "pi", approvalMode: "always-ask", autoRoute: false })).rejects.toThrow(/no approval channel/);
-	// yolo is allowed (build the driver; we don't start it, so no real pi binary is needed).
-	// Using a fake driver factory so create() doesn't spawn a real pi.
 	await mgr.stop();
 });
 
 test("create() rejects sandbox on a non-omp harness (sandbox×non-omp is unbuildable today)", async () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1";
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-sandbox-"));
 	tmps.push(stateDir);
 	const repo = await makeRepo();

@@ -240,7 +240,20 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 	// (its own is now live, so hostAlive() spares it).
 	void pruneStaleSockets().catch(() => []);
 
-	// Pump omp stdout → ring + clients; detect readiness.
+	// Some harnesses (pi) don't emit a `{"type":"ready"}` frame — they're ready as soon as they accept a
+	// command. For those, probe with a get_state right after spawn and treat the first response frame as
+	// readiness. omp emits the ready frame, so no probe is sent (emitsReadyFrame defaults true).
+	const emitsReadyFrame = harness?.emitsReadyFrame ?? true;
+	if (!emitsReadyFrame) {
+		try {
+			proc.stdin.write('{"type":"get_state","id":"__sq_ready_probe"}\n');
+			proc.stdin.flush();
+		} catch {
+			/* if the child died before we could probe, the exit handler surfaces it */
+		}
+	}
+
+	// Pump child stdout → ring + clients; detect readiness (ready frame, or first response for probe-ready harnesses).
 	void (async () => {
 		const decoder = new TextDecoder();
 		let buf = "";
@@ -252,7 +265,7 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 					const line = buf.slice(0, nl).trim();
 					buf = buf.slice(nl + 1);
 					if (!line) continue;
-					if (!ready && line.includes('"type":"ready"')) {
+					if (!ready && (line.includes('"type":"ready"') || (!emitsReadyFrame && line.includes('"type":"response"')))) {
 						ready = true;
 						broadcast(meta());
 					}

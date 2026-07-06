@@ -24,7 +24,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { type HarnessDescriptor, resolveBin, resolveHarness } from "./harness-registry.ts";
+import { type HarnessDescriptor, resolveBin, resolveHarness, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
@@ -1132,7 +1132,11 @@ export class SquadManager extends EventEmitter {
 		// Eligible = adoptable (dead host, on-disk worktree, not a branch child) AND not a branch the
 		// orchestrator already halted (re-adopting a halted run burns a ceiling slot + a resume attempt
 		// before the orchestrator re-skips it).
-		const eligible = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt)).filter((p) => !(p.branch && halted.isHalted(p.branch)));
+		const eligible = agentsToAdopt(snapshot.agents, new Set(this.agents.keys()), (wt) => existsSync(wt))
+			.filter((p) => !(p.branch && halted.isHalted(p.branch)))
+			// Concern 07: a non-resumable harness (ACP — direct spawn, no detached host) can't be adopted;
+			// re-spawning would mint a fresh session that loses the prior one. Drop it rather than orphan-respawn.
+			.filter((p) => this.harnessResumable(p));
 		// Probe each for unlanded work, then cap re-adoption at the agent ceiling. Re-spawning EVERY
 		// orphaned worktree at once (bypassCap) is what OOM'd the host on restart. A resumable workflow
 		// CHECKPOINT counts as work even with a clean worktree (the run is mid-graph between commits) —
@@ -3034,6 +3038,12 @@ export class SquadManager extends EventEmitter {
 		// harness concept doesn't apply to them.
 		const harnessDesc = kind === "omp-operator" ? resolveHarness({ harness: opts.harness, runtime: opts.runtime }) : undefined;
 		if (harnessDesc) {
+			// Honest gating (concern 08): an unverified harness (not smoke-tested against a live binary) is
+			// refused unless the operator explicitly opts in — so a harness that half-works can't be picked
+			// by accident, the way this repo's `/make-it-work` history warns against.
+			if (!harnessDesc.verified && !unverifiedHarnessesEnabled()) {
+				throw new Error(`harness "${harnessDesc.name}" is unverified (not smoke-tested against a live binary)${harnessDesc.note ? ` — ${harnessDesc.note}` : ""}. Set OMP_SQUAD_UNVERIFIED_HARNESS=1 to use it.`);
+			}
 			// A no-approval harness (pi: host perms, no approval channel) cannot enforce anything stricter
 			// than yolo — refuse rather than silently granting full autonomy under an "always-ask"/"write"
 			// label (the "inverted safety" failure mode). Surfaced, never coerced.
@@ -3221,6 +3231,15 @@ export class SquadManager extends EventEmitter {
 		return (p.kind ?? "omp-operator") === "omp-operator" ? resolveHarness(p) : undefined;
 	}
 
+	/** Whether a persisted agent's harness survives a daemon restart. ACP harnesses are direct child spawns
+	 *  with no detached host over a socket, so on restart they're already dead — they can't be reattached
+	 *  (reconnectLive's hostAlive probe fails) NOR soundly cold-adopted (a fresh ACP session loses the prior
+	 *  one, and session/load is capability-gated). So they're excluded from the adopt path rather than
+	 *  orphan-respawned. omp/pi (detached host) and workflow/flue (own resume) all return true. */
+	private harnessResumable(p: PersistedAgent): boolean {
+		return this.harnessFor(p)?.capabilities.resumable ?? true;
+	}
+
 	private makeDriver(p: PersistedAgent, cold = false): AgentDriver {
 		if (p.kind === "flue-service" && p.flue) {
 			return new FlueServiceDriver({ dir: p.flue.dir, workflow: p.flue.workflow, target: p.flue.target });
@@ -3269,7 +3288,14 @@ export class SquadManager extends EventEmitter {
 		}
 		if (harness.protocol === "acp") {
 			const command = harness.acpCommand ? [...harness.acpCommand, ...(p.model ? ["--model", p.model] : [])] : undefined;
-			return new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command });
+			// ACP has no system-prompt slot, so omp-squad context (fabric primer + tool-grant scoping) is
+			// injected only when the operator opts in (OMP_SQUAD_ACP_CONTEXT=prompt); default "none" runs the
+			// unit UNSCOPED (honest — surfaced via the capability). approvalMode is mapped best-effort to an
+			// ACP session mode inside the driver.
+			const contextInjection = process.env.OMP_SQUAD_ACP_CONTEXT === "prompt" ? "prompt" : "none";
+			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection });
+			acp.on("acpcapabilities", (caps: unknown) => this.log("info", `acp ${harness.name} ${p.id} advertised capabilities: ${JSON.stringify(caps)}`));
+			return acp;
 		}
 		// omp-rpc protocol family (omp, pi, …): same detached agent-host transport, harness name threaded
 		// so the host builds the right approval-flag dialect + extension set for this binary.
