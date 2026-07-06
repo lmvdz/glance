@@ -11,7 +11,7 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'attention' | 'active' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'topology' | 'federation' | 'knowledge' | 'org';
+export type AppView = 'attention' | 'active' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'scoreboard' | 'topology' | 'federation' | 'knowledge' | 'org';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
