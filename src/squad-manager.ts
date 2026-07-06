@@ -139,7 +139,10 @@ import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
-import { recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
+import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
+import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
+import { DAY_MS } from "./omp-graph/schema.ts";
+import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { scoreConfidence } from "./confidence.ts";
@@ -2361,6 +2364,16 @@ export class SquadManager extends EventEmitter {
 			this.floatPrOnLandReady(rec);
 			return result;
 		}
+		// Effective-model fix (Epic 6 concern 06, carried forward from the C05 review): `dto.model` is
+		// undefined ("unknown") for a dispatched fleet unit — nothing back-stamps it — so reading
+		// `dto.model` here would key BOTH the model-outcome ledger below and the C05 row-write further
+		// down on an all-"unknown" model axis. Hoisted above both write sites (previously the row-write
+		// alone did this fetch, a few lines further down) so the ledger `shiftedModel`/C06's router reads
+		// is keyed on the SAME real effective model as the row. Gated on `!result.retryable` — the
+		// precondition common to both write sites below — so a retryable refusal never pays for a
+		// receipts read it doesn't need.
+		const lastReceipt = !result.retryable ? (await readReceipts(this.stateDir, dto.id)).at(-1) : undefined;
+		const effectiveModel = lastReceipt?.model ?? dto.model;
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
@@ -2371,7 +2384,7 @@ export class SquadManager extends EventEmitter {
 			// itself — so concern 07's default-shift has data on day one even before it's turned on.
 			// Never gates the land above; purely record-only, after the outcome is already known.
 			try {
-				recordModelOutcome(this.stateDir, dto.model, tierOf(rec.options.thinking), result.ok);
+				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
 				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
 				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
@@ -2402,13 +2415,13 @@ export class SquadManager extends EventEmitter {
 				// `routing.{mode,tier}` above, so grading the router against these is non-circular.
 				// filesTouched: the confidence scorer's own blast-radius proxy (finalizeRun's
 				// `scoreConfidence({ filesTouched: receipt.filesTouched.length, ... })`), read off this
-				// agent's LAST finalized RunReceipt. `readReceipts` returns rows in append order, so the
-				// last entry is the most recent run; its `filesTouched` (git-status-derived at that run's
-				// finish()) already reflects every prior turn's uncommitted changes too, since nothing is
-				// committed until land()'s own commitWip. Undefined when no run ever finalized for this
-				// agent (e.g. a re-adopted/direct land with no receipt on disk) — never fabricated.
-				const priorReceipts = await readReceipts(this.stateDir, dto.id);
-				const lastReceipt = priorReceipts[priorReceipts.length - 1];
+				// agent's LAST finalized RunReceipt (`lastReceipt`, hoisted above alongside `effectiveModel`
+				// so both this row-write and the model-outcome ledger write above key on the SAME receipt
+				// read). `readReceipts` returns rows in append order, so the last entry is the most recent
+				// run; its `filesTouched` (git-status-derived at that run's finish()) already reflects every
+				// prior turn's uncommitted changes too, since nothing is committed until land()'s own
+				// commitWip. Undefined when no run ever finalized for this agent (e.g. a re-adopted/direct
+				// land with no receipt on disk) — never fabricated.
 				// fixupCount: the SAME workflow-engine visit counter (`WorkflowRunState.visits.fixup`)
 				// concern 01's fixups-to-green metric (recordWorkflowOutcomeMetrics above) and
 				// digestReward's firstTryGreen already read. IN-RUN churn, not post-merge regression — see
@@ -2423,7 +2436,7 @@ export class SquadManager extends EventEmitter {
 					// nothing back-stamps dto.model for a dispatched fleet unit, so bare dto.model would be
 					// undefined here and collapse the whole scoreboard model axis to "unknown". Fall back to
 					// dto.model only for the rare explicit-model path where no receipt landed on disk.
-					model: lastReceipt?.model ?? dto.model,
+					model: effectiveModel,
 					costUsd: dto.receipt?.costUsd,
 					confidence: dto.confidence,
 					validation: rec.dto.validation?.verdict,
@@ -3110,6 +3123,38 @@ export class SquadManager extends EventEmitter {
 		const effectiveAtCreate = effectiveAutonomyMode({ requested: requestedMode, approvalMode, autoLand: this.autoLand, landConfirm: this.landConfirm });
 		if (opts.task && effectiveAtCreate === "observe") throw new Error("create with task is blocked in observe mode");
 		const thinking = opts.thinking ?? "low";
+		// Route model at dispatch (Epic 6 / model-routing-control-loop concern 06 — the control loop's
+		// ACTION arm). `taskClass` mirrors the SAME formula the `routing` field below uses (`opts.verifyMode`
+		// already carries `routeIntake`'s decision by this point), so the router keys on exactly the class
+		// the row/roster will later be bucketed under.
+		//
+		// SAFE BY DEFAULT: gated on the existing `OMP_SQUAD_MODEL_OUTCOMES=1` flag (same gate
+		// `smart-spawn.ts`'s interactive `shiftedModel` uses) — with the flag unset, this entire block is
+		// skipped and dispatch is byte-for-byte unchanged. Never overrides an explicit `opts.model` (a
+		// profile or operator's choice), mirroring `shiftedModel`'s rule #1.
+		//
+		// SHADOW-FIRST: even with the gate on, `OMP_SQUAD_MODEL_ROUTE_SHADOW` defaults ON (anything but the
+		// literal "0") — the decision is logged (+ recorded as a `model-route-decision` learning metric) but
+		// NOT applied, so an operator can compare shadow decisions against the task-class panel before
+		// opting into `OMP_SQUAD_MODEL_ROUTE_SHADOW=0` (apply mode). Applying it also closes the C01 gap for
+		// harnesses that never emit an effective model: a routed unit now carries an explicit `opts.model`.
+		if (process.env.OMP_SQUAD_MODEL_OUTCOMES === "1" && opts.model === undefined) {
+			try {
+				const taskClass = { mode: opts.verifyMode ?? "none", tier: tierOf(thinking) };
+				const rows = await readTaskOutcomes(this.stateDir);
+				const matrix = buildTaskClassMatrix(rows, this.landingRosterRouting(), { start: Date.now() - 30 * DAY_MS, end: Date.now() });
+				const decision = routeModelForTaskClass(taskClass, matrix);
+				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0";
+				this.learningMetrics.record("model-route-decision", decision.model ? 1 : 0, {
+					mode: shadow ? "shadow" : "apply",
+					taskClass: `${taskClass.mode}:${taskClass.tier}`,
+				});
+				this.log("info", `model-route${shadow ? " [shadow]" : ""}: ${decision.reason}`);
+				if (!shadow && decision.model !== undefined) opts = { ...opts, model: decision.model };
+			} catch (err) {
+				this.log("warn", `model-route decision failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
 		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
 		let cwd: string;
