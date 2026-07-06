@@ -122,6 +122,17 @@ interface Props {
   depthWeeks: DepthWeek[] | null;
   depthMetric: DepthMetric;
   onDepthMetric: (m: DepthMetric) => void;
+  /** Bumped by the container on a deliberate view change (preset/refresh) to re-center the
+   *  viewport. Incidental range growth (poll / lazy history) does NOT bump it, so the user's
+   *  pan/zoom survives. */
+  resetKey?: number;
+  /** Called when a leftward drag reaches the loaded start edge — the container lazily fetches
+   *  and stitches an older window so the drag can continue into the past. */
+  onReachStart?: () => void;
+  /** An older window is currently being fetched (shows a hint; also gates re-triggering). */
+  loadingOlder?: boolean;
+  /** No more history to load (hit the max lookback) — stop asking. */
+  atHistoryLimit?: boolean;
 }
 
 interface Hover {
@@ -133,7 +144,7 @@ interface Hover {
   ring?: { cx: number; cy: number; r: number; color: string } | { rect: [number, number, number, number]; color: string };
 }
 
-export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, repoLabel, onInspect, trace, viz, onViz, depthWeeks, depthMetric, onDepthMetric }) => {
+export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, repoLabel, onInspect, trace, viz, onViz, depthWeeks, depthMetric, onDepthMetric, resetKey = 0, onReachStart, loadingOlder = false, atHistoryLimit = false }) => {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(1200);
@@ -142,14 +153,27 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
   const [hoveredWeek, setHoveredWeek] = useState<number | null>(null);
   const drag = useRef<{ cx0: number; ux0: number; s0: number; moved: boolean; pid: number } | null>(null);
 
-  // reset the viewport when the doc's range identity changes (new days preset)
-  const rangeKey = `${model.start}:${model.end}`;
-  const lastRange = useRef(rangeKey);
-  if (lastRange.current !== rangeKey) {
-    lastRange.current = rangeKey;
+  // Re-center the viewport ONLY on a deliberate view change (preset switch / refresh), signalled
+  // by the container bumping `resetKey`. The 20s poll and lazy history-extend both change
+  // model.start/end but must NOT disturb the user's pan/zoom — so they don't bump it.
+  const lastReset = useRef(resetKey);
+  if (lastReset.current !== resetKey) {
+    lastReset.current = resetKey;
     // eslint-disable-next-line react-hooks/rules-of-hooks -- render-time reset of derived state, React-sanctioned pattern
     setView({ s: model.start, e: model.end });
   }
+
+  // When the loaded range grows (poll advances `end`, lazy load lowers `start`), keep the current
+  // view but clamp it back into bounds if a preset shrink left it dangling. A still-valid view is
+  // returned untouched (same object → no re-render), so panning into freshly-loaded history is smooth.
+  useEffect(() => {
+    setView((v) => {
+      if (v.s >= model.start && v.e <= model.end) return v;
+      const sp = Math.min(v.e - v.s, model.end - model.start);
+      const s = Math.max(model.start, Math.min(v.s, model.end - sp));
+      return { s, e: s + sp };
+    });
+  }, [model.start, model.end]);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -275,6 +299,10 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
         const dux = toUser(ev).x - d.ux0;
         const sp = view.e - view.s;
         let s = d.s0 - (dux / plotW) * sp;
+        // Dragging right pans toward the past (s decreases). Hitting the loaded start edge asks
+        // the container for an older window; the pan clamps here until that history arrives, then
+        // the widened bounds let the next drag continue seamlessly.
+        if (s < model.start && !loadingOlder && !atHistoryLimit) onReachStart?.();
         s = Math.max(model.start, Math.min(s, model.end - sp));
         setView({ s, e: s + sp });
         setHover(null);
@@ -626,12 +654,18 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
         .fp-drc.lift { transform: translateY(-18px) scale(1.06); }
         @media (prefers-reduced-motion: reduce) { .fp-pulse { animation: none; } .fp-drc { transition: none; } }
       `}</style>
+      {viz === 'flat' && (loadingOlder || (atHistoryLimit && view.s <= model.start + (view.e - view.s) * 0.04)) && (
+        <div className="pointer-events-none absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-md border border-white/10 bg-black/55 px-2 py-1 text-[10px] font-medium tracking-wide text-white/80 backdrop-blur">
+          {loadingOlder && <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-white/30 border-t-white/80" aria-hidden="true" />}
+          {loadingOlder ? 'Loading older history…' : 'Start of loaded history'}
+        </div>
+      )}
       <svg
         ref={svgRef}
         className="fp-svg block h-full w-full"
         viewBox={`0 0 ${W} ${H}`}
         role="img"
-        aria-label="Fleet pulse: milestones and the cost-and-commits pulse above the day spine; agent runs, shipped tickets and automation below. Scroll zooms, drag pans."
+        aria-label="Fleet pulse: milestones and the cost-and-commits pulse above the day spine; agent runs, shipped tickets and automation below. Scroll zooms; drag pans, and dragging left past the edge loads older history."
         onPointerDown={onPointerDown}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
