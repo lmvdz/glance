@@ -10,6 +10,8 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { EventEmitter } from "node:events";
+import { FileStore } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { RpcAgent } from "../src/rpc-agent.ts";
 import { AcpAgentDriver } from "../src/acp-agent-driver.ts";
@@ -195,6 +197,71 @@ test("create() rejects sandbox on a non-omp harness (sandbox×non-omp is unbuild
 	const repo = await makeRepo();
 	const mgr = mgrFor(stateDir);
 	await expect(mgr.create({ name: "g", repo, harness: "gemini", approvalMode: "yolo", sandbox: { image: "alpine", workdir: "/w" }, autoRoute: false })).rejects.toThrow(/cannot run sandboxed/);
+	await mgr.stop();
+});
+
+// ── cold restore/adopt preserves the harness (audit fix) ─────────────────────
+
+class NoopDriver extends EventEmitter {
+	readonly isReady = true;
+	readonly isAlive = true;
+	start(): Promise<void> { return Promise.resolve(); }
+	stop(): Promise<void> { return Promise.resolve(); }
+	prompt(): Promise<void> { return Promise.resolve(); }
+	abort(): Promise<unknown> { return Promise.resolve(); }
+	getState(): Promise<unknown> { return Promise.resolve({ todoPhases: [], isStreaming: false }); }
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
+async function makeDirtyWorktree(): Promise<string> {
+	const wt = await fs.mkdtemp(path.join(os.tmpdir(), "harness-wt-"));
+	tmps.push(wt);
+	const git = async (a: string[]) => { await Bun.spawn(["git", ...a], { cwd: wt, stdout: "ignore", stderr: "ignore" }).exited; };
+	await git(["init", "-q"]);
+	await git(["config", "user.email", "t@t"]);
+	await git(["config", "user.name", "t"]);
+	await git(["config", "commit.gpgsign", "false"]);
+	await fs.writeFile(path.join(wt, "README.md"), "x\n");
+	await git(["add", "."]);
+	await git(["commit", "-qm", "init"]);
+	await fs.writeFile(path.join(wt, "wip.txt"), "unlanded\n"); // dirty ⇒ has work ⇒ adopted
+	return wt;
+}
+
+test("cold-adopting a pi record keeps harness=pi (does NOT revert to omp)", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-adopt-"));
+	tmps.push(stateDir);
+	const worktree = await makeDirtyWorktree();
+	await new FileStore(stateDir).save({
+		agents: [{ id: "orphan-pi", name: "pi-unit", repo: worktree, worktree, approvalMode: "yolo", kind: "omp-operator", harness: "pi" }],
+		transcripts: {},
+		features: [],
+	});
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	(mgr as unknown as { makeDriver: () => unknown }).makeDriver = () => new NoopDriver();
+	await mgr.start();
+	const dto = mgr.list()[0];
+	expect(dto).toBeDefined();
+	expect(dto!.id).not.toBe("orphan-pi"); // fresh id on adoption
+	expect(dto!.harness).toBe("pi"); // harness lineage preserved through the cold-adopt create()
+	await mgr.stop();
+});
+
+test("a non-resumable ACP record is excluded from adoption (concern 07)", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-adopt-acp-"));
+	tmps.push(stateDir);
+	const worktree = await makeDirtyWorktree();
+	await new FileStore(stateDir).save({
+		// legacy runtime:"acp" (→ auggie, resumable:false) — should be skipped, not respawned.
+		agents: [{ id: "orphan-acp", name: "acp-unit", repo: worktree, worktree, approvalMode: "yolo", kind: "omp-operator", runtime: "acp" }],
+		transcripts: {},
+		features: [],
+	});
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	(mgr as unknown as { makeDriver: () => unknown }).makeDriver = () => new NoopDriver();
+	await mgr.start();
+	expect(mgr.list().length).toBe(0); // excluded — ACP is non-resumable
 	await mgr.stop();
 });
 

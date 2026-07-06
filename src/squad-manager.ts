@@ -361,6 +361,14 @@ function lineageFieldsFrom(p: {
 	};
 }
 
+/** Carry the harness lineage (harness name / legacy runtime alias / bin override) through the COLD
+ *  restore + adopt create() calls, which rebuild options from a PersistedAgent with an explicit field
+ *  list. Without this a restored pi/ACP unit silently reverts to omp — the exact respawn-as-omp bug the
+ *  `harness` field exists to prevent (the warm reconnect path reads the record directly and is unaffected). */
+function harnessFieldsFrom(p: { harness?: string; runtime?: "omp" | "acp"; bin?: string }): { harness?: string; runtime?: "omp" | "acp"; bin?: string } {
+	return { harness: p.harness, runtime: p.runtime, bin: p.bin };
+}
+
 /**
  * The ONE place a `VerifySpec.mode` maps to a synthesized workflow builder. `makeDriver` and the
  * fork-resume re-parse (createFork) both call this identical expression so the two paths can never
@@ -1165,6 +1173,9 @@ export class SquadManager extends EventEmitter {
 				issue: p.issue,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
+				// Restore the harness lineage so a cold-adopted/restored pi or ACP unit keeps its harness
+				// instead of silently reverting to omp (audit finding — the warm path was already safe).
+				...harnessFieldsFrom(p),
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,
@@ -3228,7 +3239,15 @@ export class SquadManager extends EventEmitter {
 	 *  their own drivers. Same resolution choke point makeDriver uses, so reattach/reconnect records get the
 	 *  same capability gating as freshly-created ones. */
 	private harnessFor(p: PersistedAgent): HarnessDescriptor | undefined {
-		return (p.kind ?? "omp-operator") === "omp-operator" ? resolveHarness(p) : undefined;
+		if ((p.kind ?? "omp-operator") !== "omp-operator") return undefined;
+		// Tolerant on the restore/gating paths: an unknown persisted harness name (removed/renamed across a
+		// daemon up/downgrade) must not throw out of a bulk adopt sweep. create() still resolves explicitly
+		// (fail-loud) for a fresh spawn; here we degrade to "unknown ⇒ undefined" (treated as omp-default).
+		try {
+			return resolveHarness(p);
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Whether a persisted agent's harness survives a daemon restart. ACP harnesses are direct child spawns
@@ -5870,6 +5889,12 @@ export class SquadManager extends EventEmitter {
 				this.log("info", `skipped restoring branch child ${p.name} (${p.id}) — its parent's resumed fan-out will re-spawn it under the same deterministic id/worktree`);
 				continue;
 			}
+			// Concern 07: a non-resumable harness (ACP — direct spawn, no detached host) can't be cold-restored
+			// soundly; a fresh session would replace the dead one. Skip rather than respawn under the wrong state.
+			if (!this.harnessResumable(p)) {
+				this.log("info", `skipped restoring ${p.name} (${p.id}) — harness "${p.harness ?? p.runtime ?? "?"}" is not resumable across a restart`);
+				continue;
+			}
 			await this.create({
 				name: p.name,
 				repo: p.repo,
@@ -5882,6 +5907,9 @@ export class SquadManager extends EventEmitter {
 				issue: p.issue,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
+				// Restore the harness lineage so a cold-adopted/restored pi or ACP unit keeps its harness
+				// instead of silently reverting to omp (audit finding — the warm path was already safe).
+				...harnessFieldsFrom(p),
 				featureId: p.featureId,
 				owns: p.owns,
 				requires: p.requires,
