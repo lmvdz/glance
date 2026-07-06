@@ -1,5 +1,5 @@
 # Create-anchored denominator + non-landing-kind exclusion
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -29,3 +29,6 @@ None outside omp-squad. `isLandingUnit` is new and additive; existing land logic
 - Create one of each: a normal coding unit, a flue-service unit, an observe-mode unit, an observer-role unit. Confirm `isLandingUnit` returns true only for the first.
 - Kill a dispatched unit after create but before it lands (e.g. stop the daemon mid-run); confirm it still appears in `state.json` and is counted as a denominator failure, not silently dropped.
 - Confirm a plan-only/observe unit does NOT appear as a false failure in the denominator.
+
+## Resolution
+Closed — commits `92aacea` + `d…` (review fix). New `src/is-landing-unit.ts` with `isLandingUnit(dto)` + `landingRosterOf()`; `SquadManager.landingRoster()` wraps `landingRosterOf(this.list())`, and `list()` returns the full in-memory roster (incl. crashed-but-persisted units, rehydrated via `adoptOrphanedAgents`) — the opus review confirmed the critical denominator check: hard-crashed units ARE counted as failures. **Review fix applied:** the observe exclusion originally keyed off `effectiveMode`, which collapses to "observe" on any `blockedReason` (incl. `dto.error`/`dto.pending`) — that silently dropped errored/abandoned units (real failures) and re-inflated merge-rate. Fixed to key off the static `autonomyMode` (types.ts:657); added a regression test. 13 `isLandingUnit` tests + 35 adjacent pass; tsc clean. Uses `dto.effectiveMode`→now `dto.autonomyMode`; no "abandoned sweep" built (roster IS the denominator, per spec).

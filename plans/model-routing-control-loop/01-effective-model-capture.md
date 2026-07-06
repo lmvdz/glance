@@ -1,5 +1,5 @@
 # Effective-model capture (RPC path)
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -25,3 +25,6 @@ None. `RunReceipt.model` is already an optional field consumed by `buildAttribut
 - Dispatch a fleet unit (no explicit model) through the daemon; after it finishes, read its `receipts/<agentId>.jsonl` and confirm `model` is a real id (e.g. `claude-sonnet-4-5`), not absent.
 - Confirm `buildAttribution` over those receipts now shows the real model family instead of everything under `unknown`.
 - Unit test: feed a synthetic assistant frame with `message.model` set + `seed.model` unset → accumulator emits that model; with `seed.model` preset → preset wins.
+
+## Resolution
+Closed — commit `668a40a`. Widened the `Frame` message type + added `RunAccumulator.noteModel()` (first-model-wins) in `src/receipts.ts`, split the `message_end` guard so usage and model are handled independently. **Also patched the production path:** `src/squad-manager.ts`'s duplicated inline frame switch (~:4192) drives the live `RunAccumulator` for dispatched units — `receipts.ts`'s exported `ingest()` is only exercised by tests, so patching it alone would have been a prod no-op. `types.ts` untouched (`RunReceipt.model` already existed). +2 receipts tests. Full suite 1554/1554, tsc clean. **Follow-up worth filing:** de-dup `squad-manager.ts`'s frame handling against `receipts.ts`'s `ingest()` so this drift can't recur silently.

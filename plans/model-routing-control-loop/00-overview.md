@@ -39,6 +39,10 @@ Staged observe → learn → act loop for omp-squad model selection. From `/rese
 - **D1 Epsilon-random exploration** at dispatch — hard prerequisite before the loop may *regenerate* model policy from its own evidence (avoids self-confirming drift). Blocked by C06.
 - **D2 Mid-run difficulty escalation** — Fusion's headline. Prereqs, all required: a real `getModel()` on the driver seam; predicate on the engine visit counter (`shared.visits`, `engine.ts:100`) not `resolveStyle`/`__reflectAttempt`; terminal-model + `escalated`-tag attribution so it can't poison C05; and `RpcAgent`-path coverage. Blocked by C06 + those four.
 
+## Progress
+- **Batch 1 SHIPPED** (2026-07-06): C01 + C02 closed, opus-reviewed, one review-fix applied (denominator must count errored/blocked units — keyed off static `autonomyMode`, not `effectiveMode`). Full suite 1554/1554, tsc clean. On PR #71. Remaining: C03 → C04 → C05 → C06.
+- Follow-up surfaced by C01 (not blocking): `squad-manager.ts` has a duplicated inline frame switch that shadows `receipts.ts`'s `ingest()`; de-dup so future frame-field additions can't drift silently.
+
 ## Notes
 - Proceeded over an existing WIP pile (headless run): scanner reported 25 plans-with-open-concerns, but that count is inflated by the same plans duplicated across 6 worktree checkouts under `.claude/worktrees/`; oldest genuine is `meta-plan-autonomous-fleet` (2026-07-05).
 - Build-vs-buy: **borrow every pattern, no dependency** — all seams pre-exist.
