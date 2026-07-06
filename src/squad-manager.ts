@@ -2376,6 +2376,22 @@ export class SquadManager extends EventEmitter {
 		// itself; purely record-only, after the outcome is already known, same as its two siblings above.
 		if (!result.retryable) {
 			try {
+				// Independent difficulty signals (Epic 6 concern 04) — neither is a router output, unlike
+				// `routing.{mode,tier}` above, so grading the router against these is non-circular.
+				// filesTouched: the confidence scorer's own blast-radius proxy (finalizeRun's
+				// `scoreConfidence({ filesTouched: receipt.filesTouched.length, ... })`), read off this
+				// agent's LAST finalized RunReceipt. `readReceipts` returns rows in append order, so the
+				// last entry is the most recent run; its `filesTouched` (git-status-derived at that run's
+				// finish()) already reflects every prior turn's uncommitted changes too, since nothing is
+				// committed until land()'s own commitWip. Undefined when no run ever finalized for this
+				// agent (e.g. a re-adopted/direct land with no receipt on disk) — never fabricated.
+				const priorReceipts = await readReceipts(this.stateDir, dto.id);
+				const lastReceipt = priorReceipts[priorReceipts.length - 1];
+				// fixupCount: the SAME workflow-engine visit counter (`WorkflowRunState.visits.fixup`)
+				// concern 01's fixups-to-green metric (recordWorkflowOutcomeMetrics above) and
+				// digestReward's firstTryGreen already read. IN-RUN churn, not post-merge regression — see
+				// task-outcomes.ts's module doc for why no post-merge rework signal exists in this codebase.
+				const fixupCount = rec.options.workflowState?.visits?.fixup;
 				await recordTaskOutcome(this.stateDir, {
 					agentId: dto.id,
 					branch: dto.branch,
@@ -2384,6 +2400,8 @@ export class SquadManager extends EventEmitter {
 					costUsd: dto.receipt?.costUsd,
 					confidence: dto.confidence,
 					validation: rec.dto.validation?.verdict,
+					filesTouched: lastReceipt?.filesTouched.length,
+					fixupCount,
 					outcome: result.ok ? "landed" : "rejected",
 					source: "land",
 					ts: Date.now(),

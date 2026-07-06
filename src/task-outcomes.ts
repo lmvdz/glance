@@ -18,6 +18,14 @@
  * O_APPEND commentary). The daemon's single event loop serializes writes in practice, but a
  * multi-daemon/restart overlap is possible; small rows + agentId-keyed upsert-on-read make an
  * interleave (or a torn line) recoverable rather than corrupting.
+ *
+ * Difficulty fields (concern 04, added alongside `filesTouched`/`fixupCount` below): diff LOC
+ * (added+removed) was considered and deliberately OMITTED — getting it cheaply at the land() join
+ * would mean a NEW `git diff --numstat` invocation + parse at merge time (the branch diff shape isn't
+ * already computed anywhere reachable from `land()`), which is exactly the heavy git plumbing this
+ * concern was told to avoid. `filesTouched` and `fixupCount` both come from state the run already
+ * computed for other reasons (the confidence scorer's blast-radius proxy and the fixups-to-green
+ * metric, respectively) — no new git calls needed.
  */
 
 import * as fs from "node:fs/promises";
@@ -32,6 +40,25 @@ export interface TaskOutcomeRow {
 	costUsd?: number;
 	confidence?: number;
 	validation?: "pass" | "veto" | "abstain" | "skipped";
+	/**
+	 * Independent, post-hoc difficulty signals (concern 04) — deliberately NOT router outputs. `tier`
+	 * and `mode` above are both things the router CHOSE; grading the router against its own labels is
+	 * circular. These three are how hard the task turned out to be, observed after the fact, so a
+	 * reader (C05's matrix) can cross-tab "chosen tier" against "observed difficulty" instead of just
+	 * re-deriving the router's own verdict.
+	 */
+	/** Blast radius: count of files this run touched (from `RunReceipt.filesTouched`, the confidence
+	 *  scorer's own blast-radius proxy — see `scoreConfidence` call in squad-manager.ts finalizeRun).
+	 *  Undefined when no receipt was ever finalized for this agent (e.g. a re-adopted/direct land). */
+	filesTouched?: number;
+	/** In-run churn: the workflow engine's fixup-node visit counter (`WorkflowRunState.visits.fixup`),
+	 *  the SAME count concern 01's fixups-to-green metric and `firstTryGreen` derive from. This is
+	 *  IN-RUN rework (retries before the agent's own land attempt) — NOT a post-merge regression signal;
+	 *  there is no revert/re-touch detector anywhere in this codebase today (recordLandOutcome clears on
+	 *  success, the regression gate rolls back in-transaction as a land *failure*, re-dispatch is
+	 *  prevented rather than counted). Any surface built on this field must say "in-run rework", never
+	 *  imply post-merge regression. */
+	fixupCount?: number;
 	outcome: "landed" | "rejected" | "abandoned";
 	/** Which code path produced this row — "land" (the in-process land() method), "reconciled" (the
 	 *  PR-reconciler's out-of-band GitHub-UI-merge backstop), or "sweep" (any future batch reconciliation). */
