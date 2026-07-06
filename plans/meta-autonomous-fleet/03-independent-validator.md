@@ -1,5 +1,5 @@
 # Epic 3 — Independent validator + compliance
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

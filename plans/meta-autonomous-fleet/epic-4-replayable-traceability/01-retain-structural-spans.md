@@ -1,5 +1,5 @@
 # Retain structural spans through sampling
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical

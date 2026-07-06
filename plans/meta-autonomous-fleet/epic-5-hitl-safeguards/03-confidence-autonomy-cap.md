@@ -1,6 +1,6 @@
 # Confidence cap → force propose-only (assist) below threshold
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,5 +1,5 @@
 # Validator land-gate — non-overridable veto at the landBranch seam
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

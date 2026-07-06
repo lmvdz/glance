@@ -1,5 +1,5 @@
 # Link the per-agent digest into the trace tree
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

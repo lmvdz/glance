@@ -1,5 +1,5 @@
 # Weave verify/spawn audit into the causal spine
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

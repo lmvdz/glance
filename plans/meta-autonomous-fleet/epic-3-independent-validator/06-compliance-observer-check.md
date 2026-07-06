@@ -1,5 +1,5 @@
 # Compliance findings in the Observer loop
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical

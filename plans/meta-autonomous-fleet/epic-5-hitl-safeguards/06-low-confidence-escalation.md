@@ -1,6 +1,6 @@
 # Low-confidence auto-escalation (the join: confidence → propose-only + auto-report)
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical

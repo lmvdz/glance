@@ -1,6 +1,6 @@
 # Execution-role dimension (types + DTO mirror + round-trip)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

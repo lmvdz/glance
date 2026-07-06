@@ -1,6 +1,6 @@
 # Observer → dispatch seam (spawn an observing agent)
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

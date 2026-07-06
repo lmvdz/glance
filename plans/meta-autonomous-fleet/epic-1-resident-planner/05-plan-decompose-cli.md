@@ -1,6 +1,6 @@
 # `omp-squad plan-decompose <dir>` one-shot CLI + end-to-end verify
 
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical

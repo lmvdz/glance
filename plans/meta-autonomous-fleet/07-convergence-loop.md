@@ -1,5 +1,5 @@
 # Epic 7 — Convergence loop (capstone)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

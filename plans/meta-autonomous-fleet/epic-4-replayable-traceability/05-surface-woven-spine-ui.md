@@ -1,5 +1,5 @@
 # Surface the woven spine + reasoning link + honest sampling label
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

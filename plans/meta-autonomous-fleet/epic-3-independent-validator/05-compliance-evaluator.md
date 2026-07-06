@@ -1,5 +1,5 @@
 # Compliance evaluator — evaluateCompliance over the ledgers + governancePayload
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

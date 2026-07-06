@@ -1,5 +1,5 @@
 # Epic 5 — HITL safeguards
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

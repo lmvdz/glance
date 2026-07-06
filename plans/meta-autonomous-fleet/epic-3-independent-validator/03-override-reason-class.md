@@ -1,5 +1,5 @@
 # Override reason class — force ≠ validator-override
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
