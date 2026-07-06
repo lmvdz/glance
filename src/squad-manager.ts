@@ -4177,9 +4177,19 @@ export class SquadManager extends EventEmitter {
 			}
 			case "message_end": {
 				const msg = frame.message as
-					| { role?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost?: { total: number } } }
+					| {
+							role?: string;
+							usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost?: { total: number } };
+							model?: string;
+					  }
 					| undefined;
-				if (msg?.role === "assistant" && msg.usage) rec.run?.onAssistantUsage(msg.usage);
+				if (msg?.role === "assistant") {
+					if (msg.usage) rec.run?.onAssistantUsage(msg.usage);
+					// Late-bind the effective model off the wire — a dispatched fleet unit sets no
+					// explicit rec.dto.model, so without this every fleet run collapses to "unknown"
+					// in attribution even though the RPC frame already carries the resolved model.
+					if (msg.model) rec.run?.noteModel(msg.model);
+				}
 				rec.run?.onMessageEnd();
 				this.finishThinkingStream(rec);
 				this.finishAssistantStream(rec);

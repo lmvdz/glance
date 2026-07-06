@@ -137,6 +137,32 @@ test("a RunReceipt carrying a validation record (Epic 3) round-trips through JSO
 	expect(back[0].validation?.verdict).toBe("veto");
 });
 
+test("late-binds the effective model off an assistant frame when seed.model is unset", () => {
+	const acc = new RunAccumulator({ agentId: "ag5", name: "epsilon", repo: "/repo" });
+	feed(acc, [
+		{ type: "agent_start" },
+		{ type: "message_end", message: { role: "assistant", usage, model: "claude-sonnet-4-5" } },
+		{ type: "agent_end" },
+	]);
+	acc.finish("idle", []);
+
+	const snap = acc.snapshot();
+	expect(snap.model).toBe("claude-sonnet-4-5");
+});
+
+test("an explicit opts.model stays authoritative over a later assistant frame's model", () => {
+	const acc = new RunAccumulator({ agentId: "ag6", name: "zeta", repo: "/repo", model: "opus" });
+	feed(acc, [
+		{ type: "agent_start" },
+		{ type: "message_end", message: { role: "assistant", usage, model: "claude-sonnet-4-5" } },
+		{ type: "agent_end" },
+	]);
+	acc.finish("idle", []);
+
+	const snap = acc.snapshot();
+	expect(snap.model).toBe("opus");
+});
+
 test("graceful no-usage case: tokens/costUsd omitted", () => {
 	const acc = new RunAccumulator({ agentId: "ag3", name: "gamma", repo: "/repo" });
 	feed(acc, [{ type: "agent_start" }, { type: "tool_execution_start", toolName: "search" }, { type: "agent_end" }]);
