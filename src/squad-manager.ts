@@ -140,6 +140,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { isArmed } from "./convergence-oracle.ts";
 import { scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
@@ -942,6 +943,17 @@ export class SquadManager extends EventEmitter {
 			holdForConfirm: this.landConfirm,
 			notifyReady: (id) => this.markLandReady(id),
 			onCatastrophe: (id, detail) => this.markCatastrophe(id, detail),
+			continueAgent: (id, note) => {
+				// Belt-and-suspenders (RT2-A5): while a convergence loop is armed, its Stop-hook oracle already
+				// owns turn-boundary reinjection — don't double-inject from the daemon side.
+				if (isArmed(this.stateDir)) return Promise.resolve();
+				const rec = this.agents.get(id);
+				if (!rec) return Promise.resolve();
+				// Recovery metric: the subsequent land verdict is already on the confidence/land ledger, so
+				// recording the reprompt event is enough to correlate whether reprompted units re-pass.
+				this.learningMetrics.record("veto-reprompt", 1);
+				return this.promptConnected(rec, note).catch((err) => this.log("warn", `veto reprompt for ${id} failed: ${String(err)}`));
+			},
 			log: (m) => this.log("info", `orchestrator: ${m}`),
 			persist: openOrchestratorState(this.stateDir), // OMPSQ-139: halted/landed/staged survive restart, keyed by branch
 			scheduler: this.scheduler, // OMPSQ-134: drain the SAME queue create() parks into (OMP_SQUAD_QUEUE_ON_FULL)
@@ -1154,6 +1166,12 @@ export class SquadManager extends EventEmitter {
 				approvalMode: p.approvalMode,
 				autonomyMode: p.autonomyMode,
 				thinking: p.thinking,
+				// Restore the original system prompt (tool grants / profile memory / fabric primer) on both
+				// fresh-id resume paths. It was dropped, so a resumed unit's child spawned with NO
+				// --append-system-prompt and silently lost its capability scoping. For profiled units
+				// createWithId re-prepends profile.memory+toolGrants (the persisted value is already-composed)
+				// — cosmetic, idempotent content, no behavioral effect; non-profiled fleet units compose cleanly.
+				appendSystemPrompt: p.appendSystemPrompt,
 				issue: p.issue,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
@@ -1187,11 +1205,35 @@ export class SquadManager extends EventEmitter {
 					// previously that only happened inside the pending-close loop, so the common no-pending
 					// adopt never recorded lineage and followLineage's crash-spanning stitch never fired for it).
 					await this.closeOrphanedPending(dto.id, p);
+					// Give the cold-adopted plain unit its prior context back (surfacing only, no auto-prompt).
+					await this.surfaceResumeDigest(dto.id, p);
 				})
 				.catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
 		if (n || skipped) this.log("info", `took over ${n} orphaned worktree(s) with work; skipped ${skipped} (done/clean or over the ${hardAgentCeiling()}-agent cap)`);
 		return n;
+	}
+
+	/** Surface a resumed unit's prior-session digest as a fenced system transcript entry — the same
+	 *  "surfacing only, never auto-prompt the live agent (no silent spend)" treatment restart() gives
+	 *  (see there). Both fresh-id resume paths (adoptOrphanedAgents above, the restore loop in
+	 *  loadPersisted) mint a NEW agent id from a PersistedAgent, so the digest — written during the
+	 *  original run under p.id (writeDigest keys by the run-time dto.id) — is read under the OLD id,
+	 *  never the new dto.id. Plain units only: a resuming workflow re-executes its checkpointed node
+	 *  and carries its own rollup, so it needs no prose digest injected. Best-effort — the whole body
+	 *  is caught (an unhandled rejection detached from the boot sequence would crash the Bun daemon). */
+	private async surfaceResumeDigest(newId: string, p: PersistedAgent): Promise<void> {
+		if (p.kind === "workflow") return;
+		try {
+			const rec = this.agents.get(newId);
+			if (!rec) return;
+			const digest = await readDigest(this.stateDir, p.id);
+			if (!digest) return;
+			this.append(rec, "system", "📒 Resume digest — prior session memory:\n" + fenceUntrusted("resume digest", digest));
+			this.emitAgent(rec);
+		} catch (err) {
+			this.log("warn", `resume digest surface for ${p.name} failed: ${String(err)}`);
+		}
 	}
 
 	/** A cold-adopted agent's persisted pending can never be legitimately answered (fresh id, dead RPC
@@ -5803,6 +5845,12 @@ export class SquadManager extends EventEmitter {
 				profileId: p.profileId,
 				approvalMode: p.approvalMode,
 				thinking: p.thinking,
+				// Restore the original system prompt (tool grants / profile memory / fabric primer) on both
+				// fresh-id resume paths. It was dropped, so a resumed unit's child spawned with NO
+				// --append-system-prompt and silently lost its capability scoping. For profiled units
+				// createWithId re-prepends profile.memory+toolGrants (the persisted value is already-composed)
+				// — cosmetic, idempotent content, no behavioral effect; non-profiled fleet units compose cleanly.
+				appendSystemPrompt: p.appendSystemPrompt,
 				issue: p.issue,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
@@ -5824,6 +5872,8 @@ export class SquadManager extends EventEmitter {
 					// Unconditional, like adoptOrphanedAgents' call site — closeOrphanedPending unconditionally
 					// stitches the cause.priorId lineage entry too (#lifecycle-truth finding 4).
 					await this.closeOrphanedPending(dto.id, p);
+					// Same prior-context surfacing as the adopt path (both mint a fresh id from a PersistedAgent).
+					await this.surfaceResumeDigest(dto.id, p);
 				})
 				.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
