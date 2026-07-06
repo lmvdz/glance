@@ -16,6 +16,8 @@ The control loop's **action arm**: turn the outcome evidence into cheaper routin
 3. **Gate + shadow-first.** Behind `OMP_SQUAD_MODEL_OUTCOMES=1` (the existing gate, `:229`). Ship shadow-first: log the decision it *would* make (routed model vs default) without applying, verify the choices look sane against the panel, then flip to applying. Emit the decision so it's auditable.
 4. **Attribution stays clean.** Because the model is set at create, `recordModelOutcome`/the C03 row record the real chosen model — no mid-run ambiguity. This closes the observe→act loop: routed outcomes feed back into the same matrix.
 
+**Carry-forward from C05 review (do this in C06):** `recordModelOutcome` at `squad-manager.ts:~2374` records the model outcome keyed on `dto.model` — which is undefined ("unknown") for dispatched fleet units, exactly like the C03 row bug was. Since `shiftedModel` reads the `recordModelOutcome` ledger by model, this staleness means the ledger C06 consumes is also model-blind for the fleet. Fix `recordModelOutcome` to use the effective model (thread `lastReceipt?.model`, same as the C05 fix at the row-write) so the up-front router keys on the real model family. Without this, C06's routing reads an all-"unknown" model ledger.
+
 **Explicitly NOT in scope:** epsilon-random exploration (D1) — without it the router may only *conservatively boost* on existing evidence, never *regenerate* policy from its own closed loop. Keep the boost-only, sample-gated behavior; document that self-optimization needs D1.
 
 ## Cross-Repo Side Effects
