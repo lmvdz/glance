@@ -24,9 +24,12 @@
 
 import "./env-compat.ts"; // GLANCE_* ↔ OMP_SQUAD_* aliasing — must run before any env read
 import * as path from "node:path";
-import { arm, disarm, readOracle, writeOracle as persistOracle } from "./convergence-oracle.ts";
+import { arm, clearFailures, disarm, readFailures, readOracle, writeFailures, writeOracle as persistOracle } from "./convergence-oracle.ts";
 import { ratchet } from "./convergence-ratchet.ts";
 import { runIteration, runToConvergence, type ConvergenceDeps, type DispatchOutcome, type PlanFrontier } from "./convergence.ts";
+import { detectVerify } from "./intake.ts";
+import { execGatedCommand } from "./gate-runner.ts";
+import { extractGateFailures } from "./land.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import type { FeatureCriterion, VerifiedState } from "./types.ts";
 
@@ -212,8 +215,27 @@ function realValidate(repo: string): ConvergenceDeps["validate"] {
 		const diff = await gitDiffAgainstHead(repo);
 		const record = await validator.scoreAgainstCriteria(criteria, diff);
 		const unmet = record.perCriterion.filter((p) => !p.satisfied).map((p) => p.id);
-		return { gap: unmet.length, confidence: record.confidence, failures: [] };
+		return { gap: unmet.length, confidence: record.confidence, failures: await suiteFailures(repo) };
 	};
+}
+
+/**
+ * The repo's CURRENT verify/test-suite failure set — the ratchet's real signal (S3). Runs the same
+ * verify command + failure extractor the post-merge regression gate uses (`detectVerify` + gateExec +
+ * `extractGateFailures`), so "never undo a verified gain" is the exact monotonicity landing enforces —
+ * NOT the unmet-acceptance-criteria list (which would misfire the ratchet on iteration 1). Empty when
+ * the repo declares no verify command or the suite is green. Best-effort/fail-open: a spawn error
+ * yields [] so a flaky runner never wedges the loop into a false "regression → escalate".
+ */
+async function suiteFailures(repo: string): Promise<string[]> {
+	try {
+		const command = await detectVerify(repo);
+		if (!command) return [];
+		const { stdout, stderr } = await execGatedCommand(command, repo, { mounts: [repo] });
+		return extractGateFailures(`${stdout}\n${stderr}`);
+	} catch {
+		return [];
+	}
 }
 
 async function buildDeps(args: RunArgs, repo: string): Promise<ConvergenceDeps> {
@@ -275,28 +297,34 @@ export async function runConvergence(args: RunArgs, repo: string = process.cwd()
  * itself. Idempotent w.r.t. the hook contract: called on an already-terminal oracle it advances
  * nothing (the hook would not have re-injected in that case) and disarms.
  *
- * Prior-iteration `failures` are NOT carried across the process boundary (the oracle schema, the
- * cross-process contract, deliberately omits them per DESIGN.md §1) — passed as `[]`. This is inert
- * today because real `validate` returns `failures: []` regardless (S3, the dormant ratchet); if a
- * real single-iteration suite failure-set is ever wired in, persisting it becomes part of that same
- * follow-up scope (DESIGN.md "Known limitations").
+ * Prior-iteration `failures` ARE carried across the `--once` process boundary — but via the failures
+ * SIDECAR (`readFailures`/`writeFailures`), NOT the oracle, which the cross-process schema deliberately
+ * keeps pinned (§1). The first turn reads `null` (no sidecar) → baseline, no ratchet; every later turn
+ * ratchets this turn's suite failures against the previous turn's, making the no-regression guarantee
+ * live in the real loop (S3 — formerly dormant).
  */
 export async function runOnceIteration(args: RunArgs, repo: string = process.cwd()): Promise<VerifiedState> {
 	const deps = await buildDeps(args, repo);
 	const current = (await readOracle()) ?? seedState(args, deps);
 
 	// Idempotent: an already-terminal oracle is left untouched (the hook would not have re-injected),
-	// and the sentinel is cleaned up.
+	// and the sentinel + failures sidecar are cleaned up.
 	if (current.decision !== "continue") {
 		await disarm();
+		await clearFailures();
 		return current;
 	}
 
 	// (Re)arm with this session's identity so the next turn's Stop hook stays gated to us.
 	await arm(undefined, loopSessionId());
-	const { next } = await runIteration(current, deps, []);
-	// A terminal outcome ends the loop — disarm so no stale sentinel survives the run.
-	if (next.decision !== "continue") await disarm();
+	const prevFailures = await readFailures(); // null on the baseline turn — no ratchet, just record
+	const { next, failures } = await runIteration(current, deps, prevFailures);
+	await writeFailures(failures); // hand this turn's set to the next `--once` process for its ratchet
+	// A terminal outcome ends the loop — disarm + drop the sidecar so no stale state survives the run.
+	if (next.decision !== "continue") {
+		await disarm();
+		await clearFailures();
+	}
 	return next;
 }
 
