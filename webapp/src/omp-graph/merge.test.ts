@@ -78,3 +78,35 @@ describe('mergeGraphDocs', () => {
     expect(ids).toEqual(['git.churn', 'git.commits']);
   });
 });
+
+const series = (id: string, points: { t: number; v: number }[]): GraphTrack => ({
+  id,
+  label: id,
+  group: 'g',
+  source: 'receipts',
+  type: 'series',
+  points,
+});
+const costTotal = (d: GraphDocWire): number => {
+  const t = d.tracks.find((x) => x.id === 'receipts.cost');
+  return t?.type === 'series' ? t.points.reduce((s, p) => s + p.v, 0) : 0;
+};
+
+describe('cumulative-cost safety (regression: the pulse cumulative must not climb every poll)', () => {
+  test('DISJOINT loaded-history + recent windows: cost is the exact sum, never doubled', () => {
+    const olderHist = doc(0, 10 * HOUR, [series('receipts.cost', [{ t: 2 * HOUR, v: 1.5 }, { t: 5 * HOUR, v: 0.5 }])]);
+    const recent = doc(10 * HOUR, 20 * HOUR, [series('receipts.cost', [{ t: 12 * HOUR, v: 3 }])]);
+    expect(costTotal(mergeGraphDocs(olderHist, recent))).toBeCloseTo(5, 6); // 1.5 + 0.5 + 3, once each
+  });
+
+  test('range-relative cost bins mean two SHIFTED recent windows STACK — so the poll must REPLACE the recent window, never merge it', () => {
+    // GraphDoc cost bins are bucketed relative to range.start (src schema `bucketSums`), which
+    // advances ~20s per poll — so the SAME real spend lands at a slightly different `t` each poll.
+    // Merging successive recent windows would therefore double-count; the panel replaces instead.
+    const poll1 = doc(0, 10 * HOUR, [series('receipts.cost', [{ t: 3 * HOUR, v: 4 }])]);
+    const poll2 = doc(20_000, 10 * HOUR + 20_000, [series('receipts.cost', [{ t: 3 * HOUR + 20_000, v: 4 }])]); // same $4, shifted 20s
+    // If a caller (wrongly) accumulated recent windows, cost would grow without bound — this asserts
+    // the hazard is real, which is exactly why OmpGraphPanel keeps the recent window REPLACE-only.
+    expect(costTotal(mergeGraphDocs(poll1, poll2))).toBeCloseTo(8, 6);
+  });
+});
