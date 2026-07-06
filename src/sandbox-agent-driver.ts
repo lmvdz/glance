@@ -17,7 +17,9 @@ import { EventEmitter } from "node:events";
 import type { Subprocess } from "bun";
 import type { AgentDriver } from "./agent-driver.ts";
 import { pickModel } from "./rpc-agent.ts";
+import { Result } from "effect";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
+import { decodeHostToolCall, decodeResponseFrame } from "./schema/agent-host-frame.ts";
 import { gitNoSignEnv } from "./git-harden.ts";
 
 export interface SandboxAgentOptions {
@@ -45,8 +47,7 @@ interface ModelInfo {
 	id: string;
 }
 
-type ResponseFrame = { type: "response"; id?: string; command: string; success: boolean; data?: unknown; error?: string };
-type HostToolCallFrame = { type: "host_tool_call"; id: string; toolCallId: string; toolName: string; arguments: unknown };
+// ResponseFrame / HostToolCallFrame are defined + validated in ./schema/agent-host-frame.ts
 type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
 
 export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
@@ -196,7 +197,9 @@ export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
 				this.emit("ready");
 				return;
 			case "response": {
-				const r = frame as ResponseFrame;
+				const decoded = decodeResponseFrame(frame);
+				if (Result.isFailure(decoded)) return; // malformed response — drop
+				const r = decoded.success;
 				if (r.id && this.pending.has(r.id)) {
 					const p = this.pending.get(r.id)!;
 					this.pending.delete(r.id);
@@ -208,9 +211,12 @@ export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
 			case "extension_ui_request":
 				this.emit("ui", frame as RpcExtensionUIRequest);
 				return;
-			case "host_tool_call":
-				this.emit("hosttool", frame as HostToolCallFrame);
+			case "host_tool_call": {
+				const decoded = decodeHostToolCall(frame);
+				if (Result.isFailure(decoded)) return; // malformed tool call — drop, never execute garbage
+				this.emit("hosttool", decoded.success);
 				return;
+			}
 			default:
 				this.emit("event", frame);
 				return;
