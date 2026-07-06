@@ -1,5 +1,5 @@
 # Route model at dispatch via enriched shiftedModel
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -29,3 +29,6 @@ None outside omp-squad. Changes default dispatch routing **only when the env gat
 - Flip to applying: confirm a routed unit's receipt/row shows the chosen model and feeds back into C05's matrix.
 - Confirm a thin/no-data class falls through to default (no shift on insufficient samples).
 - `/verify`: drive a real dispatch through the daemon end-to-end, not just a unit test.
+
+## Resolution
+Closed — a new pure `src/model-route.ts` (`routeModelForTaskClass`, boost-only: escalate cheap→opus iff `opus.mergeRate − sonnet.mergeRate ≥ MIN_EDGE` and neither cell is `insufficientData`, else no-shift) wired into `createWithId` after `routeIntake`, gated `OMP_SQUAD_MODEL_OUTCOMES=1 && opts.model===undefined`, shadow-default (`OMP_SQUAD_MODEL_ROUTE_SHADOW` ON unless "0"). Carry-forward done: `recordModelOutcome` (:2381) now records the effective model (hoisted `lastReceipt`/`effectiveModel`, timing unchanged, C05 row-write reuses it). Opus review PASS, no critical/significant: gate-off is a true zero-cost no-op (whole block short-circuits), routing can only ever return `"opus"` or no-shift (never degrades/overrides), best-effort try/catch so a routing error can't fail dispatch. 13 tests (8 pure + 5 real-`create()` dispatch). Full suite 1591/1591; tsc clean. **Residuals (future concern, not this scope):** (1) the reconciler's `recordTaskOutcome` (~:4757) still reads `dto.model` — same latent gap; (2) `currentDefault` hardcoded "sonnet" — safe because the only action is escalate-to-opus (worst case: an unnecessary escalation, never a degrade), revisit if the fleet default moves off sonnet.
