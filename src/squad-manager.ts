@@ -4518,10 +4518,18 @@ export class SquadManager extends EventEmitter {
 	private async resolveAgentIdForBranch(branch: string): Promise<string | undefined> {
 		const live = this.agentByBranch(branch);
 		if (live) return live.dto.id;
+		// Pick the genuinely most-recent match by run time, NOT iteration order: receipts are stored
+		// one file per agentId and `readAllReceipts` concatenates them in `readdir()` (filesystem/hash)
+		// order, which is not chronological. A reused branch (revert→reland, or an ad-hoc `add` reusing
+		// `squad/<name>`) has multiple matching receipts across different agents; keying the reconciled
+		// outcome to whichever `readdir` happened to return last would misattribute it to a stale agent.
 		const receipts = await readAllReceipts(this.stateDir);
-		let found: string | undefined;
-		for (const r of receipts) if (r.branch === branch) found = r.agentId; // last (most recent) match wins
-		return found;
+		let found: RunReceipt | undefined;
+		for (const r of receipts) {
+			if (r.branch !== branch) continue;
+			if (!found || (r.endedAt ?? r.startedAt) > (found.endedAt ?? found.startedAt)) found = r;
+		}
+		return found?.agentId;
 	}
 
 	/**

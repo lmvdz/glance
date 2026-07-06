@@ -40,7 +40,8 @@ Staged observe → learn → act loop for omp-squad model selection. From `/rese
 - **D2 Mid-run difficulty escalation** — Fusion's headline. Prereqs, all required: a real `getModel()` on the driver seam; predicate on the engine visit counter (`shared.visits`, `engine.ts:100`) not `resolveStyle`/`__reflectAttempt`; terminal-model + `escalated`-tag attribution so it can't poison C05; and `RpcAgent`-path coverage. Blocked by C06 + those four.
 
 ## Progress
-- **Batch 1 SHIPPED** (2026-07-06): C01 + C02 closed, opus-reviewed, one review-fix applied (denominator must count errored/blocked units — keyed off static `autonomyMode`, not `effectiveMode`). Full suite 1554/1554, tsc clean. On PR #71. Remaining: C03 → C04 → C05 → C06.
+- **Batch 1 SHIPPED** (2026-07-06): C01 + C02 closed, opus-reviewed, one review-fix applied (denominator must count errored/blocked units — keyed off static `autonomyMode`, not `effectiveMode`). Full suite 1554/1554, tsc clean. On PR #71.
+- **Batch 2 SHIPPED** (2026-07-06): C03 closed, opus-reviewed, one review-fix applied (`resolveAgentIdForBranch` must pick most-recent by run time, not `readdir` order, or a reused branch misattributes a reconciled outcome). Full suite 1561/1561, tsc clean. On PR #71. Remaining: C04 → C05 → C06.
 - Follow-up surfaced by C01 (not blocking): `squad-manager.ts` has a duplicated inline frame switch that shadows `receipts.ts`'s `ingest()`; de-dup so future frame-field additions can't drift silently.
 
 ## Notes

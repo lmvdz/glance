@@ -1,5 +1,5 @@
 # Joined task-outcome row + idempotent agentId key
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -31,3 +31,6 @@ Produce one trustworthy, idempotent row per unit that joins the routing decision
 - Force a failed manual land; confirm a `rejected` row is written (not dropped by the guard).
 - Trigger the reconciler out-of-band path (merge a squad branch directly, let the reconciler catch it); confirm it resolves to the same agentId row via the branch index and does not create a duplicate.
 - Revert→reland the same branch; confirm the row updates (terminal-wins), not doubles.
+
+## Resolution
+Closed — commits `ce49f1b` + review fix. New `src/task-outcomes.ts` (`recordTaskOutcome` durable append, `readTaskOutcomes` collapse-by-agentId terminal-wins); `PersistedAgent.routing?` (additive); `land()` writes the row under a deliberately wider `!result.retryable` gate so manual (auto:false) failures record a `rejected` row (the narrower sibling `(auto||result.ok)` guard drops them); reconciler resolves agentId via `resolveAgentIdForBranch` (roster → receipt scan). Opus review confirmed the land() placement is correct (staged holds return earlier → no row; PR-mode only reports `landed` on real merge) and the terminal-wins collapse is sound (single shared file → append order is chronological). **Review fix applied:** `resolveAgentIdForBranch` picked "most recent" by `readAllReceipts` iteration order, which is filesystem `readdir` order (per-agent files), NOT chronological — on a reused branch it could misattribute a reconciled outcome to a stale agent. Fixed to select max by `endedAt ?? startedAt`. Full suite 1561/1561; tsc clean. Known-minor: a no-op land (ok:true, nothing merged) writes a `landed` row — consistent with the existing `recordModelOutcome` ledger, not a C03-introduced inconsistency. Test gap (accepted): no direct test of `resolveAgentIdForBranch` branch-reuse ordering (private reconciler helper; would need a heavy integration harness) — the fix is tsc-checked + logically simple (max-by-time).
