@@ -90,3 +90,9 @@ export function recordModelOutcome(stateDir: string, model: string | undefined, 
 export function modelOutcomes(stateDir: string, model: string | undefined, tier: ComplexityTier): ModelOutcomeCounts {
 	return readLedger(stateDir)[ledgerKey(modelKey(model), tier)] ?? { landed: 0, rejected: 0 };
 }
+
+/** Read-only: the whole `${model}::${tier}` → counts ledger (empty on missing/corrupt). For the
+ *  model scoreboard, which needs every key at once rather than one lookup. */
+export function readModelOutcomes(stateDir: string): ModelOutcomes {
+	return readLedger(stateDir);
+}
