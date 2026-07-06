@@ -17,11 +17,17 @@ import FleetPulseCanvas, { type DepthMetric, type DepthWeek } from '../omp-graph
 import Inspector from '../omp-graph/Inspector';
 import { buildPulseModel, hourBins } from '../omp-graph/pulse-model';
 import { normalizeAttribution, normalizeGraphDoc } from '../omp-graph/normalize';
+import { mergeGraphDocs } from '../omp-graph/merge';
 import type { InspectSel } from '../omp-graph/inspect';
 import type { AttributionDoc, GraphDocWire, ProvenanceDoc } from '../omp-graph/types';
 
 const RANGES = [7, 14, 30] as const;
-const WEEK_MS = 7 * 24 * 3_600_000;
+const DAY_MS = 24 * 3_600_000;
+const WEEK_MS = 7 * DAY_MS;
+/** Older-history chunk per lazy load — under the daemon's 32-day per-request cap. */
+const OLDER_CHUNK_MS = 30 * DAY_MS;
+/** How far back dragging can pull history before it stops (a full year). */
+const MAX_HISTORY_MS = 365 * DAY_MS;
 
 export const OmpGraphPanel: React.FC = () => {
   const { agents } = useTaskContext();
@@ -36,11 +42,17 @@ export const OmpGraphPanel: React.FC = () => {
   const [viz, setViz] = useState<'flat' | 'depth'>('flat');
   const [depthMetric, setDepthMetric] = useState<DepthMetric>('commits');
   const [depthWeeks, setDepthWeeks] = useState<DepthWeek[] | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Bumped only on deliberate view changes (preset switch / refresh) so the canvas
+  // re-centers then — NOT on the 20s poll or a lazy history extend, which must leave
+  // the user's pan/zoom untouched.
+  const [resetKey, setResetKey] = useState(0);
 
   // a slow response for an old range must not overwrite a newer one
   const reqId = useRef(0);
+  const loadingOlderRef = useRef(false);
   const load = useCallback(
-    async (opts?: { force?: boolean }) => {
+    async (opts?: { force?: boolean; replace?: boolean }) => {
       const id = ++reqId.current;
       if (opts?.force) setRefreshing(true);
       try {
@@ -53,7 +65,10 @@ export const OmpGraphPanel: React.FC = () => {
         // which parses fine but omits required fields. Coerce at the boundary so a partial
         // doc becomes null (→ empty state) instead of crashing buildPulseModel on doc.range.
         const nd = normalizeGraphDoc(d);
-        setDoc(nd);
+        // Merge the fresh recent window over any accumulated history (poll), or replace
+        // outright on a preset switch. `replace` drops previously-stitched older windows —
+        // a new preset is a fresh starting window the user can drag back from again.
+        setDoc((prev) => (nd && prev && !opts?.replace ? mergeGraphDocs(prev, nd) : nd));
         setAttribution(normalizeAttribution(a));
         setEmpty(nd ? '' : 'No graph data for this workspace yet — add a repo to your workspace to populate the pulse.');
         setError('');
@@ -68,13 +83,38 @@ export const OmpGraphPanel: React.FC = () => {
   );
 
   useEffect(() => {
-    void load();
+    // A preset change is a fresh window: replace the accumulation and re-center the view.
+    void load({ replace: true });
+    setResetKey((k) => k + 1);
     const iv = setInterval(() => void load(), 20_000);
     return () => {
       clearInterval(iv);
       reqId.current++;
     };
   }, [load]);
+
+  // Lazy history: called when a leftward drag reaches the loaded start edge. Fetches one
+  // bounded older window and stitches it onto the front of the doc, WITHOUT touching the
+  // view — so the user keeps dragging straight into the newly-available past.
+  const earliestLoaded = doc?.range.start;
+  const atHistoryLimit = earliestLoaded != null && earliestLoaded <= Date.now() - MAX_HISTORY_MS;
+  const loadOlder = useCallback(async () => {
+    if (loadingOlderRef.current) return;
+    const end = doc?.range.start;
+    if (end == null || end <= Date.now() - MAX_HISTORY_MS) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const start = Math.max(Date.now() - MAX_HISTORY_MS, end - OLDER_CHUNK_MS);
+    try {
+      const older = normalizeGraphDoc(await apiJson<GraphDocWire>(`/api/graph?start=${Math.round(start)}&end=${Math.round(end)}`));
+      if (older) setDoc((prev) => (prev ? mergeGraphDocs(older, prev) : older));
+    } catch {
+      /* transient — the drag can retry */
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }, [doc?.range.start]);
 
   // DEPTH lazily fetches one real /api/graph window per week row
   useEffect(() => {
@@ -186,6 +226,10 @@ export const OmpGraphPanel: React.FC = () => {
             depthWeeks={depthWeeks}
             depthMetric={depthMetric}
             onDepthMetric={setDepthMetric}
+            resetKey={resetKey}
+            onReachStart={loadOlder}
+            loadingOlder={loadingOlder}
+            atHistoryLimit={atHistoryLimit}
           />
         )}
         {model && sel && <Inspector sel={sel} model={model} attribution={attribution} onClose={close} onTrace={setTrace} />}
