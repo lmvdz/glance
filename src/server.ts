@@ -21,8 +21,7 @@ import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
 import { buildProvenance, type ProvenanceDoc } from "./omp-graph/provenance.ts";
-import { maybeIngestClaudeCode } from "./ingest/claude-code.ts";
-import { maybeIngestCodex } from "./ingest/codex.ts";
+import { ingestHarnesses } from "./ingest/index.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { readModelOutcomes } from "./model-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
@@ -1901,8 +1900,7 @@ async function graphPayload(url: URL, repo: string): Promise<GraphDoc & { plan: 
 	if (hit && !fresh && Date.now() - hit.at < ttl) return { ...hit.doc, plan };
 	// external-harness ledgers (Claude Code sessions) fold into receipts here,
 	// throttled — so the pulse attributes EVERY harness that worked this repo
-	await maybeIngestClaudeCode(stateDir, repo);
-	await maybeIngestCodex(stateDir, repo);
+	await ingestHarnesses(stateDir, repo);
 	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, range ? { range } : { days, futureDays: future });
 	graphCache.set(key, { at: Date.now(), doc });
 	return { ...doc, plan };
@@ -1922,8 +1920,7 @@ async function attributionPayload(url: URL, repo: string): Promise<ReturnType<ty
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
 	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
 	const stateDir = resolveStateDir();
-	await maybeIngestClaudeCode(stateDir, repo);
-	await maybeIngestCodex(stateDir, repo);
+	await ingestHarnesses(stateDir, repo);
 	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
 	return buildAttribution(receipts, range, { plan: planFromEnv() });
 }
@@ -1935,8 +1932,7 @@ async function attributionPayload(url: URL, repo: string): Promise<ReturnType<ty
  */
 async function scoreboardPayload(repo: string): Promise<Scoreboard> {
 	const stateDir = resolveStateDir();
-	await maybeIngestClaudeCode(stateDir, repo);
-	await maybeIngestCodex(stateDir, repo);
+	await ingestHarnesses(stateDir, repo);
 	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
 	return buildScoreboard(receipts, readModelOutcomes(stateDir));
 }
