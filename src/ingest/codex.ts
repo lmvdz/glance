@@ -30,6 +30,7 @@ import { appendReceipt } from "../receipts.ts";
 import type { RunReceipt } from "../types.ts";
 import { estimateCost } from "../omp-graph/rates.ts";
 import { cwdBelongsToRepo, normalizeRepo } from "./claude-code.ts";
+import type { HarnessIngester } from "./harness.ts";
 
 /** Cumulative token usage as Codex reports it (input inclusive of cached). */
 export interface CodexUsage {
@@ -253,19 +254,9 @@ export async function ingestCodex(opts: { stateDir: string; repo: string; codexS
 	return { scanned, ingested };
 }
 
-// ── lazy trigger for the server: at most one walk per THROTTLE_MS per repo ────
-const THROTTLE_MS = 5 * 60_000;
-const lastRun = new Map<string, number>();
-
-export async function maybeIngestCodex(stateDir: string, repo: string): Promise<void> {
-	const key = `${stateDir}:${repo}`;
-	const last = lastRun.get(key) ?? 0;
-	if (Date.now() - last < THROTTLE_MS) return;
-	lastRun.set(key, Date.now());
-	try {
-		const r = await ingestCodex({ stateDir, repo });
-		if (r.ingested > 0) console.log(`codex ingest: ${r.ingested} session(s) → receipts (${r.scanned} scanned)`);
-	} catch (err) {
-		console.warn("codex ingest failed:", err);
-	}
-}
+/** Registered in the harness-ingest framework (src/ingest/harness.ts); throttling + failure
+ *  isolation now live in the shared `ingestAllHarnesses`. */
+export const codexIngester: HarnessIngester = {
+	name: "codex",
+	ingest: (o) => ingestCodex(o),
+};
