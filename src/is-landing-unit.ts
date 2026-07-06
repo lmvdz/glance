@@ -29,9 +29,14 @@ import type { AgentDTO } from "./types.ts";
  */
 export type LandingUnitCandidate = Pick<AgentDTO, "kind" | "executionRole"> & {
 	workflow?: { verify?: { mode?: "verify" | "tdd" | "observe" } };
-	/** Actual authority after approval/env caps and blockers (`AgentDTO.effectiveMode`) — the
-	 *  runtime-capped mode, not the requested/static `autonomyMode`. */
-	effectiveMode?: AutonomyMode;
+	/** Requested/static authority for this run (`AgentDTO.autonomyMode`) — NOT the runtime-capped
+	 *  `effectiveMode`. We key the observe exclusion off the STATIC mode on purpose: `effectiveMode`
+	 *  collapses to "observe" whenever a `blockedReason` is set (autonomy.ts) — and `blockedReason`
+	 *  fires on `dto.error`/`dto.pending`, so an errored or awaiting-input unit that never landed would
+	 *  read as effectiveMode "observe". That unit is a real merge-rate FAILURE and must stay in the
+	 *  denominator; only a by-design plan-only unit (statically requested `autonomyMode: "observe"`)
+	 *  is a non-lander. `effectiveMode` can't distinguish the two — `autonomyMode` can. */
+	autonomyMode?: AutonomyMode;
 };
 
 /**
@@ -39,9 +44,11 @@ export type LandingUnitCandidate = Pick<AgentDTO, "kind" | "executionRole"> & {
  * case counting a missing land row against it would be a false failure:
  *  - `kind === "flue-service"` (types.ts:55) — a synthetic repo ("(flue-service)"), no branch, never merges.
  *  - `executionRole === "observer"` (types.ts:58) — reproduce-and-report; never commits.
- *  - `effectiveMode === "observe"` (autonomy.ts) — `land` is stripped from `availableActions`
- *    (autonomy.ts's `availableActions`); covers the runtime-capped case (a `blockedReason` or a
- *    below-floor `confidence`), not just a statically-requested observe mode.
+ *  - `autonomyMode === "observe"` (types.ts:657) — a by-design plan-only unit; `land` is stripped
+ *    from `availableActions` (autonomy.ts). Keyed off the STATIC requested mode, not the runtime
+ *    `effectiveMode`: the latter collapses to "observe" on any `blockedReason` (incl. `dto.error`/
+ *    `dto.pending`), which would wrongly drop errored/abandoned units — real failures that must be
+ *    counted. See `LandingUnitCandidate.autonomyMode` for the full rationale.
  *  - `workflow.verify.mode === "observe"` (types.ts VerifySpec) — the synthesized observe loop never
  *    fixes/commits.
  *
@@ -53,7 +60,7 @@ export type LandingUnitCandidate = Pick<AgentDTO, "kind" | "executionRole"> & {
 export function isLandingUnit(rec: LandingUnitCandidate): boolean {
 	if (rec.kind === "flue-service") return false;
 	if (rec.executionRole === "observer") return false;
-	if (rec.effectiveMode === "observe") return false;
+	if (rec.autonomyMode === "observe") return false;
 	if (rec.workflow?.verify?.mode === "observe") return false;
 	return true;
 }

@@ -28,20 +28,22 @@ describe("isLandingUnit", () => {
 		expect(isLandingUnit({ kind: "omp-operator", executionRole: "tester" })).toBe(true);
 	});
 
-	test("effectiveMode === observe never lands, even without a static autonomyMode", () => {
-		expect(isLandingUnit({ kind: "omp-operator", effectiveMode: "observe" })).toBe(false);
+	test("a by-design plan-only unit (static autonomyMode === observe) never lands", () => {
+		expect(isLandingUnit({ kind: "omp-operator", autonomyMode: "observe" })).toBe(false);
 	});
 
-	test("a runtime-capped effectiveMode (blocked/low-confidence) is treated the same as observe", () => {
-		// effectiveMode is the ALREADY-CAPPED mode (syncAuthority folds in blockedReason/confidence-floor
-		// caps in squad-manager.ts) — isLandingUnit reads only that, never a separately-requested mode.
-		const capped: LandingUnitCandidate = { kind: "omp-operator", effectiveMode: "observe" };
-		expect(isLandingUnit(capped)).toBe(false);
+	test("an errored/blocked unit is NOT dropped from the denominator (keyed off static mode, not effectiveMode)", () => {
+		// The bug this guards: effectiveMode collapses to "observe" whenever a blockedReason is set
+		// (autonomy.ts), and blockedReason fires on dto.error/dto.pending. An errored, never-landed unit
+		// is a REAL merge-rate failure and must stay counted. isLandingUnit reads the static autonomyMode,
+		// so an autodrive unit that errored (live effectiveMode would be "observe") still counts as landing.
+		const errored: LandingUnitCandidate = { kind: "omp-operator", autonomyMode: "autodrive" };
+		expect(isLandingUnit(errored)).toBe(true);
 	});
 
-	test("assist/autodrive effectiveMode lands", () => {
-		expect(isLandingUnit({ kind: "omp-operator", effectiveMode: "assist" })).toBe(true);
-		expect(isLandingUnit({ kind: "omp-operator", effectiveMode: "autodrive" })).toBe(true);
+	test("assist/autodrive requested mode lands", () => {
+		expect(isLandingUnit({ kind: "omp-operator", autonomyMode: "assist" })).toBe(true);
+		expect(isLandingUnit({ kind: "omp-operator", autonomyMode: "autodrive" })).toBe(true);
 	});
 
 	test("a workflow synthesized observe verify-loop never lands", () => {
@@ -67,7 +69,7 @@ describe("landingRosterOf", () => {
 			{ kind: "omp-operator" }, // lands
 			{ kind: "flue-service" }, // excluded
 			{ kind: "omp-operator", executionRole: "observer" }, // excluded
-			{ kind: "omp-operator", effectiveMode: "observe" }, // excluded
+			{ kind: "omp-operator", autonomyMode: "observe" }, // excluded (by-design plan-only)
 			{ kind: "workflow", workflow: { verify: { mode: "observe" } } }, // excluded
 			{ kind: "omp-operator", executionRole: "tester" }, // lands
 			{ kind: "workflow" }, // lands
