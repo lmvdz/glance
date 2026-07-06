@@ -431,7 +431,7 @@ function fmtIdle(ms: number): string {
 // ───────────────────────────── attention items ─────────────────────────────
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
-export type AttentionKind = 'blocked' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report';
+export type AttentionKind = 'blocked' | 'vetoed' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report';
 export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer';
 
 /** Epic 5 (HITL safeguards, DESIGN.md D3): a working agent is considered drifting once it's gone
@@ -537,8 +537,25 @@ export function attentionItems(input: AttentionInput): AttentionItem[] {
       continue;
     }
 
-    // Ready to land → land.
-    if (a.landReady) {
+    // Validator veto → review. A green proof the INDEPENDENT judge rejected: the single most
+    // important land-time "needs you" event, and it must NOT read as a calm "ready to land" row.
+    if (a.landReady && a.validation?.verdict === 'veto') {
+      items.push({
+        id: `veto:${a.id}`,
+        severity: 'critical',
+        kind: 'vetoed',
+        title: `${a.name} was vetoed by the validator`,
+        detail: a.validation.rationale || 'The independent validator rejected this change despite a green proof — review before landing.',
+        agentId: a.id,
+        since: a.lastActivity,
+        action: { label: 'Review', kind: 'view' },
+      });
+      mark(a.id, 'vetoed');
+      mark(a.id, 'land-ready'); // suppress the calm land-ready row below for the same agent
+    }
+
+    // Ready to land → land. A veto is handled above and must not ALSO show a calm land row.
+    if (a.landReady && a.validation?.verdict !== 'veto') {
       const canLand = a.availableActions === undefined || a.availableActions.includes('land');
       items.push({
         id: `land:${a.id}`,

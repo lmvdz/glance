@@ -380,6 +380,17 @@ describe('attentionItems', () => {
     expect(items[0].kind).toBe('blocked');
   });
 
+  test('vetoed land-ready agent → a critical "vetoed" row with the rationale, and NOT a calm land row', () => {
+    const validation = { verdict: 'veto' as const, agreement: 0, confidence: 0.9, perCriterion: [], rationale: 'criterion 2 unmet' };
+    const items = attentionItems({ agents: [agent('a', 'idle', { landReady: true, validation })] });
+    const veto = items.find((i) => i.kind === 'vetoed');
+    expect(veto).toBeDefined();
+    expect(veto?.severity).toBe('critical');
+    expect(veto?.detail).toContain('criterion 2 unmet');
+    expect(veto?.action?.kind).toBe('view');
+    expect(items.some((i) => i.kind === 'land-ready')).toBe(false); // the calm row is suppressed
+  });
+
   test('collisions become warn view items', () => {
     const items = attentionItems({ collisions: [{ file: 'src/x.ts', agents: [{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }] }] });
     expect(items[0].kind).toBe('collision');

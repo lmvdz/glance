@@ -502,3 +502,48 @@ test("list view prompts to answer when agents need input", () => {
 	const plain = buildBoard(board({ view: "list" })).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
 	expect(plain).toContain("press a to answer");
 });
+
+// ── Trust legibility: the TUI must surface the fields it previously discarded ──────────────
+// (validator VETO, land-readiness, confidence, and an exception-first sort). Regression guard for
+// feat/surface-validator-confidence.
+
+const strip = (lines: string[]) => lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+
+test("buildBoard sorts an errored agent ABOVE an idle one (exception-first, was buried before)", () => {
+	const agents = [dto({ id: "i", name: "idler", status: "idle" }), dto({ id: "e", name: "crasher", status: "error", error: "boom" })];
+	const plain = strip(buildBoard(board({ view: "list", selectedId: "i", agents })));
+	const idxErr = plain.findIndex((l) => l.includes("crasher"));
+	const idxIdle = plain.findIndex((l) => l.includes("idler"));
+	expect(idxErr).toBeGreaterThan(-1);
+	expect(idxErr).toBeLessThan(idxIdle); // error floats above idle
+});
+
+test("buildBoard flags a validator VETO on a green land-ready agent (badge + title + float)", () => {
+	const vetoed = dto({ id: "v", name: "vetoed-one", status: "idle", landReady: true, verificationState: "fresh", validation: { verdict: "veto", agreement: 0, confidence: 0.9, perCriterion: [], rationale: "criterion 2 unmet" } });
+	const idle = dto({ id: "z", name: "zzz-idle", status: "idle" });
+	const plain = strip(buildBoard(board({ view: "list", selectedId: "z", agents: [idle, vetoed] })));
+	const joined = plain.join("\n");
+	expect(joined).toContain("VETO"); // the row badge
+	expect(joined).toContain("1 vetoed"); // the title count
+	// vetoed agent floats above a plain idle one
+	expect(plain.findIndex((l) => l.includes("vetoed-one"))).toBeLessThan(plain.findIndex((l) => l.includes("zzz-idle")));
+});
+
+test("buildBoard agent view shows the landing/authority line: proof, VETO+rationale, confidence, mode", () => {
+	const sel = dto({ id: "s", name: "sole", status: "idle", landReady: true, verificationState: "fresh", effectiveMode: "assist", confidence: 0.22, validation: { verdict: "veto", agreement: 0, confidence: 0.9, perCriterion: [], rationale: "missing tests" } });
+	const plain = strip(buildBoard(board({ view: "agent", selectedId: "s", agents: [sel] }))).join("\n");
+	expect(plain).toContain("proof fresh");
+	expect(plain).toContain("VETOED: missing tests");
+	expect(plain).toContain("conf 22%");
+	expect(plain).toContain("propose-only"); // 0.22 < 0.4 floor
+	expect(plain).not.toContain("ready to land"); // a veto is NOT ready to land
+});
+
+test("buildBoard shows a plain land-ready agent as ready (no veto)", () => {
+	const sel = dto({ id: "s", name: "sole", status: "idle", landReady: true, verificationState: "fresh", confidence: 0.8 });
+	const plain = strip(buildBoard(board({ view: "agent", selectedId: "s", agents: [sel] }))).join("\n");
+	expect(plain).toContain("ready to land");
+	expect(plain).not.toContain("propose-only");
+	const list = strip(buildBoard(board({ view: "list", selectedId: "s", agents: [sel] }))).join("\n");
+	expect(list).toContain("1 ready");
+});

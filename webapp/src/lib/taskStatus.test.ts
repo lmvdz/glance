@@ -149,3 +149,23 @@ describe('taskListRank', () => {
     expect([...ranks].sort((x, y) => x - y)).toEqual(ranks); // already ascending
   });
 });
+
+describe('validator veto downgrades "ready to land"', () => {
+  const veto = { verdict: 'veto' as const, agreement: 0, confidence: 0.9, perCriterion: [], rationale: 'nope' };
+  test('a vetoed land-ready agent is CRITICAL "review", never a calm "ready to land"', () => {
+    const s = summarizeTask([agent('a', 'idle', { landReady: true, validation: veto })]);
+    expect(s.posture).toBe('needs-you');
+    expect(s.verdict).toBe('critical');
+    expect(s.headline).toContain('vetoed by the validator');
+    expect(s.vetoed.map((a) => a.id)).toEqual(['a']);
+    // and it floats to the very top of the rail (critical needs-you)
+    expect(taskListRank(s, false)).toBe(0);
+  });
+  test('a land-ready agent with a PASS verdict stays the calm warn "ready to land"', () => {
+    const pass = { ...veto, verdict: 'pass' as const };
+    const s = summarizeTask([agent('a', 'idle', { landReady: true, validation: pass })]);
+    expect(s.verdict).toBe('warn');
+    expect(s.headline).toContain('ready to land');
+    expect(s.vetoed).toHaveLength(0);
+  });
+});
