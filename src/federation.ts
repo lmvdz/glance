@@ -18,7 +18,7 @@ import { Result } from "effect";
 import type { Actor, AgentDTO, ClientCommand, OperatorPresence } from "./types.ts";
 import type { LeaseEntry } from "./leases.ts";
 import { repoIdentity } from "./repo-identity.ts";
-import { decodeClientCommand } from "./schema/client-command.ts";
+import { decodeFederationFrame } from "./schema/federation-frame.ts";
 
 export const LOCAL_ACTOR: Actor = { id: "local", origin: "local" };
 
@@ -287,7 +287,7 @@ const INITIAL_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 30_000;
 
 /** Wire frames exchanged with the coordinator. */
-type FederationFrame =
+export type FederationFrame =
 	| { kind: "presence"; presence: OperatorPresence }
 	| { kind: "command"; cmd: ClientCommand; actor: Actor; ip?: string; to?: string; cmdId?: string }
 	| { kind: "command-ack"; cmdId: string; to: string; from?: string; outcome: CommandAck["outcome"]; detail?: string }
@@ -504,7 +504,11 @@ export class TailnetFederationBus implements FederationBus {
 	private async handleFrame(data: unknown): Promise<void> {
 		try {
 			if (typeof data !== "string") return;
-			const frame = JSON.parse(data) as FederationFrame;
+			// The wire is fully untrusted (OMPSQ-162): a peer controls every byte. Validate the whole
+			// frame envelope — including the embedded command — before fanning it out. Malformed ⇒ drop.
+			const decodedFrame = decodeFederationFrame(JSON.parse(data));
+			if (Result.isFailure(decodedFrame)) return;
+			const frame = decodedFrame.success;
 			switch (frame.kind) {
 				case "presence":
 					for (const cb of this.presenceCbs) cb(frame.presence);
@@ -512,13 +516,9 @@ export class TailnetFederationBus implements FederationBus {
 				case "command": {
 					// Addressed to a specific operator ⇒ everyone else drops it (the coordinator broadcasts).
 					if (frame.to !== undefined && frame.to !== this.operator.id) break;
-					// The wire is untrusted (OMPSQ-162): validate the command envelope before it reaches
-					// applyCommand. A peer that ships a malformed/hostile command frame is dropped here.
-					const decoded = decodeClientCommand(frame.cmd);
-					if (Result.isFailure(decoded)) break;
 					const actor = await this.resolveActor(frame);
 					// The CLAIMED sender id addresses the ack only — never authority (that's `actor`).
-					for (const cb of this.commandCbs) cb({ cmd: decoded.success, actor, cmdId: frame.cmdId, replyTo: frame.actor?.id });
+					for (const cb of this.commandCbs) cb({ cmd: frame.cmd, actor, cmdId: frame.cmdId, replyTo: frame.actor?.id });
 					break;
 				}
 				case "command-ack": {

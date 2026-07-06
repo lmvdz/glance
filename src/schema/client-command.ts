@@ -84,7 +84,8 @@ export interface ClientCommandDecodeError {
 	readonly message: string;
 }
 
-function formatIssue(issue: unknown): string {
+/** Collapse a Schema decode issue into a single-line, bounded reason for a 4xx body or a log. */
+export function formatDecodeIssue(issue: unknown): string {
 	const raw = typeof (issue as { message?: unknown })?.message === "string" ? (issue as { message: string }).message : String(issue);
 	return raw.replace(/\s+/g, " ").trim().slice(0, 200);
 }
@@ -99,6 +100,6 @@ function formatIssue(issue: unknown): string {
  */
 export function decodeClientCommand(input: unknown): Result.Result<ClientCommand, ClientCommandDecodeError> {
 	const r = decodeCmd(input);
-	if (Result.isFailure(r)) return Result.fail({ message: formatIssue(r.failure) });
+	if (Result.isFailure(r)) return Result.fail({ message: formatDecodeIssue(r.failure) });
 	return Result.succeed(r.success as ClientCommand);
 }
