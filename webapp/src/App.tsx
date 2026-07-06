@@ -19,6 +19,7 @@ import { FleetHealthPanel } from './components/FleetHealthPanel';
 import { HeatPanel } from './components/HeatPanel';
 import { ActivityHeatmapPanel } from './components/ActivityHeatmapPanel';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
+import { ScoreboardPanel } from './components/ScoreboardPanel';
 import { TopologyPanel } from './components/TopologyPanel';
 import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
@@ -55,6 +56,7 @@ const MainContent = () => {
   if (view === 'heat') return <HeatPanel />;
   if (view === 'activity-heatmap') return <ActivityHeatmapPanel />;
   if (view === 'omp-graph') return <OmpGraphPanel />;
+  if (view === 'scoreboard') return <ScoreboardPanel />;
   if (view === 'topology') return <TopologyPanel />;
   if (view === 'knowledge') return <KnowledgePanel />;
   if (view === 'federation') return <FederationPanel />;

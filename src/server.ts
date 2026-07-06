@@ -22,6 +22,8 @@ import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
 import { buildProvenance, type ProvenanceDoc } from "./omp-graph/provenance.ts";
 import { maybeIngestClaudeCode } from "./ingest/claude-code.ts";
+import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
+import { readModelOutcomes } from "./model-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
@@ -1158,12 +1160,13 @@ export class SquadServer {
 		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
 		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
 		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
-		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit" || url.pathname === "/api/graph/attribution" || url.pathname === "/api/graph/provenance") {
+		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit" || url.pathname === "/api/graph/attribution" || url.pathname === "/api/graph/scoreboard" || url.pathname === "/api/graph/provenance") {
 			const repo = resolveGraphRepo(url, manager);
 			if (!repo) return new Response("repo not allowed", { status: 403 });
 			if (url.pathname === "/api/graph") return Response.json(await graphPayload(url, repo));
 			if (url.pathname === "/api/graph/commit") return Response.json(await commitDetailPayload(url, repo));
 			if (url.pathname === "/api/graph/attribution") return Response.json(await attributionPayload(url, repo));
+			if (url.pathname === "/api/graph/scoreboard") return Response.json(await scoreboardPayload(repo));
 			return Response.json(await provenancePayload(url, repo, manager));
 		}
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
@@ -1920,6 +1923,18 @@ async function attributionPayload(url: URL, repo: string): Promise<ReturnType<ty
 	await maybeIngestClaudeCode(stateDir, repo);
 	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
 	return buildAttribution(receipts, range, { plan: planFromEnv() });
+}
+
+/**
+ * The model scoreboard: land-rate (per complexity tier) + $/landed-change per model, joining the
+ * model-outcome ledger with receipt cost. Answers the agent-selection rubric from real outcomes.
+ * Outcomes are fleet-global (the ledger is not repo-keyed); cost is this repo's receipts.
+ */
+async function scoreboardPayload(repo: string): Promise<Scoreboard> {
+	const stateDir = resolveStateDir();
+	await maybeIngestClaudeCode(stateDir, repo);
+	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
+	return buildScoreboard(receipts, readModelOutcomes(stateDir));
 }
 
 /** GET /api/graph/provenance?id=OMPSQ-336 — the plan→agent→proof→land thread for one ticket. */
