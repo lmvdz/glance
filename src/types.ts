@@ -809,6 +809,13 @@ export interface PersistedAgent {
 	 *  moment the daemon restarts, even though nothing about the receipts themselves changed. Threaded
 	 *  through every boot path via `lineageFieldsFrom`, same sticky rule as the two live-run write sites. */
 	traceId?: string;
+	/** The durable "what we picked" record of `routeIntake`'s decision (model-routing-control-loop
+	 *  concern 03) — stamped once at create time, never mutated after. `mode` is the resolved verify
+	 *  mode ("tdd"/"verify"/"none", or whatever the router or an explicit `opts.verify` settled on);
+	 *  `tier` is `tierOf(thinking)` (model-outcomes.ts), the same coarse bucketing the model-outcome
+	 *  ledger already uses, so a later join (task-outcomes.ts) groups on identical axes. Additive/
+	 *  optional: absent on any agent persisted before this field existed. */
+	routing?: { mode: string; tier: string; thinking?: ThinkingLevel; routedAt: number };
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */

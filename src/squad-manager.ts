@@ -139,6 +139,7 @@ import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { landingRosterOf } from "./is-landing-unit.ts";
+import { recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { scoreConfidence } from "./confidence.ts";
@@ -2364,6 +2365,33 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
+		// Joined task-outcome row (Epic 6 concern 03): idempotent, agentId-keyed row joining the routing
+		// decision (`rec.options.routing`) with the terminal land outcome. Deliberately a WIDER gate than
+		// the block above — `!result.retryable` alone, not `!result.retryable && (auto || result.ok)` —
+		// because a manual (auto:false) FAILURE is exactly the combination the narrower guard drops
+		// (auto=false, result.ok=false ⇒ `(auto||result.ok)` is false), and an operator-driven land failure
+		// must not be silently missing from the observability surface. A retryable refusal (dirty main,
+		// etc.) is an environmental precondition, not a terminal outcome — no row for it; the roster
+		// denominator (isLandingUnit) already accounts for it correctly without one. Never gates the land
+		// itself; purely record-only, after the outcome is already known, same as its two siblings above.
+		if (!result.retryable) {
+			try {
+				await recordTaskOutcome(this.stateDir, {
+					agentId: dto.id,
+					branch: dto.branch,
+					routing: rec.options.routing ?? { mode: "none", tier: tierOf(rec.options.thinking) },
+					model: dto.model,
+					costUsd: dto.receipt?.costUsd,
+					confidence: dto.confidence,
+					validation: rec.dto.validation?.verdict,
+					outcome: result.ok ? "landed" : "rejected",
+					source: "land",
+					ts: Date.now(),
+				} satisfies TaskOutcomeRow);
+			} catch (err) {
+				this.log("warn", `task-outcome record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
 		// Forced land that merged WITHOUT a passing proof gate — audit it so the override is never invisible trust.
 		if (result.forcedWithoutProof) {
 			const forceActor = opts.actor ?? LOCAL_ACTOR;
@@ -3098,6 +3126,11 @@ export class SquadManager extends EventEmitter {
 			requires: opts.requires,
 			produces,
 			scopeSource: opts.scopeSource,
+			// Joined task-outcome row (concern 03): the durable "what we picked" record. `opts.verifyMode`
+			// already carries `decision.mode` by this point when routeIntake ran above (it overwrote
+			// `opts.verifyMode` at the routing call site) — so this formula covers BOTH the routed and the
+			// explicit-verify-mode paths without re-deriving the router's decision here.
+			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now() },
 		};
 
 		const dto: AgentDTO = {
@@ -4474,6 +4507,24 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Resolve a stable `agentId` for `branch` when the live `AgentRecord` may already be gone from the
+	 * roster — the reconciler's out-of-band backstop (`reconcileOnePr`) runs well after the fact, often
+	 * on a daemon restart, by which point `this.agents` may no longer hold the record `agentByBranch`
+	 * would find. Falls back to scanning durable receipts (`RunReceipt.branch`/`agentId` are both stable
+	 * and survive roster eviction) for the most recent match. Undefined ⇒ genuinely unresolvable; the
+	 * caller must log-and-skip rather than fabricate an id (a made-up id would corrupt task-outcomes'
+	 * agentId-keyed idempotency).
+	 */
+	private async resolveAgentIdForBranch(branch: string): Promise<string | undefined> {
+		const live = this.agentByBranch(branch);
+		if (live) return live.dto.id;
+		const receipts = await readAllReceipts(this.stateDir);
+		let found: string | undefined;
+		for (const r of receipts) if (r.branch === branch) found = r.agentId; // last (most recent) match wins
+		return found;
+	}
+
+	/**
 	 * Attempt (or confirm) the Plane close for `entry`'s tracked issue. Returns true when there is
 	 * nothing left to confirm: the entry never had a tracked issue, autoclose is off (so there is
 	 * nothing to retry — a disabled close is done, not failed), it was already closed (idempotent via
@@ -4594,6 +4645,32 @@ export class SquadManager extends EventEmitter {
 			const rec = this.agentByBranch(entry.branch);
 			if (rec) rec.dto.landReady = false; // successful land ⇒ clear the confirm-mode staged flag, same as land()
 			recordLandOutcome(this.stateDir, entry.branch, true, "merged out-of-band");
+			// Joined task-outcome row (concern 03): this path is branch-keyed and the AgentRecord may
+			// already be evicted from the live roster by the time an out-of-band merge is caught —
+			// resolve the SAME agentId land() would have written via the roster-then-receipts fallback, so
+			// the idempotent upsert-on-read collapses to one row instead of a duplicate. Unresolvable ⇒
+			// log-and-skip (never fabricate an agentId — see resolveAgentIdForBranch's doc).
+			const outcomeAgentId = rec?.dto.id ?? (await this.resolveAgentIdForBranch(entry.branch));
+			if (outcomeAgentId) {
+				try {
+					await recordTaskOutcome(this.stateDir, {
+						agentId: outcomeAgentId,
+						branch: entry.branch,
+						routing: rec?.options.routing ?? { mode: "none", tier: tierOf(rec?.options.thinking) },
+						model: rec?.dto.model,
+						costUsd: rec?.dto.receipt?.costUsd,
+						confidence: rec?.dto.confidence,
+						validation: rec?.dto.validation?.verdict,
+						outcome: "landed",
+						source: "reconciled",
+						ts: Date.now(),
+					} satisfies TaskOutcomeRow);
+				} catch (err) {
+					this.log("warn", `task-outcome record failed for ${entry.branch} (reconciled, non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				}
+			} else {
+				this.log("warn", `task-outcome: could not resolve agentId for out-of-band merge of ${entry.branch} — skipping row (roster gone, no matching receipt)`);
+			}
 			const closed = await this.attemptCloseFor(entry, repo);
 			if (rec) this.emitAgent(rec);
 			updatePendingPr(this.stateDir, entry.branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now(), ...(closed ? { issueClosedAt: Date.now() } : {}) });
