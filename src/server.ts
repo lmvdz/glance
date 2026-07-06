@@ -14,7 +14,9 @@ import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
+import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
+import { decodeClientCommand } from "./schema/client-command.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
@@ -530,12 +532,17 @@ export class SquadServer {
 				},
 				close: (ws) => this.unregisterSocket(ws),
 				message: async (ws, raw) => {
-					let cmd: ClientCommand;
+					let parsed: unknown;
 					try {
-						cmd = JSON.parse(typeof raw === "string" ? raw : raw.toString());
+						parsed = JSON.parse(typeof raw === "string" ? raw : raw.toString());
 					} catch {
 						return;
 					}
+					// Untrusted wire: validate the command envelope before dispatch. A malformed or
+					// hostile frame (unknown type, mistyped/missing field, injected keys) is dropped.
+					const decoded = decodeClientCommand(parsed);
+					if (Result.isFailure(decoded)) return;
+					const cmd = decoded.success;
 					// Route to the socket's org fleet (registry mode) or the single manager; org never from the wire.
 					const actor = this.actorForSocket(ws);
 					const m = await this.managerFor(actor);
@@ -1455,12 +1462,15 @@ export class SquadServer {
 			return Response.json({ ok: true, pull, git: after, restarting: true });
 		}
 		if (url.pathname === "/api/command" && req.method === "POST") {
-			let cmd: ClientCommand;
+			let body: unknown;
 			try {
-				cmd = (await req.json()) as ClientCommand;
+				body = await req.json();
 			} catch {
 				return new Response("bad json", { status: 400 });
 			}
+			const decoded = decodeClientCommand(body);
+			if (Result.isFailure(decoded)) return new Response(`bad command: ${decoded.failure.message}`, { status: 400 });
+			const cmd = decoded.success;
 			if (cmd.type === "create") {
 				const dto = await manager.create({ ...cmd.options, track: true }, actor);
 				return Response.json(dto);
