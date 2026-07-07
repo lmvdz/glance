@@ -27,12 +27,20 @@
  */
 
 import path from "node:path";
+import { Schema } from "effect";
 import { getStorageBackend } from "./dal/storage.ts";
+import { decodeJsonWith } from "./schema/external-json.ts";
 
 export interface RemovedLedger {
 	has(id: string): boolean;
 	add(id: string): void;
 }
+
+/** On-disk shape: a JSON array of tombstoned agent ids (written sorted by writeIds). A real Schema
+ *  decode (src/schema/external-json.ts convention) rather than a `JSON.parse as` cast — persisted
+ *  state survives daemon upgrades, so the shape check is a genuine trust boundary, and it keeps the
+ *  json-parse-as-cast ratchet flat. */
+const RemovedIdsSchema = Schema.Array(Schema.String);
 
 function readIds(stateDir: string): Set<string> {
 	try {
@@ -41,9 +49,8 @@ function readIds(stateDir: string): Set<string> {
 		if (!b.exists(file)) return new Set();
 		const raw0 = b.readTextSync(file);
 		if (raw0 === undefined) return new Set();
-		const raw = JSON.parse(raw0) as unknown;
-		if (!Array.isArray(raw)) return new Set();
-		return new Set(raw.filter((x): x is string => typeof x === "string" && x.length > 0));
+		const ids = decodeJsonWith(RemovedIdsSchema, raw0);
+		return new Set((ids ?? []).filter((x) => x.length > 0));
 	} catch {
 		return new Set(); // corrupt/unreadable ⇒ behave as "nothing tombstoned" this boot; never crash start()
 	}
