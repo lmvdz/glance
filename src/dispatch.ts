@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { existsSync } from "node:fs";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { DispatchLedger } from "./dispatch-ledger.ts";
+import { harnessScorecardLogLine } from "./harness-scorecard.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
@@ -97,8 +98,11 @@ export interface DispatchDeps {
 	repos: () => string[];
 	/** Open issues for a repo; `null` ⇒ Plane not configured / unreachable (skip). */
 	listIssues: (repo: string) => Promise<IssueRef[] | null>;
-	/** Spawn a routed agent for an issue (→ manager.create with autoRoute). */
-	spawn: (repo: string, issue: IssueRef) => Promise<void>;
+	/** Spawn a routed agent for an issue (→ manager.create with autoRoute). Returning the created DTO is
+	 *  optional (existing test fakes returning `Promise<void>` keep working) — when present, `tick()`
+	 *  reads its `harnessScorecard` (concern 03, advisory-only) to log context-poor units at the moment
+	 *  of admission. Never gates on it: a `void`-returning spawn behaves byte-for-byte as before. */
+	spawn: (repo: string, issue: IssueRef) => Promise<AgentDTO | void>;
 	/** Issue ids already represented in the roster (any state) — never double-dispatch. */
 	claimed: () => Set<string>;
 	/** Count of dispatched agents currently busy — caps concurrency. */
@@ -348,9 +352,14 @@ export class Dispatcher {
 					this.blockedLogged.delete(issue.id); // dispatching ⇒ no longer deferred
 					this.deps.log(`dispatch ${issue.identifier ?? issue.id} — ${issue.name}`);
 					try {
-						await this.deps.spawn(repo, issue);
+						const dto = await this.deps.spawn(repo, issue);
 						spawned++;
 						budget--;
+						// Harness scorecard (concern 03, advisory-only): surface a context-poor unit right at
+						// admission — the log line is a no-op (undefined) for a clean 5/5 or a void-returning
+						// spawn, so this never changes behavior for a caller that doesn't return a DTO.
+						const line = dto ? harnessScorecardLogLine(dto.harnessScorecard) : undefined;
+						if (line) this.deps.log(`${issue.identifier ?? issue.id}: ${line}`);
 					} catch (err) {
 						this.deps.log(`dispatch failed for ${issue.id}: ${err instanceof Error ? err.message : String(err)}`);
 					}

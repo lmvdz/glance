@@ -343,6 +343,39 @@ test("dispatchOrder ranks known priorities before plain issues", () => {
 
 // #17: a transient (thrown) Plane poll is retried once and recovers; a persistent failure is surfaced
 // (log) and skipped for that repo instead of rejecting the whole tick.
+// Concern 03 (harness scorecard, advisory shadow): dispatch() is the auto-dispatch admission point —
+// when `spawn` returns the created DTO, a red-flagged scorecard is surfaced as a log line right at
+// dispatch time, never affecting spawn count, budget, or dispatched-set bookkeeping.
+test("harness scorecard: a red-flagged spawn logs a one-line diagnostic naming the issue", async () => {
+	const logs: string[] = [];
+	const { deps } = harness({
+		log: (m) => logs.push(m),
+		listIssues: async () => [issue("A")],
+		spawn: async (_repo, iss) => ({ ...dto("working"), id: iss.id, harnessScorecard: { score: 3, dimensions: { instructions: false, tools: true, environment: true, state: true, feedback: false }, redFlags: ["no real task/spec text reaches the agent", "no real feedback gate"], at: 0 } }),
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(1);
+	expect(logs.some((m) => m.includes("A") && m.includes("harness scorecard 3/5") && m.includes("no real feedback gate"))).toBe(true);
+});
+
+test("harness scorecard: a clean 5/5 spawn logs nothing extra", async () => {
+	const logs: string[] = [];
+	const { deps } = harness({
+		log: (m) => logs.push(m),
+		listIssues: async () => [issue("A")],
+		spawn: async (_repo, iss) => ({ ...dto("working"), id: iss.id, harnessScorecard: { score: 5, dimensions: { instructions: true, tools: true, environment: true, state: true, feedback: true }, redFlags: [], at: 0 } }),
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(1);
+	expect(logs.some((m) => m.includes("harness scorecard"))).toBe(false);
+});
+
+test("harness scorecard: a void-returning spawn (no DTO) behaves exactly as before — never a scorecard log", async () => {
+	const logs: string[] = [];
+	const { deps, spawned } = harness({ log: (m) => logs.push(m) });
+	expect(await new Dispatcher(deps).tick()).toBe(3);
+	expect(spawned.sort()).toEqual(["A", "B", "C"]);
+	expect(logs.some((m) => m.includes("harness scorecard"))).toBe(false);
+});
+
 test("(#17) a transient listIssues throw is retried once and the poll recovers", async () => {
 	let attempts = 0;
 	const { deps, spawned } = harness({
