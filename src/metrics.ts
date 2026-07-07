@@ -89,7 +89,17 @@ export function isOn(v: Variant): boolean {
 
 // ── metrics ───────────────────────────────────────────────────────────────────────────────
 
-export type MetricName = "first-try-green" | "fixups-to-green" | "escalation" | "land-failure-streak" | "primer-empty" | "model-outcome-recorded" | "veto-reprompt" | "decision-captured" | "model-route-decision";
+export type MetricName =
+	| "first-try-green"
+	| "fixups-to-green"
+	| "escalation"
+	| "land-failure-streak"
+	| "primer-empty"
+	| "model-outcome-recorded"
+	| "model-outcome-blocked"
+	| "veto-reprompt"
+	| "decision-captured"
+	| "model-route-decision";
 
 export interface MetricEvent {
 	/** Strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */

@@ -70,7 +70,9 @@ export const PATTERNS: Pattern[] = [
 		regex: /instanceof Error \? /,
 		allowlist: [],
 		// 88→91: reland stale-baseline correction (no tagged-error hierarchy exists yet to migrate TO).
-		baseline: 91,
+		// 91→90: land()'s outcome-record block routes through squad-manager's `errText` helper
+		// (3 inline sites → 1 helper line) pending the tagged-error hierarchy — the ratchet only goes DOWN.
+		baseline: 90,
 	},
 ];
 

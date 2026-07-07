@@ -139,11 +139,11 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
-import { recordModelOutcome, tierOf } from "./model-outcomes.ts";
+import { recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { shadowCostCheck } from "./cost-gate.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
-import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
+import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
@@ -287,6 +287,23 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 		required: ["text"],
 	},
 };
+
+/** Human-readable text for an unknown catch value — the ONE place this module spells out the
+ *  `instanceof Error` idiom, pending the tagged-error hierarchy the effect-migration ratchet tracks.
+ *  New catch sites must call this instead of inlining the pattern (the ratchet bites on inlines). */
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * Re-emit cooldown for the repo-level "land blocked" warn event (research-sirvir/01, review). The
+ * orchestrator re-attempts retryable lands every ~30s tick, so an unthrottled emit floods
+ * automation.jsonl (append-only, no rotation) at 120 rows/hr/agent. The event CANNOT be suppressed
+ * outright, though: factory-status derives the landBlocked banner from FRESH "land" rollup rows, so a
+ * persisting refusal must keep re-emitting inside that freshness window or the banner silently
+ * self-clears while landing is still blocked. Derived from the exported window floor minus one
+ * orchestrator-tick margin (never an independent number that could drift past the window): a
+ * persistent dirty main re-emits every ~4 minutes — one warn per repo condition, not per agent-tick.
+ */
+const LAND_BLOCKED_WARN_COOLDOWN_MS = FACTORY_FRESHNESS_FLOOR_MS - 60_000;
 
 function peerMessageBudget(): number {
 	return envInt("OMP_SQUAD_PEERMSG_BUDGET", 5);
@@ -638,6 +655,17 @@ export class SquadManager extends EventEmitter {
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
 	private readonly reattached = new Set<string>();
+	/** Edge-trigger for the blocked model-outcome counter (research-sirvir/01, review): the orchestrator
+	 *  re-attempts a retryable land every ~30s, so an unconditional increment turns `blocked` into a
+	 *  tick-rate artifact instead of "attempted, couldn't land cleanly" per EPISODE. Keyed
+	 *  `${repo}::${branch}` → `${headSha}::${reasonClass}`; increment only when the episode value
+	 *  changes, cleared for a branch when a non-retryable outcome records for it. In-memory on purpose:
+	 *  a daemon restart re-records at most once per still-live episode, which is acceptable noise. */
+	private readonly landBlockedEpisode = new Map<string, string>();
+	/** Last warn-emit ms per `${repo}::${reasonClass}` for the land-blocked automation event — one
+	 *  re-emit per LAND_BLOCKED_WARN_COOLDOWN_MS per repo condition (a dirty main is ONE repo-level
+	 *  fact, not a per-agent fact), keeping the factory-status banner alive without the per-tick flood. */
+	private readonly landBlockedWarnAt = new Map<string, number>();
 	/** Deterministic branch agent ids `reconcileParallelResume` just stopped, so the next `spawnFleetBranch`
 	 *  call under the same id knows to append the "resuming after a restart" addendum to the branch's
 	 *  re-prompt. Consumed (deleted) the moment spawnFleetBranch checks it — short-lived, not persisted. */
@@ -2574,6 +2602,9 @@ export class SquadManager extends EventEmitter {
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
 		// never bump the streak for it, else transient dirty windows park a healthy branch.
 		if (!result.retryable && (auto || result.ok)) {
+			// Any non-retryable outcome (landed OR rejected) closes the branch's blocked EPISODE: the next
+			// retryable refusal is a genuinely new "attempted, couldn't land cleanly" fact, not a repeat.
+			this.landBlockedEpisode.delete(`${dto.repo}::${dto.branch ?? ""}`);
 			recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 			// Model-outcome ledger (Epic 6 concern 06): a cheap, always-on statistic — like land-ledger
 			// itself — so concern 07's default-shift has data on day one even before it's turned on.
@@ -2582,7 +2613,7 @@ export class SquadManager extends EventEmitter {
 				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
 				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
-				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${errText(err)}`);
 			}
 			// Confidence-threshold tuner (Epic 6 concern 08): record the SAME land outcome against this
 			// run's Epic 5 confidence score. `dto.confidence` is undefined for a run that never finished a
@@ -2592,8 +2623,50 @@ export class SquadManager extends EventEmitter {
 			try {
 				recordConfidenceOutcome(this.stateDir, envNumber("OMP_SQUAD_CONFIDENCE_FLOOR", 0.4), dto.confidence, result.ok);
 			} catch (err) {
-				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${errText(err)}`);
 			}
+		} else if (result.retryable) {
+			// research-sirvir/01-recording-unlock (part 2, durable fix): a retryable/environmental refusal
+			// (dominantly a dirty main checkout — a human-editing-the-shared-checkout precondition, not a
+			// branch defect) previously skipped this WHOLE block, including the "cheap, always-on"
+			// model-outcome statistic above — so a fleet that rarely reaches a clean land recorded NOTHING,
+			// not even a failure, and every learning ledger looked empty rather than "blocked". Decoupled:
+			// record the attempt in its own `blocked` bucket (model-outcomes.ts), distinct from
+			// landed/rejected, so the ledger reflects "attempted, couldn't land cleanly" WITHOUT polluting
+			// land-rate — a dirty main isn't the model's fault, and landed/rejected readers (smart-spawn's
+			// outcome-driven default, attribution-scoreboard, cost-gate) must see the SAME numbers as
+			// before this fix. `dto.model` (not `effectiveModel`) here — the receipts read above is
+			// skipped on a retryable result on purpose (comment above), and this statistic doesn't need
+			// the precision fix-up that keying the router's routing-quality read does.
+			//
+			// EDGE-TRIGGERED (review): the orchestrator retries a retryable land every ~30s tick, so an
+			// unconditional increment would make `blocked` a tick-rate artifact (120/hr/agent on a
+			// persistently dirty main), not an episode count. One increment per
+			// (repo, branch, headSha, reasonClass) episode: a new commit on the branch or a different
+			// refusal reason opens a new episode; the non-retryable arm above closes it. In-memory ⇒ a
+			// daemon restart re-records at most once per still-live episode (acceptable).
+			const blockDetail = result.detail ?? result.message;
+			const reasonClass = blockDetail.includes("uncommitted tracked changes") ? "dirty-main" : "retryable";
+			const episodeScope = `${dto.repo}::${dto.branch ?? ""}`;
+			const headSha = await headCommit(dto.worktree).catch(() => "");
+			const episode = `${headSha}::${reasonClass}`;
+			if (this.landBlockedEpisode.get(episodeScope) !== episode) {
+				this.landBlockedEpisode.set(episodeScope, episode);
+				try {
+					recordModelOutcomeBlocked(this.stateDir, dto.model, tierOf(rec.options.thinking));
+					this.learningMetrics.record("model-outcome-blocked", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
+				} catch (err) {
+					this.log("warn", `model-outcomes blocked-record failed for ${dto.name} (non-fatal): ${errText(err)}`);
+				}
+			}
+			// Loud surfaced state (part 2 continued): a retryable refusal must not ONLY accumulate in
+			// land-failures.json (a file nobody looks at until they go forensic) — route it through the
+			// automation observability channel too, the same way `fileScopeFinding` routes a scope-contract
+			// finding, so /api/automation + the automation panel + factory status all see "fleet cannot
+			// land" without a live daemon restart or a manual grep. Cooldown-throttled per repo condition
+			// inside fileLandBlockedFinding (NOT edge-triggered like the counter above: the factory-status
+			// banner needs periodic fresh rows to stay up while the condition persists).
+			this.fileLandBlockedFinding(dto.repo, dto.branch, blockDetail, reasonClass);
 		}
 		// Joined task-outcome row (Epic 6 concern 03): idempotent, agentId-keyed row joining the routing
 		// decision (`rec.options.routing`) with the terminal land outcome. Deliberately a WIDER gate than
@@ -3079,6 +3152,39 @@ export class SquadManager extends EventEmitter {
 			this.automation.for("scope", repo)({ durationMs: 0, level: "warn", detail: message });
 		} catch {
 			/* observability must never break the spawn/finalize path */
+		}
+	}
+
+	/**
+	 * Route a retryable/environmental land refusal through the automation observability channel (the
+	 * "land" loop, event-driven like "scope" above — no cadence/flag of its own): a warn-level event
+	 * that persists, surfaces in /api/automation + the automation panel + factory status's landBlocked
+	 * banner (research-sirvir/01-recording-unlock, part 2). The dominant cause is a dirty main checkout
+	 * (land.ts's "uncommitted tracked changes" refusal) — tagged with the `dirty-main` skipReason so
+	 * factory-status can surface it by name; any OTHER retryable cause (e.g. a PR-mode `gh pr merge`
+	 * hiccup) still fires the event, just without that specific tag. Never blocks a land; best-effort,
+	 * never throws.
+	 *
+	 * Cooldown-throttled per `${repo}::${reasonClass}` (review): a dirty main is ONE repo-level
+	 * condition, so ten agents retrying every 30s must not write ten-agents-worth of rows to the
+	 * append-only automation.jsonl. One warn per LAND_BLOCKED_WARN_COOLDOWN_MS per repo condition —
+	 * deliberately BELOW factory-status's freshness window (see the constant) so a persisting refusal
+	 * keeps producing fresh rollup rows and the banner never self-clears while landing is still blocked.
+	 */
+	private fileLandBlockedFinding(repo: string, branch: string | undefined, detail: string, reasonClass: string, now = Date.now()): void {
+		try {
+			const cooldownKey = `${repo}::${reasonClass}`;
+			if (now - (this.landBlockedWarnAt.get(cooldownKey) ?? 0) < LAND_BLOCKED_WARN_COOLDOWN_MS) return;
+			this.landBlockedWarnAt.set(cooldownKey, now);
+			this.log("warn", `land blocked${branch ? ` (${branch})` : ""}: ${detail}`);
+			this.automation.for("land", repo)({
+				durationMs: 0,
+				level: "warn",
+				skipReason: reasonClass === "dirty-main" ? "dirty-main" : undefined,
+				detail: branch ? `${branch}: ${detail}` : detail,
+			});
+		} catch {
+			/* observability must never break the land path */
 		}
 	}
 	async verifyAgentWork(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
@@ -5510,7 +5616,7 @@ export class SquadManager extends EventEmitter {
 	factoryStatus(now = Date.now()): FactoryStatus {
 		// Freshness window: the widest per-loop budget (3 cadences, floor 5m) so a recent heartbeat still
 		// shows up in the rollup regardless of loop cadence.
-		const windowMs = Math.max(...FACTORY_LOOPS.map((l) => Math.max(l.cadenceMs * 3, 300_000)));
+		const windowMs = Math.max(...FACTORY_LOOPS.map((l) => Math.max(l.cadenceMs * 3, FACTORY_FRESHNESS_FLOOR_MS)));
 		const liveArmed: Record<string, boolean> = {
 			dispatch: !!this.dispatcher,
 			observer: this.observers.length > 0,

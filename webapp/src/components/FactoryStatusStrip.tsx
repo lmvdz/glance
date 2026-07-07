@@ -17,11 +17,12 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Activity, ChevronDown, RefreshCw } from 'lucide-react';
+import { Activity, AlertTriangle, ChevronDown, RefreshCw } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import {
   STATUS_META,
   overallHeadline,
+  landBlockedLine,
   loopReasonLine,
   fmtSince,
   type FactoryStatus,
@@ -140,9 +141,21 @@ export const FactoryStatusStrip: React.FC = () => {
 
   const overall = STATUS_META[data.overall];
   const notArmedCount = data.loops.filter((l) => l.status === 'not-armed').length;
+  const landBlocked = landBlockedLine(data);
 
   return (
     <div className="flex-shrink-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950">
+      {/* "Fleet cannot land" banner — the loudest row when a retryable refusal (dirty main) is live,
+          because EVERY auto-land is being refused and the learning ledgers are starved until it clears
+          (research-sirvir/01-recording-unlock, part 2). */}
+      {landBlocked && (
+        <div className="flex items-center gap-2 border-b border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/20 px-4 py-1.5">
+          <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+          <span className="min-w-0 truncate text-xs font-semibold text-red-700 dark:text-red-300" title={landBlocked}>
+            {landBlocked}
+          </span>
+        </div>
+      )}
       {/* Headline row — always visible. */}
       <div className="flex items-center gap-2.5 px-4 py-2">
         <Activity className="h-4 w-4 flex-shrink-0 text-amber-500" aria-hidden="true" />

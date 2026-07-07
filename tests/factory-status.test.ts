@@ -8,8 +8,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { AutomationRollupRow } from "../src/automation-log.ts";
-import { buildFactoryStatus, deriveLoopReport, deriveOverall, FACTORY_LOOPS, loopFlagEnabled, type BuildFactoryStatusInput } from "../src/factory-status.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { AutomationLog, type AutomationRollupRow } from "../src/automation-log.ts";
+import { buildFactoryStatus, deriveLandBlockStatus, deriveLoopReport, deriveOverall, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, loopFlagEnabled, type BuildFactoryStatusInput } from "../src/factory-status.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -184,5 +187,62 @@ describe("buildFactoryStatus — the whole snapshot", () => {
 		);
 		expect(s.overall).toBe("off");
 		expect(s.loops.every((l) => l.status === "off")).toBe(true);
+	});
+});
+
+describe("deriveLandBlockStatus — the 'fleet cannot land' banner (research-sirvir/01, part 2)", () => {
+	const reason = "squad/a1: main checkout /repo has uncommitted tracked changes — refusing to land";
+
+	test("a recent dirty-main refusal raises the banner with the reason + timestamp", () => {
+		const b = deriveLandBlockStatus([roll("land", { events: 1, errors: 1, lastAt: NOW - 60_000, lastSkipReason: reason })]);
+		expect(b.blocked).toBe(true);
+		expect(b.reason).toBe(reason);
+		expect(b.at).toBe(NOW - 60_000);
+	});
+
+	test("no land row at all → not blocked (the common healthy case)", () => {
+		expect(deriveLandBlockStatus([])).toEqual({ blocked: false });
+		expect(deriveLandBlockStatus([roll("dispatch", { events: 3, lastAt: NOW })])).toEqual({ blocked: false });
+	});
+
+	test("a land row whose NEWEST event carried no skipReason clears the banner (untagged retryable causes stay off it)", () => {
+		expect(deriveLandBlockStatus([roll("land", { events: 2, lastAt: NOW - 1_000 })])).toEqual({ blocked: false });
+	});
+
+	test("buildFactoryStatus surfaces the banner in the whole snapshot", () => {
+		const blocked = buildFactoryStatus(baseInput({ rollup: [roll("land", { events: 1, errors: 1, lastAt: NOW - 5_000, lastSkipReason: reason })] }));
+		expect(blocked.landBlocked.blocked).toBe(true);
+		expect(blocked.landBlocked.reason).toBe(reason);
+		const clean = buildFactoryStatus(baseInput());
+		expect(clean.landBlocked).toEqual({ blocked: false });
+	});
+
+	// Banner LIVENESS across the freshness-window boundary (review): the manager re-emits the warn per
+	// repo condition on a cooldown BELOW the window (LAND_BLOCKED_WARN_COOLDOWN_MS = floor − 60s), so a
+	// refusal persisting for LONGER than the window keeps producing fresh rollup rows and the banner
+	// never silently self-clears. Driven through the REAL AutomationLog ring + rollup, not a synthetic
+	// row — this is the exact pipeline squad-manager's factoryStatus() reads.
+	test("banner liveness: cooldown re-emits keep the banner up past the window; without them it self-clears", () => {
+		const cooldownMs = FACTORY_FRESHNESS_FLOOR_MS - 60_000; // mirrors LAND_BLOCKED_WARN_COOLDOWN_MS's derivation
+		const windowMs = FACTORY_FRESHNESS_FLOOR_MS;
+		const emit = (log: AutomationLog, at: number) =>
+			log.record({ loop: "land", repo: "/repo", durationMs: 0, level: "warn", skipReason: "dirty-main", detail: reason }, at);
+		const dir = mkdtempSync(path.join(os.tmpdir(), "land-banner-liveness-"));
+		try {
+			// Persisting refusal: first emit at t0, re-emits every cooldown. Check well past the window.
+			const withReemits = new AutomationLog(path.join(dir, "a"));
+			const t0 = NOW;
+			for (let t = t0; t <= t0 + 2 * windowMs; t += cooldownMs) emit(withReemits, t);
+			const later = t0 + 2 * windowMs + 30_000; // > 10 minutes of continued refusals, mid-cooldown
+			expect(deriveLandBlockStatus(withReemits.rollup(windowMs, later)).blocked).toBe(true);
+
+			// Counterfactual: a single un-re-emitted warn ages out of the window and the banner clears —
+			// proving the cooldown MUST stay below the window (the constant derivation, not a coincidence).
+			const single = new AutomationLog(path.join(dir, "b"));
+			emit(single, t0);
+			expect(deriveLandBlockStatus(single.rollup(windowMs, t0 + windowMs + 1)).blocked).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

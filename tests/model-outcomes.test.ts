@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { modelKey, modelOutcomes, recordModelOutcome, tierOf } from "../src/model-outcomes.ts";
+import { modelKey, modelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "../src/model-outcomes.ts";
 import type { ThinkingLevel } from "../src/types.ts";
 
 function tmp(): string {
@@ -105,6 +105,100 @@ describe("recordModelOutcome / modelOutcomes", () => {
 		try {
 			chmodSync(dir, 0o500); // read+execute only — writeFileSync inside should fail silently
 			expect(() => recordModelOutcome(dir, "opus", "heavy", true)).not.toThrow();
+		} finally {
+			chmodSync(dir, 0o700);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("recordModelOutcomeBlocked (research-sirvir/01-recording-unlock, part 2)", () => {
+	test("bumps its own `blocked` counter, independent of landed/rejected", () => {
+		const dir = tmp();
+		try {
+			recordModelOutcomeBlocked(dir, "opus", "heavy");
+			recordModelOutcomeBlocked(dir, "opus", "heavy");
+			expect(modelOutcomes(dir, "opus", "heavy")).toEqual({ landed: 0, rejected: 0, blocked: 2 });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("never touches landed/rejected on an entry that already has real outcomes", () => {
+		const dir = tmp();
+		try {
+			recordModelOutcome(dir, "opus", "heavy", true);
+			recordModelOutcome(dir, "opus", "heavy", false);
+			recordModelOutcomeBlocked(dir, "opus", "heavy");
+			expect(modelOutcomes(dir, "opus", "heavy")).toEqual({ landed: 1, rejected: 1, blocked: 1 });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("landed/rejected recording after a blocked entry is unaffected by the blocked bucket", () => {
+		const dir = tmp();
+		try {
+			recordModelOutcomeBlocked(dir, "opus", "heavy");
+			recordModelOutcome(dir, "opus", "heavy", true);
+			expect(modelOutcomes(dir, "opus", "heavy")).toEqual({ landed: 1, rejected: 0, blocked: 1 });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an on-disk ledger written BEFORE `blocked` existed still parses; blocked lands on top of it", () => {
+		const dir = tmp();
+		try {
+			// The exact old on-disk shape — no `blocked` key anywhere.
+			writeFileSync(path.join(dir, "model-outcomes.json"), JSON.stringify({ "opus::heavy": { landed: 3, rejected: 1 } }));
+			expect(modelOutcomes(dir, "opus", "heavy")).toEqual({ landed: 3, rejected: 1 });
+			recordModelOutcomeBlocked(dir, "opus", "heavy");
+			expect(modelOutcomes(dir, "opus", "heavy")).toEqual({ landed: 3, rejected: 1, blocked: 1 });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an entry that has ONLY ever landed/rejected has no `blocked` key at all — old-shape exact-equality is unaffected", () => {
+		const dir = tmp();
+		try {
+			recordModelOutcome(dir, "opus", "heavy", true);
+			// No recordModelOutcomeBlocked call for this key — the read must stay the exact old shape,
+			// proving the new field is genuinely additive/optional, not defaulted-in everywhere.
+			expect(modelOutcomes(dir, "opus", "heavy")).toEqual({ landed: 1, rejected: 0 });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("different tiers for the same model are independent", () => {
+		const dir = tmp();
+		try {
+			recordModelOutcomeBlocked(dir, "opus", "light");
+			expect(modelOutcomes(dir, "opus", "light")).toEqual({ landed: 0, rejected: 0, blocked: 1 });
+			expect(modelOutcomes(dir, "opus", "heavy")).toEqual({ landed: 0, rejected: 0 });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an undefined model folds to 'default' and accumulates there", () => {
+		const dir = tmp();
+		try {
+			recordModelOutcomeBlocked(dir, undefined, "mid");
+			recordModelOutcomeBlocked(dir, "  ", "mid");
+			expect(modelOutcomes(dir, "default", "mid")).toEqual({ landed: 0, rejected: 0, blocked: 2 });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a write failure is swallowed (best-effort) — never throws", () => {
+		const dir = tmp();
+		try {
+			chmodSync(dir, 0o500);
+			expect(() => recordModelOutcomeBlocked(dir, "opus", "heavy")).not.toThrow();
 		} finally {
 			chmodSync(dir, 0o700);
 			rmSync(dir, { recursive: true, force: true });
