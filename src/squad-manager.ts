@@ -55,7 +55,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { loadRepoProfiles, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -129,6 +129,7 @@ import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPathFor } from "./agent-host.ts";
 import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
+import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
@@ -340,7 +341,7 @@ function sentinelDenied(...ids: (string | undefined)[]): boolean {
 // profile/model parsing in ./agent-profiles.ts. Re-exports keep the public import paths stable.
 export { liveAgents };
 export { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable } from "./spawn-identity.ts";
-export { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+export { loadRepoProfiles, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
@@ -1584,11 +1585,18 @@ export class SquadManager extends EventEmitter {
 		return this.agents.get(id)?.dto;
 	}
 
-	profiles(): AgentProfile[] {
+	/** Merge order (base → override): repo catalog (`.glance/profiles.json`, sanitized — see
+	 *  loadRepoProfiles) ← env `OMP_SQUAD_PROFILES` (override by id) ← installed capability profiles.
+	 *  `repo` is optional so the repo-less callers (the `/api/profiles` picker, which has no cwd in
+	 *  scope) keep today's env+capability-only behavior; create() always passes `opts.repo`. */
+	profiles(repo?: string): AgentProfile[] {
+		const repoProfiles = repo ? loadRepoProfiles(repo) : [];
 		const envProfiles = profileOptionsFromEnv();
 		const envIds = new Set(envProfiles.map((p) => p.id));
-		const installed = capabilityProfiles(this.capabilityStore).filter((p) => !envIds.has(p.id));
-		return [...envProfiles, ...installed];
+		const merged = [...repoProfiles.filter((p) => !envIds.has(p.id)), ...envProfiles];
+		const mergedIds = new Set(merged.map((p) => p.id));
+		const installed = capabilityProfiles(this.capabilityStore).filter((p) => !mergedIds.has(p.id));
+		return [...merged, ...installed];
 	}
 
 	capabilities(): CapabilitySnapshot {
@@ -1702,9 +1710,9 @@ export class SquadManager extends EventEmitter {
 		return file;
 	}
 
-	private profileFor(id: string | undefined): AgentProfile | undefined {
+	private profileFor(id: string | undefined, repo?: string): AgentProfile | undefined {
 		if (!id) return undefined;
-		return this.profiles().find((p) => p.id === id);
+		return this.profiles(repo).find((p) => p.id === id);
 	}
 
 	async modelOptions(): Promise<RuntimeModelOption[]> {
@@ -3065,7 +3073,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private async createWithId(opts: CreateAgentOptions, explicitId: string | undefined, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
-		const profile = this.profileFor(opts.profileId);
+		const profile = this.profileFor(opts.profileId, opts.repo);
 		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
 		// what tools the spawned agent may use. They were parsed but NEVER applied — every agent got full tool
 		// access regardless. We now (a) inject the allow-list into the agent's system prompt (the path that
@@ -3081,6 +3089,15 @@ export class SquadManager extends EventEmitter {
 				profileId: profile.id,
 				model: opts.model ?? profile.model,
 				approvalMode: opts.approvalMode ?? profile.approvalMode,
+				// Capability bundle: a profile can also select the harness/bin/thinking a unit runs on
+				// (elevate-profile-bundle). Explicit opts always win over the profile's default.
+				harness: opts.harness ?? profile.harness,
+				bin: opts.bin ?? profile.bin,
+				// mcp: a REPO-sourced profile's `mcp` was already stripped by parseProfiles (agent-profiles.ts)
+				// before it ever reached `this.profiles()`/`profileFor` — `profile.mcp` here can only ever be an
+				// env/operator server list. `opts.mcp` (direct, same trust tier as opts.bin) still wins.
+				mcp: opts.mcp ?? profile.mcp,
+				thinking: opts.thinking ?? profile.thinking,
 				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
 		}
@@ -3204,6 +3221,13 @@ export class SquadManager extends EventEmitter {
 			if (opts.sandbox && harnessDesc.protocol !== "omp-rpc") {
 				throw new Error(`harness "${harnessDesc.name}" cannot run sandboxed yet — sandbox currently supports only omp-rpc harnesses`);
 			}
+			// Capability validation for a profile-selected axis the resolved harness can't honor: ACP
+			// harnesses have no thinking-level channel (makeDriver never threads `thinking` through to
+			// AcpAgentDriver), so a profile that sets `thinking` there would otherwise be silently dropped.
+			// Reject loudly instead — the operator picked an incompatible profile/harness pair.
+			if (profile?.thinking && !harnessDesc.capabilities.thinking) {
+				throw new Error(`profile "${profile.id}" sets thinking:"${profile.thinking}" but harness "${harnessDesc.name}" has no thinking-level channel (capabilities.thinking=false) — drop the profile's thinking field or pick a different harness`);
+			}
 		}
 
 		let cwd: string;
@@ -3235,6 +3259,14 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 
+		// MCP injection (omp-rpc family): the worktree exists now, agent.start() hasn't run yet. ACP's
+		// mcpServers are instead threaded through makeDriver's AcpAgentDriver construction below — this
+		// is the omp/pi half only, gated to that protocol so a workflow/flue/sandbox/ACP unit never gets a
+		// stray `.omp/mcp.json` it can't read. A write failure logs but never blocks the spawn.
+		if (harnessDesc?.protocol === "omp-rpc" && opts.mcp?.length) {
+			await writeMcpConfig(cwd, opts.mcp).catch((err) => this.log("warn", `mcp config write failed for "${name}": ${String(err)}`));
+		}
+
 		const persisted: PersistedAgent = {
 			id,
 			name,
@@ -3254,6 +3286,7 @@ export class SquadManager extends EventEmitter {
 			runtime: opts.runtime,
 			harness: harnessDesc?.name,
 			bin: opts.bin,
+			mcp: opts.mcp,
 			flue: opts.flue,
 			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify, mode: opts.verifyMode } } : undefined,
 			// Carry the resumable checkpoint so an adopted/restored workflow continues its graph from the
@@ -3287,6 +3320,8 @@ export class SquadManager extends EventEmitter {
 			kind,
 			harness: harnessDesc?.name,
 			harnessCaps: harnessDesc ? { toolApproval: harnessDesc.capabilities.toolApproval, resumable: harnessDesc.capabilities.resumable, hostTools: harnessDesc.capabilities.hostTools, contextInjection: harnessDesc.capabilities.contextInjection } : undefined,
+			// NAMES ONLY (types.ts#AgentDTO.mcpServerNames) — never command/env/url/headers.
+			mcpServerNames: opts.mcp?.length ? opts.mcp.map((s) => s.name) : undefined,
 			executionRole: opts.executionRole,
 			parentId: opts.parentId,
 			...lineageFieldsFrom(opts),
@@ -3449,7 +3484,7 @@ export class SquadManager extends EventEmitter {
 			// unit UNSCOPED (honest — surfaced via the capability). approvalMode is mapped best-effort to an
 			// ACP session mode inside the driver.
 			const contextInjection = process.env.OMP_SQUAD_ACP_CONTEXT === "prompt" ? "prompt" : "none";
-			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection });
+			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection, mcpServers: p.mcp });
 			acp.on("acpcapabilities", (caps: unknown) => this.log("info", `acp ${harness.name} ${p.id} advertised capabilities: ${JSON.stringify(caps)}`));
 			return acp;
 		}

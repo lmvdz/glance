@@ -29,7 +29,8 @@ import { EventEmitter } from "node:events";
 import type { Subprocess } from "bun";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { AgentDriver } from "./agent-driver.ts";
-import type { RpcSessionState } from "./types.ts";
+import { toAcpMcpServers } from "./mcp-config.ts";
+import type { McpServerSpec, RpcSessionState } from "./types.ts";
 
 export interface AcpAgentDriverOptions {
 	/** Roster id (identity only; the transport needs no name). */
@@ -50,9 +51,15 @@ export interface AcpAgentDriverOptions {
 	/** How `appendSystemPrompt` reaches the agent. "none" (default, honest): the agent runs UNSCOPED —
 	 *  ACP has no system-prompt channel. "prompt": prepend it as a leading content block on the first
 	 *  turn (opt-in via OMP_SQUAD_ACP_CONTEXT=prompt — lossy: mixes trusted scoping into the user turn,
-	 *  no prompt-caching). "mcp": the spec-blessed route (session/new mcpServers) — the real fix, see
-	 *  concern 06; not yet wired to a live context server. */
+	 *  no prompt-caching). "mcp": serving the fabric primer / tool-grant TEXT itself via a synthetic MCP
+	 *  context server — still not wired (distinct from `mcpServers` below, which attaches REAL
+	 *  profile-selected MCP servers and IS wired via `session/new`). */
 	contextInjection?: "none" | "prompt" | "mcp";
+	/** MCP servers resolved for this unit's profile (plans/agent-profiles/02-skills-mcp-binding.md) —
+	 *  translated to the ACP wire shape and handed to `session/new`'s `mcpServers` (see `mcpServers()`
+	 *  below). This is ACP's only spec-blessed context/capability channel; distinct from
+	 *  `contextInjection`, which is about the fabric primer / tool-grant prompt text, not real MCP tools. */
+	mcpServers?: McpServerSpec[];
 }
 
 type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
@@ -223,10 +230,11 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		this.emit("ready");
 	}
 
-	/** MCP servers handed to the agent at session/new. Empty today; concern 06's "mcp" context route will
-	 *  serve the fabric primer + tool-grant scoping here (ACP's only spec-blessed context channel). */
+	/** MCP servers handed to the agent at session/new — the profile's resolved `McpServerSpec[]`
+	 *  translated to the ACP wire shape (see `toAcpMcpServers`, src/mcp-config.ts, the one place both
+	 *  harness families' translation logic lives). Empty when the unit's profile attaches no servers. */
 	private mcpServers(): unknown[] {
-		return [];
+		return toAcpMcpServers(this.opts.mcpServers);
 	}
 
 	/** Best-effort map of the manager's approval intent onto an ACP session mode. Only `yolo` is actionable
