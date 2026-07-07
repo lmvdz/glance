@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { harnessLineage, modelLineage } from "../src/model-lineage.ts";
+import { DEFAULT_PROVIDER, harnessLineage, modelLineage, resolveProvider } from "../src/model-lineage.ts";
 import { modelFamily } from "../src/omp-graph/attribution.ts";
 
 describe("modelLineage", () => {
@@ -58,5 +58,24 @@ describe("harnessLineage", () => {
 		expect(harnessLineage("pi")).toBe("unknown");
 		expect(harnessLineage("opencode")).toBe("unknown");
 		expect(harnessLineage(undefined)).toBe("unknown");
+	});
+});
+
+describe("resolveProvider (degradation ladder, concern 06)", () => {
+	test("prefers the explicit model spec over the harness", () => {
+		expect(resolveProvider("openai/gpt-5", "claude-code")).toBe("openai");
+		expect(resolveProvider("sonnet", "codex")).toBe("anthropic");
+	});
+	test("falls back to the harness's static vendor pin only when the model is unreadable", () => {
+		expect(resolveProvider(undefined, "claude-code")).toBe("anthropic");
+		expect(resolveProvider("", "gemini")).toBe("google");
+		expect(resolveProvider("mistral/large", "codex")).toBe("openai"); // unknown-provider model spec falls back too
+	});
+	test("multi-model harness + no model spec ⇒ honestly unknown (never guessed)", () => {
+		expect(resolveProvider(undefined, "omp")).toBe("unknown");
+		expect(resolveProvider(undefined, undefined)).toBe("unknown");
+	});
+	test("DEFAULT_PROVIDER is the fleet's dominant subscription vendor (anthropic)", () => {
+		expect(DEFAULT_PROVIDER).toBe("anthropic");
 	});
 });
