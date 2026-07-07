@@ -15,7 +15,8 @@ import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { harnessLineage, type ModelLineage, modelLineage } from "./model-lineage.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
 import type { Proof } from "./proof.ts";
-import type { FeatureCriterion, ValidationRecord } from "./types.ts";
+import { type LensId, selectLenses } from "./lens-select.ts";
+import type { FeatureCriterion, LensVerdict, ValidationRecord } from "./types.ts";
 
 /** Raw per-criterion verdict shape the judge is asked to emit (before coercion into `perCriterion`). */
 export interface RawVerdict {
@@ -188,6 +189,113 @@ function defaultJudge(): Judge {
 	return activeReviewer().harness === "codex" ? codexJudge() : ompJudge();
 }
 
+// ── Perspective-diversified review: out-of-criteria lens judges ───────────────────────────────────
+// (plans/perspective-diversified-review/ concern 02). A SECOND review axis, orthogonal to the
+// cross-lineage (vendor) axis above: each lens is a focused, separately-prompted judge that hunts ONE
+// class of problem the criteria judge is structurally told to ignore (it grades only DECLARED criteria).
+// Advisory only, default-off (concern 06 gates it), fail-open by construction: any throw/timeout/garbage
+// degrades to `undefined` (no signal), never a fabricated verdict and never a throw that could reach a land.
+
+/** Per-lens system prompt — single-concern framing, explicitly NOT re-checking the declared criteria. */
+const LENS_SYSTEM_PROMPTS: Record<LensId, string> = {
+	regression:
+		"You are an INDEPENDENT reviewer. You are NOT checking whether declared acceptance criteria are met — " +
+		"assume another reviewer already did that, and do not repeat it. Your ONLY job: does this diff introduce a " +
+		"problem the acceptance criteria would NOT have named — a security regression, a scope violation, data loss, " +
+		"a broken or silently-swallowed failure path, or a resource/performance cliff? Inspect the diff directly and " +
+		"distrust any author description. Respond with EXACTLY one JSON object and nothing else: " +
+		'{"disposition":"accept"|"object","severity":"low"|"high","claim":"<one-line reason; empty string if accept>"}.',
+};
+
+/** Injected lens-judge seam (tests pass a fake). Never throws by contract — a throw/timeout/unparseable
+ *  run is treated identically to `undefined` (no advisory signal). */
+export type LensJudge = (input: { lens: LensId; diff: string; proof?: Proof }) => Promise<LensVerdict | undefined>;
+
+function lensTimeoutMs(): number {
+	return envInt("OMP_SQUAD_LENS_TIMEOUT_MS", 60_000);
+}
+
+/** The diff (+proof tail) a lens inspects — same truncation budget as the criteria judge. No criteria:
+ *  a lens deliberately does not see the declared criteria, so it cannot just re-grade them. */
+function lensUserPrompt(diff: string, proof?: Proof): string {
+	const proofTail = proof?.detail ? `\n\nProof output (tail):\n${truncate(proof.detail, 2000)}` : "";
+	return `Diff:\n${truncate(diff, 12000)}${proofTail}`;
+}
+
+/** Coerce a parsed object into a LensVerdict, or undefined if it lacks a usable `disposition`. */
+function coerceLensVerdict(lens: LensId, obj: Record<string, unknown> | undefined): LensVerdict | undefined {
+	if (!obj) return undefined;
+	const disposition = obj.disposition === "object" ? "object" : obj.disposition === "accept" ? "accept" : undefined;
+	if (!disposition) return undefined;
+	const severity = obj.severity === "high" ? "high" : "low";
+	const claim = typeof obj.claim === "string" ? truncate(obj.claim, RATIONALE_MAX) : "";
+	return { lens, disposition, severity, claim };
+}
+
+/**
+ * GUARDED lens parser (concern 02). `decideTyped` does NOT wrap `parse()` in try/catch, so a throwing
+ * parser would escape and fail-CLOSE a land — this must never throw. Stream-tolerant like
+ * `parseCodexVerdict`: try each line (codex JSONL), then the whole blob (plain omp stdout). Any failure
+ * anywhere resolves to `undefined` (no signal).
+ */
+export function parseLensVerdict(lens: LensId): (raw: string) => LensVerdict | undefined {
+	return (raw: string) => {
+		try {
+			let found: LensVerdict | undefined;
+			for (const line of raw.split("\n")) {
+				const t = line.trim();
+				if (!t.startsWith("{")) continue;
+				let obj: Record<string, unknown> | undefined;
+				try {
+					const parsed: unknown = JSON.parse(t);
+					obj = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+				} catch {
+					continue;
+				}
+				const direct = coerceLensVerdict(lens, obj);
+				if (direct) {
+					found = direct;
+					continue;
+				}
+				const text = obj ? pickCodexText(obj) : undefined;
+				if (text) {
+					const embedded = coerceLensVerdict(lens, extractJsonObject(text));
+					if (embedded) found = embedded;
+				}
+			}
+			return found ?? coerceLensVerdict(lens, extractJsonObject(raw));
+		} catch {
+			return undefined;
+		}
+	};
+}
+
+/**
+ * A lens judge on the SAME one-shot machinery as the criteria judge — `omp -p` (or `codex exec` when
+ * `activeReviewer()` selects the cross-vendor harness), same truncation, same never-throws contract.
+ * Cross-vendor-capable: an operator can run the lens on codex while the criteria judge stays on omp,
+ * multiplying the two independence axes at lens granularity.
+ */
+export function ompLensJudge(lens: LensId): LensJudge {
+	return async ({ diff, proof }) => {
+		try {
+			const reviewer = activeReviewer();
+			const system = LENS_SYSTEM_PROMPTS[lens];
+			const user = lensUserPrompt(diff, proof);
+			const codex = reviewer.harness === "codex";
+			return await decideTyped<LensVerdict | undefined>({
+				bin: codex ? "codex" : undefined,
+				args: codex ? ["exec", "-s", "read-only", `${system}\n\n${user}`] : ["-p", "--model", reviewer.model, "--system-prompt", system, user],
+				parse: parseLensVerdict(lens),
+				fallback: undefined,
+				timeoutMs: lensTimeoutMs(),
+			});
+		} catch {
+			return undefined;
+		}
+	};
+}
+
 /**
  * Score `diff` against DECLARED `criteria`. Never throws.
  *  - empty `criteria` ⇒ `"skipped"` (DESIGN §4 — never invents criteria to grade against).
@@ -258,6 +366,12 @@ export interface ValidatorGateOpts {
 	 *  cross-lineage stamp. Absent ⇒ author lineage resolves `unknown` (an honest non-assertion). */
 	authorModel?: string;
 	authorHarness?: string;
+	/** Injected lens-judge factory (concern 03) — tests pass a fake; production uses `ompLensJudge`.
+	 *  Only consulted when the master flag is on and the criteria judge returned a clean `pass`. */
+	lensJudge?: (lens: LensId) => LensJudge;
+	/** Injected re-check factory (concern 05); production uses `ompLensVerifyJudge`. Reached only after a
+	 *  panel objection, under both the master flag and the VERIFY sub-flag. */
+	lensVerifyJudge?: () => LensVerifyJudge;
 }
 
 export interface ValidatorGateResult {
@@ -280,6 +394,11 @@ function validatorEnabled(): boolean {
  *  module state in proof.ts. */
 const gateCache = new Map<string, ValidationRecord>();
 
+/** Force standard `a/`…`b/` diff header prefixes regardless of the operator's git config, so the lens
+ *  selector's header parser (`changedFilesFromDiff`) never silently under-covers under diff.noprefix /
+ *  diff.mnemonicPrefix. `-c` overrides must precede the `diff` subcommand. */
+const DIFF_PREFIX_ARGS = ["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"];
+
 async function gitOut(args: string[], cwd: string): Promise<string> {
 	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "ignore" });
 	const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
@@ -297,7 +416,9 @@ async function computeLandDiff(repo: string, worktree: string, baseCommit?: stri
 		// `--no-ext-diff` is load-bearing: GIT_HARDEN_ARGS sets `-c diff.external=` (empty), which makes
 		// git try to exec "" as an external differ and die with EMPTY output for every diff. `--no-ext-diff`
 		// forces the builtin diff (and still ignores any malicious repo-level diff.external — the harden intent).
-		let diff = await gitOut(["diff", "--no-ext-diff", `${base}...HEAD`], worktree);
+		// `DIFF_PREFIX_ARGS` pins the standard `a/`…`b/` header prefixes so the lens selector's file parser
+		// (changedFilesFromDiff) is reliable even under an operator's diff.noprefix/mnemonicPrefix git config.
+		let diff = await gitOut([...DIFF_PREFIX_ARGS, "diff", "--no-ext-diff", `${base}...HEAD`], worktree);
 		// In-place (worktree === repo) the base collapses to HEAD, so `base...HEAD` is empty even though
 		// the unit made real commits. Recover the true change set via the merge-base with the tracked
 		// upstream / default branch when one is resolvable; otherwise leave it empty (→ honest abstain).
@@ -307,13 +428,142 @@ async function computeLandDiff(repo: string, worktree: string, baseCommit?: stri
 				(await gitOut(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo));
 			if (upstream) {
 				const mergeBase = await gitOut(["merge-base", upstream, "HEAD"], repo);
-				if (mergeBase && mergeBase !== base) diff = await gitOut(["diff", "--no-ext-diff", `${mergeBase}...HEAD`], worktree);
+				if (mergeBase && mergeBase !== base) diff = await gitOut([...DIFF_PREFIX_ARGS, "diff", "--no-ext-diff", `${mergeBase}...HEAD`], worktree);
 			}
 		}
 		return diff;
 	} catch {
 		return "";
 	}
+}
+
+// ── Lens panel wiring (concern 03) ────────────────────────────────────────────────────────────────
+// The advisory panel runs SEQUENTIALLY, AFTER the authoritative criteria judge has resolved — never
+// concurrent with it. Co-locating lens spawns at the criteria judge's moment of need risks a
+// provider-rate-limit/resource timeout on the AUTHORITATIVE call (→ fail-open abstain → a would-be-veto
+// lands). The advisory feature must never be able to degrade the authority, so we pay sum-latency, not
+// max-latency. Lenses run only on a clean `pass` (a veto is already blocked; an abstain/skipped had no
+// validated diff to add an opinion to) and only on a criteria-cache MISS — a re-land reuses the stored
+// record (which already carries its lensAdvisory), so the criteria-scoped gateCache subsumes any
+// separate lens cache.
+
+/** OFF by default — the master flag; concern 06 owns the full flag surface + a default-off contract test. */
+function lensReviewEnabled(): boolean {
+	return process.env.OMP_SQUAD_LENS_REVIEW === "1";
+}
+
+/** How many lenses may fire (v1 default 1). `0` disables the panel even with the master flag on. */
+function lensMax(): number {
+	return envInt("OMP_SQUAD_LENS_MAX", 1);
+}
+
+/** Optional CSV allowlist (`OMP_SQUAD_LENS_SET`) intersected with the known lenses; unset ⇒ no restriction. */
+function lensAllow(): LensId[] | undefined {
+	const raw = process.env.OMP_SQUAD_LENS_SET;
+	if (!raw) return undefined;
+	const known: LensId[] = ["regression"];
+	const set = new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+	return known.filter((l) => set.has(l));
+}
+
+/** The resolved lens-review config — the single readable surface for the flags (concern 06). Everything
+ *  defaults OFF/minimal: `review:false` (master), `verify:false`, `max:1`. A default-off contract test
+ *  pins this; callers can also read it for observability. */
+export function lensConfig(): { review: boolean; max: number; allow?: LensId[]; verify: boolean; timeoutMs: number } {
+	return { review: lensReviewEnabled(), max: lensMax(), allow: lensAllow(), verify: lensVerifyEnabled(), timeoutMs: lensTimeoutMs() };
+}
+
+/** Run a single lens, guarded — an injected fake or a real judge that throws resolves to `undefined`
+ *  (no signal), never propagating out of the panel. */
+async function runOneLens(lens: LensId, make: (l: LensId) => LensJudge, diff: string, proof?: Proof): Promise<LensVerdict | undefined> {
+	try {
+		return await make(lens)({ lens, diff, proof });
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Fire the selected lenses over the already-computed diff and collect their advisory verdicts.
+ * `Promise.allSettled` + per-lens guard means no single lens failure can reject the batch or reach the
+ * land. Returns `[]` when nothing fired (docs-only, capped to 0, or all lenses gave no signal).
+ */
+export async function runLensPanel(diff: string, proof: Proof | undefined, criteriaText: string, make: (l: LensId) => LensJudge): Promise<LensVerdict[]> {
+	const lenses = selectLenses(diff, { criteriaText, max: lensMax(), allow: lensAllow() });
+	if (lenses.length === 0) return [];
+	const settled = await Promise.allSettled(lenses.map((lens) => runOneLens(lens, make, diff, proof)));
+	const verdicts: LensVerdict[] = [];
+	for (const r of settled) if (r.status === "fulfilled" && r.value) verdicts.push(r.value);
+	return verdicts;
+}
+
+// ── VERIFY re-check (concern 05) — the ACCEPT/REJECT/VERIFY middle branch ──────────────────────────
+// A high-severity objection is neither blindly trusted nor ignored: one narrow re-check, scoped to
+// exactly that claim, decides whether it holds. Structurally nested under the master flag (only reachable
+// from inside validatorGate's enabled+pass+panel-ran block) plus its own sub-flag. Fail-open: an
+// unreachable/undetermined re-check resolves to `confirmed:false` — it never escalates on a failure, and
+// a `confirmed:true` still only maxes the confidence penalty (concern 04); it NEVER vetoes.
+
+/** Injected re-check seam. `true` = confirmed, `false` = refuted, `undefined` = couldn't determine
+ *  (treated as NOT confirmed — an unreachable re-check must never escalate). */
+export type LensVerifyJudge = (input: { lens: LensId; claim: string; diff: string; proof?: Proof }) => Promise<boolean | undefined>;
+
+/** Its own sub-flag; only meaningful WITHIN an already-enabled panel (checked after a panel objection). */
+function lensVerifyEnabled(): boolean {
+	return process.env.OMP_SQUAD_LENS_VERIFY === "1";
+}
+
+const LENS_VERIFY_SYSTEM =
+	"You are re-checking ONE specific concern another reviewer raised about a code diff. Decide only whether that " +
+	'concern is substantiated by the diff itself. Respond with EXACTLY one JSON object: {"verdict":"confirmed"|"refuted"|"inconclusive"}.';
+
+/** Guarded parser — confirmed ⇒ true, refuted/inconclusive ⇒ false (do not escalate on doubt), else undefined. */
+function parseVerifyConfirmed(raw: string): boolean | undefined {
+	try {
+		const v = extractJsonObject(raw)?.verdict;
+		if (v === "confirmed") return true;
+		if (v === "refuted" || v === "inconclusive") return false;
+		return undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** The re-check judge, on the same one-shot machinery (omp/codex) as the lens judge. Never throws. */
+export function ompLensVerifyJudge(): LensVerifyJudge {
+	return async ({ claim, diff, proof }) => {
+		try {
+			const reviewer = activeReviewer();
+			const user = `A reviewer flagged this specific concern about the diff:\n${truncate(claim, RATIONALE_MAX)}\n\n${lensUserPrompt(diff, proof)}`;
+			const codex = reviewer.harness === "codex";
+			return await decideTyped<boolean | undefined>({
+				bin: codex ? "codex" : undefined,
+				args: codex ? ["exec", "-s", "read-only", `${LENS_VERIFY_SYSTEM}\n\n${user}`] : ["-p", "--model", reviewer.model, "--system-prompt", LENS_VERIFY_SYSTEM, user],
+				parse: parseVerifyConfirmed,
+				fallback: undefined,
+				timeoutMs: lensTimeoutMs(),
+			});
+		} catch {
+			return undefined;
+		}
+	};
+}
+
+/**
+ * Re-check the FIRST high-severity objection (concern 05). Returns undefined when there is none — the
+ * caller only invokes this after the sub-flag check, so a `low` objection or an all-accept panel never
+ * spends the extra call. A failed/undetermined re-check ⇒ `confirmed:false` (fail-open).
+ */
+export async function runLensVerify(verdicts: LensVerdict[], diff: string, proof: Proof | undefined, make: () => LensVerifyJudge): Promise<{ lens: LensId; claim: string; confirmed: boolean } | undefined> {
+	const target = verdicts.find((v) => v.disposition === "object" && v.severity === "high");
+	if (!target) return undefined;
+	let confirmed = false;
+	try {
+		confirmed = (await make()({ lens: target.lens, claim: target.claim, diff, proof })) === true;
+	} catch {
+		confirmed = false;
+	}
+	return { lens: target.lens, claim: target.claim, confirmed };
 }
 
 /**
@@ -329,8 +579,34 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 	const criteriaSig = opts.criteria.map((c) => `${c.id}=${c.text}`).join("|");
 	const cacheKey = opts.proof?.commit && opts.proof?.tree ? `${opts.proof.commit}:${opts.proof.tree}:${Bun.hash(criteriaSig)}` : undefined;
 	const cached = cacheKey ? gateCache.get(cacheKey) : undefined;
-	const record = cached ?? (await scoreAgainstCriteria(opts.criteria, await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit), opts.proof, opts.judge, opts.authorModel, opts.authorHarness));
-	if (cacheKey && !cached) gateCache.set(cacheKey, record);
+	let record: ValidationRecord;
+	if (cached) {
+		record = cached;
+	} else {
+		const diff = await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit);
+		record = await scoreAgainstCriteria(opts.criteria, diff, opts.proof, opts.judge, opts.authorModel, opts.authorHarness);
+		// Advisory lenses: only on a clean pass, only when enabled, strictly after the criteria judge.
+		// Build a NEW record (never mutate the one about to be cached-by-reference).
+		if (record.verdict === "pass" && lensReviewEnabled()) {
+			// Defensive outer catch: the panel is fail-open by construction (every judge call is guarded),
+			// but this is the trust-critical land path — an outer catch guarantees that even a future throw
+			// in selectLenses/runLensPanel (OUTSIDE runOneLens's per-lens guard) can never fail-CLOSE a land.
+			try {
+				const lensAdvisory = await runLensPanel(diff, opts.proof, criteriaSig, opts.lensJudge ?? ompLensJudge);
+				if (lensAdvisory.length > 0) {
+					record = { ...record, lensAdvisory };
+					// VERIFY re-check: structurally nested here (master flag already gated above) + its own sub-flag.
+					if (lensVerifyEnabled()) {
+						const lensVerify = await runLensVerify(lensAdvisory, diff, opts.proof, opts.lensVerifyJudge ?? ompLensVerifyJudge);
+						if (lensVerify) record = { ...record, lensVerify };
+					}
+				}
+			} catch {
+				// advisory only — a lens failure never touches the record's verdict or the land decision
+			}
+		}
+		if (cacheKey) gateCache.set(cacheKey, record);
+	}
 	if (record.verdict !== "veto") return { record };
 	const unmet = record.perCriterion.filter((p) => !p.satisfied).map((p) => p.id);
 	return { record, veto: `validator veto: declared criteria unmet (${unmet.join(", ") || "unknown"})${record.rationale ? ` — ${record.rationale}` : ""}` };
