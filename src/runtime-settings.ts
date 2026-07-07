@@ -17,6 +17,8 @@ export type FeatureFlagKey =
 	| "OMP_SQUAD_OBSERVE_AUTOFIX"
 	| "OMP_SQUAD_SCOUT"
 	| "OMP_SQUAD_REGRESSION_GATE"
+	| "OMP_SQUAD_LAND_RISK_GATE"
+	| "OMP_SQUAD_POLICY_RULES"
 	| "OMP_SQUAD_LOOP_ARMED";
 
 export interface FeatureFlagDefinition {
@@ -58,6 +60,8 @@ export const FEATURE_FLAGS: FeatureFlagDefinition[] = [
 	{ key: "OMP_SQUAD_OBSERVE_AUTOFIX", label: "Observer autofix", description: "Let observer run safe housekeeping fixes such as reaping landed survivors.", defaultEnabled: false },
 	{ key: "OMP_SQUAD_SCOUT", label: "Reasoning scout", description: "Harvest unresolved work items surfaced in agent reasoning.", defaultEnabled: true, restartRequired: true },
 	{ key: "OMP_SQUAD_REGRESSION_GATE", label: "Regression gate", description: "Run the full suite on merged main after a land and block on any newly introduced failure.", defaultEnabled: true, restartRequired: false },
+	{ key: "OMP_SQUAD_LAND_RISK_GATE", label: "Land blast-radius gate", description: "Block a large or sensitive-path diff from auto-landing unattended (leaves it for a human Land review).", defaultEnabled: false },
+	{ key: "OMP_SQUAD_POLICY_RULES", label: "Runtime policy rules", description: "Enforce operator-defined deny/ask rules on agent tool calls (in addition to the built-in guardrails).", defaultEnabled: false },
 	{ key: "OMP_SQUAD_LOOP_ARMED", label: "Convergence loop", description: "Arm the Stop-hook auto-continuation for a convergence run (armed per-process by the run entrypoint; never persisted to daemon env).", defaultEnabled: false, ephemeral: true },
 ];
 

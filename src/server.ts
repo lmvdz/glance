@@ -38,6 +38,7 @@ import {
 	FeatureConcernsPatchBodySchema,
 	FeatureCreateBodySchema,
 	FeatureFlagBodySchema,
+	PolicyRulesBodySchema,
 	FeatureFromPlanBodySchema,
 	FeatureLandBodySchema,
 	FeatureModuleBodySchema,
@@ -107,6 +108,7 @@ import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
 import { resolveStateDir } from "./state-dir.ts";
 import { featureFlagStates, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
+import { parsePolicyDoc, type PolicyStore } from "./policy.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
 import type { CapabilityInstallState } from "./capabilities/index.ts";
 
@@ -323,6 +325,8 @@ export interface SquadServerOptions {
 	rootOrgId?: string;
 	/** Runtime feature-flag settings persisted under the state dir and applied to process.env. */
 	runtimeSettings?: RuntimeSettingsStore;
+	/** Operator policy rules (C-RULES) persisted under the state dir; agents read them at tool-call time. */
+	policy?: PolicyStore;
 }
 
 /** Pure: a short, stable fingerprint of the served UI. Changes whenever index.html changes,
@@ -901,6 +905,18 @@ export class SquadServer {
 			}
 			const flags = await this.opts.runtimeSettings.setFeatureFlag(decoded.success.key, decoded.success.enabled);
 			return Response.json({ featureFlags: flags });
+		}
+		if (url.pathname === "/api/policy/rules" && req.method === "GET") {
+			if (!this.opts.policy) return new Response("policy persistence unavailable", { status: 501 });
+			return Response.json(await this.opts.policy.load());
+		}
+		if (url.pathname === "/api/policy/rules" && req.method === "POST") {
+			if (!this.opts.policy) return new Response("policy persistence unavailable", { status: 501 });
+			const decoded = decodeBody(PolicyRulesBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("a rules array is required", { status: 400 });
+			// parsePolicyDoc drops malformed rules (fail-open); the store persists the sanitized set.
+			const doc = await this.opts.policy.setRules(parsePolicyDoc({ rules: decoded.success.rules }).rules);
+			return Response.json(doc);
 		}
 		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: session
 		// callers route to their org manager; the on-box bearer token is a break-glass operator view.

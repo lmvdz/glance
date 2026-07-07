@@ -16,12 +16,35 @@
 
 import * as path from "node:path";
 import * as os from "node:os";
+import { statSync } from "node:fs";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { claimLease, heartbeatSession, holdersOf, LEASE_TTL_MS, releaseSession } from "./leases.ts";
 import type { LeaseEntry } from "./leases.ts";
 import { hardenedGitSync } from "./git-harden.ts";
 import { screenToolCall, targetFiles } from "./agent-guard.ts";
-import { protectedStateRoots } from "./state-dir.ts";
+import { type PolicyRule, readPolicyDocSync } from "./policy.ts";
+import { protectedStateRoots, resolveStateDir } from "./state-dir.ts";
+
+/**
+ * Operator policy rules (C-RULES) for THIS agent's tool calls, read from the daemon's `policy.json`
+ * and mtime-cached so a hot tool loop doesn't stat-storm. OFF unless OMP_SQUAD_POLICY_RULES=1 (the
+ * daemon mirrors the feature flag into every spawned agent's env). Fail-open: any error ⇒ no rules.
+ */
+let policyCache: { mtimeMs: number; rules: PolicyRule[] } | undefined;
+function policyRulesForAgent(): PolicyRule[] {
+	if (process.env.OMP_SQUAD_POLICY_RULES !== "1") return [];
+	const dir = resolveStateDir();
+	const file = path.join(dir, "policy.json");
+	let mtimeMs: number;
+	try {
+		mtimeMs = statSync(file).mtimeMs;
+	} catch {
+		policyCache = undefined; // no file ⇒ no rules
+		return [];
+	}
+	if (!policyCache || policyCache.mtimeMs !== mtimeMs) policyCache = { mtimeMs, rules: readPolicyDocSync(dir).rules };
+	return policyCache.rules;
+}
 
 interface ToolCallEvent {
 	toolName: string;
@@ -77,7 +100,7 @@ export default function leaseHook(pi: ExtensionAPI): void {
 		// Guardrail FIRST — hard-block daemon/host control + out-of-worktree edits for EVERY tool call,
 		// before the edit/write lease logic below. A yolo agent can't bypass it: a hook block stops the
 		// tool before it runs. `repo` is this agent's worktree root (resolved in session_start).
-		const fenced = screenToolCall(ev.toolName, ev.input, { worktree: repo, protectedRoots, home });
+		const fenced = screenToolCall(ev.toolName, ev.input, { worktree: repo, protectedRoots, home, policyRules: policyRulesForAgent() });
 		if (fenced) {
 			if (ctx.hasUI) await ctx.ui.notify(fenced.reason, "error");
 			return fenced;

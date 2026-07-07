@@ -1,5 +1,5 @@
 # Policy store + evaluator
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

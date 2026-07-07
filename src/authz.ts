@@ -62,6 +62,7 @@ export function commandTier(cmd: ClientCommand): Role {
 export function restActionTier(method: string, pathname: string): Role {
 	if (pathname === "/api/upgrade") return "admin";
 	if (pathname === "/api/settings/feature-flags") return "admin";
+	if (pathname === "/api/policy/rules") return method === "GET" ? "viewer" : "admin";
 	if (pathname.startsWith("/api/capability-sources") || pathname.startsWith("/api/capability-installs")) return method === "GET" ? "viewer" : "admin";
 	if (pathname.startsWith("/api/capability-packs")) return method === "GET" ? "viewer" : "admin";
 	// Destructive direct-manager mutations whose server.ts handlers bypass applyCommand, plus vision

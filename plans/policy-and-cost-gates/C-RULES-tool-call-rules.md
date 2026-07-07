@@ -1,5 +1,5 @@
 # Data-driven deny/ask at the tool-call seam
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

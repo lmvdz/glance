@@ -31,5 +31,5 @@ An operator can tighten a live fleet with a data rule (no redeploy), and a big/r
 
 ## Notes
 - Adversarial design (opus designer, code-verified) cut the grand 3-tier per-org engine to a flat deny/ask table whose schema makes widening unrepresentable — see DESIGN.md.
-- **Execution status:** C-LAND executed + shipped this pass; C-STORE/C-RULES/C-COST decomposed and deferred to a follow-up execution (the durable plan is the handoff).
+- **Execution status:** ALL FOUR concerns executed + shipped (C-LAND, C-STORE, C-RULES, C-COST). Full suite 1725 pass/0 fail; policy write→read→enforce live-driven end-to-end.
 - Verified: `PendingRequest` ASK round-trip is live-agent-only → daemon-side ASK must park/block, never a synthetic pending (cmux black-hole lesson). `RISKY_RE` (squad-manager) already classifies destructive requests — reused.

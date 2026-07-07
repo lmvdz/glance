@@ -1,5 +1,5 @@
 # Cost projection gate (shadow-only)
-STATUS: open
+STATUS: closed
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: research

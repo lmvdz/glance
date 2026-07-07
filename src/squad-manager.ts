@@ -138,6 +138,7 @@ import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollu
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
 import { recordModelOutcome, tierOf } from "./model-outcomes.ts";
+import { shadowCostCheck } from "./cost-gate.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
@@ -3115,6 +3116,10 @@ export class SquadManager extends EventEmitter {
 			};
 			this.log("info", `routed "${name}": ${decision.reason}`);
 		}
+		// Pre-execution cost projection (C-COST) — shadow-only: warns when this (model,tier) is projected
+		// to run over budget, BEFORE the spawn spends anything. Fire-and-forget so it never delays a spawn;
+		// no-op unless OMP_SQUAD_COST_GATE is on. Enforce (hard park) is deferred.
+		void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line));
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
 		// so the fleet is observable from the backlog without a manual plan-to-plane step. No-ops when
 		// Plane is unconfigured; restore / fan-out / flue paths never set `track`.
