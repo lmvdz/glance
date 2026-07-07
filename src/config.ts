@@ -1,4 +1,4 @@
-// Typed, Effect-Schema-backed environment-variable readers.
+// Typed environment-variable readers.
 //
 // Replaces the widespread `Number(process.env.OMP_SQUAD_X) || <default>`
 // anti-pattern, which has two bugs:
@@ -12,25 +12,13 @@
 //   - return the default ONLY when the var is unset or blank,
 //   - warn (once per var) when a present value is non-numeric, then fall back.
 //
-// Backing: the string -> number parse is done by Effect `Schema.FiniteFromString`
-// (via `Schema.decodeUnknownResult`, which returns a Result instead of throwing).
-// FiniteFromString respects 0/negatives/floats and FAILS on garbage such as
-// "abc", "NaN", and "Infinity" — exactly the distinction the old `Number(x) || d`
-// pattern erased. (The Effect `Config` module in this beta is a Schema-based API
-// still in flux — `Config.integer`/`Config.number` don't exist as the phase brief
-// assumed — so we use the stable `Schema`/`Result` surface the rest of the
-// codebase already adopted.)
+// Backing: parse with JavaScript's numeric conversion, then require
+// Number.isFinite so garbage such as "abc", "NaN", and "Infinity" falls back
+// with a warning instead of silently becoming the default.
 //
 // These are read LAZILY, per call: each call reads the CURRENT `process.env`,
 // so tests (and live re-config) that set an env var and then call the getter
-// observe the new value. Only the (pure, env-independent) decoder is built once
-// at module load; the env read itself is never snapshotted.
-
-import { Result, Schema } from "effect"
-
-// Built once — a pure decoder, independent of process.env, so hoisting it does
-// not break the per-call laziness of the env read below.
-const decodeFinite = Schema.decodeUnknownResult(Schema.FiniteFromString)
+// observe the new value.
 
 const warned = new Set<string>()
 
@@ -49,8 +37,8 @@ function readFinite(name: string, fallback: number): number | undefined {
 	// Unset or blank/whitespace-only => treat as "not configured": use the
 	// default, silently (this is the normal, expected case).
 	if (raw === undefined || raw.trim() === "") return undefined
-	const parsed = decodeFinite(raw)
-	if (Result.isSuccess(parsed)) return parsed.success
+	const parsed = Number(raw)
+	if (Number.isFinite(parsed)) return parsed
 	// Present but non-numeric => misconfiguration; surface it once, then fall back.
 	warnOnce(name, raw)
 	return undefined
