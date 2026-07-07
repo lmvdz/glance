@@ -99,6 +99,24 @@ export interface AgentReport {
 	createdAt: number;
 }
 
+/**
+ * A non-blocking "I need a human to look at this" flag (harness-agnostic `glance notify`, cmux
+ * research concern 03). Appended to `AgentDTO.attentionEvents` — deliberately NOT a `PendingRequest`,
+ * so it never blocks the agent or flips its status to "input"; push stays status-driven (never
+ * fired from this channel). Sibling of `AgentReport` (which carries a proposal/confidence), this one
+ * is a bare "look here" with a source tag for where it came from.
+ */
+export interface AttentionEvent {
+	id: string;
+	summary: string;
+	detail?: string;
+	/** Where the flag originated: "notify" = operator/CLI/scriptable ingress (`glance notify`),
+	 *  "tool" = an omp agent's `squad_attention` host tool call, "harness" = a non-omp harness's
+	 *  RPC `notify` extension-UI method (previously inert — appended to the transcript only). */
+	source: "notify" | "tool" | "harness";
+	createdAt: number;
+}
+
 export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "system";
 
 export type TranscriptStatus = "running" | "ok" | "error" | "cancelled";
@@ -685,6 +703,12 @@ export interface AgentDTO {
 	 *  `blockedReason`/`effectiveAutonomyMode`'s observe cap, and a report must never block the agent.
 	 *  Live/run-scoped only (not persisted to state.json), append-only across a run. */
 	reports?: AgentReport[];
+	/** Non-blocking "I need a human to look at this" flags — operator/CLI `glance notify`, an omp
+	 *  agent's `squad_attention` host tool, or a non-omp harness's RPC `notify` extension-UI method.
+	 *  Deliberately NOT a `PendingRequest` — never blocks the agent or flips its status, and push stays
+	 *  status-driven (never fired from this channel). Live/run-scoped only (not persisted to
+	 *  state.json), append-only across a run — mirrors `reports` above. */
+	attentionEvents?: AttentionEvent[];
 	/** Last 5 SIGNIFICANT lifecycle transitions (turn-progress excluded) — a compact inline strip.
 	 *  Full history via GET /api/agents/:id/transitions. Capped deliberately: this rides emitAgent's
 	 *  broadcast (per RPC-frame on the hot path), so it must never carry the full ring. */
@@ -1209,7 +1233,8 @@ export type ClientCommand =
 	| { type: "snapshot" } // request a full roster + recent transcript replay
 	| { type: "subscribe"; id: string } // ask for transcript replay of one agent
 	| { type: "commission"; spec: CommissionSpec }
-	| { type: "set-mode"; id: string; mode: AutonomyMode; reason?: string };
+	| { type: "set-mode"; id: string; mode: AutonomyMode; reason?: string }
+	| { type: "notify"; id: string; summary: string; detail?: string };
 
 // ── Federation (Phase 2): cross-operator coordination ───────────────────────
 

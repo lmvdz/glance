@@ -467,6 +467,21 @@ describe('attentionItems', () => {
     expect(a.status).toBe('working');
   });
 
+  test('an attention event on a working agent surfaces as a non-blocking warn view item (harness-agnostic notify)', () => {
+    const createdAt = Date.now();
+    const a = agent('a', 'working', {
+      lastActivity: Date.now(),
+      attentionEvents: [{ id: 'e1', summary: 'stuck on flaky test', detail: 'retried 3x', source: 'notify', createdAt }],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('attention');
+    expect(items[0].severity).toBe('warn');
+    expect(items[0].action?.kind).toBe('view');
+    expect(items[0].detail).toContain('stuck on flaky test');
+    expect(items[0].since).toBe(createdAt);
+  });
+
   test('a blocked agent with a report only emits the blocked item (priority order, not a double row)', () => {
     const items = attentionItems({
       agents: [agent('a', 'input', { reports: [{ id: 'r1', summary: 'unsure', createdAt: Date.now() }] })],

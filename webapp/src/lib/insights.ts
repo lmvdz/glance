@@ -431,7 +431,7 @@ function fmtIdle(ms: number): string {
 // ───────────────────────────── attention items ─────────────────────────────
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
-export type AttentionKind = 'blocked' | 'vetoed' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report';
+export type AttentionKind = 'blocked' | 'vetoed' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report' | 'attention';
 export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer';
 
 /** Epic 5 (HITL safeguards, DESIGN.md D3): a working agent is considered drifting once it's gone
@@ -600,6 +600,21 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
         detail: r.proposal ? `${r.summary} — ${r.proposal}` : r.summary,
         agentId: a.id,
         since: r.createdAt,
+        action: { label: 'View', kind: 'view' },
+      });
+    }
+
+    // Harness-agnostic attention lane (v2 glance-notify: operator notify / squad_attention tool /
+    // harness notify RPC) → view. Same non-blocking contract as reports: independent of `status`.
+    for (const e of a.attentionEvents ?? []) {
+      items.push({
+        id: `attention:${a.id}:${e.id}`,
+        severity: 'warn',
+        kind: 'attention',
+        title: `${a.name} needs a look`,
+        detail: e.detail ? `${e.summary} — ${e.detail}` : e.summary,
+        agentId: a.id,
+        since: e.createdAt,
         action: { label: 'View', kind: 'view' },
       });
     }

@@ -80,14 +80,15 @@ test("squad_kb_search reports no-match cleanly", async () => {
 	expect(cap.tool!.text).toContain("No matching context");
 });
 
-test("registerHostTools advertises squad_kb_search + squad_message + squad_report to an omp agent", async () => {
+test("registerHostTools advertises squad_kb_search + squad_message + squad_report + squad_attention to an omp agent", async () => {
 	const { mgr, repo } = await mgrWithDecision();
 	let registered: HostToolDef[] | null = null;
 	const rec = { dto: { id: "r2", repo }, options: {}, agent: { setHostTools: (t: HostToolDef[]) => { registered = t; } } } as any;
 	(mgr as unknown as { registerHostTools: (r: unknown) => void }).registerHostTools(rec);
 	expect(registered).not.toBeNull();
 	// squad_report: Epic 5's non-blocking "I'm unsure, here's a proposal" host tool (DESIGN.md D2).
-	expect(registered!.map((t) => t.name).sort()).toEqual(["squad_kb_search", "squad_message", "squad_report"].sort());
+	// squad_attention: cmux-research concern 03's non-blocking "I need a human to look" host tool.
+	expect(registered!.map((t) => t.name).sort()).toEqual(["squad_kb_search", "squad_message", "squad_report", "squad_attention"].sort());
 	const kb = registered!.find((t) => t.name === "squad_kb_search")!;
 	expect((kb.parameters as { required?: string[] }).required).toContain("query");
 });
