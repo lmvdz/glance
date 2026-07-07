@@ -474,9 +474,12 @@ const SEVERITY_RANK: Record<AttentionSeverity, number> = { critical: 0, warn: 1,
  * fold in the server action-items only for things the client can't see (health),
  * de-duplicating by agent so a blocked agent never appears twice.
  *
- * Sort: critical → warn → ok, then most-recently-relevant first.
+ * Sort: critical → warn → ok, then most-recently-relevant first (default
+ * `"severity"`); pass `opts.sort = "blocked-longest"` to instead rank the
+ * WHOLE list by age (oldest `since` first, undated rows last) so the operator
+ * can see who's been waiting the longest, cmux-notification-rings style.
  */
-export function attentionItems(input: AttentionInput): AttentionItem[] {
+export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity' | 'blocked-longest' }): AttentionItem[] {
   const agents = input.agents ?? [];
   const items: AttentionItem[] = [];
   const seenAgentKinds = new Set<string>();
@@ -659,7 +662,16 @@ export function attentionItems(input: AttentionInput): AttentionItem[] {
     }
   }
 
-  items.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || (b.since ?? 0) - (a.since ?? 0) || a.id.localeCompare(b.id));
+  if (opts?.sort === 'blocked-longest') {
+    items.sort((a, b) => {
+      if (a.since == null && b.since == null) return a.id.localeCompare(b.id);
+      if (a.since == null) return 1; // undated rows last
+      if (b.since == null) return -1;
+      return a.since - b.since || a.id.localeCompare(b.id);
+    });
+  } else {
+    items.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || (b.since ?? 0) - (a.since ?? 0) || a.id.localeCompare(b.id));
+  }
   return items;
 }
 

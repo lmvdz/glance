@@ -17,10 +17,11 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Inbox, RefreshCw, Send, X, CheckCircle2 } from 'lucide-react';
+import { Inbox, RefreshCw, Send, X, CheckCircle2, ArrowUpDown, Bell, BellOff } from 'lucide-react';
 import { apiJson, jsonInit } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
 import { answerCommand, restartCommand, steerCommand } from '../lib/agent-control';
+import { enablePush, pushPermission } from '../lib/push';
 import {
   attentionItems,
   detectCollisions,
@@ -54,6 +55,21 @@ export const AttentionPanel: React.FC = () => {
   const [answering, setAnswering] = useState<AttentionItem | null>(null);
   const [answerText, setAnswerText] = useState('');
   const answerRef = useRef<HTMLTextAreaElement | null>(null);
+  // Ranking toggle (cmux-style rankable notification panel): default stays the
+  // severity-led order; "blocked-longest" re-ranks the whole list by age so the
+  // operator can see who's been waiting longest.
+  const [sort, setSort] = useState<'severity' | 'blocked-longest'>('severity');
+  // Background push enrollment. This panel is the always-visible attention surface
+  // (unlike AccountMenu, which is null in file mode — where the autonomous factory
+  // runs), so the file-mode operator can enable phone/desktop push from here.
+  const [pushPerm, setPushPerm] = useState<NotificationPermission | 'unsupported'>(() => pushPermission());
+  const enablePushHere = useCallback(async () => {
+    if (pushPerm === 'granted') return;
+    const result = await enablePush();
+    setPushPerm(pushPermission());
+    if (result === 'granted') showToast('Background push enabled — a blocked unit will now buzz this device', 'success');
+    else if (result === 'denied') showToast('Notification permission denied', 'error');
+  }, [pushPerm, showToast]);
 
   const load = useCallback(async () => {
     try {
@@ -86,13 +102,22 @@ export const AttentionPanel: React.FC = () => {
   const capacity = useMemo(() => computeCapacity(gov), [gov]);
   const collisions = useMemo(() => detectCollisions(usage?.runs, agents), [usage?.runs, agents]);
   const items = useMemo(
-    () => attentionItems({ actionItems: serverItems, agents, capacity, collisions }),
-    [serverItems, agents, capacity, collisions],
+    () => attentionItems({ actionItems: serverItems, agents, capacity, collisions }, { sort }),
+    [serverItems, agents, capacity, collisions, sort],
   );
 
   const critical = items.filter((i) => i.severity === 'critical');
   const warn = items.filter((i) => i.severity === 'warn');
   const grouped: Record<'critical' | 'warn', AttentionItem[]> = { critical, warn };
+  // "Longest waiting" is a cmux-style single ranked queue — splitting it back into
+  // severity buckets would defeat the point of ranking by age across the whole
+  // list, so it renders as one section instead of the two severity groups.
+  const sections: { key: string; title: string; rows: AttentionItem[] }[] =
+    sort === 'blocked-longest'
+      ? items.length > 0
+        ? [{ key: 'all', title: 'Longest waiting', rows: items }]
+        : []
+      : SEVERITY_GROUPS.filter(({ key }) => grouped[key].length > 0).map(({ key, title }) => ({ key, title, rows: grouped[key] }));
 
   const working = agents.filter((a) => a.status === 'working').length;
   const idle = agents.filter((a) => a.status === 'idle').length;
@@ -187,6 +212,18 @@ export const AttentionPanel: React.FC = () => {
     </span>
   );
 
+  const sortToggle = (
+    <button
+      onClick={() => setSort((s) => (s === 'severity' ? 'blocked-longest' : 'severity'))}
+      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+      title={sort === 'severity' ? 'Sorted newest first — click to sort by longest waiting' : 'Sorted by longest waiting — click to sort newest first'}
+      aria-label="Toggle attention sort order"
+    >
+      <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+      {sort === 'severity' ? 'Newest' : 'Longest waiting'}
+    </button>
+  );
+
   const refresh = (
     <button
       onClick={() => void load()}
@@ -198,8 +235,30 @@ export const AttentionPanel: React.FC = () => {
     </button>
   );
 
+  const pushToggle =
+    pushPerm === 'unsupported' ? null : (
+      <button
+        onClick={() => void enablePushHere()}
+        disabled={pushPerm === 'granted'}
+        className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-default disabled:opacity-60"
+        title={pushPerm === 'granted' ? 'Background push enabled — a blocked unit buzzes this device even when the tab is closed' : 'Enable background push so a blocked unit reaches you when you are not watching'}
+        aria-label="Enable background notifications"
+      >
+        {pushPerm === 'granted' ? <Bell className="h-3 w-3" aria-hidden="true" /> : <BellOff className="h-3 w-3" aria-hidden="true" />}
+        {pushPerm === 'granted' ? 'Push on' : 'Push'}
+      </button>
+    );
+
+  const actions = (
+    <>
+      {pushToggle}
+      {sortToggle}
+      {refresh}
+    </>
+  );
+
   return (
-    <PanelShell icon={<Inbox className="h-4 w-4 text-blue-500" />} title="Needs you" subtitle={subtitle} actions={refresh}>
+    <PanelShell icon={<Inbox className="h-4 w-4 text-blue-500" />} title="Needs you" subtitle={subtitle} actions={actions}>
       {/* Loading */}
       {!loaded && !error && (
         <div className="space-y-2 animate-pulse">
@@ -242,10 +301,8 @@ export const AttentionPanel: React.FC = () => {
             </div>
           )}
 
-          {/* Grouped, sorted attention rows. */}
-          {SEVERITY_GROUPS.map(({ key, title }) => {
-            const rows = grouped[key];
-            if (rows.length === 0) return null;
+          {/* Grouped (or, in "longest waiting" mode, single-ranked) attention rows. */}
+          {sections.map(({ key, title, rows }) => {
             return (
               <SectionCard key={key} title={title} right={`${rows.length}`}>
                 <div className="divide-y divide-gray-100 dark:divide-gray-800">
