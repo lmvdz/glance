@@ -69,6 +69,28 @@ function truncate(s: string, n: number): string {
 	return s.length <= n ? s : `${s.slice(0, n)}…`;
 }
 
+/**
+ * Provision `node_modules` in the disposable scratch worktree before any gate runs.
+ *
+ * `mkScratchWorktree` is a bare `git worktree add` — it has NO node_modules, so an
+ * acceptance/regression gate that shells out to a project-local binary (`tsc`,
+ * `bun run check`, …) dies with `command not found` / exit 127 and BLOCKS an
+ * otherwise-landable branch. The daemon already installs unit worktrees the same way
+ * (SquadManager.installWorker); the scratch-merge worktree needs the same provisioning.
+ *
+ * Runs on the host with the daemon's env (warm bun cache + network), so it is fast and
+ * populates the bind-mounted dir the sandboxed gate later sees. Skipped for non-bun repos
+ * (no package.json). Returns an error string the caller surfaces as a gate failure, or
+ * null on success/skip — deps that can't install mean the gate can't be trusted.
+ */
+export async function installScratchDeps(scratch: string): Promise<string | null> {
+	if (!existsSync(path.join(scratch, "package.json"))) return null;
+	const proc = Bun.spawn(["bun", "install"], { cwd: scratch, stdout: "pipe", stderr: "pipe" });
+	const [, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	if ((await proc.exited) !== 0) return `scratch dep install failed: ${err.trim().slice(0, 300)}`;
+	return null;
+}
+
 /** "owner/repo" from repoIdentity()'s "host/owner/repo" key — gh must be addressed by slug, not host
  *  (see land-mode.ts's probe() for why: a host-aliased origin normalizes to a non-github.com host). */
 function slugOf(repo: string): string {
@@ -500,6 +522,13 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 				return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: staleReason };
 			}
 		}
+
+		// Provision deps in the merged scratch tree so the acceptance + regression gates below can
+		// invoke project-local tools (tsc, `bun run <script>`). Without this a bun repo's gate fails
+		// with `command not found` (exit 127) and blocks a landable branch. After the merge so the
+		// branch's own dependency changes are what gets installed.
+		const installErr = await installScratchDeps(scratch);
+		if (installErr) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${installErr}` };
 
 		const verify = opts.verify ?? (await detectVerify(repo));
 		if (verify) {
