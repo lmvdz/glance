@@ -58,6 +58,34 @@ test("runProof records a failing proof (non-zero exit)", async () => {
 	expect((await runProof({ repo, worktree: repo, command: "exit 3" })).ok).toBe(false);
 });
 
+test("runProof staged: all stages green → ok, per-stage receipts recorded in order", async () => {
+	const repo = await baseRepo();
+	const proof = await runProof({ repo, worktree: repo, command: "true && true", stages: [{ name: "typecheck", command: "true" }, { name: "test", command: "true" }] });
+	expect(proof.ok).toBe(true);
+	expect(proof.stages?.map((s) => s.name)).toEqual(["typecheck", "test"]);
+	expect(proof.stages?.every((s) => s.exitCode === 0)).toBe(true);
+	// command (and its fingerprint) stays the joined string, not the per-stage commands
+	expect(proof.command).toBe("true && true");
+});
+
+test("runProof staged: FAIL-FAST — first red stage stops the run, later stages recorded as skipped", async () => {
+	const repo = await baseRepo();
+	const proof = await runProof({ repo, worktree: repo, command: "exit 3 && true", stages: [{ name: "typecheck", command: "exit 3" }, { name: "test", command: "true" }] });
+	expect(proof.ok).toBe(false);
+	expect(proof.stages?.[0]).toMatchObject({ name: "typecheck", exitCode: 3 });
+	// the test stage never ran (fail-fast): recorded as skipped (exitCode null)
+	expect(proof.stages?.[1]).toMatchObject({ name: "test", exitCode: null });
+	// the failure names the stage for legibility
+	expect(proof.detail).toContain("typecheck");
+});
+
+test("runProof single-command (no stages) is unchanged — stages undefined", async () => {
+	const repo = await baseRepo();
+	const proof = await runProof({ repo, worktree: repo, command: "true" });
+	expect(proof.ok).toBe(true);
+	expect(proof.stages).toBeUndefined();
+});
+
 test("isFresh: passing + matching fingerprint is fresh; mismatch, dirty, or failure is not", () => {
 	const fp = { commit: "abc", tree: "tree", branch: "feat", dirty: false, baseCommit: "base", repo: "/repo", worktree: "/repo-wt", commandHash: "cmd", now: 10 };
 	const b: Omit<Proof, "ok" | "commit"> = { tree: "tree", branch: "feat", dirty: false, baseCommit: "base", repo: "/repo", worktree: "/repo-wt", command: "x", commandHash: "cmd", ranAt: 0, ttlMs: 100, detail: "", artifacts: [] };

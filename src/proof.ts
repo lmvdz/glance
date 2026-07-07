@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { resolveStateDir } from "./state-dir.ts";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
 import { gateExec } from "./gate-runner.ts";
+import type { GateStage } from "./intake.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 let proofRoot = path.join(resolveStateDir(), "proof");
@@ -54,6 +55,21 @@ export interface Proof {
 	 * record says so rather than pretending every proof is equal. Undefined on pre-sandbox records.
 	 */
 	sandboxed?: boolean;
+	/**
+	 * Per-stage receipts when the gate ran as an ordered, cheap-first, fail-fast sequence
+	 * (typecheck → test). OBSERVABILITY ONLY — the `ok` field above and the DoneProof grade are still
+	 * the authoritative pass/fail; `stages` exists so a failure says WHICH stage failed and confirms the
+	 * later stages were skipped (fail-fast). Undefined on single-command / pre-staging records.
+	 */
+	stages?: StageResult[];
+}
+
+/** Outcome of one gate stage. `exitCode` null ⇒ stage was skipped (an earlier stage failed fast). */
+export interface StageResult {
+	name: string;
+	command: string;
+	exitCode: number | null;
+	durationMs: number;
 }
 
 /** Manager/org state root owns proof storage; tests/standalone callers use the default. */
@@ -224,7 +240,7 @@ export async function proofFingerprint(repo: string, worktree: string, command?:
  * optional browser-vision pass (off unless `visionUrl` or env `OMP_SQUAD_APP_URL` is set) only
  * appends evidence to `artifacts`; it can never flip the gate.
  */
-export async function runProof(opts: { repo: string; worktree: string; command: string; visionUrl?: string; producer?: VisionProducer }): Promise<Proof> {
+export async function runProof(opts: { repo: string; worktree: string; command: string; stages?: GateStage[]; visionUrl?: string; producer?: VisionProducer }): Promise<Proof> {
 	// Total by contract: a missing worktree (reaped / never created) or any spawn failure yields a
 	// FAILED proof, never a throw — an unhandled rejection here crashes the daemon's orchestrator tick.
 	const before = existsSync(opts.worktree) ? await proofFingerprint(opts.repo, opts.worktree, opts.command) : undefined;
@@ -232,18 +248,41 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 	let err = "";
 	let code = 1;
 	let sandboxed = false;
+	// When the caller passes structured stages (from detectVerifyStages), run them cheap-first and
+	// FAIL-FAST — stop at the first red stage so a typecheck failure never pays for the test suite, and
+	// the record says which stage failed + which were skipped. `command` (and its fingerprint) stays the
+	// joined string for proof-freshness compatibility; stages are additive observability, not the grade.
+	const staged = !!(opts.stages && opts.stages.length);
+	const stageResults: StageResult[] = [];
 	try {
 		if (!existsSync(opts.worktree)) throw new Error(`worktree missing: ${opts.worktree}`);
 		if (before?.dirty) throw new Error("worktree has uncommitted changes (tracked edits or new files) — commit or discard them before Verify");
 		// gateExec: scrubbed env always; hermetic docker container by default when docker is usable
 		// (else a legible host fallback). plan.sandboxed records which — a host-run proof is weaker.
-		const plan = await gateExec(opts.command, opts.worktree, { mounts: [opts.repo] });
-		sandboxed = plan.sandboxed;
-		const proc = Bun.spawn(plan.argv, { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: plan.env });
-		const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-		out = o;
-		err = e;
-		code = c;
+		const runOne = async (command: string): Promise<{ out: string; err: string; code: number }> => {
+			const plan = await gateExec(command, opts.worktree, { mounts: [opts.repo] });
+			sandboxed = plan.sandboxed;
+			const proc = Bun.spawn(plan.argv, { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: plan.env });
+			const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			return { out: o, err: e, code: c };
+		};
+		const gateStages: GateStage[] = staged ? opts.stages! : [{ name: "verify", command: opts.command }];
+		code = 0;
+		for (let i = 0; i < gateStages.length; i++) {
+			const stage = gateStages[i]!;
+			const started = Date.now();
+			const r = await runOne(stage.command);
+			stageResults.push({ name: stage.name, command: stage.command, exitCode: r.code, durationMs: Date.now() - started });
+			out = out ? `${out}\n${r.out}` : r.out;
+			err = err ? `${err}\n${r.err}` : r.err;
+			if (r.code !== 0) {
+				code = r.code;
+				const skipped = gateStages.slice(i + 1);
+				if (staged) err = `${err}\n[gate] stage "${stage.name}" failed (exit ${r.code})${skipped.length ? `; ${skipped.length} later stage(s) skipped` : ""}`.trim();
+				for (const s of skipped) stageResults.push({ name: s.name, command: s.command, exitCode: null, durationMs: 0 });
+				break; // fail-fast
+			}
+		}
 	} catch (spawnErr) {
 		err = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
 		code = 1;
@@ -271,6 +310,7 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 		detail: tail.slice(0, 4000),
 		artifacts: await collectArtifacts(opts.worktree),
 		sandboxed,
+		stages: staged ? stageResults : undefined,
 	};
 	// Optional, evidence-only browser-vision pass. Never touches the gate fields above — it only
 	// merges its screenshots/notes into artifacts (deduped, since collectArtifacts may already

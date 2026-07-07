@@ -190,6 +190,10 @@ export interface IssueRef {
 	produces?: string[];
 	/** Whether the issue scope contract came from an operator or planner inference. */
 	scopeSource?: ScopeSource;
+	/** The authored spec body (Tier-2 / plan-concern text) for context injection at dispatch. Populated
+	 *  best-effort from the issue detail; UNTRUSTED (human/skills-MCP-writable) — must be fenced as data,
+	 *  not instructions, before it reaches an agent prompt. Absent ⇒ title-only dispatch (no regression). */
+	description?: string;
 }
 
 // ── Feedback Loop domain/wire types ─────────────────────────────────────────

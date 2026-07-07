@@ -7,7 +7,7 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { detectVerify, routeIntake } from "../src/intake.ts";
+import { detectVerify, detectVerifyStages, routeIntake } from "../src/intake.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -37,6 +37,24 @@ test("detectVerify: Cargo → cargo check && cargo test", async () => {
 
 test("detectVerify: no toolchain → undefined", async () => {
 	expect(await detectVerify(await repo({ "README.md": "hi" }))).toBeUndefined();
+});
+
+test("detectVerifyStages: bun scripts → ordered, named, cheap-first stages", async () => {
+	const d = await repo({ "bun.lock": "", "package.json": JSON.stringify({ scripts: { typecheck: "tsc", test: "bun test" } }) });
+	expect(await detectVerifyStages(d)).toEqual([
+		{ name: "typecheck", command: "bun run typecheck" },
+		{ name: "test", command: "bun run test" },
+	]);
+	// detectVerify is exactly the &&-join of the stages — one source of truth
+	expect(await detectVerify(d)).toBe("bun run typecheck && bun run test");
+});
+
+test("detectVerifyStages: Cargo → two stages; no toolchain → empty", async () => {
+	expect(await detectVerifyStages(await repo({ "Cargo.toml": "[package]" }))).toEqual([
+		{ name: "typecheck", command: "cargo check" },
+		{ name: "test", command: "cargo test" },
+	]);
+	expect(await detectVerifyStages(await repo({ "README.md": "hi" }))).toEqual([]);
 });
 
 test("routeIntake: ordinary code change → autonomous verify loop (no human gate)", async () => {

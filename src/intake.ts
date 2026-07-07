@@ -120,24 +120,40 @@ export function ompClassify(bin = "omp", timeoutMs?: number): Classify {
 	return async (prompt: string): Promise<string> => (await ompOneShot(["-p", "--no-tools", "--smol", "--hide-thinking", prompt], { bin, timeoutMs })).out;
 }
 
-/** Infer the repo's verification command from its toolchain manifests. */
-export async function detectVerify(repo: string): Promise<string | undefined> {
+/** One named, cheap-first verification stage. The stage boundary is captured HERE, at the structured
+ *  source — never by re-tokenizing a joined `a && b` string downstream (which would silently drop
+ *  `cd`/`export`/quoted-`&&` semantics and could turn a red gate green). */
+export interface GateStage {
+	name: string;
+	command: string;
+}
+
+/** Infer the repo's verification as an ORDERED, cheap-first stage list (typecheck → test). Empty when
+ *  no toolchain is recognized. `detectVerify` is exactly the `&&`-join of this — one source of truth. */
+export async function detectVerifyStages(repo: string): Promise<GateStage[]> {
 	const pkg = await readJsonObject(path.join(repo, "package.json"));
 	const scriptsRaw = pkg?.scripts;
 	if (scriptsRaw && typeof scriptsRaw === "object" && !Array.isArray(scriptsRaw)) {
 		const scripts = scriptsRaw as Record<string, unknown>; // guarded above: a non-array object
 		const has = (k: string): boolean => typeof scripts[k] === "string";
 		const pm = await detectPackageManager(repo);
-		const cmds: string[] = [];
-		if (has("typecheck")) cmds.push(`${pm} run typecheck`);
-		else if (has("check")) cmds.push(`${pm} run check`);
-		if (has("test")) cmds.push(`${pm} run test`);
-		if (cmds.length) return cmds.join(" && ");
+		const stages: GateStage[] = [];
+		if (has("typecheck")) stages.push({ name: "typecheck", command: `${pm} run typecheck` });
+		else if (has("check")) stages.push({ name: "check", command: `${pm} run check` });
+		if (has("test")) stages.push({ name: "test", command: `${pm} run test` });
+		if (stages.length) return stages;
 	}
-	if (await exists(path.join(repo, "Cargo.toml"))) return "cargo check && cargo test";
-	if (await exists(path.join(repo, "go.mod"))) return "go build ./... && go test ./...";
-	if (await exists(path.join(repo, "pyproject.toml"))) return "pytest -q";
-	return undefined;
+	if (await exists(path.join(repo, "Cargo.toml"))) return [{ name: "typecheck", command: "cargo check" }, { name: "test", command: "cargo test" }];
+	if (await exists(path.join(repo, "go.mod"))) return [{ name: "build", command: "go build ./..." }, { name: "test", command: "go test ./..." }];
+	if (await exists(path.join(repo, "pyproject.toml"))) return [{ name: "test", command: "pytest -q" }];
+	return [];
+}
+
+/** Infer the repo's verification command from its toolchain manifests — the `&&`-join of
+ *  {@link detectVerifyStages}. Undefined when no toolchain is recognized. */
+export async function detectVerify(repo: string): Promise<string | undefined> {
+	const stages = await detectVerifyStages(repo);
+	return stages.length ? stages.map((s) => s.command).join(" && ") : undefined;
 }
 
 async function detectPackageManager(repo: string): Promise<string> {
