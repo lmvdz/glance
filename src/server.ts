@@ -62,10 +62,12 @@ import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocume
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
+import { buildTaskClassMatrix, type TaskClassMatrixDoc } from "./omp-graph/task-class-matrix.ts";
 import { buildProvenance, type ProvenanceDoc } from "./omp-graph/provenance.ts";
 import { ingestHarnesses } from "./ingest/index.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { readModelOutcomes } from "./model-outcomes.ts";
+import { readTaskOutcomes } from "./task-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
@@ -1246,6 +1248,11 @@ export class SquadServer {
 			if (url.pathname === "/api/graph/scoreboard") return Response.json(await scoreboardPayload(repo));
 			return Response.json(await provenancePayload(url, repo, manager));
 		}
+		// Not nested under the resolveGraphRepo-gated /api/graph block above: TaskOutcomeRow (the
+		// joined outcome log this reads) has no `repo` field — a unit's routing decision isn't a
+		// per-repo concept — so there is nothing for that allowlist to scope. Fleet-wide, like
+		// /api/usage and /api/heat.
+		if (url.pathname === "/api/graph/task-class") return Response.json(await taskClassPayload(manager, url));
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/presence") {
@@ -2015,6 +2022,20 @@ async function scoreboardPayload(repo: string): Promise<Scoreboard> {
 	await ingestHarnesses(stateDir, repo);
 	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
 	return buildScoreboard(receipts, readModelOutcomes(stateDir));
+}
+
+/**
+ * GET /api/graph/task-class — the task-class × model outcome matrix (model-routing-control-loop
+ * concern 05). OBSERVATIONAL, NOT A DECISION ORACLE — see task-class-matrix.ts's module doc; the
+ * webapp panel MUST surface `doc.note` prominently, not just tuck it into a tooltip.
+ */
+async function taskClassPayload(manager: SquadManager, url: URL): Promise<TaskClassMatrixDoc> {
+	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
+	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
+	const stateDir = resolveStateDir();
+	const rows = await readTaskOutcomes(stateDir);
+	const denominatorPopulation = manager.landingRosterRouting();
+	return buildTaskClassMatrix(rows, denominatorPopulation, range);
 }
 
 /** GET /api/graph/provenance?id=OMPSQ-336 — the plan→agent→proof→land thread for one ticket. */
