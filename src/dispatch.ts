@@ -110,9 +110,32 @@ export interface DispatchDeps {
 	liveCount?: () => number;
 	/** Global live-agent WIP cap (OMP_SQUAD_MAX_WIP). When set, dispatch never pushes live agents past it. */
 	maxWip?: number;
-	/** True while the model subscription is rate-limited (5h/weekly cap). When set, a tick spawns nothing —
-	 *  spawning here would only launch agents that immediately stall on the same cap. Self-clears on cooldown. */
-	paused?: () => boolean;
+	/**
+	 * True while `provider` (a `ModelLineage`-grain string — see model-lineage.ts) is rate-limited (5h/
+	 * weekly cap) — spawning onto it would only launch agents that immediately stall on the same cap.
+	 * Called with NO argument at the top of a tick when `providerFor` is absent (or the ladder is inert
+	 * — see `secondLaneAvailable`): the legacy global check, true while ANY provider is capped, so a
+	 * tick spawns nothing (byte-for-byte the old single-global-cooldown behavior). Called WITH a
+	 * provider once per candidate issue when `providerFor` is wired: only that issue is skipped, so a
+	 * capped provider no longer freezes units bound for a different, live provider. Self-clears on cooldown.
+	 */
+	paused?: (provider?: string) => boolean;
+	/**
+	 * Degradation ladder (concern 06): resolve the provider a prospective spawn for `issue` in `repo`
+	 * would land on, so `tick()` can gate per-unit instead of once globally. Undefined ⇒ no per-unit
+	 * differentiation is possible — the dispatcher falls back to the legacy top-of-tick `paused()`
+	 * no-arg check (zero behavior change from before this concern).
+	 */
+	providerFor?: (repo: string, issue: IssueRef) => string | undefined;
+	/**
+	 * True when a second verified, differently-provider'd harness is actually enabled (see
+	 * `harness-registry.ts`'s `hasSecondVerifiedProviderLane`) — i.e. per-unit gating has real
+	 * differentiation to act on, not just a relabeled global pause. FAIL-SAFE: per-unit gating runs
+	 * only on an explicit `true`. Undefined (not wired) or `false` ⇒ the legacy top-of-tick global
+	 * freeze, plus one inert log when `providerFor` is supplied — a partially-wired install
+	 * (`providerFor` without this) must never silently lose the fleet-wide safety freeze.
+	 */
+	secondLaneAvailable?: () => boolean;
 	/** Observability sink — one report per tick (a no-op poll is a heartbeat proving the loop is alive). */
 	record?: AutomationRecorder;
 	/** Restart-safe issue ids already dispatched by prior daemon boots. Omitted ⇒ in-memory only. */
@@ -142,8 +165,14 @@ export class Dispatcher {
 	private readonly skipLogged = new Set<string>();
 	private timer?: Timer;
 	private running = false;
-	/** True while a rate-limit pause is in effect — so the pause/resume is logged once per episode, not per tick. */
+	/** True while a rate-limit pause is in effect — so the pause/resume is logged once per episode, not per tick.
+	 *  Only used on the legacy global-check path (no `providerFor`, or the ladder is inert). */
 	private pauseLogged = false;
+	/** True once the "ladder is inert" log has fired — logged once, not every tick. */
+	private inertLogged = false;
+	/** Providers currently logged as paused under per-unit gating — logged once per pause/resume
+	 *  transition, mirroring `pauseLogged` but per bucket instead of one global flag. */
+	private readonly pausedProvidersLogged = new Set<string>();
 
 	constructor(deps: DispatchDeps) {
 		this.deps = deps;
@@ -157,19 +186,44 @@ export class Dispatcher {
 			this.deps.record?.({ durationMs: 0, skipReason: "overlap", detail: "previous dispatch tick still running" });
 			return 0; // never overlap polls
 		}
-		// Model subscription rate-limited (5h/weekly cap): spawning now only launches agents that immediately
-		// stall on the same cap. Skip the whole poll until the cooldown lifts; issues stay open for a later tick.
-		if (this.deps.paused?.()) {
-			if (!this.pauseLogged) {
-				this.pauseLogged = true;
-				this.deps.log("paused — model subscription rate-limited (5h/weekly cap); not spawning until it clears");
-			}
-			this.deps.record?.({ durationMs: Date.now() - t0, level: "warn", detail: "paused — model subscription rate-limited" });
-			return 0;
+		// Degradation ladder (concern 06): per-unit gating only has real differentiation to offer once
+		// (a) the caller can resolve a prospective unit's provider (`providerFor`) AND (b) a second
+		// verified, differently-provider'd harness is EXPLICITLY confirmed enabled (`secondLaneAvailable()
+		// === true` — undefined/unwired must NOT count as permission: this is a fleet-safety freeze, so a
+		// partially-wired install fails SAFE). Absent either, fall back to the pre-ladder top-of-tick
+		// global check byte-for-byte — no regression.
+		const perUnitGating = !!this.deps.providerFor && this.deps.secondLaneAvailable?.() === true;
+		if (!perUnitGating && this.deps.providerFor && !this.inertLogged) {
+			this.inertLogged = true;
+			this.deps.log("per-provider dispatch gating inert — no second verified provider lane confirmed (unconfigured or not wired); behaves like the single global pause");
 		}
-		if (this.pauseLogged) {
-			this.pauseLogged = false;
-			this.deps.log("resumed — model subscription rate-limit cleared");
+		if (perUnitGating) this.inertLogged = false;
+
+		if (!perUnitGating) {
+			// Model subscription rate-limited (5h/weekly cap): spawning now only launches agents that immediately
+			// stall on the same cap. Skip the whole poll until the cooldown lifts; issues stay open for a later tick.
+			if (this.deps.paused?.()) {
+				if (!this.pauseLogged) {
+					this.pauseLogged = true;
+					this.deps.log("paused — model subscription rate-limited (5h/weekly cap); not spawning until it clears");
+				}
+				this.deps.record?.({ durationMs: Date.now() - t0, level: "warn", detail: "paused — model subscription rate-limited" });
+				return 0;
+			}
+			if (this.pauseLogged) {
+				this.pauseLogged = false;
+				this.deps.log("resumed — model subscription rate-limit cleared");
+			}
+		} else {
+			// Per-unit gating: no top-of-tick short-circuit — each candidate issue below is checked
+			// against ITS OWN provider, so a capped provider skips only its units, not the whole tick.
+			// Reconcile pause→resume logging here (once per provider, not per skipped issue).
+			for (const p of [...this.pausedProvidersLogged]) {
+				if (!this.deps.paused?.(p)) {
+					this.pausedProvidersLogged.delete(p);
+					this.deps.log(`resumed — provider ${p} rate-limit cleared`);
+				}
+			}
 		}
 		this.running = true;
 		let spawned = 0;
@@ -223,6 +277,22 @@ export class Dispatcher {
 					if (claimed.has(issue.id) || this.dispatched.has(issue.id) || this.deps.ledger?.has(issue.id)) {
 						noteSkip("already-handled", "all open issues already claimed or dispatched");
 						continue;
+					}
+					// Degradation ladder (concern 06): gate PER ISSUE on the provider it would actually spawn
+					// onto — a cap on provider A skips only A's units; B's units keep dispatching this same
+					// tick. `continue`, never `break` — a later issue in this repo (or a later repo) may
+					// resolve to a different, live provider.
+					if (perUnitGating) {
+						const provider = this.deps.providerFor?.(repo, issue);
+						if (this.deps.paused?.(provider)) {
+							const label = provider ?? "unknown";
+							if (!this.pausedProvidersLogged.has(label)) {
+								this.pausedProvidersLogged.add(label);
+								this.deps.log(`paused — provider ${label} rate-limited (usage cap); skipping its units, other providers keep dispatching`);
+							}
+							noteSkip("blocked", `provider ${label} rate-limited (usage cap)`);
+							continue;
+						}
 					}
 					// Human-review / do-NOT-auto-land: stays visible in the UI's issue list but never auto-dispatched.
 					// Not added to `dispatched`, logged once like the blocked_by deferral.

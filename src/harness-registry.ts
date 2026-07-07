@@ -14,6 +14,8 @@
  * it only says which transport speaks it and what the runtime is capable of.
  */
 
+import { harnessLineage } from "./model-lineage.ts";
+
 export type HarnessProtocol = "omp-rpc" | "acp";
 
 /** What a harness's runtime can and cannot do — read once at agent creation to gate behavior and
@@ -92,6 +94,29 @@ export function unverifiedHarnessesEnabled(): boolean {
  *  OMP_SQUAD_UNVERIFIED_HARNESS=1) — so the create UI/CLI never offers a harness that half-works. */
 export function listHarnesses(includeUnverified = unverifiedHarnessesEnabled()): HarnessDescriptor[] {
 	return [...registry.values()].filter((d) => d.verified || includeUnverified);
+}
+
+/**
+ * True when a second VERIFIED harness is enabled whose static vendor pin (`harnessLineage`) differs
+ * from the default harness's — the precondition for the per-provider degradation ladder (concern 06,
+ * plans/research-sirvir/06-degradation-ladder.md) to have any real differentiation to act on. omp/pi/
+ * opencode are multi-model runtimes with NO static vendor pin (`harnessLineage` reads "unknown" for
+ * all three — see model-lineage.ts), so this stays false until a vendor-pinned ACP harness (claude-code,
+ * gemini, codex) is BOTH registered `verified:true` AND distinct from the default harness's lineage.
+ * Today none of the three are verified, so this is false and dispatch.ts logs the ladder as inert
+ * instead of silently no-oping (the concern's explicit "name it, don't fake it" requirement).
+ *
+ * VERIFIED-ONLY by contract: `listHarnesses(false)` — the OMP_SQUAD_UNVERIFIED_HARNESS=1 escape hatch
+ * (which lets `listHarnesses()`' default surface unverified harnesses on create UIs) must NOT let an
+ * unsmoked codex/gemini registration convince the dispatcher a real second subscription lane exists.
+ */
+export function hasSecondVerifiedProviderLane(defaultHarness: string = globalDefaultHarness()): boolean {
+	const baseline = harnessLineage(defaultHarness);
+	return listHarnesses(false).some((d) => {
+		if (d.name === defaultHarness) return false;
+		const lineage = harnessLineage(d.name);
+		return lineage !== "unknown" && lineage !== baseline;
+	});
 }
 
 /** The operator's global default harness: `GLANCE_HARNESS` env, else "omp". */
