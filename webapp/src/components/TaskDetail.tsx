@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Su
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MarkdownComponents, PlanBlockContext } from './PlanBlocks';
+import { AgentSourceBadge } from './AgentSourceBadge';
 import { TaskProperties } from './TaskProperties';
 import { ProofProvenancePanel } from './ProofProvenancePanel';
 import { useTaskContext } from '../context/TaskContext';
@@ -1656,7 +1657,7 @@ export const TaskDetail = () => {
 
               <div className="mb-6">
                 <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-2 mb-3"><div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">Decisions</div></div>
-                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-800 rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <span className="mt-1 inline-block rounded-sm bg-emerald-100 px-1 py-px text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" title="captured by an agent">agent</span>}</div>)}</div>
+                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-800 rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <AgentSourceBadge className="mt-1" />}</div>)}</div>
                 <div className="flex gap-2"><input value={newDecisionText} onChange={(e) => setNewDecisionText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addDecision()} placeholder="Record a decision for future agents..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addDecision} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
 

@@ -2012,6 +2012,27 @@ export class SquadManager extends EventEmitter {
 		return { feature: pf, agent };
 	}
 
+	/**
+	 * Atomically append one agent-captured decision to a feature, resolving the feature the SAME way
+	 * updateFeature does (adopting a plan-derived feature that isn't yet persisted — so capture works
+	 * for exactly the plan-driven agents it targets, not just already-adopted features). Reads the
+	 * feature's CURRENT decisions at write time and appends in one synchronous step — no stale
+	 * read-modify-write over a client snapshot, so concurrent agent captures can't clobber each other.
+	 * De-dupes on normalized text. Returns the outcome so the caller can tell the agent what happened.
+	 */
+	async recordAgentDecision(featureId: string, decision: FeatureDecision, repo?: string): Promise<"recorded" | "duplicate" | "no-feature"> {
+		const pf = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
+		if (!pf) return "no-feature";
+		const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
+		const target = norm(decision.text);
+		const existing = pf.decisions ?? [];
+		if (existing.some((d) => norm(d.text) === target)) return "duplicate";
+		pf.decisions = [...existing, decision];
+		pf.updatedAt = Date.now();
+		this.emitFeaturesChanged();
+		return "recorded";
+	}
+
 	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
 		const pf = this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, patch.repo);
 		if (!pf) return undefined;
@@ -5335,7 +5356,14 @@ export class SquadManager extends EventEmitter {
 			return;
 		}
 		if (call.toolName === RECORD_DECISION_TOOL) {
-			void this.handleRecordDecisionTool(rec, call);
+			// Gate dispatch on the SAME flag that gates advertisement (registerHostTools) — so turning the
+			// flag off actually disables the feature (and keeps the "off" A/B arm clean) rather than only
+			// hiding the tool while a carried-over / resumed / guessed call still writes decisions.
+			if (isOn(learningFlags(rec.dto.id).decisionCapture)) {
+				void this.handleRecordDecisionTool(rec, call);
+			} else {
+				rec.agent.respondHostTool(call.id, "decision capture is disabled", true);
+			}
 			return;
 		}
 		// Capability tool-grant enforcement (#3): if this agent was spawned from a capability profile that
@@ -5449,15 +5477,8 @@ export class SquadManager extends EventEmitter {
 				return;
 			}
 			const featureId = rec.dto.featureId;
-			const pf = featureId ? this.featureStore.get(featureId) : undefined;
-			if (!featureId || !pf) {
+			if (!featureId) {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
-				return;
-			}
-			const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
-			const existing = pf.decisions ?? [];
-			if (existing.some((d) => norm(d.text) === norm(text))) {
-				rec.agent.respondHostTool(call.id, "decision already recorded — no change");
 				return;
 			}
 			const decision: FeatureDecision = {
@@ -5467,11 +5488,26 @@ export class SquadManager extends EventEmitter {
 				createdAt: Date.now(),
 				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
 			};
-			await this.updateFeature(featureId, { decisions: [...existing, decision] });
-			this.append(rec, "system", `📝 decision recorded: ${truncate(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
-			this.learningMetrics.record("decision-captured", 1);
-			void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncate(text, 120));
+			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
+			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
+			if (outcome === "no-feature") {
+				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
+				return;
+			}
+			if (outcome === "duplicate") {
+				rec.agent.respondHostTool(call.id, "decision already recorded — no change");
+				return;
+			}
+			// Durably written. Respond success FIRST so a throw in the cosmetic post-steps below can never
+			// flip an already-persisted decision to a "failed" reply (which would make the agent retry).
+			this.learningMetrics.record("decision-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
 			rec.agent.respondHostTool(call.id, "decision recorded — future agents on this work will inherit it");
+			try {
+				this.append(rec, "system", `📝 decision recorded: ${truncate(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncate(text, 120));
+			} catch (postErr) {
+				this.log("warn", `record-decision post-step failed for ${rec.dto.name} (decision was saved): ${String(postErr)}`);
+			}
 		} catch (err) {
 			try {
 				rec.agent.respondHostTool(call.id, `failed to record decision: ${String(err)}`, true);

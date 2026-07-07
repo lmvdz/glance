@@ -15,6 +15,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Library, Search, Flame, Lightbulb, Lock, GitCommitHorizontal, Users, Sparkles } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { PanelShell, SectionCard, VerdictBadge } from './ui';
+import { AgentSourceBadge } from './AgentSourceBadge';
 
 type KbType = 'agent' | 'digest' | 'hot-area' | 'scout' | 'lease' | 'decision';
 
@@ -203,7 +204,7 @@ const Overview: React.FC<{ snapshot: FabricSnapshot | null }> = ({ snapshot }) =
                 <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-400">
                   <span>{d.featureTitle}</span>
                   {d.decisionSource === 'agent' ? (
-                    <span className="rounded-sm bg-emerald-100 px-1 py-px text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" title="captured by an agent">agent</span>
+                    <AgentSourceBadge />
                   ) : d.decisionSource ? (
                     <span>· {d.decisionSource}</span>
                   ) : null}

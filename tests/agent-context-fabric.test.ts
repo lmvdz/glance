@@ -148,6 +148,9 @@ test("reserved squad_message host tool routes through applyCommand without creat
 });
 
 test("squad_record_decision captures a source:agent decision onto the feature, idempotently, and skips when no feature is attached", async () => {
+	const savedFlag = process.env.OMP_SQUAD_DECISION_CAPTURE;
+	process.env.OMP_SQUAD_DECISION_CAPTURE = "1"; // dispatch is flag-gated
+	cleanups.push(async () => { if (savedFlag === undefined) delete process.env.OMP_SQUAD_DECISION_CAPTURE; else process.env.OMP_SQUAD_DECISION_CAPTURE = savedFlag; });
 	const dir = await tmpDir("acf-record-");
 	const mgr = new SquadManager({ stateDir: dir });
 	// Seed the agent's feature into the (private) featureStore — the write target for captured decisions.
@@ -189,6 +192,17 @@ test("squad_record_decision captures a source:agent decision onto the feature, i
 	await done3.promise;
 	expect(replies.at(-1)?.isError).toBe(true);
 	expect(replies.at(-1)?.text).toContain("no feature");
+
+	// Flag off ⇒ dispatch is disabled (no write), consistent with advertisement gating.
+	process.env.OMP_SQUAD_DECISION_CAPTURE = "0";
+	const done4 = Promise.withResolvers<void>();
+	rec.agent.respondHostTool = (callId, text, isError) => { replies.push({ callId, text, isError }); done4.resolve(); };
+	harness.onHostTool(rec, { id: "c4", toolName: "squad_record_decision", arguments: { text: "a brand new decision while disabled" } });
+	await done4.promise;
+	expect(replies.at(-1)?.isError).toBe(true);
+	expect(replies.at(-1)?.text).toContain("disabled");
+	expect((featureStore.get("f")?.decisions ?? []).length).toBe(1); // unchanged
+	process.env.OMP_SQUAD_DECISION_CAPTURE = "1";
 });
 
 test("fabric snapshot is scoped and returns distilled facts with receipt provenance", async () => {
