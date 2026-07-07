@@ -16,6 +16,7 @@
  */
 
 import * as fsp from "node:fs/promises";
+import { envInt } from "./config.ts";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
@@ -72,7 +73,7 @@ function defaultReflectLlm(): ReflectLlm {
 			args: ["-p", "--model", reflectModel(), "--system-prompt", SYSTEM_PROMPT, user],
 			parse: parseRawReflection,
 			fallback: undefined,
-			timeoutMs: Number(process.env.OMP_SQUAD_REFLECT_TIMEOUT_MS) || 20_000,
+			timeoutMs: envInt("OMP_SQUAD_REFLECT_TIMEOUT_MS", 20_000),
 		});
 	};
 }

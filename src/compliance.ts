@@ -10,6 +10,7 @@
  */
 
 import type { AuditQuery } from "./audit.ts";
+import { envInt } from "./config.ts";
 import type { ForcedLand, LandLedger, ValidatorOverride } from "./land-ledger.ts";
 import type { AuditEntry } from "./types.ts";
 
@@ -41,7 +42,7 @@ export interface ComplianceDeps {
 /** Consecutive failed auto-lands before a branch counts as "repeatedly failing" — reuses the
  *  manager's default cap (mirrors `landFailCap()` in src/observer.ts). */
 function landFailCap(): number {
-	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
+	return envInt("OMP_SQUAD_AUTOLAND_FAIL_CAP", 3);
 }
 
 /** Policy 1 — any forced (proof-bypassing) land is a HIGH finding naming the branch + actor. */

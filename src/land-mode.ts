@@ -12,6 +12,7 @@
  * (which make local arithmetic permanently wrong) don't silently reopen or reap the wrong thing.
  */
 
+import { envInt } from "./config.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { isAncestor } from "./done-proof.ts";
 import { ghJson } from "./gh.ts";
@@ -30,7 +31,7 @@ export interface ResolvedLandMode {
 
 /** Cache TTL for a resolved mode, ms. Overridable for tests; default 5 minutes. */
 function ttlMs(): number {
-	return Number(process.env.OMP_SQUAD_LAND_MODE_TTL_MS) || 5 * 60_000;
+	return envInt("OMP_SQUAD_LAND_MODE_TTL_MS", 5 * 60_000);
 }
 
 const cache = new Map<string, { resolved: ResolvedLandMode; at: number }>();

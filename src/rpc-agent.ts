@@ -15,7 +15,9 @@ import * as path from "node:path";
 import type { Socket } from "bun";
 import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
 import { socketPathFor } from "./agent-host.ts";
+import { Result } from "effect";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
+import { decodeHostToolCall, decodeResponseFrame, type HostToolCallFrame } from "./schema/agent-host-frame.ts";
 
 export interface RpcAgentOptions {
 	/** Stable id (socket path derives from it). Omit for a transient auto-generated id. */
@@ -34,22 +36,7 @@ export interface RpcAgentOptions {
 	socket?: string;
 }
 
-type ResponseFrame = {
-	type: "response";
-	id?: string;
-	command: string;
-	success: boolean;
-	data?: unknown;
-	error?: string;
-};
-
-type HostToolCallFrame = {
-	type: "host_tool_call";
-	id: string;
-	toolCallId: string;
-	toolName: string;
-	arguments: unknown;
-};
+// ResponseFrame / HostToolCallFrame are defined + validated in ./schema/agent-host-frame.ts
 
 type Pending = {
 	resolve: (data: unknown) => void;
@@ -275,7 +262,9 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 				}
 				return;
 			case "response": {
-				const r = frame as ResponseFrame;
+				const decoded = decodeResponseFrame(frame);
+				if (Result.isFailure(decoded)) return; // malformed response — drop
+				const r = decoded.success;
 				if (r.id && this.pending.has(r.id)) {
 					const p = this.pending.get(r.id)!;
 					this.pending.delete(r.id);
@@ -287,9 +276,12 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 			case "extension_ui_request":
 				this.emit("ui", frame as RpcExtensionUIRequest);
 				return;
-			case "host_tool_call":
-				this.emit("hosttool", frame as HostToolCallFrame);
+			case "host_tool_call": {
+				const decoded = decodeHostToolCall(frame);
+				if (Result.isFailure(decoded)) return; // malformed tool call — drop, never execute garbage
+				this.emit("hosttool", decoded.success);
 				return;
+			}
 			default:
 				this.emit("event", frame);
 				return;

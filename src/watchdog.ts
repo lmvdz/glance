@@ -4,6 +4,8 @@
  * discovered via a frozen dashboard. Pure: the daemon supplies the sample; this only judges it.
  */
 
+import { envInt, envNumber } from "./config.ts";
+
 export interface HealthSample {
 	/** Daemon resident memory (MB). */
 	rssMb: number;
@@ -29,9 +31,9 @@ export interface HealthLimits {
  *  above it flags an orphan/runaway leak (each agent is ≈ host + omp). */
 export function defaultHealthLimits(ncpu: number, agentCeiling: number): HealthLimits {
 	return {
-		maxRssMb: Number(process.env.OMP_SQUAD_MAX_RSS_MB) || 1024,
-		maxLoadPerCpu: Number(process.env.OMP_SQUAD_MAX_LOAD_PER_CPU) || 2,
-		minFreeRatio: Number(process.env.OMP_SQUAD_MIN_FREE_RATIO) || 0.1,
+		maxRssMb: envInt("OMP_SQUAD_MAX_RSS_MB", 1024),
+		maxLoadPerCpu: envNumber("OMP_SQUAD_MAX_LOAD_PER_CPU", 2),
+		minFreeRatio: envNumber("OMP_SQUAD_MIN_FREE_RATIO", 0.1),
 		maxHosts: Math.max(agentCeiling * 3, 8),
 	};
 }

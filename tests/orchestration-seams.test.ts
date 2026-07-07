@@ -30,8 +30,14 @@ test("routeFailure: repair budget is env-tunable per call (#11)", () => {
 	process.env.OMP_SQUAD_REPAIR_BUDGET = "1";
 	expect(routeFailure("red")).toBe("retry"); // 0 < 1
 	expect(routeFailure("red", { attempts: 1 })).toBe("escalate"); // at the tuned budget
-	process.env.OMP_SQUAD_REPAIR_BUDGET = "0"; // invalid/zero ⇒ fall back to default 3
-	expect(routeFailure("red", { attempts: 2 })).toBe("retry");
+	// A budget of 0 is now RESPECTED (the old `Number(env) || 3` ate it, collapsing
+	// 0 → 3): budget 0 means "no repair retries, escalate immediately".
+	process.env.OMP_SQUAD_REPAIR_BUDGET = "0";
+	expect(routeFailure("red")).toBe("escalate"); // attempts 0, already at budget 0
+	expect(routeFailure("red", { attempts: 2 })).toBe("escalate");
+	// Garbage (non-numeric) still falls back to the default 3 (and warns once).
+	process.env.OMP_SQUAD_REPAIR_BUDGET = "abc";
+	expect(routeFailure("red", { attempts: 2 })).toBe("retry"); // 2 < 3
 });
 
 test("routeFailure: conflict retries exactly once, then escalates (#11)", () => {
