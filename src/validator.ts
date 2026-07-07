@@ -449,7 +449,7 @@ async function computeLandDiff(repo: string, worktree: string, baseCommit?: stri
 
 /** OFF by default — the master flag; concern 06 owns the full flag surface + a default-off contract test. */
 function lensReviewEnabled(): boolean {
-	return process.env.OMP_SQUAD_LENS_REVIEW === "1";
+	return envBool("OMP_SQUAD_LENS_REVIEW", false);
 }
 
 /** How many lenses may fire (v1 default 1). `0` disables the panel even with the master flag on. */
@@ -510,7 +510,7 @@ export type LensVerifyJudge = (input: { lens: LensId; claim: string; diff: strin
 
 /** Its own sub-flag; only meaningful WITHIN an already-enabled panel (checked after a panel objection). */
 function lensVerifyEnabled(): boolean {
-	return process.env.OMP_SQUAD_LENS_VERIFY === "1";
+	return envBool("OMP_SQUAD_LENS_VERIFY", false);
 }
 
 const LENS_VERIFY_SYSTEM =
