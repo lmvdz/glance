@@ -28,6 +28,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { envInt } from "./config.ts";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { ComplianceFinding } from "./compliance.ts";
@@ -120,7 +121,7 @@ function observeEnabled(): boolean {
 }
 /** Hard cap on observer-filed OPEN issues (default 10). */
 function observeMax(): number {
-	return Number(process.env.OMP_SQUAD_OBSERVE_MAX) || 10;
+	return envInt("OMP_SQUAD_OBSERVE_MAX", 10);
 }
 /** Opt-in: file plain findings without the triage marker so the dispatcher auto-dispatches them. */
 function autoDispatch(): boolean {
@@ -137,7 +138,7 @@ function observeReproduce(): boolean {
 /** Consecutive failed auto-lands before the observer files a bug for a branch (mirrors the manager's
  *  AUTO_LAND_FAIL_CAP so a parked branch is exactly the one that gets a bug filed). */
 function landFailCap(): number {
-	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
+	return envInt("OMP_SQUAD_AUTOLAND_FAIL_CAP", 3);
 }
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
