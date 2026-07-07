@@ -1,4 +1,4 @@
-import { envInt } from "./config.ts";
+import { envBool, envInt } from "./config.ts";
 import * as path from "node:path";
 import { getStorageBackend } from "./dal/storage.ts";
 import type { AutomationRecorder } from "./automation-log.ts";
@@ -38,7 +38,7 @@ const TRIAGE_MARKER = "do-not-auto-land";
 const DEDUP_THRESHOLD = 0.6;
 
 function opportunityEnabled(): boolean {
-	return process.env.OMP_SQUAD_OPPORTUNITY !== "0";
+	return envBool("OMP_SQUAD_OPPORTUNITY", true);
 }
 
 function opportunityMin(): number {

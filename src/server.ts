@@ -16,6 +16,7 @@ import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
+import { envBool, envInt } from "./config.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
@@ -75,6 +76,7 @@ import { checkVisionUrl } from "./ssrf.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { type LeaseEntry, leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
+import { hardAgentCeiling } from "./spawn-identity.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
@@ -147,11 +149,11 @@ Default to chat, diagnosis, and concise guidance. Do not create features, issues
  * ponytail: env-flag + dist-exists check, not a config object — one toggle, no machinery.
  */
 export function webappEnabled(): boolean {
-	return process.env.OMP_SQUAD_WEBAPP === "1" && existsSync(WEBAPP_INDEX);
+	return envBool("OMP_SQUAD_WEBAPP", false) && existsSync(WEBAPP_INDEX);
 }
 
 export function feedbackEnabled(): boolean {
-	return process.env.OMP_SQUAD_FEEDBACK === "1";
+	return envBool("OMP_SQUAD_FEEDBACK", false);
 }
 
 /** Synthetic org id stamped on the on-box loopback bootstrap admin so managerFor routes it to the root
@@ -467,7 +469,7 @@ export class SquadServer {
 	}
 
 	private feedbackRateAllowed(req: Request, server: Server<SocketData>, campaignId: string): boolean {
-		const limit = Number(process.env.OMP_SQUAD_FEEDBACK_RATE_LIMIT_PER_MIN) || 30;
+		const limit = envInt("OMP_SQUAD_FEEDBACK_RATE_LIMIT_PER_MIN", 30);
 		if (limit <= 0) return true;
 		const minute = Math.floor(Date.now() / 60_000);
 		const ip = server.requestIP(req)?.address ?? "unknown";
@@ -1980,7 +1982,7 @@ async function graphPayload(url: URL, repo: string): Promise<GraphDoc & { plan: 
 	const range = explicitRange(url);
 	const stateDir = resolveStateDir();
 	const key = range ? `r${range.start}:${range.end}:${repo}` : `${days}:${future}:${repo}`;
-	const ttl = Number(process.env.OMP_GRAPH_CACHE_MS) || 10_000;
+	const ttl = envInt("OMP_GRAPH_CACHE_MS", 10_000);
 	const fresh = url.searchParams.get("fresh"); // reload icon bypasses the cache
 	const plan = planFromEnv() ?? null;
 	const hit = graphCache.get(key);
@@ -2157,8 +2159,8 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 	return {
 		authMode: dbMode ? "db" : "file",
 		role,
-		wipCap: Number(process.env.OMP_SQUAD_WIP_CAP) || 3,
-		maxAgents: Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3),
+		wipCap: envInt("OMP_SQUAD_WIP_CAP", 3),
+		maxAgents: hardAgentCeiling(),
 		health: await manager.sampleHealth(),
 		federation: { coordinator: !!process.env.OMP_SQUAD_COORDINATOR, dbRegistry },
 		audit: { available: true },

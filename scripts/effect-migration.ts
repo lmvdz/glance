@@ -44,7 +44,7 @@ export const PATTERNS: Pattern[] = [
 		description: "`Number(process.env.X) || d` silently eats a legit 0 and coerces garbage — replace with envInt/envNumber from src/config.ts",
 		regex: /Number\(process\.env\.[A-Z_]+\)\s*\|\|/,
 		allowlist: ["src/config.ts"],
-		baseline: 4,
+		baseline: 0,
 	},
 	{
 		id: "json-parse-as-cast",
@@ -58,11 +58,15 @@ export const PATTERNS: Pattern[] = [
 	},
 	{
 		id: "bool-env-compare",
-		description: '`process.env.X === "1"` scattered boolean parsing — candidate for a typed envBool helper (not yet built)',
+		description: '`process.env.X === "1"` scattered boolean parsing — replace with envBool from src/config.ts (see the equivalence table on that helper)',
 		regex: /process\.env\.[A-Z_]+\s*[!=]==\s*"[01]"/,
-		allowlist: [],
-		// 50→52: reland stale-baseline correction (no envBool helper exists yet to migrate TO).
-		baseline: 52,
+		// config.ts is the helper's own home — its envBool doc comment cites the legacy idioms verbatim
+		// (same reason it's allowlisted for number-env-or-default). Everything else still counts.
+		allowlist: ["src/config.ts"],
+		// 52→19: envBool built + every site migrated except the files a parallel wave owns
+		// (src/squad-manager.ts ×16, src/land-pr.ts ×2, src/harness-registry.ts ×1) — those
+		// stay COUNTED as legacy so the next burn-down still sees them.
+		baseline: 19,
 	},
 	{
 		id: "error-message-idiom",

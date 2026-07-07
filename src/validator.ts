@@ -10,7 +10,7 @@
  * and a per-(commit,tree) cache; it is the seam `SquadManager.landBranch` calls (DESIGN §1).
  */
 
-import { envInt } from "./config.ts";
+import { envBool, envInt } from "./config.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { harnessLineage, type ModelLineage, modelLineage } from "./model-lineage.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
@@ -270,7 +270,7 @@ export interface ValidatorGateResult {
  *  OMP_SQUAD_STALE_GATE/staleGateEnabled() in src/land.ts — lets the fleet run with the validator off
  *  during rollout. */
 function validatorEnabled(): boolean {
-	return process.env.OMP_SQUAD_VALIDATOR !== "0";
+	return envBool("OMP_SQUAD_VALIDATOR", true);
 }
 
 /** Verdict cache keyed by `${proof.commit}:${proof.tree}:${criteriaHash}` so repeated land attempts on

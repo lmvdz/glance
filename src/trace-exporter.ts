@@ -3,6 +3,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { envBool } from "./config.ts";
 import { allowlistOrigins, checkVisionUrl } from "./ssrf.ts";
 import type { Span } from "./spans.ts";
 
@@ -36,7 +37,7 @@ function timeoutMs(): number {
  * operator configured — never a blanket bypass. An empty set ⇒ the strict guard applies unchanged.
  */
 function traceAllowPrivate(): boolean {
-	return process.env.OMP_SQUAD_TRACE_ALLOW_PRIVATE === "1";
+	return envBool("OMP_SQUAD_TRACE_ALLOW_PRIVATE", false);
 }
 
 /** Origin of a configured collector URL, or undefined if malformed/empty. */
@@ -234,7 +235,7 @@ export function traceExporterFromEnv(log?: (message: string) => void, stateDir?:
 	if (process.env.OMP_SQUAD_TRACE_EXPORT_OTLP_URL) exporters.push(new OtlpHttpExporter(process.env.OMP_SQUAD_TRACE_EXPORT_OTLP_URL));
 	if (process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL) exporters.push(new LangfuseExporter(process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_URL, process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_PUBLIC_KEY, process.env.OMP_SQUAD_TRACE_EXPORT_LANGFUSE_SECRET_KEY));
 	if (process.env.OMP_SQUAD_TRACE_EXPORT_DATADOG_URL) exporters.push(new DatadogExporter(process.env.OMP_SQUAD_TRACE_EXPORT_DATADOG_URL, process.env.OMP_SQUAD_TRACE_EXPORT_DATADOG_API_KEY));
-	if (stateDir && process.env.OMP_SQUAD_TRACE_LOCAL !== "0") exporters.push(new LocalFileExporter(path.join(stateDir, "traces.jsonl")));
+	if (stateDir && envBool("OMP_SQUAD_TRACE_LOCAL", true)) exporters.push(new LocalFileExporter(path.join(stateDir, "traces.jsonl")));
 	if (!exporters.length) return undefined;
 	const max = Number(process.env.OMP_SQUAD_TRACE_EXPORT_QUEUE);
 	return new TraceExportQueue(exporters, { max: Number.isFinite(max) && max > 0 ? Math.floor(max) : 1000, log });

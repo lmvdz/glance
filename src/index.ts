@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
+import { envBool } from "./config.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
@@ -64,7 +65,7 @@ const glanceBin = (): string | undefined => process.env.GLANCE_BIN?.trim() || un
  * silently spins a global factory. Exported for the boot-gate test.
  */
 export function rootFactoryEnabled(repoCount: number = planeRepos().length): boolean {
-	return process.env.OMP_SQUAD_ROOT_FACTORY === "1" && repoCount > 0;
+	return envBool("OMP_SQUAD_ROOT_FACTORY", false) && repoCount > 0;
 }
 
 const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
@@ -237,7 +238,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	await runtimeSettings.apply();
 	const policy = new PolicyStore(stateDir);
 	const tls = process.env.OMP_SQUAD_TLS_CERT && process.env.OMP_SQUAD_TLS_KEY ? { cert: process.env.OMP_SQUAD_TLS_CERT, key: process.env.OMP_SQUAD_TLS_KEY } : undefined;
-	if (bindIsInsecure(host, Boolean(tls)) && process.env.OMP_SQUAD_INSECURE !== "1") {
+	if (bindIsInsecure(host, Boolean(tls)) && !envBool("OMP_SQUAD_INSECURE", false)) {
 		process.stderr.write(
 			`refusing to bind ${host} over plaintext HTTP.\n` +
 				`The bearer token and all dashboard traffic would cross the network in cleartext,\n` +
@@ -312,7 +313,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	process.on("uncaughtException", (err) => {
 		process.stderr.write(`[uncaughtException] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
 	});
-	const autoLand = process.env.OMP_SQUAD_AUTOLAND !== "0";
+	const autoLand = envBool("OMP_SQUAD_AUTOLAND", true);
 	let manager: SquadManager | undefined;
 	let registry: ManagerRegistry | undefined;
 	if (dbHandle) {
@@ -343,7 +344,7 @@ async function cmdUp(args: string[]): Promise<void> {
 			manager = new SquadManager({ bus: new NullFederationBus(), operator, stateDir, autoLand, bin: glanceBin() });
 			await manager.start();
 			process.stderr.write(`root factory: on — operator autonomous factory active for ${planeRepos().join(", ")}\n`);
-		} else if (process.env.OMP_SQUAD_ROOT_FACTORY === "1") {
+		} else if (envBool("OMP_SQUAD_ROOT_FACTORY", false)) {
 			process.stderr.write("root factory: OMP_SQUAD_ROOT_FACTORY=1 but no Plane repos configured (PLANE_PROJECT_MAP) — not started\n");
 		}
 	} else {
@@ -351,7 +352,7 @@ async function cmdUp(args: string[]): Promise<void> {
 		// Federation is ON by default — a real LocalFederationBus that works locally with no
 		// coordinator (loopback pub/sub + own roster) and gossips to peers only once a coordinator
 		// URL is configured. OMP_SQUAD_FEDERATION=0 is the explicit opt-out back to the inert NullFederationBus.
-		const federationOff = process.env.OMP_SQUAD_FEDERATION === "0";
+		const federationOff = !envBool("OMP_SQUAD_FEDERATION", true);
 		const bus = federationOff ? new NullFederationBus() : new LocalFederationBus({ operator, coordinatorUrl: coordinator, token: coordinatorToken });
 		// Extra repos to gossip file leases for, beyond those discovered from the presence registry.
 		// The daemon gossips leases IN-PROCESS over `bus` (SquadManager, SEAM 1) — no separate worker.
@@ -387,7 +388,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	// auto-supervision is the per-org, in-process maybeAutoSupervise inside each manager (lifecycle 05).
 	const stopTracker = startExternalSessionTracker();
 	// risk #7: the external supervisor authenticates with the file-mode bearer token; DB mode has none, so file-mode only.
-	const supervise = !dbHandle && process.env.OMP_SQUAD_AUTO_SUPERVISE !== "0" && flags["no-supervise"] !== true;
+	const supervise = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
 	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
 
 	// Cross-host file leasing: the file-mode daemon now gossips its own leases IN-PROCESS over the

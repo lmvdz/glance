@@ -23,7 +23,7 @@
  * scan instead of burning one redundant LLM call per reattached agent.
  */
 
-import { envInt } from "./config.ts";
+import { envBool, envInt } from "./config.ts";
 import * as path from "node:path";
 import { getStorageBackend } from "./dal/storage.ts";
 import type { AutomationRecorder } from "./automation-log.ts";
@@ -309,7 +309,7 @@ export class Scout {
 	 *  drift path are disabled, or without a liveReasoning dep — arming the shared sweep for drift alone
 	 *  (Scout backlog off, Sentinel on) is exactly the point of folding drift into this one cursor/timer. */
 	start(intervalMs = 60_000): void {
-		if (this.timer || !this.deps.liveReasoning || (process.env.OMP_SQUAD_SCOUT === "0" && !sentinelEnabled())) return;
+		if (this.timer || !this.deps.liveReasoning || (!envBool("OMP_SQUAD_SCOUT", true) && !sentinelEnabled())) return;
 		const log = this.deps.log ?? (() => {});
 		this.timer = setInterval(() => void this.tick().catch((e) => log(`tick error (contained): ${e instanceof Error ? e.message : String(e)}`)), intervalMs);
 		this.timer.unref?.();
@@ -325,7 +325,7 @@ export class Scout {
 	/** One mid-run sweep: scan each live agent's new reasoning. Inert when BOTH the backlog harvest and
 	 *  Sentinel's drift path are disabled; never overlaps itself. */
 	async tick(): Promise<void> {
-		if (process.env.OMP_SQUAD_SCOUT === "0" && !sentinelEnabled()) return;
+		if (!envBool("OMP_SQUAD_SCOUT", true) && !sentinelEnabled()) return;
 		if (this.running) {
 			this.deps.record?.({ durationMs: 0, skipReason: "overlap", detail: "previous scout sweep still running" });
 			return;
@@ -366,7 +366,7 @@ export class Scout {
 		// NOTE: this budget check only gates the BACKLOG extraction below (not `return`s out of runScan) so
 		// that the drift block's SEPARATE `sentinelBudget` (Sentinel v0) still gets a chance to run even when
 		// Scout's own backlog budget is exhausted — the two are deliberately independent (DESIGN.md).
-		if (process.env.OMP_SQUAD_SCOUT === "0") {
+		if (!envBool("OMP_SQUAD_SCOUT", true)) {
 			// backlog harvesting disabled — fall through to `runDrift` below untouched.
 		} else if (!this.budget.tryConsume()) {
 			log(`scout LLM budget reached (${scoutMaxCallsPerHour()}/h) — skipping extraction for ${ctx.agent}`);

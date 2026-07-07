@@ -18,6 +18,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { statSync } from "node:fs";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { envBool } from "./config.ts";
 import { claimLease, heartbeatSession, holdersOf, LEASE_TTL_MS, releaseSession } from "./leases.ts";
 import type { LeaseEntry } from "./leases.ts";
 import { hardenedGitSync } from "./git-harden.ts";
@@ -32,7 +33,7 @@ import { protectedStateRoots, resolveStateDir } from "./state-dir.ts";
  */
 let policyCache: { mtimeMs: number; rules: PolicyRule[] } | undefined;
 function policyRulesForAgent(): PolicyRule[] {
-	if (process.env.OMP_SQUAD_POLICY_RULES !== "1") return [];
+	if (!envBool("OMP_SQUAD_POLICY_RULES", false)) return [];
 	const dir = resolveStateDir();
 	const file = path.join(dir, "policy.json");
 	let mtimeMs: number;

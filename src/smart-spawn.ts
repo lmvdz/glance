@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { envBool } from "./config.ts";
 import type { ApprovalMode, CreateAgentOptions, ThinkingLevel } from "./types.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
 import { tierOf, type ComplexityTier, type ModelOutcomeCounts } from "./model-outcomes.ts";
@@ -57,7 +58,7 @@ function landedRate(o: ModelOutcomeCounts): number {
  */
 function shiftedModel(currentModel: string | undefined, tier: ComplexityTier, outcomes: OutcomesReader | undefined): { model?: string; reasonSuffix?: string } {
 	if (currentModel !== undefined) return {}; // never override an explicit choice
-	if (process.env.OMP_SQUAD_MODEL_OUTCOMES !== "1" || !outcomes) return {};
+	if (!envBool("OMP_SQUAD_MODEL_OUTCOMES", false) || !outcomes) return {};
 	// Cold incumbent ⇒ no basis for comparison ⇒ no shift. Trusting an unmeasured incumbent's 0%
 	// rate would penalize it exactly the way the winner-side floor forbids for a cold challenger.
 	const incumbent = outcomes("default", tier);

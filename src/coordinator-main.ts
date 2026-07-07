@@ -14,6 +14,7 @@
  */
 
 import "./env-compat.ts"; // GLANCE_* ↔ OMP_SQUAD_* aliasing — must run before any env read
+import { envBool } from "./config.ts";
 import { runCoordinator } from "./coordinator.ts";
 
 /** Loopback-only bind? (mirrors isLoopbackHost in index.ts; inlined to avoid pulling in the CLI module graph) */
@@ -28,7 +29,7 @@ if (import.meta.main) {
 	const hostname = process.env.OMP_SQUAD_COORDINATOR_HOST || "127.0.0.1";
 	const token = process.env.OMP_SQUAD_COORDINATOR_TOKEN || undefined;
 
-	if (!isLoopbackHost(hostname) && token === undefined && process.env.OMP_SQUAD_INSECURE !== "1") {
+	if (!isLoopbackHost(hostname) && token === undefined && !envBool("OMP_SQUAD_INSECURE", false)) {
 		process.stderr.write(
 			`refusing to bind ${hostname} with no coordinator token.\n` +
 				`Any peer that can reach the relay would snoop and spoof presence/lease frames.\n` +
