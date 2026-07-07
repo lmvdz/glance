@@ -20,6 +20,7 @@ import {
 	DEFAULT_HARNESS,
 	getHarness,
 	globalDefaultHarness,
+	hasSecondVerifiedProviderLane,
 	listHarnesses,
 	resolveBin,
 	resolveHarness,
@@ -263,6 +264,28 @@ test("a non-resumable ACP record is excluded from adoption (concern 07)", async 
 	await mgr.start();
 	expect(mgr.list().length).toBe(0); // excluded — ACP is non-resumable
 	await mgr.stop();
+});
+
+// ── degradation ladder precondition (concern 06) ──────────────────────────────
+
+test("hasSecondVerifiedProviderLane: false today — the only vendor-pinned harnesses (claude-code/gemini/codex) are unverified", () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
+	// omp (default), pi, opencode are all verified but multi-model (unknown lineage) — no differentiation.
+	expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+});
+
+test("hasSecondVerifiedProviderLane: true once a vendor-pinned harness is verified and differs from the default", () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1"; // simulate claude-code having been smoke-verified
+	expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // claude-code(anthropic)/gemini(google)/codex(openai) now visible
+});
+
+test("hasSecondVerifiedProviderLane: a vendor-pinned DEFAULT harness needs a genuinely different vendor to count", () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1";
+	// default = claude-code (anthropic); gemini (google) / codex (openai) still differ ⇒ true.
+	expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
 });
 
 test("globalDefaultHarness honors GLANCE_HARNESS, else omp", () => {

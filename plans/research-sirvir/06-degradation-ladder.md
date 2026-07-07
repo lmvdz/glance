@@ -1,10 +1,39 @@
 # Graceful degradation ladder — provider-scoped, per-unit, fail-safe (GOAL 2)
 
-STATUS: open
+STATUS: in-review
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/rate-limit.ts, src/dispatch.ts, src/harness-registry.ts, src/model-lineage.ts
+PR: feat/sirvir-06-degradation-ladder (draft)
+
+## Resolution note (2026-07-07)
+Shipped the full per-provider capability in the 4 listed files: `RateLimitGate` is now a
+`Map<provider, cooldown>` (`note`/`paused`/`untilFor`/`reasonFor` all optionally take a
+provider; the no-arg shape is preserved byte-for-byte as the legacy global OR), `dispatch.ts`
+gates per-issue via new `providerFor`/`secondLaneAvailable` deps (falls back to the exact old
+top-of-tick global check when either is absent — zero regression), `model-lineage.ts` gained
+`resolveProvider()` (model-then-harness fallback, mirrors `validator.ts`'s private
+`lineageFields`) and `DEFAULT_PROVIDER` (the fail-safe fold target for "unknown"), and
+`harness-registry.ts` gained `hasSecondVerifiedProviderLane()` to detect the precondition and
+log inertness honestly instead of faking differentiation.
+
+**Divergence from the drafted approach:** `squad-manager.ts` (the wiring glue that
+instantiates `RateLimitGate`, supplies `DispatchDeps`, and calls `note()` from
+`auto_retry_start`) is explicitly out of scope for this concern (owned by a sibling unit /
+deferred). So this PR builds and unit/integration-tests the full partitioning capability by
+direct construction, but does NOT wire it into the live daemon — today's dispatcher still runs
+the byte-for-byte legacy global-freeze path since `providerFor`/`secondLaneAvailable` are never
+supplied by `squad-manager.ts`. That wiring (resolve `providerFor` from the repo's configured
+harness/model, call `hasSecondVerifiedProviderLane()`, and thread a real provider into the
+`auto_retry_start` `note()` call using harness-at-spawn, not the raced `dto.model` backfill) is
+the necessary follow-up to make the payoff live. Named, not silently dropped.
+
+Also confirmed empirically: `opencode` is `verified:true` today but is NOT vendor-pinned
+(`harnessLineage("opencode")` reads `"unknown"` — it's a generic multi-model ACP runtime), so it
+does not count as a differentiating second lane. The concern's "no second verified lane exists
+today" premise still holds; only claude-code/gemini/codex are vendor-pinned and all three remain
+`verified:false`.
 
 ## Goal
 Stop a single provider's usage cap from freezing the WHOLE fleet: units that would run on a *different, un-capped* provider keep dispatching. Independent of the GOAL-1 chain (disjoint files) — can run in parallel.
