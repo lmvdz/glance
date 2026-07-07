@@ -13,6 +13,7 @@ import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts
 import type { TransitionReason } from "./agent-lifecycle.ts";
 import type { SubagentNode } from "./subagents.ts";
 import type { ModelLineage } from "./model-lineage.ts";
+import type { LensId } from "./lens-select.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -341,6 +342,20 @@ export interface FeatureCriterion {
  * Epic 5's confidence scorer reads `agreement` as one input to the aggregate `confidence` it computes
  * separately — this record never computes that aggregate itself (DESIGN §5).
  */
+/**
+ * Perspective-diversified review (plans/perspective-diversified-review/) — one focused, out-of-criteria
+ * lens's advisory verdict on a diff. `disposition:"object"` with a `claim` flags a problem the DECLARED
+ * criteria would not have named; `severity:"high"` on an objection triggers the one-shot re-check
+ * (`ValidationRecord.lensVerify`). Advisory ONLY: these adjust the confidence score, never the veto.
+ */
+export interface LensVerdict {
+	lens: LensId;
+	disposition: "accept" | "object";
+	severity: "low" | "high";
+	/** One-line reason for an objection; empty on accept. Truncated (~600 chars). */
+	claim: string;
+}
+
 export interface ValidationRecord {
 	verdict: "pass" | "veto" | "abstain" | "skipped";
 	/** 0..1 fraction of declared criteria the judge marked satisfied. */
@@ -359,6 +374,13 @@ export interface ValidationRecord {
 	authorLineage?: ModelLineage;
 	reviewerLineage?: ModelLineage;
 	sameLineage?: boolean;
+	/** Perspective-diversified review (plans/perspective-diversified-review/): advisory out-of-criteria
+	 *  lens verdicts that ran ALONGSIDE the authoritative criteria judge. Advisory only — they adjust the
+	 *  confidence score and can trigger a narrow re-check, but NEVER change the veto. Absent ⇒ none ran. */
+	lensAdvisory?: LensVerdict[];
+	/** The one-shot re-check of a high-severity lens objection (concern 05): did a second, claim-scoped
+	 *  look confirm it? `confirmed:true` maxes the confidence penalty; it still never vetoes. */
+	lensVerify?: { lens: LensId; claim: string; confirmed: boolean };
 	ranAt: number;
 }
 
