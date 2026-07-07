@@ -40,8 +40,10 @@ const FAMILY_LINEAGE: Record<string, ModelLineage> = {
 
 /**
  * Collapse any model reference — a provider-prefixed spec, a bare family (`sonnet`, `gpt-5.2`,
- * `gemini-2.5-pro`), or `undefined`/junk — into a vendor lineage. NEVER throws; unreadable ⇒ `unknown`
- * (we do not assert a lineage we can't substantiate).
+ * `gemini-2.5-pro`), a FAMILY NAME ITSELF (`opus`, `openai`, `gemini` — what `modelFamily()` outputs
+ * and what `model-outcomes.ts`'s family-keyed ledger rows key by), or `undefined`/junk — into a
+ * vendor lineage. NEVER throws; unreadable ⇒ `unknown` (we do not assert a lineage we can't
+ * substantiate).
  */
 export function modelLineage(model?: string): ModelLineage {
 	const raw = (model ?? "").trim();
@@ -53,6 +55,14 @@ export function modelLineage(model?: string): ModelLineage {
 		const byProvider = PROVIDER_LINEAGE[raw.slice(0, slash).toLowerCase()];
 		if (byProvider) return byProvider;
 	}
+	// Family-literal fast path BEFORE re-deriving via modelFamily: `modelFamily()`'s own keyword match
+	// looks for substrings like "gpt"/"codex"/"o[34]", not the literal family name `"openai"` — so
+	// `modelFamily("openai")` returns `"other"`, not `"openai"`, and a lookup keyed by that would
+	// wrongly fall through to `unknown`. A raw string that IS already a family key (the shape
+	// `smart-spawn.ts`'s cross-provider guard and the family-keyed scoreboard both pass around) must
+	// resolve directly against `FAMILY_LINEAGE` rather than round-tripping through `modelFamily`.
+	const byFamilyLiteral = FAMILY_LINEAGE[raw.toLowerCase()];
+	if (byFamilyLiteral) return byFamilyLiteral;
 	// Family fallback — also catches prefixed strings whose id carries the family keyword
 	// ("anthropic/claude-sonnet-4-5" → modelFamily → "sonnet"), and bare families.
 	return FAMILY_LINEAGE[modelFamily(raw)] ?? "unknown";

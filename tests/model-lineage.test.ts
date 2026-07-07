@@ -19,6 +19,16 @@ describe("modelLineage", () => {
 		expect(modelLineage("gemini-2.5-pro")).toBe("google");
 	});
 
+	test("a raw string that IS ALREADY a family name (research-sirvir/02's family-keyed namespace) resolves directly", () => {
+		// `modelFamily("openai")` itself returns `"other"` (its keyword match looks for "gpt"/"codex",
+		// not the literal string "openai") — a naive `FAMILY_LINEAGE[modelFamily(raw)]` lookup would
+		// wrongly answer "unknown" for the family's own name. This is exactly the shape
+		// `smart-spawn.ts`'s `eligibleCandidates` cross-provider guard and the family-keyed scoreboard
+		// pass around, so it must resolve correctly.
+		expect(modelLineage("openai")).toBe("openai");
+		expect(modelLineage("gemini")).toBe("google");
+	});
+
 	test("unreadable / unknown never guesses", () => {
 		expect(modelLineage(undefined)).toBe("unknown");
 		expect(modelLineage("")).toBe("unknown");
