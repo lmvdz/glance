@@ -1,5 +1,5 @@
 # Lens judge machinery — one out-of-criteria lens on the existing judge path
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,5 +1,5 @@
 # Lens selector — decide whether a lens fires from the diff surface
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

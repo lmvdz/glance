@@ -1,5 +1,5 @@
 # VERIFY re-check — one narrow second look at a high-severity objection
-STATUS: open
+STATUS: closed
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

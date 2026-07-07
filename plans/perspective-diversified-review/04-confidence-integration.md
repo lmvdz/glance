@@ -1,5 +1,5 @@
 # Confidence integration — advisory lens verdict into the auto-land hold lever
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
