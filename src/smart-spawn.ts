@@ -14,16 +14,11 @@ import * as path from "node:path";
 import { envBool } from "./config.ts";
 import type { ApprovalMode, CreateAgentOptions, ThinkingLevel } from "./types.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
-import { DEFAULT_MODEL_FAMILY, tierOf, type ComplexityTier, type ModelOutcomeCounts } from "./model-outcomes.ts";
+import { DEFAULT_MODEL_FAMILY, tierOf, type ComplexityTier } from "./model-outcomes.ts";
 import { DEFAULT_PROVIDER, modelLineage, type ModelLineage } from "./model-lineage.ts";
+import type { ModelScore, Scoreboard } from "./attribution-scoreboard.ts";
 
 const INFER_TIMEOUT_MS = 20_000;
-
-/**
- * Outcome-driven model default (Epic 6 concern 07) — reads landed-vs-rejected per `(model, tier)`
- * and reuses `tierOf` from concern 06 so record-time and read-time bucketing can never drift apart.
- */
-export type OutcomesReader = (model: string, tier: ComplexityTier) => ModelOutcomeCounts;
 
 /** A cold/unseen candidate is not eligible to WIN the shift — but is never starved below the
  *  baseline heuristic's traffic either; the shift only ADDS a preference toward a proven winner. */
@@ -31,6 +26,16 @@ export const MIN_SAMPLES = 8;
 /** The eligible candidate must beat the incumbent default's landed-rate by at least this much
  *  before the shift fires — otherwise the default heuristic stands unchanged. */
 export const MIN_EDGE = 0.15;
+/**
+ * Cost tie-break margin (research-sirvir/04), same 0..1 land-rate scale as `MIN_EDGE` — deliberately
+ * much smaller. `MIN_EDGE` answers "is this candidate meaningfully BETTER at the task" (a quality
+ * gate that alone decides whether a shift happens at all); `COST_TIE_EPSILON` answers a narrower
+ * question — "are these two candidates close enough on land-rate that $/landed-change should be the
+ * decider" — and ONLY applies among candidates that are otherwise a wash on quality. Cost never
+ * competes with a genuine `MIN_EDGE` quality win (that would re-introduce the vetoed-escalation bug
+ * the red-team caught); it only breaks a tie that land-rate alone couldn't call.
+ */
+export const COST_TIE_EPSILON = 0.05;
 
 /** The two FAMILIES the current spawn heuristic picks between (SYSTEM_PROMPT's "opus for hard work,
  *  omit otherwise" — "omit" maps to `DEFAULT_MODEL_FAMILY`, the REAL family `model-outcomes.ts`
@@ -54,15 +59,28 @@ export function eligibleCandidates(candidates: readonly string[], provider: Mode
 	return candidates.filter((c) => modelLineage(c) === provider);
 }
 
-function landedRate(o: ModelOutcomeCounts): number {
-	const total = o.landed + o.rejected;
-	return total > 0 ? o.landed / total : 0;
+function landedRate(landed: number, rejected: number): number {
+	const total = landed + rejected;
+	return total > 0 ? landed / total : 0;
+}
+
+/** One model's row in the scoreboard, or `undefined` if it has no record at all (cold). */
+function scoreFor(scoreboard: Scoreboard, model: string): ModelScore | undefined {
+	return scoreboard.models.find((m) => m.model === model);
+}
+
+/** `{landed, rejected}` for one `(model, tier)` cell of a scoreboard row — `{0,0}` when the model
+ *  has no row, or the row has no attempts recorded for this particular tier yet. */
+function tierCounts(score: ModelScore | undefined, tier: ComplexityTier): { landed: number; rejected: number } {
+	const row = score?.byTier.find((t) => t.tier === tier);
+	return { landed: row?.landed ?? 0, rejected: row?.rejected ?? 0 };
 }
 
 /**
- * Boost-only, floored, never-overriding default shift (DESIGN.md's outcome-driven model default):
+ * Boost-only, floored, never-overriding default shift (DESIGN.md's outcome-driven model default;
+ * cost-weighted per research-sirvir/04):
  *  1. An explicit model already set (the LLM planner returned one) is NEVER overridden.
- *  2. Off unless `OMP_SQUAD_MODEL_OUTCOMES=1` AND an `outcomes` reader is injected.
+ *  2. Off unless `OMP_SQUAD_MODEL_OUTCOMES=1` AND a `scoreboard` is injected.
  *  3. Exploration floor is SYMMETRIC — it protects BOTH sides of the comparison from a small sample:
  *     - a WINNER candidate with fewer than `MIN_SAMPLES` total outcomes is not eligible to win;
  *     - the INCUMBENT (`DEFAULT_MODEL_FAMILY`, the REAL family an omitted model resolves to — never
@@ -75,27 +93,50 @@ function landedRate(o: ModelOutcomeCounts): number {
  *  4. Candidates are further restricted to the spawn's provider (`eligibleCandidates`) — a
  *     cross-provider family (e.g. `openai`) is never eligible to win an Anthropic-subscription omp
  *     unit's shift, even if it would otherwise land the comparison (research-sirvir/02 MINOR 5).
- *  5. The best ELIGIBLE candidate replaces the default only if it beats the (trusted) incumbent rate
- *     by at least `MIN_EDGE`; otherwise the default stands, unchanged.
+ *  5. TWO-STAGE win condition, never a single blended sum (a blended `land-rate − λ·costRatio` was the
+ *     red-team-CONFIRMED-broken draft: an unbounded cost ratio could veto every escalation, and a null
+ *     incumbent cost divided-by-zero into `-Infinity`, both fixed by NOT dividing at all):
+ *       a. QUALITY WIN — a candidate beats the incumbent's (trusted) land-rate by at least `MIN_EDGE`.
+ *          This is checked and satisfied independent of cost — cost can never veto a real quality win,
+ *          which is the whole point of the existing "escalate to opus for hard work" behavior.
+ *       b. COST TIE-BREAK — ONLY for a candidate that does NOT already clear (a): if its land-rate is
+ *          within `COST_TIE_EPSILON` of the incumbent's (i.e. quality-equivalent, not just "close"),
+ *          AND both the candidate's and incumbent's `costPerLandedChange` are known (non-null; cost
+ *          data is per-model, land-rate is per-`(model, tier)` — an acknowledged scope mismatch, see
+ *          the module doc), AND the candidate is cheaper, it wins at equal quality. If either cost is
+ *          null the comparison is skipped entirely (falls through to "no shift" for that candidate) —
+ *          never a division, never an unbounded ratio, never `-Infinity`.
+ *     Among multiple qualifying candidates the highest land-rate wins; a land-rate tie prefers the
+ *     cheaper (known) cost.
  * Returns the (possibly) shifted model + an optional reason suffix; never mutates its input.
  */
-function shiftedModel(currentModel: string | undefined, tier: ComplexityTier, outcomes: OutcomesReader | undefined): { model?: string; reasonSuffix?: string } {
+function shiftedModel(currentModel: string | undefined, tier: ComplexityTier, scoreboard: Scoreboard | undefined): { model?: string; reasonSuffix?: string } {
 	if (currentModel !== undefined) return {}; // never override an explicit choice
-	if (!envBool("OMP_SQUAD_MODEL_OUTCOMES", false) || !outcomes) return {};
+	if (!envBool("OMP_SQUAD_MODEL_OUTCOMES", false) || !scoreboard) return {};
+	const incumbentScore = scoreFor(scoreboard, DEFAULT_MODEL_FAMILY);
+	const incumbent = tierCounts(incumbentScore, tier);
 	// Cold incumbent ⇒ no basis for comparison ⇒ no shift. Trusting an unmeasured incumbent's 0%
 	// rate would penalize it exactly the way the winner-side floor forbids for a cold challenger.
-	const incumbent = outcomes(DEFAULT_MODEL_FAMILY, tier);
 	if (incumbent.landed + incumbent.rejected < MIN_SAMPLES) return {};
-	const incumbentRate = landedRate(incumbent);
-	let best: { model: string; rate: number } | undefined;
+	const incumbentRate = landedRate(incumbent.landed, incumbent.rejected);
+	const incumbentCost = incumbentScore?.costPerLandedChange ?? null;
+
+	let best: { model: string; rate: number; cost: number | null; qualityWin: boolean } | undefined;
 	for (const model of eligibleCandidates(SHIFT_CANDIDATES)) {
-		const o = outcomes(model, tier);
+		if (model === DEFAULT_MODEL_FAMILY) continue; // the incumbent is never "the shift"
+		const score = scoreFor(scoreboard, model);
+		const o = tierCounts(score, tier);
 		if (o.landed + o.rejected < MIN_SAMPLES) continue; // cold — not eligible to win, never starved either
-		const rate = landedRate(o);
-		if (!best || rate > best.rate) best = { model, rate };
+		const rate = landedRate(o.landed, o.rejected);
+		const cost = score?.costPerLandedChange ?? null;
+		const qualityWin = rate - incumbentRate >= MIN_EDGE;
+		const costTieWin = !qualityWin && Math.abs(rate - incumbentRate) <= COST_TIE_EPSILON && incumbentCost != null && cost != null && cost < incumbentCost;
+		if (!qualityWin && !costTieWin) continue;
+		if (!best || rate > best.rate || (rate === best.rate && (cost ?? Infinity) < (best.cost ?? Infinity))) best = { model, rate, cost, qualityWin };
 	}
-	if (!best || best.model === DEFAULT_MODEL_FAMILY || best.rate - incumbentRate < MIN_EDGE) return {};
-	return { model: best.model, reasonSuffix: `model shifted to ${best.model} (${best.rate.toFixed(2)} land-rate, ${tier} tier)` };
+	if (!best) return {};
+	const costNote = best.qualityWin ? "" : `, cheaper at equal quality ($${(best.cost ?? 0).toFixed(2)} vs $${(incumbentCost ?? 0).toFixed(2)}/landed)`;
+	return { model: best.model, reasonSuffix: `model shifted to ${best.model} (${best.rate.toFixed(2)} land-rate, ${tier} tier${costNote})` };
 }
 
 export interface SpawnPlan extends CreateAgentOptions {
@@ -233,7 +274,7 @@ async function infer(prompt: string, candidates: string[]): Promise<RawPlan | un
  * injection seam of its own, but the assembly + shift logic (the part concern 07 actually adds)
  * is fully deterministic given `raw`, so it doesn't need one.
  */
-export function assemblePlan(prompt: string, candidates: string[], cwd: string, raw: RawPlan | undefined, opts: { outcomes?: OutcomesReader } = {}): SpawnPlan {
+export function assemblePlan(prompt: string, candidates: string[], cwd: string, raw: RawPlan | undefined, opts: { scoreboard?: Scoreboard } = {}): SpawnPlan {
 	const claimed = raw?.repo === undefined ? undefined : path.resolve(raw.repo);
 	const repo = claimed !== undefined && candidates.includes(claimed) ? claimed : pickRepoHeuristic(prompt, candidates, cwd);
 
@@ -249,10 +290,10 @@ export function assemblePlan(prompt: string, candidates: string[], cwd: string, 
 	if (raw?.produces?.length) plan.produces = raw.produces;
 	if (raw?.requires?.length || raw?.owns?.length || raw?.produces?.length) plan.scopeSource = "inferred";
 
-	// Outcome-driven model default (Epic 6 concern 07) — never overrides an explicit `plan.model`
-	// (checked first thing inside `shiftedModel`); off unless OMP_SQUAD_MODEL_OUTCOMES=1 AND an
-	// `outcomes` reader was injected.
-	const shift = shiftedModel(plan.model, tierOf(thinking), opts.outcomes);
+	// Outcome-driven, cost-weighted model default (Epic 6 concern 07; research-sirvir/04) — never
+	// overrides an explicit `plan.model` (checked first thing inside `shiftedModel`); off unless
+	// OMP_SQUAD_MODEL_OUTCOMES=1 AND a `scoreboard` was injected.
+	const shift = shiftedModel(plan.model, tierOf(thinking), opts.scoreboard);
 	if (shift.model !== undefined) {
 		plan.model = shift.model;
 		plan.reason = [plan.reason, shift.reasonSuffix].filter((s): s is string => !!s).join(" + ");
@@ -261,8 +302,8 @@ export function assemblePlan(prompt: string, candidates: string[], cwd: string, 
 }
 
 /** Resolve a free-text task into a complete, valid spawn plan. Never throws; always returns a usable plan. */
-export async function planSpawn(prompt: string, opts: { cwd: string; candidates: string[]; outcomes?: OutcomesReader }): Promise<SpawnPlan> {
+export async function planSpawn(prompt: string, opts: { cwd: string; candidates: string[]; scoreboard?: Scoreboard }): Promise<SpawnPlan> {
 	const candidates = opts.candidates.length > 0 ? opts.candidates : [path.resolve(opts.cwd)];
 	const raw = await infer(prompt, candidates);
-	return assemblePlan(prompt, candidates, opts.cwd, raw, { outcomes: opts.outcomes });
+	return assemblePlan(prompt, candidates, opts.cwd, raw, { scoreboard: opts.scoreboard });
 }
