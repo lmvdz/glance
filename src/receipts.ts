@@ -91,6 +91,13 @@ export class RunAccumulator {
 		this.spans.onTool(toolName, intent);
 	}
 
+	/** Late-bind the effective model from the wire (e.g. an assistant frame's `message.model`).
+	 *  First-model-wins: never overwrites an explicit `opts.model` seeded at `start()`, and only
+	 *  ever sets once, since there is no mid-run model swap in v1. */
+	noteModel(model: string): void {
+		if (!this.seed.model && model) this.seed.model = model;
+	}
+
 	/** Accumulate one assistant message's usage; lazily creates the aggregate. */
 	onAssistantUsage(usage: AssistantUsage): void {
 		const t = (this.tokens ??= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
@@ -162,7 +169,7 @@ export class RunAccumulator {
 type Frame = {
 	type?: string;
 	toolName?: string;
-	message?: { role?: string; usage?: AssistantUsage };
+	message?: { role?: string; usage?: AssistantUsage; model?: string };
 	[k: string]: unknown;
 };
 
@@ -180,7 +187,10 @@ export function ingest(acc: RunAccumulator, frame: Frame): void {
 			acc.onTool(typeof frame.toolName === "string" ? frame.toolName : "tool", typeof frame.intent === "string" ? frame.intent : "");
 			break;
 		case "message_end":
-			if (frame.message?.role === "assistant" && frame.message.usage) acc.onAssistantUsage(frame.message.usage);
+			if (frame.message?.role === "assistant") {
+				if (frame.message.usage) acc.onAssistantUsage(frame.message.usage);
+				if (frame.message.model) acc.noteModel(frame.message.model);
+			}
 			acc.onMessageEnd();
 			break;
 		// agent_end / exit carry no run data; finalizeRun calls finish() directly.

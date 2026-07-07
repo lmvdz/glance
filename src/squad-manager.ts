@@ -146,6 +146,11 @@ import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
+import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
+import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
+import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
+import { DAY_MS } from "./omp-graph/schema.ts";
+import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { isArmed } from "./convergence-oracle.ts";
@@ -1593,6 +1598,41 @@ export class SquadManager extends EventEmitter {
 		return [...this.agents.values()].map((r) => r.dto);
 	}
 
+	/**
+	 * Denominator honesty (Epic 6 concern 02): the merge-rate denominator population, anchored on the
+	 * durable dispatched-unit roster rather than land receipts (a unit that dies before `finalizeRun`
+	 * never appends a receipt, so a receipts-based count structurally excludes the worst failures).
+	 * Every unit in `this.agents` survived its own `create()`'s `persist()` — including one killed a
+	 * moment later — so it stays a denominator member (a failure, if it never lands) unless
+	 * `isLandingUnit` says its kind/role/mode never lands by design (concern 05 consumes this to
+	 * compute `landed / landingRoster().length`).
+	 */
+	landingRoster(): AgentDTO[] {
+		return landingRosterOf(this.list());
+	}
+
+	/**
+	 * The `landingRoster()` population enriched with each unit's routing decision + model — concern
+	 * 05's task-class matrix denominator. `routing` (`{mode, tier}`, concern 03) lives on the durable
+	 * `PersistedAgent` (`rec.options`), NOT on `AgentDTO` — it was deliberately never added to the
+	 * wire-facing DTO (a field only this one server-side aggregator needs isn't worth touching the
+	 * five `AgentDTO` literal construction sites in this already load-bearing file for). Same
+	 * membership as `landingRoster()` (filters `isLandingUnit` on the same `dto`), just read from the
+	 * record's stored options instead of the DTO. A unit dispatched before routing existed, or via a
+	 * path that never stamped it, falls back to `{mode:"unknown", tier:"unknown"}` — it still counts
+	 * in the denominator (that's the whole point of C02), just bucketed honestly as unrouted rather
+	 * than silently dropped.
+	 */
+	landingRosterRouting(): { agentId: string; taskClass: { mode: string; tier: string }; model?: string }[] {
+		return [...this.agents.values()]
+			.filter((r) => isLandingUnit(r.dto))
+			.map((r) => ({
+				agentId: r.dto.id,
+				taskClass: { mode: r.options.routing?.mode ?? "unknown", tier: r.options.routing?.tier ?? "unknown" },
+				model: r.dto.model,
+			}));
+	}
+
 	getTranscript(id: string): TranscriptEntry[] {
 		return this.agents.get(id)?.transcript ?? [];
 	}
@@ -2497,6 +2537,16 @@ export class SquadManager extends EventEmitter {
 			this.floatPrOnLandReady(rec);
 			return result;
 		}
+		// Effective-model fix (Epic 6 concern 06, carried forward from the C05 review): `dto.model` is
+		// undefined ("unknown") for a dispatched fleet unit — nothing back-stamps it — so reading
+		// `dto.model` here would key BOTH the model-outcome ledger below and the C05 row-write further
+		// down on an all-"unknown" model axis. Hoisted above both write sites (previously the row-write
+		// alone did this fetch, a few lines further down) so the ledger `shiftedModel`/C06's router reads
+		// is keyed on the SAME real effective model as the row. Gated on `!result.retryable` — the
+		// precondition common to both write sites below — so a retryable refusal never pays for a
+		// receipts read it doesn't need.
+		const lastReceipt = !result.retryable ? (await readReceipts(this.stateDir, dto.id)).at(-1) : undefined;
+		const effectiveModel = lastReceipt?.model ?? dto.model;
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
@@ -2507,7 +2557,7 @@ export class SquadManager extends EventEmitter {
 			// itself — so concern 07's default-shift has data on day one even before it's turned on.
 			// Never gates the land above; purely record-only, after the outcome is already known.
 			try {
-				recordModelOutcome(this.stateDir, dto.model, tierOf(rec.options.thinking), result.ok);
+				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
 				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
 				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
@@ -2521,6 +2571,56 @@ export class SquadManager extends EventEmitter {
 				recordConfidenceOutcome(this.stateDir, envNumber("OMP_SQUAD_CONFIDENCE_FLOOR", 0.4), dto.confidence, result.ok);
 			} catch (err) {
 				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+		// Joined task-outcome row (Epic 6 concern 03): idempotent, agentId-keyed row joining the routing
+		// decision (`rec.options.routing`) with the terminal land outcome. Deliberately a WIDER gate than
+		// the block above — `!result.retryable` alone, not `!result.retryable && (auto || result.ok)` —
+		// because a manual (auto:false) FAILURE is exactly the combination the narrower guard drops
+		// (auto=false, result.ok=false ⇒ `(auto||result.ok)` is false), and an operator-driven land failure
+		// must not be silently missing from the observability surface. A retryable refusal (dirty main,
+		// etc.) is an environmental precondition, not a terminal outcome — no row for it; the roster
+		// denominator (isLandingUnit) already accounts for it correctly without one. Never gates the land
+		// itself; purely record-only, after the outcome is already known, same as its two siblings above.
+		if (!result.retryable) {
+			try {
+				// Independent difficulty signals (Epic 6 concern 04) — neither is a router output, unlike
+				// `routing.{mode,tier}` above, so grading the router against these is non-circular.
+				// filesTouched: the confidence scorer's own blast-radius proxy (finalizeRun's
+				// `scoreConfidence({ filesTouched: receipt.filesTouched.length, ... })`), read off this
+				// agent's LAST finalized RunReceipt (`lastReceipt`, hoisted above alongside `effectiveModel`
+				// so both this row-write and the model-outcome ledger write above key on the SAME receipt
+				// read). `readReceipts` returns rows in append order, so the last entry is the most recent
+				// run; its `filesTouched` (git-status-derived at that run's finish()) already reflects every
+				// prior turn's uncommitted changes too, since nothing is committed until land()'s own
+				// commitWip. Undefined when no run ever finalized for this agent (e.g. a re-adopted/direct
+				// land with no receipt on disk) — never fabricated.
+				// fixupCount: the SAME workflow-engine visit counter (`WorkflowRunState.visits.fixup`)
+				// concern 01's fixups-to-green metric (recordWorkflowOutcomeMetrics above) and
+				// digestReward's firstTryGreen already read. IN-RUN churn, not post-merge regression — see
+				// task-outcomes.ts's module doc for why no post-merge rework signal exists in this codebase.
+				const fixupCount = rec.options.workflowState?.visits?.fixup;
+				await recordTaskOutcome(this.stateDir, {
+					agentId: dto.id,
+					branch: dto.branch,
+					routing: rec.options.routing ?? { mode: "none", tier: tierOf(rec.options.thinking) },
+					// Effective model from the finalized receipt (concern 01's noteModel writes the model
+					// omp ACTUALLY ran onto RunReceipt.model), NOT dto.model — dispatch sets no model and
+					// nothing back-stamps dto.model for a dispatched fleet unit, so bare dto.model would be
+					// undefined here and collapse the whole scoreboard model axis to "unknown". Fall back to
+					// dto.model only for the rare explicit-model path where no receipt landed on disk.
+					model: effectiveModel,
+					costUsd: dto.receipt?.costUsd,
+					confidence: dto.confidence,
+					validation: rec.dto.validation?.verdict,
+					filesTouched: lastReceipt?.filesTouched.length,
+					fixupCount,
+					outcome: result.ok ? "landed" : "rejected",
+					source: "land",
+					ts: Date.now(),
+				} satisfies TaskOutcomeRow);
+			} catch (err) {
+				this.log("warn", `task-outcome record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
 		// Forced land that merged WITHOUT a passing proof gate — audit it so the override is never invisible trust.
@@ -3212,6 +3312,38 @@ export class SquadManager extends EventEmitter {
 		const effectiveAtCreate = effectiveAutonomyMode({ requested: requestedMode, approvalMode, autoLand: this.autoLand, landConfirm: this.landConfirm });
 		if (opts.task && effectiveAtCreate === "observe") throw new Error("create with task is blocked in observe mode");
 		const thinking = opts.thinking ?? "low";
+		// Route model at dispatch (Epic 6 / model-routing-control-loop concern 06 — the control loop's
+		// ACTION arm). `taskClass` mirrors the SAME formula the `routing` field below uses (`opts.verifyMode`
+		// already carries `routeIntake`'s decision by this point), so the router keys on exactly the class
+		// the row/roster will later be bucketed under.
+		//
+		// SAFE BY DEFAULT: gated on the existing `OMP_SQUAD_MODEL_OUTCOMES=1` flag (same gate
+		// `smart-spawn.ts`'s interactive `shiftedModel` uses) — with the flag unset, this entire block is
+		// skipped and dispatch is byte-for-byte unchanged. Never overrides an explicit `opts.model` (a
+		// profile or operator's choice), mirroring `shiftedModel`'s rule #1.
+		//
+		// SHADOW-FIRST: even with the gate on, `OMP_SQUAD_MODEL_ROUTE_SHADOW` defaults ON (anything but the
+		// literal "0") — the decision is logged (+ recorded as a `model-route-decision` learning metric) but
+		// NOT applied, so an operator can compare shadow decisions against the task-class panel before
+		// opting into `OMP_SQUAD_MODEL_ROUTE_SHADOW=0` (apply mode). Applying it also closes the C01 gap for
+		// harnesses that never emit an effective model: a routed unit now carries an explicit `opts.model`.
+		if (process.env.OMP_SQUAD_MODEL_OUTCOMES === "1" && opts.model === undefined) {
+			try {
+				const taskClass = { mode: opts.verifyMode ?? "none", tier: tierOf(thinking) };
+				const rows = await readTaskOutcomes(this.stateDir);
+				const matrix = buildTaskClassMatrix(rows, this.landingRosterRouting(), { start: Date.now() - 30 * DAY_MS, end: Date.now() });
+				const decision = routeModelForTaskClass(taskClass, matrix);
+				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0";
+				this.learningMetrics.record("model-route-decision", decision.model ? 1 : 0, {
+					mode: shadow ? "shadow" : "apply",
+					taskClass: `${taskClass.mode}:${taskClass.tier}`,
+				});
+				this.log("info", `model-route${shadow ? " [shadow]" : ""}: ${decision.reason}`);
+				if (!shadow && decision.model !== undefined) opts = { ...opts, model: decision.model };
+			} catch (err) {
+				this.log("warn", `model-route decision failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
 		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
 		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
@@ -3316,6 +3448,11 @@ export class SquadManager extends EventEmitter {
 			requires: opts.requires,
 			produces,
 			scopeSource: opts.scopeSource,
+			// Joined task-outcome row (concern 03): the durable "what we picked" record. `opts.verifyMode`
+			// already carries `decision.mode` by this point when routeIntake ran above (it overwrote
+			// `opts.verifyMode` at the routing call site) — so this formula covers BOTH the routed and the
+			// explicit-verify-mode paths without re-deriving the router's decision here.
+			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now() },
 		};
 
 		const dto: AgentDTO = {
@@ -4465,9 +4602,19 @@ export class SquadManager extends EventEmitter {
 			}
 			case "message_end": {
 				const msg = frame.message as
-					| { role?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost?: { total: number } } }
+					| {
+							role?: string;
+							usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost?: { total: number } };
+							model?: string;
+					  }
 					| undefined;
-				if (msg?.role === "assistant" && msg.usage) rec.run?.onAssistantUsage(msg.usage);
+				if (msg?.role === "assistant") {
+					if (msg.usage) rec.run?.onAssistantUsage(msg.usage);
+					// Late-bind the effective model off the wire — a dispatched fleet unit sets no
+					// explicit rec.dto.model, so without this every fleet run collapses to "unknown"
+					// in attribution even though the RPC frame already carries the resolved model.
+					if (msg.model) rec.run?.noteModel(msg.model);
+				}
 				rec.run?.onMessageEnd();
 				this.finishThinkingStream(rec);
 				this.finishAssistantStream(rec);
@@ -4738,6 +4885,32 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Resolve a stable `agentId` for `branch` when the live `AgentRecord` may already be gone from the
+	 * roster — the reconciler's out-of-band backstop (`reconcileOnePr`) runs well after the fact, often
+	 * on a daemon restart, by which point `this.agents` may no longer hold the record `agentByBranch`
+	 * would find. Falls back to scanning durable receipts (`RunReceipt.branch`/`agentId` are both stable
+	 * and survive roster eviction) for the most recent match. Undefined ⇒ genuinely unresolvable; the
+	 * caller must log-and-skip rather than fabricate an id (a made-up id would corrupt task-outcomes'
+	 * agentId-keyed idempotency).
+	 */
+	private async resolveAgentIdForBranch(branch: string): Promise<string | undefined> {
+		const live = this.agentByBranch(branch);
+		if (live) return live.dto.id;
+		// Pick the genuinely most-recent match by run time, NOT iteration order: receipts are stored
+		// one file per agentId and `readAllReceipts` concatenates them in `readdir()` (filesystem/hash)
+		// order, which is not chronological. A reused branch (revert→reland, or an ad-hoc `add` reusing
+		// `squad/<name>`) has multiple matching receipts across different agents; keying the reconciled
+		// outcome to whichever `readdir` happened to return last would misattribute it to a stale agent.
+		const receipts = await readAllReceipts(this.stateDir);
+		let found: RunReceipt | undefined;
+		for (const r of receipts) {
+			if (r.branch !== branch) continue;
+			if (!found || (r.endedAt ?? r.startedAt) > (found.endedAt ?? found.startedAt)) found = r;
+		}
+		return found?.agentId;
+	}
+
+	/**
 	 * Attempt (or confirm) the Plane close for `entry`'s tracked issue. Returns true when there is
 	 * nothing left to confirm: the entry never had a tracked issue, autoclose is off (so there is
 	 * nothing to retry — a disabled close is done, not failed), it was already closed (idempotent via
@@ -4858,6 +5031,32 @@ export class SquadManager extends EventEmitter {
 			const rec = this.agentByBranch(entry.branch);
 			if (rec) rec.dto.landReady = false; // successful land ⇒ clear the confirm-mode staged flag, same as land()
 			recordLandOutcome(this.stateDir, entry.branch, true, "merged out-of-band");
+			// Joined task-outcome row (concern 03): this path is branch-keyed and the AgentRecord may
+			// already be evicted from the live roster by the time an out-of-band merge is caught —
+			// resolve the SAME agentId land() would have written via the roster-then-receipts fallback, so
+			// the idempotent upsert-on-read collapses to one row instead of a duplicate. Unresolvable ⇒
+			// log-and-skip (never fabricate an agentId — see resolveAgentIdForBranch's doc).
+			const outcomeAgentId = rec?.dto.id ?? (await this.resolveAgentIdForBranch(entry.branch));
+			if (outcomeAgentId) {
+				try {
+					await recordTaskOutcome(this.stateDir, {
+						agentId: outcomeAgentId,
+						branch: entry.branch,
+						routing: rec?.options.routing ?? { mode: "none", tier: tierOf(rec?.options.thinking) },
+						model: rec?.dto.model,
+						costUsd: rec?.dto.receipt?.costUsd,
+						confidence: rec?.dto.confidence,
+						validation: rec?.dto.validation?.verdict,
+						outcome: "landed",
+						source: "reconciled",
+						ts: Date.now(),
+					} satisfies TaskOutcomeRow);
+				} catch (err) {
+					this.log("warn", `task-outcome record failed for ${entry.branch} (reconciled, non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				}
+			} else {
+				this.log("warn", `task-outcome: could not resolve agentId for out-of-band merge of ${entry.branch} — skipping row (roster gone, no matching receipt)`);
+			}
 			const closed = await this.attemptCloseFor(entry, repo);
 			if (rec) this.emitAgent(rec);
 			updatePendingPr(this.stateDir, entry.branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now(), ...(closed ? { issueClosedAt: Date.now() } : {}) });

@@ -114,6 +114,35 @@ export interface ServerActionItem {
   requestId?: string;
 }
 
+/** One `taskClass × model` cell from GET /api/graph/task-class.cells[taskClass][model] — mirrors
+ *  `CellMetrics` in src/omp-graph/task-class-matrix.ts. OBSERVATIONAL, never a causal comparison —
+ *  see `TaskClassMatrixPayload.note`. */
+export interface TaskClassCell {
+  n: number;
+  landed: number;
+  mergeRate: number;
+  medianCostUsd?: number;
+  nWithCost: number;
+  costCoveragePct: number;
+  medianConfidence?: number;
+  inRunReworkRate?: number;
+  insufficientData: boolean;
+}
+
+/** Shape of GET /api/graph/task-class (subset). `causal` is always `false` — the router's own
+ *  routing choices, not a randomized comparison; `note` is the mandatory honesty label every panel
+ *  built on this payload must render prominently. */
+export interface TaskClassMatrixPayload {
+  taskClasses: string[];
+  models: string[];
+  cells: Record<string, Record<string, TaskClassCell>>;
+  totalUnits: number;
+  totalLanded: number;
+  minSamples: number;
+  causal: false;
+  note: string;
+}
+
 // ───────────────────────────── capacity ─────────────────────────────
 
 export interface CapacitySummary {
