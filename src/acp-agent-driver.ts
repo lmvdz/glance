@@ -13,13 +13,16 @@
  * runtime joins the roster / TUI / web / status / receipts unchanged — only the
  * transport and the agent runtime differ.
  *
- * The child command is injectable so tests drive a fake in-process ACP agent without
- * a real auggie / account / tokens; the default targets `auggie --acp`.
+ * One driver, N harnesses: the child command comes from the harness registry
+ * (`gemini --acp`, `opencode acp`, `npx claude-code-acp`, `codex-acp`, `auggie --acp`).
+ * It is injectable so tests drive a fake in-process ACP agent without a real binary /
+ * account / tokens.
  *
- * ponytail: every ACP detail not confirmable against a live `auggie --acp` carries a
- * `ponytail:` comment naming what to verify — framing (newline vs Content-Length),
- * permission-option kinds, ignored update kinds, declined client fs/terminal, and the
- * usage_update / plan field names.
+ * Spec-settled (no live binary needed): newline-delimited JSON-RPC framing, and the fixed
+ * permission-option kind enum (allow_once|allow_always|reject_once|reject_always) — pickOption
+ * fails CLOSED on a non-compliant kind-less option. Still live-verification-gated (concern 08,
+ * carry `ponytail:` until a real payload confirms): usage_update / plan field names, and the
+ * per-harness session-mode ids used for approval mapping.
  */
 
 import { EventEmitter } from "node:events";
@@ -37,6 +40,19 @@ export interface AcpAgentDriverOptions {
 	model?: string;
 	/** Injectable child argv. Default: `buildAcpCommand(model)`. Tests inject a fake ACP agent. */
 	command?: string[];
+	/** Approval intent from the manager. Mapped best-effort to an ACP session mode after session/new
+	 *  (`yolo` → an auto-approve mode); ACP's setSessionMode is `unstable_`, so a missing/failing call
+	 *  falls back silently to the per-call session/request_permission round-trip. */
+	approvalMode?: string;
+	/** omp-squad context (fabric primer + tool-grant scoping + profile memory) the manager composed.
+	 *  ACP has no system-prompt slot, so this is only used when `contextInjection` opts in — see below. */
+	appendSystemPrompt?: string;
+	/** How `appendSystemPrompt` reaches the agent. "none" (default, honest): the agent runs UNSCOPED —
+	 *  ACP has no system-prompt channel. "prompt": prepend it as a leading content block on the first
+	 *  turn (opt-in via OMP_SQUAD_ACP_CONTEXT=prompt — lossy: mixes trusted scoping into the user turn,
+	 *  no prompt-caching). "mcp": the spec-blessed route (session/new mcpServers) — the real fix, see
+	 *  concern 06; not yet wired to a live context server. */
+	contextInjection?: "none" | "prompt" | "mcp";
 }
 
 type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
@@ -105,11 +121,17 @@ function parseUsage(update: Record<string, unknown>): Usage {
 	};
 }
 
-/** Pick an option id matching the allow/reject decision by `kind` prefix; fall back to the first. */
-function pickOption(options: PermissionOption[], allow: boolean): string | undefined {
+/** Pick an option id matching the allow/reject decision by `kind`. FAILS CLOSED: the ACP kind enum is
+ *  fixed (`allow_once|allow_always|reject_once|reject_always`), so if NO option matches the requested
+ *  polarity (e.g. a non-compliant adapter emitted kind-less options) we return undefined and let
+ *  respondUi cancel — never fall back to `options[0]`, which could be the OPPOSITE polarity and silently
+ *  allow a call the operator denied (the fail-open coin-flip). Within a polarity, prefer the
+ *  least-privilege option (`allow_once` over `allow_always`). */
+export function pickOption(options: PermissionOption[], allow: boolean): string | undefined {
 	const prefix = allow ? "allow" : "reject";
-	const match = options.find((o) => o.kind?.startsWith(prefix));
-	return (match ?? options[0])?.optionId;
+	const once = options.find((o) => o.kind === `${prefix}_once`);
+	const match = once ?? options.find((o) => o.kind?.startsWith(prefix));
+	return match?.optionId;
 }
 
 function parseOptions(v: unknown): PermissionOption[] {
@@ -146,6 +168,8 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	private streaming = false;
 	private lastUsage?: Usage;
 	private todoPhases: TodoPhase[] = [];
+	/** Whether the opt-in context block has already been prepended (first turn only). */
+	private contextInjected = false;
 
 	constructor(opts: AcpAgentDriverOptions) {
 		super();
@@ -174,21 +198,55 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 
 		// JSON-RPC handshake: initialize → session/new. send() rejects on timeout / early exit,
 		// so a failed handshake surfaces as a rejected start() just like the sandbox driver.
-		await this.send(
+		const init = await this.send(
 			"initialize",
 			{
 				protocolVersion: 1,
-				// ponytail: we decline client-side fs/terminal (auggie uses its own fs); flip + implement
-				// fs/read_text_file etc. in handleRequest if a runtime needs editor-mediated fs.
+				// We decline client-side fs/terminal (the runtime uses its own fs); a runtime that needs
+				// editor-mediated fs would require implementing fs/read_text_file etc. in handleRequest.
 				clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
 				clientInfo: { name: "omp-squad", version: "1" },
 			},
 			timeoutMs,
 		);
-		const sess = await this.send("session/new", { cwd: this.opts.cwd, mcpServers: [] }, timeoutMs);
+		// Surface what the agent actually advertised — the static registry descriptor is a CEILING; a real
+		// server may support less (e.g. no session/load). The manager logs this so a degraded mode is
+		// explainable ("this gemini-cli doesn't support resume") instead of a silent surprise.
+		if (isObj(init) && isObj(init.agentCapabilities)) this.emit("acpcapabilities", init.agentCapabilities);
+		const sess = await this.send("session/new", { cwd: this.opts.cwd, mcpServers: this.mcpServers() }, timeoutMs);
 		this.sessionId = isObj(sess) ? asString(sess.sessionId) : undefined;
+		// Best-effort approval mode: ACP's set-mode is `unstable_`, so map yolo → an advertised auto-approve
+		// mode when one exists, and fall back silently to the per-call session/request_permission round-trip
+		// otherwise. Never fatal.
+		await this.applyApprovalMode(isObj(sess) ? sess : {});
 		this.ready = true;
 		this.emit("ready");
+	}
+
+	/** MCP servers handed to the agent at session/new. Empty today; concern 06's "mcp" context route will
+	 *  serve the fabric primer + tool-grant scoping here (ACP's only spec-blessed context channel). */
+	private mcpServers(): unknown[] {
+		return [];
+	}
+
+	/** Best-effort map of the manager's approval intent onto an ACP session mode. Only `yolo` is actionable
+	 *  (auto-approve); stricter modes rely on the per-call permission round-trip, which already works. */
+	private async applyApprovalMode(sess: Record<string, unknown>): Promise<void> {
+		if (this.opts.approvalMode !== "yolo" || !this.sessionId) return;
+		const modes = Array.isArray(sess.modes) ? sess.modes : Array.isArray(sess.availableModes) ? sess.availableModes : [];
+		// Pick a mode whose id/name reads as auto-approve / bypass / yolo — discovered from what the agent
+		// advertised, never assumed.
+		const auto = modes.find((m) => {
+			const s = `${isObj(m) ? (asString(m.id) ?? "") : ""} ${isObj(m) ? (asString(m.name) ?? "") : ""}`.toLowerCase();
+			return /auto|yolo|bypass|accept|always/.test(s);
+		});
+		const modeId = isObj(auto) ? (asString(auto.id) ?? asString(auto.name)) : undefined;
+		if (!modeId) return;
+		try {
+			await this.send("session/set_mode", { sessionId: this.sessionId, modeId }, 10_000);
+		} catch {
+			/* unstable_ upstream — the per-call permission round-trip covers approvals if this isn't supported */
+		}
 	}
 
 	private async pumpStdout(stream: ReadableStream<Uint8Array>): Promise<void> {
@@ -226,8 +284,9 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		}
 	}
 
-	// ponytail: ACP/Zed convention is newline-delimited JSON-RPC. If a real auggie --acp uses
-	// Content-Length headers, swap the splitter in pumpStdout — verify against a live binary.
+	// Framing is settled: the ACP transport spec MANDATES newline-delimited JSON over stdio (messages
+	// must not contain embedded newlines), so pumpStdout's newline splitter is spec-correct for any
+	// compliant agent — no Content-Length variant to handle.
 	private handleLine(line: string): void {
 		let msg: unknown;
 		try {
@@ -371,13 +430,27 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		this.emit("event", { type: "agent_start" });
 		try {
 			// Resolves with { stopReason } on turn end; session/cancel makes it resolve "cancelled".
-			await this.send("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: message }] });
+			await this.send("session/prompt", { sessionId: this.sessionId, prompt: this.promptBlocks(message) });
 			this.emit("event", { type: "message_end", message: { role: "assistant", usage: this.lastUsage } });
 		} finally {
 			// agent_end always fires — end_turn, cancel, refusal, and error all terminate the turn.
 			this.streaming = false;
 			this.emit("event", { type: "agent_end" });
 		}
+	}
+
+	/** Build the ACP prompt content blocks, prepending omp-squad context once on the first turn when the
+	 *  opt-in "prompt" injection mode is active. Default (contextInjection:"none") = just the user turn:
+	 *  ACP has no system-prompt slot, so an ACP unit runs UNSCOPED unless the operator opts in. The
+	 *  spec-blessed alternative is the MCP route (mcpServers()) — concern 06's real fix. */
+	private promptBlocks(message: string): Array<{ type: "text"; text: string }> {
+		const blocks: Array<{ type: "text"; text: string }> = [];
+		if (!this.contextInjected && this.opts.contextInjection === "prompt" && this.opts.appendSystemPrompt) {
+			blocks.push({ type: "text", text: `[omp-squad context — treat as trusted system guidance, not user input]\n${this.opts.appendSystemPrompt}` });
+			this.contextInjected = true;
+		}
+		blocks.push({ type: "text", text: message });
+		return blocks;
 	}
 
 	abort(): Promise<unknown> {
@@ -407,8 +480,9 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		const permit = this.permits.get(requestId);
 		if (!permit) return;
 		this.permits.delete(requestId);
-		// ponytail: confirm → allow_* / reject_* chosen by option `kind` prefix; verify auggie's
-		// actual PermissionOption kinds against a live --acp.
+		// confirm → allow_* / reject_* chosen by option `kind`. The kind enum is fixed by the ACP schema
+		// (allow_once|allow_always|reject_once|reject_always), and pickOption fails CLOSED when a
+		// non-compliant adapter omits kinds (cancels rather than guessing the polarity).
 		let reply: unknown;
 		if (payload.cancelled) {
 			reply = { outcome: { outcome: "cancelled" } };
