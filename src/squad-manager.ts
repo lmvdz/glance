@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { globalDefaultHarness, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -450,6 +450,59 @@ function lineageFieldsFrom(p: {
  *  `harness` field exists to prevent (the warm reconnect path reads the record directly and is unaffected). */
 function harnessFieldsFrom(p: { harness?: string; runtime?: "omp" | "acp"; bin?: string }): { harness?: string; runtime?: "omp" | "acp"; bin?: string } {
 	return { harness: p.harness, runtime: p.runtime, bin: p.bin };
+}
+
+/**
+ * The ACTUAL inner runtime a persisted record's turns execute on — never the env default when the
+ * kind pins something else (cross-lineage review, PR #112 finding 2). `resolveHarnessName` resolves
+ * to `GLANCE_HARNESS` for a record with no explicit harness, but:
+ *  - a workflow-kind unit's inner coder/tester is ALWAYS an omp-dialect `RpcAgent`
+ *    (`WorkflowDriver.acquireInner`/`acquireTester` — createInnerDriver aside, there is no harness
+ *    selection on that path), so under `GLANCE_HARNESS=codex` its receipts must still read "omp";
+ *  - a flue-service unit runs `flue run` (FlueServiceDriver) — its own runtime, labeled "flue".
+ *    Not a registry harness name, which is fine: `RunReceipt.harness` is free-form by contract
+ *    (the claude-code/codex ingesters already stamp non-registry names), and every reader
+ *    (attribution, scoreboard) treats it as an opaque label.
+ * Only plain omp-operator units resolve through the registry (explicit harness > legacy runtime
+ * alias > global default).
+ */
+export function actualUnitHarness(p: { kind?: string; harness?: string; runtime?: string }): string {
+	const kind = p.kind ?? "omp-operator";
+	if (kind === "workflow") return "omp";
+	if (kind === "flue-service") return "flue";
+	return resolveHarnessName(p);
+}
+
+/**
+ * THE one provider-resolution helper for the degradation ladder (cross-lineage review, PR #112
+ * finding 1): both the dispatcher's `providerFor` gate and the `auto_retry_start` record site derive
+ * their provider key from THIS function, so the two can never drift apart — a cap recorded under a
+ * key the gate never checks would let per-provider gating keep dispatching straight into the capped
+ * lane.
+ *
+ * INVARIANT — the key is derived from DECLARED configuration only:
+ *  - `declaredModel` is an operator/profile-declared model; a model the pre-spawn model-route loop
+ *    applied (OMP_SQUAD_MODEL_OUTCOMES=1, shadow off — see `PersistedAgent.routing.routedModel`)
+ *    is intentionally EXCLUDED on both sides, because the dispatcher cannot predict routing for a
+ *    prospective issue. Excluding it is the fail-safe direction: a routed unit's cap folds into the
+ *    declared/default lane (over-pause), instead of the gate under-pausing into a capped routed lane.
+ *  - The harness axis is the ACTUAL inner runtime (`actualUnitHarness`), so a workflow unit's cap
+ *    lands where its omp inner actually consumed capacity. The dispatcher gates prospective issues
+ *    with kind "omp-operator" (intake routing's kind outcome is unknowable pre-spawn); with the
+ *    fleet default harness (omp — unknown lineage, folded to the dominant provider by the gate)
+ *    that resolves to the SAME bucket as a workflow inner, so gate ≡ record in every real config.
+ *    Divergence needs a vendor-pinned DEFAULT harness (today gated behind
+ *    OMP_SQUAD_UNVERIFIED_HARNESS=1) — accepted and documented here rather than guessed around.
+ */
+export function unitProviderKey(p: { kind?: string; harness?: string; runtime?: string; declaredModel?: string }): string {
+	return resolveProvider(p.declaredModel, actualUnitHarness(p));
+}
+
+/** The DECLARED model of a persisted record — `model` unless it is byte-for-byte the model the
+ *  pre-spawn router applied (`routing.routedModel`), which is excluded from provider keys by
+ *  `unitProviderKey`'s invariant. */
+export function declaredModelOf(p: { model?: string; routing?: { routedModel?: string } }): string | undefined {
+	return p.model !== undefined && p.model === p.routing?.routedModel ? undefined : p.model;
 }
 
 /**
@@ -1098,13 +1151,15 @@ export class SquadManager extends EventEmitter {
 	 * Degradation ladder (concern 06): the provider a prospective auto-dispatch spawn for `repo`/`issue`
 	 * would resolve onto — dispatch.ts's per-issue gate. `dispatchSpawn` → `create()` never threads a
 	 * per-issue model or harness today (no `profileId`, no `opts.model`: see `createWithId`), so this
-	 * mirrors that reality byte-for-byte rather than predicting a value the real spawn wouldn't land on
-	 * — a wrong prediction would defeat the whole point (skipping units that would ACTUALLY run on the
-	 * capped provider). `repo`/`issue` are accepted for the `DispatchDeps` shape and future per-repo/issue
-	 * differentiation; unused today since every auto-dispatched unit resolves the same way.
+	 * evaluates the SHARED `unitProviderKey` helper (the same function the `auto_retry_start` record
+	 * site uses — gate key and record key cannot drift) with exactly what a dispatched spawn would
+	 * declare: no model, no harness, kind "omp-operator" (intake routing's kind outcome is unknowable
+	 * pre-spawn — see the helper's invariant doc). `repo`/`issue` are accepted for the `DispatchDeps`
+	 * shape and future per-repo/issue differentiation; unused today since every auto-dispatched unit
+	 * declares the same (empty) configuration.
 	 */
 	private dispatchProviderFor(_repo: string, _issue: IssueRef): string | undefined {
-		return resolveProvider(undefined, globalDefaultHarness());
+		return unitProviderKey({ kind: "omp-operator" });
 	}
 
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
@@ -3500,6 +3555,7 @@ export class SquadManager extends EventEmitter {
 		// NOT applied, so an operator can compare shadow decisions against the task-class panel before
 		// opting into `OMP_SQUAD_MODEL_ROUTE_SHADOW=0` (apply mode). Applying it also closes the C01 gap for
 		// harnesses that never emit an effective model: a routed unit now carries an explicit `opts.model`.
+		let routedModel: string | undefined;
 		if (process.env.OMP_SQUAD_MODEL_OUTCOMES === "1" && opts.model === undefined) {
 			try {
 				const taskClass = { mode: opts.verifyMode ?? "none", tier: tierOf(thinking) };
@@ -3512,7 +3568,14 @@ export class SquadManager extends EventEmitter {
 					taskClass: `${taskClass.mode}:${taskClass.tier}`,
 				});
 				this.log("info", `model-route${shadow ? " [shadow]" : ""}: ${decision.reason}`);
-				if (!shadow && decision.model !== undefined) opts = { ...opts, model: decision.model };
+				if (!shadow && decision.model !== undefined) {
+					opts = { ...opts, model: decision.model };
+					// Mark the model as ROUTER-chosen (vs operator/profile-declared): `unitProviderKey`'s
+					// invariant excludes routed models from the rate-limit provider key on both the gate and
+					// the record side (see `declaredModelOf`), so a routed unit's cap can never land in a
+					// bucket the dispatcher's pre-routing gate would not check.
+					routedModel = decision.model;
+				}
 			} catch (err) {
 				this.log("warn", `model-route decision failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
@@ -3625,7 +3688,7 @@ export class SquadManager extends EventEmitter {
 			// already carries `decision.mode` by this point when routeIntake ran above (it overwrote
 			// `opts.verifyMode` at the routing call site) — so this formula covers BOTH the routed and the
 			// explicit-verify-mode paths without re-deriving the router's decision here.
-			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now() },
+			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now(), routedModel },
 		};
 
 		const dto: AgentDTO = {
@@ -4762,11 +4825,11 @@ export class SquadManager extends EventEmitter {
 						// Receipt attribution gap (orchestration receipts audit 2026-07-07): the harness backing
 						// this run, resolved at spawn (`rec.harness`, set once by create()'s `resolveHarness` call)
 						// — NOT `receipts.ts`'s own `?? "omp"` default, which silently mislabels a non-omp unit.
-						// `resolveHarnessName` covers workflow/flue-kind records (`harnessFor` returns undefined
-						// for them by convention — the capability-gating concept doesn't apply) with the SAME
-						// legacy-alias + global-default resolution `resolveHarness` itself uses, so a workflow run
-						// still gets a real harness name instead of falling through to receipts.ts's bare default.
-						harness: rec.harness?.name ?? resolveHarnessName(rec.options),
+						// `actualUnitHarness` covers workflow/flue-kind records (`harnessFor` returns undefined
+						// for them by convention) with the runtime they ACTUALLY execute on — workflow inners are
+						// always omp-dialect RpcAgents, flue is its own runtime — never the `GLANCE_HARNESS` env
+						// default, which those kinds don't consult (cross-lineage review, PR #112 finding 2).
+						harness: rec.harness?.name ?? actualUnitHarness(rec.options),
 					});
 				}
 				rec.run.start(rec.dto.model);
@@ -4847,15 +4910,18 @@ export class SquadManager extends EventEmitter {
 				// dispatcher pauses; log once per episode (only on the not-paused → paused transition) to avoid spam
 				// when several agents trip the same cap. delayMs is omp's parsed retry hint (when the cap frees up).
 				//
-				// Degradation ladder (concern 06): resolve the provider from harness-AT-SPAWN (`rec.harness`,
-				// resolved once at create() time — falling back to `resolveHarnessName` for workflow/flue kinds,
-				// which don't carry a HarnessDescriptor) + the CONFIGURED model (`rec.options.model`) — NEVER
-				// `rec.dto.model`, which the poll loop's `applyState` backfills asynchronously off the wire and is
-				// often still unset in this ≤2.5s pre-poll window (the raced backfill the concern doc warns
-				// against). Threading a real (possibly "unknown") provider into `note()` only sharpens which
-				// bucket a cap lands in — `paused()`'s no-arg legacy OR and `RateLimitGate`'s "unknown" → dominant-
-				// provider fold are both unchanged, so this is zero regression until a second verified lane exists.
-				const provider = resolveProvider(rec.options.model, rec.harness?.name ?? resolveHarnessName(rec.options));
+				// Degradation ladder (concern 06): resolve the provider through the SHARED `unitProviderKey`
+				// helper — the same function the dispatcher's `providerFor` gate evaluates, so the bucket a cap
+				// lands in is by construction a bucket the gate checks (cross-lineage review, PR #112 finding 1).
+				// Inputs are the record's DECLARED configuration: kind (workflow/flue kinds key on their actual
+				// inner runtime, not the env default — finding 2), harness-at-spawn, and `declaredModelOf`
+				// (which excludes a router-applied model per the helper's invariant). NEVER `rec.dto.model` —
+				// the poll loop's `applyState` backfills that asynchronously off the wire and it is often still
+				// unset in this ≤2.5s pre-poll window (the raced backfill the concern doc warns against).
+				// Threading a real (possibly "unknown") provider into `note()` only sharpens which bucket a cap
+				// lands in — `paused()`'s no-arg legacy OR and `RateLimitGate`'s "unknown" → dominant-provider
+				// fold are both unchanged, so this is zero regression until a second verified lane exists.
+				const provider = unitProviderKey({ kind: rec.options.kind, harness: rec.options.harness, runtime: rec.options.runtime, declaredModel: declaredModelOf(rec.options) });
 				const wasPaused = this.rateLimit.paused(provider);
 				if (this.rateLimit.note(frame.errorMessage, frame.delayMs, provider) && !wasPaused) {
 					const mins = Math.ceil((this.rateLimit.untilFor(provider) - Date.now()) / 60_000);

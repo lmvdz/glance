@@ -942,8 +942,12 @@ export interface PersistedAgent {
 	 *  mode ("tdd"/"verify"/"none", or whatever the router or an explicit `opts.verify` settled on);
 	 *  `tier` is `tierOf(thinking)` (model-outcomes.ts), the same coarse bucketing the model-outcome
 	 *  ledger already uses, so a later join (task-outcomes.ts) groups on identical axes. Additive/
-	 *  optional: absent on any agent persisted before this field existed. */
-	routing?: { mode: string; tier: string; thinking?: ThinkingLevel; routedAt: number };
+	 *  optional: absent on any agent persisted before this field existed. `routedModel` marks a model
+	 *  the pre-spawn model-route control loop (OMP_SQUAD_MODEL_OUTCOMES apply mode) chose — as opposed
+	 *  to an operator/profile-DECLARED `model` — so the rate-limit provider key can exclude it (see
+	 *  squad-manager's `unitProviderKey`: routing overrides are out of the gate key by invariant, and
+	 *  the record key must match the gate key). Additive/optional like the rest. */
+	routing?: { mode: string; tier: string; thinking?: ThinkingLevel; routedAt: number; routedModel?: string };
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */

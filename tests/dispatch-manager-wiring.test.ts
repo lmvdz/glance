@@ -24,10 +24,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { getHarness, registerHarness } from "../src/harness-registry.ts";
-import { SquadManager } from "../src/squad-manager.ts";
+import { readReceipts } from "../src/receipts.ts";
+import { actualUnitHarness, declaredModelOf, SquadManager, unitProviderKey } from "../src/squad-manager.ts";
 import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
 
-const ENV = ["OMP_SQUAD_AUTODISPATCH", "OMP_SQUAD_OBSERVE", "OMP_SQUAD_SCOUT", "OMP_SQUAD_OPPORTUNITY", "OMP_SQUAD_PLANSYNC", "OMP_SQUAD_AUTODRIVE", "OMP_SQUAD_PLANE_CACHE_MS", "PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "PLANE_PROJECT_MAP"] as const;
+const ENV = ["OMP_SQUAD_AUTODISPATCH", "OMP_SQUAD_OBSERVE", "OMP_SQUAD_SCOUT", "OMP_SQUAD_OPPORTUNITY", "OMP_SQUAD_PLANSYNC", "OMP_SQUAD_AUTODRIVE", "OMP_SQUAD_PLANE_CACHE_MS", "PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BASE_URL", "PLANE_PROJECT_MAP", "GLANCE_HARNESS"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV) saved[k] = process.env[k];
 
@@ -207,3 +208,123 @@ test("a real second verified provider lane: a cap on the ACTUAL resolved provide
 		await stop();
 	});
 }, 20_000);
+
+// ── cross-lineage review findings (PR #112): gate-key/record-key symmetry + actual-runtime keys ──
+
+test("unitProviderKey: gate key ≡ record key across the (harness, declaredModel) matrix — one shared helper", () => {
+	// The gate (dispatchProviderFor) and the record site (auto_retry_start) both evaluate
+	// unitProviderKey; symmetry means: for any declared configuration, the key the gate would compute
+	// for a prospective unit equals the key the record site computes for the unit actually spawned
+	// from that configuration (whose only extra input is declaredModelOf — the identity function for
+	// any operator/profile-declared model).
+	const combos: Array<{ harness?: string; model?: string; want: string }> = [
+		{ harness: undefined, model: undefined, want: "unknown" }, // default omp — multi-model, no vendor pin
+		{ harness: "omp", model: undefined, want: "unknown" },
+		{ harness: "pi", model: undefined, want: "unknown" },
+		{ harness: "codex", model: undefined, want: "openai" }, // vendor-pinned harness
+		{ harness: "claude-code", model: undefined, want: "anthropic" },
+		{ harness: "gemini", model: undefined, want: "google" },
+		{ harness: undefined, model: "gpt-5.5", want: "openai" }, // declared model wins
+		{ harness: undefined, model: "opus", want: "anthropic" },
+		{ harness: "codex", model: "claude-opus-4-8", want: "anthropic" }, // model beats the harness pin
+		{ harness: "claude-code", model: "openai/gpt-5.5", want: "openai" },
+	];
+	for (const c of combos) {
+		const gateKey = unitProviderKey({ kind: "omp-operator", harness: c.harness, declaredModel: c.model });
+		const recordKey = unitProviderKey({ kind: "omp-operator", harness: c.harness, declaredModel: declaredModelOf({ model: c.model }) });
+		expect(recordKey).toBe(gateKey);
+		expect(gateKey).toBe(c.want);
+	}
+});
+
+test("declaredModelOf: excludes exactly the router-applied model, keeps operator/profile-declared ones", () => {
+	// Router applied THIS model (routedModel === model) ⇒ excluded from the provider key.
+	expect(declaredModelOf({ model: "gpt-5.5", routing: { routedModel: "gpt-5.5" } })).toBeUndefined();
+	// Operator-declared (no routing mark, or a mark for a DIFFERENT model — the operator overrode it).
+	expect(declaredModelOf({ model: "gpt-5.5" })).toBe("gpt-5.5");
+	expect(declaredModelOf({ model: "gpt-5.5", routing: { routedModel: "opus" } })).toBe("gpt-5.5");
+	expect(declaredModelOf({})).toBeUndefined();
+});
+
+test("actualUnitHarness: workflow/flue kinds pin their real inner runtime, never the GLANCE_HARNESS env default", () => {
+	process.env.GLANCE_HARNESS = "codex";
+	expect(actualUnitHarness({ kind: "workflow" })).toBe("omp"); // acquireInner is always an omp-dialect RpcAgent
+	expect(actualUnitHarness({ kind: "flue-service" })).toBe("flue"); // FlueServiceDriver runs `flue run`
+	expect(actualUnitHarness({})).toBe("codex"); // plain operator unit genuinely resolves the env default
+	expect(actualUnitHarness({ kind: "omp-operator", harness: "pi" })).toBe("pi"); // explicit harness wins
+});
+
+/** Light manager (no Plane stub) for the record-site tests — the dispatcher isn't under test here. */
+async function makePlainMgr(prefix: string): Promise<{ mgr: SquadManager; repo: string; stateDir: string }> {
+	process.env.OMP_SQUAD_AUTODISPATCH = "0";
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-state-`));
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-repo-`));
+	tmps.push(stateDir, repo);
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	await mgr.start();
+	(mgr as unknown as { makeDriver: (p: PersistedAgent, cold?: boolean) => AgentDriver }).makeDriver = () => new FakeDriver();
+	return { mgr, repo, stateDir };
+}
+
+interface RecordInternals {
+	agents: Map<string, { dto: { id: string; model?: string }; options: PersistedAgent; run?: unknown }>;
+	onAgentEvent: (rec: unknown, frame: { type?: string; [k: string]: unknown }) => void;
+	finalizeRun: (rec: unknown) => Promise<void>;
+	rateLimit: { paused: (provider?: string) => boolean };
+}
+
+test("a ROUTER-applied model's cap records under the gate's bucket, not the routed provider's (no gate/record drift)", async () => {
+	const { mgr, repo } = await makePlainMgr("routed-cap");
+	const internals = mgr as unknown as RecordInternals;
+	const dto = await mgr.create({ name: "routed", repo, approvalMode: "yolo", autoRoute: false });
+	const rec = internals.agents.get(dto.id)!;
+	// Simulate the model-route apply path having chosen an OpenAI model (the real router only picks the
+	// Anthropic frontier today — this is the forward-looking drift the review flagged): opts.model was
+	// set by the router AND marked in routing.routedModel, exactly as createWithId's apply branch stamps it.
+	rec.options.model = "gpt-5.5";
+	rec.options.routing = { ...(rec.options.routing ?? { mode: "none", tier: "light", routedAt: Date.now() }), routedModel: "gpt-5.5" };
+
+	internals.onAgentEvent(rec, { type: "auto_retry_start", errorMessage: "429 usage limit reached", delayMs: 5 * 60_000 });
+
+	// The cap must land in the bucket the dispatcher's pre-routing gate checks (default lane →
+	// "unknown" → folded to anthropic), NOT the routed model's openai bucket — otherwise per-unit
+	// gating would keep dispatching new units straight into the capped routed lane.
+	expect(internals.rateLimit.paused("openai")).toBe(false);
+	expect(internals.rateLimit.paused("anthropic")).toBe(true);
+	await mgr.stop();
+});
+
+test("an OPERATOR-declared model's cap records under its own provider (declared config stays in the key)", async () => {
+	const { mgr, repo } = await makePlainMgr("declared-cap");
+	const internals = mgr as unknown as RecordInternals;
+	const dto = await mgr.create({ name: "declared", repo, approvalMode: "yolo", autoRoute: false, model: "gpt-5.5" });
+	const rec = internals.agents.get(dto.id)!;
+
+	internals.onAgentEvent(rec, { type: "auto_retry_start", errorMessage: "429 usage limit reached", delayMs: 5 * 60_000 });
+
+	expect(internals.rateLimit.paused("openai")).toBe(true);
+	expect(internals.rateLimit.paused("anthropic")).toBe(false);
+	await mgr.stop();
+});
+
+test("workflow-kind under GLANCE_HARNESS=codex: receipt harness 'omp', cap bucket anthropic (actual inner runtime, both axes)", async () => {
+	process.env.GLANCE_HARNESS = "codex";
+	const { mgr, repo, stateDir } = await makePlainMgr("wf-actual-runtime");
+	const internals = mgr as unknown as RecordInternals;
+	// `verify` ⇒ kind "workflow" — its inner coder is ALWAYS an omp-dialect RpcAgent, whatever the env default.
+	const dto = await mgr.create({ name: "wf", repo, approvalMode: "yolo", autoRoute: false, verify: "true" });
+	const rec = internals.agents.get(dto.id)!;
+	expect(rec.options.kind).toBe("workflow");
+
+	internals.onAgentEvent(rec, { type: "agent_start" });
+	internals.onAgentEvent(rec, { type: "auto_retry_start", errorMessage: "429 usage limit reached", delayMs: 5 * 60_000 });
+	await internals.finalizeRun(rec);
+
+	// Receipt axis: the actual inner runtime, not the env default.
+	const [receipt] = await readReceipts(stateDir, dto.id);
+	expect(receipt.harness).toBe("omp");
+	// Rate-limit axis: the cap folds into the dominant (anthropic) bucket, never openai-via-env-default.
+	expect(internals.rateLimit.paused("anthropic")).toBe(true);
+	expect(internals.rateLimit.paused("openai")).toBe(false);
+	await mgr.stop();
+});

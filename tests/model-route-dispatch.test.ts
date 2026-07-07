@@ -149,6 +149,11 @@ test("gate ON, apply mode (SHADOW=0): the chosen frontier model lands on the DTO
 	const rollup = mgr.learningMetricsSnapshot(24 * 3_600_000).rollup;
 	const row = rollup.find((r) => r.name === "model-route-decision");
 	expect(row?.byTag?.mode?.apply?.count).toBeGreaterThanOrEqual(1);
+	// The applied model is marked ROUTER-chosen on the durable routing record (PR #112 review finding 1):
+	// `unitProviderKey`/`declaredModelOf` exclude it from the rate-limit provider key, so a routed unit's
+	// cap can never land in a bucket the dispatcher's pre-routing gate doesn't check.
+	const rec = (mgr as unknown as { agents: Map<string, { options: PersistedAgent }> }).agents.get(dto.id)!;
+	expect(rec.options.routing?.routedModel).toBe("opus");
 	await mgr.stop();
 });
 
