@@ -13,6 +13,12 @@
  * (a `throw` for an internal invariant, a `JSON.parse` of our own state file). We
  * gate the patterns that have a clean Effect replacement and let the count shrink
  * as boundaries migrate. Run `bun scripts/effect-migration.ts` for the live report.
+ *
+ * Baselines re-anchored to current `main` at re-land time (this ratchet was orphaned
+ * off main after its original PR #88 merge, so the wire drifted while nothing enforced
+ * it): number-env-or-default TIGHTENED 38→4 (migrations landed meanwhile), and the three
+ * un-migrated patterns re-locked at their present ceilings (json 52→54, bool 44→50,
+ * error-idiom 82→88). The gate now enforces no-further-backslide from today.
  */
 import { Glob } from "bun";
 import { readFileSync } from "node:fs";
@@ -38,28 +44,28 @@ export const PATTERNS: Pattern[] = [
 		description: "`Number(process.env.X) || d` silently eats a legit 0 and coerces garbage — replace with envInt/envNumber from src/config.ts",
 		regex: /Number\(process\.env\.[A-Z_]+\)\s*\|\|/,
 		allowlist: ["src/config.ts"],
-		baseline: 38,
+		baseline: 4,
 	},
 	{
 		id: "json-parse-as-cast",
 		description: "`JSON.parse(...) as T` with no validation — at a TRUST BOUNDARY (untrusted/persisted input) replace with a Schema decode. Triage before tightening: parsing our own freshly-written data is fine.",
 		regex: /JSON\.parse\([^;{}]*\)\s+as\s+[A-Za-z]/,
 		allowlist: ["src/schema/"], // schema modules re-narrow VALIDATED output; that `as` is sound
-		baseline: 52,
+		baseline: 54,
 	},
 	{
 		id: "bool-env-compare",
 		description: '`process.env.X === "1"` scattered boolean parsing — candidate for a typed envBool helper (not yet built)',
 		regex: /process\.env\.[A-Z_]+\s*[!=]==\s*"[01]"/,
 		allowlist: [],
-		baseline: 44,
+		baseline: 50,
 	},
 	{
 		id: "error-message-idiom",
 		description: "`err instanceof Error ? err.message : String(err)` — the shape that a tagged-error hierarchy replaces (not yet built; tracked, not urgent)",
 		regex: /instanceof Error \? /,
 		allowlist: [],
-		baseline: 82,
+		baseline: 88,
 	},
 ];
 
