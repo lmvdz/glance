@@ -336,6 +336,20 @@ export interface TraceResponseDTO {
   sampled?: boolean;
 }
 
+/** Mirrors backend `HarnessDimension` (src/harness-scorecard.ts). */
+export type HarnessDimension = 'instructions' | 'tools' | 'environment' | 'state' | 'feedback';
+
+/** Mirrors backend `HarnessScorecard` (src/harness-scorecard.ts) — a pre-dispatch, advisory-only
+ *  static score of a unit's harness bundle across the five subsystems the learn-harness-engineering
+ *  curriculum names. Computed once at spawn and stamped onto the DTO; never persisted, never gates
+ *  anything. Absent on agents spawned before this shipped, or restored/adopted without a fresh spawn. */
+export interface HarnessScorecardDTO {
+  score: number;
+  dimensions: Record<HarnessDimension, boolean>;
+  redFlags: string[];
+  at: number;
+}
+
 export interface AgentDTO {
   id: string;
   name: string;
@@ -413,6 +427,8 @@ export interface AgentDTO {
   /** Live progress (currentNode/rollup/etc.) over `workflowGraph`'s static topology, plus the
    *  terminal/runId subset the Fork button's `forkAvailable` gate is documented against. */
   workflowState?: WorkflowRunStateDTO;
+  /** Pre-dispatch harness scorecard (advisory shadow) — see `HarnessScorecardDTO`. */
+  harnessScorecard?: HarnessScorecardDTO;
 }
 
 export interface TranscriptTool {

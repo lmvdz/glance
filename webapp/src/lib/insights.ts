@@ -719,6 +719,46 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
   return items;
 }
 
+// ───────────────────────────── harness scorecard (own diagnostic surface) ─────────────────────────────
+//
+// Deliberately NOT folded into `attentionItems`/`AttentionKind`: the deferred design
+// (plans/research-learn-harness-engineering/03-harness-scorecard-shadow.md) explicitly named
+// alert-fatigue as a risk of routing a threshold-gated static score through the shared "attention"
+// lane — it would bury real "needs-you" events under structural-completeness noise. This is a
+// separate, own-purpose read-model: a static, pre-dispatch DIAGNOSTIC (context-poor units become
+// visible at admission), not an actionable "something needs a human now" signal. A panel may render
+// it alongside attentionItems, but must never merge the two lists.
+
+/** One agent's harness scorecard, surfaced only when it has at least one red flag (a clean 5/5 is
+ *  not worth a row — this is a diagnostic surface, not a status board). */
+export interface HarnessScorecardFinding {
+  id: string;
+  agentId: string;
+  agentName: string;
+  score: number;
+  redFlags: string[];
+  at: number;
+}
+
+/**
+ * Every dispatched unit whose harness scorecard carries at least one red flag, worst-first (lowest
+ * score, then most recent). Agents with no scorecard (spawned before this shipped, or restored/adopted
+ * without a fresh spawn) and agents scoring a clean 5/5 are omitted — nothing to say about either.
+ */
+export function harnessScorecardFindings(agents: AgentDTO[]): HarnessScorecardFinding[] {
+  return agents
+    .filter((a): a is AgentDTO & { harnessScorecard: NonNullable<AgentDTO['harnessScorecard']> } => (a.harnessScorecard?.redFlags.length ?? 0) > 0)
+    .map((a) => ({
+      id: `harness-scorecard:${a.id}`,
+      agentId: a.id,
+      agentName: a.name,
+      score: a.harnessScorecard.score,
+      redFlags: a.harnessScorecard.redFlags,
+      at: a.harnessScorecard.at,
+    }))
+    .sort((a, b) => a.score - b.score || b.at - a.at || a.agentId.localeCompare(b.agentId));
+}
+
 function shortPath(p: string): string {
   const parts = p.split(/[\\/]/).filter(Boolean);
   if (parts.length <= 2) return p;

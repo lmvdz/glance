@@ -10,6 +10,7 @@ import {
   activeWork,
   activeWorkAction,
   activeWorkDigest,
+  harnessScorecardFindings,
   type GovernancePayload,
   type HealthSample,
   type UsageRun,
@@ -525,6 +526,44 @@ describe('attentionItems', () => {
     // the collision row has no `since` and must sort last, even though it's alphabetically
     // earlier than the blocked row's id.
     expect(items.map((i) => i.kind)).toEqual(['blocked', 'collision']);
+  });
+});
+
+// ───────────────────────────── harnessScorecardFindings ─────────────────────────────
+
+function scorecard(score: number, redFlags: string[], at = 0): AgentDTO['harnessScorecard'] {
+  const dims = { instructions: true, tools: true, environment: true, state: true, feedback: true };
+  return { score, dimensions: dims, redFlags, at };
+}
+
+describe('harnessScorecardFindings', () => {
+  test('a clean 5/5 scorecard is omitted — nothing to say', () => {
+    const findings = harnessScorecardFindings([agent('a', 'working', { harnessScorecard: scorecard(5, []) })]);
+    expect(findings).toEqual([]);
+  });
+
+  test('an agent with no scorecard at all is omitted', () => {
+    const findings = harnessScorecardFindings([agent('a', 'working')]);
+    expect(findings).toEqual([]);
+  });
+
+  test('a red-flagged scorecard surfaces as its own finding, distinct from attentionItems', () => {
+    // Recent lastActivity so this agent has no OTHER attention-worthy state (e.g. stalled) — isolating
+    // the point: a harness-scorecard red flag alone never appears in attentionItems' shared lane.
+    const a = agent('a', 'working', { harnessScorecard: scorecard(3, ['no real feedback gate']), lastActivity: Date.now() });
+    const findings = harnessScorecardFindings([a]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ agentId: 'a', agentName: 'a', score: 3, redFlags: ['no real feedback gate'] });
+    expect(attentionItems({ agents: [a] })).toEqual([]);
+  });
+
+  test('sorts worst score first, most-recent first as a tiebreaker', () => {
+    const findings = harnessScorecardFindings([
+      agent('a', 'working', { harnessScorecard: scorecard(4, ['x'], 100) }),
+      agent('b', 'working', { harnessScorecard: scorecard(1, ['x', 'y', 'z'], 50) }),
+      agent('c', 'working', { harnessScorecard: scorecard(4, ['x'], 200) }),
+    ]);
+    expect(findings.map((f) => f.agentId)).toEqual(['b', 'c', 'a']);
   });
 });
 
