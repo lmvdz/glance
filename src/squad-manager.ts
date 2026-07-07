@@ -2291,6 +2291,7 @@ export class SquadManager extends EventEmitter {
 				commitWip: !busy,
 				requireProof: !force,
 				staleGate: !force,
+				riskOverride: force, // human force-land clears the blast-radius gate too (C-LAND)
 				verify: pf.acceptance ?? undefined,
 				issueId: rec?.dto.issue?.id,
 				issueIdentifier: rec?.dto.issue?.identifier,
@@ -2397,6 +2398,7 @@ export class SquadManager extends EventEmitter {
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
 			requireProof: !opts.force,
 			staleGate: !opts.force,
+			riskOverride: opts.force, // a human force-land clears the blast-radius gate too (C-LAND)
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
