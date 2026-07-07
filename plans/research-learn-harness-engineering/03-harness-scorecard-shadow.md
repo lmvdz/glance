@@ -4,7 +4,7 @@ PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/squad-manager.ts, src/dispatch.ts, webapp/src/lib/insights.ts
-PR: https://github.com/lmvdz/glance/pull/TBD
+PR: https://github.com/lmvdz/glance/pull/115
 
 ## Goal
 Statically score a unit's harness across the 5 subsystems (instructions/tools/environment/state/
