@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { LensVerdict } from "./types.ts";
-import type { LensVerifyJudge } from "./validator.ts";
-import { runLensVerify } from "./validator.ts";
+import type { LensVerdict } from "../src/types.ts";
+import type { LensVerifyJudge } from "../src/validator.ts";
+import { runLensVerify } from "../src/validator.ts";
 
 const v = (disposition: "accept" | "object", severity: "low" | "high", claim = "x"): LensVerdict => ({ lens: "regression", disposition, severity, claim });
 const verifyMake = (result: boolean | undefined): (() => LensVerifyJudge) => () => async () => result;

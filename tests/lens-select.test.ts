@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { changedFilesFromDiff, selectLenses } from "./lens-select.ts";
+import { changedFilesFromDiff, selectLenses } from "../src/lens-select.ts";
 
 /** Minimal unified-diff header block for a set of new-side paths. */
 function diffOf(...paths: string[]): string {

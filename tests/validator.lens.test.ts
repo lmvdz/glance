@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ompLensJudge, parseLensVerdict } from "./validator.ts";
+import { ompLensJudge, parseLensVerdict } from "../src/validator.ts";
 
 const parse = parseLensVerdict("regression");
 

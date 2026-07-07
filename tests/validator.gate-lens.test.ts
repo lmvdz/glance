@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { LensId } from "./lens-select.ts";
-import type { FeatureCriterion } from "./types.ts";
-import type { Judge, LensJudge } from "./validator.ts";
-import { runLensPanel, scoreAgainstCriteria, validatorGate } from "./validator.ts";
+import type { LensId } from "../src/lens-select.ts";
+import type { FeatureCriterion } from "../src/types.ts";
+import type { Judge, LensJudge } from "../src/validator.ts";
+import { runLensPanel, scoreAgainstCriteria, validatorGate } from "../src/validator.ts";
 
 /** A lens-judge factory, matching what runLensPanel / validatorGate consume. */
 type Make = (l: LensId) => LensJudge;

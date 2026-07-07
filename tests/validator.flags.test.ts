@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Judge, LensJudge, LensVerifyJudge } from "./validator.ts";
-import { lensConfig, validatorGate } from "./validator.ts";
+import type { Judge, LensJudge, LensVerifyJudge } from "../src/validator.ts";
+import { lensConfig, validatorGate } from "../src/validator.ts";
 
 const LENS_ENV = ["OMP_SQUAD_LENS_REVIEW", "OMP_SQUAD_LENS_MAX", "OMP_SQUAD_LENS_SET", "OMP_SQUAD_LENS_VERIFY", "OMP_SQUAD_LENS_TIMEOUT_MS"];
 afterEach(() => {

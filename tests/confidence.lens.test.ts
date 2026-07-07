@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
-import type { LensVerdict, ValidationRecord } from "./types.ts";
+import { lensAdvisoryBucket, scoreConfidence } from "../src/confidence.ts";
+import type { LensVerdict, ValidationRecord } from "../src/types.ts";
 
 // Base scenario chosen to sit mid-range (0.5) so lens deltas are visible, not clamped:
 // verificationState "stale" (+0), filesTouched 5 (0), no primary validator.

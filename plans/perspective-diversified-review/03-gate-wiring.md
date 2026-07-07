@@ -5,7 +5,7 @@ REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/validator.ts
 
-RE-LAND NOTE (2026-07-07): code cherry-picked back from orphaned worktree-research-recursive-orchestration (was merged in PR #96 as plan-only, code never reached main) — see reland/pr96-review-lens; STATUS held at in-review until that PR merges.
+RE-LAND NOTE (2026-07-07): code cherry-picked back from orphaned worktree-research-recursive-orchestration (was merged in PR #96 as plan-only, code never reached main) — see reland/pr96-review-lens; STATUS held at in-review until that PR merges. Also fixed: its `*.test.ts` files lived under `src/`, outside bunfig.toml's `[test] root = "tests"` scope — the "48 lens tests" never actually ran in the gating `bun test`; moved to `tests/` so they do.
 
 ## Goal
 
