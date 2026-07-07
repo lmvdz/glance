@@ -1157,9 +1157,12 @@ export type SquadEvent =
  *  default-off) rides the SAME reasoning read for a second, cheap drift classification, but reports
  *  on its OWN "sentinel" channel so its LLM spend/finds never inflate Scout's backlog numbers; Observer
  *  and Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
-// "scope" and "orphan-audit" are event-driven (fired once per occurrence — a scope-contract
-// finding, a post-merge orphan-commit finding), not periodic loops like the others.
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit";
+// "scope", "orphan-audit" and "land" are event-driven (fired once per occurrence — a scope-contract
+// finding, a post-merge orphan-commit finding, a retryable land refusal), not periodic loops like the
+// others. "land" (research-sirvir/01-recording-unlock, part 2): a retryable/environmental land refusal
+// (e.g. a dirty main checkout) fires a warn-level event so it surfaces loudly instead of accumulating
+// silently in land-failures.json — no cadence/flag of its own.
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit" | "land";
 
 /**
  * Structured reason an automation loop intentionally skipped a unit without doing work.
@@ -1174,7 +1177,8 @@ export type AutomationSkipReason =
 	| "already-handled" // all candidates already claimed / filed / deduped
 	| "human-review" //    work exists but is gated on human review / do-not-auto-land
 	| "blocked" //         work exists but is blocked by open dependency issues
-	| "already-done"; //   open issue's work is already recorded done in the repo (closed plan concern)
+	| "already-done" //    open issue's work is already recorded done in the repo (closed plan concern)
+	| "dirty-main"; //     land loop only: main checkout has uncommitted tracked changes — land refused
 
 /**
  * One unit of background-loop work, the observability record the audit log never carried (it logs only

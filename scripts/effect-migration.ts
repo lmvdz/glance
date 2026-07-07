@@ -70,7 +70,11 @@ export const PATTERNS: Pattern[] = [
 		regex: /instanceof Error \? /,
 		allowlist: [],
 		// 88→91: reland stale-baseline correction (no tagged-error hierarchy exists yet to migrate TO).
-		baseline: 91,
+		// 91→92: research-sirvir/01-recording-unlock part 2 — one new catch (recordModelOutcomeBlocked,
+		// squad-manager.ts) mirrors its two sibling catches (recordModelOutcome/recordConfidenceOutcome)
+		// immediately above it in the same land() block; matching the existing idiom there beats inventing
+		// a one-off alternative ahead of the tagged-error hierarchy this pattern is tracked against.
+		baseline: 92,
 	},
 ];
 

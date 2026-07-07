@@ -19,6 +19,19 @@ export type ComplexityTier = "light" | "mid" | "heavy";
 export interface ModelOutcomeCounts {
 	landed: number;
 	rejected: number;
+	/**
+	 * Attempted but never reached a landed/rejected verdict — a retryable/environmental refusal (a
+	 * dirty main checkout, a PR-merge API hiccup) blocked the land before the model's work could be
+	 * judged (research-sirvir/01-recording-unlock, part 2). Recorded so a fleet that rarely reaches a
+	 * clean land still produces SOME learning signal instead of total silence, but kept in its OWN
+	 * bucket, never folded into `landed`/`rejected`: a dirty main is not the model's fault, and every
+	 * existing reader of those two fields (smart-spawn's outcome-driven default, attribution-scoreboard,
+	 * cost-gate) must see land-rate exactly as before. Optional and back-compat: absent on any ledger
+	 * entry written before this field existed, and absent on any entry that has only ever
+	 * landed/rejected — so exact-shape equality (`toEqual({landed, rejected})`) on existing call sites
+	 * is unaffected.
+	 */
+	blocked?: number;
 }
 
 /** `${model}::${tier}` → counts. */
@@ -84,6 +97,23 @@ export function recordModelOutcome(stateDir: string, model: string | undefined, 
 	const entry = ledger[key] ?? { landed: 0, rejected: 0 };
 	if (landed) entry.landed++;
 	else entry.rejected++;
+	ledger[key] = entry;
+	writeLedger(stateDir, ledger);
+	return entry;
+}
+
+/**
+ * Record one BLOCKED land attempt for `(model, tier)` — the retryable/environmental-refusal case
+ * (squad-manager's `result.retryable`, e.g. a dirty main checkout) that never reached a landed/rejected
+ * verdict. Bumps ONLY `.blocked`; `.landed`/`.rejected` on the entry are left exactly as they were, so
+ * this is purely additive from every existing reader's point of view — a separate counter, not a third
+ * value of the landed/rejected statistic. Same read-modify-write discipline as `recordModelOutcome`.
+ */
+export function recordModelOutcomeBlocked(stateDir: string, model: string | undefined, tier: ComplexityTier, _now = Date.now()): ModelOutcomeCounts {
+	const key = ledgerKey(modelKey(model), tier);
+	const ledger = readLedger(stateDir);
+	const entry = ledger[key] ?? { landed: 0, rejected: 0 };
+	entry.blocked = (entry.blocked ?? 0) + 1;
 	ledger[key] = entry;
 	writeLedger(stateDir, ledger);
 	return entry;

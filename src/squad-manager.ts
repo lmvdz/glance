@@ -139,7 +139,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
-import { recordModelOutcome, tierOf } from "./model-outcomes.ts";
+import { recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { shadowCostCheck } from "./cost-gate.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
@@ -2594,6 +2594,31 @@ export class SquadManager extends EventEmitter {
 			} catch (err) {
 				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
+		} else if (result.retryable) {
+			// research-sirvir/01-recording-unlock (part 2, durable fix): a retryable/environmental refusal
+			// (dominantly a dirty main checkout — a human-editing-the-shared-checkout precondition, not a
+			// branch defect) previously skipped this WHOLE block, including the "cheap, always-on"
+			// model-outcome statistic above — so a fleet that rarely reaches a clean land recorded NOTHING,
+			// not even a failure, and every learning ledger looked empty rather than "blocked". Decoupled:
+			// record the attempt in its own `blocked` bucket (model-outcomes.ts), distinct from
+			// landed/rejected, so the ledger reflects "attempted, couldn't land cleanly" WITHOUT polluting
+			// land-rate — a dirty main isn't the model's fault, and landed/rejected readers (smart-spawn's
+			// outcome-driven default, attribution-scoreboard, cost-gate) must see the SAME numbers as
+			// before this fix. `dto.model` (not `effectiveModel`) here — the receipts read above is
+			// skipped on a retryable result on purpose (comment above), and this statistic doesn't need
+			// the precision fix-up that keying the router's routing-quality read does.
+			try {
+				recordModelOutcomeBlocked(this.stateDir, dto.model, tierOf(rec.options.thinking));
+				this.learningMetrics.record("model-outcome-blocked", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
+			} catch (err) {
+				this.log("warn", `model-outcomes blocked-record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+			// Loud surfaced state (part 2 continued): a retryable refusal must not ONLY accumulate in
+			// land-failures.json (a file nobody looks at until they go forensic) — route it through the
+			// automation observability channel too, the same way `fileScopeFinding` routes a scope-contract
+			// finding, so /api/automation + the automation panel + factory status all see "fleet cannot
+			// land" without a live daemon restart or a manual grep.
+			this.fileLandBlockedFinding(dto.repo, dto.branch, result.detail ?? result.message);
 		}
 		// Joined task-outcome row (Epic 6 concern 03): idempotent, agentId-keyed row joining the routing
 		// decision (`rec.options.routing`) with the terminal land outcome. Deliberately a WIDER gate than
@@ -3079,6 +3104,30 @@ export class SquadManager extends EventEmitter {
 			this.automation.for("scope", repo)({ durationMs: 0, level: "warn", detail: message });
 		} catch {
 			/* observability must never break the spawn/finalize path */
+		}
+	}
+
+	/**
+	 * Route a retryable/environmental land refusal through the automation observability channel (the
+	 * "land" loop, event-driven like "scope" above — no cadence/flag of its own): a warn-level event
+	 * that persists, surfaces in /api/automation + the automation panel + factory status's landBlocked
+	 * banner (research-sirvir/01-recording-unlock, part 2). The dominant cause is a dirty main checkout
+	 * (land.ts's "uncommitted tracked changes" refusal) — tagged with the `dirty-main` skipReason so
+	 * factory-status can surface it by name; any OTHER retryable cause (e.g. a PR-mode `gh pr merge`
+	 * hiccup) still fires the event, just without that specific tag. Never blocks a land; best-effort,
+	 * never throws.
+	 */
+	private fileLandBlockedFinding(repo: string, branch: string | undefined, detail: string): void {
+		try {
+			this.log("warn", `land blocked${branch ? ` (${branch})` : ""}: ${detail}`);
+			this.automation.for("land", repo)({
+				durationMs: 0,
+				level: "warn",
+				skipReason: detail.includes("uncommitted tracked changes") ? "dirty-main" : undefined,
+				detail: branch ? `${branch}: ${detail}` : detail,
+			});
+		} catch {
+			/* observability must never break the land path */
 		}
 	}
 	async verifyAgentWork(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
