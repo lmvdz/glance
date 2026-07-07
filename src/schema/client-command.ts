@@ -13,10 +13,11 @@
  * extra keys) is rejected — v4 `Schema.Struct` also strips excess keys, which
  * neutralizes field-injection. The two heavy variants, `create`
  * (`CreateAgentOptions`, ~40 nested fields) and `commission` (`CommissionSpec`),
- * validate the envelope and that the payload object is present, then pass the
- * payload through untouched via `Schema.Unknown`. Deep-modeling those payloads is
- * the Phase-2 follow-up; today they are consumed by `manager.create()` /
- * `manager.commission()`, which own their own handling.
+ * are now deep-modeled in `./create-agent-options.ts` (Phase-2): their
+ * user/wire-facing fields are validated, while the handful of fields set only by
+ * internal restore/fan-out paths stay opaque passthrough. A malformed payload
+ * (missing `repo`, `repo: 42`, a bad `approvalMode`) is rejected before it
+ * reaches `manager.create()` / `manager.commission()`.
  *
  * `types.ts#ClientCommand` stays the source of truth. The compile-time drift
  * guard below fails the build if a variant is added there without being mirrored
@@ -25,6 +26,7 @@
 import { Result, Schema } from "effect";
 import type { AutonomyMode } from "../autonomy.ts";
 import type { ClientCommand } from "../types.ts";
+import { CommissionSpecSchema, CreateAgentOptionsSchema } from "./create-agent-options.ts";
 
 /** Autonomy tiers, mirrored from `autonomy.ts#AutonomyMode`. */
 const AutonomyModeSchema = Schema.Literals(["observe", "assist", "autodrive"]);
@@ -49,13 +51,13 @@ export const ClientCommandSchema = Schema.Union([
 	Schema.Struct({ type: Schema.Literal("restart"), id: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("fork"), id: Schema.String, seq: Schema.optional(Schema.Number) }),
 	Schema.Struct({ type: Schema.Literal("remove"), id: Schema.String, deleteWorktree: Schema.optional(Schema.Boolean) }),
-	// Envelope-only: `options` (CreateAgentOptions) is preserved untouched — Phase-2 deep-models it.
-	Schema.Struct({ type: Schema.Literal("create"), options: Schema.Unknown }),
+	// Phase-2: `options` (CreateAgentOptions) is deep-modeled in ./create-agent-options.ts.
+	Schema.Struct({ type: Schema.Literal("create"), options: CreateAgentOptionsSchema }),
 	Schema.Struct({ type: Schema.Literal("message"), to: Schema.String, text: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("snapshot") }),
 	Schema.Struct({ type: Schema.Literal("subscribe"), id: Schema.String }),
-	// Envelope-only: `spec` (CommissionSpec) is preserved untouched — Phase-2 deep-models it.
-	Schema.Struct({ type: Schema.Literal("commission"), spec: Schema.Unknown }),
+	// Phase-2: `spec` (CommissionSpec) is deep-modeled in ./create-agent-options.ts.
+	Schema.Struct({ type: Schema.Literal("commission"), spec: CommissionSpecSchema }),
 	Schema.Struct({ type: Schema.Literal("set-mode"), id: Schema.String, mode: AutonomyModeSchema, reason: Schema.optional(Schema.String) }),
 ]);
 
