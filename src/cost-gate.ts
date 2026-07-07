@@ -13,7 +13,7 @@
 
 import { buildScoreboard } from "./attribution-scoreboard.ts";
 import { envInt, envNumber } from "./config.ts";
-import { type ComplexityTier, modelKey, modelOutcomes, readModelOutcomes } from "./model-outcomes.ts";
+import { type ComplexityTier, modelFamily, modelOutcomes, readModelOutcomes } from "./model-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
 
 export type CostGateMode = "off" | "shadow" | "enforce";
@@ -43,8 +43,8 @@ export async function projectCost(stateDir: string, model: string | undefined, t
 	let costPerLandedChange: number | null = null;
 	try {
 		const board = buildScoreboard(await readAllReceipts(stateDir), readModelOutcomes(stateDir));
-		const key = modelKey(model);
-		const score = board.models.find((m) => modelKey(m.model) === key);
+		const key = modelFamily(model);
+		const score = board.models.find((m) => modelFamily(m.model) === key);
 		if (score) {
 			costPerLandedChange = score.costPerLandedChange;
 			landRate = score.byTier.find((t) => t.tier === tier)?.landRate ?? landRate ?? score.landRate;
