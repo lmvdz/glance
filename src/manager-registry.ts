@@ -18,6 +18,7 @@
  */
 
 import * as path from "node:path";
+import { envInt } from "./config.ts";
 import { pruneStaleSockets, reapOrphanHosts } from "./agent-host.ts";
 import type { Store } from "./dal/store.ts";
 import { NullFederationBus } from "./federation.ts";
@@ -63,7 +64,7 @@ export class ManagerRegistry {
 	onEvent: (orgId: string, e: SquadEvent) => void = () => {};
 
 	constructor(private readonly deps: RegistryDeps) {
-		this.idleMs = deps.idleMs ?? (Number(process.env.OMP_SQUAD_ORG_IDLE_MS) || 600_000);
+		this.idleMs = deps.idleMs ?? envInt("OMP_SQUAD_ORG_IDLE_MS", 600_000);
 	}
 
 	/** Start the maintenance loop (evict idle + machine-global janitors). */
