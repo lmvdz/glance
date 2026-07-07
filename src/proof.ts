@@ -15,6 +15,7 @@ import * as fsp from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { resolveStateDir } from "./state-dir.ts";
+import { getStorageBackend } from "./dal/storage.ts";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
 import { gateExec } from "./gate-runner.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
@@ -100,7 +101,9 @@ export interface ProofFingerprint {
 /** The recorded proof for a worktree, or undefined. */
 export async function proofFor(repo: string, worktree: string): Promise<Proof | undefined> {
 	try {
-		const p: unknown = JSON.parse(await fsp.readFile(fileFor(repo, worktree).file, "utf8"));
+		const raw = await getStorageBackend().readText(fileFor(repo, worktree).file);
+		if (raw === undefined) return undefined;
+		const p: unknown = JSON.parse(raw);
 		return isProof(p) ? p : undefined;
 	} catch {
 		return undefined;
@@ -130,36 +133,28 @@ const PROOF_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Remove proof records older than `maxAgeMs` and any now-empty repo dirs. Returns records removed. */
 export async function sweepProofs(maxAgeMs = PROOF_TTL_MS): Promise<number> {
-	let repoDirs: string[];
-	try {
-		repoDirs = await fsp.readdir(proofRoot);
-	} catch {
-		return 0;
-	}
+	const storage = getStorageBackend();
+	const repoDirs = await storage.readdir(proofRoot); // [] when the proof root doesn't exist
 	const cutoff = Date.now() - maxAgeMs;
 	let removed = 0;
 	for (const rd of repoDirs) {
 		const dir = path.join(proofRoot, rd);
-		let files: string[];
-		try {
-			files = await fsp.readdir(dir);
-		} catch {
-			continue;
-		}
+		const files = await storage.readdir(dir); // [] when missing → nothing to sweep
 		let live = 0;
 		for (const f of files) {
 			if (!f.endsWith(".json")) continue;
 			const file = path.join(dir, f);
 			try {
-				const p: unknown = JSON.parse(await fsp.readFile(file, "utf8"));
+				const raw = await storage.readText(file);
+				const p: unknown = raw === undefined ? undefined : JSON.parse(raw);
 				if (isProof(p) && p.ranAt >= cutoff) { live++; continue; }
-				await fsp.rm(file, { force: true });
+				await storage.remove(file);
 				removed++;
 			} catch {
 				/* skip unreadable */
 			}
 		}
-		if (live === 0) await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+		if (live === 0) await storage.remove(dir).catch(() => {});
 	}
 	return removed;
 }
@@ -280,9 +275,7 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 		const shots = await runVisionPass({ worktree: opts.worktree, url, producer: opts.producer });
 		proof.artifacts = [...new Set([...proof.artifacts, ...shots])].sort();
 	}
-	const { dir, file } = fileFor(opts.repo, opts.worktree);
-	await fsp.mkdir(dir, { recursive: true });
-	await fsp.writeFile(file, JSON.stringify(proof));
+	await getStorageBackend().writeDurable(fileFor(opts.repo, opts.worktree).file, JSON.stringify(proof));
 	return proof;
 }
 
@@ -313,9 +306,7 @@ export async function recordProof(input: { repo: string; worktree: string; comma
 		artifacts: [],
 		sandboxed: input.sandboxed ?? false,
 	};
-	const { dir, file } = fileFor(input.repo, input.worktree);
-	await fsp.mkdir(dir, { recursive: true });
-	await fsp.writeFile(file, JSON.stringify(proof));
+	await getStorageBackend().writeDurable(fileFor(input.repo, input.worktree).file, JSON.stringify(proof));
 	return proof;
 }
 
