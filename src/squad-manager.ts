@@ -154,6 +154,7 @@ import { DAY_MS } from "./omp-graph/schema.ts";
 import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
@@ -1162,8 +1163,10 @@ export class SquadManager extends EventEmitter {
 		return unitProviderKey({ kind: "omp-operator" });
 	}
 
-	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
-	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
+	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). Returns
+	 *  the created DTO (concern 03: `Dispatcher.tick()` reads its `harnessScorecard` off this return value
+	 *  to log a red-flag line at the moment of admission — never gates on it). */
+	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<AgentDTO> {
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
 		// Materialize the AUTHORED SPEC (learn-harness-engineering "repo IS the spec"): the dispatcher
 		// works off the lightweight list IssueRef, which carries only the title — the Tier-2 / plan-concern
@@ -1171,7 +1174,7 @@ export class SquadManager extends EventEmitter {
 		// best-effort, null on any failure so dispatch never blocks on Plane) and carry it on the issue;
 		// createWithId fences + injects it. UNTRUSTED — see the injection site.
 		const enriched = await this.dispatchSpec(repo, issue);
-		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue: enriched, autoRoute: true, approvalMode: "yolo", requires: issue.requires, owns: issue.owns, produces: issue.produces, scopeSource: issue.scopeSource });
+		return this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue: enriched, autoRoute: true, approvalMode: "yolo", requires: issue.requires, owns: issue.owns, produces: issue.produces, scopeSource: issue.scopeSource });
 	}
 
 	/** Best-effort enrich an issue with its authored spec body for context injection. Never throws;
@@ -3438,12 +3441,17 @@ export class SquadManager extends EventEmitter {
 		// decisions / hot files / peer context with ZERO turn cost, drawn from the context fabric.
 		// buildContextPrimer fences its own output as untrusted (concern 02) — do NOT re-fence here.
 		// Best-effort — never blocks a spawn.
+		// hasPrimer is hoisted (not re-derived from opts.appendSystemPrompt later) so the harness
+		// scorecard's "instructions" dimension (below, concern 03) can tell "a context primer landed"
+		// apart from "the profile injected unrelated persona text" without re-parsing the joined string.
+		let hasPrimer = false;
 		if (opts.featureId && (opts.task || opts.name)) {
 			try {
 				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
 				const primer = buildContextPrimer(snapshot, [opts.task, opts.name].filter(Boolean).join(" "));
 				this.learningMetrics.record("primer-empty", primer ? 0 : 1);
 				if (primer) {
+					hasPrimer = true;
 					opts = {
 						...opts,
 						appendSystemPrompt: [opts.appendSystemPrompt, primer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
@@ -3724,6 +3732,33 @@ export class SquadManager extends EventEmitter {
 			forkAvailable: this.deriveForkAvailable(persisted.workflowState),
 			adopted: opts.adopted,
 		};
+		// Pre-dispatch harness scorecard (concern 03, advisory shadow — plans/research-learn-harness-
+		// engineering/03-harness-scorecard-shadow.md): a single post-worktree-cut score across the five
+		// subsystems, so a context-poor unit is visible in the DTO from its very first emit instead of
+		// after a wasted run. ADVISORY ONLY: computed and stamped here, never fed back into any decision
+		// above (the throws/conflicts/WIP-cap checks all already ran) — this can only describe a spawn
+		// that is already happening, never gate one.
+		//
+		// "instructions": for an issue-dispatched unit, a bare auto-generated "IDENTIFIER: name" title is
+		// NOT real instructions — only the authored spec body (concern 01's specBlock) or a cold-start
+		// primer counts. For an ad-hoc (non-issue) dispatch, the whole task string IS the instructions
+		// (there's no separate title/body split), so a non-empty task suffices.
+		// "tools": a profile capability grant OR an explicit requires/produces scope contract; neither ⇒
+		// full unscoped access.
+		// "environment": a resolved branch means a real, isolated worktree was cut (wt.inPlace and a
+		// non-git existingPath both leave `resolvedBranch` undefined).
+		// "state": a continuity anchor a restart/crash can reattach to — feature membership, a tracked
+		// work item, or a resumable workflow checkpoint.
+		// "feedback": a real completion loop (verify command or workflow graph), not a bare prompt.
+		if (harnessScorecardEnabled()) {
+			dto.harnessScorecard = scoreHarness({
+				hasInstructions: opts.issue ? Boolean(specBlock) || hasPrimer : Boolean(opts.task?.trim()),
+				toolsScoped: Boolean(toolGrants?.length || opts.requires?.length || produces?.length),
+				isolatedEnvironment: Boolean(resolvedBranch),
+				continuityAnchor: Boolean(opts.featureId || opts.issue || opts.workflowState),
+				hasFeedbackGate: Boolean(opts.verify || opts.workflow),
+			});
+		}
 		this.seedAuthority(dto, requestedMode);
 
 		const agent = this.makeDriver(persisted, opts.cold);
