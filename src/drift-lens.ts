@@ -14,6 +14,7 @@
  * verdict once an independent judge confirms it (src/drift-audit.ts's confirmDrift).
  */
 
+import { envBool } from "./config.ts";
 import { extractJsonObject } from "./omp-call.ts";
 import { ScoutCallBudget } from "./scout.ts";
 import type { FeatureCriterion } from "./types.ts";
@@ -92,9 +93,9 @@ export function parseDriftHypothesis(raw: string, ctx: HypothesisContext): Hypot
 	return { kind: "wrong-direction", severity, agent: ctx.agent, runId: ctx.runId, evidence, rationale, at: now() };
 }
 
-/** Default OFF — v0 is opt-in (inverse of Scout's default-on `OMP_SQUAD_SCOUT !== "0"`). */
+/** Default OFF — v0 is opt-in (inverse of Scout's default-on `envBool("OMP_SQUAD_SCOUT", true)`). */
 export function sentinelEnabled(): boolean {
-	return process.env.OMP_SQUAD_SENTINEL === "1";
+	return envBool("OMP_SQUAD_SENTINEL", false);
 }
 
 /** Default per-hour LLM-call budget for the drift lens, mirroring scout.ts's DEFAULT_SCOUT_MAX_CALLS_PER_HOUR. */

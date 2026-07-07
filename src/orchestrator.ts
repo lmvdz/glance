@@ -18,6 +18,7 @@
  */
 
 import type { OrchestratorPersistence } from "./orchestrator-state.ts";
+import { envBool } from "./config.ts";
 import { headCommit } from "./proof.ts";
 import { routeFailure, type FailureContext, type FailureKind, type FailureRoute } from "./resolver.ts";
 import { liveAgents, Scheduler } from "./scheduler.ts";
@@ -101,7 +102,7 @@ export interface OrchestratorDeps {
 
 /** On by default; set OMP_SQUAD_AUTODRIVE=0 to disable the self-driving control loop. */
 function autodrive(): boolean {
-	return process.env.OMP_SQUAD_AUTODRIVE !== "0";
+	return envBool("OMP_SQUAD_AUTODRIVE", true);
 }
 
 /** Cap identical blocked-land retries before parking — a blocked land won't unblock by re-merging the same refs. */
@@ -337,7 +338,7 @@ export class Orchestrator {
 		// in the tick (a full agent turn here would stall verify/land for every other agent behind it); the
 		// manager's closure owns the .catch, the armed-convergence double-inject guard, and the recovery
 		// metric. The LAND_RETRY_CAP park ceiling below is unchanged — this adds one real chance to react.
-		if (blocks === 1 && process.env.OMP_SQUAD_VETO_REPROMPT === "1" && a.validation?.verdict === "veto" && this.deps.continueAgent) {
+		if (blocks === 1 && envBool("OMP_SQUAD_VETO_REPROMPT", false) && a.validation?.verdict === "veto" && this.deps.continueAgent) {
 			const unmet = (a.validation.perCriterion ?? []).filter((c) => !c.satisfied).map((c) => c.id).join(", ");
 			const note = `Independent validator vetoed this land: ${a.validation.rationale || "(no rationale given)"}. Unmet criteria: ${unmet || "(unspecified)"}. Address these, then the next verify/land will re-check.`;
 			void this.deps.continueAgent(a.id, note);

@@ -4,7 +4,7 @@
  * model output, mirroring how tests/scout.test.ts drives `parseTickets`.
  */
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
 	buildDriftPrompt,
 	DEFAULT_SENTINEL_MAX_CALLS_PER_HOUR,
@@ -13,6 +13,7 @@ import {
 	sentinelEnabled,
 	sentinelMaxCallsPerHour,
 } from "../src/drift-lens.ts";
+import { __resetConfigWarnings } from "../src/config.ts";
 import { ScoutCallBudget, scoutMaxCallsPerHour } from "../src/scout.ts";
 import type { FeatureCriterion } from "../src/types.ts";
 
@@ -105,8 +106,17 @@ test('sentinelEnabled() is false unless OMP_SQUAD_SENTINEL="1" (default OFF — 
 	expect(sentinelEnabled()).toBe(false);
 	process.env.OMP_SQUAD_SENTINEL = "0";
 	expect(sentinelEnabled()).toBe(false);
-	process.env.OMP_SQUAD_SENTINEL = "yes";
-	expect(sentinelEnabled()).toBe(false);
+	// "yes" is not a valid 0/1 flag: still false (same as the old raw `=== "1"`),
+	// but envBool now surfaces the misconfiguration — assert the warn, keep the suite quiet.
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		process.env.OMP_SQUAD_SENTINEL = "yes";
+		expect(sentinelEnabled()).toBe(false);
+		expect(warn).toHaveBeenCalledTimes(1);
+	} finally {
+		warn.mockRestore();
+		__resetConfigWarnings();
+	}
 	process.env.OMP_SQUAD_SENTINEL = "1";
 	expect(sentinelEnabled()).toBe(true);
 });

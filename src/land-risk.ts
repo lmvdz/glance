@@ -9,12 +9,12 @@
  * path via `LandOpts.riskOverride`, so the button always works (the "ASK" = a human resolves).
  */
 
-import { envInt } from "./config.ts";
+import { envBool, envInt } from "./config.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 /** OFF by default — an operator opts in during rollout, like OMP_SQUAD_REGRESSION_GATE. */
 export function landRiskGateEnabled(): boolean {
-	return process.env.OMP_SQUAD_LAND_RISK_GATE === "1";
+	return envBool("OMP_SQUAD_LAND_RISK_GATE", false);
 }
 
 /** Auto-land is blocked once the branch changes at least this many files (env-tunable). */

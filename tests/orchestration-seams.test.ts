@@ -5,9 +5,10 @@
  * routeFailure policy is the bounded retry/escalate tiering of #11.
  */
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { routeFailure } from "../src/resolver.ts";
 import { Orchestrator, type OrchestratorDeps } from "../src/orchestrator.ts";
+import { __resetConfigWarnings } from "../src/config.ts";
 
 const savedDrive = process.env.OMP_SQUAD_AUTODRIVE;
 const savedBudget = process.env.OMP_SQUAD_REPAIR_BUDGET;
@@ -35,9 +36,18 @@ test("routeFailure: repair budget is env-tunable per call (#11)", () => {
 	process.env.OMP_SQUAD_REPAIR_BUDGET = "0";
 	expect(routeFailure("red")).toBe("escalate"); // attempts 0, already at budget 0
 	expect(routeFailure("red", { attempts: 2 })).toBe("escalate");
-	// Garbage (non-numeric) still falls back to the default 3 (and warns once).
-	process.env.OMP_SQUAD_REPAIR_BUDGET = "abc";
-	expect(routeFailure("red", { attempts: 2 })).toBe("retry"); // 2 < 3
+	// Garbage (non-numeric) still falls back to the default 3 (and warns once). Spy on
+	// console.warn (mirrors tests/config.test.ts) so this expected warning doesn't print
+	// during a full suite run — only its occurrence is asserted, not its noise.
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		process.env.OMP_SQUAD_REPAIR_BUDGET = "abc";
+		expect(routeFailure("red", { attempts: 2 })).toBe("retry"); // 2 < 3
+		expect(warn).toHaveBeenCalledTimes(1);
+	} finally {
+		warn.mockRestore();
+		__resetConfigWarnings();
+	}
 });
 
 test("routeFailure: conflict retries exactly once, then escalates (#11)", () => {

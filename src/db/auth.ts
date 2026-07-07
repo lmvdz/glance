@@ -18,6 +18,7 @@ import { organization } from "better-auth/plugins/organization";
 import { genericOAuth } from "better-auth/plugins/generic-oauth";
 import type { Dialect } from "kysely";
 import type { DbKind } from "./index.ts";
+import { envBool } from "../config.ts";
 import { workosConfig, workosDiscoveryUrl, workosUserInfo } from "../workos.ts";
 
 export interface AuthConfig {
@@ -50,7 +51,7 @@ export function configuredSocialProviders(): string[] {
 /** Whether self-service email sign-up is open. Mirrors the disableSignUp gate below so the UI can hide
  *  the "Sign up" affordance on a closed (invite/bootstrap-only) fleet. */
 export function signupOpen(): boolean {
-	return process.env.OMP_SQUAD_ALLOW_SIGNUP === "1";
+	return envBool("OMP_SQUAD_ALLOW_SIGNUP", false);
 }
 
 /** BetterAuth options over the shared dialect. Used both to migrate now and to instantiate auth in P1. */
@@ -88,7 +89,7 @@ export function authOptions({ dialect, type, trustedOrigins, baseURL }: AuthConf
 		baseURL: resolvedBase,
 		// Sign-up is CLOSED by default (no open registration on a shared fleet); set OMP_SQUAD_ALLOW_SIGNUP=1
 		// to open it. New/no-org users bridge to `viewer` (read-only) until an admin adds them to an org.
-		emailAndPassword: { enabled: true, disableSignUp: process.env.OMP_SQUAD_ALLOW_SIGNUP !== "1" },
+		emailAndPassword: { enabled: true, disableSignUp: !envBool("OMP_SQUAD_ALLOW_SIGNUP", false) },
 		// allowUserToCreateOrganization:false ⇒ org ownership (→ admin tier) can't be self-minted;
 		// the loopback bootstrap admin provisions the first org/members out-of-band.
 		plugins: [organization({ allowUserToCreateOrganization: false }), ...ssoPlugins],

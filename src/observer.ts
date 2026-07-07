@@ -28,7 +28,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { envInt } from "./config.ts";
+import { envBool, envInt } from "./config.ts";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { ComplianceFinding } from "./compliance.ts";
@@ -117,7 +117,7 @@ const TRIAGE_MARKER = "do-not-auto-land";
 
 /** On by default; set OMP_SQUAD_OBSERVE=0 to disable the self-audit loop. */
 function observeEnabled(): boolean {
-	return process.env.OMP_SQUAD_OBSERVE !== "0";
+	return envBool("OMP_SQUAD_OBSERVE", true);
 }
 /** Hard cap on observer-filed OPEN issues (default 10). */
 function observeMax(): number {
@@ -125,15 +125,15 @@ function observeMax(): number {
 }
 /** Opt-in: file plain findings without the triage marker so the dispatcher auto-dispatches them. */
 function autoDispatch(): boolean {
-	return process.env.OMP_SQUAD_OBSERVE_AUTODISPATCH === "1";
+	return envBool("OMP_SQUAD_OBSERVE_AUTODISPATCH", false);
 }
 /** Opt-in: action autoFixable findings directly (reap-survivor) instead of filing. */
 function autoFix(): boolean {
-	return process.env.OMP_SQUAD_OBSERVE_AUTOFIX === "1";
+	return envBool("OMP_SQUAD_OBSERVE_AUTOFIX", false);
 }
 /** Opt-in: dispatch an observing agent to reproduce a confirmed regression instead of only filing it. */
 function observeReproduce(): boolean {
-	return process.env.OMP_SQUAD_OBSERVE_REPRODUCE === "1";
+	return envBool("OMP_SQUAD_OBSERVE_REPRODUCE", false);
 }
 /** Consecutive failed auto-lands before the observer files a bug for a branch (mirrors the manager's
  *  AUTO_LAND_FAIL_CAP so a parked branch is exactly the one that gets a bug filed). */

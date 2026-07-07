@@ -11,6 +11,7 @@
  */
 
 import { detectVerify } from "./intake.ts";
+import { envBool } from "./config.ts";
 import { gateExec } from "./gate-runner.ts";
 import { proofGate, recordProof } from "./proof.ts";
 import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
@@ -239,7 +240,7 @@ export function decideRegressionGate(baseFailures: Iterable<string>, mergedFailu
 
 /** On by default; set OMP_SQUAD_REGRESSION_GATE=0 to disable the post-merge full-suite regression check. */
 function regressionGateEnabled(): boolean {
-	return process.env.OMP_SQUAD_REGRESSION_GATE !== "0";
+	return envBool("OMP_SQUAD_REGRESSION_GATE", true);
 }
 
 /**
@@ -493,12 +494,12 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 
 /** On by default; set OMP_SQUAD_AUTORESOLVE=0 to disable automated conflict resolution during a land. */
 function autoresolve(): boolean {
-	return process.env.OMP_SQUAD_AUTORESOLVE !== "0";
+	return envBool("OMP_SQUAD_AUTORESOLVE", true);
 }
 
 /** On by default; set OMP_SQUAD_STALE_GATE=0 to allow stale branches to merge unchecked (old behavior). */
 function staleGateEnabled(): boolean {
-	return process.env.OMP_SQUAD_STALE_GATE !== "0";
+	return envBool("OMP_SQUAD_STALE_GATE", true);
 }
 
 /** Cap the file list in a stale-gate refusal so the land detail stays readable. */

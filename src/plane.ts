@@ -20,6 +20,7 @@ import * as path from "node:path";
 import { envInt } from "./config.ts";
 import type { IssueRef, PlaneTicket, TaskDetail } from "./types.ts";
 import { makeCache, throttledFetch } from "./plane-throttle.ts";
+import { decodeJsonWith, PlaneProjectMapSchema } from "./schema/external-json.ts";
 import { parseTier2 } from "./tier2.ts";
 
 interface PlaneConfig {
@@ -37,11 +38,10 @@ function readConfig(): PlaneConfig | null {
 	if (!apiKey || !workspace) return null;
 	let projectMap: Record<string, string> = {};
 	if (process.env.PLANE_PROJECT_MAP) {
-		try {
-			projectMap = JSON.parse(process.env.PLANE_PROJECT_MAP) as Record<string, string>;
-		} catch {
-			projectMap = {};
-		}
+		// Operator-provided JSON is a config boundary: decode-or-{} (the old cast let
+		// non-string values flow into project-id URL segments; a wrong-shaped map now
+		// falls back to {} exactly like malformed JSON always did).
+		projectMap = decodeJsonWith(PlaneProjectMapSchema, process.env.PLANE_PROJECT_MAP) ?? {};
 	}
 	return {
 		apiKey,

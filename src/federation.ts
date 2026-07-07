@@ -18,6 +18,7 @@ import { Result } from "effect";
 import type { Actor, AgentDTO, ClientCommand, OperatorPresence } from "./types.ts";
 import type { LeaseEntry } from "./leases.ts";
 import { repoIdentity } from "./repo-identity.ts";
+import { decodeJsonWith, TailscaleWhoisSchema } from "./schema/external-json.ts";
 import { decodeFederationFrame } from "./schema/federation-frame.ts";
 
 export const LOCAL_ACTOR: Actor = { id: "local", origin: "local" };
@@ -299,15 +300,13 @@ function mintCmdId(): string {
 	return `cmd-${crypto.randomUUID()}`;
 }
 
-/** Shape of `tailscale whois --json <ip>` output we care about. */
-interface TailscaleWhoisResult {
-	UserProfile?: { LoginName?: string; DisplayName?: string };
-}
-
 /**
  * Default `whois`: resolve a tailnet peer IP to its SSO-backed `Actor` via the
  * local `tailscale whois --json <ip>` LocalAPI. Best-effort — returns undefined
- * if the tailscale binary is absent or the IP is not a known tailnet peer.
+ * if the tailscale binary is absent, the IP is not a known tailnet peer, or the
+ * output isn't whois-shaped (another binary's stdout is a trust boundary: the
+ * old blind cast let a non-string LoginName flow into `Actor.id`; the
+ * TailscaleWhoisSchema decode rejects it).
  */
 async function tailscaleWhois(ip: string): Promise<Actor | undefined> {
 	try {
@@ -317,10 +316,10 @@ async function tailscaleWhois(ip: string): Promise<Actor | undefined> {
 		const timer = setTimeout(() => proc.kill(), 3000);
 		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]).finally(() => clearTimeout(timer));
 		if (code !== 0) return undefined;
-		const parsed = JSON.parse(out) as TailscaleWhoisResult;
-		const id = parsed.UserProfile?.LoginName;
+		const parsed = decodeJsonWith(TailscaleWhoisSchema, out);
+		const id = parsed?.UserProfile?.LoginName;
 		if (id === undefined || id === "") return undefined;
-		return { id, displayName: parsed.UserProfile?.DisplayName, origin: "remote" };
+		return { id, displayName: parsed?.UserProfile?.DisplayName, origin: "remote" };
 	} catch {
 		return undefined;
 	}

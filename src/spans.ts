@@ -7,6 +7,7 @@
  */
 
 import { redact } from "./redact.ts";
+import { envBool } from "./config.ts";
 import type { AgentStatus, AuditEntry, RunReceipt } from "./types.ts";
 
 // "spawn" covers audit create/commission/fork actions (D2 — "why spawned"); "validate" is a
@@ -76,7 +77,7 @@ export function traceIdFor(seed: { agentId: string; runId: string; featureId?: s
 }
 
 export function traceSpansEnabled(): boolean {
-	return process.env.OMP_SQUAD_TRACE !== "0";
+	return envBool("OMP_SQUAD_TRACE", true);
 }
 
 export function traceSampleRatio(): number {
