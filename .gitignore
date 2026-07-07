@@ -10,3 +10,4 @@ node_modules
 access-token
 vapid.json
 push-subs.json
+dist
