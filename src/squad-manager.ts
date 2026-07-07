@@ -140,8 +140,9 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
-import { recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
+import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { shadowCostCheck } from "./cost-gate.ts";
+import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
@@ -5647,6 +5648,22 @@ export class SquadManager extends EventEmitter {
 	 *  reaped agents and post-restart history stay visible — a per-live-agent read hides all of it. */
 	async allReceipts(): Promise<RunReceipt[]> {
 		return readAllReceipts(this.stateDir);
+	}
+
+	/**
+	 * Interactive-spawn cost/outcome scoreboard (research-sirvir/03, the dead-wire fix): closes over
+	 * the manager's own PRIVATE `this.stateDir` — mirrors `allReceipts()` above and the
+	 * `shadowCostCheck(this.stateDir, …)` call pattern — so a DB-mode org-scoped manager (a private
+	 * `stateDir = root/orgs/orgId`, see `manager-registry.ts`) reads its OWN tenant's ledger, never the
+	 * global `resolveStateDir()` root, which would read the wrong (empty, for every tenant) ledger
+	 * while recording happens under the org dir. `readModelOutcomes`/`buildScoreboard` already apply
+	 * research-sirvir/02's `modelFamily` normalization, so a `smart-spawn.ts` candidate lookup
+	 * (`"opus"`/`DEFAULT_MODEL_FAMILY`) hits regardless of the raw id shape a receipt or ledger row
+	 * carries. Built fresh per call (no caching): both ledgers mutate on every land, and this is no
+	 * more I/O than `allReceipts()` already costs for one interactive spawn request.
+	 */
+	async spawnScoreboard(): Promise<Scoreboard> {
+		return buildScoreboard(await readAllReceipts(this.stateDir), readModelOutcomes(this.stateDir));
 	}
 
 	async trace(id: string): Promise<TraceResponse> {

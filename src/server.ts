@@ -1414,7 +1414,13 @@ export class SquadServer {
 			if (prompt.length === 0) return new Response("empty prompt", { status: 400 });
 			const profileId = Result.isSuccess(decoded) && typeof decoded.success.profileId === "string" ? decoded.success.profileId : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
-			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
+			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
+			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
+			// root and would read another tenant's (or an empty) ledger instead of `manager`'s own private
+			// `stateDir`. Gated the same way `shiftedModel` itself is, so the scoreboard's receipts scan is
+			// skipped entirely (not just ignored) when the feature is off.
+			const scoreboard = envBool("OMP_SQUAD_MODEL_OUTCOMES", false) ? await manager.spawnScoreboard() : undefined;
+			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked), scoreboard });
 			try {
 				const dto = await manager.create({ ...plan, profileId, track: true }, actor);
 				return Response.json({ agent: dto, plan });
