@@ -70,9 +70,10 @@ mock.module("../src/gh.ts", () => ({
 	ghAvailable: async () => true,
 }));
 
-const { ensurePr, landAgentPr, getPendingPr, listPendingPrs, recordPendingPr, assertMerged, mergeMethod } = await import("../src/land-pr.ts");
+const { ensurePr, landAgentPr, getPendingPr, listPendingPrs, recordPendingPr, assertMerged, assertNoOrphanedCommits, mergeMethod } = await import("../src/land-pr.ts");
 const { getDoneProofByBranch } = await import("../src/done-proof.ts");
 const { repoIdentity } = await import("../src/repo-identity.ts");
+import type { AutomationReport } from "../src/automation-log.ts";
 
 const ENV_KEYS = ["OMP_SQUAD_PR_DRAFT", "OMP_SQUAD_PR_MERGE_METHOD", "OMP_SQUAD_REGRESSION_GATE"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -718,6 +719,131 @@ test("assertMerged: method=rebase refused when the reported merge commit isn't r
 	const res = await assertMerged({ repo, defaultBranch: "main", branchTipSha: "branchtip123", prNumber: 1 }, "rebase");
 	expect(res.ok).toBe(false);
 	expect(res.detail).toContain("not reachable");
+});
+
+// ── post-merge orphan assertion — loud automation-log entry, never a failed land ────────────────
+
+function orphanRecorder(): { record: (r: AutomationReport) => void; reports: AutomationReport[] } {
+	const reports: AutomationReport[] = [];
+	return { record: (r) => reports.push(r), reports };
+}
+
+test("assertNoOrphanedCommits: fully-merged branch ⇒ no automation entry at all (no crying wolf)", async () => {
+	const { repo } = await baseline("orph-clean-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "x\n" });
+	await git(repo, "push", "-q", "origin", "squad/a1");
+	await githubMerge("squad/a1")(repo); // real merge to origin/main, then re-fetch below
+	await git(repo, "fetch", "-q", "origin", "main");
+	void wt;
+
+	const { record, reports } = orphanRecorder();
+	await assertNoOrphanedCommits({ repo, defaultBranch: "main", branch: "squad/a1", prNumber: 7, prUrl: "u", method: "merge" }, record);
+
+	expect(reports).toEqual([]);
+});
+
+test("assertNoOrphanedCommits: commits on origin/<branch> missing from origin/<default> record ONE loud error entry", async () => {
+	const { repo } = await baseline("orph-found-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "x\n" });
+	await githubMerge("squad/a1")(repo); // PR-merge simulation of the branch as it stands
+	// The incident shape: MORE commits pushed to the branch AFTER the merge, never re-landed.
+	const stranded = await commit(wt, "post-merge.txt", "stranded\n", "post-merge stranded work");
+	await git(repo, "push", "-q", "origin", "squad/a1");
+	await git(repo, "fetch", "-q", "origin");
+
+	const { record, reports } = orphanRecorder();
+	await assertNoOrphanedCommits({ repo, defaultBranch: "main", branch: "squad/a1", prNumber: 7, prUrl: "https://github.com/acme/app/pull/7", method: "merge" }, record);
+
+	expect(reports.length).toBe(1);
+	expect(reports[0].level).toBe("error");
+	expect(reports[0].detail).toContain("PR #7");
+	expect(reports[0].detail).toContain("squad/a1");
+	expect(reports[0].detail).toContain(stranded.slice(0, 12));
+	expect(reports[0].detail).toContain("1 commit(s) as unreached");
+});
+
+test("assertNoOrphanedCommits: a cherry failure (unfetched/deleted ref) is itself reported loudly, never silently treated as clean", async () => {
+	const { repo } = await baseline("orph-cherr-fail-");
+
+	const { record, reports } = orphanRecorder();
+	await assertNoOrphanedCommits({ repo, defaultBranch: "main", branch: "never-pushed-branch", prNumber: 8, prUrl: "u", method: "merge" }, record);
+
+	expect(reports.length).toBe(1);
+	expect(reports[0].level).toBe("error");
+	expect(reports[0].detail).toContain("orphan check FAILED");
+	expect(reports[0].detail).toContain("could not confirm");
+});
+
+test("assertNoOrphanedCommits: squash/rebase findings carry the false-positive caveat", async () => {
+	const { repo } = await baseline("orph-squash-caveat-");
+	await branchWorktree(repo, "squad/a1", { "feature.txt": "x\n" });
+	await git(repo, "push", "-q", "origin", "squad/a1");
+	// Simulate a SQUASH merge: origin/main advances with a different commit carrying a DIFFERENT patch
+	// (e.g. conflict-resolved content) so git cherry keeps marking the original commit as `+`.
+	await commit(repo, "unrelated.txt", "other\n", "squashed result (different patch)");
+	await git(repo, "push", "-q", "origin", "main");
+	await git(repo, "fetch", "-q", "origin");
+
+	const { record, reports } = orphanRecorder();
+	await assertNoOrphanedCommits({ repo, defaultBranch: "main", branch: "squad/a1", prNumber: 9, prUrl: "u", method: "squash" }, record);
+
+	expect(reports.length).toBe(1);
+	expect(reports[0].detail).toContain("method=squash");
+	expect(reports[0].detail).toContain("false-positives");
+});
+
+test("assertNoOrphanedCommits: no recorder wired ⇒ silent no-op, never throws", async () => {
+	const { repo } = await baseline("orph-norec-");
+	await expect(assertNoOrphanedCommits({ repo, defaultBranch: "main", branch: "whatever", prNumber: 1, prUrl: "u", method: "merge" }, undefined)).resolves.toBeUndefined();
+});
+
+test("landAgentPr: a green land where GitHub's merge really landed everything records NO orphan entry", async () => {
+	const { repo } = await baseline("lp-orph-clean-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-orph-clean-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const { record, reports } = orphanRecorder();
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir, record);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect(reports).toEqual([]); // clean merge ⇒ the orphan assertion stays silent
+});
+
+test("landAgentPr: post-merge stranding (a third party pushes MORE commits to origin's branch ref during the merge) returns ok — the merge happened — but records the loud orphan entry", async () => {
+	const { repo, origin } = await baseline("lp-orph-loud-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-orph-loud-state-");
+	prList = [];
+	// The exact incident shape from the repo's own audits: the merge itself is honest (branch tip lands
+	// in origin/main, assertMerged's ancestry check passes), but a THIRD PARTY (human follow-up push,
+	// another tool) adds commits to origin's branch ref that no PR ever carries to main. The daemon's
+	// local branch ref never sees them — only a fetch of the branch does, which is exactly what the
+	// orphan assertion performs.
+	let strandedSha = "";
+	mergeSimulator = async (cwd: string) => {
+		await githubMerge("squad/a1")(cwd);
+		const clone = path.join(await tmpDir("lp-orph-clone-"), "c");
+		await git(cwd, "clone", "-q", origin, clone);
+		await git(clone, "config", "user.email", "third@party");
+		await git(clone, "config", "user.name", "third-party");
+		await git(clone, "config", "commit.gpgsign", "false");
+		await git(clone, "checkout", "-q", "squad/a1");
+		strandedSha = await commit(clone, "stranded.txt", "stranded\n", "third-party work pushed around the merge");
+		await git(clone, "push", "-q", "origin", "squad/a1");
+	};
+
+	const { record, reports } = orphanRecorder();
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir, record);
+
+	expect(res.ok).toBe(true); // the land is NOT failed — the merge already happened
+	expect(res.merged).toBe(true);
+	expect(reports.length).toBe(1); // ...but the stranding got LOUD
+	expect(reports[0].level).toBe("error");
+	expect(reports[0].detail).toContain("PR #");
+	expect(reports[0].detail).toContain(strandedSha.slice(0, 12));
 });
 
 // ── PendingPr ledger — corrupt / missing file, matches done-proof.ts's contract ─────────────────
