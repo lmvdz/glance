@@ -17,6 +17,44 @@ import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
+import {
+	AgentLandBodySchema,
+	AgentModeBodySchema,
+	AgentVisionBodySchema,
+	AnnotationCreateBodySchema,
+	AnnotationSendBodySchema,
+	CapabilityInstallBodySchema,
+	CapabilityInstallPatchBodySchema,
+	CapabilityInstallRunBodySchema,
+	CapabilitySourceBodySchema,
+	CommentsCreateBodySchema,
+	ConsoleBodySchema,
+	decodeBody,
+	decodeBodyOrEmpty,
+	FeatureAgentsLinkBodySchema,
+	FeatureAnswersBodySchema,
+	FeatureAutoBodySchema,
+	FeatureConcernsPatchBodySchema,
+	FeatureCreateBodySchema,
+	FeatureFlagBodySchema,
+	FeatureFromPlanBodySchema,
+	FeatureLandBodySchema,
+	FeatureModuleBodySchema,
+	FeatureModuleRepairBodySchema,
+	FeaturePatchBodySchema,
+	FederationCommandBodySchema,
+	FeedbackItemsEnvelopeSchema,
+	JoinRequestDecideBodySchema,
+	OrgJoinPolicyBodySchema,
+	OrgMemberInviteBodySchema,
+	OrgMemberRoleBodySchema,
+	OrgPatchBodySchema,
+	PlanCandidateCreateBodySchema,
+	PlanCandidateTransitionBodySchema,
+	PushSubscriptionBodySchema,
+	SpawnBodySchema,
+	TaskStartBodySchema,
+} from "./schema/http-body.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
@@ -649,9 +687,12 @@ export class SquadServer {
 			if (!feedbackEnabled()) return new Response("not found", { status: 404 });
 			if (!this.singleManager) return new Response("feedback unavailable", { status: 404 });
 			const body: unknown = await req.json().catch(() => null);
-			const campaignId = body && typeof body === "object" && !Array.isArray(body) && "campaignId" in body && typeof body.campaignId === "string" ? body.campaignId : "";
+			const parsedFeedback = decodeBodyOrEmpty(FeedbackItemsEnvelopeSchema, body);
+			const campaignId = typeof parsedFeedback.campaignId === "string" ? parsedFeedback.campaignId : "";
 			if (!this.feedbackRateAllowed(req, server, campaignId)) return new Response("rate limited", { status: 429 });
 			try {
+				// `body` (not `parsedFeedback`) is forwarded verbatim — submitFeedbackItem owns its own
+				// validation of the full item shape; the schema above only narrows campaignId.
 				const item = await this.singleManager.submitFeedbackItem(body, req.headers.get("origin"));
 				return Response.json({ item }, { status: 201 });
 			} catch (err) {
@@ -753,10 +794,11 @@ export class SquadServer {
 			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
 			const orgId = session.session.activeOrganizationId;
 			if (!orgId) return new Response("no active org", { status: 400 });
-			const body = (await req.json().catch(() => null)) as { id?: unknown; action?: unknown } | null;
-			const id = body && typeof body.id === "string" ? body.id : "";
-			if (!id) return new Response("missing id", { status: 400 });
-			const ok = body?.action === "deny" ? await denyJoinRequest(this.db.db, id, orgId) : await approveJoinRequest(this.db.db, id, orgId);
+			const raw: unknown = await req.json().catch(() => null);
+			const decoded = decodeBody(JoinRequestDecideBodySchema, raw);
+			if (Result.isFailure(decoded)) return new Response("missing id", { status: 400 });
+			const body = decoded.success;
+			const ok = body.action === "deny" ? await denyJoinRequest(this.db.db, body.id, orgId) : await approveJoinRequest(this.db.db, body.id, orgId);
 			return Response.json({ ok });
 		}
 		// Org settings. Profile is visible to any member of the active org; member management is admin-only,
@@ -771,8 +813,8 @@ export class SquadServer {
 			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
 			const orgId = session.session.activeOrganizationId;
 			if (!orgId) return new Response("no active org", { status: 400 });
-			const body = (await req.json().catch(() => null)) as { name?: unknown } | null;
-			const ok = await renameOrg(this.db.db, orgId, body && typeof body.name === "string" ? body.name : "");
+			const body = decodeBodyOrEmpty(OrgPatchBodySchema, await req.json().catch(() => null));
+			const ok = await renameOrg(this.db.db, orgId, typeof body.name === "string" ? body.name : "");
 			return Response.json({ ok });
 		}
 		if (url.pathname === "/api/org/members" && req.method === "GET") {
@@ -785,13 +827,13 @@ export class SquadServer {
 			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
 			const orgId = session.session.activeOrganizationId;
 			if (!orgId) return new Response("no active org", { status: 400 });
-			const body = (await req.json().catch(() => null)) as { userId?: unknown; role?: unknown } | null;
-			const userId = body && typeof body.userId === "string" ? body.userId : "";
-			if (!userId) return new Response("missing userId", { status: 400 });
+			const decoded = decodeBody(OrgMemberRoleBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.userId) return new Response("missing userId", { status: 400 });
+			const { userId, role: targetRole } = decoded.success;
 			if (userId === session.user.id) return Response.json({ ok: false, error: "you can't change your own membership here" });
 			const result =
 				url.pathname === "/api/org/members/role"
-					? await setMemberRole(this.db.db, orgId, userId, body && typeof body.role === "string" ? body.role : "")
+					? await setMemberRole(this.db.db, orgId, userId, typeof targetRole === "string" ? targetRole : "")
 					: await removeMember(this.db.db, orgId, userId);
 			return Response.json(result);
 		}
@@ -800,10 +842,10 @@ export class SquadServer {
 			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
 			const orgId = session.session.activeOrganizationId;
 			if (!orgId) return new Response("no active org", { status: 400 });
-			const body = (await req.json().catch(() => null)) as { email?: unknown; role?: unknown } | null;
-			const email = body && typeof body.email === "string" ? body.email : "";
-			if (!email) return new Response("missing email", { status: 400 });
-			return Response.json(await addMemberByEmail(this.db.db, orgId, email, body && typeof body.role === "string" ? body.role : "member"));
+			const decoded = decodeBody(OrgMemberInviteBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.email) return new Response("missing email", { status: 400 });
+			const { email, role: inviteRole } = decoded.success;
+			return Response.json(await addMemberByEmail(this.db.db, orgId, email, typeof inviteRole === "string" ? inviteRole : "member"));
 		}
 		// Domain-join policy (WorkOS orgs only) — read/set the org's auto|approval policy in WorkOS metadata.
 		if (url.pathname === "/api/org/join-policy" && req.method === "GET") {
@@ -821,20 +863,18 @@ export class SquadServer {
 			if (!orgId) return new Response("no active org", { status: 400 });
 			const profile = await getOrgProfile(this.db.db, orgId);
 			if (!profile?.workosOrgId) return Response.json({ ok: false, error: "not a WorkOS-backed organization" });
-			const body = (await req.json().catch(() => null)) as { policy?: unknown } | null;
-			const policy = body?.policy === "auto" ? "auto" : "approval";
+			const body = decodeBodyOrEmpty(OrgJoinPolicyBodySchema, await req.json().catch(() => null));
+			const policy = body.policy === "auto" ? "auto" : "approval";
 			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
 		if (url.pathname === "/api/push/subscribe" && req.method === "POST") {
 			if (!this.opts.push) return new Response("push unavailable", { status: 501 });
-			const sub: unknown = await req.json().catch(() => null);
-			if (!sub || typeof sub !== "object" || !("endpoint" in sub) || typeof sub.endpoint !== "string") return new Response("invalid subscription", { status: 400 });
-			if (!("keys" in sub) || typeof sub.keys !== "object" || !sub.keys) return new Response("invalid subscription", { status: 400 });
-			const keys = sub.keys;
-			if (!("p256dh" in keys) || typeof keys.p256dh !== "string" || !("auth" in keys) || typeof keys.auth !== "string") return new Response("invalid subscription", { status: 400 });
-			await this.opts.push.subscribe({ endpoint: sub.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } });
+			const decoded = decodeBody(PushSubscriptionBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("invalid subscription", { status: 400 });
+			const sub = decoded.success;
+			await this.opts.push.subscribe({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } });
 			return Response.json({ ok: true });
 		}
 		if (url.pathname === "/api/settings" && req.method === "GET") {
@@ -843,11 +883,11 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/settings/feature-flags" && req.method === "POST") {
 			if (!this.opts.runtimeSettings) return new Response("settings persistence unavailable", { status: 501 });
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("key" in body) || typeof body.key !== "string" || !isFeatureFlagKey(body.key) || !("enabled" in body) || typeof body.enabled !== "boolean") {
+			const decoded = decodeBody(FeatureFlagBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !isFeatureFlagKey(decoded.success.key)) {
 				return new Response("feature flag key and enabled boolean required", { status: 400 });
 			}
-			const flags = await this.opts.runtimeSettings.setFeatureFlag(body.key, body.enabled);
+			const flags = await this.opts.runtimeSettings.setFeatureFlag(decoded.success.key, decoded.success.enabled);
 			return Response.json({ featureFlags: flags });
 		}
 		// Resolve the caller's fleet. Single-manager mode: the root manager. DB-registry mode: session
@@ -888,9 +928,9 @@ export class SquadServer {
 		if (url.pathname === "/api/capability-catalog") return Response.json({ catalog: publicCapabilityCatalog() });
 		if (url.pathname === "/api/capability-sources" && req.method === "GET") return Response.json({ sources: manager.capabilities().sources });
 		if (url.pathname === "/api/capability-sources" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object") return new Response("manifest or catalogId required", { status: 400 });
-			const rec = body as Record<string, unknown>;
+			const decoded = decodeBody(CapabilitySourceBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("manifest or catalogId required", { status: 400 });
+			const rec = decoded.success;
 			const catalogId = typeof rec.catalogId === "string" ? rec.catalogId : undefined;
 			const catalogEntry = catalogId ? publicCapabilityManifest(catalogId) : undefined;
 			const manifest = catalogEntry?.manifest ?? rec.manifest;
@@ -910,17 +950,16 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/capability-installs" && req.method === "GET") return Response.json({ installs: manager.capabilities().installs });
 		if (url.pathname === "/api/capability-installs" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("packId" in body) || typeof body.packId !== "string") return new Response("packId required", { status: 400 });
-			const rec = body as Record<string, unknown>;
+			const decoded = decodeBody(CapabilityInstallBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("packId required", { status: 400 });
+			const rec = decoded.success;
 			const overrides = rec.overrides && typeof rec.overrides === "object" && !Array.isArray(rec.overrides) ? rec.overrides as Record<string, unknown> : undefined;
 			const enable = typeof rec.enable === "boolean" ? rec.enable : undefined;
-			return Response.json(manager.installCapability({ packId: body.packId, overrides, enable }, actor));
+			return Response.json(manager.installCapability({ packId: rec.packId, overrides, enable }, actor));
 		}
 		const mcinstall = url.pathname.match(/^\/api\/capability-installs\/([^/]+)(?:\/(run))?$/);
 		if (mcinstall && req.method === "PATCH" && !mcinstall[2]) {
-			const body: unknown = await req.json().catch(() => null);
-			const patch = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+			const patch = decodeBodyOrEmpty(CapabilityInstallPatchBodySchema, await req.json().catch(() => null));
 			return Response.json(manager.updateCapability(decodeURIComponent(mcinstall[1]), {
 				state: capabilityInstallState(patch.state),
 				enabled: typeof patch.enabled === "boolean" ? patch.enabled : undefined,
@@ -931,8 +970,7 @@ export class SquadServer {
 			}, actor));
 		}
 		if (mcinstall && req.method === "POST" && mcinstall[2] === "run") {
-			const body: unknown = await req.json().catch(() => ({}));
-			const rec = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+			const rec = decodeBodyOrEmpty(CapabilityInstallRunBodySchema, await req.json().catch(() => null));
 			const bindingKey = typeof rec.bindingKey === "string" ? rec.bindingKey : undefined;
 			const repo = typeof rec.repo === "string" && rec.repo ? rec.repo : undefined;
 			const prompt = typeof rec.prompt === "string" && rec.prompt.trim() ? rec.prompt.trim() : undefined;
@@ -942,48 +980,49 @@ export class SquadServer {
 		if (url.pathname === "/api/features" && req.method === "GET") return Response.json(await manager.features(url.searchParams.get("repo") ?? undefined));
 		if (url.pathname === "/api/features/archived" && req.method === "GET") return Response.json({ features: manager.archivedFeatures(url.searchParams.get("repo") ?? undefined) });
 		if (url.pathname === "/api/features" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("title" in body) || typeof body.title !== "string") return new Response("title required", { status: 400 });
-			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
-			const planDir = "planDir" in body && typeof body.planDir === "string" ? body.planDir : undefined;
+			const decoded = decodeBody(FeatureCreateBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("title required", { status: 400 });
+			const body = decoded.success;
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const planDir = typeof body.planDir === "string" ? body.planDir : undefined;
 			manager.createFeature({ title: body.title, repo, planDir });
 			return Response.json({ ok: true });
 		}
 		if (url.pathname === "/api/features/from-plan" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("planDir" in body) || typeof body.planDir !== "string") return new Response("planDir required", { status: 400 });
-			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const decoded = decodeBody(FeatureFromPlanBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("planDir required", { status: 400 });
+			const body = decoded.success;
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 			const planDir = body.planDir.replace(/\/+$/, "");
 			const planTitle = (await listPlanDirs(repo)).find((pd) => pd.dir === planDir)?.title;
-			const fallbackTitle = "title" in body && typeof body.title === "string" && body.title.trim() ? body.title.trim() : path.basename(planDir).replace(/[-_]+/g, " ");
+			const fallbackTitle = typeof body.title === "string" && body.title.trim() ? body.title.trim() : path.basename(planDir).replace(/[-_]+/g, " ");
 			const title = planTitle ?? fallbackTitle;
 			const existing = (await manager.features(repo)).find((f) => f.planDir === planDir);
 			const pf = existing ?? manager.createFeature({ title, repo, planDir });
 			return Response.json(pf);
 		}
 		if (url.pathname === "/api/features/auto" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("goal" in body) || typeof body.goal !== "string" || !body.goal.trim()) return new Response("goal required", { status: 400 });
-			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
-			const title = "title" in body && typeof body.title === "string" && body.title.trim() ? body.title.trim() : body.goal.trim().slice(0, 48);
-			const model = "model" in body && typeof body.model === "string" && body.model ? body.model : undefined;
+			const decoded = decodeBody(FeatureAutoBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.goal.trim()) return new Response("goal required", { status: 400 });
+			const body = decoded.success;
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : body.goal.trim().slice(0, 48);
+			const model = typeof body.model === "string" && body.model ? body.model : undefined;
 			const { feature, agent } = await manager.createAutoFeature({ title, repo, goal: body.goal.trim(), model });
 			return Response.json({ feature, agentId: agent.id });
 		}
 		const mfpatch = url.pathname.match(/^\/api\/features\/([^/]+)$/);
 		if (mfpatch && req.method === "PATCH") {
-			const body: unknown = await req.json().catch(() => null);
+			const body = decodeBodyOrEmpty(FeaturePatchBodySchema, await req.json().catch(() => null));
 			const patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[] } = {};
-			if (body && typeof body === "object") {
-				if ("repo" in body && typeof body.repo === "string") patch.repo = body.repo;
-				if ("title" in body && typeof body.title === "string") patch.title = body.title;
-				if ("description" in body && typeof body.description === "string") patch.description = body.description;
-				if ("archived" in body && typeof body.archived === "boolean") patch.archived = body.archived;
-				if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
-				if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
-				if ("decisions" in body) patch.decisions = featureDecisions(body.decisions);
-				if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
-			}
+			if ("repo" in body && typeof body.repo === "string") patch.repo = body.repo;
+			if ("title" in body && typeof body.title === "string") patch.title = body.title;
+			if ("description" in body && typeof body.description === "string") patch.description = body.description;
+			if ("archived" in body && typeof body.archived === "boolean") patch.archived = body.archived;
+			if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
+			if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
+			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions);
+			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
 		}
@@ -996,27 +1035,28 @@ export class SquadServer {
 		const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
 		if (mflink && req.method === "POST") {
 			const id = decodeURIComponent(mflink[1]);
-			const body: unknown = await req.json().catch(() => null);
-			if (body && typeof body === "object" && "task" in body && typeof body.task === "string" && body.task.trim()) {
-				const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
-				const name = "name" in body && typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
+			const body = decodeBodyOrEmpty(FeatureAgentsLinkBodySchema, await req.json().catch(() => null));
+			if (typeof body.task === "string" && body.task.trim()) {
+				const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+				const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
 				const feature = await manager.updateFeature(id, { repo });
 				if (!feature) return new Response("no such feature", { status: 404 });
 				const dto = await manager.create({ repo, name, task: body.task.trim(), featureId: feature.id, approvalMode: "yolo", track: true }, actor);
 				manager.linkAgent(feature.id, dto.id);
 				return Response.json({ agent: dto });
 			}
-			if (!body || typeof body !== "object" || !("agentId" in body) || typeof body.agentId !== "string") return new Response("agentId required", { status: 400 });
-			const unlink = "unlink" in body && body.unlink === true;
+			if (typeof body.agentId !== "string") return new Response("agentId required", { status: 400 });
+			const unlink = body.unlink === true;
 			return Response.json({ ok: manager.linkAgent(id, body.agentId, unlink) });
 		}
 		const mfconcern = url.pathname.match(/^\/api\/features\/([^/]+)\/concerns$/);
 		if (mfconcern && req.method === "PATCH") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("file" in body) || typeof body.file !== "string" || !body.file.trim()) {
+			const decoded = decodeBody(FeatureConcernsPatchBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.file.trim()) {
 				return new Response("file required", { status: 400 });
 			}
-			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const body = decoded.success;
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : undefined;
 			const opts: { repo?: string; file: string; status?: string; blockedBy?: number[] } = { repo, file: body.file };
 			if ("status" in body && typeof body.status === "string" && body.status.trim()) opts.status = body.status.trim();
 			if ("blockedBy" in body && Array.isArray(body.blockedBy)) opts.blockedBy = body.blockedBy.map((n) => Number(n)).filter((n) => Number.isFinite(n));
@@ -1026,14 +1066,15 @@ export class SquadServer {
 		}
 		const mfanswer = url.pathname.match(/^\/api\/features\/([^/]+)\/answers$/);
 		if (mfanswer && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("file" in body) || typeof body.file !== "string" || !body.file.trim()) {
+			const decoded = decodeBody(FeatureAnswersBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.file.trim()) {
 				return new Response("file required", { status: 400 });
 			}
-			const prompt = "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";
-			const value = "value" in body && typeof body.value === "string" ? body.value.trim() : "";
+			const body = decoded.success;
+			const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+			const value = typeof body.value === "string" ? body.value.trim() : "";
 			if (!prompt || !value) return new Response("prompt and value required", { status: 400 });
-			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 			const featureId = decodeURIComponent(mfanswer[1]);
 			const feature = (await manager.features(repo)).find((x) => x.id === featureId);
 			if (!feature || !feature.planDir) return new Response("no such feature", { status: 404 });
@@ -1048,26 +1089,26 @@ export class SquadServer {
 		if (url.pathname === "/api/capability-discovery") return Response.json({ name: "omp-squad capabilities", routes: ["/api/capability-catalog", "/api/capability-sources", "/api/capability-packs", "/api/capability-installs", "/api/federation/capabilities"], privateTenantData: false });
 		const mfland = url.pathname.match(/^\/api\/features\/([^/]+)\/land$/);
 		if (mfland && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
-			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason.trim() : undefined;
+			const body = decodeBodyOrEmpty(FeatureLandBodySchema, await req.json().catch(() => null));
+			const force = body.force === true;
+			const reason = typeof body.reason === "string" ? body.reason.trim() : undefined;
 			return Response.json(await manager.landFeature(decodeURIComponent(mfland[1]), force, actor, reason));
 		}
 		const mftickets = url.pathname.match(/^\/api\/features\/([^/]+)\/tickets$/);
 		if (mftickets && req.method === "GET") return Response.json(await withTimeout(manager.featurePlaneTickets(decodeURIComponent(mftickets[1])), 1500, { tickets: null }));
 		const mfmodule = url.pathname.match(/^\/api\/features\/([^/]+)\/module$/);
 		if (mfmodule && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
-			const createTickets = !!(body && typeof body === "object" && "tickets" in body && body.tickets === true);
+			const body = decodeBodyOrEmpty(FeatureModuleBodySchema, await req.json().catch(() => null));
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const createTickets = body.tickets === true;
 			const out = await manager.createFeatureModule(decodeURIComponent(mfmodule[1]), { repo, createTickets });
 			return out ? Response.json(out) : new Response("module create failed (Plane not configured?)", { status: 501 });
 		}
 		const mfmoduleRepair = url.pathname.match(/^\/api\/features\/([^/]+)\/module\/repair$/);
 		if (mfmoduleRepair && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : undefined;
-			const closeOrphans = !!(body && typeof body === "object" && "closeOrphans" in body && body.closeOrphans === true);
+			const body = decodeBodyOrEmpty(FeatureModuleRepairBodySchema, await req.json().catch(() => null));
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : undefined;
+			const closeOrphans = body.closeOrphans === true;
 			const out = await manager.repairFeatureModuleTickets(decodeURIComponent(mfmoduleRepair[1]), { repo, closeOrphans });
 			return out ? Response.json(out) : new Response("module repair failed (Plane not configured?)", { status: 501 });
 		}
@@ -1098,17 +1139,19 @@ export class SquadServer {
 		if (mcand && req.method === "POST") {
 			const repo = url.searchParams.get("repo") ?? process.cwd();
 			const featureId = decodeURIComponent(mcand[1]);
-			const body: unknown = await req.json().catch(() => null);
-			const rec = body && typeof body === "object" ? body as Record<string, unknown> : {};
-			const planPath = typeof rec.planPath === "string" && rec.planPath.trim() ? rec.planPath.trim() : "";
-			const summary = typeof rec.summary === "string" && rec.summary.trim() ? rec.summary.trim() : "";
-			if (!planPath || !summary) return new Response("planPath and summary required", { status: 400 });
+			const decoded = decodeBody(PlanCandidateCreateBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.planPath.trim() || !decoded.success.summary.trim()) {
+				return new Response("planPath and summary required", { status: 400 });
+			}
+			const rec = decoded.success;
+			const planPath = rec.planPath.trim();
+			const summary = rec.summary.trim();
 			return Response.json(await manager.addPlanRevisionCandidate({ repo, featureId, planPath, summary, producerAgentId: typeof rec.producerAgentId === "string" ? rec.producerAgentId : undefined, runId: typeof rec.runId === "string" ? rec.runId : undefined, traceId: typeof rec.traceId === "string" ? rec.traceId : undefined, diffRef: typeof rec.diffRef === "string" ? rec.diffRef : undefined }, actor));
 		}
 		const mcandState = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates\/([^/]+)\/(accept|reject|supersede)$/);
 		if (mcandState && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const body = decodeBodyOrEmpty(PlanCandidateTransitionBodySchema, await req.json().catch(() => null));
+			const reason = typeof body.reason === "string" ? body.reason : undefined;
 			const state = ({ accept: "accepted", reject: "rejected", supersede: "superseded" } as Record<string, PlanRevisionCandidateState>)[mcandState[3]];
 			const candidate = await manager.transitionPlanRevisionCandidate(decodeURIComponent(mcandState[2]), state, actor, reason);
 			return candidate ? Response.json(candidate) : new Response("candidate not found", { status: 404 });
@@ -1123,8 +1166,8 @@ export class SquadServer {
 		if (mann && req.method === "POST") {
 			const repo = url.searchParams.get("repo") ?? process.cwd();
 			const featureId = decodeURIComponent(mann[1]);
-			const body: unknown = await req.json().catch(() => null);
-			const text = body && typeof body === "object" && "body" in body && typeof body.body === "string" ? body.body.trim() : "";
+			const body = decodeBodyOrEmpty(AnnotationCreateBodySchema, await req.json().catch(() => null));
+			const text = typeof body.body === "string" ? body.body.trim() : "";
 			const annotation = planAnnotationTarget(body);
 			if (!text || !annotation) return new Response("body and planPath required", { status: 400 });
 			const feature = (await manager.features(repo)).find((x) => x.id === featureId);
@@ -1141,15 +1184,15 @@ export class SquadServer {
 			const repo = url.searchParams.get("repo") ?? process.cwd();
 			const featureId = decodeURIComponent(manns[1]);
 			const annotationId = decodeURIComponent(manns[2]);
-			const body: unknown = await req.json().catch(() => null);
-			const mode = body && typeof body === "object" && "mode" in body && body.mode === "agent" ? "agent" : "planner";
+			const body = decodeBodyOrEmpty(AnnotationSendBodySchema, await req.json().catch(() => null));
+			const mode = body.mode === "agent" ? "agent" : "planner";
 			const feature = (await manager.features(repo)).find((x) => x.id === featureId);
 			if (!feature) return new Response("no such feature", { status: 404 });
 			const comment = (await manager.listComments({ repo, subject: featureId })).find((item) => item.id === annotationId);
 			if (!comment || comment.kind !== "plan-annotation") return new Response("annotation not found", { status: 404 });
 			const message = planAnnotationPrompt(feature, comment);
 			if (mode === "agent") {
-				const agentId = body && typeof body === "object" && "agentId" in body && typeof body.agentId === "string" ? body.agentId : "";
+				const agentId = typeof body.agentId === "string" ? body.agentId : "";
 				if (!agentId) return new Response("agentId required", { status: 400 });
 				await manager.applyCommand({ type: "prompt", id: agentId, message }, actor);
 				return Response.json({ agentId, mode });
@@ -1216,8 +1259,7 @@ export class SquadServer {
 			// Outbound remote steering: send a ClientCommand to a peer operator's daemon. The
 			// local manager gates on operator tier; the RECEIVER re-authorizes independently
 			// (whois-verified actor + RBAC), so this can never grant authority it doesn't have.
-			const body: unknown = await req.json().catch(() => null);
-			const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+			const rec = decodeBodyOrEmpty(FederationCommandBodySchema, await req.json().catch(() => null));
 			const to = typeof rec.to === "string" ? rec.to.trim() : "";
 			const cmd = rec.cmd && typeof rec.cmd === "object" && typeof (rec.cmd as Record<string, unknown>).type === "string" ? (rec.cmd as ClientCommand) : undefined;
 			if (!to || !cmd) return new Response("to (operator id) and cmd ({type,...}) required", { status: 400 });
@@ -1297,10 +1339,10 @@ export class SquadServer {
 			return new Response(md, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 		}
 		if (url.pathname === "/api/spawn" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			const prompt = body && typeof body === "object" && "prompt" in body && typeof body.prompt === "string" ? body.prompt.trim() : "";
+			const decoded = decodeBody(SpawnBodySchema, await req.json().catch(() => null));
+			const prompt = Result.isSuccess(decoded) ? decoded.success.prompt.trim() : "";
 			if (prompt.length === 0) return new Response("empty prompt", { status: 400 });
-			const profileId = body && typeof body === "object" && "profileId" in body && typeof body.profileId === "string" ? body.profileId : undefined;
+			const profileId = Result.isSuccess(decoded) && typeof decoded.success.profileId === "string" ? decoded.success.profileId : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
 			try {
@@ -1311,10 +1353,10 @@ export class SquadServer {
 			}
 		}
 		if (url.pathname === "/api/console" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
-			const model = body && typeof body === "object" && "model" in body && typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-			const profileId = body && typeof body === "object" && "profileId" in body && typeof body.profileId === "string" ? body.profileId : undefined;
+			const body = decodeBodyOrEmpty(ConsoleBodySchema, await req.json().catch(() => null));
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+			const profileId = typeof body.profileId === "string" ? body.profileId : undefined;
 			const dto = await manager.create({ repo, name: "chat", model, profileId, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
 			return Response.json({ agentId: dto.id });
 		}
@@ -1347,10 +1389,10 @@ export class SquadServer {
 			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			let message = `squad(${dto.name}): ${dto.issue?.name ?? "agent changes"}`;
-			const body: unknown = await req.json().catch(() => null);
-			const force = !!(body && typeof body === "object" && "force" in body && body.force === true);
-			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason.trim() : undefined;
-			if (body && typeof body === "object" && "message" in body && typeof body.message === "string" && body.message.trim()) {
+			const body = decodeBodyOrEmpty(AgentLandBodySchema, await req.json().catch(() => null));
+			const force = body.force === true;
+			const reason = typeof body.reason === "string" ? body.reason.trim() : undefined;
+			if (typeof body.message === "string" && body.message.trim()) {
 				message = body.message.trim();
 			}
 			const result = await manager.land(id, message, { auto: false, force, reason, actor });
@@ -1370,10 +1412,10 @@ export class SquadServer {
 		}
 		const mmode = url.pathname.match(/^\/api\/agents\/([^/]+)\/mode$/);
 		if (mmode && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			const mode = validateRequestedMode(body && typeof body === "object" && "mode" in body ? (body as { mode?: unknown }).mode : undefined);
+			const body = decodeBodyOrEmpty(AgentModeBodySchema, await req.json().catch(() => null));
+			const mode = validateRequestedMode(body.mode);
 			if (!mode) return new Response("invalid mode", { status: 400 });
-			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const reason = typeof body.reason === "string" ? body.reason : undefined;
 			const dto = await manager.transitionMode(decodeURIComponent(mmode[1]), mode, actor, reason);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(dto);
@@ -1382,8 +1424,8 @@ export class SquadServer {
 		if (mvision && req.method === "POST") {
 			const dto = manager.getAgent(decodeURIComponent(mvision[1]));
 			if (!dto) return new Response("no such agent", { status: 404 });
-			const body: unknown = await req.json().catch(() => null);
-			const target = body && typeof body === "object" && "url" in body && typeof body.url === "string" && body.url.trim() ? body.url.trim() : process.env.OMP_SQUAD_APP_URL;
+			const body = decodeBodyOrEmpty(AgentVisionBodySchema, await req.json().catch(() => null));
+			const target = typeof body.url === "string" && body.url.trim() ? body.url.trim() : process.env.OMP_SQUAD_APP_URL;
 			if (!target) return new Response("no url for vision — pass {url} or set OMP_SQUAD_APP_URL", { status: 422 });
 			// SSRF guard (OMPSQ-152): the daemon's browser must not be aimed at private/loopback/metadata
 			// targets. Only http(s) public hosts pass; the operator's OMP_SQUAD_APP_URL origin is allowlisted.
@@ -1406,8 +1448,8 @@ export class SquadServer {
 		if (mstart && req.method === "POST") {
 			const id = decodeURIComponent(mstart[1]);
 			if (!id) return new Response("task id required", { status: 400 });
-			const body: unknown = await req.json().catch(() => null);
-			const repo = body && typeof body === "object" && "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const body = decodeBodyOrEmpty(TaskStartBodySchema, await req.json().catch(() => null));
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 			const issues = await listPlaneIssues(repo);
 			if (issues === null) return new Response("plane not configured", { status: 501 });
 			const issue = issues.find((i) => i.id === id);
@@ -1430,12 +1472,13 @@ export class SquadServer {
 			return Response.json(await manager.listComments({ repo, subject, unresolved }));
 		}
 		if (url.pathname === "/api/comments" && req.method === "POST") {
-			const body: unknown = await req.json().catch(() => null);
-			if (!body || typeof body !== "object" || !("subject" in body) || typeof body.subject !== "string" || !body.subject || !("body" in body) || typeof body.body !== "string" || !body.body.trim()) {
+			const decoded = decodeBody(CommentsCreateBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.subject || !decoded.success.body.trim()) {
 				return new Response("subject and body required", { status: 400 });
 			}
-			const repo = "repo" in body && typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
-			const urgent = "urgent" in body && body.urgent === true;
+			const body = decoded.success;
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			const urgent = body.urgent === true;
 			return Response.json(await manager.addComment({ repo, subject: body.subject, body: body.body.trim(), urgent }, actor));
 		}
 		const mresolve = url.pathname.match(/^\/api\/comments\/([^/]+)\/resolve$/);
