@@ -12,6 +12,7 @@ import type { Span } from "./spans.ts";
 import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts";
 import type { TransitionReason } from "./agent-lifecycle.ts";
 import type { SubagentNode } from "./subagents.ts";
+import type { ModelLineage } from "./model-lineage.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -351,6 +352,13 @@ export interface ValidationRecord {
 	rationale: string;
 	/** The judge lineage that ran (e.g. "opus"), independent of the executor's model. */
 	model?: string;
+	/** Cross-lineage review (plans/cross-lineage-review/): the VENDOR lineage of the change's author
+	 *  and of the judge. `sameLineage` is true when they share a vendor (correlated blind spots → a
+	 *  weaker signal, downgraded in confidence + surfaced in the UI). `undefined` = one side's lineage
+	 *  was unreadable — we never assert same-lineage we can't substantiate. */
+	authorLineage?: ModelLineage;
+	reviewerLineage?: ModelLineage;
+	sameLineage?: boolean;
 	ranAt: number;
 }
 

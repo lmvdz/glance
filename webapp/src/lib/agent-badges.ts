@@ -67,7 +67,15 @@ export function isVetoed(agent: Pick<AgentDTO, 'validation'>): boolean {
 export function validationBadge(agent: Pick<AgentDTO, 'validation'>): { label: string; cls: string; title: string } | null {
   const v = agent.validation;
   if (!v || v.verdict === 'skipped') return null;
-  const title = v.rationale || 'Independent validator verdict';
+  // Cross-lineage review: a same-lineage (self-graded) verdict is a weaker signal and says so; a
+  // genuine cross-vendor review is called out positively. Unknown lineage adds nothing (honest).
+  const lineageNote =
+    v.sameLineage === true
+      ? `\n⚠ same-lineage review (${v.reviewerLineage ?? '?'} reviewing ${v.authorLineage ?? '?'}) — weaker signal`
+      : v.sameLineage === false
+        ? `\n✓ cross-lineage review (${v.reviewerLineage ?? '?'} reviewing ${v.authorLineage ?? '?'})`
+        : '';
+  const title = (v.rationale || 'Independent validator verdict') + lineageNote;
   switch (v.verdict) {
     case 'veto':
       return { label: 'vetoed', cls: 'bg-red-100 font-semibold text-red-700 dark:bg-red-950/50 dark:text-red-400', title };

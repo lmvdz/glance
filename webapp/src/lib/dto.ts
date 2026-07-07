@@ -75,6 +75,11 @@ export interface ValidationRecordDTO {
   perCriterion: { id: string; satisfied: boolean; note?: string }[];
   rationale: string;
   model?: string;
+  /** Cross-lineage review: vendor lineage of author vs judge; `sameLineage` true = self-graded
+   *  (weaker signal). Mirrors backend ValidationRecord (src/model-lineage.ts). */
+  authorLineage?: "anthropic" | "openai" | "google" | "unknown";
+  reviewerLineage?: "anthropic" | "openai" | "google" | "unknown";
+  sameLineage?: boolean;
   ranAt: number;
 }
 

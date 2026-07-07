@@ -2702,8 +2702,11 @@ export class SquadManager extends EventEmitter {
 		const pf = opts.featureId ? this.featureStore.get(opts.featureId) : undefined;
 		const criteria = opts.criteria ?? pf?.acceptanceCriteria ?? [];
 		const proof = await proofFor(opts.repo, opts.worktree);
-		const { record, veto } = await validatorGate({ criteria, repo: opts.repo, worktree: opts.worktree, branch: opts.branch, proof, judge: this.validatorJudgeOverride() });
+		// Read the author's lineage BEFORE the gate: `dto.model` is the poll-backfilled `provider/id`
+		// spec (applyState) on the common omp/pi path; `harness` is the fallback for vendor-pinned ACP
+		// runtimes. Threaded so the ValidationRecord can flag a same-lineage (self-graded) review.
 		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
+		const { record, veto } = await validatorGate({ criteria, repo: opts.repo, worktree: opts.worktree, branch: opts.branch, proof, judge: this.validatorJudgeOverride(), authorModel: rec?.dto.model, authorHarness: rec?.dto.harness });
 		if (rec) {
 			rec.dto.validation = record;
 			this.emitAgent(rec);
@@ -4857,7 +4860,7 @@ export class SquadManager extends EventEmitter {
 		// `undefined` — absence never penalizes.
 		const validator: "pass" | "fail" | undefined =
 			rec.dto.validation?.verdict === "pass" ? "pass" : rec.dto.validation?.verdict === "veto" ? "fail" : undefined;
-		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator });
+		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage });
 		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });

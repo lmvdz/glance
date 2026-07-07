@@ -105,3 +105,34 @@ test("rationale is truncated to ~600 chars", async () => {
 	const result = await scoreAgainstCriteria(CRITERIA, "diff", undefined, judge);
 	expect(result.rationale.length).toBeLessThanOrEqual(601); // 600 + ellipsis
 });
+
+// ── Cross-lineage review (plans/cross-lineage-review/) ────────────────────────────────────────────
+
+test("author sonnet + default reviewer opus ⇒ sameLineage true (both anthropic)", async () => {
+	const judge = fakeJudge({ perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: true }], confidence: 0.9, rationale: "ok" });
+	const r = await scoreAgainstCriteria(CRITERIA, "diff", undefined, judge, "anthropic/claude-sonnet-4-5", "omp");
+	expect(r.authorLineage).toBe("anthropic");
+	expect(r.reviewerLineage).toBe("anthropic"); // validatorModel() defaults to opus
+	expect(r.sameLineage).toBe(true);
+});
+
+test("author gpt-5 ⇒ sameLineage false (openai author, anthropic reviewer)", async () => {
+	const judge = fakeJudge({ perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: true }], confidence: 0.9, rationale: "ok" });
+	const r = await scoreAgainstCriteria(CRITERIA, "diff", undefined, judge, "openai/gpt-5", "codex");
+	expect(r.authorLineage).toBe("openai");
+	expect(r.sameLineage).toBe(false);
+});
+
+test("unknown author model on a multi-model harness ⇒ sameLineage undefined (never assumed)", async () => {
+	const judge = fakeJudge({ perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: true }], confidence: 0.9, rationale: "ok" });
+	const r = await scoreAgainstCriteria(CRITERIA, "diff", undefined, judge, undefined, "omp");
+	expect(r.authorLineage).toBe("unknown");
+	expect(r.sameLineage).toBeUndefined();
+});
+
+test("unknown model but vendor-pinned harness ⇒ author lineage from harness", async () => {
+	const judge = fakeJudge({ perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: true }], confidence: 0.9, rationale: "ok" });
+	const r = await scoreAgainstCriteria(CRITERIA, "diff", undefined, judge, undefined, "gemini");
+	expect(r.authorLineage).toBe("google");
+	expect(r.sameLineage).toBe(false);
+});

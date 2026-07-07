@@ -39,3 +39,21 @@ test("score is always clamped to [0,1]", () => {
 test("unknown verification state is treated the same as none/failed (never a bonus)", () => {
 	expect(scoreConfidence({ verificationState: "unknown", filesTouched: 5 })).toBe(scoreConfidence({ verificationState: "none", filesTouched: 5 }));
 });
+
+test("same-lineage pass earns a smaller bonus than a cross-lineage pass", () => {
+	const cross = scoreConfidence({ verificationState: "stale", filesTouched: 5, validator: "pass", sameLineage: false });
+	const same = scoreConfidence({ verificationState: "stale", filesTouched: 5, validator: "pass", sameLineage: true });
+	expect(same).toBeCloseTo(cross - 0.05);
+});
+
+test("sameLineage undefined preserves the exact prior pass behavior", () => {
+	const prior = scoreConfidence({ verificationState: "stale", filesTouched: 5, validator: "pass" });
+	const undef = scoreConfidence({ verificationState: "stale", filesTouched: 5, validator: "pass", sameLineage: undefined });
+	expect(undef).toBe(prior);
+});
+
+test("a same-lineage veto is not softened — still the full -0.4", () => {
+	const cross = scoreConfidence({ verificationState: "fresh", filesTouched: 1, validator: "fail", sameLineage: false });
+	const same = scoreConfidence({ verificationState: "fresh", filesTouched: 1, validator: "fail", sameLineage: true });
+	expect(same).toBe(cross);
+});
