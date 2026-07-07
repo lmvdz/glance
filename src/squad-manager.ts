@@ -196,6 +196,10 @@ const PEER_MESSAGE_MAX_CHARS = 2000;
 const KB_SEARCH_TOOL = "squad_kb_search";
 /** Epic 5 (HITL safeguards, DESIGN.md D2): NON-blocking — responds immediately, never rides `pending`. */
 const REPORT_TOOL = "squad_report";
+/** Decision capture (research-tencentdb-agent-memory): NON-blocking like REPORT_TOOL. Advertised only
+ *  when the OMP_SQUAD_DECISION_CAPTURE flag is on. Writes a source:"agent" decision to the agent's
+ *  feature so future agents inherit it via the cold-start primer / squad_kb_search. */
+const RECORD_DECISION_TOOL = "squad_record_decision";
 
 /**
  * Reserved host tools advertised to every omp-backed agent via `set_host_tools` on ready (the
@@ -245,6 +249,21 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 		},
 	},
 ];
+
+/** Advertised only when OMP_SQUAD_DECISION_CAPTURE is on (see registerHostTools) — kept out of the
+ *  always-on SQUAD_HOST_TOOLS so the flag gates advertisement, not just dispatch. */
+const RECORD_DECISION_TOOL_DEF: HostToolDef = {
+	name: RECORD_DECISION_TOOL,
+	description:
+		"Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.",
+	parameters: {
+		type: "object",
+		properties: {
+			text: { type: "string", description: "The decision and its rationale, in one or two sentences." },
+		},
+		required: ["text"],
+	},
+};
 
 function peerMessageBudget(): number {
 	return envInt("OMP_SQUAD_PEERMSG_BUDGET", 5);
@@ -5292,8 +5311,11 @@ export class SquadManager extends EventEmitter {
 		// absent descriptor (workflow/flue kinds) keeps today's behavior — host tools advertised.
 		const caps = (rec.harness ?? this.harnessFor(rec.options))?.capabilities;
 		if (caps && !caps.hostTools) return;
+		// Decision capture is flag-gated (default off): advertise squad_record_decision only when on,
+		// so a fresh agent's tool list matches what onHostTool will actually dispatch.
+		const tools = isOn(learningFlags(rec.dto.id).decisionCapture) ? [...SQUAD_HOST_TOOLS, RECORD_DECISION_TOOL_DEF] : SQUAD_HOST_TOOLS;
 		try {
-			rec.agent.setHostTools?.(SQUAD_HOST_TOOLS);
+			rec.agent.setHostTools?.(tools);
 		} catch (err) {
 			this.log("warn", `set_host_tools failed for ${rec.dto.name}: ${String(err)}`);
 		}
@@ -5310,6 +5332,10 @@ export class SquadManager extends EventEmitter {
 		}
 		if (call.toolName === REPORT_TOOL) {
 			void this.handleReportTool(rec, call);
+			return;
+		}
+		if (call.toolName === RECORD_DECISION_TOOL) {
+			void this.handleRecordDecisionTool(rec, call);
 			return;
 		}
 		// Capability tool-grant enforcement (#3): if this agent was spawned from a capability profile that
@@ -5405,6 +5431,55 @@ export class SquadManager extends EventEmitter {
 		rec.agent.respondHostTool(call.id, "report recorded — continue working, a human will review it when they can");
 		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncate(summary, 120));
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * squad_record_decision (research-tencentdb-agent-memory): capture a consequential decision into the
+	 * agent's feature as a source:"agent" FeatureDecision, so it surfaces in the cold-start primer /
+	 * squad_kb_search for future agents. NON-blocking like handleReportTool — responds immediately,
+	 * never setPending. Best-effort: any failure is reported to the agent + warn-logged, never thrown.
+	 * Idempotent: a normalized-text match against the feature's existing decisions is a no-op.
+	 */
+	private async handleRecordDecisionTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		try {
+			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+			const text = typeof args.text === "string" ? args.text.trim() : "";
+			if (!text) {
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string })`, true);
+				return;
+			}
+			const featureId = rec.dto.featureId;
+			const pf = featureId ? this.featureStore.get(featureId) : undefined;
+			if (!featureId || !pf) {
+				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
+				return;
+			}
+			const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
+			const existing = pf.decisions ?? [];
+			if (existing.some((d) => norm(d.text) === norm(text))) {
+				rec.agent.respondHostTool(call.id, "decision already recorded — no change");
+				return;
+			}
+			const decision: FeatureDecision = {
+				id: randomUUID(),
+				text,
+				source: "agent",
+				createdAt: Date.now(),
+				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
+			};
+			await this.updateFeature(featureId, { decisions: [...existing, decision] });
+			this.append(rec, "system", `📝 decision recorded: ${truncate(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+			this.learningMetrics.record("decision-captured", 1);
+			void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncate(text, 120));
+			rec.agent.respondHostTool(call.id, "decision recorded — future agents on this work will inherit it");
+		} catch (err) {
+			try {
+				rec.agent.respondHostTool(call.id, `failed to record decision: ${String(err)}`, true);
+			} catch {
+				/* respond best-effort */
+			}
+			this.log("warn", `record-decision failed for ${rec.dto.name}: ${String(err)}`);
+		}
 	}
 
 	private derive(rec: AgentRecord): AgentStatus {

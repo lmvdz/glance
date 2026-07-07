@@ -383,6 +383,10 @@ export interface FeatureDecision {
 	text: string;
 	source?: "plan" | "human" | "agent";
 	createdAt?: number;
+	/** Provenance backlink for agent-CAPTURED decisions (source:"agent") — the run that recorded it.
+	 *  Populated only on the agent path; never fabricated for plan/human sources (mirrors the
+	 *  "never-faked timestamp" discipline in fabric-search.ts). */
+	sourceRef?: { agentId?: string; runId?: string };
 }
 
 export interface FeatureRelationship {

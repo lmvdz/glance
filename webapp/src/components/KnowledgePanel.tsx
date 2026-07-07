@@ -200,7 +200,14 @@ const Overview: React.FC<{ snapshot: FabricSnapshot | null }> = ({ snapshot }) =
             {decisions.map((d, i) => (
               <li key={i} className="border-b border-gray-100 dark:border-gray-800 px-4 py-2.5 last:border-b-0">
                 <div className="text-sm text-gray-800 dark:text-gray-200">{d.text}</div>
-                <div className="mt-0.5 text-[11px] text-gray-400">{d.featureTitle}{d.decisionSource ? ` · ${d.decisionSource}` : ''}</div>
+                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <span>{d.featureTitle}</span>
+                  {d.decisionSource === 'agent' ? (
+                    <span className="rounded-sm bg-emerald-100 px-1 py-px text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" title="captured by an agent">agent</span>
+                  ) : d.decisionSource ? (
+                    <span>· {d.decisionSource}</span>
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>
