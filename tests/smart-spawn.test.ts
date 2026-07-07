@@ -8,8 +8,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { assemblePlan, discoverRepos, MIN_EDGE, MIN_SAMPLES, parsePlanJson, pickRepoHeuristic, slug, type OutcomesReader } from "../src/smart-spawn.ts";
-import type { ModelOutcomeCounts } from "../src/model-outcomes.ts";
+import { assemblePlan, discoverRepos, eligibleCandidates, MIN_EDGE, MIN_SAMPLES, parsePlanJson, pickRepoHeuristic, slug, type OutcomesReader } from "../src/smart-spawn.ts";
+import { DEFAULT_MODEL_FAMILY, type ModelOutcomeCounts } from "../src/model-outcomes.ts";
 
 afterEach(() => {
 	delete process.env.OMP_SQUAD_REPO_ROOTS;
@@ -72,14 +72,14 @@ describe("assemblePlan — outcome-driven model default shift", () => {
 	}
 
 	test("flag off (default): no shift even with a strongly-winning candidate", () => {
-		const outcomes = outcomesFrom({ "opus::heavy": { landed: 8, rejected: 0 }, "default::heavy": { landed: 1, rejected: 9 } });
+		const outcomes = outcomesFrom({ "opus::heavy": { landed: 8, rejected: 0 }, [`${DEFAULT_MODEL_FAMILY}::heavy`]: { landed: 1, rejected: 9 } });
 		const plan = assemblePlan("do it", candidates, cwd, { thinking: "high" }, { outcomes });
 		expect(plan.model).toBeUndefined();
 	});
 
 	test("flag on + >= MIN_SAMPLES + edge cleared: shifts to the better-landing model and appends a reason", () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
-		const outcomes = outcomesFrom({ "opus::heavy": { landed: 7, rejected: 1 }, "default::heavy": { landed: 1, rejected: 7 } }); // opus 0.875, default 0.125 → edge 0.75 >> 0.15
+		const outcomes = outcomesFrom({ "opus::heavy": { landed: 7, rejected: 1 }, [`${DEFAULT_MODEL_FAMILY}::heavy`]: { landed: 1, rejected: 7 } }); // opus 0.875, default 0.125 → edge 0.75 >> 0.15
 		const plan = assemblePlan("do it", candidates, cwd, { thinking: "high" }, { outcomes });
 		expect(plan.model).toBe("opus");
 		expect(plan.reason).toContain("model shifted to opus");
@@ -88,21 +88,21 @@ describe("assemblePlan — outcome-driven model default shift", () => {
 
 	test(`flag on but a candidate has fewer than MIN_SAMPLES (${MIN_SAMPLES}) total outcomes: no shift (cold, not eligible to win)`, () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
-		const outcomes = outcomesFrom({ "opus::heavy": { landed: 3, rejected: 0 }, "default::heavy": { landed: 1, rejected: 9 } }); // opus has only 3 samples < 8
+		const outcomes = outcomesFrom({ "opus::heavy": { landed: 3, rejected: 0 }, [`${DEFAULT_MODEL_FAMILY}::heavy`]: { landed: 1, rejected: 9 } }); // opus has only 3 samples < 8
 		const plan = assemblePlan("do it", candidates, cwd, { thinking: "high" }, { outcomes });
 		expect(plan.model).toBeUndefined();
 	});
 
 	test(`flag on but the edge is below MIN_EDGE (${MIN_EDGE}): no shift, default stands`, () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
-		const outcomes = outcomesFrom({ "opus::heavy": { landed: 5, rejected: 3 }, "default::heavy": { landed: 5, rejected: 4 } }); // opus 0.625 vs default 0.556 → edge ~0.07 < 0.15
+		const outcomes = outcomesFrom({ "opus::heavy": { landed: 5, rejected: 3 }, [`${DEFAULT_MODEL_FAMILY}::heavy`]: { landed: 5, rejected: 4 } }); // opus 0.625 vs default 0.556 → edge ~0.07 < 0.15
 		const plan = assemblePlan("do it", candidates, cwd, { thinking: "high" }, { outcomes });
 		expect(plan.model).toBeUndefined();
 	});
 
 	test("an explicit LLM-supplied model is NEVER overridden, even with a winning candidate available", () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
-		const outcomes = outcomesFrom({ "opus::heavy": { landed: 8, rejected: 0 }, "default::heavy": { landed: 0, rejected: 8 } });
+		const outcomes = outcomesFrom({ "opus::heavy": { landed: 8, rejected: 0 }, [`${DEFAULT_MODEL_FAMILY}::heavy`]: { landed: 0, rejected: 8 } });
 		const plan = assemblePlan("do it", candidates, cwd, { model: "sonnet", thinking: "high" }, { outcomes });
 		expect(plan.model).toBe("sonnet");
 	});
@@ -116,7 +116,7 @@ describe("assemblePlan — outcome-driven model default shift", () => {
 	test("a cold candidate is never starved below the baseline — an undecided shift just leaves the default untouched", () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
 		// Neither candidate has enough samples: the shift must be a pure no-op, never an implicit demotion.
-		const outcomes = outcomesFrom({ "opus::mid": { landed: 1, rejected: 0 }, "default::mid": { landed: 0, rejected: 0 } });
+		const outcomes = outcomesFrom({ "opus::mid": { landed: 1, rejected: 0 }, [`${DEFAULT_MODEL_FAMILY}::mid`]: { landed: 0, rejected: 0 } });
 		const plan = assemblePlan("do it", candidates, cwd, {}, { outcomes });
 		expect(plan.model).toBeUndefined();
 	});
@@ -126,7 +126,7 @@ describe("assemblePlan — outcome-driven model default shift", () => {
 		// opus clears MIN_SAMPLES (8) at a mediocre 0.25 land rate; "default" was NEVER measured ({0,0}).
 		// Trusting the incumbent's unmeasured 0% rate would flip EVERY mid-tier omitted-model spawn to
 		// opus (0.25 - 0 = 0.25 >= MIN_EDGE) despite opus's own poor record — starving the cold incumbent.
-		const outcomes = outcomesFrom({ "opus::mid": { landed: 2, rejected: 6 }, "default::mid": { landed: 0, rejected: 0 } });
+		const outcomes = outcomesFrom({ "opus::mid": { landed: 2, rejected: 6 }, [`${DEFAULT_MODEL_FAMILY}::mid`]: { landed: 0, rejected: 0 } });
 		const plan = assemblePlan("do it", candidates, cwd, {}, { outcomes });
 		expect(plan.model).toBeUndefined(); // cold incumbent ⇒ no basis for comparison ⇒ base heuristic stands
 	});
@@ -134,15 +134,38 @@ describe("assemblePlan — outcome-driven model default shift", () => {
 	test("(S1 regression) a thinly-measured incumbent (below MIN_SAMPLES) also blocks the shift", () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
 		// opus: 8 samples @ 0.875; default: only 3 samples (below the floor) — even a strong winner must wait.
-		const outcomes = outcomesFrom({ "opus::heavy": { landed: 7, rejected: 1 }, "default::heavy": { landed: 3, rejected: 0 } });
+		const outcomes = outcomesFrom({ "opus::heavy": { landed: 7, rejected: 1 }, [`${DEFAULT_MODEL_FAMILY}::heavy`]: { landed: 3, rejected: 0 } });
 		const plan = assemblePlan("do it", candidates, cwd, { thinking: "high" }, { outcomes });
 		expect(plan.model).toBeUndefined();
 	});
 
 	test("record/read bucketing agree: a 'medium'/undefined thinking task reads the 'mid' tier", () => {
 		process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
-		const outcomes = outcomesFrom({ "opus::mid": { landed: 8, rejected: 0 }, "default::mid": { landed: 0, rejected: 8 } });
+		const outcomes = outcomesFrom({ "opus::mid": { landed: 8, rejected: 0 }, [`${DEFAULT_MODEL_FAMILY}::mid`]: { landed: 0, rejected: 8 } });
 		const plan = assemblePlan("do it", candidates, cwd, {}, { outcomes }); // no thinking ⇒ tierOf(undefined) === "mid"
 		expect(plan.model).toBe("opus");
+	});
+});
+
+// ── Cross-provider leak guard (research-sirvir/02, red-team MINOR 5) ───────────────────────────
+
+describe("eligibleCandidates", () => {
+	test("excludes a family from a different vendor's subscription for the default (anthropic) provider", () => {
+		expect(eligibleCandidates(["opus", "sonnet", "openai", "gemini"])).toEqual(["opus", "sonnet"]);
+	});
+
+	test("never let a well-landing openai family become the chosen model for an Anthropic-subscription omp unit", () => {
+		// Same shape as the real SHIFT_CANDIDATES eligibility scan: an `openai` candidate would win
+		// outright on outcomes alone (it's the only one clearing MIN_SAMPLES with a good rate), but it
+		// must never even enter the comparison for the default anthropic provider.
+		expect(eligibleCandidates(["opus", "openai"])).toEqual(["opus"]);
+	});
+
+	test("parameterized by provider — an openai-scoped caller keeps openai and drops anthropic families", () => {
+		expect(eligibleCandidates(["opus", "sonnet", "openai"], "openai")).toEqual(["openai"]);
+	});
+
+	test("an empty candidate list stays empty", () => {
+		expect(eligibleCandidates([])).toEqual([]);
 	});
 });
