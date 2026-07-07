@@ -4,27 +4,38 @@
  */
 
 import React from 'react';
-import { LogOut, Building2 } from 'lucide-react';
+import { LogOut, Building2, Bell, BellOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTaskContext } from '../context/TaskContext';
 import { JoinRequests } from './JoinRequests';
+import { enablePush, pushPermission } from '../lib/push';
 
 // Compact signed-in identity + sign-out, shown in the workbench header. Renders nothing in file mode
 // (no session concept there), so it's inert unless the daemon runs in db mode with a logged-in user.
 export const AccountMenu = () => {
   const { me, signOut } = useAuth();
-  const { setView } = useTaskContext();
+  const { setView, showToast } = useTaskContext();
   const [open, setOpen] = React.useState(false);
+  const [pushPerm, setPushPerm] = React.useState<NotificationPermission | 'unsupported'>(() => pushPermission());
   const ref = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
     if (!open) return;
+    setPushPerm(pushPermission());
     const onDown = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
   }, [open]);
+
+  const handleTogglePush = async () => {
+    if (pushPerm === 'granted') return;
+    const result = await enablePush();
+    setPushPerm(pushPermission());
+    if (result === 'granted') showToast('Background push enabled', 'success');
+    else if (result === 'denied') showToast('Notification permission denied', 'error');
+  };
 
   if (!me) return null;
   const { user, role, activeOrganizationId } = me;
@@ -72,6 +83,20 @@ export const AccountMenu = () => {
             <Building2 className="h-3.5 w-3.5" aria-hidden="true" />
             Organization settings
           </button>
+          {pushPerm !== 'unsupported' && (
+            <button
+              onClick={() => void handleTogglePush()}
+              disabled={pushPerm === 'granted'}
+              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-default disabled:opacity-60 dark:text-gray-200 dark:hover:bg-gray-800"
+            >
+              {pushPerm === 'granted' ? (
+                <Bell className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <BellOff className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              {pushPerm === 'granted' ? 'Background notifications on' : 'Background notifications'}
+            </button>
+          )}
           <button
             onClick={() => {
               setOpen(false);

@@ -474,6 +474,43 @@ describe('attentionItems', () => {
     expect(items).toHaveLength(1);
     expect(items[0].kind).toBe('blocked');
   });
+
+  test('opts.sort "blocked-longest" ranks the whole list oldest-since-first, regardless of severity; the default stays freshest-first', () => {
+    const t0 = 1000; // oldest
+    const t1 = 2000;
+    const t2 = 3000; // freshest
+    const input = {
+      agents: [
+        // land-ready (warn) but the OLDEST — must lead in blocked-longest despite lower severity.
+        agent('warn-old', 'idle', { landReady: true, lastActivity: t0 }),
+        // blocked (critical), middle age.
+        agent('crit-mid', 'input', { lastActivity: t1 }),
+        // errored (critical), freshest.
+        agent('crit-new', 'error', { error: 'boom', lastActivity: t2 }),
+      ],
+    };
+
+    const longest = attentionItems(input, { sort: 'blocked-longest' });
+    expect(longest.map((i) => i.id)).toEqual(['land:warn-old', 'blocked:crit-mid', 'error:crit-new']);
+    expect(longest.map((i) => i.since)).toEqual([t0, t1, t2]);
+
+    const byDefault = attentionItems(input);
+    // default: critical first (freshest-first within severity), then warn.
+    expect(byDefault.map((i) => i.id)).toEqual(['error:crit-new', 'blocked:crit-mid', 'land:warn-old']);
+  });
+
+  test('blocked-longest sorts items lacking `since` to the end, tie-broken by id', () => {
+    const items = attentionItems(
+      {
+        collisions: [{ file: 'src/x.ts', agents: [{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }] }],
+        agents: [agent('a', 'input', { lastActivity: 500 })],
+      },
+      { sort: 'blocked-longest' },
+    );
+    // the collision row has no `since` and must sort last, even though it's alphabetically
+    // earlier than the blocked row's id.
+    expect(items.map((i) => i.kind)).toEqual(['blocked', 'collision']);
+  });
 });
 
 // ───────────────────────────── pushRolling ─────────────────────────────
