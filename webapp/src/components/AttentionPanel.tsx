@@ -44,7 +44,7 @@ const SEVERITY_GROUPS: { key: 'critical' | 'warn'; title: string }[] = [
 ];
 
 export const AttentionPanel: React.FC = () => {
-  const { agents, connected, openConsole, sendConsoleCommand, showToast } = useTaskContext();
+  const { agents, connected, openConsole, openIntervene, sendConsoleCommand, showToast } = useTaskContext();
 
   const [gov, setGov] = useState<GovernancePayload | null>(null);
   const [usage, setUsage] = useState<UsagePayload | null>(null);
@@ -308,7 +308,7 @@ export const AttentionPanel: React.FC = () => {
                 <div className="divide-y divide-gray-100 dark:divide-gray-800">
                   {rows.map((item) => (
                     <div key={item.id}>
-                      <AttentionRow item={item} onAction={onAction} busy={busyId === item.id} />
+                      <AttentionRow item={item} onAction={onAction} onOpen={(i) => openIntervene(i.agentId)} busy={busyId === item.id} />
                       {/* Inline composer, opened by the Answer or Steer action. */}
                       {answering?.id === item.id && (
                         <div className="border-t border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/60 px-4 py-3">

@@ -24,6 +24,7 @@ import { TopologyPanel } from './components/TopologyPanel';
 import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
+import { IntervenceView } from './components/IntervenceView';
 import { ActiveWorkPane } from './components/ActiveWorkPane';
 import { FactoryStatusStrip } from './components/FactoryStatusStrip';
 import { OrgSettings } from './components/OrgSettings';
@@ -49,6 +50,7 @@ const MainContent = () => {
   if (status === 'authed' && !currentProject && view !== 'org') return <FirstRunSetup />;
 
   if (view === 'attention') return <AttentionPanel />;
+  if (view === 'intervene') return <IntervenceView />;
   if (view === 'active') return <ActiveWorkPane />;
   if (view === 'capabilities') return <CapabilityPanel />;
   if (view === 'automation') return <AutomationPanel />;
