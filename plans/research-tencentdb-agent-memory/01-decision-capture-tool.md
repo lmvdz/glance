@@ -1,5 +1,5 @@
 # squad_record_decision host tool + provenance
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -84,3 +84,6 @@ None outside omp-squad. The webapp already renders `decisionSource` (concern 02 
 - Flag off (default): `registerHostTools` does not advertise the tool; `onHostTool` with the tool name falls through to the grant gate.
 - Live: with `OMP_SQUAD_DECISION_CAPTURE=1`, drive a real agent to call the tool; confirm the decision appears in `/api/fabric` `counts.decisions` and in a fresh agent's primer on the same repo/task.
 - Suite: `bun test` green; `bunx tsc --noEmit` clean.
+
+## Resolution
+CLOSED (c997a1d). squad_record_decision tool + handler + flag/metric + FeatureDecision.sourceRef shipped; end-to-end handler test green (capture + idempotency + no-feature guard). Backend 1677 pass, tsc clean.

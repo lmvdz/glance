@@ -21,6 +21,9 @@ An agent can call `squad_record_decision` to record a consequential choice, whic
 | 01 | — | — |
 | 02 | 01 | `grep -n "sourceRef" src/types.ts` returns the new field; `grep -n "squad_record_decision" src/squad-manager.ts` returns the tool |
 
+## Status
+**Both concerns CLOSED (2/2) — shipped on PR #90.** Backend 1677 pass / webapp 574 pass, both tsc clean. Feature is flag-gated `OMP_SQUAD_DECISION_CAPTURE` (default off). Not yet live-driven with a real model agent autonomously calling the tool (needs daemon + tokens); the handler path is exercised end-to-end through a real `SquadManager`.
+
 ## Notes
 - **Proceeded over a large WIP pile** (Phase 0 scan: 79 plans with open concerns, oldest `meta-plan-autonomous-fleet` 2026-07-05) — this run is a research→plan chain, so the debt is logged here rather than blocking the pipeline.
 - This plan is the **pivot** from the descoped consolidation design (see `DESIGN.md`). The consolidation/de-pollution work stays cut until captured-decision volume makes it measurable.

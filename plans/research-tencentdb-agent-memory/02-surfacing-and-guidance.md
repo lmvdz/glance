@@ -1,5 +1,5 @@
 # Surfacing: agent-source badge + guidance
-STATUS: open
+STATUS: closed
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -20,3 +20,6 @@ None.
 ## Verify
 - With a captured `source:"agent"` decision present (from concern 01), the KnowledgePanel "Decisions on record" row shows the agent badge; a human-added decision shows no agent badge; a plan decision shows its existing treatment.
 - `cd webapp && bunx tsc --noEmit` clean; the panel renders without console errors when driven against a feature that has mixed-source decisions.
+
+## Resolution
+CLOSED (c997a1d). Emerald 'agent' badge on agent-captured decisions in KnowledgePanel + TaskDetail. Webapp 574 pass, tsc clean. (Tool-description usage nudge shipped in concern 01's def.)
