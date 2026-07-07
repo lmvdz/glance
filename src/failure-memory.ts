@@ -13,8 +13,8 @@
  * branch's worktree, which the whole point of this fact (surviving past that worktree) rules out.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 
 export interface FailureAnnotation {
 	/** The observer's stable dedup key, e.g. `land-failing:squad/abc123`. */
@@ -37,8 +37,11 @@ function storePath(stateDir: string): string {
 export function readFailureAnnotations(stateDir: string): FailureStore {
 	try {
 		const p = storePath(stateDir);
-		if (!existsSync(p)) return {};
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		const b = getStorageBackend();
+		if (!b.exists(p)) return {};
+		const raw0 = b.readTextSync(p);
+		if (raw0 === undefined) return {};
+		const raw = JSON.parse(raw0) as unknown;
 		return raw && typeof raw === "object" ? (raw as FailureStore) : {};
 	} catch {
 		return {};
@@ -47,7 +50,7 @@ export function readFailureAnnotations(stateDir: string): FailureStore {
 
 function writeFailureAnnotations(stateDir: string, store: FailureStore): void {
 	try {
-		writeFileSync(storePath(stateDir), JSON.stringify(store));
+		getStorageBackend().writeDurableSync(storePath(stateDir), JSON.stringify(store));
 	} catch {
 		/* best-effort: a disk failure must never break the observer tick that produced this */
 	}

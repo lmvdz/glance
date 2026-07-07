@@ -1,7 +1,6 @@
-import { existsSync } from "node:fs";
-import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { writeFileDurable } from "./dal/store.ts";
+import { getStorageBackend } from "./dal/storage.ts";
 
 export type FeatureFlagKey =
 	| "OMP_SQUAD_WEBAPP"
@@ -132,7 +131,8 @@ export class RuntimeSettingsStore {
 
 	async load(): Promise<RuntimeSettingsSnapshot> {
 		try {
-			return parseSnapshot(JSON.parse(await fs.readFile(this.file, "utf8")));
+			const raw = await getStorageBackend().readText(this.file);
+			return raw === undefined ? { featureFlags: {} } : parseSnapshot(JSON.parse(raw));
 		} catch {
 			return { featureFlags: {} };
 		}
@@ -162,6 +162,6 @@ export class RuntimeSettingsStore {
 	}
 
 	exists(): boolean {
-		return existsSync(this.file);
+		return getStorageBackend().exists(this.file);
 	}
 }

@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { envInt } from "./config.ts";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { FabricHotAreaFact, FabricScoutFact } from "./fabric.ts";
 import { jaccard, titleTokens } from "./scout.ts";
@@ -183,8 +183,11 @@ export class Opportunity {
 
 	private loadSeen(): SeenMap {
 		try {
-			if (!existsSync(this.seenPath)) return {};
-			const raw = JSON.parse(readFileSync(this.seenPath, "utf8")) as unknown;
+			const b = getStorageBackend();
+			if (!b.exists(this.seenPath)) return {};
+			const raw0 = b.readTextSync(this.seenPath);
+			if (raw0 === undefined) return {};
+			const raw = JSON.parse(raw0) as unknown;
 			return raw && typeof raw === "object" ? (raw as SeenMap) : {};
 		} catch {
 			return {};
@@ -193,7 +196,7 @@ export class Opportunity {
 
 	private saveSeen(): void {
 		try {
-			writeFileSync(this.seenPath, JSON.stringify(this.seen));
+			getStorageBackend().writeDurableSync(this.seenPath, JSON.stringify(this.seen));
 		} catch (e) {
 			(this.deps.log ?? (() => {}))(`persist failed: ${e instanceof Error ? e.message : String(e)}`);
 		}

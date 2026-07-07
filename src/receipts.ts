@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentStatus, ReceiptRollup, RunReceipt } from "./types.ts";
 import { shouldKeepSpans, SpanCollector, traceMaxSpans, traceSampleRatio } from "./spans.ts";
+import { getStorageBackend } from "./dal/storage.ts";
 
 /** Assistant usage shape we care about (subset of pi-catalog `Usage`). */
 interface AssistantUsage {
@@ -209,17 +210,10 @@ export function receiptPath(baseDir: string, agentId: string): string {
 }
 
 export async function appendReceipt(baseDir: string, receipt: RunReceipt): Promise<void> {
-	const file = receiptPath(baseDir, receipt.agentId);
-	await fs.mkdir(path.dirname(file), { recursive: true });
-	// Append + fsync so a committed receipt line survives a host crash. The read path
-	// (readReceipts) is per-line tolerant, so fsync only narrows the torn-tail window.
-	const fh = await fs.open(file, "a");
-	try {
-		await fh.writeFile(`${JSON.stringify(receipt)}\n`);
-		await fh.sync();
-	} finally {
-		await fh.close();
-	}
+	// Append + fsync through the active StorageBackend so a committed receipt line survives a host crash
+	// and rides whatever substrate is configured. The read path (readReceipts) is per-line tolerant, so
+	// fsync only narrows the torn-tail window.
+	await getStorageBackend().appendDurable(receiptPath(baseDir, receipt.agentId), `${JSON.stringify(receipt)}\n`);
 }
 
 export async function readReceipts(baseDir: string, agentId: string): Promise<RunReceipt[]> {

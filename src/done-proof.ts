@@ -9,8 +9,8 @@
  * (a disk failure must never break a land).
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 export interface DoneProof {
@@ -42,8 +42,11 @@ function ledgerPath(stateDir: string): string {
 export function readDoneProofLedger(stateDir: string): DoneProofLedger {
 	try {
 		const p = ledgerPath(stateDir);
-		if (!existsSync(p)) return { byBranch: {}, byIssue: {} };
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		const b = getStorageBackend();
+		if (!b.exists(p)) return { byBranch: {}, byIssue: {} };
+		const raw0 = b.readTextSync(p);
+		if (raw0 === undefined) return { byBranch: {}, byIssue: {} };
+		const raw = JSON.parse(raw0) as unknown;
 		if (!raw || typeof raw !== "object") return { byBranch: {}, byIssue: {} };
 		const r = raw as Partial<DoneProofLedger>;
 		return {
@@ -57,7 +60,7 @@ export function readDoneProofLedger(stateDir: string): DoneProofLedger {
 
 function writeDoneProofLedger(stateDir: string, ledger: DoneProofLedger): void {
 	try {
-		writeFileSync(ledgerPath(stateDir), JSON.stringify(ledger));
+		getStorageBackend().writeDurableSync(ledgerPath(stateDir), JSON.stringify(ledger));
 	} catch {
 		/* best-effort: a disk failure must never break the land it records */
 	}

@@ -10,8 +10,8 @@
  * fail closed before verify/land rather than continue after losing a critical state transition.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 
 /** Decision classes the loop must not re-litigate after a restart. */
 type Kind = "verifying" | "verified" | "blocked" | "halted" | "landed" | "staged";
@@ -45,12 +45,16 @@ export interface OrchestratorPersistence {
 export function openOrchestratorState(stateDir: string): OrchestratorPersistence {
 	const file = path.join(stateDir, "orchestrator-state.json");
 	const sets: Record<Kind, Set<string>> = { verifying: new Set(), verified: new Set(), blocked: new Set(), halted: new Set(), landed: new Set(), staged: new Set() };
+	const backend = getStorageBackend();
 	try {
-		if (existsSync(file)) {
-			const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<Record<Kind, unknown>>;
-			for (const k of KINDS) {
-				const v = raw?.[k];
-				if (Array.isArray(v)) sets[k] = new Set(v.filter((x): x is string => typeof x === "string"));
+		if (backend.exists(file)) {
+			const raw0 = backend.readTextSync(file);
+			if (raw0 !== undefined) {
+				const raw = JSON.parse(raw0) as Partial<Record<Kind, unknown>>;
+				for (const k of KINDS) {
+					const v = raw?.[k];
+					if (Array.isArray(v)) sets[k] = new Set(v.filter((x): x is string => typeof x === "string"));
+				}
 			}
 		}
 	} catch {
@@ -58,7 +62,7 @@ export function openOrchestratorState(stateDir: string): OrchestratorPersistence
 	}
 
 	const flush = (): void => {
-		writeFileSync(file, JSON.stringify({ verifying: [...sets.verifying], verified: [...sets.verified], blocked: [...sets.blocked], halted: [...sets.halted], landed: [...sets.landed], staged: [...sets.staged] }));
+		getStorageBackend().writeDurableSync(file, JSON.stringify({ verifying: [...sets.verifying], verified: [...sets.verified], blocked: [...sets.blocked], halted: [...sets.halted], landed: [...sets.landed], staged: [...sets.staged] }));
 	};
 	const mark = (k: Kind, key: string): void => {
 		if (key && !sets[k].has(key)) {

@@ -44,6 +44,7 @@ import { writeConcernDrafts } from "./plan-writer.ts";
 import { ompClassify } from "./intake.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
+import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
@@ -228,6 +229,10 @@ async function cmdUp(args: string[]): Promise<void> {
 	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
 	const host = process.env.OMP_SQUAD_HOST || (typeof flags.host === "string" ? flags.host : undefined) || "127.0.0.1";
 	const stateDir = stateDirPath();
+	// Select the durable-storage substrate BEFORE any persistence runs. Default local disk; a different
+	// backend (Archil, S3, …) is a drop-in via setStorageBackend — see src/dal/storage.ts. `archil` loud-
+	// fails until the pilot's follow-up implements it, so a misconfig can never silently lose state.
+	setStorageBackend(backendFromEnv());
 	const runtimeSettings = new RuntimeSettingsStore(stateDir);
 	await runtimeSettings.apply();
 	const policy = new PolicyStore(stateDir);

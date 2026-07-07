@@ -21,48 +21,16 @@ import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } fr
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
 import { type OrgContext, withOrg } from "./context.ts";
+import { getStorageBackend } from "./storage.ts";
 
 /**
- * Atomically + durably write `data` to `file`: temp → fsync(file) → rename → fsync(dir).
- * After this resolves, the bytes survive a host crash (POSIX and Archil both define
- * fsync as the durability barrier). On any throw the temp file is best-effort removed,
- * preserving the old store behavior of never leaving a stray `.tmp` as truth.
- *
- * ponytail: the directory-fd fsync (which makes the rename itself durable) is skipped
- * on platforms where opening a dir for fsync fails — some FUSE mounts reject it. We
- * swallow EISDIR/EINVAL/EBADF/EPERM/ENOTSUP there and proceed; the file-bytes fsync
- * still holds. Upgrade path: a platform-specific dir-sync syscall if a target ever needs
- * the rename barrier and the dir-fd open is the only thing blocking it.
+ * Atomically + durably write `data` to `file` through the active StorageBackend (default: local disk,
+ * temp → fsync(file) → rename → fsync(dir)). After this resolves the bytes survive a host crash. The
+ * concrete durability mechanism now lives in `LocalStorageBackend` (src/dal/storage.ts); this thin
+ * delegator keeps every existing caller (FileStore, settings, policy, …) backend-swappable for free.
  */
 export async function writeFileDurable(file: string, data: string): Promise<void> {
-	const dir = path.dirname(file);
-	await fs.mkdir(dir, { recursive: true });
-	const tmp = `${file}.tmp`;
-	try {
-		const fh = await fs.open(tmp, "w");
-		try {
-			await fh.writeFile(data);
-			await fh.sync(); // fsync the file's bytes before the rename
-		} finally {
-			await fh.close();
-		}
-		await fs.rename(tmp, file);
-	} catch (err) {
-		await fs.rm(tmp, { force: true }).catch(() => {});
-		throw err;
-	}
-	// fsync the directory so the rename entry itself is durable.
-	try {
-		const dfh = await fs.open(dir, "r");
-		try {
-			await dfh.sync();
-		} finally {
-			await dfh.close();
-		}
-	} catch (err) {
-		const code = (err as NodeJS.ErrnoException)?.code;
-		if (code && !["EISDIR", "EINVAL", "EBADF", "EPERM", "ENOTSUP"].includes(code)) throw err;
-	}
+	await getStorageBackend().writeDurable(file, data);
 }
 
 /** Full persisted state the manager round-trips on save/load. */

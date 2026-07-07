@@ -15,10 +15,11 @@
  * reconcile from (concern 07's backstop loop).
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { gateExec } from "./gate-runner.ts";
 import { detectVerify } from "./intake.ts";
@@ -149,8 +150,11 @@ function pendingPrPath(stateDir: string): string {
 export function readPendingPrLedger(stateDir: string): PendingPrLedger {
 	try {
 		const p = pendingPrPath(stateDir);
-		if (!existsSync(p)) return { byBranch: {} };
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		const b = getStorageBackend();
+		if (!b.exists(p)) return { byBranch: {} };
+		const raw0 = b.readTextSync(p);
+		if (raw0 === undefined) return { byBranch: {} };
+		const raw = JSON.parse(raw0) as unknown;
 		if (!raw || typeof raw !== "object") return { byBranch: {} };
 		const r = raw as Partial<PendingPrLedger>;
 		return { byBranch: r.byBranch && typeof r.byBranch === "object" ? r.byBranch : {} };
@@ -161,7 +165,7 @@ export function readPendingPrLedger(stateDir: string): PendingPrLedger {
 
 function writePendingPrLedger(stateDir: string, ledger: PendingPrLedger): void {
 	try {
-		writeFileSync(pendingPrPath(stateDir), JSON.stringify(ledger));
+		getStorageBackend().writeDurableSync(pendingPrPath(stateDir), JSON.stringify(ledger));
 	} catch {
 		/* best-effort: a disk failure must never break the land it records */
 	}
