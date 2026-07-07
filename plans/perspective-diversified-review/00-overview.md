@@ -97,11 +97,13 @@ Two more claims in the "Resolution" section above did not hold up under independ
    (co-located with the modules they test), but `bunfig.toml` scopes `bun test` to `[test] root =
    "tests"` specifically to keep it out of `webapp/`. Plain `bun test` silently discovered 0 of them.
    Moved all seven to `tests/` (rewriting `./x.ts` imports to `../src/x.ts`, matching every other test
-   in the repo) — confirmed via file count (237→244) and pass count (1828→1878, +50 = the 48 original
-   + 2 new live-sanity tests below) that they are now inside the real gate.
-2. **`bool-env-compare` ratchet baseline was stale.** The new `OMP_SQUAD_LENS_REVIEW`/`OMP_SQUAD_LENS_VERIFY`
-   flag checks in `src/validator.ts` pushed the pattern count from 52→54; bumped `scripts/effect-migration.ts`
-   accordingly (no `envBool` helper exists yet to migrate onto, consistent with the existing debt note).
+   in the repo) — the +50 delta in the gating suite's pass count (the 48 original + 2 new live-sanity
+   tests below) confirms they are now inside the real gate.
+2. **The flag reads were legacy `process.env.X === "1"` compares.** PR #109 (merged mid-re-land) built
+   `envBool(name, fallback)` in `src/config.ts` and burned the `bool-env-compare` ratchet down to 19;
+   the two lens flag reads in `src/validator.ts` are converted onto the helper (default-off polarity:
+   `envBool("OMP_SQUAD_LENS_REVIEW", false)` / `envBool("OMP_SQUAD_LENS_VERIFY", false)`), keeping the
+   ratchet at 19/19 with no baseline adjustment.
 
 Added `tests/validator.gate-lens-live.test.ts`: a full `validatorGate` run against a **real temp git
 repo** (not a fake diff) proving the master-flag-unset path never invokes the lens judge and the
