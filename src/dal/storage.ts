@@ -16,16 +16,24 @@
  * still use raw fs and can migrate to these helpers incrementally.
  */
 
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import * as fs from "node:fs/promises";
-import { readFileSync } from "node:fs";
 import * as path from "node:path";
+
+/** Options for a durable write. `mode` sets the created file's permission bits (e.g. 0o600 for a
+ *  secret) — a temp+rename otherwise lands at the default 0644 and would leak a token/key. */
+export interface WriteOpts {
+	mode?: number;
+}
 
 export interface StorageBackend {
 	/** Short identifier for logs / diagnostics (e.g. "local", "archil"). */
 	readonly name: string;
 	/** Atomically + durably write `data` to `file` (survives a host crash). */
-	writeDurable(file: string, data: string): Promise<void>;
+	writeDurable(file: string, data: string, opts?: WriteOpts): Promise<void>;
+	/** Synchronous durable write — for the single-daemon state ledgers that persist inline on a sync
+	 *  path and can't await. A non-filesystem backend (pure remote API) may not support this. */
+	writeDurableSync(file: string, data: string, opts?: WriteOpts): void;
 	/** Append `data` to `file` durably (fsync'd) — for NDJSON ledgers like receipts. */
 	appendDurable(file: string, data: string): Promise<void>;
 	/** Read `file` as UTF-8, or `undefined` if it doesn't exist / can't be read. */
@@ -50,12 +58,12 @@ const DIR_FSYNC_TOLERATED = new Set(["EISDIR", "EINVAL", "EBADF", "EPERM", "ENOT
 export class LocalStorageBackend implements StorageBackend {
 	readonly name = "local";
 
-	async writeDurable(file: string, data: string): Promise<void> {
+	async writeDurable(file: string, data: string, opts?: WriteOpts): Promise<void> {
 		const dir = path.dirname(file);
 		await fs.mkdir(dir, { recursive: true });
 		const tmp = `${file}.tmp`;
 		try {
-			const fh = await fs.open(tmp, "w");
+			const fh = await fs.open(tmp, "w", opts?.mode);
 			try {
 				await fh.writeFile(data);
 				await fh.sync(); // fsync the file's bytes before the rename
@@ -74,6 +82,40 @@ export class LocalStorageBackend implements StorageBackend {
 				await dfh.sync();
 			} finally {
 				await dfh.close();
+			}
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code && !DIR_FSYNC_TOLERATED.has(code)) throw err;
+		}
+	}
+
+	writeDurableSync(file: string, data: string, opts?: WriteOpts): void {
+		const dir = path.dirname(file);
+		mkdirSync(dir, { recursive: true });
+		const tmp = `${file}.tmp`;
+		try {
+			const fd = openSync(tmp, "w", opts?.mode);
+			try {
+				writeSync(fd, data);
+				fsyncSync(fd); // fsync the bytes before the rename
+			} finally {
+				closeSync(fd);
+			}
+			renameSync(tmp, file);
+		} catch (err) {
+			try {
+				rmSync(tmp, { force: true });
+			} catch {
+				/* best-effort */
+			}
+			throw err;
+		}
+		try {
+			const dfd = openSync(dir, "r");
+			try {
+				fsyncSync(dfd);
+			} finally {
+				closeSync(dfd);
 			}
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException)?.code;
@@ -148,6 +190,9 @@ export class ArchilStorageBackend implements StorageBackend {
 	}
 	// async methods REJECT (not throw synchronously) so callers' `.catch`/`await` see a normal failure.
 	async writeDurable(): Promise<void> {
+		this.nope();
+	}
+	writeDurableSync(): void {
 		this.nope();
 	}
 	async appendDurable(): Promise<void> {

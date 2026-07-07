@@ -7,8 +7,8 @@
  * tiny JSON ledger is the same set on disk.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 
 export interface DispatchLedger {
 	has(issueId: string): boolean;
@@ -18,8 +18,11 @@ export interface DispatchLedger {
 function readIds(stateDir: string): Set<string> {
 	try {
 		const file = path.join(stateDir, "dispatch-ledger.json");
-		if (!existsSync(file)) return new Set();
-		const raw = JSON.parse(readFileSync(file, "utf8")) as unknown;
+		const b = getStorageBackend();
+		if (!b.exists(file)) return new Set();
+		const raw0 = b.readTextSync(file);
+		if (raw0 === undefined) return new Set();
+		const raw = JSON.parse(raw0) as unknown;
 		if (!Array.isArray(raw)) return new Set();
 		return new Set(raw.filter((x): x is string => typeof x === "string" && x.length > 0));
 	} catch {
@@ -29,8 +32,7 @@ function readIds(stateDir: string): Set<string> {
 
 function writeIds(stateDir: string, ids: Set<string>): void {
 	try {
-		mkdirSync(stateDir, { recursive: true });
-		writeFileSync(path.join(stateDir, "dispatch-ledger.json"), JSON.stringify([...ids].sort()));
+		getStorageBackend().writeDurableSync(path.join(stateDir, "dispatch-ledger.json"), JSON.stringify([...ids].sort()));
 	} catch {
 		/* best-effort: disk failure must not break dispatch */
 	}

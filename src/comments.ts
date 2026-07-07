@@ -9,8 +9,8 @@
  * rotation. Ceiling: linear reads on a long-lived log. Upgrade path: the sqlite store if it grows.
  */
 
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import type { PlanRevisionCandidate, PlanRevisionCandidateState } from "./types.ts";
 
 export interface PlanAnnotationTarget {
@@ -63,8 +63,7 @@ export function nextCommentId(now = Date.now()): string {
 
 export async function appendCommentEvent(baseDir: string, ev: CommentEvent): Promise<void> {
   const file = commentsPath(baseDir);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.appendFile(file, `${JSON.stringify(ev)}\n`);
+  await getStorageBackend().appendDurable(file, `${JSON.stringify(ev)}\n`);
 }
 
 export interface CommentQuery {
@@ -76,12 +75,8 @@ export interface CommentQuery {
 
 /** Read the log, fold add+resolve → current state, filter by repo+subject. Oldest-first (append order). */
 export async function listComments(baseDir: string, q: CommentQuery): Promise<ArtifactComment[]> {
-  let text: string;
-  try {
-    text = await fs.readFile(commentsPath(baseDir), "utf8");
-  } catch {
-    return [];
-  }
+  const text = await getStorageBackend().readText(commentsPath(baseDir));
+  if (text === undefined) return [];
   const byId = new Map<string, ArtifactComment>();
   const order: string[] = [];
   for (const line of text.split("\n")) {
@@ -112,8 +107,7 @@ export async function listComments(baseDir: string, q: CommentQuery): Promise<Ar
 
 
 async function appendCandidateEvent(baseDir: string, ev: CandidateEvent): Promise<void> {
-  await fs.mkdir(baseDir, { recursive: true });
-  await fs.appendFile(planRevisionCandidatesPath(baseDir), JSON.stringify(ev) + "\n", "utf8");
+  await getStorageBackend().appendDurable(planRevisionCandidatesPath(baseDir), JSON.stringify(ev) + "\n");
 }
 
 export interface CandidateQuery { repo?: string; featureId?: string; state?: PlanRevisionCandidateState }
@@ -132,8 +126,7 @@ export async function transitionPlanRevisionCandidate(baseDir: string, id: strin
 }
 
 export async function listPlanRevisionCandidates(baseDir: string, q: CandidateQuery = {}): Promise<PlanRevisionCandidate[]> {
-  let text = "";
-  try { text = await fs.readFile(planRevisionCandidatesPath(baseDir), "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+  const text = (await getStorageBackend().readText(planRevisionCandidatesPath(baseDir))) ?? "";
   const map = new Map<string, PlanRevisionCandidate>();
   for (const line of text.split(/\n/)) {
     if (!line.trim()) continue;

@@ -12,8 +12,8 @@
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import type { Actor, Role } from "./types.ts";
 
 const TOKEN_FILE = "access-token";
@@ -21,15 +21,12 @@ const TOKEN_FILE = "access-token";
 /** Read the persisted access token, generating + persisting one on first run. */
 export async function loadOrCreateToken(stateDir: string): Promise<string> {
 	const file = path.join(stateDir, TOKEN_FILE);
-	try {
-		const existing = (await fs.readFile(file, "utf8")).trim();
-		if (existing) return existing;
-	} catch {
-		// missing → create below
-	}
+	const b = getStorageBackend();
+	const raw = await b.readText(file);
+	const existing = raw?.trim();
+	if (existing) return existing;
 	const token = randomBytes(24).toString("base64url");
-	await fs.mkdir(stateDir, { recursive: true });
-	await fs.writeFile(file, `${token}\n`, { mode: 0o600 });
+	await b.writeDurable(file, `${token}\n`, { mode: 0o600 });
 	return token;
 }
 

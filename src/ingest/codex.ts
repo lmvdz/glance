@@ -26,6 +26,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getStorageBackend } from "../dal/storage.ts";
 import { appendReceipt } from "../receipts.ts";
 import type { RunReceipt } from "../types.ts";
 import { estimateCost } from "../omp-graph/rates.ts";
@@ -194,10 +195,13 @@ export async function ingestCodex(opts: { stateDir: string; repo: string; codexS
 	const base = opts.codexSessionsDir ?? path.join(os.homedir(), ".codex", "sessions");
 	const cursorFile = path.join(opts.stateDir, "ingest", "codex.json");
 	let cursor: Cursor = {};
-	try {
-		cursor = JSON.parse(await fs.readFile(cursorFile, "utf8")) as Cursor;
-	} catch {
-		// first run
+	const cursorRaw = await getStorageBackend().readText(cursorFile);
+	if (cursorRaw !== undefined) {
+		try {
+			cursor = JSON.parse(cursorRaw) as Cursor;
+		} catch {
+			// corrupt — first run
+		}
 	}
 
 	let rel: string[] = [];
@@ -249,8 +253,7 @@ export async function ingestCodex(opts: { stateDir: string; repo: string; codexS
 		ingested++;
 	}
 
-	await fs.mkdir(path.dirname(cursorFile), { recursive: true });
-	await fs.writeFile(cursorFile, JSON.stringify(cursor));
+	await getStorageBackend().writeDurable(cursorFile, JSON.stringify(cursor));
 	return { scanned, ingested };
 }
 

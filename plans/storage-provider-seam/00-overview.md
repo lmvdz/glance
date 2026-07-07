@@ -23,7 +23,13 @@ built here decoupled from Archil (operator chose "storage seam, skip Archil").
 ## Scope boundary (deliberate)
 - **In:** the DAEMON's authoritative durable state — roster/feature `state.json`, transcripts, feedback, settings, policy, receipts, proofs. Keyed by absolute path, so per-org roots are encoded in the path (not the backend instance).
 - **Out (correct, not a gap):** git **worktrees** (real fs paths git operates on directly — an Archil deployment *mounts* them), and **agent-process reads** (`readPolicyDocSync` — a separate process reads the mounted disk directly, not the daemon's backend).
-- **Follow-up (mechanical, non-urgent):** the ~40 non-authoritative log/cache/cursor writers still use raw `fs`; they migrate by swapping their fs calls for the backend helpers. Durability is unaffected (they were never fsync'd) and they're not authoritative state.
+- **Migration completed (2026-07-07):** the remaining state-dir writers are now routed too — 19 more files. The backend gained `writeDurableSync` (a sync durable write, so the sync JSON ledgers route with ZERO async-ripple and get a durability upgrade) and a `mode?` write option (so secret files keep `0o600`). Routed: dispatch-ledger, failure-memory, orchestrator-state, scout-cursor, model-outcomes, done-proof (ledger), opportunity, scout, land-pr (PendingPr ledger), resident-planner (state), digest, audit, comments, fabric (reads), the 3 ingest cursors, and auth/push secrets.
+- **Deliberately still raw fs (NOT gaps — routing them would be wrong or lossy):**
+  - `convergence-oracle.ts` — a filesystem CONTRACT shared with `scripts/continue-loop.sh` (bash reads the same files and can't call the backend); routing it would let daemon + shell diverge on a non-local backend.
+  - `state-lock.ts` — the single-writer mutex needs real hardlink semantics + local `/proc` liveness; a networked/branchable substrate breaks it.
+  - `metrics.ts` / `jsonl-log.ts` — best-effort, ring-authoritative hot logs (per-sample fsync would hurt; jsonl-log rotation needs stat/rename the seam doesn't expose). The in-memory ring is the source of truth; the file degrades to local, which is fine.
+  - `plane-secrets.ts` — a HOST credential file (`~/.claude/secrets/plane.env`) outside the state dir; a swapped substrate wouldn't contain it.
+  - worktree/repo writers (architect, plan-writer, workflow/executor, features, explore) and not-fs hits (validate, smart-spawn, workflow-source, intake).
 
 ## Verification
 - `tests/storage-backend.test.ts`: LocalBackend round-trips; a MemBackend proves `writeFileDurable`/`appendReceipt`/proof all route through the ACTIVE backend; the Archil stub loud-fails; `backendFromEnv` selects.

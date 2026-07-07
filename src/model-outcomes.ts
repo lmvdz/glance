@@ -10,8 +10,8 @@
  * while the consumer (concern 07's default-shift) is off; only the SHIFT is flag-gated.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import type { ThinkingLevel } from "./types.ts";
 
 export type ComplexityTier = "light" | "mid" | "heavy";
@@ -31,8 +31,11 @@ function ledgerPath(stateDir: string): string {
 function readLedger(stateDir: string): ModelOutcomes {
 	try {
 		const p = ledgerPath(stateDir);
-		if (!existsSync(p)) return {};
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		const b = getStorageBackend();
+		if (!b.exists(p)) return {};
+		const raw0 = b.readTextSync(p);
+		if (raw0 === undefined) return {};
+		const raw = JSON.parse(raw0) as unknown;
 		return raw && typeof raw === "object" ? (raw as ModelOutcomes) : {};
 	} catch {
 		return {}; // corrupt/unreadable ⇒ start fresh (worst case: the shift forgets one key's history)
@@ -41,7 +44,7 @@ function readLedger(stateDir: string): ModelOutcomes {
 
 function writeLedger(stateDir: string, ledger: ModelOutcomes): void {
 	try {
-		writeFileSync(ledgerPath(stateDir), JSON.stringify(ledger));
+		getStorageBackend().writeDurableSync(ledgerPath(stateDir), JSON.stringify(ledger));
 	} catch {
 		/* best-effort: a disk failure must never break the land it records */
 	}
