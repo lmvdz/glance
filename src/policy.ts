@@ -9,10 +9,10 @@
  * and an uncompilable rule regex is skipped (logged by the caller), never thrown.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { promises as fs } from "node:fs";
+import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { writeFileDurable } from "./dal/store.ts";
+import { getStorageBackend } from "./dal/storage.ts";
 
 export type PolicySeam = "tool_call" | "land" | "dispatch";
 export type PolicyDecision = "deny" | "ask";
@@ -161,7 +161,8 @@ export class PolicyStore {
 
 	async load(): Promise<PolicyDoc> {
 		try {
-			return parsePolicyDoc(JSON.parse(await fs.readFile(this.file, "utf8")));
+			const raw = await getStorageBackend().readText(this.file);
+			return raw === undefined ? { rules: [] } : parsePolicyDoc(JSON.parse(raw));
 		} catch {
 			return { rules: [] };
 		}
@@ -192,6 +193,6 @@ export class PolicyStore {
 	}
 
 	exists(): boolean {
-		return existsSync(this.file);
+		return getStorageBackend().exists(this.file);
 	}
 }
