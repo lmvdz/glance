@@ -77,6 +77,8 @@ import { all, claim, release, who } from "./presence.ts";
 import { type LeaseEntry, leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { hardAgentCeiling } from "./spawn-identity.ts";
+import { liveAgents as liveAgentCount } from "./scheduler.ts";
+import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
@@ -502,6 +504,50 @@ export class SquadServer {
 	/** Resolve the fleet a request/socket acts on. This is the ONLY way to reach a manager. */
 	private managerFor(actor: Actor): Promise<SquadManager | undefined> {
 		return this.fleetForOrg(actor.orgId);
+	}
+
+	/** The manager set a GET reaches for fleet-wide observability (health/graph/usage/heat/activity/
+	 *  action-items/governance) — the SAME break-glass audience GET /api/agents already unions via
+	 *  `registry.liveManagers()`: the optional root factory plus every currently live org manager. A
+	 *  tenant session is never bootstrapAdmin, so it always gets its own single-manager array here
+	 *  (or none, if it has no active org) — isolation is unaffected; only the on-box loopback admin
+	 *  bearer token ever sees more than one manager. */
+	private observabilityManagers(bootstrapAdmin: boolean, manager: SquadManager | undefined): SquadManager[] {
+		if (!bootstrapAdmin) return manager ? [manager] : [];
+		return [...(this.singleManager ? [this.singleManager] : []), ...(this.registry?.liveManagers() ?? [])];
+	}
+
+	/** GET-only fleet-wide observability routes, resolved against `managers` (see `observabilityManagers`)
+	 *  instead of the single per-request `manager` — so the bootstrap-admin break-glass view aggregates
+	 *  every live org manager exactly like GET /api/agents does, instead of silently reading empty just
+	 *  because no root factory is configured. Returns undefined for any other pathname/method so the
+	 *  caller falls through to the single-manager route table below. */
+	private async handleObservability(url: URL, req: Request, managers: SquadManager[], role: Role): Promise<Response | undefined> {
+		if (req.method !== "GET" || managers.length === 0) return undefined;
+		if (url.pathname === "/api/health") {
+			const h = await aggregateHealth(managers);
+			const projects = new Set(managers.flatMap((m) => m.projects().map((p) => p.repo))).size;
+			return Response.json({ ok: h.warnings.length === 0, warnings: h.warnings, ...h.sample, projects, uptimeSec: Math.round(process.uptime()), at: h.at });
+		}
+		if (url.pathname === "/api/usage") return Response.json(await usagePayload(managers, url));
+		if (url.pathname === "/api/heat") return Response.json(await heatPayload(managers, url));
+		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(managers, url));
+		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit" || url.pathname === "/api/graph/attribution" || url.pathname === "/api/graph/scoreboard" || url.pathname === "/api/graph/provenance") {
+			const repo = resolveGraphRepo(url, managers);
+			if (!repo) return new Response("repo not allowed", { status: 403 });
+			if (url.pathname === "/api/graph") return Response.json(await graphPayload(url, repo));
+			if (url.pathname === "/api/graph/commit") return Response.json(await commitDetailPayload(url, repo));
+			if (url.pathname === "/api/graph/attribution") return Response.json(await attributionPayload(url, repo));
+			if (url.pathname === "/api/graph/scoreboard") return Response.json(await scoreboardPayload(repo));
+			return Response.json(await provenancePayload(url, repo, managers));
+		}
+		// Not nested under the resolveGraphRepo-gated /api/graph block above: TaskOutcomeRow (the joined
+		// outcome log this reads) has no `repo` field — a unit's routing decision isn't a per-repo concept
+		// — so there is nothing for that allowlist to scope. Fleet-wide, like /api/usage and /api/heat.
+		if (url.pathname === "/api/graph/task-class") return Response.json(await taskClassPayload(managers, url));
+		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(managers, url));
+		if (url.pathname === "/api/governance") return Response.json(await governancePayload(managers, role, this.dbMode, !!this.registry));
+		return undefined;
 	}
 
 	/** Actor for an inbound WS command — the socket's tier plus, in DB-registry mode, its stamped org. */
@@ -944,6 +990,13 @@ export class SquadServer {
 					? { ...actorForRole(role), orgId }
 					: actorForRole(role);
 		const manager = await this.managerFor(actor);
+		// Fleet-wide GET observability (graph/usage/heat/activity/action-items/governance) is resolved
+		// against the SAME break-glass audience as GET /api/agents above (see observabilityManagers) so
+		// it must be checked before the `!manager` gate below: a bootstrap-admin without a root factory
+		// has no single `manager` (orgId stayed unresolved above) but DOES have live org managers to
+		// aggregate. A tenant session's set is always its own 1-manager array, so isolation is unaffected.
+		const observabilityResponse = await this.handleObservability(url, req, this.observabilityManagers(bootstrapAdmin, manager), role);
+		if (observabilityResponse) return observabilityResponse;
 		if (!manager) return this.noFleet(req, url);
 		// Authenticated feedback routes live in ./feedback-routes.ts (the pre-auth widget
 		// submit + widget.js stay above — they need the server's rate limiter).
@@ -1234,29 +1287,8 @@ export class SquadServer {
 			return Response.json({ agentId: dto.id, mode });
 		}
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
-		if (url.pathname === "/api/health") {
-			const h = await manager.sampleHealth();
-			return Response.json({ ok: h.warnings.length === 0, warnings: h.warnings, ...h.sample, projects: manager.projects().length, uptimeSec: Math.round(process.uptime()), at: h.at });
-		}
-		if (url.pathname === "/api/usage") return Response.json(await usagePayload(manager, url));
-		if (url.pathname === "/api/heat") return Response.json(await heatPayload(manager, url));
-		if (url.pathname === "/api/activity/heatmap") return Response.json(await activityHeatmapPayload(manager, url));
-		if (url.pathname === "/api/graph" || url.pathname === "/api/graph/commit" || url.pathname === "/api/graph/attribution" || url.pathname === "/api/graph/scoreboard" || url.pathname === "/api/graph/provenance") {
-			const repo = resolveGraphRepo(url, manager);
-			if (!repo) return new Response("repo not allowed", { status: 403 });
-			if (url.pathname === "/api/graph") return Response.json(await graphPayload(url, repo));
-			if (url.pathname === "/api/graph/commit") return Response.json(await commitDetailPayload(url, repo));
-			if (url.pathname === "/api/graph/attribution") return Response.json(await attributionPayload(url, repo));
-			if (url.pathname === "/api/graph/scoreboard") return Response.json(await scoreboardPayload(repo));
-			return Response.json(await provenancePayload(url, repo, manager));
-		}
-		// Not nested under the resolveGraphRepo-gated /api/graph block above: TaskOutcomeRow (the
-		// joined outcome log this reads) has no `repo` field — a unit's routing decision isn't a
-		// per-repo concept — so there is nothing for that allowlist to scope. Fleet-wide, like
-		// /api/usage and /api/heat.
-		if (url.pathname === "/api/graph/task-class") return Response.json(await taskClassPayload(manager, url));
-		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(manager, url));
-		if (url.pathname === "/api/governance") return Response.json(await governancePayload(manager, role, this.dbMode, !!this.registry));
+		// /api/health and the rest of the graph/usage/heat/activity/action-items/governance observability
+		// family are handled by handleObservability (above, before the `!manager` gate) — see its doc.
 		if (url.pathname === "/api/presence") {
 			// risk #6: the global presence registry is machine-wide; never serve it in DB-registry mode.
 			if (this.registry) return Response.json([]);
@@ -1793,7 +1825,14 @@ export async function tracePayload(manager: SquadManager, id: string): Promise<T
 	return response;
 }
 
-async function usagePayload(manager: SquadManager, url: URL): Promise<{
+/** Every persisted receipt across every manager the caller can see — a tenant session's array is always
+ *  1 manager (unchanged behavior); the bootstrap-admin break-glass array can be several, so this unions
+ *  them rather than reading only the first (which would silently drop every other org's history). */
+async function allReceiptsAcross(managers: SquadManager[]): Promise<RunReceipt[]> {
+	return (await Promise.all(managers.map((m) => m.allReceipts()))).flat();
+}
+
+async function usagePayload(managers: SquadManager[], url: URL): Promise<{
 	runs: RunReceipt[];
 	receipts: RunReceipt[];
 	toolCalls: number;
@@ -1810,7 +1849,7 @@ async function usagePayload(manager: SquadManager, url: URL): Promise<{
 	// Source the persisted ledger (like attributionPayload/trace), not the live roster: receipts outlive
 	// the agents that produced them — reaped agents, and every agent after a daemon restart — so
 	// roster-scoping hid all but the currently-live runs' history.
-	const receipts = (await manager.allReceipts()).filter(
+	const receipts = (await allReceiptsAcross(managers)).filter(
 		(r) => (!repo || r.repo === repo) && (!agentId || r.agentId === agentId) && (!since || (r.endedAt ?? r.startedAt) >= since),
 	);
 	const runs = receipts.sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt)).slice(0, limit);
@@ -1833,7 +1872,7 @@ async function usagePayload(manager: SquadManager, url: URL): Promise<{
 	};
 }
 
-async function heatPayload(manager: SquadManager, url: URL): Promise<{
+async function heatPayload(managers: SquadManager[], url: URL): Promise<{
 	days: string[];
 	tree: { id: string; name: string; type: "file"; depth: number; heat: number[] }[];
 	hotAreas: { path: string; heat: number }[];
@@ -1852,7 +1891,7 @@ async function heatPayload(manager: SquadManager, url: URL): Promise<{
 	const indexByDay = new Map(days.map((d, i) => [d, i]));
 	// Persisted ledger, not the live roster (see usagePayload) — otherwise reaped agents and post-restart
 	// history vanish and the panel falsely reads "No receipt-backed file writes in this window".
-	const receipts = (await manager.allReceipts()).filter((r) => !repo || r.repo === repo);
+	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repo || r.repo === repo);
 	const byFile = new Map<string, number[]>();
 	for (const r of receipts) {
 		const day = new Date(r.endedAt ?? r.startedAt).toISOString().slice(0, 10);
@@ -1892,7 +1931,7 @@ async function heatPayload(manager: SquadManager, url: URL): Promise<{
  * wall clock is the rhythm the operator actually lives) — a (day, hour) cell is
  * internally consistent because both come from the same local Date.
  */
-async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<{
+async function activityHeatmapPayload(managers: SquadManager[], url: URL): Promise<{
 	days: string[];
 	hours: number[];
 	matrix: { day: string; hourly: number[] }[];
@@ -1913,7 +1952,7 @@ async function activityHeatmapPayload(manager: SquadManager, url: URL): Promise<
 	});
 	const rowByDay = new Map(days.map((d) => [d, new Array<number>(24).fill(0)]));
 	// Persisted ledger, not the live roster (see usagePayload), so the rhythm survives restarts + reaps.
-	const receipts = (await manager.allReceipts()).filter((r) => !repo || r.repo === repo);
+	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repo || r.repo === repo);
 	let max = 0;
 	let total = 0;
 	for (const r of receipts) {
@@ -1966,11 +2005,11 @@ const graphCache = new Map<string, { at: number; doc: GraphDoc }>();
  * viewer can't drive `git show` / adapter reads against arbitrary repos on the host.
  * No param → the daemon cwd (the webapp never sends one).
  */
-function resolveGraphRepo(url: URL, manager: SquadManager): string | null {
+function resolveGraphRepo(url: URL, managers: SquadManager[]): string | null {
 	const raw = url.searchParams.get("repo");
 	if (!raw) return process.cwd();
 	const resolved = path.resolve(raw);
-	const allowed = new Set([path.resolve(process.cwd()), ...manager.projects().map((p) => path.resolve(p.repo))]);
+	const allowed = new Set([path.resolve(process.cwd()), ...managers.flatMap((m) => m.projects()).map((p) => path.resolve(p.repo))]);
 	return allowed.has(resolved) ? resolved : null;
 }
 
@@ -2031,21 +2070,22 @@ async function scoreboardPayload(repo: string): Promise<Scoreboard> {
  * concern 05). OBSERVATIONAL, NOT A DECISION ORACLE — see task-class-matrix.ts's module doc; the
  * webapp panel MUST surface `doc.note` prominently, not just tuck it into a tooltip.
  */
-async function taskClassPayload(manager: SquadManager, url: URL): Promise<TaskClassMatrixDoc> {
+async function taskClassPayload(managers: SquadManager[], url: URL): Promise<TaskClassMatrixDoc> {
 	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
 	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
 	const stateDir = resolveStateDir();
 	const rows = await readTaskOutcomes(stateDir);
-	const denominatorPopulation = manager.landingRosterRouting();
+	const denominatorPopulation = managers.flatMap((m) => m.landingRosterRouting());
 	return buildTaskClassMatrix(rows, denominatorPopulation, range);
 }
 
 /** GET /api/graph/provenance?id=OMPSQ-336 — the plan→agent→proof→land thread for one ticket. */
-async function provenancePayload(url: URL, repo: string, manager: SquadManager): Promise<ProvenanceDoc | { error: string }> {
+async function provenancePayload(url: URL, repo: string, managers: SquadManager[]): Promise<ProvenanceDoc | { error: string }> {
 	const id = (url.searchParams.get("id") ?? "").trim().toUpperCase();
 	if (!/^[A-Z][A-Z0-9]*-\d+$/.test(id)) return { error: "invalid ticket id" };
 	const stateDir = resolveStateDir();
-	const features = (await manager.features(repo).catch(() => [])).map((f) => ({
+	const featureLists = await Promise.all(managers.map((m) => m.features(repo).catch(() => [])));
+	const features = featureLists.flat().map((f) => ({
 		id: f.id,
 		title: f.title,
 		planDir: f.planDir,
@@ -2146,7 +2186,24 @@ async function commitDetailPayload(url: URL, repo: string): Promise<CommitDetail
 }
 
 
-async function governancePayload(manager: SquadManager, role: Role, dbMode: boolean, dbRegistry: boolean): Promise<{
+/**
+ * Fleet-wide health across every manager the caller can see. `rssMb`/`load1`/`ncpu`/`freeRatio`/`hosts`
+ * are process/host-wide (sampleHealth reads `process.memoryUsage()`/`os.*`, identical no matter which
+ * manager answers, since every manager lives in this one daemon process) — so the first manager's own
+ * sample already supplies them correctly. Only `agents` (live roster occupancy) differs per manager, so
+ * for a multi-manager (bootstrap-admin) view it's summed and the warnings recomputed against the true
+ * fleet-wide count — otherwise a WIP-cap warning would only ever reflect one org's agents.
+ */
+async function aggregateHealth(managers: SquadManager[]): Promise<Awaited<ReturnType<SquadManager["sampleHealth"]>>> {
+	const [primary, ...rest] = managers;
+	const { sample, warnings, at } = await primary.sampleHealth();
+	if (rest.length === 0) return { sample, warnings, at };
+	const agents = liveAgentCount(managers.flatMap((m) => m.list()));
+	const combined: HealthSample = { ...sample, agents };
+	return { sample: combined, warnings: assessHealth(combined, defaultHealthLimits(sample.ncpu, hardAgentCeiling())), at };
+}
+
+async function governancePayload(managers: SquadManager[], role: Role, dbMode: boolean, dbRegistry: boolean): Promise<{
 	authMode: "db" | "file";
 	role: Role;
 	wipCap: number;
@@ -2161,17 +2218,17 @@ async function governancePayload(manager: SquadManager, role: Role, dbMode: bool
 		role,
 		wipCap: envInt("OMP_SQUAD_WIP_CAP", 3),
 		maxAgents: hardAgentCeiling(),
-		health: await manager.sampleHealth(),
+		health: await aggregateHealth(managers),
 		federation: { coordinator: !!process.env.OMP_SQUAD_COORDINATOR, dbRegistry },
 		audit: { available: true },
 		// Epic 3 (leaf 05): real policy findings over the audit + land ledgers, not just RBAC/capacity.
-		compliance: { findings: await manager.complianceFindings(), evaluatedAt: Date.now() },
+		compliance: { findings: (await Promise.all(managers.map((m) => m.complianceFindings()))).flat(), evaluatedAt: Date.now() },
 	};
 }
-async function actionItemsPayload(manager: SquadManager, url: URL): Promise<{ items: ActionItem[]; generatedAt: number }> {
+async function actionItemsPayload(managers: SquadManager[], url: URL): Promise<{ items: ActionItem[]; generatedAt: number }> {
 	const repo = url.searchParams.get("repo") ?? undefined;
-	const agents = manager.list().filter((a) => !repo || a.repo === repo);
-	const health = await manager.sampleHealth();
+	const agents = managers.flatMap((m) => m.list()).filter((a) => !repo || a.repo === repo);
+	const health = await aggregateHealth(managers);
 	const items: ActionItem[] = [];
 	for (const a of agents) {
 		for (const p of a.pending) {
