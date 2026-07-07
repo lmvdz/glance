@@ -53,3 +53,49 @@ Everything LLM-driven, schema-extending, or artifact-generating is **cut** — i
 
 1. **Ship the MVP at all, or shelve?** Given the channel is empirically empty, the measurement probe + cheap general quota/dedup guard is genuinely useful as future-proofing, but is not urgent. Options: (a) ship probe + guard behind A/B; (b) probe only; (c) shelve and revisit when decision volume appears; (d) **pivot** to the real gap — decision capture.
 2. If pivoting: is institutional memory (captured decisions/conventions) a priority worth its own plan? That is where the source tool's ideas actually pay off — but only once there are decisions to remember.
+
+---
+
+# PIVOT: Decision Capture (the real upstream gap)
+
+**User steer (2026-07-07):** shelve consolidation; build the mechanism that makes decisions *exist*. Consolidation was optimizing an empty channel — the higher-value move is to fill it with high-signal, provenance-carrying decisions. Once volume appears, the descoped de-pollution work above becomes measurable rather than assumed.
+
+## Goal
+An agent can record a consequential decision, which lands in its feature's `pf.decisions` (with `source:"agent"` + provenance) and immediately surfaces in the fabric primer, `squad_kb_search`, KnowledgePanel, and the feature's decisions log — building real institutional memory.
+
+## Approach: explicit non-blocking host tool (not passive extraction)
+
+A new `squad_record_decision` reserved host tool, modeled exactly on `squad_report`/`handleReportTool` (squad-manager.ts:5393) — non-blocking (responds immediately, never `setPending`), best-effort, dispatched before the capability grant gate.
+
+### Why an explicit tool, not run-end LLM extraction
+
+| | Explicit tool (chosen) | Passive haiku harvest at finalizeRun (rejected) |
+|---|---|---|
+| LLM cost | **Zero** | First per-run LLM cost, and `finalizeRun` fires **every turn** (squad-manager.ts:4386) → fleet-multiplied — the exact cost tension the research flagged |
+| Signal | High — agent flags what *it* judged consequential | Extraction noise: restatements, false "decisions" → pollutes the channel we're filling |
+| Provenance | Clean `{agentId, runId}` from the live call | Same, but attached to guessed items |
+| Fit | Mirrors the existing `handleReportTool` seam | New, heavier, best-effort LLM tail |
+
+Passive harvest is explicitly deferred; if explicit capture proves too sparse, revisit as an opt-in **end-of-run** (not per-turn) extraction, measured — never default-on.
+
+## Key Decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Capture mechanism | Explicit `squad_record_decision` host tool | Zero-cost, high-signal, fits existing non-blocking tool seam |
+| Handler template | `handleReportTool` (non-blocking, no `setPending`) | A decision-record must not flip the agent to "input" status |
+| Write path | `updateFeature(featureId, {decisions:[...existing, new]})` | Canonical setter; auto-persists + WS-broadcasts via `emitFeaturesChanged` |
+| Id / idempotency | `randomUUID()` id; de-dupe read-modify-write on id + normalized text | Server validator drops id-less decisions; guards double-record on retry |
+| Provenance | Add optional `sourceRef?:{agentId?,runId?}` to `FeatureDecision`, populated **only** on the agent path | Agent decisions have a real origin (unlike plan-parsed); never fabricated — matches the codebase's `ts`-never-faked discipline |
+| No-feature agents | Skip + warn (respond isError with a helpful message) | `featureId` is optional; ad-hoc agents have no feature to append to |
+| Rollout | Flag-gate registration + dispatch behind `OMP_SQUAD_DECISION_CAPTURE`, default off | Matches `learningFlags()` discipline; adding a host tool changes agent behavior |
+| Agent guidance | One-line "when to record a decision" in the tool `description` (+ optional system-prompt nudge) | The tool is only as useful as the agent's propensity to call it; keep the nudge minimal |
+| UI | `source:"agent"` badge in KnowledgePanel + TaskDetail decisions | Both already render `decisionSource`; badge is the only net-new UI |
+
+## Risks
+- **Under-use** — agents may rarely call the tool. Mitigated: sparse high-signal beats dense noise; measurable via a `decision-captured` metric; the tool description nudges usage. Honest minimal mechanism.
+- **Duplicate records on retry / re-prompt** — mitigated by id + normalized-text de-dupe in the read-modify-write.
+- **Repo-scoping** — a captured decision only surfaces in a primer if the feature's `repo` is in the actor's scope (fabric.ts:270) — expected, not a bug.
+
+## Open Questions
+- None blocking. Flag name `OMP_SQUAD_DECISION_CAPTURE` (default off) unless you prefer default-on given it's opt-in-by-agent-invocation anyway.
