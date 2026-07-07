@@ -79,11 +79,19 @@ export class ManagerRegistry {
 		return this.managers.get(orgId)?.manager;
 	}
 
+	/** Every currently materialized org manager. Used only by loopback bearer-token operator
+	 *  observability (the bootstrap-admin break-glass view over GET /api/agents and the graph/usage/
+	 *  heat/activity/action-items/governance route family in server.ts); tenant sessions still route
+	 *  through exactly one org-scoped manager and never see this list. */
+	liveManagers(): SquadManager[] {
+		return [...this.managers.values()].map((entry) => entry.manager);
+	}
+
 	/** Live roster across every currently materialized org manager. Used only by loopback bearer-token
 	 *  operator observability (`glance list` / GET /api/agents) in DB mode; tenant sessions still route
 	 *  through exactly one org-scoped manager. */
 	liveAgents(): AgentDTO[] {
-		return [...this.managers.values()].flatMap((entry) => entry.manager.list());
+		return this.liveManagers().flatMap((manager) => manager.list());
 	}
 
 	/** Lazily create (+start +attach listener) or return the manager for `orgId`. Idempotent under concurrency. */
