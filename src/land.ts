@@ -13,6 +13,7 @@
 import { detectVerify } from "./intake.ts";
 import { gateExec } from "./gate-runner.ts";
 import { proofGate, recordProof } from "./proof.ts";
+import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 import type { FeatureCriterion } from "./types.ts";
 
@@ -137,6 +138,9 @@ export interface LandOpts {
 	featureId?: string;
 	criteria?: FeatureCriterion[];
 	validatorOverride?: boolean;
+	/** Bypass the land blast-radius gate (C-LAND) — set by the human Land / force-land path so a
+	 *  deliberate large/sensitive merge always lands. Mirrors `validatorOverride`. */
+	riskOverride?: boolean;
 }
 
 /**
@@ -393,6 +397,15 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	// A fast-forward can't be stale (main hasn't moved). Force-land (staleGate:false) skips this
 	// like the proof gate; OMP_SQUAD_STALE_GATE=0 disables it.
 	const staleReason = opts.staleGate !== false && staleGateEnabled() ? await staleBranchReason(repo, branch) : undefined;
+
+	// Land blast-radius gate (C-LAND): a large or sensitive-path diff should not AUTO-land unattended.
+	// Blocks EVERY merge path (ff / no-ff / auto-resolve), not just the stale one — the whole point is
+	// that the change is too big/risky to merge without a human glance. `riskOverride` (the human Land /
+	// force path) bypasses it; off by default and fail-open, so it never blocks a normal fleet.
+	if (!opts.riskOverride && landRiskGateEnabled()) {
+		const riskReason = await landRiskReason(repo, branch);
+		if (riskReason) return { ok: false, committed, merged: false, message, detail: riskReason };
+	}
 
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the
 	// gate to run after merge (caller override wins; undefined ⇒ auto-detect; empty ⇒ skip).

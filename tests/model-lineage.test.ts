@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { harnessLineage, modelLineage } from "./model-lineage.ts";
-import { modelFamily } from "./omp-graph/attribution.ts";
+import { harnessLineage, modelLineage } from "../src/model-lineage.ts";
+import { modelFamily } from "../src/omp-graph/attribution.ts";
 
 describe("modelLineage", () => {
 	test("provider-qualified specs (the poll-backfill shape) map by provider", () => {
