@@ -86,6 +86,20 @@ const GATE_FOLD_VAR = "__gateFold";
 
 const MAX_CONTEXT_OUTPUT = 4000;
 const IDLE_POLL_MS = 5_000;
+/**
+ * Legibility only (no behavior change): a command node failing because its OWN environment was
+ * never provisioned (no node_modules ⇒ `tsc`/`bun run <script>` isn't even resolvable) looks
+ * byte-for-byte identical, to an operator reading a CATASTROPHE detail, to the code under test
+ * actually being broken. This is a text classifier over the exec output only — it does NOT change
+ * `outcome` (still "failed" on any non-zero exit) or touch the engine's visit-cap math, so
+ * escalate's cap (and every other cap) fires exactly as before. It only prefixes the text fed to
+ * the fixup/escalate agent (and, transitively, whatever CATASTROPHE detail string quotes it) so
+ * "deps are missing" is distinguishable at a glance from "a real check/test failed".
+ */
+const UNPROVISIONED_RE = /command not found|is not recognized as an internal or external command|cannot find module|MODULE_NOT_FOUND|Cannot find package|ENOENT.*node_modules|no such file or directory.*node_modules/i;
+function looksUnprovisioned(code: number, output: string): boolean {
+	return code === 127 || UNPROVISIONED_RE.test(output);
+}
 /** Idle polls (~30s) with the inner loop reporting not-streaming, after it was seen active, before we treat a missing agent_end as turn-end. */
 const IDLE_TICKS = 6;
 /** Reflexion "last attempt" fallback cap — mirrors the engine's DEFAULT_NODE_VISITS (engine.ts) so a
@@ -262,7 +276,8 @@ export class SingleAgentExecutor implements NodeExecutor {
 		const run = this.opts.execCommand ?? defaultExecCommand;
 		const { code, stdout, stderr } = await run(script, this.opts.cwd);
 		const combined = [stdout, stderr].filter((s) => s.trim()).join("\n").trim();
-		const shown = combined.length > MAX_CONTEXT_OUTPUT ? `${combined.slice(0, MAX_CONTEXT_OUTPUT)}\n…(truncated)` : combined;
+		const truncated = combined.length > MAX_CONTEXT_OUTPUT ? `${combined.slice(0, MAX_CONTEXT_OUTPUT)}\n…(truncated)` : combined;
+		const shown = code !== 0 && looksUnprovisioned(code, combined) ? `[environment not provisioned — dependencies missing, not a code failure]\n${truncated}` : truncated;
 		this.opts.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `$ ${node.label ?? node.id} → exit ${code}\n${shown || "(no output)"}` } });
 		this.opts.emit({ type: "message_end" });
 		return { outcome: code === 0 ? "succeeded" : "failed", text: shown };

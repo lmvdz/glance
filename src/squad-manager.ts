@@ -39,6 +39,8 @@ import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeInta
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
+import { errText } from "./err-text.ts";
+import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
@@ -130,7 +132,7 @@ import type {
 import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.ts";
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPathFor } from "./agent-host.ts";
-import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
+import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, provisionWorktreeDeps, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
@@ -288,11 +290,6 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 		required: ["text"],
 	},
 };
-
-/** Human-readable text for an unknown catch value — the ONE place this module spells out the
- *  `instanceof Error` idiom, pending the tagged-error hierarchy the effect-migration ratchet tracks.
- *  New catch sites must call this instead of inlining the pattern (the ratchet bites on inlines). */
-const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
  * Re-emit cooldown for the repo-level "land blocked" warn event (research-sirvir/01, review). The
@@ -3640,6 +3637,15 @@ export class SquadManager extends EventEmitter {
 				// Non-git target dir: no isolation, but "spawn anywhere" still works. A real git checkout
 				// that fails worktree creation now throws instead (OMPSQ-40) — never run on the shared tree.
 				this.log("warn", `${opts.repo} is not a git repo — running agent in place (no isolation)`);
+			} else {
+				// Live incident: every dispatched unit's verify-loop gate (`bun run check && bun run test`)
+				// died with `CATASTROPHE: node "escalate" exceeded its visit cap` because a bare `git worktree
+				// add` has no node_modules — the gate could never pass. `addWorktree`'s own symlink shortcut
+				// only fires when the PRIMARY checkout already has node_modules AND never reaches a nested,
+				// non-workspace package (this repo's own webapp/). Provision for real, bounded + non-fatal —
+				// a failure here logs loudly but the spawn proceeds; the agent (or an operator) can still
+				// install its own deps rather than never getting a worktree at all.
+				await provisionWorktreeDeps(cwd, (msg) => this.log("warn", `spawn provisioning: ${msg}`));
 			}
 		}
 
