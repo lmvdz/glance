@@ -81,3 +81,12 @@ under-covers under an operator's `diff.noprefix`/`mnemonicPrefix`).
 **Deferred (behind shadow evidence):** the multi-lens pool (perf/architecture/testing); the promotion path
 to criteria-injection/veto; UI surfacing of `lensAdvisory`/`lensVerify`. v1 is the falsifiable experiment —
 turn it on with `OMP_SQUAD_LENS_REVIEW=1` and read the shadow log before building the pool.
+
+## Re-land (2026-07-07)
+
+The "shipped" claim above never reached `main`: PR #96 merged only this plan doc, not the code.
+`git cherry origin/main origin/worktree-research-recursive-orchestration` showed all four commits behind
+it (73004b7, 43cbd0a, b573f8d, ae211c6) still `+` (orphaned), and `src/lens-select.ts` did not exist on
+`origin/main`. Re-landed clean — no conflicts against main's proof.ts layered stages / webapp-legacy
+removal / ratchet-baseline changes — as `reland/pr96-review-lens`. All six concern STATUS lines below
+rolled back from `closed` to `in-review` until that PR actually merges.

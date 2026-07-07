@@ -1,9 +1,11 @@
 # Lens selector — decide whether a lens fires from the diff surface
-STATUS: closed
+STATUS: in-review
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
 TOUCHES: src/lens-select.ts, src/lens-select.test.ts
+
+RE-LAND NOTE (2026-07-07): code cherry-picked back from orphaned worktree-research-recursive-orchestration (was merged in PR #96 as plan-only, code never reached main) — see reland/pr96-review-lens; STATUS held at in-review until that PR merges.
 
 ## Goal
 

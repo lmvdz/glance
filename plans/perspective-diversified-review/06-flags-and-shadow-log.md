@@ -1,9 +1,11 @@
 # Flags, default-off contract, and shadow catch-logging
-STATUS: closed
+STATUS: in-review
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
 TOUCHES: src/config.ts, src/validator.ts, src/validator.flags.test.ts
+
+RE-LAND NOTE (2026-07-07): code cherry-picked back from orphaned worktree-research-recursive-orchestration (was merged in PR #96 as plan-only, code never reached main) — see reland/pr96-review-lens; STATUS held at in-review until that PR merges.
 
 ## Goal
 

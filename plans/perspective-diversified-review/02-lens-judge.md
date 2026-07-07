@@ -1,9 +1,11 @@
 # Lens judge machinery — one out-of-criteria lens on the existing judge path
-STATUS: closed
+STATUS: in-review
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/validator.ts, src/types.ts, src/validator.lens.test.ts
+
+RE-LAND NOTE (2026-07-07): code cherry-picked back from orphaned worktree-research-recursive-orchestration (was merged in PR #96 as plan-only, code never reached main) — see reland/pr96-review-lens; STATUS held at in-review until that PR merges.
 
 ## Goal
 
