@@ -33,6 +33,7 @@ export interface LearningFlags {
 	failureMemory: Variant;
 	modelOutcomes: Variant;
 	thresholdTuner: Variant;
+	decisionCapture: Variant;
 }
 
 const FLAG_ENV: Record<keyof LearningFlags, string> = {
@@ -41,6 +42,7 @@ const FLAG_ENV: Record<keyof LearningFlags, string> = {
 	failureMemory: "OMP_SQUAD_FAILURE_MEMORY",
 	modelOutcomes: "OMP_SQUAD_MODEL_OUTCOMES",
 	thresholdTuner: "OMP_SQUAD_THRESHOLD_TUNER",
+	decisionCapture: "OMP_SQUAD_DECISION_CAPTURE",
 };
 
 /** FNV-1a-style stable hash, used ONLY to pick a deterministic 50/50 A/B variant per id — never
@@ -77,6 +79,7 @@ export function learningFlags(id = ""): LearningFlags {
 		failureMemory: resolveVariant(FLAG_ENV.failureMemory, id),
 		modelOutcomes: resolveVariant(FLAG_ENV.modelOutcomes, id),
 		thresholdTuner: resolveVariant(FLAG_ENV.thresholdTuner, id),
+		decisionCapture: resolveVariant(FLAG_ENV.decisionCapture, id),
 	};
 }
 
@@ -86,7 +89,7 @@ export function isOn(v: Variant): boolean {
 
 // ── metrics ───────────────────────────────────────────────────────────────────────────────
 
-export type MetricName = "first-try-green" | "fixups-to-green" | "escalation" | "land-failure-streak" | "primer-empty" | "model-outcome-recorded" | "veto-reprompt";
+export type MetricName = "first-try-green" | "fixups-to-green" | "escalation" | "land-failure-streak" | "primer-empty" | "model-outcome-recorded" | "veto-reprompt" | "decision-captured";
 
 export interface MetricEvent {
 	/** Strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */

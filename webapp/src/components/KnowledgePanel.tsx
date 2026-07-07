@@ -15,6 +15,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Library, Search, Flame, Lightbulb, Lock, GitCommitHorizontal, Users, Sparkles } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { PanelShell, SectionCard, VerdictBadge } from './ui';
+import { AgentSourceBadge } from './AgentSourceBadge';
 
 type KbType = 'agent' | 'digest' | 'hot-area' | 'scout' | 'lease' | 'decision';
 
@@ -200,7 +201,14 @@ const Overview: React.FC<{ snapshot: FabricSnapshot | null }> = ({ snapshot }) =
             {decisions.map((d, i) => (
               <li key={i} className="border-b border-gray-100 dark:border-gray-800 px-4 py-2.5 last:border-b-0">
                 <div className="text-sm text-gray-800 dark:text-gray-200">{d.text}</div>
-                <div className="mt-0.5 text-[11px] text-gray-400">{d.featureTitle}{d.decisionSource ? ` · ${d.decisionSource}` : ''}</div>
+                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <span>{d.featureTitle}</span>
+                  {d.decisionSource === 'agent' ? (
+                    <AgentSourceBadge />
+                  ) : d.decisionSource ? (
+                    <span>· {d.decisionSource}</span>
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>
