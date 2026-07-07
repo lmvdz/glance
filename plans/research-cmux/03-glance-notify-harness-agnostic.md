@@ -1,5 +1,19 @@
-# (v2, DEFERRED) harness-agnostic `glance notify` + AttentionEvent
-STATUS: blocked
+# (v2) harness-agnostic `glance notify` + AttentionEvent
+STATUS: closed
+
+## v2 buildable scope (CORRECTED after claude-code-guide + explore, this pass)
+**Key finding: glance runs NO `claude-code` unit driver.** Real drivers are omp (`RpcAgent`, has the host-tool channel) and generic ACP (`auggie --acp`, no host-tool channel); "claude-code" is only a passive cost-*ingester* (`src/ingest/claude-code.ts`), never spawned. So the committed Claude Code Notification-hook + spawn-marker identity is **moot until glance drives claude-code** — CUT from this pass (kept in Deferred below). Claude Code's `Notification` hook *can* filter to matcher `idle_prompt` and must be env-gated (`$GLANCE_AGENT_ID`) to avoid firing on the human's own repo sessions — recorded for when it's real.
+
+What ships this pass (non-blocking attention lane, harnesses glance actually runs; push stays status-driven per v1 red team — NO push widening):
+1. **Wire** — `AttentionEvent { id; summary; detail?; source: "notify"|"tool"|"harness"; createdAt }` in `src/types.ts`, `AgentDTO.attentionEvents?: AttentionEvent[]` (live/run-scoped, append-only, mirrors `reports`), mirrored in `webapp/src/lib/dto.ts`. New `{ type: "notify"; id; summary; detail? }` `ClientCommand` (`src/types.ts:1108`).
+2. **Operator/scriptable ingress** — `glance notify <id> "<summary>" [--detail x]` CLI (`src/index.ts`, `case "notify"` + `cmdNotify`, mirrors `cmdPrompt`) → `applyCommand` `case "notify"` resolves `this.agents.get(id)`, appends `AttentionEvent{source:"notify"}`, `emitAgent`. This is the `cmux notify` analog — any program/CI/hook can raise attention on a unit.
+3. **omp in-band** — `squad_attention` host tool (sibling of `squad_report`, `SQUAD_HOST_TOOLS` @ `squad-manager.ts:199`), `onHostTool` dispatch + `handleAttentionTool` → append `source:"tool"`.
+4. **Un-black-hole the harness notify** — `onUi` `req.method === "notify"` (`squad-manager.ts:5024`) today only appends a transcript line; ALSO append an `AttentionEvent{source:"harness"}` + `emitAgent`, making the inert RPC notify protocol a real attention row.
+5. **Surface** — new `for (const e of a.attentionEvents ?? [])` branch in `attentionItems()` (after the `reports` branch, `insights.ts:591`) → new `AttentionKind` `'attention'` (add to the union @ `insights.ts:434`), severity `warn`, action `View`. Tests: insights branch + squad-manager (notify command, squad_attention tool, harness-notify wiring).
+
+Identity is by **explicit id** (operator knows it from the dashboard; omp tool/harness-notify already have `rec`) — the worktree-path trap is avoided by not path-matching at all. No spawn marker needed this pass.
+
+## Original goal
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: research
@@ -25,4 +39,6 @@ Let a unit on **any** harness (omp/pi/claude-code/codex/opencode/gemini) explici
 - A `--blocking` notify actually suspends the harness and the operator's answer reaches it (no black-hole).
 
 ## Resolution
-Deferred at v1 close. Pick up as its own `/plan` + PR. v1 (concerns 01-02) ships the loved feature without it.
+**v2 attention lane SHIPPED** (non-blocking, harnesses glance actually runs). `AttentionEvent` type + `AgentDTO.attentionEvents[]` (src + webapp mirror, byte-identical), `{type:"notify"}` ClientCommand, `glance notify <id> "<summary>" [--detail]` CLI, `squad_attention` omp host tool, and the previously-black-holed `onUi` harness notify now appended as a `source:"harness"` attention event. Surfaces as a new `'attention'` warn row in `attentionItems()` (no AttentionPanel change — severity-keyed grouping). Root typecheck clean; backend 1562 pass (+5 integration tests, +1 pre-existing kb-tool fix); webapp insights 70 pass. **Live-driven**: `glance notify` against a real unit on a throwaway daemon → DTO carries the AttentionEvent, status stays `working`, 0 pending (non-blocking contract holds — no synthetic PendingRequest).
+
+**Still deferred (moot until glance drives claude-code units):** the committed Claude Code Notification hook (matcher `idle_prompt`, env-gated on `$GLANCE_AGENT_ID` to avoid firing on the human's own repo sessions) + spawn-written id marker + a real blocking-suspend mechanism (fake PendingRequest is a category error — see above). glance runs no claude-code driver today; revisit when it does.

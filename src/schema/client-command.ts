@@ -59,6 +59,8 @@ export const ClientCommandSchema = Schema.Union([
 	// Phase-2: `spec` (CommissionSpec) is deep-modeled in ./create-agent-options.ts.
 	Schema.Struct({ type: Schema.Literal("commission"), spec: CommissionSpecSchema }),
 	Schema.Struct({ type: Schema.Literal("set-mode"), id: Schema.String, mode: AutonomyModeSchema, reason: Schema.optional(Schema.String) }),
+	// cmux-research concern 03 (harness-agnostic `glance notify`): non-blocking attention flag.
+	Schema.Struct({ type: Schema.Literal("notify"), id: Schema.String, summary: Schema.String, detail: Schema.optional(Schema.String) }),
 ]);
 
 /** The type the schema decodes to. Intentionally wider than `ClientCommand`
