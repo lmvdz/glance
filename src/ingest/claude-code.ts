@@ -12,6 +12,13 @@
  * ingested. A session is only ingested once it has been idle for `idleMs`; if it
  * later grows (resumed session), only the NEW lines become a continuation
  * receipt. Parsing is pure; only the walk/cursor does IO.
+ *
+ * Dedupe: Claude Code writes one jsonl line per assistant CONTENT BLOCK (thinking/
+ * text/tool_use), not one per API response — every block of one response repeats the
+ * same `message.usage`. `parseSession` dedupes by `message.id` so each response's
+ * tokens/cost are billed once (naive per-line summing over-billed by ~2.35× on a real
+ * transcript). See `CursorFileEntry.v` for how a cursor already-marked "done" under
+ * the old math gets healed on upgrade.
  */
 
 import * as fs from "node:fs/promises";
@@ -70,6 +77,12 @@ export function parseSession(lines: string[], sessionIdHint = "", from = 0): Ses
 	let costUsd = 0;
 	let toolCalls = 0;
 	const files = new Set<string>();
+	// Claude Code writes ONE jsonl line per assistant content block (thinking/text/tool_use), each
+	// repeating the SAME `message.usage` for that single API response (same `message.id`). Summing
+	// every line double- (or triple-, quadruple-…) counts tokens/cost. Dedupe by id so each API
+	// response is billed exactly once; a line with no id (older transcript format) is always billed —
+	// there's nothing to dedupe against.
+	const seenMessageIds = new Set<string>();
 
 	for (let i = from; i < lines.length; i++) {
 		const raw = lines[i];
@@ -88,7 +101,7 @@ export function parseSession(lines: string[], sessionIdHint = "", from = 0): Ses
 			if (!startedAt) startedAt = ts;
 			if (ts > endedAt) endedAt = ts;
 		}
-		const msg = d.message as { model?: string; usage?: Record<string, number>; content?: unknown } | undefined;
+		const msg = d.message as { id?: string; model?: string; usage?: Record<string, number>; content?: unknown } | undefined;
 		if (!msg) continue;
 		if (Array.isArray(msg.content)) {
 			for (const c of msg.content as { type?: string; name?: string; input?: { file_path?: string } }[]) {
@@ -98,19 +111,24 @@ export function parseSession(lines: string[], sessionIdHint = "", from = 0): Ses
 			}
 		}
 		if (d.type === "assistant" && msg.usage) {
-			const u = msg.usage;
-			const block = {
-				input: u.input_tokens ?? 0,
-				output: u.output_tokens ?? 0,
-				cacheRead: u.cache_read_input_tokens ?? 0,
-				cacheWrite: u.cache_creation_input_tokens ?? 0,
-			};
-			tokens.input += block.input;
-			tokens.output += block.output;
-			tokens.cacheRead += block.cacheRead;
-			tokens.cacheWrite += block.cacheWrite;
-			costUsd += estimateCost(msg.model, block);
-			if (msg.model) byModelOut.set(msg.model, (byModelOut.get(msg.model) ?? 0) + block.output);
+			const msgId = typeof msg.id === "string" ? msg.id : undefined;
+			const isDuplicate = msgId !== undefined && seenMessageIds.has(msgId);
+			if (msgId !== undefined) seenMessageIds.add(msgId);
+			if (!isDuplicate) {
+				const u = msg.usage;
+				const block = {
+					input: u.input_tokens ?? 0,
+					output: u.output_tokens ?? 0,
+					cacheRead: u.cache_read_input_tokens ?? 0,
+					cacheWrite: u.cache_creation_input_tokens ?? 0,
+				};
+				tokens.input += block.input;
+				tokens.output += block.output;
+				tokens.cacheRead += block.cacheRead;
+				tokens.cacheWrite += block.cacheWrite;
+				costUsd += estimateCost(msg.model, block);
+				if (msg.model) byModelOut.set(msg.model, (byModelOut.get(msg.model) ?? 0) + block.output);
+			}
 		}
 	}
 
@@ -160,8 +178,40 @@ export function encodeProjectDir(p: string): string {
 	return p.replace(/[/\\.]/g, "-");
 }
 
-interface Cursor {
-	[file: string]: { lines: number; size: number };
+interface CursorFileEntry {
+	lines: number;
+	size: number;
+	/**
+	 * Cursor-entry schema version this file was last (re)ingested under. Bump
+	 * `CURSOR_SCHEMA_VERSION` whenever a fix changes how `parseSession` computes totals from
+	 * an UNCHANGED transcript (e.g. the message.id dedupe below) — otherwise a file the OLD
+	 * code already marked "fully ingested" (size matches) skips forever and its stale receipt
+	 * (e.g. ~2.35× inflated pre-dedupe) survives the fix undetected. An entry stamped with an
+	 * older version bypasses the unchanged-skip once: its previously-appended receipt is
+	 * purged and the file is fully re-parsed under the current logic, so the correction lands
+	 * as a single clean receipt rather than summed on top of the stale one. Absent ⇒ 0
+	 * (pre-versioning cursor, e.g. any real cursor written before this field existed).
+	 */
+	v?: number;
+}
+type Cursor = Record<string, CursorFileEntry>;
+
+/** Bump on any fix to `parseSession`'s totals math (see `CursorFileEntry.v`). */
+const CURSOR_SCHEMA_VERSION = 1;
+
+/** Delete a session's previously-appended receipt file, if any — used only when migrating a
+ *  stale (pre-`CURSOR_SCHEMA_VERSION`) cursor entry so the corrected recompute isn't summed
+ *  on top of the old, wrong totals. Silently a no-op if nothing was ever ingested for it. */
+async function purgeStaleReceipt(stateDir: string, sessionIdHint: string): Promise<void> {
+	try {
+		await fs.unlink(receiptPathFor(stateDir, sessionIdHint));
+	} catch {
+		// nothing to purge
+	}
+}
+
+function receiptPathFor(stateDir: string, sessionIdHint: string): string {
+	return path.join(stateDir, "receipts", `cc-${sessionIdHint.slice(0, 8)}.jsonl`);
 }
 
 export interface IngestResult {
@@ -172,7 +222,7 @@ export interface IngestResult {
 /**
  * Walk the repo's Claude Code project dirs (main + its worktrees), append
  * receipts for idle sessions not yet (fully) ingested. Cheap after the first
- * pass — the cursor skips unchanged files by size.
+ * pass — the cursor skips unchanged files by size (unless stale, see `CursorFileEntry.v`).
  */
 export async function ingestClaudeCode(opts: {
 	stateDir: string;
@@ -219,7 +269,8 @@ export async function ingestClaudeCode(opts: {
 				continue;
 			}
 			const cur = cursor[full];
-			if (cur && cur.size === stat.size) continue; // fully ingested, unchanged
+			const stale = !!cur && (cur.v ?? 0) < CURSOR_SCHEMA_VERSION;
+			if (cur && cur.size === stat.size && !stale) continue; // fully ingested, unchanged, current schema
 			if (now - stat.mtimeMs < idleMs) continue; // still live — wait for idle
 			let text: string;
 			try {
@@ -227,10 +278,17 @@ export async function ingestClaudeCode(opts: {
 			} catch {
 				continue;
 			}
+			const sessionIdHint = f.replace(/\.jsonl$/, "");
+			if (stale) {
+				// a pre-CURSOR_SCHEMA_VERSION ingest already appended a receipt computed under
+				// the OLD (buggy) math — purge it before recomputing so the fix doesn't sum the
+				// corrected total on top of the stale one.
+				await purgeStaleReceipt(opts.stateDir, sessionIdHint);
+			}
 			const lines = text.split("\n");
-			const from = cur?.lines ?? 0;
-			const summary = parseSession(lines, f.replace(/\.jsonl$/, ""), from);
-			cursor[full] = { lines: lines.length, size: stat.size };
+			const from = stale ? 0 : (cur?.lines ?? 0); // stale ⇒ full clean recompute, not a delta continuation
+			const summary = parseSession(lines, sessionIdHint, from);
+			cursor[full] = { lines: lines.length, size: stat.size, v: CURSOR_SCHEMA_VERSION };
 			if (!summary) continue;
 			// sessions that never worked in this repo (stray cwd) are skipped
 			if (!cwdBelongsToRepo(summary.cwd, opts.repo)) continue;
