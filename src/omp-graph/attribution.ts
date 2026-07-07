@@ -39,7 +39,9 @@ export interface AttributionDoc {
 	generatedAt: number;
 }
 
-/** Collapse a raw model id to a comparable family key. */
+/** Collapse a raw model id to a comparable family key. NOTE: `src/model-lineage.ts` `modelLineage()`
+ *  is built on top of this — the coarser VENDOR grain of the same mapping. Keep them in sync; a new
+ *  family added here must get a lineage there (a test enforces it). */
 export function modelFamily(model?: string): string {
 	const m = (model ?? "").toLowerCase();
 	if (m.includes("fable") || m.includes("mythos")) return "fable";

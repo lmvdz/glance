@@ -18,6 +18,9 @@ export interface ConfidenceInput {
 	filesTouched: number;
 	/** Epic 3 independent-validator verdict, when available. Absent ⇒ neutral (no penalty, no bonus). */
 	validator?: "pass" | "fail";
+	/** Cross-lineage review (plans/cross-lineage-review/): true when the judge shared the author's
+	 *  vendor lineage — a self-graded pass is worth LESS. Absent/undefined ⇒ unchanged behavior. */
+	sameLineage?: boolean;
 }
 
 /** Deterministic, clamped [0,1] run-end self-confidence. See DESIGN.md §D1 for the formula. */
@@ -31,7 +34,9 @@ export function scoreConfidence(input: ConfidenceInput): number {
 	if (input.filesTouched <= 3) score += 0.1;
 	else if (input.filesTouched > 12) score -= 0.2;
 
-	if (input.validator === "pass") score += 0.1;
+	// A same-lineage (self-graded) pass counts for less — the reviewer shared the author's blind spots
+	// (plans/cross-lineage-review/). A veto stays -0.4 regardless: bad news isn't softened by who found it.
+	if (input.validator === "pass") score += input.sameLineage === true ? 0.05 : 0.1;
 	else if (input.validator === "fail") score -= 0.4;
 
 	return Math.max(0, Math.min(1, score));

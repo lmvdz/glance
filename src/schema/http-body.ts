@@ -111,6 +111,13 @@ export const FeatureFlagBodySchema = Schema.Struct({
 	enabled: Schema.Boolean,
 });
 
+/** POST /api/policy/rules — the full rule set (replace). Per-rule coercion/sanitization is a
+ *  post-decode business check via `parsePolicyDoc` (drops malformed rules), so the wire schema only
+ *  asserts the envelope shape: an object with a `rules` array. */
+export const PolicyRulesBodySchema = Schema.Struct({
+	rules: Schema.Array(Schema.Unknown),
+});
+
 // ---------------------------------------------------------------------------
 // Capabilities
 // ---------------------------------------------------------------------------

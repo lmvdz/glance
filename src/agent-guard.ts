@@ -22,6 +22,7 @@
  */
 
 import * as path from "node:path";
+import { evalPolicy, type PolicyRule } from "./policy.ts";
 
 export interface GuardBlock {
 	block: true;
@@ -37,6 +38,10 @@ export interface GuardContext {
 	protectedRoots: string[];
 	/** Home dir, for expanding ~ / $HOME in shell tokens (defaults to process env at call sites). */
 	home: string;
+	/** Operator-defined runtime policy rules (C-RULES). Passed in by the hook (mtime-cached read) ONLY
+	 *  when OMP_SQUAD_POLICY_RULES is on — absent ⇒ no data-driven rules, today's hardcoded behavior.
+	 *  These are consulted AFTER the hardcoded checks below, so a policy table can only ever TIGHTEN. */
+	policyRules?: PolicyRule[];
 }
 
 /**
@@ -137,6 +142,20 @@ export function screenToolCall(toolName: string, input: Record<string, unknown>,
 	if (toolName === "edit" || toolName === "write") {
 		const escaped = escapesWorktree(targetFiles(input), ctx.worktree);
 		if (escaped) return { block: true, reason: `squad guardrail: ${escaped} is outside this agent's worktree (${path.resolve(ctx.worktree)}) — agents must only edit files in their own worktree` };
+	}
+	// Operator policy rules (C-RULES) run LAST, after every hardcoded protection — so a data-driven
+	// table can only add denials, never remove one (tighten-only). A `deny` blocks; an `ask` also
+	// blocks here (soft reason): omp/pi have no cross-harness mid-tool human round-trip, so an
+	// unattended agent cannot satisfy an approval — it is denied until an operator lifts the rule.
+	if (ctx.policyRules && ctx.policyRules.length > 0) {
+		const verdict = evalPolicy(ctx.policyRules, { seam: "tool_call", tool: toolName, command: typeof cmd === "string" ? cmd : undefined });
+		if (verdict) {
+			const reason =
+				verdict.decision === "deny"
+					? `squad policy: ${verdict.reason}`
+					: `squad policy: ${verdict.reason} — requires operator approval, not permitted unattended`;
+			return { block: true, reason };
+		}
 	}
 	return undefined;
 }

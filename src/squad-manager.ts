@@ -138,6 +138,7 @@ import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollu
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
 import { recordModelOutcome, tierOf } from "./model-outcomes.ts";
+import { shadowCostCheck } from "./cost-gate.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
@@ -2330,6 +2331,7 @@ export class SquadManager extends EventEmitter {
 				commitWip: !busy,
 				requireProof: !force,
 				staleGate: !force,
+				riskOverride: force, // human force-land clears the blast-radius gate too (C-LAND)
 				verify: pf.acceptance ?? undefined,
 				issueId: rec?.dto.issue?.id,
 				issueIdentifier: rec?.dto.issue?.identifier,
@@ -2436,6 +2438,7 @@ export class SquadManager extends EventEmitter {
 			confirmResolved: auto && autoresolveConfirm(), // OMPSQ-138: an AUTO resolved-conflict land stages, not merges
 			requireProof: !opts.force,
 			staleGate: !opts.force,
+			riskOverride: opts.force, // a human force-land clears the blast-radius gate too (C-LAND)
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
@@ -2742,8 +2745,11 @@ export class SquadManager extends EventEmitter {
 		const pf = opts.featureId ? this.featureStore.get(opts.featureId) : undefined;
 		const criteria = opts.criteria ?? pf?.acceptanceCriteria ?? [];
 		const proof = await proofFor(opts.repo, opts.worktree);
-		const { record, veto } = await validatorGate({ criteria, repo: opts.repo, worktree: opts.worktree, branch: opts.branch, proof, judge: this.validatorJudgeOverride() });
+		// Read the author's lineage BEFORE the gate: `dto.model` is the poll-backfilled `provider/id`
+		// spec (applyState) on the common omp/pi path; `harness` is the fallback for vendor-pinned ACP
+		// runtimes. Threaded so the ValidationRecord can flag a same-lineage (self-graded) review.
 		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
+		const { record, veto } = await validatorGate({ criteria, repo: opts.repo, worktree: opts.worktree, branch: opts.branch, proof, judge: this.validatorJudgeOverride(), authorModel: rec?.dto.model, authorHarness: rec?.dto.harness });
 		if (rec) {
 			rec.dto.validation = record;
 			this.emitAgent(rec);
@@ -3152,6 +3158,10 @@ export class SquadManager extends EventEmitter {
 			};
 			this.log("info", `routed "${name}": ${decision.reason}`);
 		}
+		// Pre-execution cost projection (C-COST) — shadow-only: warns when this (model,tier) is projected
+		// to run over budget, BEFORE the spawn spends anything. Fire-and-forget so it never delays a spawn;
+		// no-op unless OMP_SQUAD_COST_GATE is on. Enforce (hard park) is deferred.
+		void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line));
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
 		// so the fleet is observable from the backlog without a manual plan-to-plane step. No-ops when
 		// Plane is unconfigured; restore / fan-out / flue paths never set `track`.
@@ -4897,7 +4907,7 @@ export class SquadManager extends EventEmitter {
 		// `undefined` — absence never penalizes.
 		const validator: "pass" | "fail" | undefined =
 			rec.dto.validation?.verdict === "pass" ? "pass" : rec.dto.validation?.verdict === "veto" ? "fail" : undefined;
-		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator });
+		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage });
 		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });

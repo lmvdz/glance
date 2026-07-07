@@ -12,6 +12,7 @@
 
 import { envInt } from "./config.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
+import { harnessLineage, type ModelLineage, modelLineage } from "./model-lineage.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
 import type { Proof } from "./proof.ts";
 import type { FeatureCriterion, ValidationRecord } from "./types.ts";
@@ -38,6 +39,40 @@ function validatorModel(): string {
 	return process.env.OMP_SQUAD_VALIDATOR_MODEL ?? "opus";
 }
 
+/** The judge harness (plans/cross-lineage-review/ concern 05): "omp" (default, Claude-lineage judge)
+ *  or "codex" (OpenAI-lineage judge via the codex CLI — opt-in, off until its live-verify test passes). */
+function validatorHarness(): string {
+	return process.env.OMP_SQUAD_VALIDATOR_HARNESS ?? "omp";
+}
+
+/**
+ * The reviewer that will ACTUALLY run, as one source of truth for BOTH judge selection and the
+ * lineage stamp — so the record can never claim a cross-vendor review that didn't happen. The codex
+ * reviewer is chosen only when configured AND the binary is present; if codex is absent we fall back
+ * to the omp judge at selection time and the stamp honestly says anthropic (no codex ran).
+ */
+function activeReviewer(): { model: string; lineage: ModelLineage; harness: "omp" | "codex" } {
+	if (validatorHarness() === "codex" && Bun.which("codex")) return { model: "codex", lineage: "openai", harness: "codex" };
+	return { model: validatorModel(), lineage: modelLineage(validatorModel()), harness: "omp" };
+}
+
+/**
+ * The author↔reviewer VENDOR lineage pair for a review (plans/cross-lineage-review/). `reviewerLineage`
+ * is the reviewer that actually ran; the author lineage is read from the executor's model, falling
+ * back to the harness name only for vendor-pinned harnesses. `sameLineage` is left `undefined` unless
+ * BOTH sides are known — an unreadable author is never assumed to match (or differ from) the reviewer.
+ */
+function lineageFields(reviewerLineage: ModelLineage, authorModel?: string, authorHarness?: string): {
+	authorLineage: ModelLineage;
+	reviewerLineage: ModelLineage;
+	sameLineage?: boolean;
+} {
+	const fromModel = modelLineage(authorModel);
+	const authorLineage = fromModel === "unknown" ? harnessLineage(authorHarness) : fromModel;
+	const sameLineage = authorLineage !== "unknown" && reviewerLineage !== "unknown" ? authorLineage === reviewerLineage : undefined;
+	return { authorLineage, reviewerLineage, sameLineage };
+}
+
 const SYSTEM_PROMPT =
 	"You are an INDEPENDENT validator judging whether a code change satisfies a list of DECLARED acceptance criteria. " +
 	"You did not write this code and must not trust the author's own claims — inspect the diff (and proof output, if given) " +
@@ -45,8 +80,8 @@ const SYSTEM_PROMPT =
 	'object and nothing else: {"perCriterion":[{"id":"<criterion id>","satisfied":true|false,"note":"<short reason>"}],' +
 	'"confidence":0..1,"rationale":"<short overall rationale>"}.';
 
-function parseRawVerdict(raw: string): RawVerdict | undefined {
-	const obj = extractJsonObject(raw);
+/** Coerce a parsed object into a RawVerdict, or undefined if it has no usable `perCriterion`. */
+function coerceVerdict(obj: Record<string, unknown> | undefined): RawVerdict | undefined {
 	if (!obj) return undefined;
 	const per = obj.perCriterion;
 	if (!Array.isArray(per)) return undefined;
@@ -60,20 +95,97 @@ function parseRawVerdict(raw: string): RawVerdict | undefined {
 	return { perCriterion, confidence, rationale };
 }
 
-/** Default judge: an independent one-shot `omp -p --model <lineage>` call. `Bun.which("omp")` missing,
+function parseRawVerdict(raw: string): RawVerdict | undefined {
+	return coerceVerdict(extractJsonObject(raw));
+}
+
+/**
+ * Parse a verdict from `codex exec` output (plans/cross-lineage-review/ concern 05). codex may emit
+ * a JSONL EVENT STREAM (one `{type,payload}` object per line, our verdict embedded in an
+ * `agent_message`/`item` text field), NOT one clean JSON object — so we go LINE-BY-LINE and take the
+ * last line that yields a usable verdict, and only fall back to a whole-blob `extractJsonObject` when
+ * no line matched (the plain-stdout case). We deliberately never `extractJsonObject` the whole stream
+ * first: its outermost-`{`-to-last-`}` slice spans multiple events on a JSONL stream and throws.
+ */
+export function parseCodexVerdict(raw: string): RawVerdict | undefined {
+	let found: RawVerdict | undefined;
+	for (const line of raw.split("\n")) {
+		const t = line.trim();
+		if (!t.startsWith("{")) continue;
+		let obj: Record<string, unknown> | undefined;
+		try {
+			const parsed: unknown = JSON.parse(t);
+			obj = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+		} catch {
+			continue;
+		}
+		if (!obj) continue;
+		// (a) the verdict object emitted directly as a line
+		const direct = coerceVerdict(obj);
+		if (direct) { found = direct; continue; }
+		// (b) a codex event whose text/message field carries the verdict JSON
+		const text = pickCodexText(obj);
+		if (text) {
+			const embedded = coerceVerdict(extractJsonObject(text));
+			if (embedded) found = embedded;
+		}
+	}
+	// (c) plain single-object stdout (no event framing)
+	return found ?? parseRawVerdict(raw);
+}
+
+/** Best-effort dig for the assistant text in a codex event object (`agent_message`/`item` shapes seen
+ *  in src/ingest/codex.ts). Returns undefined if none — the caller then tries other lines. */
+function pickCodexText(obj: Record<string, unknown>): string | undefined {
+	const payload = (obj.payload ?? {}) as Record<string, unknown>;
+	const item = (obj.item ?? {}) as Record<string, unknown>;
+	for (const v of [payload.message, payload.text, obj.message, obj.text, item.text]) {
+		if (typeof v === "string" && v.includes("{")) return v;
+	}
+	return undefined;
+}
+
+/** The criteria+diff+proof prompt body shared by every judge harness. */
+function judgeUserPrompt(criteria: FeatureCriterion[], diff: string, proof?: Proof): string {
+	const criteriaText = criteria.map((c) => `- [${c.id}] ${c.text}`).join("\n");
+	const proofTail = proof?.detail ? `\n\nProof output (tail):\n${truncate(proof.detail, 2000)}` : "";
+	return `Declared acceptance criteria:\n${criteriaText}\n\nDiff:\n${truncate(diff, 12000)}${proofTail}`;
+}
+
+/** omp judge: an independent one-shot `omp -p --model <lineage>` call. `Bun.which("omp")` missing,
  *  a timeout, or unparseable output all degrade to `undefined` via `decideTyped`'s fallback — never throws. */
-function defaultJudge(): Judge {
-	return ({ criteria, diff, proof }) => {
-		const criteriaText = criteria.map((c) => `- [${c.id}] ${c.text}`).join("\n");
-		const proofTail = proof?.detail ? `\n\nProof output (tail):\n${truncate(proof.detail, 2000)}` : "";
-		const user = `Declared acceptance criteria:\n${criteriaText}\n\nDiff:\n${truncate(diff, 12000)}${proofTail}`;
-		return decideTyped<RawVerdict | undefined>({
-			args: ["-p", "--model", validatorModel(), "--system-prompt", SYSTEM_PROMPT, user],
+function ompJudge(): Judge {
+	return ({ criteria, diff, proof }) =>
+		decideTyped<RawVerdict | undefined>({
+			args: ["-p", "--model", validatorModel(), "--system-prompt", SYSTEM_PROMPT, judgeUserPrompt(criteria, diff, proof)],
 			parse: parseRawVerdict,
 			fallback: undefined,
 			timeoutMs: envInt("OMP_SQUAD_VALIDATOR_TIMEOUT_MS", 120_000),
 		});
-	};
+}
+
+/**
+ * codex judge (plans/cross-lineage-review/ concern 05) — a GENUINELY different-vendor (OpenAI) reviewer
+ * via `codex exec`. codex has no `--system-prompt`, so the system prompt is folded into the user text;
+ * output is parsed stream-tolerantly (see `parseCodexVerdict`). A codex miss/timeout/unparseable run
+ * degrades to `undefined` → an honest OpenAI-lineage `abstain` (fail-open), never a fabricated pass.
+ * OFF until its live-verify test proves codex emits parseable verdicts on real diffs.
+ */
+function codexJudge(): Judge {
+	return ({ criteria, diff, proof }) =>
+		decideTyped<RawVerdict | undefined>({
+			bin: "codex",
+			args: ["exec", "-s", "read-only", `${SYSTEM_PROMPT}\n\n${judgeUserPrompt(criteria, diff, proof)}`],
+			parse: parseCodexVerdict,
+			fallback: undefined,
+			timeoutMs: envInt("OMP_SQUAD_VALIDATOR_CODEX_TIMEOUT_MS", 90_000),
+		});
+}
+
+/** Selects the judge harness, kept in lockstep with `activeReviewer()` so the running reviewer and the
+ *  stamped reviewer lineage never disagree. */
+function defaultJudge(): Judge {
+	return activeReviewer().harness === "codex" ? codexJudge() : ompJudge();
 }
 
 /**
@@ -83,8 +195,17 @@ function defaultJudge(): Judge {
  *  - otherwise every input criterion gets a `perCriterion` entry (one the judge didn't mention
  *    defaults to `satisfied:false`); `"veto"` iff any is unsatisfied, else `"pass"`.
  */
-export async function scoreAgainstCriteria(criteria: FeatureCriterion[], diff: string, proof?: Proof, judge: Judge = defaultJudge()): Promise<ValidationRecord> {
+export async function scoreAgainstCriteria(
+	criteria: FeatureCriterion[],
+	diff: string,
+	proof?: Proof,
+	judge: Judge = defaultJudge(),
+	authorModel?: string,
+	authorHarness?: string,
+): Promise<ValidationRecord> {
 	const ranAt = Date.now();
+	const reviewer = activeReviewer();
+	const lineage = lineageFields(reviewer.lineage, authorModel, authorHarness);
 	if (criteria.length === 0) {
 		return { verdict: "skipped", agreement: 1, confidence: 0, perCriterion: [], rationale: "no declared criteria", ranAt };
 	}
@@ -92,7 +213,7 @@ export async function scoreAgainstCriteria(criteria: FeatureCriterion[], diff: s
 	// change. Abstain (fail-open) rather than fabricating a veto for a change the judge never saw. This
 	// covers the in-place (worktree === repo) case where the base collapses to HEAD, plus any no-op land.
 	if (!diff.trim()) {
-		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "empty diff — nothing to validate (in-place or no-op land); not scored", model: validatorModel(), ranAt };
+		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "empty diff — nothing to validate (in-place or no-op land); not scored", model: reviewer.model, ...lineage, ranAt };
 	}
 	let raw: RawVerdict | undefined;
 	try {
@@ -101,7 +222,7 @@ export async function scoreAgainstCriteria(criteria: FeatureCriterion[], diff: s
 		raw = undefined;
 	}
 	if (!raw || raw.perCriterion.length === 0) {
-		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "judge unavailable or returned no verdict", model: validatorModel(), ranAt };
+		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "judge unavailable or returned no verdict", model: reviewer.model, ...lineage, ranAt };
 	}
 	const byId = new Map(raw.perCriterion.map((p) => [p.id, p] as const));
 	const perCriterion = criteria.map((c) => {
@@ -117,7 +238,8 @@ export async function scoreAgainstCriteria(criteria: FeatureCriterion[], diff: s
 		confidence: raw.confidence ?? 0,
 		perCriterion,
 		rationale: truncate(raw.rationale ?? "", RATIONALE_MAX),
-		model: validatorModel(),
+		model: reviewer.model,
+		...lineage,
 		ranAt,
 	};
 }
@@ -132,6 +254,10 @@ export interface ValidatorGateOpts {
 	proof?: Proof;
 	/** Injected judge override — undefined ⇒ `scoreAgainstCriteria`'s own default judge. */
 	judge?: Judge;
+	/** The change author's executor model + harness (from the unit DTO at the land site), for the
+	 *  cross-lineage stamp. Absent ⇒ author lineage resolves `unknown` (an honest non-assertion). */
+	authorModel?: string;
+	authorHarness?: string;
 }
 
 export interface ValidatorGateResult {
@@ -203,7 +329,7 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 	const criteriaSig = opts.criteria.map((c) => `${c.id}=${c.text}`).join("|");
 	const cacheKey = opts.proof?.commit && opts.proof?.tree ? `${opts.proof.commit}:${opts.proof.tree}:${Bun.hash(criteriaSig)}` : undefined;
 	const cached = cacheKey ? gateCache.get(cacheKey) : undefined;
-	const record = cached ?? (await scoreAgainstCriteria(opts.criteria, await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit), opts.proof, opts.judge));
+	const record = cached ?? (await scoreAgainstCriteria(opts.criteria, await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit), opts.proof, opts.judge, opts.authorModel, opts.authorHarness));
 	if (cacheKey && !cached) gateCache.set(cacheKey, record);
 	if (record.verdict !== "veto") return { record };
 	const unmet = record.perCriterion.filter((p) => !p.satisfied).map((p) => p.id);

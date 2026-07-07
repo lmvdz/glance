@@ -43,6 +43,7 @@ import { decompose, DECOMPOSE_TIMEOUT_MS, type VerifiedConcern } from "./planner
 import { writeConcernDrafts } from "./plan-writer.ts";
 import { ompClassify } from "./intake.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
+import { PolicyStore } from "./policy.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
@@ -228,6 +229,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	const stateDir = stateDirPath();
 	const runtimeSettings = new RuntimeSettingsStore(stateDir);
 	await runtimeSettings.apply();
+	const policy = new PolicyStore(stateDir);
 	const tls = process.env.OMP_SQUAD_TLS_CERT && process.env.OMP_SQUAD_TLS_KEY ? { cert: process.env.OMP_SQUAD_TLS_CERT, key: process.env.OMP_SQUAD_TLS_KEY } : undefined;
 	if (bindIsInsecure(host, Boolean(tls)) && process.env.OMP_SQUAD_INSECURE !== "1") {
 		process.stderr.write(
@@ -369,7 +371,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	// registry: the server routes the operator's own org (OMP_SQUAD_ROOT_ORG) + the on-box loopback admin to
 	// the root factory, and every tenant org to its per-org registry manager (server.ts managerFor).
 	const rootOrgId = process.env.OMP_SQUAD_ROOT_ORG?.trim() || undefined;
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, rootOrgId });
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
