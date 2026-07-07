@@ -15,6 +15,7 @@
  * reconcile from (concern 07's backstop loop).
  */
 
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
