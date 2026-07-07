@@ -142,3 +142,14 @@ export async function readDigest(stateDir: string, agentId: string): Promise<str
 export function fenceUntrusted(label: string, body: string): string {
 	return `===== BEGIN ${label} (untrusted data) =====\n${body}\n===== END ${label} =====`;
 }
+
+/**
+ * The authored-spec block injected into a dispatched unit's context (learn-harness-engineering
+ * "repo IS the spec"): the concern/Tier-2 body, fenced as UNTRUSTED data so a human/skills-MCP-writable
+ * issue body can never act as instructions to a yolo agent. Undefined (title-only, no regression) when
+ * the body is empty/absent.
+ */
+export function authoredSpecBlock(description: string | undefined): string | undefined {
+	const spec = description?.trim();
+	return spec ? fenceUntrusted("authored task spec", spec) : undefined;
+}

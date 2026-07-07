@@ -34,7 +34,7 @@ import { parseWorkflow } from "./workflow/dot.ts";
 import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowRunState } from "./workflow/types.ts";
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
-import { type Classify, detectVerify, ompClassify, routeIntake } from "./intake.ts";
+import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeIntake } from "./intake.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
@@ -152,7 +152,7 @@ import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
 import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
@@ -1062,7 +1062,29 @@ export class SquadManager extends EventEmitter {
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
 	private async dispatchSpawn(repo: string, issue: IssueRef): Promise<void> {
 		const task = `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}`;
-		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue, autoRoute: true, approvalMode: "yolo", requires: issue.requires, owns: issue.owns, produces: issue.produces, scopeSource: issue.scopeSource });
+		// Materialize the AUTHORED SPEC (learn-harness-engineering "repo IS the spec"): the dispatcher
+		// works off the lightweight list IssueRef, which carries only the title — the Tier-2 / plan-concern
+		// body the promote-issue skill authored is otherwise discarded at dispatch. Pull it (cached,
+		// best-effort, null on any failure so dispatch never blocks on Plane) and carry it on the issue;
+		// createWithId fences + injects it. UNTRUSTED — see the injection site.
+		const enriched = await this.dispatchSpec(repo, issue);
+		await this.create({ repo, name: issue.identifier?.toLowerCase(), branch: planeIssueBranch(issue), task, issue: enriched, autoRoute: true, approvalMode: "yolo", requires: issue.requires, owns: issue.owns, produces: issue.produces, scopeSource: issue.scopeSource });
+	}
+
+	/** Best-effort enrich an issue with its authored spec body for context injection. Never throws;
+	 *  returns the issue unchanged when the body is unavailable (title-only fallback). */
+	private async dispatchSpec(repo: string, issue: IssueRef): Promise<IssueRef> {
+		if (issue.description) return issue;
+		try {
+			const detail = await fetchIssueDetail(repo, issue.id);
+			const body = detail?.body?.trim();
+			if (!body) return issue;
+			const cap = envInt("OMP_SQUAD_SPEC_MAX_CHARS", 4000);
+			const spec = body.length > cap ? `${body.slice(0, cap)}\n…(spec truncated at ${cap} chars)` : body;
+			return { ...issue, description: spec };
+		} catch {
+			return issue;
+		}
 	}
 
 	/**
@@ -2950,14 +2972,17 @@ export class SquadManager extends EventEmitter {
 	async verifyFeature(id: string): Promise<{ ok: boolean; command?: string; results: { agentId?: string; branch?: string; ok: boolean; detail?: string; artifacts: number }[] } | null> {
 		const pf = this.featureStore.get(id);
 		if (!pf) return null;
-		const command = pf.acceptance ?? (await detectVerify(pf.repo));
+		// A repo-detected gate runs as ordered fail-fast stages (typecheck → test); a custom acceptance
+		// command stays a single opaque stage (we can't safely split arbitrary shell).
+		const stages = pf.acceptance ? undefined : await detectVerifyStages(pf.repo);
+		const command = pf.acceptance ?? (stages?.length ? stages.map((s) => s.command).join(" && ") : undefined);
 		if (!command) return { ok: false, results: [{ ok: false, detail: "no acceptance command — set the feature's acceptance or add a test script to the repo", artifacts: 0 }] };
 		this.snapshotBranches(id);
 		const members: LandMember[] = [...this.agents.values()].filter((r) => r.dto.featureId === id).map((r) => ({ agentId: r.dto.id, agentName: r.dto.name, branch: r.dto.branch, worktree: r.dto.worktree, repo: pf.repo }));
 		for (const b of pf.branches ?? []) if (!members.some((m) => m.agentId === b.agentId)) members.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo: pf.repo });
 		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string; artifacts: number }[] = [];
 		for (const m of members) {
-			const proof = await runProof({ repo: pf.repo, worktree: m.worktree, command });
+			const proof = await runProof({ repo: pf.repo, worktree: m.worktree, command, stages });
 			results.push({ agentId: m.agentId, branch: m.branch, ok: proof.ok, detail: proof.detail, artifacts: proof.artifacts.length });
 		}
 		this.emitFeaturesChanged();
@@ -3061,9 +3086,10 @@ export class SquadManager extends EventEmitter {
 		if (!rec) return false;
 		this.syncAuthority(rec.dto);
 		if (rec.dto.effectiveMode === "observe") throw new Error("verify blocked in observe mode");
-		const command = await detectVerify(rec.dto.repo);
+		const stages = await detectVerifyStages(rec.dto.repo);
+		const command = stages.length ? stages.map((s) => s.command).join(" && ") : undefined;
 		if (!command) return false;
-		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command });
+		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command, stages });
 		await this.refreshProofState(rec);
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "verify", id, proof.ok ? "ok" : "error", proof.detail);
@@ -3235,6 +3261,17 @@ export class SquadManager extends EventEmitter {
 			} catch (err) {
 				this.log("warn", `context primer failed: ${String(err)}`);
 			}
+		}
+		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
+		// (acceptance criteria / verification / scope) instead of reconstructing intent from an 8-word
+		// title. The body is human/skills-MCP-writable, so fence it as UNTRUSTED data — never let issue
+		// text act as instructions to the yolo agent. Absent ⇒ title-only (no regression).
+		const specBlock = authoredSpecBlock(opts.issue?.description);
+		if (specBlock) {
+			opts = {
+				...opts,
+				appendSystemPrompt: [opts.appendSystemPrompt, specBlock].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+			};
 		}
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {
