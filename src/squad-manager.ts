@@ -154,7 +154,7 @@ import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { isArmed } from "./convergence-oracle.ts";
-import { scoreConfidence } from "./confidence.ts";
+import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
@@ -2973,6 +2973,16 @@ export class SquadManager extends EventEmitter {
 			rec.dto.validation = record;
 			this.emitAgent(rec);
 		}
+		// Shadow catch-log (plans/perspective-diversified-review/ concern 06): make the advisory panel's
+		// output MEASURABLE — the dataset that answers "does a focused out-of-criteria lens catch what the
+		// monolithic criteria judge missed?" before any pool of lenses is built. One line per verdict.
+		if (record.lensAdvisory?.length) {
+			for (const l of record.lensAdvisory) {
+				const sev = l.disposition === "object" ? ` (${l.severity})` : "";
+				const recheck = record.lensVerify ? `, re-check confirmed=${record.lensVerify.confirmed}` : "";
+				this.log("info", `lens-review [${l.lens}] ${l.disposition}${sev}: ${l.claim || "—"} — unit ${rec?.dto.name ?? opts.agentId ?? "?"}, criteria verdict ${record.verdict}${recheck}`);
+			}
+		}
 		if (veto && !opts.validatorOverride) {
 			return { ok: false, committed: false, merged: false, message: opts.message, detail: veto };
 		}
@@ -5310,7 +5320,7 @@ export class SquadManager extends EventEmitter {
 		// `undefined` — absence never penalizes.
 		const validator: "pass" | "fail" | undefined =
 			rec.dto.validation?.verdict === "pass" ? "pass" : rec.dto.validation?.verdict === "veto" ? "fail" : undefined;
-		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage });
+		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage, lensAdvisory: lensAdvisoryBucket(rec.dto.validation) });
 		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });

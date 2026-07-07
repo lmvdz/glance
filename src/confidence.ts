@@ -12,6 +12,7 @@
  */
 
 import type { VerificationState } from "./autonomy.ts";
+import type { ValidationRecord } from "./types.ts";
 
 export interface ConfidenceInput {
 	verificationState: VerificationState;
@@ -21,6 +22,22 @@ export interface ConfidenceInput {
 	/** Cross-lineage review (plans/cross-lineage-review/): true when the judge shared the author's
 	 *  vendor lineage — a self-graded pass is worth LESS. Absent/undefined ⇒ unchanged behavior. */
 	sameLineage?: boolean;
+	/** Perspective-diversified review (plans/perspective-diversified-review/): advisory out-of-criteria
+	 *  lens outcome. "clean" = lenses ran and all accepted; "objected" = at least one objection; "confirmed"
+	 *  = a high-severity objection survived its re-check. Absent ⇒ neutral. All deltas are SMALLER in
+	 *  magnitude than the primary validator's — advisory, never authoritative. */
+	lensAdvisory?: "clean" | "objected" | "confirmed";
+}
+
+/** Collapse a validation record's lens fields into the single confidence bucket. Absent/empty ⇒ neutral
+ *  (undefined), preserving the "absence = unknown, never penalize" doctrine. A confirmed high-severity
+ *  objection outranks a plain objection; all-accept ⇒ "clean". */
+export function lensAdvisoryBucket(v?: ValidationRecord): "clean" | "objected" | "confirmed" | undefined {
+	const lenses = v?.lensAdvisory;
+	if (!lenses || lenses.length === 0) return undefined;
+	if (v?.lensVerify?.confirmed) return "confirmed";
+	if (lenses.some((l) => l.disposition === "object")) return "objected";
+	return "clean";
 }
 
 /** Deterministic, clamped [0,1] run-end self-confidence. See DESIGN.md §D1 for the formula. */
@@ -38,6 +55,13 @@ export function scoreConfidence(input: ConfidenceInput): number {
 	// (plans/cross-lineage-review/). A veto stays -0.4 regardless: bad news isn't softened by who found it.
 	if (input.validator === "pass") score += input.sameLineage === true ? 0.05 : 0.1;
 	else if (input.validator === "fail") score -= 0.4;
+
+	// Advisory out-of-criteria lens (plans/perspective-diversified-review/). Deltas are deliberately
+	// smaller than the primary validator's ±0.1/−0.4 — this axis nudges, it never decides. The clamp
+	// below keeps stacked deltas (e.g. same-lineage bonus + a lens penalty) inside [0,1].
+	if (input.lensAdvisory === "clean") score += 0.05;
+	else if (input.lensAdvisory === "objected") score -= 0.15;
+	else if (input.lensAdvisory === "confirmed") score -= 0.25;
 
 	return Math.max(0, Math.min(1, score));
 }
