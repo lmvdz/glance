@@ -16,8 +16,8 @@
  * pruned lazily on load against the ids the caller knows are gone.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 
 function cursorPath(stateDir: string): string {
 	return path.join(stateDir, "scout-cursor.json");
@@ -27,8 +27,11 @@ function cursorPath(stateDir: string): string {
 export function readScoutCursors(stateDir: string): Map<string, number> {
 	try {
 		const p = cursorPath(stateDir);
-		if (!existsSync(p)) return new Map();
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		const b = getStorageBackend();
+		if (!b.exists(p)) return new Map();
+		const raw0 = b.readTextSync(p);
+		if (raw0 === undefined) return new Map();
+		const raw = JSON.parse(raw0) as unknown;
 		if (!raw || typeof raw !== "object") return new Map();
 		const out = new Map<string, number>();
 		for (const [id, ts] of Object.entries(raw as Record<string, unknown>)) {
@@ -43,7 +46,7 @@ export function readScoutCursors(stateDir: string): Map<string, number> {
 /** Best-effort write-through — a disk failure must never break the scan it records. */
 export function writeScoutCursors(stateDir: string, cursors: Map<string, number>): void {
 	try {
-		writeFileSync(cursorPath(stateDir), JSON.stringify(Object.fromEntries(cursors)));
+		getStorageBackend().writeDurableSync(cursorPath(stateDir), JSON.stringify(Object.fromEntries(cursors)));
 	} catch {
 		/* best-effort */
 	}

@@ -12,8 +12,8 @@
  * cross-field queries or retention become a real need.
  */
 
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import type { Actor, AuditEntry } from "./types.ts";
 
 export function auditPath(baseDir: string): string {
@@ -54,8 +54,7 @@ export function makeAuditEntry(input: AuditInput, now = Date.now()): AuditEntry 
 
 export async function appendAudit(baseDir: string, entry: AuditEntry): Promise<void> {
 	const file = auditPath(baseDir);
-	await fs.mkdir(path.dirname(file), { recursive: true });
-	await fs.appendFile(file, `${JSON.stringify(entry)}\n`);
+	await getStorageBackend().appendDurable(file, `${JSON.stringify(entry)}\n`);
 }
 
 export interface AuditQuery {
@@ -69,12 +68,8 @@ export interface AuditQuery {
 
 /** Read the log newest-first, applying optional exact-match filters + a bounded limit. */
 export async function readAudit(baseDir: string, q: AuditQuery = {}): Promise<AuditEntry[]> {
-	let text: string;
-	try {
-		text = await fs.readFile(auditPath(baseDir), "utf8");
-	} catch {
-		return [];
-	}
+	const text = await getStorageBackend().readText(auditPath(baseDir));
+	if (text === undefined) return [];
 	const out: AuditEntry[] = [];
 	for (const line of text.split("\n")) {
 		if (!line.trim()) continue;

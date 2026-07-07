@@ -41,6 +41,7 @@ class MemBackend implements StorageBackend {
 	writes = 0;
 	appends = 0;
 	async writeDurable(file: string, data: string) { this.writes++; this.files.set(file, data); }
+	writeDurableSync(file: string, data: string) { this.writes++; this.files.set(file, data); }
 	async appendDurable(file: string, data: string) { this.appends++; this.files.set(file, (this.files.get(file) ?? "") + data); }
 	async readText(file: string) { return this.files.get(file); }
 	readTextSync(file: string) { return this.files.get(file); }

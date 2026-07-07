@@ -9,8 +9,8 @@
  * section is derived deterministically from the inputs.
  */
 
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 import { summarize } from "./summarizer.ts";
 import type { RunReceipt, TranscriptEntry } from "./types.ts";
 
@@ -122,17 +122,13 @@ export function digestPath(stateDir: string, agentId: string): string {
 
 export async function writeDigest(stateDir: string, agentId: string, md: string): Promise<void> {
 	const p = digestPath(stateDir, agentId);
-	await fs.mkdir(path.dirname(p), { recursive: true });
-	await fs.writeFile(p, md, "utf8");
+	await getStorageBackend().writeDurable(p, md);
 }
 
 /** Returns "" when no digest has been written for this agent yet. */
 export async function readDigest(stateDir: string, agentId: string): Promise<string> {
-	try {
-		return await fs.readFile(digestPath(stateDir, agentId), "utf8");
-	} catch {
-		return "";
-	}
+	const raw = await getStorageBackend().readText(digestPath(stateDir, agentId));
+	return raw ?? "";
 }
 
 /**

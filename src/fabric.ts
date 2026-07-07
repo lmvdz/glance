@@ -1,6 +1,6 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scopeFor } from "./agent-scope.ts";
+import { getStorageBackend } from "./dal/storage.ts";
 import { readDigest } from "./digest.ts";
 import { readFailureAnnotations } from "./failure-memory.ts";
 import { leasesFor, type LeaseEntry } from "./leases.ts";
@@ -123,12 +123,8 @@ function cleanScoutTitle(name: string): string {
 }
 
 async function receiptAgentIds(stateDir: string, scope: Set<string>): Promise<string[]> {
-	try {
-		const names = await fs.readdir(path.join(stateDir, "receipts"));
-		return names.filter((n) => n.endsWith(".jsonl")).map((n) => n.slice(0, -6)).filter((id) => scope.has(id));
-	} catch {
-		return [];
-	}
+	const names = await getStorageBackend().readdir(path.join(stateDir, "receipts"));
+	return names.filter((n) => n.endsWith(".jsonl")).map((n) => n.slice(0, -6)).filter((id) => scope.has(id));
 }
 
 async function scopedReceipts(stateDir: string, scope: Set<string>): Promise<RunReceipt[]> {
@@ -158,15 +154,13 @@ export function hotAreasFromReceipts(receipts: RunReceipt[], now = Date.now()): 
 
 async function readScoutSeen(stateDir: string): Promise<ScoutSeen> {
 	const out: ScoutSeen = {};
-	let names: string[];
-	try {
-		names = await fs.readdir(stateDir);
-	} catch {
-		return out;
-	}
+	const b = getStorageBackend();
+	const names = await b.readdir(stateDir);
 	for (const name of names.filter((n) => /^scout-seen(?:\.|\.json$)/.test(n))) {
 		try {
-			const raw = JSON.parse(await fs.readFile(path.join(stateDir, name), "utf8")) as unknown;
+			const raw0 = await b.readText(path.join(stateDir, name));
+			if (raw0 === undefined) continue; // entry vanished between readdir and read — skip it
+			const raw = JSON.parse(raw0) as unknown;
 			if (raw && typeof raw === "object") Object.assign(out, raw as ScoutSeen);
 		} catch {
 			// Corrupt scout cache should not break the read-only fabric.

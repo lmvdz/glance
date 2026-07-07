@@ -12,8 +12,8 @@
  */
 
 import { createCipheriv, createHmac, randomBytes } from "node:crypto";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getStorageBackend } from "./dal/storage.ts";
 
 export interface PushSubscription {
 	endpoint: string;
@@ -129,18 +129,21 @@ export class PushService {
 
 	/** Load (or generate + persist) the VAPID keypair and any saved subscriptions. */
 	async init(): Promise<void> {
+		const b = getStorageBackend();
+		const vapidRaw = await b.readText(this.vapidFile);
 		try {
-			this.vapid = JSON.parse(await fs.readFile(this.vapidFile, "utf8")) as VapidKeys;
+			if (vapidRaw === undefined) throw new Error("missing");
+			this.vapid = JSON.parse(vapidRaw) as VapidKeys;
 		} catch {
 			const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
 			const raw = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
 			const privateKeyJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
 			this.vapid = { publicKey: b64url(raw), privateKeyJwk };
-			await fs.mkdir(path.dirname(this.vapidFile), { recursive: true });
-			await fs.writeFile(this.vapidFile, JSON.stringify(this.vapid), { mode: 0o600 });
+			await b.writeDurable(this.vapidFile, JSON.stringify(this.vapid), { mode: 0o600 });
 		}
+		const subsRaw = await b.readText(this.subsFile);
 		try {
-			this.subs = JSON.parse(await fs.readFile(this.subsFile, "utf8")) as PushSubscription[];
+			this.subs = subsRaw === undefined ? [] : (JSON.parse(subsRaw) as PushSubscription[]);
 		} catch {
 			this.subs = [];
 		}
@@ -199,7 +202,6 @@ export class PushService {
 	}
 
 	private async persist(): Promise<void> {
-		await fs.mkdir(path.dirname(this.subsFile), { recursive: true });
-		await fs.writeFile(this.subsFile, JSON.stringify(this.subs), { mode: 0o600 });
+		await getStorageBackend().writeDurable(this.subsFile, JSON.stringify(this.subs), { mode: 0o600 });
 	}
 }
