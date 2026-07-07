@@ -90,5 +90,16 @@ Do **not** add `@effect/cli`, `@effect/platform`, or `@effect/schema` — they a
 ## Local Effect Source
 
 The Effect v4 repository (`effect-smol`) is cloned to `~/.local/share/effect-solutions/effect` for reference. Use it to explore APIs, find usage examples, and understand implementation details when the documentation isn't enough. Package sources live under `~/.local/share/effect-solutions/effect/packages/`.
+
+## Effect migration: reach for the new way, never re-add the old
+
+Migration is a **ratchet**, not a rewrite (`scripts/effect-migration.ts` is the live inventory; `tests/effect-ratchet.test.ts` fails the suite if you ADD a legacy occurrence). When writing or editing code:
+
+- **Reading an env number** → `envInt` / `envNumber` from `src/config.ts`. NEVER `Number(process.env.X) || d` (it eats a legit `0` and hides garbage).
+- **Parsing untrusted or cross-boundary JSON** (HTTP body, WS/federation frame, agent-host frame, a peer/plane payload, a persisted file you didn't just write) → decode with a `Schema` from `src/schema/*` (see `client-command.ts` for the pattern: a `Result`-returning decoder, `formatDecodeIssue`, and a compile-time drift guard keeping `types.ts` the source of truth). NEVER `JSON.parse(...) as T` at a trust boundary.
+- Adding a `ClientCommand` variant, `FederationFrame` kind, or a `CreateAgentOptions` field? Update the matching schema in `src/schema/` too — the drift guard will fail `tsc` otherwise.
+- Not everything migrates: a `throw` for an internal invariant, or `JSON.parse` of a file we just wrote, is fine. Gate the boundary, not the whole codebase.
+- After migrating a batch, LOWER the corresponding `baseline` in `scripts/effect-migration.ts` in the same PR so the ratchet keeps biting.
+- Blocked for now (do not attempt): the classic `Config.integer` API and `setInterval`→fiber loops — the installed `effect@4.0.0-beta` lacks the stable Config/runtime surface for these. Stay in the sync `Schema`/`Result` lane until v4 leaves beta.
 <!-- effect-solutions:end -->
 
