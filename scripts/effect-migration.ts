@@ -51,10 +51,11 @@ export const PATTERNS: Pattern[] = [
 		description: "`JSON.parse(...) as T` with no validation — at a TRUST BOUNDARY (untrusted/persisted input) replace with a Schema decode. Triage before tightening: parsing our own freshly-written data is fine.",
 		regex: /JSON\.parse\([^;{}]*\)\s+as\s+[A-Za-z]/,
 		allowlist: ["src/schema/"], // schema modules re-narrow VALIDATED output; that `as` is sound
-		// 54→55: the #88 reland set baselines below main's actual count, so main was red on landing.
-		// The +1 (workos.ts JWT-payload decode) is pre-existing merged code; corrected to reality here.
-		// Follow-up debt: that JWT decode is a real trust boundary — migrate to a Schema decode.
-		baseline: 55,
+		// 55→52: the three flagged REAL trust boundaries now decode via src/schema/external-json.ts —
+		// the workos.ts JWT payload (the follow-up debt called out here previously), federation.ts's
+		// `tailscale whois` output (another binary's stdout), and plane.ts's PLANE_PROJECT_MAP env JSON.
+		// The remaining 52 are mostly our-own-persisted-state parses; keep triaging before tightening.
+		baseline: 52,
 	},
 	{
 		id: "bool-env-compare",

@@ -14,6 +14,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { decodeJsonWith, JwtClaimsSchema } from "./schema/external-json.ts";
 
 export interface WorkosConfig {
 	/** WorkOS Client ID (client_...). Also the path segment in the AuthKit OIDC discovery URL. */
@@ -44,16 +45,13 @@ export function workosDiscoveryUrl(clientId: string): string {
 
 /** Decode a JWT's payload WITHOUT verifying its signature. Safe here: the token was just handed to us by
  *  WorkOS over TLS in the code→token exchange, and we only read non-authoritative profile claims from it
- *  (identity/session are still owned by better-auth). Returns null on any malformed input. */
+ *  (identity/session are still owned by better-auth). Returns null on any malformed input — including a
+ *  payload segment that decodes to valid JSON but isn't an object (the old blind cast waved those through). */
 export function decodeJwtPayload(jwt: string | undefined | null): Record<string, unknown> | null {
 	if (!jwt) return null;
 	const parts = jwt.split(".");
 	if (parts.length < 2 || !parts[1]) return null;
-	try {
-		return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
-	} catch {
-		return null;
-	}
+	return decodeJsonWith(JwtClaimsSchema, Buffer.from(parts[1], "base64url").toString("utf8"));
 }
 
 /** Normalized profile from a WorkOS sign-in, plus the WorkOS org/role for later JIT org mapping. */
