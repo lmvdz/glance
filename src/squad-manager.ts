@@ -25,7 +25,8 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { type HarnessDescriptor, resolveBin, resolveHarness, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { globalDefaultHarness, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
 import { CommissionExecutor } from "./workflow/commission-executor.ts";
@@ -850,7 +851,13 @@ export class SquadManager extends EventEmitter {
 				maxActive,
 				liveCount: () => occupyingAgents(this.list()), // only starting/working/input occupy a slot — idle/done agents must not pin the cap
 				maxWip: this.scheduler.cap(),
-				paused: () => this.rateLimit.paused(),
+				paused: (provider) => this.rateLimit.paused(provider),
+				// Degradation ladder (concern 06, plans/research-sirvir/06-degradation-ladder.md): wire the
+				// real provider-resolution + second-lane detector so dispatch.ts can gate per-issue instead of
+				// once globally. `secondLaneAvailable` is a live registry check (not cached) — a harness
+				// getting smoke-verified mid-boot flips the ladder live without a restart.
+				providerFor: (repo, issue) => this.dispatchProviderFor(repo, issue),
+				secondLaneAvailable: () => hasSecondVerifiedProviderLane(),
 				record: this.automation.for("dispatch"),
 				ledger: openDispatchLedger(this.stateDir),
 				alreadyDone: (repo, issue) => this.issueAlreadyDone(repo, issue),
@@ -1085,6 +1092,19 @@ export class SquadManager extends EventEmitter {
 			persist: openOrchestratorState(this.stateDir), // OMPSQ-139: halted/landed/staged survive restart, keyed by branch
 			scheduler: this.scheduler, // OMPSQ-134: drain the SAME queue create() parks into (OMP_SQUAD_QUEUE_ON_FULL)
 		});
+	}
+
+	/**
+	 * Degradation ladder (concern 06): the provider a prospective auto-dispatch spawn for `repo`/`issue`
+	 * would resolve onto — dispatch.ts's per-issue gate. `dispatchSpawn` → `create()` never threads a
+	 * per-issue model or harness today (no `profileId`, no `opts.model`: see `createWithId`), so this
+	 * mirrors that reality byte-for-byte rather than predicting a value the real spawn wouldn't land on
+	 * — a wrong prediction would defeat the whole point (skipping units that would ACTUALLY run on the
+	 * capped provider). `repo`/`issue` are accepted for the `DispatchDeps` shape and future per-repo/issue
+	 * differentiation; unused today since every auto-dispatched unit resolves the same way.
+	 */
+	private dispatchProviderFor(_repo: string, _issue: IssueRef): string | undefined {
+		return resolveProvider(undefined, globalDefaultHarness());
 	}
 
 	/** Spawn a routed agent for a Plane issue — the auto-dispatch entry point (intent → process). */
@@ -4818,10 +4838,20 @@ export class SquadManager extends EventEmitter {
 				// A usage-limit retry means the model subscription is rate-limited (5h/weekly cap). Note it so the
 				// dispatcher pauses; log once per episode (only on the not-paused → paused transition) to avoid spam
 				// when several agents trip the same cap. delayMs is omp's parsed retry hint (when the cap frees up).
-				const wasPaused = this.rateLimit.paused();
-				if (this.rateLimit.note(frame.errorMessage, frame.delayMs) && !wasPaused) {
-					const mins = Math.ceil((this.rateLimit.until - Date.now()) / 60_000);
-					this.log("warn", `model subscription rate-limited (${rec.dto.name}) — pausing auto-dispatch ~${mins}m: ${this.rateLimit.reason}`);
+				//
+				// Degradation ladder (concern 06): resolve the provider from harness-AT-SPAWN (`rec.harness`,
+				// resolved once at create() time — falling back to `resolveHarnessName` for workflow/flue kinds,
+				// which don't carry a HarnessDescriptor) + the CONFIGURED model (`rec.options.model`) — NEVER
+				// `rec.dto.model`, which the poll loop's `applyState` backfills asynchronously off the wire and is
+				// often still unset in this ≤2.5s pre-poll window (the raced backfill the concern doc warns
+				// against). Threading a real (possibly "unknown") provider into `note()` only sharpens which
+				// bucket a cap lands in — `paused()`'s no-arg legacy OR and `RateLimitGate`'s "unknown" → dominant-
+				// provider fold are both unchanged, so this is zero regression until a second verified lane exists.
+				const provider = resolveProvider(rec.options.model, rec.harness?.name ?? resolveHarnessName(rec.options));
+				const wasPaused = this.rateLimit.paused(provider);
+				if (this.rateLimit.note(frame.errorMessage, frame.delayMs, provider) && !wasPaused) {
+					const mins = Math.ceil((this.rateLimit.untilFor(provider) - Date.now()) / 60_000);
+					this.log("warn", `model subscription rate-limited (${rec.dto.name}, provider ${provider}) — pausing auto-dispatch ~${mins}m: ${this.rateLimit.reasonFor(provider)}`);
 				}
 				break;
 			}
