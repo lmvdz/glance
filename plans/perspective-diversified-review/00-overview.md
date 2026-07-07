@@ -56,3 +56,28 @@ measured before any pool is built.
   (oldest `meta-plan-autonomous-fleet:meta-autonomous-fleet` at 2026-07-05; ~half are
   `console-agent-tooling` scanner phantoms). Proceeded per the research→plan greenlight.
 - Source: `plans/research-recursive-orchestration/BRIEF.md` (draft PR #96) → this plan.
+
+## Resolution (2026-07-07)
+
+All six concerns **shipped** on PR #96 (implemented in-worktree, not via the fleet — the operator's
+daemon runs in DB/org mode, which disables the file-mode `add` factory; 403 on dispatch). Full backend
+suite **1760 pass / 0 fail**, `tsc` clean; 48 new lens tests including every fail-open contract.
+
+An adversarial opus code review verified all five hard invariants hold in code (fail-open, advisory-only,
+default-off, criteria-judge-alone/first, cache-correctness) — verdict **ship**. Its two minor fail-safe
+items were both applied: a defensive outer catch around the advisory block (future-proofs fail-open on the
+trust-critical path) and pinning `a/…b/` diff prefixes in `computeLandDiff` (so the selector never
+under-covers under an operator's `diff.noprefix`/`mnemonicPrefix`).
+
+| Concern | Status | Note |
+|---|---|---|
+| 01 lens selector | closed | `src/lens-select.ts` + 10 tests. Deviation: v1's single lens fires on any non-docs diff, so `RISKY_PATH_RE` routing (lockfile conflict with docs-only skip) is deferred to the pool; `HIGH_RISK` on criteria text is the extra trigger. |
+| 02 lens judge | closed | `LensJudge`/`ompLensJudge` on `decideTyped`; guarded stream-tolerant parser; cross-vendor via `activeReviewer()`. 7 tests. |
+| 03 gate wiring | closed | Sequential-after-criteria, pass+miss+non-docs only, `allSettled`+guards+defensive catch. **Simplification vs plan:** the criteria-scoped `gateCache` subsumes lens caching (lenses run only on a miss, stored in the same record) — no separate lens cache, killing a whole class of cache bugs. 8 tests. |
+| 04 confidence | closed | `lensAdvisory` bucket → `scoreConfidence` (sub-primary deltas, clamped) → `finalizeRun` → the real auto-land hold gate. 11 tests. |
+| 05 VERIFY re-check | closed | One narrow re-check of the first high-severity objection; nested under master flag; fail-open (undetermined ⇒ not confirmed); never vetoes. 7 tests. |
+| 06 flags + shadow log | closed | `lensConfig()` default-off surface (in `src/validator.ts`, not `config.ts` — validator-local); default-off contract test; shadow catch-log in `runValidatorGate`. 5 tests. |
+
+**Deferred (behind shadow evidence):** the multi-lens pool (perf/architecture/testing); the promotion path
+to criteria-injection/veto; UI surfacing of `lensAdvisory`/`lensVerify`. v1 is the falsifiable experiment —
+turn it on with `OMP_SQUAD_LENS_REVIEW=1` and read the shadow log before building the pool.

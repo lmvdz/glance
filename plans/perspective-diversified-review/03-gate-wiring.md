@@ -1,5 +1,5 @@
 # Gate wiring — fire the lens sequentially after the authoritative judge
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

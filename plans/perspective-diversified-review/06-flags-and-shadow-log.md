@@ -1,5 +1,5 @@
 # Flags, default-off contract, and shadow catch-logging
-STATUS: open
+STATUS: closed
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
