@@ -51,21 +51,26 @@ export const PATTERNS: Pattern[] = [
 		description: "`JSON.parse(...) as T` with no validation — at a TRUST BOUNDARY (untrusted/persisted input) replace with a Schema decode. Triage before tightening: parsing our own freshly-written data is fine.",
 		regex: /JSON\.parse\([^;{}]*\)\s+as\s+[A-Za-z]/,
 		allowlist: ["src/schema/"], // schema modules re-narrow VALIDATED output; that `as` is sound
-		baseline: 54,
+		// 54→55: the #88 reland set baselines below main's actual count, so main was red on landing.
+		// The +1 (workos.ts JWT-payload decode) is pre-existing merged code; corrected to reality here.
+		// Follow-up debt: that JWT decode is a real trust boundary — migrate to a Schema decode.
+		baseline: 55,
 	},
 	{
 		id: "bool-env-compare",
 		description: '`process.env.X === "1"` scattered boolean parsing — candidate for a typed envBool helper (not yet built)',
 		regex: /process\.env\.[A-Z_]+\s*[!=]==\s*"[01]"/,
 		allowlist: [],
-		baseline: 50,
+		// 50→52: reland stale-baseline correction (no envBool helper exists yet to migrate TO).
+		baseline: 52,
 	},
 	{
 		id: "error-message-idiom",
 		description: "`err instanceof Error ? err.message : String(err)` — the shape that a tagged-error hierarchy replaces (not yet built; tracked, not urgent)",
 		regex: /instanceof Error \? /,
 		allowlist: [],
-		baseline: 88,
+		// 88→91: reland stale-baseline correction (no tagged-error hierarchy exists yet to migrate TO).
+		baseline: 91,
 	},
 ];
 
