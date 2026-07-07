@@ -523,8 +523,21 @@ export interface AgentProfile {
 	id: string;
 	name: string;
 	description?: string;
+	/** VESTIGIAL — superseded by `harness` below (this field never selected a driver; it only ever
+	 *  chose flue-service/workflow vs the default omp-operator `kind`). Kept for back-compat. */
 	runtime: AgentKind;
+	/** Coding-agent harness this profile selects (registry key: omp/pi/claude-code/codex/opencode/gemini/…).
+	 *  A REPO-sourced profile (`.glance/profiles.json`) may only name a *verified* registered harness —
+	 *  parseProfiles rejects anything else and logs why. Env profiles (`OMP_SQUAD_PROFILES`) keep full trust. */
+	harness?: string;
+	/** Per-agent binary (argv[0]) override for the resolved harness. SECURITY: flows unchecked to
+	 *  `Bun.spawn` — a REPO-sourced profile can never set this (parseProfiles drops it + warns); only an
+	 *  env profile may. */
+	bin?: string;
 	model?: string;
+	/** Reasoning-effort level this profile requests. Rejected loudly at create() if the resolved harness's
+	 *  `capabilities.thinking` is `false` (no thinking-level channel) rather than silently dropped. */
+	thinking?: ThinkingLevel;
 	approvalMode?: ApprovalMode;
 	capabilities?: string[];
 	memory?: string;

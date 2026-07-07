@@ -438,6 +438,9 @@ async function cmdAdd(args: string[]): Promise<void> {
 	// --bin overrides the harness's binary for this one agent.
 	if (typeof flags.harness === "string") options.harness = flags.harness;
 	if (typeof flags.bin === "string") options.bin = flags.bin;
+	// Spawn from a named capability bundle (env OMP_SQUAD_PROFILES or repo .glance/profiles.json) —
+	// its harness/bin/model/thinking/memory/capabilities apply unless the flags above override them.
+	if (typeof flags.profile === "string") options.profileId = flags.profile;
 	if (flags.plain === true) options.autoRoute = false;
 
 	// Discoverability: warn if anyone (squad agent or raw omp session) is already on this repo.

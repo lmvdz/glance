@@ -55,7 +55,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { loadRepoProfiles, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -320,7 +320,7 @@ function sentinelDenied(...ids: (string | undefined)[]): boolean {
 // profile/model parsing in ./agent-profiles.ts. Re-exports keep the public import paths stable.
 export { liveAgents };
 export { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable } from "./spawn-identity.ts";
-export { modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+export { loadRepoProfiles, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 
 /** UI methods that block the agent on a human decision. */
 const BLOCKING_UI_METHODS: Record<string, true> = {
@@ -1564,11 +1564,18 @@ export class SquadManager extends EventEmitter {
 		return this.agents.get(id)?.dto;
 	}
 
-	profiles(): AgentProfile[] {
+	/** Merge order (base → override): repo catalog (`.glance/profiles.json`, sanitized — see
+	 *  loadRepoProfiles) ← env `OMP_SQUAD_PROFILES` (override by id) ← installed capability profiles.
+	 *  `repo` is optional so the repo-less callers (the `/api/profiles` picker, which has no cwd in
+	 *  scope) keep today's env+capability-only behavior; create() always passes `opts.repo`. */
+	profiles(repo?: string): AgentProfile[] {
+		const repoProfiles = repo ? loadRepoProfiles(repo) : [];
 		const envProfiles = profileOptionsFromEnv();
 		const envIds = new Set(envProfiles.map((p) => p.id));
-		const installed = capabilityProfiles(this.capabilityStore).filter((p) => !envIds.has(p.id));
-		return [...envProfiles, ...installed];
+		const merged = [...repoProfiles.filter((p) => !envIds.has(p.id)), ...envProfiles];
+		const mergedIds = new Set(merged.map((p) => p.id));
+		const installed = capabilityProfiles(this.capabilityStore).filter((p) => !mergedIds.has(p.id));
+		return [...merged, ...installed];
 	}
 
 	capabilities(): CapabilitySnapshot {
@@ -1682,9 +1689,9 @@ export class SquadManager extends EventEmitter {
 		return file;
 	}
 
-	private profileFor(id: string | undefined): AgentProfile | undefined {
+	private profileFor(id: string | undefined, repo?: string): AgentProfile | undefined {
 		if (!id) return undefined;
-		return this.profiles().find((p) => p.id === id);
+		return this.profiles(repo).find((p) => p.id === id);
 	}
 
 	async modelOptions(): Promise<RuntimeModelOption[]> {
@@ -3019,7 +3026,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private async createWithId(opts: CreateAgentOptions, explicitId: string | undefined, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
-		const profile = this.profileFor(opts.profileId);
+		const profile = this.profileFor(opts.profileId, opts.repo);
 		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
 		// what tools the spawned agent may use. They were parsed but NEVER applied — every agent got full tool
 		// access regardless. We now (a) inject the allow-list into the agent's system prompt (the path that
@@ -3035,6 +3042,11 @@ export class SquadManager extends EventEmitter {
 				profileId: profile.id,
 				model: opts.model ?? profile.model,
 				approvalMode: opts.approvalMode ?? profile.approvalMode,
+				// Capability bundle: a profile can also select the harness/bin/thinking a unit runs on
+				// (elevate-profile-bundle). Explicit opts always win over the profile's default.
+				harness: opts.harness ?? profile.harness,
+				bin: opts.bin ?? profile.bin,
+				thinking: opts.thinking ?? profile.thinking,
 				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
 		}
@@ -3153,6 +3165,13 @@ export class SquadManager extends EventEmitter {
 			// containment protocol-aware so any harness can be sandboxed).
 			if (opts.sandbox && harnessDesc.protocol !== "omp-rpc") {
 				throw new Error(`harness "${harnessDesc.name}" cannot run sandboxed yet — sandbox currently supports only omp-rpc harnesses`);
+			}
+			// Capability validation for a profile-selected axis the resolved harness can't honor: ACP
+			// harnesses have no thinking-level channel (makeDriver never threads `thinking` through to
+			// AcpAgentDriver), so a profile that sets `thinking` there would otherwise be silently dropped.
+			// Reject loudly instead — the operator picked an incompatible profile/harness pair.
+			if (profile?.thinking && !harnessDesc.capabilities.thinking) {
+				throw new Error(`profile "${profile.id}" sets thinking:"${profile.thinking}" but harness "${harnessDesc.name}" has no thinking-level channel (capabilities.thinking=false) — drop the profile's thinking field or pick a different harness`);
 			}
 		}
 
