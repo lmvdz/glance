@@ -1,5 +1,5 @@
 # Elevate AgentProfile to a full capability bundle + secure project catalog
-STATUS: open
+STATUS: closed
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -29,3 +29,6 @@ None (single repo). New optional file `.glance/profiles.json` is read if present
 - Unit test: profile `thinking` on a `thinking:false` harness → loud error/warn, not silent.
 - Merge test: repo catalog + env override by id resolves as specified.
 - **Live drive**: write a `.glance/profiles.json` with a safe profile, `glance add . --profile <id>` (or the existing `--profileId` path), confirm the unit spawns on the profile's harness/model. (If no `--profile` CLI flag exists, add one mirroring `--harness`.)
+
+## Resolution
+Closed — shipped on draft PR #92 (branch feat/agent-profiles). AgentProfile gains harness/bin/thinking; createWithId wires them into resolveHarness/makeDriver; `.glance/profiles.json` project catalog merged with env; repo profiles capability-restricted (bin dropped, unverified harness rejected — RCE fix); thinking-vs-capability loud gate; CLI `--profile`. typecheck clean, 1687 pass (+11). Live-driven: `--profile designer` applied harness/model/thinking/persona (persisted state confirmed); malicious repo profile's bin dropped + codex rejected (daemon log). Deviations: extended `profiles(repo?)` instead of a new method; `/api/profiles` route not yet repo-aware (UI picker won't surface repo-catalog entries — follow-on); model needs no capability gate (always pre-spawn).

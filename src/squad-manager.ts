@@ -129,6 +129,7 @@ import { type SubagentNode, SubagentTracker, mergeSubagents } from "./subagents.
 import { commandRole, effectiveRole, RbacDenied, roleAtLeast } from "./auth.ts";
 import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPathFor } from "./agent-host.ts";
 import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
+import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
@@ -3046,6 +3047,10 @@ export class SquadManager extends EventEmitter {
 				// (elevate-profile-bundle). Explicit opts always win over the profile's default.
 				harness: opts.harness ?? profile.harness,
 				bin: opts.bin ?? profile.bin,
+				// mcp: a REPO-sourced profile's `mcp` was already stripped by parseProfiles (agent-profiles.ts)
+				// before it ever reached `this.profiles()`/`profileFor` — `profile.mcp` here can only ever be an
+				// env/operator server list. `opts.mcp` (direct, same trust tier as opts.bin) still wins.
+				mcp: opts.mcp ?? profile.mcp,
 				thinking: opts.thinking ?? profile.thinking,
 				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
@@ -3204,6 +3209,14 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 
+		// MCP injection (omp-rpc family): the worktree exists now, agent.start() hasn't run yet. ACP's
+		// mcpServers are instead threaded through makeDriver's AcpAgentDriver construction below — this
+		// is the omp/pi half only, gated to that protocol so a workflow/flue/sandbox/ACP unit never gets a
+		// stray `.omp/mcp.json` it can't read. A write failure logs but never blocks the spawn.
+		if (harnessDesc?.protocol === "omp-rpc" && opts.mcp?.length) {
+			await writeMcpConfig(cwd, opts.mcp).catch((err) => this.log("warn", `mcp config write failed for "${name}": ${String(err)}`));
+		}
+
 		const persisted: PersistedAgent = {
 			id,
 			name,
@@ -3223,6 +3236,7 @@ export class SquadManager extends EventEmitter {
 			runtime: opts.runtime,
 			harness: harnessDesc?.name,
 			bin: opts.bin,
+			mcp: opts.mcp,
 			flue: opts.flue,
 			workflow: opts.workflow ? { path: opts.workflow } : opts.verify ? { verify: { command: opts.verify, mode: opts.verifyMode } } : undefined,
 			// Carry the resumable checkpoint so an adopted/restored workflow continues its graph from the
@@ -3256,6 +3270,8 @@ export class SquadManager extends EventEmitter {
 			kind,
 			harness: harnessDesc?.name,
 			harnessCaps: harnessDesc ? { toolApproval: harnessDesc.capabilities.toolApproval, resumable: harnessDesc.capabilities.resumable, hostTools: harnessDesc.capabilities.hostTools, contextInjection: harnessDesc.capabilities.contextInjection } : undefined,
+			// NAMES ONLY (types.ts#AgentDTO.mcpServerNames) — never command/env/url/headers.
+			mcpServerNames: opts.mcp?.length ? opts.mcp.map((s) => s.name) : undefined,
 			executionRole: opts.executionRole,
 			parentId: opts.parentId,
 			...lineageFieldsFrom(opts),
@@ -3418,7 +3434,7 @@ export class SquadManager extends EventEmitter {
 			// unit UNSCOPED (honest — surfaced via the capability). approvalMode is mapped best-effort to an
 			// ACP session mode inside the driver.
 			const contextInjection = process.env.OMP_SQUAD_ACP_CONTEXT === "prompt" ? "prompt" : "none";
-			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection });
+			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection, mcpServers: p.mcp });
 			acp.on("acpcapabilities", (caps: unknown) => this.log("info", `acp ${harness.name} ${p.id} advertised capabilities: ${JSON.stringify(caps)}`));
 			return acp;
 		}

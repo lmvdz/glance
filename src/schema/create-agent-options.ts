@@ -81,6 +81,18 @@ const FlueMemberConfigSchema = Schema.Struct({
 	target: Schema.Literals(["node", "cloudflare"]),
 });
 
+/** `types.ts#McpServerSpec` — an MCP server a profile (or a direct create request) attaches. */
+const McpServerSpecSchema = Schema.Struct({
+	name: Schema.String,
+	type: Schema.Literals(["stdio", "sse", "http"]),
+	command: Schema.optional(Schema.String),
+	args: Schema.optional(Schema.Array(Schema.String)),
+	env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+	url: Schema.optional(Schema.String),
+	headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+	enabled: Schema.optional(Schema.Boolean),
+});
+
 /**
  * `types.ts#CreateAgentOptions`. User/wire-facing fields modeled concretely;
  * internal restore/fan-out plumbing modeled as `optional(Unknown)` (see file
@@ -91,6 +103,10 @@ export const CreateAgentOptionsSchema = Schema.Struct({
 	repo: Schema.String,
 	name: Schema.optional(Schema.String),
 	runtime: Schema.optional(RuntimeSchema),
+	// harness/bin select the driver (harness-registry) — wire-facing since `glance add --harness`
+	// posts a `create` command; without these here Schema.Struct would strip them before create().
+	harness: Schema.optional(Schema.String),
+	bin: Schema.optional(Schema.String),
 	branch: Schema.optional(Schema.String),
 	existingPath: Schema.optional(Schema.String),
 	model: Schema.optional(Schema.String),
@@ -113,6 +129,7 @@ export const CreateAgentOptionsSchema = Schema.Struct({
 	owns: Schema.optional(Schema.Array(Schema.String)),
 	produces: Schema.optional(Schema.Array(Schema.String)),
 	track: Schema.optional(Schema.Boolean),
+	mcp: Schema.optional(Schema.Array(McpServerSpecSchema)),
 	// ── internal restore / fan-out only: never over the wire, kept opaque ─────
 	workflowState: Schema.optional(Schema.Unknown),
 	parentId: Schema.optional(Schema.Unknown),

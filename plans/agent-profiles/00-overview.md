@@ -6,15 +6,16 @@ Any glance unit can be created from a named **Agent Profile** = a full `{harness
 ## Work
 | Concern | Why it exists | Complexity | Touches |
 |---|---|---|---|
-| 01 — Elevate AgentProfile to a full bundle + secure project catalog | A profile can't select a harness today (dead `runtime` field; no `harness`/`bin`/`thinking`). Profiles load only from env. Wire the bundle into unit create; load a repo `.glance/profiles.json` — capability-restricted (no `bin`/unverified-harness from repo files, RCE fix). | architectural | src/types.ts, src/agent-profiles.ts, src/squad-manager.ts, src/harness-registry.ts (capability check), tests |
-| 02 — (NEXT, gated on user's container choice) chained-units pipeline + per-branch harness | Multi-harness pipelines as chained profiled units; thread harness/profileId through BranchSpec for parallel fan-out. | architectural | src/workflow-driver.ts, src/squad-manager.ts (spawnFleetBranch) |
-| 03 — (NEXT, highest product value) skills/MCP-per-profile binding | Make "designer" actually good at design: bind a profile to real capability skill-packs / MCP servers, not just persona text. Needs its own design against src/capabilities/. | research | src/capabilities/, src/agent-profiles.ts, src/types.ts |
+| 01 — Elevate AgentProfile to a full bundle + secure project catalog | **DONE (PR #92)** — profile selects harness/bin/thinking; `.glance/profiles.json` catalog, capability-restricted (repo can't set bin/unverified-harness = RCE fix). | architectural | src/types.ts, src/agent-profiles.ts, src/squad-manager.ts, tests |
+| 02 — Bind a profile to real skills via MCP servers | **DONE (PR #92)** — the user-chosen "skills axis". `profile.mcp` → `<worktree>/.omp/mcp.json` (omp) + ACP session channel; repo-mcp rejected (RCE class); DTO exposes names only. This is what makes "designer" ≠ "coder" for real, not persona text. | architectural | src/types.ts, src/agent-profiles.ts, src/squad-manager.ts, src/acp-agent-driver.ts, src/mcp-config.ts, tests |
+| 03 — (DEFERRED, gated on user's container choice) chained-units pipeline + per-branch harness | Multi-harness pipelines as chained profiled units; thread harness/profileId through BranchSpec for parallel fan-out. | architectural | src/workflow-driver.ts, src/squad-manager.ts (spawnFleetBranch) |
 
 ## Order
 | Batch | Concerns | Why together |
 |---|---|---|
-| 1 | 01 | The foundation — correct regardless of the container fork. Build now. |
-| — | 02, 03 | Gated on the DESIGN.md open-question (chained-units vs graph-nodes) + a focused skills design. Present to user first. |
+| 1 | 01 | The foundation — correct regardless of the container fork. |
+| 2 | 02 | The skills axis (user-chosen next slice). Stacks on 01. |
+| — | 03 | Gated on the DESIGN.md open-question (chained-units vs graph-nodes). |
 
 ## Dependency graph
 | Concern | Blocked by | 30s check |

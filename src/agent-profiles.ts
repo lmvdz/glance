@@ -5,7 +5,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentProfile, ThinkingLevel } from "./types.ts";
+import type { AgentProfile, McpServerSpec, ThinkingLevel } from "./types.ts";
 import { getHarness } from "./harness-registry.ts";
 
 export interface RuntimeModelOption {
@@ -44,13 +44,53 @@ export function profileOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Age
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["minimal", "low", "medium", "high", "xhigh"]);
 
+const MCP_TYPES = new Set<McpServerSpec["type"]>(["stdio", "sse", "http"]);
+
+/** A string→string record, tolerant of a malformed shape (missing ⇒ undefined, non-string values dropped). */
+function parseStringRecord(v: unknown): Record<string, string> | undefined {
+	if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+	const out: Record<string, string> = {};
+	for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+		if (typeof val === "string") out[k] = val;
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+/** Parse `AgentProfile.mcp` — tolerant of malformed entries (dropped silently, like `capabilities`'
+ *  string filter); an entry missing `name` or a valid `type` is not a server at all. Does NOT enforce
+ *  the repo-source RCE rule — that's the caller's job (mirrors how `bin`/`harness` are parsed first,
+ *  then sanitized by `source` below). */
+function parseMcpServers(raw: unknown): McpServerSpec[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const out = raw.flatMap((item): McpServerSpec[] => {
+		if (!item || typeof item !== "object") return [];
+		const r = item as Record<string, unknown>;
+		const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : "";
+		const type = typeof r.type === "string" && MCP_TYPES.has(r.type as McpServerSpec["type"]) ? (r.type as McpServerSpec["type"]) : undefined;
+		if (!name || !type) return [];
+		return [{
+			name,
+			type,
+			command: typeof r.command === "string" ? r.command : undefined,
+			args: Array.isArray(r.args) ? r.args.filter((v): v is string => typeof v === "string") : undefined,
+			env: parseStringRecord(r.env),
+			url: typeof r.url === "string" ? r.url : undefined,
+			headers: parseStringRecord(r.headers),
+			enabled: typeof r.enabled === "boolean" ? r.enabled : undefined,
+		}];
+	});
+	return out.length ? out : undefined;
+}
+
 /** `source` distinguishes operator-set env profiles (fully trusted) from `.glance/profiles.json`
  *  (repo-committed — anyone who can open a PR can edit it). A "repo" profile is sanitized: `bin`
- *  is dropped outright (it flows unchecked to `Bun.spawn` — RCE if a repo could set it) and
- *  `harness` is rejected unless it names a *verified* registered harness (an unverified one is
- *  already hidden from every other create surface; letting a repo file pick one anyway would be a
- *  backdoor around that gate). Each rejection logs a console.warn naming the field and profile id —
- *  loud, not a silent drop. */
+ *  is dropped outright (it flows unchecked to `Bun.spawn` — RCE if a repo could set it), `harness`
+ *  is rejected unless it names a *verified* registered harness (an unverified one is already hidden
+ *  from every other create surface; letting a repo file pick one anyway would be a backdoor around
+ *  that gate), and `mcp` is dropped ENTIRELY (a `stdio` server is `{command,args}` — the SAME RCE
+ *  class as `bin` — so there is no partial-trust merge, unlike env↔repo profile merging by id
+ *  elsewhere: a repo profile simply may not define MCP servers). Each rejection logs a console.warn
+ *  naming the field and profile id — loud, not a silent drop. */
 function parseProfiles(raw: string | undefined, source: "env" | "repo" = "env"): AgentProfile[] {
 	if (!raw?.trim()) return [];
 	try {
@@ -66,6 +106,7 @@ function parseProfiles(raw: string | undefined, source: "env" | "repo" = "env"):
 			if (!id) return [];
 			let bin = typeof r.bin === "string" ? r.bin : undefined;
 			let harness = typeof r.harness === "string" ? r.harness : undefined;
+			let mcp = parseMcpServers(r.mcp);
 			if (source === "repo") {
 				if (bin !== undefined) {
 					console.warn(`[agent-profiles] repo profile "${id}" sets "bin" — dropped (a repo-committed profile cannot set a binary override, it would be arbitrary code execution)`);
@@ -75,6 +116,10 @@ function parseProfiles(raw: string | undefined, source: "env" | "repo" = "env"):
 					console.warn(`[agent-profiles] repo profile "${id}" sets harness "${harness}" — rejected (repo-committed profiles may only select a verified registered harness)`);
 					harness = undefined;
 				}
+				if (mcp !== undefined) {
+					console.warn(`[agent-profiles] repo profile "${id}" sets "mcp" — dropped (a repo-committed profile cannot define inline MCP servers: a stdio server is {command,args}, the same arbitrary-code-execution class as "bin")`);
+					mcp = undefined;
+				}
 			}
 			return [{
 				id,
@@ -83,6 +128,7 @@ function parseProfiles(raw: string | undefined, source: "env" | "repo" = "env"):
 				runtime,
 				harness,
 				bin,
+				mcp,
 				model: typeof r.model === "string" ? r.model : undefined,
 				thinking,
 				approvalMode: r.approvalMode === "always-ask" || r.approvalMode === "write" || r.approvalMode === "yolo" ? r.approvalMode : undefined,

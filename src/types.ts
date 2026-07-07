@@ -519,6 +519,35 @@ export interface ArtifactCommentDTO {
 }
 
 
+/**
+ * An MCP server a profile attaches so its unit gets real, specialized capability (design tools,
+ * code-analysis tools, …), beyond persona text — the thing that makes profiles genuinely different at
+ * a task class. Injected for BOTH harness families: omp-rpc via `<worktree>/.omp/mcp.json`
+ * (src/mcp-config.ts's `writeMcpConfig`), ACP via `session/new`'s `mcpServers` (src/acp-agent-driver.ts,
+ * translated by `toAcpMcpServers`).
+ *
+ * SECURITY: a `stdio` server is `{command, args}` = arbitrary code execution — the SAME RCE class as
+ * `AgentProfile.bin`. A REPO-sourced profile's `mcp` field is REJECTED ENTIRELY by parseProfiles
+ * (agent-profiles.ts), never merged by name, never partially trusted — only env/operator profiles
+ * (`OMP_SQUAD_PROFILES`) or a direct `CreateAgentOptions.mcp` (same trust tier as `opts.bin`) may set it.
+ */
+export interface McpServerSpec {
+	name: string;
+	type: "stdio" | "sse" | "http";
+	/** stdio only: argv[0]. SECURITY: flows unchecked to `Bun.spawn`/the ACP child — same class as `AgentProfile.bin`. */
+	command?: string;
+	/** stdio only. */
+	args?: string[];
+	/** stdio only. */
+	env?: Record<string, string>;
+	/** sse/http only: the server's endpoint. */
+	url?: string;
+	/** sse/http only. */
+	headers?: Record<string, string>;
+	/** Default true. */
+	enabled?: boolean;
+}
+
 export interface AgentProfile {
 	id: string;
 	name: string;
@@ -534,6 +563,10 @@ export interface AgentProfile {
 	 *  `Bun.spawn` — a REPO-sourced profile can never set this (parseProfiles drops it + warns); only an
 	 *  env profile may. */
 	bin?: string;
+	/** MCP servers this profile attaches for real, specialized capability. SECURITY: a REPO-sourced
+	 *  profile can never set this (parseProfiles drops it + warns, same RCE class as `bin`); only an
+	 *  env profile may. */
+	mcp?: McpServerSpec[];
 	model?: string;
 	/** Reasoning-effort level this profile requests. Rejected loudly at create() if the resolved harness's
 	 *  `capabilities.thinking` is `false` (no thinking-level channel) rather than silently dropped. */
@@ -572,6 +605,10 @@ export interface AgentDTO {
 	harness?: string;
 	/** Harness capability summary surfaced for the UI (approval channel + restart survival). */
 	harnessCaps?: { toolApproval: "native" | "none" | "preauth-allowlist"; resumable: boolean; hostTools: boolean; contextInjection: "native" | "none" | "mcp" };
+	/** NAMES ONLY of the MCP servers resolved for this unit (`McpServerSpec.name`) — deliberately never
+	 *  the full spec, so `command`/`env`/`url`/`headers` (secrets/exec) never reach a surface. Absent ⇒
+	 *  no MCP servers attached. */
+	mcpServerNames?: string[];
 	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
 	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
 	executionRole?: ExecutionRole;
@@ -795,6 +832,10 @@ export interface PersistedAgent {
 	/** Per-agent binary (argv[0]) override for the resolved harness (else the descriptor's bin, or
 	 *  GLANCE_BIN for the default harness). */
 	bin?: string;
+	/** MCP servers resolved for this unit (opts.mcp ?? profile.mcp — see squad-manager.ts createWithId).
+	 *  Injected into the worktree's `.omp/mcp.json` (omp-rpc harnesses) or the ACP `session/new` call at
+	 *  spawn time; never re-derived on restore. */
+	mcp?: McpServerSpec[];
 	/** flue-service only: worker invocation config. */
 	flue?: FlueMemberConfig;
 	/** workflow only: graph file backing this run. */
@@ -873,6 +914,11 @@ export interface CreateAgentOptions {
 	harness?: string;
 	/** Per-agent binary (argv[0]) override for the resolved harness. */
 	bin?: string;
+	/** MCP servers to attach to this unit (real, specialized capability — beyond persona text). Explicit
+	 *  `opts.mcp` wins over `profile.mcp` (same `opts ?? profile` ordering as `harness`/`bin`). Same trust
+	 *  tier as `opts.bin` — sanitization only applies to a REPO-sourced *profile*'s `mcp` field, never to
+	 *  this direct option. */
+	mcp?: McpServerSpec[];
 	/** Branch to create/checkout for the worktree. Defaults to a unique `squad/<agent-id>` branch. */
 	branch?: string;
 	/** Reuse an existing path as the cwd instead of cutting a worktree. */

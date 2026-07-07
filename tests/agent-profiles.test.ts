@@ -13,8 +13,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
+import { AcpAgentDriver } from "../src/acp-agent-driver.ts";
 import { loadRepoProfiles, SquadManager } from "../src/squad-manager.ts";
-import type { AgentDTO, PersistedAgent, RpcSessionState } from "../src/types.ts";
+import type { AgentDTO, McpServerSpec, PersistedAgent, RpcSessionState } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
@@ -239,5 +240,109 @@ test("profiles() with no repo arg keeps today's env+capability-only behavior (re
 	tmps.push(stateDir);
 	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
 	expect(mgr.profiles().map((p) => p.id)).toEqual(["env-only"]);
+	await mgr.stop();
+});
+
+// ── concern 02: profile → MCP servers (real, specialized capability) ─────────
+
+test("loadRepoProfiles drops `mcp` from a repo-sourced profile and warns (same RCE class as bin)", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "repo-catalog-mcp-"));
+	tmps.push(repo);
+	await writeRepoProfiles(repo, [{ id: "sneaky-mcp", name: "Sneaky MCP", mcp: [{ name: "design", type: "stdio", command: "echo" }] }]);
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		const profiles = loadRepoProfiles(repo);
+		expect(profiles).toHaveLength(1);
+		expect(profiles[0]!.mcp).toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn.mock.calls[0]![0]).toContain("mcp");
+	} finally {
+		warn.mockRestore();
+	}
+});
+
+test("an env profile's mcp servers reach a created omp-rpc unit: .omp/mcp.json written + .git/info/exclude entry", async () => {
+	stashEnv("OMP_SQUAD_PROFILES");
+	process.env.OMP_SQUAD_PROFILES = JSON.stringify([{ id: "designer", name: "Designer", mcp: [{ name: "design", type: "stdio", command: "echo", args: ["hi"] }] }]);
+	const { mgr, repo } = await makeMgr("mcp-omp-inject");
+	const dto = await mgr.create({ name: "u", repo, profileId: "designer", approvalMode: "yolo", autoRoute: false });
+	const raw = await fs.readFile(path.join(dto.worktree, ".omp", "mcp.json"), "utf8");
+	const parsed = JSON.parse(raw);
+	expect(parsed.mcpServers.design).toEqual({ type: "stdio", command: "echo", args: ["hi"] });
+	const exclude = await fs.readFile(path.join(repo, ".git", "info", "exclude"), "utf8");
+	expect(exclude).toContain(".omp/mcp.json");
+	await mgr.stop();
+});
+
+test("a repo profile's mcp is dropped end-to-end through create(): no .omp/mcp.json written, no server threaded", async () => {
+	stashEnv("OMP_SQUAD_PROFILES");
+	delete process.env.OMP_SQUAD_PROFILES;
+	const { mgr, repo } = await makeMgr("mcp-repo-e2e");
+	await writeRepoProfiles(repo, [{ id: "repo-designer", name: "Repo designer", mcp: [{ name: "design", type: "stdio", command: "echo" }] }]);
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	let dto: AgentDTO;
+	try {
+		dto = await mgr.create({ name: "u", repo, profileId: "repo-designer", approvalMode: "yolo", autoRoute: false });
+	} finally {
+		warn.mockRestore();
+	}
+	expect(dto.mcpServerNames).toBeUndefined();
+	await expect(fs.access(path.join(dto.worktree, ".omp", "mcp.json"))).rejects.toThrow();
+	const rec = (mgr as unknown as InternalHost).agents.get(dto.id)!;
+	expect(rec.options.mcp).toBeUndefined(); // never reached the harness despite the repo file asking for it
+	await mgr.stop();
+});
+
+test("the AgentDTO exposes MCP server NAMES only — never command/env/url/headers", async () => {
+	stashEnv("OMP_SQUAD_PROFILES");
+	process.env.OMP_SQUAD_PROFILES = JSON.stringify([
+		{ id: "designer", name: "Designer", mcp: [{ name: "design", type: "stdio", command: "figma-mcp", env: { FIGMA_TOKEN: "top-secret-value" } }, { name: "search", type: "http", url: "https://mcp.internal/search", headers: { Authorization: "Bearer sekrit" } }] },
+	]);
+	const { mgr, repo } = await makeMgr("mcp-dto-names");
+	const dto = await mgr.create({ name: "u", repo, profileId: "designer", approvalMode: "yolo", autoRoute: false });
+	expect(dto.mcpServerNames).toEqual(["design", "search"]);
+	const serialized = JSON.stringify(dto);
+	expect(serialized).not.toContain("top-secret-value");
+	expect(serialized).not.toContain("sekrit");
+	expect(serialized).not.toContain("figma-mcp");
+	await mgr.stop();
+});
+
+test("a second mcp injection into an already-provisioned worktree merges by name rather than clobbering (real linked-worktree shape)", async () => {
+	stashEnv("OMP_SQUAD_PROFILES");
+	process.env.OMP_SQUAD_PROFILES = JSON.stringify([{ id: "designer", name: "Designer", mcp: [{ name: "design", type: "stdio", command: "echo" }] }]);
+	const { mgr, repo } = await makeMgr("mcp-merge-e2e");
+	const dto = await mgr.create({ name: "u", repo, profileId: "designer", approvalMode: "yolo", autoRoute: false });
+	// A real linked worktree already carries create()-time's `design` entry. Inject a second server
+	// directly (mcp-config.test.ts unit-tests the pure merge logic; this proves it holds against the
+	// actual worktree shape create() produced, `.git`-file included).
+	const { writeMcpConfig } = await import("../src/mcp-config.ts");
+	await writeMcpConfig(dto.worktree, [{ name: "second", type: "http", url: "https://second.example" }]);
+	const parsed = JSON.parse(await fs.readFile(path.join(dto.worktree, ".omp", "mcp.json"), "utf8"));
+	expect(parsed.mcpServers.design.command).toBe("echo"); // the original create()-time server survives
+	expect(parsed.mcpServers.second.url).toBe("https://second.example"); // the new one is added, not a clobber
+	await mgr.stop();
+});
+
+test("makeDriver threads a profile's resolved mcp into AcpAgentDriver, translated to the ACP wire shape", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-acp-thread-state-"));
+	tmps.push(stateDir);
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	const mcp: McpServerSpec[] = [{ name: "design", type: "stdio", command: "echo", args: ["hi"], env: { FOO: "bar" } }];
+	const persisted: PersistedAgent = {
+		id: "u1",
+		name: "u1",
+		repo: "/tmp/mcp-acp-thread-repo",
+		worktree: "/tmp/mcp-acp-thread-repo",
+		approvalMode: "yolo",
+		harness: "opencode",
+		mcp,
+	};
+	// Calling the real (un-stubbed) makeDriver — no process is spawned until .start(), which this test
+	// never calls, so no live opencode binary is needed.
+	const driver = (mgr as unknown as { makeDriver: (p: PersistedAgent) => AgentDriver }).makeDriver(persisted);
+	expect(driver).toBeInstanceOf(AcpAgentDriver);
+	const servers = (driver as unknown as { mcpServers: () => unknown[] }).mcpServers();
+	expect(servers).toEqual([{ name: "design", command: "echo", args: ["hi"], env: [{ name: "FOO", value: "bar" }] }]);
 	await mgr.stop();
 });
