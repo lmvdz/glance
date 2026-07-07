@@ -4759,6 +4759,14 @@ export class SquadManager extends EventEmitter {
 						issue: rec.dto.issue?.identifier ?? rec.dto.issue?.name,
 						operator: this.operator.id,
 						org: this.operator.orgId,
+						// Receipt attribution gap (orchestration receipts audit 2026-07-07): the harness backing
+						// this run, resolved at spawn (`rec.harness`, set once by create()'s `resolveHarness` call)
+						// — NOT `receipts.ts`'s own `?? "omp"` default, which silently mislabels a non-omp unit.
+						// `resolveHarnessName` covers workflow/flue-kind records (`harnessFor` returns undefined
+						// for them by convention — the capability-gating concept doesn't apply) with the SAME
+						// legacy-alias + global-default resolution `resolveHarness` itself uses, so a workflow run
+						// still gets a real harness name instead of falling through to receipts.ts's bare default.
+						harness: rec.harness?.name ?? resolveHarnessName(rec.options),
 					});
 				}
 				rec.run.start(rec.dto.model);
@@ -5337,6 +5345,15 @@ export class SquadManager extends EventEmitter {
 		const run = rec.run;
 		if (!run || run.finalized) return;
 		run.finalized = true;
+		// Receipt attribution gap (orchestration receipts audit 2026-07-07): `applyState`'s poll loop
+		// backfills `rec.dto.model` (provider/id form) off the LIVE RPC session's own reported model —
+		// a DIFFERENT, independent signal from the `message_end` wire frame `noteModel` late-binds from
+		// inside `ingest()`. A run whose model was never explicit at start() and never emitted a
+		// message-level model (or emitted one before the poll's first backfill landed) would otherwise
+		// finalize with an empty `seed.model` despite the DTO already knowing the real model. `noteModel`
+		// is itself first-model-wins (never overwrites an explicit start()-time model), so this is a
+		// pure gap-fill, not a behavior change for a run that already resolved its model earlier.
+		if (rec.dto.model) run.noteModel(rec.dto.model);
 		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
 		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
 		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it

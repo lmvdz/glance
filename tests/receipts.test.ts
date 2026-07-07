@@ -163,6 +163,24 @@ test("an explicit opts.model stays authoritative over a later assistant frame's 
 	expect(snap.model).toBe("opus");
 });
 
+test("readReceipts parses a pre-attribution-fix receipt (no model/harness fields at all)", async () => {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipts-"));
+	tmps.push(baseDir);
+
+	// A historical receipt shape (predates the harness field / model backfill) — no `model`, no
+	// `harness` key at all, not even `undefined`. Every reader (scoreboard, attribution, /api/usage)
+	// must keep working against the old backlog of receipts on disk.
+	const legacy = { agentId: "ag-legacy", name: "old", repo: "/repo", runId: "r1", startedAt: 1, status: "idle", toolCalls: 0, toolTally: {}, filesTouched: [] };
+	await fs.mkdir(path.join(baseDir, "receipts"), { recursive: true });
+	await fs.writeFile(path.join(baseDir, "receipts", "ag-legacy.jsonl"), `${JSON.stringify(legacy)}\n`);
+
+	const back = await readReceipts(baseDir, "ag-legacy");
+	expect(back.length).toBe(1);
+	expect(back[0].model).toBeUndefined();
+	expect(back[0].harness).toBeUndefined();
+	expect(back[0].agentId).toBe("ag-legacy");
+});
+
 test("graceful no-usage case: tokens/costUsd omitted", () => {
 	const acc = new RunAccumulator({ agentId: "ag3", name: "gamma", repo: "/repo" });
 	feed(acc, [{ type: "agent_start" }, { type: "tool_execution_start", toolName: "search" }, { type: "agent_end" }]);
