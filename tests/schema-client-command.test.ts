@@ -36,12 +36,91 @@ test("accepts every scalar variant and preserves fields", () => {
 	expect(ok({ type: "set-mode", id: "a", mode: "observe", reason: "paused" })).toEqual({ type: "set-mode", id: "a", mode: "observe", reason: "paused" });
 });
 
-test("create/commission validate the envelope and pass deep payloads through untouched", () => {
-	const options = { repo: "/r", name: "x", task: "do it", model: "opus", sandbox: { image: "img", runArgs: ["--network=none"] }, requires: ["src/a"], nested: { deep: [1, 2, 3] } };
+test("create: a realistic full options payload decodes and preserves every modeled field", () => {
+	const options = {
+		repo: "/r",
+		name: "x",
+		runtime: "acp" as const,
+		branch: "squad/x",
+		existingPath: "/tmp/wt",
+		model: "opus",
+		profileId: "p1",
+		approvalMode: "yolo" as const,
+		task: "do it",
+		appendSystemPrompt: "be terse",
+		thinking: "high" as const,
+		issue: { id: "i1", name: "Ship it", identifier: "OMPSQ-1", priority: "high", requires: ["src/a"], scopeSource: "operator" as const },
+		featureId: "f1",
+		workflow: "graph.fabro",
+		flue: { dir: "/w", workflow: "extract", target: "node" as const },
+		verify: "bun test",
+		verifyMode: "tdd" as const,
+		executionRole: "tester" as const,
+		autonomyMode: "autodrive" as const,
+		sandbox: { image: "img", workdir: "/work", mountWorktree: false, runArgs: ["--network=none"] },
+		autoRoute: true,
+		requires: ["src/a"],
+		owns: ["src/b"],
+		produces: ["src/c"],
+		track: true,
+	};
+	// Every modeled field round-trips unchanged.
 	expect(ok({ type: "create", options })).toEqual({ type: "create", options });
+});
 
-	const spec = { name: "extract-emails", purpose: "pull emails", capabilities: ["read"], model: false };
-	expect(ok({ type: "commission", spec })).toEqual({ type: "commission", spec });
+test("create: internal restore/fan-out fields are kept as opaque passthrough (not stripped)", () => {
+	const options = {
+		repo: "/r",
+		// These are set only by internal restore/fan-out code, never over the wire.
+		workflowState: { cursor: 3, nested: { deep: [1, 2] } },
+		parentId: "p",
+		parentNodeId: "n",
+		branchIndex: 2,
+		subagents: [{ id: "s1" }],
+		workflowGraph: { nodes: [] },
+		scopeSource: "operator",
+		bypassCap: true,
+		adopted: true,
+		cold: true,
+		traceId: "t",
+	};
+	// optional(Unknown) preserves the value verbatim rather than dropping the key.
+	expect(ok({ type: "create", options })).toEqual({ type: "create", options });
+});
+
+test("create: strips keys that are not part of CreateAgentOptions (field-injection defense)", () => {
+	const decoded = ok({ type: "create", options: { repo: "/r", role: "admin", orgId: "other" } }) as { options: Record<string, unknown> };
+	expect(decoded.options).toEqual({ repo: "/r" });
+	expect("role" in decoded.options).toBe(false);
+});
+
+test("create: rejects a payload with a bad field type or bad enum value", () => {
+	expect(rejected({ type: "create", options: { repo: 42 } })).toBe(true); // repo must be a string
+	expect(rejected({ type: "create", options: {} })).toBe(true); // repo is required
+	expect(rejected({ type: "create", options: { repo: "/r", approvalMode: "root" } })).toBe(true); // bad ApprovalMode
+	expect(rejected({ type: "create", options: { repo: "/r", runtime: "wasm" } })).toBe(true); // bad runtime
+	expect(rejected({ type: "create", options: { repo: "/r", verifyMode: "yolo" } })).toBe(true); // bad verifyMode
+	expect(rejected({ type: "create", options: { repo: "/r", thinking: "ultra" } })).toBe(true); // bad ThinkingLevel
+	expect(rejected({ type: "create", options: { repo: "/r", requires: "src/a" } })).toBe(true); // requires must be string[]
+	expect(rejected({ type: "create", options: { repo: "/r", sandbox: { workdir: "/work" } } })).toBe(true); // sandbox.image required
+	expect(rejected({ type: "create", options: { repo: "/r", track: "yes" } })).toBe(true); // track must be boolean
+});
+
+test("commission: valid specs decode (model string | false) and preserve fields", () => {
+	const noLlm = { name: "extract-emails", purpose: "pull emails", capabilities: ["read"], model: false as const, deployTarget: "node" as const };
+	expect(ok({ type: "commission", spec: noLlm })).toEqual({ type: "commission", spec: noLlm });
+
+	const llm = { name: "triage", purpose: "route issues", model: "opus", workflowBody: "return {}" };
+	expect(ok({ type: "commission", spec: llm })).toEqual({ type: "commission", spec: llm });
+});
+
+test("commission: rejects missing required or mistyped fields", () => {
+	expect(rejected({ type: "commission", spec: { purpose: "x" } })).toBe(true); // no name
+	expect(rejected({ type: "commission", spec: { name: "x" } })).toBe(true); // no purpose
+	expect(rejected({ type: "commission", spec: { name: "x", purpose: "y", model: 5 } })).toBe(true); // model not string|false
+	expect(rejected({ type: "commission", spec: { name: "x", purpose: "y", model: true } })).toBe(true); // model true is not allowed
+	expect(rejected({ type: "commission", spec: { name: "x", purpose: "y", capabilities: "read" } })).toBe(true); // capabilities must be string[]
+	expect(rejected({ type: "commission", spec: { name: "x", purpose: "y", deployTarget: "aws" } })).toBe(true); // bad deployTarget
 });
 
 test("strips injected excess keys (field-injection defense)", () => {
