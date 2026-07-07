@@ -206,7 +206,14 @@ function realPlan(repo: string): ConvergenceDeps["plan"] {
 	};
 }
 
-async function gitDiffAgainstHead(repo: string): Promise<string> {
+/**
+ * The hardened working-tree diff against HEAD — `git diff HEAD`, i.e. UNCOMMITTED changes only.
+ * Kept for `realValidate` below (a repo-level, single-worktree context where HEAD only moves via a
+ * genuine land). NOT what Sentinel v0's mid-run drift-confirm sink uses (see `gitDiffSinceBase`
+ * below) — a long-running agent commits incrementally, so at confirm time this would read "" and
+ * the judge would abstain on every unit of real, committed work.
+ */
+export async function gitDiffAgainstHead(repo: string): Promise<string> {
 	try {
 		// --no-ext-diff is load-bearing: GIT_HARDEN_ENV sets diff.external="", which otherwise makes
 		// git try to exec "" as an external differ and return EMPTY output for every diff.
@@ -216,6 +223,46 @@ async function gitDiffAgainstHead(repo: string): Promise<string> {
 	} catch {
 		return "";
 	}
+}
+
+async function gitOutAt(args: string[], cwd: string): Promise<string> {
+	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "ignore" });
+	const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+	return out.trim();
+}
+
+/**
+ * Sentinel v0's mid-run drift-confirm diff (plans/sentinel-drift-probe, concern 02) — the agent's
+ * FULL change set since its branch forked: committed commits AND uncommitted working-tree edits
+ * combined, not just `gitDiffAgainstHead`'s uncommitted-only slice. A long-running agent commits
+ * incrementally, so at confirm time `git diff HEAD` is routinely "" even when the unit has done (or
+ * undone) substantial work — which would make `scoreAgainstCriteria` abstain on every committed
+ * change, systematically under-counting drift.
+ *
+ * Resolution mirrors validator.ts's `computeLandDiff` upstream fallback: resolve the tracked
+ * upstream (`@{u}`) or, absent one, the default remote branch (`origin/HEAD`); merge-base it against
+ * HEAD; diff that merge-base against the CURRENT WORKING TREE (no second ref) so both committed and
+ * uncommitted changes land in one diff. No upstream/merge-base resolves ⇒ fall back to the
+ * uncommitted-only diff (better than empty). Never throws (contained; a failure degrades to the
+ * fallback, which itself never throws).
+ */
+export async function gitDiffSinceBase(worktree: string): Promise<string> {
+	try {
+		const upstream = (await gitOutAt(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], worktree)) || (await gitOutAt(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], worktree));
+		if (upstream) {
+			const mergeBase = await gitOutAt(["merge-base", upstream, "HEAD"], worktree);
+			if (mergeBase) {
+				// Two-dot form (merge-base vs. the working tree, no second ref) — deliberately NOT `mergeBase...HEAD`,
+				// which would only see committed commits and miss uncommitted edits still in flight mid-run.
+				const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, "diff", "--no-ext-diff", mergeBase], { cwd: worktree, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "ignore" });
+				const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+				return out;
+			}
+		}
+	} catch {
+		// fall through to the uncommitted-only fallback below — never throw.
+	}
+	return gitDiffAgainstHead(worktree);
 }
 
 /**

@@ -39,6 +39,9 @@ import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
+import { type Hypothesis, sentinelEnabled } from "./drift-lens.ts";
+import { confirmDrift } from "./drift-audit.ts";
+import { gitDiffSinceBase } from "./convergence-run.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
 import { execGatedCommand } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
@@ -290,6 +293,24 @@ function autoresolveConfirm(): boolean {
  */
 function pendingGhostExpiryEnabled(): boolean {
 	return process.env.OMP_SQUAD_PENDING_GHOST_EXPIRY === "1";
+}
+
+/**
+ * Sentinel v0 (plans/sentinel-drift-probe) eligibility escape hatch — DESIGN.md's Risks table calls
+ * for an "env allowlist/denylist" against the criteria-presence gate being too coarse. A comma-
+ * separated list of agent ids/names to EXCLUDE from drift monitoring even when they declare
+ * acceptance criteria. Unset/empty ⇒ nothing denied (the criteria-presence gate is the only filter).
+ */
+function sentinelDenied(...ids: (string | undefined)[]): boolean {
+	const raw = process.env.OMP_SQUAD_SENTINEL_DENY;
+	if (!raw) return false;
+	const deny = new Set(
+		raw
+			.split(",")
+			.map((s) => s.trim())
+			.filter(Boolean),
+	);
+	return ids.some((id) => id !== undefined && deny.has(id));
 }
 
 // liveAgents + the WIP cap live in ./scheduler.ts; spawn identity/adoption policy in ./spawn-identity.ts;
@@ -852,8 +873,18 @@ export class SquadManager extends EventEmitter {
 		// reasoning and files the latent items they surfaced but didn't do. One per configured Plane repo
 		// (OMPSQ-137); each only harvests agents whose repo it owns (scoutFor), so a finding lands in the
 		// right tracker. Mid-run via the periodic sweep (liveReasoning) + run-end via finalizeRun.
-		if (process.env.OMP_SQUAD_SCOUT !== "0" && observeRepos.length > 0) {
+		//
+		// Gated on scout-enabled OR sentinel-enabled (not scout alone): Sentinel v0 (plans/sentinel-drift-probe)
+		// rides Scout's shared cursor/sweep by design (one read, two lenses) — if this block were gated on
+		// OMP_SQUAD_SCOUT alone, `OMP_SQUAD_SENTINEL=1` with the backlog harvest turned off (OMP_SQUAD_SCOUT=0)
+		// would construct no Scout at all, so the drift sweep would silently never run (no timer, no log).
+		if ((process.env.OMP_SQUAD_SCOUT !== "0" || sentinelEnabled()) && observeRepos.length > 0) {
 			observeRepos.forEach((repo, i) => {
+				// Sentinel v0 (plans/sentinel-drift-probe) is default OFF: only pay for criteria resolution /
+				// the drift one-shot factory / the onHypothesis closure when the flag is actually on, so a
+				// daemon with OMP_SQUAD_SENTINEL unset is byte-for-byte unchanged (Scout's own runDrift also
+				// re-checks sentinelEnabled() itself — this is belt-and-suspenders against needless work).
+				const sentinelOn = sentinelEnabled();
 				const scout: Scout = new Scout({
 					extract: ompClassify(this.bin),
 					listIssues: () => listPlaneIssues(repo),
@@ -861,17 +892,30 @@ export class SquadManager extends EventEmitter {
 					liveReasoning: () =>
 						[...this.agents.values()]
 							.filter((r) => r.dto.status === "working" && this.scoutFor(r.dto.repo) === scout)
-							.map((r) => ({ agent: r.dto.id, runId: r.run?.snapshot().runId, task: r.options.task, issue: r.dto.issue?.identifier ?? r.dto.issue?.name, text: this.takeScoutReasoning(r) }))
+							.map((r) => ({
+								agent: r.dto.id,
+								runId: r.run?.snapshot().runId,
+								task: r.options.task,
+								issue: r.dto.issue?.identifier ?? r.dto.issue?.name,
+								text: this.takeScoutReasoning(r),
+								criteria: sentinelOn ? this.monitorCriteriaFor(r) : undefined,
+							}))
 							.filter((s) => s.text.length > 0),
 					stateDir: this.stateDir,
 					seenFile: i === 0 ? undefined : `scout-seen.${slug(repo)}.json`,
 					log: (m) => this.log("info", `scout[${repo}]: ${m}`),
 					record: this.automation.for("scout", repo),
+					// Own automation channel (never `record` above) — a drift hypothesis is not a scout "found"
+					// ticket, and conflating the two channels would double-count LLM spend/finds on the scout
+					// backlog loop's rollup.
+					driftRecord: sentinelOn ? this.automation.for("sentinel", repo) : undefined,
+					driftExtract: sentinelOn ? ompClassify(this.bin) : undefined,
+					onHypothesis: sentinelOn ? (h) => this.onDriftHypothesis(h) : undefined,
 				});
 				scout.start();
 				this.scouts.set(repo, scout);
 			});
-			this.log("info", `scout on (harvesting reasoning → ${observeRepos.join(", ")})`);
+			this.log("info", process.env.OMP_SQUAD_SCOUT !== "0" ? `scout on (harvesting reasoning → ${observeRepos.join(", ")})` : `scout backlog off, sentinel-only sweep on (drift monitoring → ${observeRepos.join(", ")})`);
 		}
 
 		// Opportunity loop — zero-token clustering over Scout's open issues plus receipt hot areas.
@@ -4788,6 +4832,63 @@ export class SquadManager extends EventEmitter {
 			writeScoutCursors(this.stateDir, this.scoutCursor);
 		}
 		return text;
+	}
+
+	/**
+	 * Sentinel v0 (plans/sentinel-drift-probe) eligibility gate: a unit is monitor-eligible only when
+	 * it has DECLARED acceptance criteria — resolves the feature-store criteria (`rec.dto.featureId` →
+	 * the persisted feature's `acceptanceCriteria`) — and isn't env-denied (`sentinelDenied`). This is
+	 * NOT the same resolution `runValidatorGate` uses at land time: an ad-hoc land-time
+	 * `opts.criteria` override (bypassing the feature store) is not monitored in v0. Ineligible ⇒
+	 * `undefined`, which the Scout wiring below turns into an omitted `criteria` field, making the
+	 * drift path a no-op for this unit (a criteria-less unit's judge would "skip" anyway — DESIGN.md's
+	 * Unit gate decision). Re-resolved live (not cached) so a feature's criteria edited mid-run, or a
+	 * denylist changed, takes effect on the very next scan/hypothesis.
+	 */
+	private monitorCriteriaFor(rec: AgentRecord): FeatureCriterion[] | undefined {
+		if (sentinelDenied(rec.dto.id, rec.dto.name)) return undefined;
+		const pf = rec.dto.featureId ? this.featureStore.get(rec.dto.featureId) : undefined;
+		const criteria = pf?.acceptanceCriteria ?? [];
+		return criteria.length > 0 ? criteria : undefined;
+	}
+
+	/**
+	 * Sentinel v0's manager-owned, action-free sink (plans/sentinel-drift-probe, concern 02) — the
+	 * ONLY place a drift hypothesis is judged. Scout relays a raw `Hypothesis` here (fire-and-relay, no
+	 * await on its side); this sink resolves the LIVE agent record, re-checks eligibility (a unit can
+	 * turn ineligible between the hypothesis and the confirm), and builds `ConfirmDeps` from it: the
+	 * same criteria resolution, the FULL mid-run change set (`gitDiffSinceBase` — committed commits AND
+	 * uncommitted edits since the branch forked; a long-running agent commits incrementally, so
+	 * `gitDiffAgainstHead`'s uncommitted-only diff would read "" and the judge would abstain on every
+	 * committed unit of work), and the runId-turnover guard (DESIGN.md's "Sweep-vs-finalizeRun race" —
+	 * a sweep can outlast `finalizeRun` tearing the run down; a hypothesis with no `runId` can never be
+	 * safely attributed to a live run, so it is never confirmed either). `confirmDrift` appends the
+	 * judge-confirmed (or abstained/skipped) verdict to the durable off-Plane audit log — v0 never
+	 * surfaces, steers, or feeds `confidence.ts`. Wrapped so a failure here can never crash a scan
+	 * (Scout already doesn't await this).
+	 */
+	private onDriftHypothesis(h: Hypothesis): void {
+		void (async () => {
+			try {
+				const rec = h.agent ? this.agents.get(h.agent) : undefined;
+				if (!rec) return;
+				const criteria = this.monitorCriteriaFor(rec);
+				if (!criteria) return; // turned ineligible since the hypothesis was raised — nothing to confirm
+				await confirmDrift({
+					hypothesis: h,
+					criteria,
+					diff: () => gitDiffSinceBase(rec.dto.worktree),
+					// h.runId != null is load-bearing: without it, `undefined === undefined` would pass whenever
+					// BOTH the hypothesis lacks a runId AND the run already tore down (rec.run undefined) —
+					// confirming/recording a hypothesis that can never be safely attributed to a live run.
+					stillLive: () => h.runId != null && rec.run?.snapshot().runId === h.runId,
+					stateDir: this.stateDir,
+					log: (m) => this.log("info", `sentinel[${rec.dto.repo}]: ${m}`),
+				});
+			} catch (e) {
+				this.log("warn", `sentinel: onHypothesis sink failed (contained): ${e instanceof Error ? e.message : String(e)}`);
+			}
+		})();
 	}
 
 	/** Pending ack waiters keyed by cmdId (resolved by the bus onAck listener; timed out by the caller). */

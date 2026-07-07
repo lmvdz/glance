@@ -4,12 +4,13 @@
  * `--fixture` end-to-end path and the real Epic 1/3 adapters against an ad-hoc plan dir.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { armPath, isArmed, readOracle, writeOracle } from "../src/convergence-oracle.ts";
-import { runConvergence, runOnceIteration } from "../src/convergence-run.ts";
+import { gitDiffAgainstHead, gitDiffSinceBase, runConvergence, runOnceIteration } from "../src/convergence-run.ts";
 import type { VerifiedState } from "../src/types.ts";
 
 function tmpStateDir(): string {
@@ -193,5 +194,86 @@ describe("runConvergence — real Epic 1/3 adapters", () => {
 				rmSync(repo, { recursive: true, force: true });
 			}
 		});
+	});
+});
+
+describe("gitDiffSinceBase (Sentinel v0 mid-run drift-confirm diff — review fix #1)", () => {
+	// Real git in tmp dirs, mirroring tests/validator-land-gate.test.ts's own convention.
+	const tmps: string[] = [];
+	afterEach(async () => {
+		for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
+	});
+
+	async function tmpGitDir(prefix: string): Promise<string> {
+		const d = await fs.mkdtemp(path.join(tmpdir(), prefix));
+		tmps.push(d);
+		return d;
+	}
+
+	async function git(cwd: string, ...a: string[]): Promise<void> {
+		await Bun.spawn(["git", ...a], { cwd, stdout: "ignore", stderr: "ignore" }).exited;
+	}
+
+	/** A base repo with one commit, plus a worktree on a branch forked from it that TRACKS the base
+	 *  branch as its upstream (`branch.<name>.merge` — mirrors a squad worktree forked from
+	 *  origin/main) — enough to exercise `gitDiffSinceBase`'s merge-base resolution without a real
+	 *  remote. The worktree gets one COMMITTED change (simulating incremental agent commits) plus one
+	 *  UNCOMMITTED edit on top (simulating in-flight work) — `gitDiffSinceBase` must surface both. */
+	async function repoWithTrackedWorktree(prefix: string): Promise<{ worktree: string }> {
+		const repo = await tmpGitDir(prefix);
+		await git(repo, "init", "-q", "-b", "main");
+		await git(repo, "config", "user.email", "t@t");
+		await git(repo, "config", "user.name", "t");
+		await git(repo, "config", "commit.gpgsign", "false");
+		await fs.writeFile(path.join(repo, "base.txt"), `base ${prefix}\n`);
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "base");
+		const worktree = path.join(await tmpGitDir(`${prefix}wt-`), "wt");
+		await git(repo, "worktree", "add", "-q", "-b", "squad/unit", worktree, "main");
+		// Simulate the fork tracking its base branch (a real squad worktree forks from origin/main,
+		// which @{u} resolves the same way) — without this, @{u} is unset and gitDiffSinceBase falls back.
+		await git(repo, "branch", "--set-upstream-to=main", "squad/unit");
+		await fs.writeFile(path.join(worktree, "feature.txt"), "committed change since fork\n");
+		await git(worktree, "add", "-A");
+		await git(worktree, "commit", "-qm", "add feature (committed mid-run)");
+		await fs.appendFile(path.join(worktree, "feature.txt"), "uncommitted edit in flight\n");
+		return { worktree };
+	}
+
+	test("with a tracked upstream, returns BOTH the committed-since-fork change AND the uncommitted edit", async () => {
+		const { worktree } = await repoWithTrackedWorktree("gdsb-tracked-");
+		const diff = await gitDiffSinceBase(worktree);
+		// Both lines show up as ADDED ("+") content relative to the merge-base — the committed commit's
+		// line is new territory since the fork, exactly like the still-uncommitted edit.
+		expect(diff).toContain("+committed change since fork"); // committed commit since the fork point
+		expect(diff).toContain("+uncommitted edit in flight"); // still-uncommitted working-tree edit
+		// The exact bug this fixes: gitDiffAgainstHead (git diff HEAD) sees ONLY the uncommitted edit —
+		// once the agent commits, the committed line is already part of HEAD, so it shows up (if at all)
+		// as unchanged DIFF CONTEXT, never as an added "+" line.
+		const uncommittedOnly = await gitDiffAgainstHead(worktree);
+		expect(uncommittedOnly).not.toContain("+committed change since fork");
+		expect(uncommittedOnly).toContain("+uncommitted edit in flight");
+	});
+
+	test("without a resolvable upstream, falls back to the uncommitted-only diff (never empty-by-surprise)", async () => {
+		const repo = await tmpGitDir("gdsb-fallback-");
+		await git(repo, "init", "-q", "-b", "main");
+		await git(repo, "config", "user.email", "t@t");
+		await git(repo, "config", "user.name", "t");
+		await git(repo, "config", "commit.gpgsign", "false");
+		await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "base");
+		// No upstream, no origin/HEAD configured — @{u} and origin/HEAD both fail to resolve.
+		await fs.writeFile(path.join(repo, "base.txt"), "base\nuncommitted-only change\n");
+		const diff = await gitDiffSinceBase(repo);
+		expect(diff).toContain("uncommitted-only change");
+		expect(diff).toEqual(await gitDiffAgainstHead(repo)); // identical to the documented fallback
+	});
+
+	test("never throws on an unreadable / non-git directory — degrades to empty", async () => {
+		const notGit = await tmpGitDir("gdsb-notgit-");
+		await expect(gitDiffSinceBase(notGit)).resolves.toBe("");
+		await expect(gitDiffSinceBase("/path/does/not/exist-at-all")).resolves.toBe("");
 	});
 });
