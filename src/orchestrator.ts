@@ -74,6 +74,13 @@ export interface OrchestratorDeps {
 	 * `CATASTROPHE:` log alone is invisible once the operator looks away. `detail` is the reason.
 	 */
 	onCatastrophe?: (agentId: string, detail: string) => void;
+	/**
+	 * Feed a note back into a live unit's next turn (composed into its next prompt). Used by the
+	 * off-by-default veto-reprompt path (OMP_SQUAD_VETO_REPROMPT): when an independent validator vetoes
+	 * a land, hand the unit the reason + unmet criteria so it can address them instead of blind-retrying
+	 * an unchanged diff until the park ceiling. When absent, the loop behaves exactly as before.
+	 */
+	continueAgent?: (agentId: string, note: string) => Promise<void>;
 	/** Log sink (defaults to no-op). */
 	log?: (msg: string) => void;
 	/**
@@ -324,6 +331,17 @@ export class Orchestrator {
 		}
 		const blocks = (this.landBlocks.get(a.id) ?? 0) + 1;
 		this.landBlocks.set(a.id, blocks);
+		// Off-by-default (OMP_SQUAD_VETO_REPROMPT), once per veto cycle (blocks === 1): feed the independent
+		// validator's veto reason back into the SAME unit's next turn so it can address the unmet criteria,
+		// instead of blind-retrying an unchanged diff until the park ceiling. Fire-and-forget — NEVER awaited
+		// in the tick (a full agent turn here would stall verify/land for every other agent behind it); the
+		// manager's closure owns the .catch, the armed-convergence double-inject guard, and the recovery
+		// metric. The LAND_RETRY_CAP park ceiling below is unchanged — this adds one real chance to react.
+		if (blocks === 1 && process.env.OMP_SQUAD_VETO_REPROMPT === "1" && a.validation?.verdict === "veto" && this.deps.continueAgent) {
+			const unmet = (a.validation.perCriterion ?? []).filter((c) => !c.satisfied).map((c) => c.id).join(", ");
+			const note = `Independent validator vetoed this land: ${a.validation.rationale || "(no rationale given)"}. Unmet criteria: ${unmet || "(unspecified)"}. Address these, then the next verify/land will re-check.`;
+			void this.deps.continueAgent(a.id, note);
+		}
 		if (blocks >= LAND_RETRY_CAP) {
 			this.persistCritical("blocked", stateKey, a, log);
 			this.markHalted(a, stateKey);
