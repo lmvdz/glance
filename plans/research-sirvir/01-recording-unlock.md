@@ -1,6 +1,6 @@
 # Fix land-outcome recording — the unlock
 
-STATUS: open
+STATUS: blocked
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: research
@@ -29,3 +29,18 @@ None (single repo). Concerns 02/04/05 depend on this producing real data.
 
 ## Verify
 Drive a real clean land through the daemon (or a scripted land of a trivial branch). Assert `~/.glance/model-outcomes.json` (or the org-scoped path) exists and contains at least one `${model}::${tier}` key with a non-zero count. Capture the file contents as evidence in the Resolution.
+
+## Resolution (root cause FOUND — 2026-07-07)
+**Not a stale daemon, not a recording-code bug. The fleet cannot land because the main checkout is persistently dirty, and recording is coupled to a clean land.**
+
+Verified:
+- Daemon started 2026-07-07 12:17:09 on `/home/lars/sui/omp-squad/src/index.ts` (main `c25cdab`); local main HAS `recordModelOutcome` (grep = 2). The running binary has the recording code — cause (A) stale-daemon is **ruled out**.
+- `git -C /home/lars/sui/omp-squad status --porcelain -uno` = **113 tracked changes** right now (the `webapp-legacy/` deletion pile + `.gitignore` mod + `plan.md` deletion), uncommitted directly on main.
+- `land-failures.json`: 5 of 10 branches are the RETRYABLE refusal `"main checkout … has uncommitted tracked changes — refusing to land"` (ompsq-55/-178/-189/-190/-194, each `fails:3`). The land branch `squad-manager.ts:2488` gates recording on `!result.retryable` → a dirty-main refusal is retryable → the record branch (both `recordLandOutcome` and `recordModelOutcome`) is skipped. Hence all three learning ledgers are empty. This is cause **(B)**, live and dominant.
+- (The other 5 failures — reviewer-reject/verify-fail/git-add-fail on 130/138/211/294/landing — are non-retryable and predate the current daemon; they'd record if they recurred post-restart, but the persistent dirty main blocks fresh lands from ever reaching them.)
+
+### Two-part fix
+1. **Immediate unblock (needs the user's call — their uncommitted work):** clean the main checkout's 113 tracked changes (commit the `webapp-legacy` removal as an intentional cleanup, or stash/revert). Cannot be done unilaterally — it's the user's working tree. Until it's clean, EVERY auto-land is refused and no recording is possible.
+2. **Durable code fix (this concern, after unblock):** the model-outcome statistic is documented "cheap, always-on … data on day one" (`squad-manager.ts:2490`) but is in practice gated behind `!result.retryable` — so a dirty-main-blocked fleet is invisibly starved of ALL learning signal. Decouple the always-on statistic from the retryable land gate (record the attempt/outcome even when the land is refused for an environmental precondition), AND/OR make "landing blocked by dirty main" a loud, surfaced state rather than silent accumulation in `land-failures.json`.
+
+**Stop-and-reassess (per 00-overview Notes):** landing itself is the bottleneck. Concern 05 (fleet routing) is premature until lands complete and the ledger populates. Recommend: unblock main → drive a clean land → verify a non-empty `model-outcomes.json` → THEN resume 02→04→05. Concern 06 (GOAL 2) is independent and unaffected.
