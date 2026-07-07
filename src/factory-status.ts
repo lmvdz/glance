@@ -135,9 +135,18 @@ export function loopFlagEnabled(env: NodeJS.ProcessEnv, key: string): boolean {
 	return env[key] !== "0";
 }
 
+/**
+ * Freshness floor (ms) shared by BOTH freshness computations: the per-loop stale budget below and the
+ * rollup window squad-manager's `factoryStatus()` feeds `buildFactoryStatus` (it takes the max per-loop
+ * budget, which bottoms out here). Anything that must stay visible on the strip while a condition
+ * PERSISTS — e.g. the land-blocked warn re-emit cooldown — must re-occur INSIDE this window or the
+ * banner silently self-clears. EXPORTED so those producers derive from it instead of duplicating it.
+ */
+export const FACTORY_FRESHNESS_FLOOR_MS = 300_000;
+
 /** Freshness budget (ms) before an armed heartbeat loop is considered stale: 3 cadences, floor 5m. */
 function freshnessMs(spec: FactoryLoopSpec): number {
-	return Math.max(spec.cadenceMs * 3, 300_000);
+	return Math.max(spec.cadenceMs * 3, FACTORY_FRESHNESS_FLOOR_MS);
 }
 
 export interface BuildFactoryStatusInput {

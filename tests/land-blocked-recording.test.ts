@@ -114,6 +114,107 @@ test("REGRESSION: a retryable dirty-main refusal records a `blocked` model outco
 	expect(landFailureCount(stateDir, "squad/a1")).toBe(0);
 });
 
+test("THROTTLE: the same dirty-main episode retried N times records blocked:1 and ONE warn row — not N (the orchestrator retries every ~30s)", async () => {
+	const stateDir = await tmpDir("blocked-throttle-state-");
+	const repo = await baseRepo("blocked-throttle-repo-");
+	const wt = await branchWorktree(repo, "squad/a1", "x.txt");
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a1", repo, wt, "squad/a1");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\nLOCAL UNCOMMITTED WORK\n");
+
+	// Same episode (same repo, branch, head, reason) driven three times — the tick-retry shape.
+	for (let i = 0; i < 3; i++) {
+		const r = await mgr.land("a1", undefined, { force: true, reason: `throttle test ${i}` });
+		expect(r.retryable).toBe(true);
+	}
+
+	// Counter is edge-triggered per episode: 1, not 3.
+	expect(modelOutcomes(stateDir, undefined, "mid")).toEqual({ landed: 0, rejected: 0, blocked: 1 });
+	// Warn rows are cooldown-throttled per repo condition: 1, not 3.
+	expect(mgr.automationActivity({ loop: "land" }).events.length).toBe(1);
+	// The banner is still up off that single fresh row.
+	expect(mgr.factoryStatus().landBlocked.blocked).toBe(true);
+});
+
+test("THROTTLE: a cooldown-expired repeat re-emits the warn (the banner's freshness feed), while the counter stays edge-triggered at 1", async () => {
+	const stateDir = await tmpDir("blocked-reemit-state-");
+	const repo = await baseRepo("blocked-reemit-repo-");
+	const wt = await branchWorktree(repo, "squad/a1", "x.txt");
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a1", repo, wt, "squad/a1");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\nLOCAL UNCOMMITTED WORK\n");
+
+	await mgr.land("a1", undefined, { force: true, reason: "reemit test 1" });
+	// Simulate the cooldown elapsing (backdate by 10m > the ~4m cooldown) without wall-clock waiting.
+	const warnAt = (mgr as unknown as { landBlockedWarnAt: Map<string, number> }).landBlockedWarnAt;
+	expect(warnAt.size).toBe(1);
+	for (const k of warnAt.keys()) warnAt.set(k, Date.now() - 600_000);
+	await mgr.land("a1", undefined, { force: true, reason: "reemit test 2" });
+
+	// Re-emitted once per elapsed cooldown period: 2 rows for 2 periods — never more.
+	expect(mgr.automationActivity({ loop: "land" }).events.length).toBe(2);
+	// Same episode throughout: still exactly one blocked increment.
+	expect(modelOutcomes(stateDir, undefined, "mid")).toEqual({ landed: 0, rejected: 0, blocked: 1 });
+});
+
+test("THROTTLE: a fresh head on the branch opens a NEW episode — blocked:2", async () => {
+	const stateDir = await tmpDir("blocked-episode-state-");
+	const repo = await baseRepo("blocked-episode-repo-");
+	const wt = await branchWorktree(repo, "squad/a1", "x.txt");
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a1", repo, wt, "squad/a1");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\nLOCAL UNCOMMITTED WORK\n");
+
+	await mgr.land("a1", undefined, { force: true, reason: "episode test 1" });
+	expect(modelOutcomes(stateDir, undefined, "mid")).toEqual({ landed: 0, rejected: 0, blocked: 1 });
+
+	// New work lands on the branch (new headSha) — a genuinely new "attempted, couldn't land" fact.
+	await fs.writeFile(path.join(wt, "y.txt"), "more work\n");
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-qm", "more work");
+	await mgr.land("a1", undefined, { force: true, reason: "episode test 2" });
+
+	expect(modelOutcomes(stateDir, undefined, "mid")).toEqual({ landed: 0, rejected: 0, blocked: 2 });
+});
+
+test("THROTTLE: a non-retryable outcome CLOSES the episode — the next refusal on the same head counts again", async () => {
+	process.env.OMP_SQUAD_AUTORESOLVE = "0"; // the conflict below must reject, not spawn a resolver
+	const stateDir = await tmpDir("blocked-close-state-");
+	const repo = await baseRepo("blocked-close-repo-");
+	const wt = await branchWorktree(repo, "squad/a1", "x.txt");
+	await fs.writeFile(path.join(wt, "base.txt"), "branch version\n");
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-qm", "branch edit of base.txt");
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a1", repo, wt, "squad/a1");
+
+	try {
+		// 1. Dirty main → blocked episode opens.
+		await fs.writeFile(path.join(repo, "base.txt"), "base\nLOCAL UNCOMMITTED WORK\n");
+		await mgr.land("a1", undefined, { force: true, reason: "close test 1" });
+		expect(modelOutcomes(stateDir, undefined, "mid")).toEqual({ landed: 0, rejected: 0, blocked: 1 });
+
+		// 2. Main cleaned but COMMITTED a conflicting edit → non-retryable rejected land. The branch
+		//    head is unchanged, but the non-retryable outcome must close the blocked episode.
+		await fs.writeFile(path.join(repo, "base.txt"), "main version\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "main edit of base.txt");
+		const rejected = await mgr.land("a1", undefined, { force: true, reason: "close test 2" });
+		expect(rejected.ok).toBe(false);
+		expect(rejected.retryable).toBeFalsy();
+		expect(modelOutcomes(stateDir, undefined, "mid")).toEqual({ landed: 0, rejected: 1, blocked: 1 });
+
+		// 3. Main dirty again, SAME branch head, SAME reason — a new episode, so blocked:2. Without the
+		//    close in step 2 this would stay at 1 (the edge-trigger would see an identical episode key).
+		await fs.writeFile(path.join(repo, "base.txt"), "main version\nDIRTY AGAIN\n");
+		const again = await mgr.land("a1", undefined, { force: true, reason: "close test 3" });
+		expect(again.retryable).toBe(true);
+		expect(modelOutcomes(stateDir, undefined, "mid")).toEqual({ landed: 0, rejected: 1, blocked: 2 });
+	} finally {
+		delete process.env.OMP_SQUAD_AUTORESOLVE;
+	}
+});
+
 test("a retryable dirty-main refusal is LOUD: automation-log warn event + factory-status landBlocked banner", async () => {
 	const stateDir = await tmpDir("blocked-loud-state-");
 	const repo = await baseRepo("blocked-loud-repo-");
