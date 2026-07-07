@@ -31,7 +31,9 @@ export interface IntakeDecision {
 const PLAN_IMPLEMENT = path.join(import.meta.dir, "..", "workflows", "plan-implement", "workflow.fabro");
 const FAN_OUT = path.join(import.meta.dir, "..", "workflows", "fan-out", "workflow.fabro");
 
-const HIGH_RISK = /\b(migrat\w+|deletion|drop\s|rewrit\w+|redesign\w*|re-?architect\w*|mainnet|deploy\w*|production|breaking change|schema change)\b/i;
+/** Exported so the review-lens selector (src/lens-select.ts) can reuse the SAME high-risk signal the
+ *  intake router uses, rather than drifting a second copy. */
+export const HIGH_RISK = /\b(migrat\w+|deletion|drop\s|rewrit\w+|redesign\w*|re-?architect\w*|mainnet|deploy\w*|production|breaking change|schema change)\b/i;
 const FANOUT_SIGNAL = /\b(in parallel|fan ?out|several approaches|multiple approaches|compare approaches|\d+\s+approaches|\d+\s+ways|brainstorm)\b/i;
 const HARD = /\b(complex|carefully|tricky|subtle|thorough|deep dive)\b/i;
 const TRIVIAL = /\b(typo|rename|comment|bump|whitespace|reformat|format)\b/i;
