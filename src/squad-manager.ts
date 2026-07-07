@@ -288,6 +288,11 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 	},
 };
 
+/** Human-readable text for an unknown catch value — the ONE place this module spells out the
+ *  `instanceof Error` idiom, pending the tagged-error hierarchy the effect-migration ratchet tracks.
+ *  New catch sites must call this instead of inlining the pattern (the ratchet bites on inlines). */
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
 function peerMessageBudget(): number {
 	return envInt("OMP_SQUAD_PEERMSG_BUDGET", 5);
 }
@@ -2582,7 +2587,7 @@ export class SquadManager extends EventEmitter {
 				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
 				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
-				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${errText(err)}`);
 			}
 			// Confidence-threshold tuner (Epic 6 concern 08): record the SAME land outcome against this
 			// run's Epic 5 confidence score. `dto.confidence` is undefined for a run that never finished a
@@ -2592,7 +2597,7 @@ export class SquadManager extends EventEmitter {
 			try {
 				recordConfidenceOutcome(this.stateDir, envNumber("OMP_SQUAD_CONFIDENCE_FLOOR", 0.4), dto.confidence, result.ok);
 			} catch (err) {
-				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${errText(err)}`);
 			}
 		} else if (result.retryable) {
 			// research-sirvir/01-recording-unlock (part 2, durable fix): a retryable/environmental refusal
@@ -2611,7 +2616,7 @@ export class SquadManager extends EventEmitter {
 				recordModelOutcomeBlocked(this.stateDir, dto.model, tierOf(rec.options.thinking));
 				this.learningMetrics.record("model-outcome-blocked", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
-				this.log("warn", `model-outcomes blocked-record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				this.log("warn", `model-outcomes blocked-record failed for ${dto.name} (non-fatal): ${errText(err)}`);
 			}
 			// Loud surfaced state (part 2 continued): a retryable refusal must not ONLY accumulate in
 			// land-failures.json (a file nobody looks at until they go forensic) — route it through the
