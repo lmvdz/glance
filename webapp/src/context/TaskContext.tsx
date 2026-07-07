@@ -11,7 +11,7 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'attention' | 'active' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'scoreboard' | 'topology' | 'federation' | 'knowledge' | 'org';
+export type AppView = 'attention' | 'active' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'scoreboard' | 'topology' | 'federation' | 'knowledge' | 'org' | 'intervene';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
@@ -59,12 +59,16 @@ interface TaskContextType {
   isChatOpen: boolean;
   /** The agent that was most recently opened via openConsole(). AssistantChat reacts to switch its active session. */
   openedConsoleAgentId: string | null;
+  /** The agent the Intervene View is focused on (set by openIntervene). */
+  interveneAgentId: string | null;
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
   setIsChatOpen: (isOpen: boolean) => void;
   /** Subscribe to an agent's transcript AND open the chat panel focused on that agent. No-op if agentId is undefined. */
   openConsole: (agentId: string | undefined) => void;
+  /** Focus the full-screen Intervene View on an agent (subscribe + route). The step-in surface off a "Needs you" tap. */
+  openIntervene: (agentId: string | undefined) => void;
   selectTask: (id: string | null) => void;
   addTask: (task: Partial<Task>) => void;
   deleteTask: (id: string) => void;
@@ -113,6 +117,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
+  const [interveneAgentId, setInterveneAgentId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
@@ -147,6 +152,15 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     squad.subscribe(agentId);
     setOpenedConsoleAgentId(agentId);
     setIsChatOpen(true);
+  };
+
+  // Step into one agent full-screen: subscribe to its transcript (so the diff/console are warm)
+  // and route to the Intervene View. The primary target of a "Needs you" tap.
+  const openIntervene = (agentId: string | undefined) => {
+    if (!agentId) return;
+    squad.subscribe(agentId);
+    setInterveneAgentId(agentId);
+    setView('intervene');
   };
 
   const selectTask = (id: string | null) => setSelectedTaskId(id);
@@ -274,7 +288,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, interveneAgentId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );
