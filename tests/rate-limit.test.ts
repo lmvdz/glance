@@ -224,6 +224,39 @@ test("dispatcher: providerFor absent ⇒ old top-of-tick global paused() behavio
 	expect(spawned).toEqual(["A"]);
 });
 
+test("dispatcher: partial wiring (providerFor set, secondLaneAvailable ABSENT) fails SAFE — global freeze holds", async () => {
+	// FAIL-SAFE contract: per-unit gating needs the explicit positive `secondLaneAvailable() === true`.
+	// An install that wired providerFor but forgot secondLaneAvailable must keep the byte-for-byte
+	// legacy global freeze — never silently trade the fleet-safety freeze for unconfirmed partitioning.
+	let now = 0;
+	const gate = new RateLimitGate(() => now);
+	gate.note("429 rate limit", 10 * 60_000, "openai"); // ONE provider capped...
+	const spawned: string[] = [];
+	const logs: string[] = [];
+	const deps: DispatchDeps = {
+		repos: () => ["/r"],
+		listIssues: async () => [{ id: "A", name: "codex issue" }, { id: "B", name: "omp issue" }],
+		spawn: async (_repo, iss) => {
+			spawned.push(iss.id);
+		},
+		claimed: () => new Set(),
+		activeCount: () => 0,
+		log: (m) => logs.push(m),
+		maxActive: 10,
+		paused: (provider) => gate.paused(provider), // top-of-tick no-arg call ORs across buckets → true
+		providerFor: (_repo, iss) => (iss.id === "A" ? "openai" : "anthropic"),
+		// secondLaneAvailable deliberately ABSENT (partially-wired install)
+	};
+	const d = new Dispatcher(deps);
+	expect(await d.tick()).toBe(0); // ...freezes EVERYTHING, including the anthropic-bound unit
+	expect(spawned).toEqual([]);
+	expect(logs.some((m) => m.includes("inert"))).toBe(true); // and says why, once
+	expect(logs.filter((m) => m.includes("inert")).length).toBe(1);
+	now = 10 * 60_000; // cap lifts → legacy path resumes normally
+	expect(await d.tick()).toBe(2);
+	expect(spawned.sort()).toEqual(["A", "B"]);
+});
+
 test("dispatcher: providerFor present but no second verified lane ⇒ inert fallback logs once, global freeze holds", async () => {
 	const spawned: string[] = [];
 	const logs: string[] = [];

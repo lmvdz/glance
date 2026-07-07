@@ -22,6 +22,7 @@ import {
 	globalDefaultHarness,
 	hasSecondVerifiedProviderLane,
 	listHarnesses,
+	registerHarness,
 	resolveBin,
 	resolveHarness,
 	resolveHarnessName,
@@ -268,6 +269,19 @@ test("a non-resumable ACP record is excluded from adoption (concern 07)", async 
 
 // ── degradation ladder precondition (concern 06) ──────────────────────────────
 
+/** Temporarily override one registry entry (e.g. flip `verified`) and ALWAYS restore the original
+ *  descriptor — the registry is module-global, so a leaked override would poison sibling tests. */
+function withHarnessOverride<T>(name: string, over: Partial<Parameters<typeof registerHarness>[0]>, fn: () => T): T {
+	const original = getHarness(name);
+	if (!original) throw new Error(`no registered harness "${name}" to override`);
+	registerHarness({ ...original, ...over, name });
+	try {
+		return fn();
+	} finally {
+		registerHarness(original);
+	}
+}
+
 test("hasSecondVerifiedProviderLane: false today — the only vendor-pinned harnesses (claude-code/gemini/codex) are unverified", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
@@ -275,17 +289,35 @@ test("hasSecondVerifiedProviderLane: false today — the only vendor-pinned harn
 	expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
 });
 
-test("hasSecondVerifiedProviderLane: true once a vendor-pinned harness is verified and differs from the default", () => {
+test("hasSecondVerifiedProviderLane: OMP_SQUAD_UNVERIFIED_HARNESS=1 does NOT fabricate a lane (verified-only contract)", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
-	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1"; // simulate claude-code having been smoke-verified
-	expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // claude-code(anthropic)/gemini(google)/codex(openai) now visible
+	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1"; // surfaces unverified harnesses on create UIs...
+	// ...but an unsmoked codex/gemini/claude-code registration is NOT a real second subscription lane:
+	// telling the dispatcher otherwise would trade the fleet-safety freeze for a lane that half-works.
+	expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+});
+
+test("hasSecondVerifiedProviderLane: true once a vendor-pinned harness is actually verified and differs from the default", () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
+	// Simulate claude-code having passed a live smoke (verified:true) — registry override, restored after.
+	withHarnessOverride("claude-code", { verified: true }, () => {
+		expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // anthropic-pinned lane, distinct from omp's unknown
+	});
+	expect(hasSecondVerifiedProviderLane("omp")).toBe(false); // override restored — back to reality
 });
 
 test("hasSecondVerifiedProviderLane: a vendor-pinned DEFAULT harness needs a genuinely different vendor to count", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
-	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1";
-	// default = claude-code (anthropic); gemini (google) / codex (openai) still differ ⇒ true.
-	expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
+	withHarnessOverride("claude-code", { verified: true }, () => {
+		// default = claude-code (anthropic); the only other verified vendor-pinned harness is itself ⇒ false.
+		expect(hasSecondVerifiedProviderLane("claude-code")).toBe(false);
+		// A verified GOOGLE lane appears ⇒ genuinely different vendor ⇒ true.
+		withHarnessOverride("gemini", { verified: true }, () => {
+			expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+		});
+	});
 });
 
 test("globalDefaultHarness honors GLANCE_HARNESS, else omp", () => {

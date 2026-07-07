@@ -130,9 +130,10 @@ export interface DispatchDeps {
 	/**
 	 * True when a second verified, differently-provider'd harness is actually enabled (see
 	 * `harness-registry.ts`'s `hasSecondVerifiedProviderLane`) — i.e. per-unit gating has real
-	 * differentiation to act on, not just a relabeled global pause. Only an explicit `false` disables
-	 * per-unit gating (falls back to the legacy top-of-tick check + logs once that the ladder is inert).
-	 * Undefined (or true) ⇒ per-unit gating runs whenever `providerFor` is supplied.
+	 * differentiation to act on, not just a relabeled global pause. FAIL-SAFE: per-unit gating runs
+	 * only on an explicit `true`. Undefined (not wired) or `false` ⇒ the legacy top-of-tick global
+	 * freeze, plus one inert log when `providerFor` is supplied — a partially-wired install
+	 * (`providerFor` without this) must never silently lose the fleet-wide safety freeze.
 	 */
 	secondLaneAvailable?: () => boolean;
 	/** Observability sink — one report per tick (a no-op poll is a heartbeat proving the loop is alive). */
@@ -187,12 +188,14 @@ export class Dispatcher {
 		}
 		// Degradation ladder (concern 06): per-unit gating only has real differentiation to offer once
 		// (a) the caller can resolve a prospective unit's provider (`providerFor`) AND (b) a second
-		// verified, differently-provider'd harness is actually enabled (`secondLaneAvailable`). Absent
-		// either, fall back to the pre-ladder top-of-tick global check byte-for-byte — no regression.
-		const perUnitGating = !!this.deps.providerFor && this.deps.secondLaneAvailable?.() !== false;
+		// verified, differently-provider'd harness is EXPLICITLY confirmed enabled (`secondLaneAvailable()
+		// === true` — undefined/unwired must NOT count as permission: this is a fleet-safety freeze, so a
+		// partially-wired install fails SAFE). Absent either, fall back to the pre-ladder top-of-tick
+		// global check byte-for-byte — no regression.
+		const perUnitGating = !!this.deps.providerFor && this.deps.secondLaneAvailable?.() === true;
 		if (!perUnitGating && this.deps.providerFor && !this.inertLogged) {
 			this.inertLogged = true;
-			this.deps.log("per-provider dispatch gating inert — no second verified provider lane configured; behaves like the single global pause");
+			this.deps.log("per-provider dispatch gating inert — no second verified provider lane confirmed (unconfigured or not wired); behaves like the single global pause");
 		}
 		if (perUnitGating) this.inertLogged = false;
 

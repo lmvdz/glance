@@ -105,10 +105,14 @@ export function listHarnesses(includeUnverified = unverifiedHarnessesEnabled()):
  * gemini, codex) is BOTH registered `verified:true` AND distinct from the default harness's lineage.
  * Today none of the three are verified, so this is false and dispatch.ts logs the ladder as inert
  * instead of silently no-oping (the concern's explicit "name it, don't fake it" requirement).
+ *
+ * VERIFIED-ONLY by contract: `listHarnesses(false)` — the OMP_SQUAD_UNVERIFIED_HARNESS=1 escape hatch
+ * (which lets `listHarnesses()`' default surface unverified harnesses on create UIs) must NOT let an
+ * unsmoked codex/gemini registration convince the dispatcher a real second subscription lane exists.
  */
 export function hasSecondVerifiedProviderLane(defaultHarness: string = globalDefaultHarness()): boolean {
 	const baseline = harnessLineage(defaultHarness);
-	return listHarnesses().some((d) => {
+	return listHarnesses(false).some((d) => {
 		if (d.name === defaultHarness) return false;
 		const lineage = harnessLineage(d.name);
 		return lineage !== "unknown" && lineage !== baseline;
