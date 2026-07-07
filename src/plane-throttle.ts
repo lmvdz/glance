@@ -14,6 +14,8 @@
  * gateway all processes call (docs/plane-gateway.md).
  */
 
+import { envInt } from "./config.ts";
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const MAX_429_RETRIES = 4;
 
@@ -22,7 +24,7 @@ const MAX_429_RETRIES = 4;
 function retryAfterMs(res: Response, attempt: number): number {
 	const ra = Number(res.headers.get("retry-after"));
 	if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 5000);
-	const base = Number(process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS) || 500;
+	const base = envInt("OMP_SQUAD_PLANE_BACKOFF_BASE_MS", 500);
 	return Math.min(base * 2 ** attempt, 5000);
 }
 
@@ -38,7 +40,7 @@ let lastAt = 0;
  */
 export async function throttledFetch(url: string, init?: RequestInit): Promise<Response | null> {
 	const run = chain.then(async () => {
-		const interval = Number(process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS) || 500;
+		const interval = envInt("OMP_SQUAD_PLANE_MIN_INTERVAL_MS", 500);
 		for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
 			const wait = lastAt + interval - Date.now();
 			if (wait > 0) await sleep(wait);

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { envInt } from "./config.ts";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { FabricHotAreaFact, FabricScoutFact } from "./fabric.ts";
@@ -41,15 +42,15 @@ function opportunityEnabled(): boolean {
 }
 
 function opportunityMin(): number {
-	return Number(process.env.OMP_SQUAD_OPPORTUNITY_MIN) || 3;
+	return envInt("OMP_SQUAD_OPPORTUNITY_MIN", 3);
 }
 
 function opportunityMax(): number {
-	return Number(process.env.OMP_SQUAD_OPPORTUNITY_MAX) || 5;
+	return envInt("OMP_SQUAD_OPPORTUNITY_MAX", 5);
 }
 
 function opportunityWindow(): number {
-	return Number(process.env.OMP_SQUAD_OPPORTUNITY_WINDOW) || 50;
+	return envInt("OMP_SQUAD_OPPORTUNITY_WINDOW", 50);
 }
 
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");

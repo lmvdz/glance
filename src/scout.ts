@@ -24,6 +24,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { envInt } from "./config.ts";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { Classify } from "./intake.ts";
@@ -354,8 +355,8 @@ export class Scout {
 					)) ?? [];
 				const openTokens = open.map((i) => titleTokens(i.name));
 				let openScout = open.filter((i) => i.name.includes(SCOUT_TAG)).length;
-				const max = Number(process.env.OMP_SQUAD_SCOUT_MAX) || 20; // cap on scout-filed OPEN issues
-				const limit = Number(process.env.OMP_SQUAD_SCOUT_PER_RUN) || 3; // cap on tickets from one scan
+				const max = envInt("OMP_SQUAD_SCOUT_MAX", 20); // cap on scout-filed OPEN issues
+				const limit = envInt("OMP_SQUAD_SCOUT_PER_RUN", 3); // cap on tickets from one scan
 				let changed = false;
 
 				for (const t of tickets) {

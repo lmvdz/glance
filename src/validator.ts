@@ -10,6 +10,7 @@
  * and a per-(commit,tree) cache; it is the seam `SquadManager.landBranch` calls (DESIGN §1).
  */
 
+import { envInt } from "./config.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
 import type { Proof } from "./proof.ts";
@@ -70,7 +71,7 @@ function defaultJudge(): Judge {
 			args: ["-p", "--model", validatorModel(), "--system-prompt", SYSTEM_PROMPT, user],
 			parse: parseRawVerdict,
 			fallback: undefined,
-			timeoutMs: Number(process.env.OMP_SQUAD_VALIDATOR_TIMEOUT_MS) || 120_000,
+			timeoutMs: envInt("OMP_SQUAD_VALIDATOR_TIMEOUT_MS", 120_000),
 		});
 	};
 }

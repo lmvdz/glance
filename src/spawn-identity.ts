@@ -9,13 +9,14 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { envInt } from "./config.ts";
 import * as os from "node:os";
 import type { IssueRef } from "./types.ts";
 
 /** Absolute live-agent ceiling that even bypass-cap (fan-out) spawns respect, so runaway fan-out can't
  *  melt the host. Default ≈ the host's CPU count (min 3) so a bare launch is bounded; override with OMP_SQUAD_MAX_AGENTS. */
 export function hardAgentCeiling(): number {
-	return Number(process.env.OMP_SQUAD_MAX_AGENTS) || Math.max(os.cpus().length || 2, 3);
+	return envInt("OMP_SQUAD_MAX_AGENTS", Math.max(os.cpus().length || 2, 3));
 }
 
 /** Persisted agents to take over on restart: not already reattached (live), not flue, and whose worktree

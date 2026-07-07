@@ -8,6 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { envInt, envNumber } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -241,7 +242,7 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 ];
 
 function peerMessageBudget(): number {
-	return Number(process.env.OMP_SQUAD_PEERMSG_BUDGET) || 5;
+	return envInt("OMP_SQUAD_PEERMSG_BUDGET", 5);
 }
 
 function commandTarget(cmd: ClientCommand): string | undefined {
@@ -249,7 +250,7 @@ function commandTarget(cmd: ClientCommand): string | undefined {
 }
 
 function autoLandFailCap(): number {
-	return Number(process.env.OMP_SQUAD_AUTOLAND_FAIL_CAP) || 3;
+	return envInt("OMP_SQUAD_AUTOLAND_FAIL_CAP", 3);
 }
 
 /**
@@ -263,7 +264,7 @@ function autoLandFailCap(): number {
  * than the operator's own setting, only less. Flag off (default) ⇒ byte-identical to before.
  */
 function confidenceFloor(): number {
-	const base = Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4;
+	const base = envNumber("OMP_SQUAD_CONFIDENCE_FLOOR", 0.4);
 	return isOn(learningFlags().thresholdTuner) ? tunedConfidenceFloor(base) : base;
 }
 
@@ -595,7 +596,7 @@ export class SquadManager extends EventEmitter {
 		this.bus = opts.bus ?? new NullFederationBus();
 		this.peerRoster = new PeerRoster(this.operator.id);
 		this.fedRepos = opts.fedRepos ?? [];
-		this.leaseGossipIntervalMs = opts.leaseGossipIntervalMs ?? (Number(process.env.OMP_SQUAD_LEASE_GOSSIP_MS) || LEASE_GOSSIP_INTERVAL_MS);
+		this.leaseGossipIntervalMs = opts.leaseGossipIntervalMs ?? envInt("OMP_SQUAD_LEASE_GOSSIP_MS", LEASE_GOSSIP_INTERVAL_MS);
 		this.stateDir = opts.stateDir ?? resolveStateDir();
 		setProofRoot(this.stateDir);
 		setThresholdTunerRoot(this.stateDir);
@@ -733,8 +734,8 @@ export class SquadManager extends EventEmitter {
 		// self-host. Ceiling: no per-tenant Plane wiring. Upgrade path: thread per-org Plane config
 		// through RegistryDeps and pass it into each manager (deferred follow-up, out of P2 scope).
 		if (process.env.OMP_SQUAD_AUTODISPATCH !== "0" && planeRepos().length > 0) {
-			const interval = Number(process.env.OMP_SQUAD_DISPATCH_INTERVAL_MS) || 60_000;
-			const maxActive = Number(process.env.OMP_SQUAD_DISPATCH_MAX) || 3;
+			const interval = envInt("OMP_SQUAD_DISPATCH_INTERVAL_MS", 60_000);
+			const maxActive = envInt("OMP_SQUAD_DISPATCH_MAX", 3);
 			this.dispatcher = new Dispatcher({
 				repos: planeRepos,
 				listIssues: listPlaneIssues,
@@ -818,7 +819,7 @@ export class SquadManager extends EventEmitter {
 		// pointers (a landed issue's doc otherwise stays `open` and the WIP counters lie). One
 		// slow tick per configured Plane repo; conservative one-way transitions (see plan-sync.ts).
 		if (process.env.OMP_SQUAD_PLANSYNC !== "0" && observeRepos.length > 0) {
-			const intervalMs = Number(process.env.OMP_SQUAD_PLANSYNC_INTERVAL_MS) || 300_000;
+			const intervalMs = envInt("OMP_SQUAD_PLANSYNC_INTERVAL_MS", 300_000);
 			for (const repo of observeRepos) {
 				const tick = (): void => {
 					void syncPlanStatuses({
@@ -844,7 +845,7 @@ export class SquadManager extends EventEmitter {
 		// self-audit must not silently stop Done-writes for merged PRs) and NOT gated on
 		// `observeRepos.length` (its own activity gate is "is there any ledger/roster work at all",
 		// checked fresh inside every tick) — runs in DB mode too, same as every other manager-owned loop.
-		const prReconcileIntervalMs = Number(process.env.OMP_SQUAD_PR_RECONCILE_INTERVAL_MS) || 120_000;
+		const prReconcileIntervalMs = envInt("OMP_SQUAD_PR_RECONCILE_INTERVAL_MS", 120_000);
 		this.prReconcileTimer = setInterval(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), prReconcileIntervalMs);
 		this.prReconcileStaggerTimer = setTimeout(() => void this.prReconcileTick().catch((e) => this.log("warn", `pr-reconcile: tick failed: ${e instanceof Error ? e.message : String(e)}`)), 20_000); // stagger past plan-sync's own 15s
 
@@ -2345,7 +2346,7 @@ export class SquadManager extends EventEmitter {
 			// a penalty. Recording is unconditional (cheap, like model-outcomes); only the READ (confidenceFloor
 			// above) is flag-gated, so the tuner has data from day one even before it's turned on.
 			try {
-				recordConfidenceOutcome(this.stateDir, Number(process.env.OMP_SQUAD_CONFIDENCE_FLOOR) || 0.4, dto.confidence, result.ok);
+				recordConfidenceOutcome(this.stateDir, envNumber("OMP_SQUAD_CONFIDENCE_FLOOR", 0.4), dto.confidence, result.ok);
 			} catch (err) {
 				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
@@ -3744,7 +3745,7 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `autosupervise: SKIP risky "${req.title}" on ${rec.dto.name} (left for human)`);
 			return;
 		}
-		const budget = Number(process.env.OMP_SQUAD_AUTOSUPERVISE_BUDGET) || 5;
+		const budget = envInt("OMP_SQUAD_AUTOSUPERVISE_BUDGET", 5);
 		const used = this.superviseBudget.get(rec.dto.id) ?? 0;
 		if (used >= budget) {
 			this.log("info", `autosupervise: budget ${budget} spent for ${rec.dto.name} — "${req.title}" left for human`);
@@ -5474,7 +5475,7 @@ export class SquadManager extends EventEmitter {
 	 *  OMP_SQUAD_WORKTREE_REAP=0; tune the freshness window with OMP_SQUAD_WORKTREE_GRACE_MS. */
 	protected async reapDeadWorktrees(): Promise<void> {
 		if (process.env.OMP_SQUAD_WORKTREE_REAP === "0") return;
-		const graceMs = Number(process.env.OMP_SQUAD_WORKTREE_GRACE_MS) || 120_000;
+		const graceMs = envInt("OMP_SQUAD_WORKTREE_GRACE_MS", 120_000);
 		const owned = new Set([...this.agents.values()].map((r) => r.options.worktree).filter((w): w is string => !!w));
 		const repos = new Set<string>([...planeRepos(), ...[...this.agents.values()].map((r) => r.options.repo)]);
 		for (const repo of repos) {

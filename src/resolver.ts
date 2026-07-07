@@ -7,6 +7,8 @@
  * drives the re-attempt.
  */
 
+import { envInt } from "./config.ts";
+
 /** What kind of failure a run hit: a red gate (tests/verify failed) or a merge conflict on land. */
 export type FailureKind = "red" | "conflict";
 
@@ -35,6 +37,6 @@ export interface FailureContext {
 export function routeFailure(kind: FailureKind, ctx?: FailureContext): FailureRoute {
 	const attempts = ctx?.attempts ?? 0;
 	if (kind === "conflict") return attempts < 1 ? "retry" : "escalate";
-	const budget = Number(process.env.OMP_SQUAD_REPAIR_BUDGET) || 3;
+	const budget = envInt("OMP_SQUAD_REPAIR_BUDGET", 3);
 	return attempts < budget ? "retry" : "escalate";
 }

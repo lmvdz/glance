@@ -17,6 +17,7 @@
  */
 
 import * as path from "node:path";
+import { envInt } from "./config.ts";
 import type { IssueRef, PlaneTicket, TaskDetail } from "./types.ts";
 import { makeCache, throttledFetch } from "./plane-throttle.ts";
 import { parseTier2 } from "./tier2.ts";
@@ -173,7 +174,7 @@ function maxIssuePages(): number {
 /** Open issues for the Plane project mapped to `repo`. `null` ⇒ Plane not configured / unreachable. */
 export async function listPlaneIssues(repo: string): Promise<IssueRef[] | null> {
 	// Cache successful reads (not null/failure) so repeated polls within the TTL share a single call.
-	return issueListCache.get(repo, Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000, () => listPlaneIssuesUncached(repo), (v) => v !== null);
+	return issueListCache.get(repo, envInt("OMP_SQUAD_PLANE_CACHE_MS", 15000), () => listPlaneIssuesUncached(repo), (v) => v !== null);
 }
 
 async function listPlaneIssuesUncached(repo: string): Promise<IssueRef[] | null> {
@@ -226,7 +227,7 @@ const allStatesCache = makeCache<IssueRef[] | null>();
  * and cached longer than the open list (reconciliation is a slow loop). No blockedBy enrichment.
  */
 export async function listPlaneIssuesAllStates(repo: string): Promise<IssueRef[] | null> {
-	const ttl = Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000;
+	const ttl = envInt("OMP_SQUAD_PLANE_CACHE_MS", 15000);
 	return allStatesCache.get(repo, Math.max(ttl, 60_000), () => fetchIssueRefs(repo, maxIssuePages()), (v) => v !== null);
 }
 
@@ -249,7 +250,7 @@ const issueDetailCache = makeCache<TaskDetail | null>();
  *  display properties). `null` ⇒ Plane not configured / no project / unreachable. Cached briefly,
  *  like `listPlaneIssues`, keyed by repo+issue. */
 export async function fetchIssueDetail(repo: string, issueId: string): Promise<TaskDetail | null> {
-	const ttl = Number(process.env.OMP_SQUAD_PLANE_CACHE_MS) || 15000;
+	const ttl = envInt("OMP_SQUAD_PLANE_CACHE_MS", 15000);
 	return issueDetailCache.get(`${repo}\u0000${issueId}`, ttl, () => fetchIssueDetailUncached(repo, issueId), (v) => v !== null);
 }
 

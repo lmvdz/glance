@@ -9,6 +9,7 @@
  * so behavior is unchanged until #13 lands.
  */
 
+import { envInt } from "./config.ts";
 import type { AgentDTO, CreateAgentOptions } from "./types.ts";
 import { readHost, underPressure } from "./resource.ts";
 import * as os from "node:os";
@@ -61,7 +62,7 @@ export class Scheduler {
 	 * env change (tests, ops) takes effect without a restart — matching the prior inline read.
 	 */
 	cap(): number {
-		return Number(process.env.OMP_SQUAD_MAX_WIP) || defaultWipCap();
+		return envInt("OMP_SQUAD_MAX_WIP", defaultWipCap());
 	}
 
 	/** True when the host is too loaded to admit another agent, independent of the count cap. */
