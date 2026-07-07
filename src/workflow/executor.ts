@@ -354,8 +354,26 @@ const defaultIdleScheduler: IdleScheduler = (check, intervalMs) => {
 	return { cancel: () => clearInterval(t) };
 };
 
+/**
+ * Wrap a command-node script so the run's own `node_modules/.bin` is first on PATH.
+ *
+ * The gate runs under `bash -lc`, and a LOGIN shell re-derives PATH by sourcing
+ * `/etc/profile` — which on many systems drops non-standard dirs (e.g. `~/.bun/bin`,
+ * where a globally-installed `omp` lives). A gate that shells out to a project-local
+ * binary (notably `omp`, which several spawn-based tests invoke bare) then fails to
+ * resolve it and the gate exits non-zero even though the code is green. Prepending
+ * the local bin — the same thing `npm run`/`bun run` do — makes gates robust to
+ * whatever the login profile does to PATH. The export is injected INSIDE the script
+ * so it runs AFTER `-l` sources the profile and therefore wins.
+ */
+export function withLocalBinOnPath(script: string, cwd: string): string {
+	const localBin = path.join(cwd, "node_modules", ".bin");
+	const quoted = `'${localBin.replace(/'/g, `'\\''`)}'`;
+	return `export PATH=${quoted}:"$PATH"\n${script}`;
+}
+
 async function defaultExecCommand(script: string, cwd: string): Promise<CommandResult> {
-	const proc = Bun.spawn(["bash", "-lc", script], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+	const proc = Bun.spawn(["bash", "-lc", withLocalBinOnPath(script, cwd)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env } });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	const code = await proc.exited;
 	return { code, stdout, stderr };
