@@ -1,6 +1,6 @@
 # Fix land-outcome recording — the unlock
 
-STATUS: blocked
+STATUS: in-review
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: research
@@ -44,3 +44,13 @@ Verified:
 2. **Durable code fix (this concern, after unblock):** the model-outcome statistic is documented "cheap, always-on … data on day one" (`squad-manager.ts:2490`) but is in practice gated behind `!result.retryable` — so a dirty-main-blocked fleet is invisibly starved of ALL learning signal. Decouple the always-on statistic from the retryable land gate (record the attempt/outcome even when the land is refused for an environmental precondition), AND/OR make "landing blocked by dirty main" a loud, surfaced state rather than silent accumulation in `land-failures.json`.
 
 **Stop-and-reassess (per 00-overview Notes):** landing itself is the bottleneck. Concern 05 (fleet routing) is premature until lands complete and the ledger populates. Recommend: unblock main → drive a clean land → verify a non-empty `model-outcomes.json` → THEN resume 02→04→05. Concern 06 (GOAL 2) is independent and unaffected.
+
+## Resolution addendum — part 2 SHIPPED (2026-07-07, feat/sirvir-01-recording-decouple)
+Part 1 (dirty main) resolved separately: PR #103 landed the `webapp-legacy` cleanup, main is clean. Part 2 (durable code fix) implemented as BOTH halves of the two-part fix:
+
+1. **Decoupled statistic — a distinct third state, not a landed/rejected pollutant.** `land()`'s record branch (`squad-manager.ts`, `if (!result.retryable && (auto || result.ok))`) gained an `else if (result.retryable)` arm that records the attempt via new `recordModelOutcomeBlocked()` (`model-outcomes.ts`): `ModelOutcomeCounts` gains an OPTIONAL `blocked` counter, bumped only for retryable/environmental refusals. `landed`/`rejected` are never touched by it — a dirty main isn't the model's fault, so the land-rate signal smart-spawn/attribution-scoreboard/cost-gate read is bit-for-bit unchanged. On-disk backward-compatible: old `model-outcomes.json` files parse as-is (`blocked` absent ⇒ absent, never defaulted in), verified by test.
+2. **Loud surfaced state.** Every retryable refusal now fires a warn-level automation event on a new event-driven `"land"` channel (`fileLandBlockedFinding`, mirrors `fileScopeFinding`; new `dirty-main` `AutomationSkipReason` tags the dominant cause) — persisted to `automation.jsonl`, visible in /api/automation. Factory status (`factory-status.ts`) derives a `landBlocked` banner (`deriveLandBlockStatus`) from that channel's rollup row, and the webapp strip (`FactoryStatusStrip`) renders it as a red "Fleet cannot land: main checkout dirty — …" banner above the headline. No more silent accumulation in `land-failures.json` (whose retryable-never-bumps-streak behavior is unchanged and re-asserted by test).
+
+**Proof:** `tests/land-blocked-recording.test.ts` drives the REAL `SquadManager.land()` over real git repos: dirty-main refusal ⇒ `{landed:0, rejected:0, blocked:1}` + streak 0 + warn `land` event + `landBlocked.blocked === true`; clean land ⇒ `{landed:1, rejected:0}` (no `blocked` key) + no banner; conflicting (non-retryable) failure ⇒ `{landed:0, rejected:1}` + streak 1 + no banner. The first test is the regression guard: re-coupling the statistic to `!retryable` fails it even if `model-outcomes.ts` is untouched. Plus `recordModelOutcomeBlocked` unit tests (incl. old-shape on-disk file) and `deriveLandBlockStatus`/`landBlockedLine` tests. `bun run check` clean; full `bun test` 1844 pass / 0 fail; webapp 578 pass.
+
+**Deliberately left:** the concern's original Verify (a live-daemon land populating `~/.glance/model-outcomes.json`) still needs a real fleet land on the now-clean main under the restarted daemon — that is an operational step (restart daemon, drive a land), not a code gap; concern 02 (key verification) picks up from there.
