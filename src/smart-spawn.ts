@@ -14,7 +14,8 @@ import * as path from "node:path";
 import { envBool } from "./config.ts";
 import type { ApprovalMode, CreateAgentOptions, ThinkingLevel } from "./types.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
-import { tierOf, type ComplexityTier, type ModelOutcomeCounts } from "./model-outcomes.ts";
+import { DEFAULT_MODEL_FAMILY, tierOf, type ComplexityTier, type ModelOutcomeCounts } from "./model-outcomes.ts";
+import { DEFAULT_PROVIDER, modelLineage, type ModelLineage } from "./model-lineage.ts";
 
 const INFER_TIMEOUT_MS = 20_000;
 
@@ -31,10 +32,27 @@ export const MIN_SAMPLES = 8;
  *  before the shift fires — otherwise the default heuristic stands unchanged. */
 export const MIN_EDGE = 0.15;
 
-/** The two models the current spawn heuristic picks between (SYSTEM_PROMPT's "opus for hard work,
- *  omit otherwise" — "omit" maps to the `"default"` bucket `model-outcomes.ts` keys undefined runs
- *  under). Not a capability classifier — a fixed, small candidate set for an outcome comparison. */
-const SHIFT_CANDIDATES = ["opus", "default"] as const;
+/** The two FAMILIES the current spawn heuristic picks between (SYSTEM_PROMPT's "opus for hard work,
+ *  omit otherwise" — "omit" maps to `DEFAULT_MODEL_FAMILY`, the REAL family `model-outcomes.ts`
+ *  resolves an undefined `model` to, not the old phantom `"default"` string that could never equal
+ *  a recorded key). Not a capability classifier — a fixed, small candidate set for an outcome
+ *  comparison, expressed in the SAME `modelFamily` namespace both record and read use
+ *  (research-sirvir/02) so a candidate lookup can actually hit. */
+const SHIFT_CANDIDATES = ["opus", DEFAULT_MODEL_FAMILY] as const;
+
+/**
+ * Cross-provider leak guard (research-sirvir/02, red-team MINOR 5): restrict a candidate list to
+ * families compatible with the spawn's subscription provider — never let a well-landing family
+ * from a DIFFERENT vendor's subscription (e.g. `openai`, if a future/wider candidate set ever
+ * included one) become the chosen model for an Anthropic-subscription omp unit. `provider` defaults
+ * to `DEFAULT_PROVIDER` (the fleet's dominant subscription vendor for omp spawns, same default
+ * `rate-limit.ts` folds an unclassifiable unit into); a harness-pinned caller could override it.
+ * Pure and exported so the guard is directly testable independent of today's (accidentally
+ * same-vendor) `SHIFT_CANDIDATES` contents.
+ */
+export function eligibleCandidates(candidates: readonly string[], provider: ModelLineage = DEFAULT_PROVIDER): string[] {
+	return candidates.filter((c) => modelLineage(c) === provider);
+}
 
 function landedRate(o: ModelOutcomeCounts): number {
 	const total = o.landed + o.rejected;
@@ -47,12 +65,17 @@ function landedRate(o: ModelOutcomeCounts): number {
  *  2. Off unless `OMP_SQUAD_MODEL_OUTCOMES=1` AND an `outcomes` reader is injected.
  *  3. Exploration floor is SYMMETRIC — it protects BOTH sides of the comparison from a small sample:
  *     - a WINNER candidate with fewer than `MIN_SAMPLES` total outcomes is not eligible to win;
- *     - the INCUMBENT ("default") must ALSO clear `MIN_SAMPLES` before its rate is trusted. An
- *       unmeasured incumbent is `{0,0}` → `landedRate` 0, which would otherwise read as "0% land
- *       rate" and let a thin/mediocre winner flip the default purely because the incumbent was never
- *       measured — starving the cold incumbent, the never-penalize rule inverted. So a cold
- *       incumbent means NO shift (the base heuristic stands), never a free win for the challenger.
- *  4. The best ELIGIBLE candidate replaces the default only if it beats the (trusted) incumbent rate
+ *     - the INCUMBENT (`DEFAULT_MODEL_FAMILY`, the REAL family an omitted model resolves to — never
+ *       the old phantom `"default"` string, which could never equal a recorded key) must ALSO clear
+ *       `MIN_SAMPLES` before its rate is trusted. An unmeasured incumbent is `{0,0}` → `landedRate` 0,
+ *       which would otherwise read as "0% land rate" and let a thin/mediocre winner flip the default
+ *       purely because the incumbent was never measured — starving the cold incumbent, the
+ *       never-penalize rule inverted. So a cold incumbent means NO shift (the base heuristic
+ *       stands), never a free win for the challenger.
+ *  4. Candidates are further restricted to the spawn's provider (`eligibleCandidates`) — a
+ *     cross-provider family (e.g. `openai`) is never eligible to win an Anthropic-subscription omp
+ *     unit's shift, even if it would otherwise land the comparison (research-sirvir/02 MINOR 5).
+ *  5. The best ELIGIBLE candidate replaces the default only if it beats the (trusted) incumbent rate
  *     by at least `MIN_EDGE`; otherwise the default stands, unchanged.
  * Returns the (possibly) shifted model + an optional reason suffix; never mutates its input.
  */
@@ -61,17 +84,17 @@ function shiftedModel(currentModel: string | undefined, tier: ComplexityTier, ou
 	if (!envBool("OMP_SQUAD_MODEL_OUTCOMES", false) || !outcomes) return {};
 	// Cold incumbent ⇒ no basis for comparison ⇒ no shift. Trusting an unmeasured incumbent's 0%
 	// rate would penalize it exactly the way the winner-side floor forbids for a cold challenger.
-	const incumbent = outcomes("default", tier);
+	const incumbent = outcomes(DEFAULT_MODEL_FAMILY, tier);
 	if (incumbent.landed + incumbent.rejected < MIN_SAMPLES) return {};
 	const incumbentRate = landedRate(incumbent);
 	let best: { model: string; rate: number } | undefined;
-	for (const model of SHIFT_CANDIDATES) {
+	for (const model of eligibleCandidates(SHIFT_CANDIDATES)) {
 		const o = outcomes(model, tier);
 		if (o.landed + o.rejected < MIN_SAMPLES) continue; // cold — not eligible to win, never starved either
 		const rate = landedRate(o);
 		if (!best || rate > best.rate) best = { model, rate };
 	}
-	if (!best || best.model === "default" || best.rate - incumbentRate < MIN_EDGE) return {};
+	if (!best || best.model === DEFAULT_MODEL_FAMILY || best.rate - incumbentRate < MIN_EDGE) return {};
 	return { model: best.model, reasonSuffix: `model shifted to ${best.model} (${best.rate.toFixed(2)} land-rate, ${tier} tier)` };
 }
 

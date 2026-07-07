@@ -17,7 +17,7 @@
  */
 
 import type { RunReceipt } from "./types.ts";
-import { modelKey, tierOf, type ComplexityTier, type ModelOutcomes } from "./model-outcomes.ts";
+import { modelFamily, tierOf, type ComplexityTier, type ModelOutcomes } from "./model-outcomes.ts";
 
 const TIERS: ComplexityTier[] = ["light", "mid", "heavy"];
 /** A receipt is glance-native (flows through the land pipeline) when it has no external harness. */
@@ -73,7 +73,7 @@ export function buildScoreboard(receipts: RunReceipt[], outcomes: ModelOutcomes)
 		he.runs += 1;
 		harness.set(h, he);
 		if (isDaemon(r)) {
-			const k = modelKey(r.model);
+			const k = modelFamily(r.model);
 			const de = daemon.get(k) ?? { cost: 0, runs: 0 };
 			de.cost += cost;
 			de.runs += 1;

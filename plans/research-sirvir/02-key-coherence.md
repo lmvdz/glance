@@ -1,10 +1,10 @@
 # Model-identity key coherence — record must equal read
 
-STATUS: open
+STATUS: in-review
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
-TOUCHES: src/model-outcomes.ts, src/smart-spawn.ts, src/attribution-scoreboard.ts
+TOUCHES: src/model-outcomes.ts, src/smart-spawn.ts, src/attribution-scoreboard.ts, src/cost-gate.ts, src/model-lineage.ts
 
 ## Goal
 Make the model identity used at RECORD time and at READ time provably identical, so a candidate/incumbent can actually match a recorded row. Today they cannot: the shift can never fire by construction.
@@ -26,3 +26,27 @@ None. Concerns 03/04/05 depend on this namespace; the scoreboard UI (`Scoreboard
 
 ## Verify
 Unit test: record an outcome for a `provider/id` model, then read it back via the candidate/incumbent path and assert a hit (not `{0,0}`). Assert `modelFamily` round-trips the real on-disk shapes (`anthropic/claude-opus-4-8`, bare `claude-opus-4-8`, undefined). Assert a cross-provider family is excluded from an omp spawn's candidate set.
+
+## Resolution — SHIPPED (2026-07-07, feat/sirvir-02-key-coherence)
+
+**One namespace, both directions.** `model-outcomes.ts` gained `modelFamily(model?: string): string` — the ONE function now used at record time (`recordModelOutcome`/`recordModelOutcomeBlocked`) and every read time (`modelOutcomes`, `readModelOutcomes`, `smart-spawn`'s candidate scan, `attribution-scoreboard`'s daemon-cost fold, `cost-gate`'s projection join). It delegates the actual keyword parsing to `omp-graph/attribution.ts`'s existing `modelFamily()` (no second parser — provider prefixes and version suffixes are already substring-matching-agnostic there) and adds exactly one rule: empty/undefined resolves to `DEFAULT_MODEL_FAMILY` (`"sonnet"`, mirroring `model-route.ts`'s `ROUTE_CHEAP_FAMILY` — a drift-guard test asserts the two constants stay equal), never the base function's own `"unknown"` and never the old phantom `"default"` string.
+
+**Mapping table** (every shape the receipts audit found, `plans/orchestration/reports/receipts-audit-2026-07-07.md` §3):
+
+| raw shape observed | → family |
+|---|---|
+| `<missing>` / undefined / empty (422/543 receipts) | `sonnet` (`DEFAULT_MODEL_FAMILY`) |
+| `openai-codex/gpt-5.5`, bare `gpt-5.5` | `openai` |
+| `claude-opus-4-8`, bare alias `opus`, `anthropic/claude-opus-4-8` | `opus` |
+| `claude-fable-5` | `fable` |
+| `claude-sonnet-5`, `claude-sonnet-4-6` | `sonnet` |
+| `claude-haiku-*` | `haiku` |
+| anything unrecognized (non-empty) | `other` |
+
+**Migration story:** read-time normalization, not a one-shot script. `readLedger` folds every on-disk `${rawKey}::${tier}` entry through `migratedFamilyOf` (same `modelFamily`, plus one migration-only rule: the literal `"default"` key — the OLD `modelKey()`'s own phantom bucket-name, never a real model id — folds to `DEFAULT_MODEL_FAMILY`). Two old keys colliding onto the same family+tier are SUMMED (`landed`/`rejected`/`blocked`), never shadowed or dropped. The fold is idempotent (a fixed-point test asserts every real family name maps to itself) and persists automatically: the next `recordModelOutcome`/`recordModelOutcomeBlocked` call writes back the already-folded shape as a side effect of its normal read-modify-write — no separate migration step to run or forget.
+
+**Cross-provider guard (red-team MINOR 5):** `smart-spawn.ts` exports `eligibleCandidates(candidates, provider = DEFAULT_PROVIDER)`, filtering via `model-lineage.ts`'s `modelLineage`. `shiftedModel`'s eligibility loop runs `eligibleCandidates(SHIFT_CANDIDATES)` instead of the raw array, so a cross-vendor family can never win an Anthropic-subscription omp unit's shift even if a future/wider candidate set includes one. Fixing this exposed a real bug in `model-lineage.ts`: `modelLineage("openai")` resolved to `"unknown"` (its own base `modelFamily` doesn't recognize the literal string `"openai"` as itself — same fixed-point gap) — added a family-literal fast path there too, with a regression test.
+
+**Deferred/out of scope:** none — the concern's stated scope (`model-outcomes.ts`, `smart-spawn.ts`, `attribution-scoreboard.ts`) is fully implemented; `cost-gate.ts` (consumer import rename) and `model-lineage.ts` (fixed-point bugfix) were necessary, minimal spillover, not scope creep — neither touches `dispatch.ts`/`rate-limit.ts`/`receipts.ts` (this wave's forbidden files). `squad-manager.ts` needed NO changes: its `recordModelOutcome(this.stateDir, dto.model, ...)` call site already passes the raw model through, and `modelFamily` normalizes it transparently.
+
+**Proof:** `bun run check` clean. Full `bun test` 1993 pass / 0 fail across 249 files. Effect-ratchet baselines untouched (no bump). New/updated tests: `tests/model-outcomes.test.ts` (modelFamily normalization + drift guard + migration fold, 32 tests total), `tests/smart-spawn.test.ts` (family-namespaced SHIFT_CANDIDATES + `eligibleCandidates` guard, 18 tests), `tests/attribution-scoreboard.test.ts` (raw-shape-joins-family-row proof, 6 tests), `tests/model-lineage.test.ts` (family-literal fixed point, 11 tests).
