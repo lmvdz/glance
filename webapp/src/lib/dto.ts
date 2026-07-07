@@ -25,6 +25,16 @@ export interface AgentReport {
   createdAt: number;
 }
 
+/** Mirrors backend `AttentionEvent` (src/types.ts) — a harness-agnostic, non-blocking "look at this"
+ *  signal (operator `notify`, an omp `squad_attention` tool call, or a raw harness notify RPC). */
+export interface AttentionEvent {
+  id: string;
+  summary: string;
+  detail?: string;
+  source: "notify" | "tool" | "harness";
+  createdAt: number;
+}
+
 /** Mirrors backend `TransitionEntry` (src/types.ts). One recorded (or denied) `{from,to,reason,at}`
  *  lifecycle transition. */
 export interface TransitionEntry {
@@ -364,6 +374,9 @@ export interface AgentDTO {
   /** Non-blocking proposals raised via `squad_report`, or auto-emitted on a low-confidence run
    *  (Epic 5 D2). Surfaced as a warn "Needs you" row — never affects `status`/`effectiveMode`. */
   reports?: AgentReport[];
+  /** Harness-agnostic attention lane (v2 glance-notify) — append-only, live/run-scoped, mirrors
+   *  `reports`. Surfaced as a warn "Needs you" row alongside reports, never affects `status`. */
+  attentionEvents?: AttentionEvent[];
   transitions?: TransitionEntry[];
   errorTransitions1h?: number;
   lastActivity: number;

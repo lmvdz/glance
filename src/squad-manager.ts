@@ -98,6 +98,7 @@ import type {
 	CreateAgentOptions,
 	CommissionResult,
 	AgentReport,
+	AttentionEvent,
 	CommissionSpec,
 	FlueMemberConfig,
 	GateReport,
@@ -190,6 +191,8 @@ const PEER_MESSAGE_MAX_CHARS = 2000;
 const KB_SEARCH_TOOL = "squad_kb_search";
 /** Epic 5 (HITL safeguards, DESIGN.md D2): NON-blocking — responds immediately, never rides `pending`. */
 const REPORT_TOOL = "squad_report";
+/** cmux-research concern 03: NON-blocking, same shape as REPORT_TOOL — a bare "look here", not a gate. */
+const ATTENTION_TOOL = "squad_attention";
 
 /**
  * Reserved host tools advertised to every omp-backed agent via `set_host_tools` on ready (the
@@ -234,6 +237,19 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 				summary: { type: "string", description: "One line: what you're unsure about, or the proposal." },
 				proposal: { type: "string", description: "Optional: the proposed diff/approach/next step in more detail." },
 				confidence: { type: "number", description: "Optional: your own 0..1 confidence in the current approach." },
+			},
+			required: ["summary"],
+		},
+	},
+	{
+		name: ATTENTION_TOOL,
+		description:
+			"Flag that you need a human to look at something — non-blocking, unlike a confirm/input host call. Use when you want to surface a finding, a heads-up, or something worth a human's attention without stopping your own work. It appears as a 'Needs you' row, not a gate.",
+		parameters: {
+			type: "object",
+			properties: {
+				summary: { type: "string", description: "One line: what needs a human's attention." },
+				detail: { type: "string", description: "Optional: more context." },
 			},
 			required: ["summary"],
 		},
@@ -3660,6 +3676,16 @@ export class SquadManager extends EventEmitter {
 				await this.remove(cmd.id, cmd.deleteWorktree ?? false);
 				void this.recordAudit(actor, "remove", cmd.id, "ok", cmd.deleteWorktree ? "deleted worktree" : undefined);
 				break;
+			case "notify": {
+				// Operator/scriptable ingress (`glance notify`, cmux-research concern 03): non-blocking,
+				// never a PendingRequest — mirrors squad_attention/the harness "notify" wiring below.
+				const event: AttentionEvent = { id: randomUUID(), summary: cmd.summary, detail: cmd.detail, source: "notify", createdAt: Date.now() };
+				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+				this.append(rec, "system", `🔔 attention (${actor.id}): ${truncate(cmd.summary, 200)}`);
+				void this.recordAudit(actor, "notify", cmd.id, "ok", truncate(cmd.summary, 120));
+				this.emitAgent(rec);
+				break;
+			}
 			default:
 				// An old daemon receiving a command type it predates (e.g. concern 04's "fork") must error
 				// loudly instead of silently no-oping — the switch falling through with no default let a
@@ -5021,7 +5047,13 @@ export class SquadManager extends EventEmitter {
 			this.setPending(rec, rec.dto.pending.filter((p) => p.id !== req.targetId), "pending-cancel");
 			if (req.targetId) this.append(rec, "system", "input request cancelled", { pending: { requestId: req.targetId, action: "cancelled" }, status: "cancelled" });
 		} else if (req.method === "notify") {
+			// Un-black-hole the harness notify (cmux-research concern 03): previously a transcript-only
+			// append with no way to surface it — now also a real attention row for non-omp harnesses
+			// (which have no host-tool channel, so squad_attention is unreachable for them).
 			this.append(rec, "system", `(${req.notifyType ?? "info"}) ${req.message}`);
+			const event: AttentionEvent = { id: randomUUID(), summary: req.message, detail: undefined, source: "harness", createdAt: Date.now() };
+			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			// emitAgent fires unconditionally at the end of this method (below) — no extra broadcast needed here.
 		} else if (BLOCKING_UI_METHODS[req.method]) {
 			added = {
 				id: req.id,
@@ -5071,6 +5103,10 @@ export class SquadManager extends EventEmitter {
 		}
 		if (call.toolName === REPORT_TOOL) {
 			void this.handleReportTool(rec, call);
+			return;
+		}
+		if (call.toolName === ATTENTION_TOOL) {
+			void this.handleAttentionTool(rec, call);
 			return;
 		}
 		// Capability tool-grant enforcement (#3): if this agent was spawned from a capability profile that
@@ -5165,6 +5201,28 @@ export class SquadManager extends EventEmitter {
 		this.append(rec, "system", `📝 report: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: REPORT_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.agent.respondHostTool(call.id, "report recorded — continue working, a human will review it when they can");
 		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncate(summary, 120));
+		this.emitAgent(rec);
+	}
+
+	/**
+	 * squad_attention (cmux-research concern 03, harness-agnostic `glance notify`): "I need a human to
+	 * look at this" WITHOUT stopping. Modeled on `handleReportTool` above, NOT the blocking `onHostTool`
+	 * pending path — it responds to the agent immediately (the agent keeps running) and appends to the
+	 * separate, non-blocking `AgentDTO.attentionEvents` channel. Never calls `setPending`.
+	 */
+	private async handleAttentionTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+		const summary = typeof args.summary === "string" ? args.summary.trim() : "";
+		if (!summary) {
+			rec.agent.respondHostTool(call.id, `usage: ${ATTENTION_TOOL}({ summary: string, detail?: string })`, true);
+			return;
+		}
+		const detail = typeof args.detail === "string" ? args.detail : undefined;
+		const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "tool", createdAt: Date.now() };
+		rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+		this.append(rec, "system", `🔔 attention: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: ATTENTION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+		rec.agent.respondHostTool(call.id, "attention recorded — continue working, a human will look when they can");
+		void this.recordAudit(agentActor(rec.dto.id), "attention.raised", rec.dto.id, "ok", truncate(summary, 120));
 		this.emitAgent(rec);
 	}
 

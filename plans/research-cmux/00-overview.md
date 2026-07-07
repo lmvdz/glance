@@ -24,7 +24,8 @@ When a unit blocks on a human, the operator's phone/desktop buzzes — unit name
 | 03 | 01 (delivery must exist before agent-declared attention is worth pushing) | deferred |
 
 ## Status
-- **v1 SHIPPED** (2026-07-06): concerns 01 + 02 closed. webapp typecheck/build clean, 555 webapp tests pass, zero backend changes. Push contract live-driven against a throwaway daemon (caught + fixed a bearer-auth bug the code-read missed). Concern 03 (`glance notify` harness-agnostic primitive) deferred to a v2 plan/PR with its corrected design captured.
+- **v1 SHIPPED** (2026-07-06): concerns 01 + 02 closed. webapp typecheck/build clean, 555 webapp tests pass, zero backend changes. Push contract live-driven against a throwaway daemon (caught + fixed a bearer-auth bug the code-read missed).
+- **v2 SHIPPED** (2026-07-06): concern 03 closed — non-blocking harness-agnostic attention lane (`AttentionEvent`, `glance notify` CLI, `squad_attention` omp tool, un-black-holed harness `onUi` notify, `'attention'` panel row). Root typecheck clean, backend 1562 pass, webapp insights 70 pass, live-driven. Cut the speculative claude-code Notification hook (glance runs no claude-code driver); remaining hook/blocking-suspend deferred with corrected design captured.
 
 ## Notes
 - **Backend push is unchanged.** `escalationPayload` (`src/server.ts:293`) already fires on `input`/`error` with the reason in the body, `/#/agent/<id>` deep link, `tag`-collapse, 3s/agent debounce. v1 is React-app wiring only.

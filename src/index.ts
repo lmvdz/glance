@@ -67,6 +67,7 @@ USAGE
   glance add <repo> [flags]                     Spawn an agent in a new worktree
   glance list [--json]                          Show the roster
   glance prompt <id> <message...>               Send an instruction to an agent
+  glance notify <id> <summary...> [--detail x]  Flag an agent needs a human's attention (non-blocking)
   glance kill <id>                              Stop an agent but keep it in the roster
   glance rm <id> [--delete-worktree]            Remove an agent
   glance who [repo]                             Who/what is working a repo (any omp agent)
@@ -495,6 +496,22 @@ async function cmdPrompt(args: string[]): Promise<void> {
 	process.stdout.write(res.ok ? "sent\n" : `failed: ${await res.text()}\n`);
 }
 
+/** `glance notify <id> "<summary>" [--detail x]` — the operator/scriptable ingress for the
+ *  non-blocking attention primitive (cmux-research concern 03): any program/CI/hook can raise
+ *  attention on a unit without stopping or blocking it. Mirrors cmdPrompt's shape. */
+async function cmdNotify(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const id = positional[0];
+	const summary = positional.slice(1).join(" ") || (typeof flags.summary === "string" ? flags.summary : "");
+	if (!id || !summary) {
+		process.stderr.write('usage: glance notify <id> <summary...> [--detail "..."]\n');
+		process.exit(1);
+	}
+	const detail = typeof flags.detail === "string" ? flags.detail : undefined;
+	const res = await postCommand(flags, { type: "notify", id, summary, detail });
+	process.stdout.write(res.ok ? "sent\n" : `failed: ${await res.text()}\n`);
+}
+
 async function cmdRm(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	const id = positional[0];
@@ -780,6 +797,9 @@ async function main(): Promise<void> {
 		case "prompt":
 		case "say":
 			await cmdPrompt(rest);
+			break;
+		case "notify":
+			await cmdNotify(rest);
 			break;
 		case "kill":
 		case "stop":
