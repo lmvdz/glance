@@ -23,12 +23,23 @@ export interface FactoryLoopReport {
   status: FactoryLoopStatus;
 }
 
+/** Server-derived "fleet cannot land" banner (src/factory-status.ts FactoryLandBlockStatus): a
+ *  retryable/environmental land refusal — dominantly a dirty main checkout — was recorded within the
+ *  status window, so auto-lands are being refused until the operator clears it. */
+export interface FactoryLandBlockStatus {
+  blocked: boolean;
+  reason?: string;
+  at?: number;
+}
+
 export interface FactoryStatus {
   generatedAt: number;
   activeAgents: number;
   planeRepoCount: number;
   loops: FactoryLoopReport[];
   overall: FactoryLoopStatus;
+  /** Optional client-side: a daemon predating the land-blocked banner doesn't send it. */
+  landBlocked?: FactoryLandBlockStatus;
 }
 
 export interface StatusMeta {
@@ -106,6 +117,17 @@ export function overallHeadline(s: FactoryStatus): string {
     case 'off':
       return 'Factory off — no autonomous loops running';
   }
+}
+
+/** The one-line "fleet cannot land" banner text, or undefined when landing is healthy. Dirty-main
+ *  (the dominant, named cause) gets the specific at-a-glance phrasing; any other surfaced reason is
+ *  shown verbatim. */
+export function landBlockedLine(s: FactoryStatus): string | undefined {
+  if (!s.landBlocked?.blocked) return undefined;
+  const reason = s.landBlocked.reason ?? 'a land was refused for an environmental precondition';
+  return reason.includes('uncommitted tracked changes')
+    ? `Fleet cannot land: main checkout dirty — ${reason}`
+    : `Fleet cannot land: ${reason}`;
 }
 
 /** The single-line reason to show under a loop chip, honest about the state. */

@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AutomationRollupRow } from "../src/automation-log.ts";
-import { buildFactoryStatus, deriveLoopReport, deriveOverall, FACTORY_LOOPS, loopFlagEnabled, type BuildFactoryStatusInput } from "../src/factory-status.ts";
+import { buildFactoryStatus, deriveLandBlockStatus, deriveLoopReport, deriveOverall, FACTORY_LOOPS, loopFlagEnabled, type BuildFactoryStatusInput } from "../src/factory-status.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -184,5 +184,33 @@ describe("buildFactoryStatus — the whole snapshot", () => {
 		);
 		expect(s.overall).toBe("off");
 		expect(s.loops.every((l) => l.status === "off")).toBe(true);
+	});
+});
+
+describe("deriveLandBlockStatus — the 'fleet cannot land' banner (research-sirvir/01, part 2)", () => {
+	const reason = "squad/a1: main checkout /repo has uncommitted tracked changes — refusing to land";
+
+	test("a recent dirty-main refusal raises the banner with the reason + timestamp", () => {
+		const b = deriveLandBlockStatus([roll("land", { events: 1, errors: 1, lastAt: NOW - 60_000, lastSkipReason: reason })]);
+		expect(b.blocked).toBe(true);
+		expect(b.reason).toBe(reason);
+		expect(b.at).toBe(NOW - 60_000);
+	});
+
+	test("no land row at all → not blocked (the common healthy case)", () => {
+		expect(deriveLandBlockStatus([])).toEqual({ blocked: false });
+		expect(deriveLandBlockStatus([roll("dispatch", { events: 3, lastAt: NOW })])).toEqual({ blocked: false });
+	});
+
+	test("a land row whose NEWEST event carried no skipReason clears the banner (untagged retryable causes stay off it)", () => {
+		expect(deriveLandBlockStatus([roll("land", { events: 2, lastAt: NOW - 1_000 })])).toEqual({ blocked: false });
+	});
+
+	test("buildFactoryStatus surfaces the banner in the whole snapshot", () => {
+		const blocked = buildFactoryStatus(baseInput({ rollup: [roll("land", { events: 1, errors: 1, lastAt: NOW - 5_000, lastSkipReason: reason })] }));
+		expect(blocked.landBlocked.blocked).toBe(true);
+		expect(blocked.landBlocked.reason).toBe(reason);
+		const clean = buildFactoryStatus(baseInput());
+		expect(clean.landBlocked).toEqual({ blocked: false });
 	});
 });

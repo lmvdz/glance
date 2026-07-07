@@ -10,6 +10,7 @@ import { expect, test, describe } from 'bun:test';
 import {
   STATUS_META,
   overallHeadline,
+  landBlockedLine,
   loopReasonLine,
   fmtSince,
   type FactoryStatus,
@@ -99,6 +100,27 @@ describe('loopReasonLine', () => {
 
   test('off (flag disabled) reads "flag off"', () => {
     expect(loopReasonLine(loop('off', { flagEnabled: false }))).toBe('flag off');
+  });
+});
+
+describe('landBlockedLine — the "fleet cannot land" banner text', () => {
+  test('dirty-main refusal gets the specific at-a-glance phrasing', () => {
+    const line = landBlockedLine(
+      snap({ landBlocked: { blocked: true, reason: 'squad/a1: main checkout /repo has uncommitted tracked changes — refusing to land', at: 1 } }),
+    );
+    expect(line).toContain('Fleet cannot land: main checkout dirty');
+    expect(line).toContain('squad/a1');
+  });
+
+  test('other surfaced reasons are shown verbatim under the banner prefix', () => {
+    expect(landBlockedLine(snap({ landBlocked: { blocked: true, reason: 'gh pr merge failed: HTTP 502', at: 1 } }))).toBe(
+      'Fleet cannot land: gh pr merge failed: HTTP 502',
+    );
+  });
+
+  test('healthy landing (or an old daemon that omits the field) shows no banner', () => {
+    expect(landBlockedLine(snap({ landBlocked: { blocked: false } }))).toBeUndefined();
+    expect(landBlockedLine(snap())).toBeUndefined();
   });
 });
 

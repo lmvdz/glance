@@ -92,6 +92,42 @@ export interface FactoryStatus {
 	/** Cumulative FileStore.save() failures this process (0 in DB mode / a healthy run). The topology
 	 *  guarantee (inspectable-topology) rests on this write landing, so a nonzero count is actionable. */
 	persistFailures: number;
+	/** The "fleet cannot land" banner (research-sirvir/01-recording-unlock, part 2) — see below. */
+	landBlocked: FactoryLandBlockStatus;
+}
+
+/**
+ * "Fleet cannot land" banner status, derived from the "land" automation channel (event-driven, fired by
+ * `SquadManager.fileLandBlockedFinding` on every retryable/environmental land refusal — dominantly a
+ * dirty main checkout). Deliberately NOT a `FactoryLoopSpec` row: it has no flag and no cadence of its
+ * own, so the armed/not-armed/idle vocabulary doesn't fit — this is a standalone always-on surface, the
+ * loud alternative to silent accumulation in land-failures.json.
+ */
+export interface FactoryLandBlockStatus {
+	/** True when a land was refused for an environmental precondition within the freshness window —
+	 *  the fleet cannot land until the operator clears it (or it self-clears, e.g. a transient dirty
+	 *  window). */
+	blocked: boolean;
+	/** The most recent refusal's detail (e.g. "‹branch›: main checkout … has uncommitted tracked
+	 *  changes …"). Undefined when not currently blocked. */
+	reason?: string;
+	/** Epoch ms of the most recent refusal. Undefined when not currently blocked. */
+	at?: number;
+}
+
+/**
+ * Derive the "fleet cannot land" banner from the "land" loop's automation rollup row. `rollup` is
+ * ALREADY windowed by the caller (`this.automation.rollup(windowMs, now)` in squad-manager's
+ * `factoryStatus()` — the same freshness budget every other FACTORY_LOOPS row uses), so a refusal aged
+ * out of that window is simply absent here; no second, independently-drifting freshness constant.
+ * Only counts a refusal that carried a `skipReason` (today: `dirty-main`, the dominant/named cause) —
+ * an untagged retryable cause (e.g. a PR-mode `gh` hiccup) still logs to /api/automation but doesn't
+ * raise this specific, named banner. Pure over its input, like `deriveLoopReport`.
+ */
+export function deriveLandBlockStatus(rollup: AutomationRollupRow[]): FactoryLandBlockStatus {
+	const row = rollup.find((r) => r.loop === "land");
+	if (!row || !row.lastSkipReason || row.lastAt <= 0) return { blocked: false };
+	return { blocked: true, reason: row.lastSkipReason, at: row.lastAt };
 }
 
 /** Effective flag read: default-ON unless explicitly "0" (mirrors the manager's `env !== "0"` gates). */
@@ -198,5 +234,6 @@ export function buildFactoryStatus(input: BuildFactoryStatusInput): FactoryStatu
 		loops,
 		overall: deriveOverall(loops, input.activeAgents),
 		persistFailures: input.persistFailures,
+		landBlocked: deriveLandBlockStatus(input.rollup),
 	};
 }
