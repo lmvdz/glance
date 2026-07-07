@@ -293,6 +293,14 @@ export function assemblePlan(prompt: string, candidates: string[], cwd: string, 
 	// Outcome-driven, cost-weighted model default (Epic 6 concern 07; research-sirvir/04) — never
 	// overrides an explicit `plan.model` (checked first thing inside `shiftedModel`); off unless
 	// OMP_SQUAD_MODEL_OUTCOMES=1 AND a `scoreboard` was injected.
+	//
+	// NO HYSTERESIS — reviewed and accepted (PR #114 cross-lineage review), a decision, not an
+	// oversight: the shift is recomputed statelessly per spawn, so two near-equal candidates whose
+	// measured rates/costs straddle a threshold can alternate across consecutive spawns as new
+	// outcomes land. Accepted because the blast radius is bounded — the shift only fires past the
+	// MIN_EDGE / COST_TIE_EPSILON gates, never overrides an explicit model, and the whole feature
+	// sits behind a default-off flag. If flapping ever matters in practice, the fix is a sticky
+	// margin (require the previous winner to be beaten by an extra epsilon), not per-spawn memory.
 	const shift = shiftedModel(plan.model, tierOf(thinking), opts.scoreboard);
 	if (shift.model !== undefined) {
 		plan.model = shift.model;

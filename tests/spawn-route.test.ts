@@ -16,9 +16,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import type { AgentDriver } from "../src/agent-driver.ts";
+import type { Scoreboard } from "../src/attribution-scoreboard.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { recordModelOutcome } from "../src/model-outcomes.ts";
-import { SquadManager } from "../src/squad-manager.ts";
+import { SPAWN_SCOREBOARD_TTL_MS, SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
 import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
 
@@ -165,4 +166,67 @@ test("POST /api/spawn: same seeded ledger, flag OFF ⇒ no shift (control — pr
 	expect(res.status).toBe(200);
 	const body = (await res.json()) as { plan: { model?: string; reason?: string } };
 	expect(body.plan.model).toBeUndefined();
+});
+
+// ── spawnScoreboard TTL + single-flight cache (PR #114 cross-lineage review) ────────────────────
+// `readAllReceipts` is an O(lifetime-receipts) walk+parse; with OMP_SQUAD_MODEL_OUTCOMES=1 every
+// POST /api/spawn hits `spawnScoreboard()`. These prove one scan is SHARED, not raced or repeated.
+// Sharing is asserted via board OBJECT IDENTITY — `buildScoreboard` mints a fresh object per build,
+// so `a === b` holds iff exactly one build produced both results (a stronger, less mockable claim
+// than a call-count spy) — paired with a data-staleness probe (an outcome recorded mid-TTL must NOT
+// appear, which is only possible if the ledger genuinely wasn't re-read).
+
+/** TS-`private` cache slots, reached the same way the suite already reaches `makeDriver`. */
+interface ScoreboardCacheHost {
+	scoreboardCache?: { at: number; board: Scoreboard };
+}
+
+async function scoreboardManager(): Promise<{ mgr: SquadManager; stateDir: string }> {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "spawn-sb-state-"));
+	tmps.push(stateDir);
+	seedLedger(stateDir);
+	const mgr = new SquadManager({ stateDir, store: new FileStore(stateDir) }); // no start(): spawnScoreboard needs only stateDir
+	cleanups.push(() => mgr.stop());
+	return { mgr, stateDir };
+}
+
+const opusMid = (b: Scoreboard) => b.models.find((m) => m.model === "opus")?.byTier.find((t) => t.tier === "mid");
+
+test("spawnScoreboard: two calls within the TTL share ONE build — the second is a cache hit that never re-reads the ledger", async () => {
+	const { mgr, stateDir } = await scoreboardManager();
+	const first = await mgr.spawnScoreboard();
+	expect(opusMid(first)?.landed).toBe(7);
+
+	// Mutate the ledger AFTER the first build. A cache hit cannot see this; a re-scan would.
+	recordModelOutcome(stateDir, "opus", "mid", true);
+
+	const second = await mgr.spawnScoreboard();
+	expect(second).toBe(first); // identity ⇒ the very same built board, no second readAllReceipts walk
+	expect(opusMid(second)?.landed).toBe(7); // staleness probe: the mid-TTL land is (correctly) not visible yet
+});
+
+test(`spawnScoreboard: after TTL (${SPAWN_SCOREBOARD_TTL_MS}ms) expiry the board is rebuilt and picks up new outcomes`, async () => {
+	const { mgr, stateDir } = await scoreboardManager();
+	const first = await mgr.spawnScoreboard();
+	recordModelOutcome(stateDir, "opus", "mid", true);
+
+	// Age the cache entry past the TTL instead of sleeping 60s — same private-slot escape hatch as makeDriver.
+	const host = mgr as unknown as ScoreboardCacheHost;
+	expect(host.scoreboardCache).toBeDefined();
+	host.scoreboardCache!.at = Date.now() - SPAWN_SCOREBOARD_TTL_MS - 1;
+
+	const rebuilt = await mgr.spawnScoreboard();
+	expect(rebuilt).not.toBe(first); // a genuinely fresh build…
+	expect(opusMid(rebuilt)?.landed).toBe(8); // …that re-read the ledger and sees the new land
+
+	// And the rebuilt board re-primes the cache: an immediate third call is a hit again.
+	expect(await mgr.spawnScoreboard()).toBe(rebuilt);
+});
+
+test("spawnScoreboard: N concurrent cold calls single-flight into ONE scan (no thundering herd of receipt walks)", async () => {
+	const { mgr } = await scoreboardManager();
+	// Fire all requests before awaiting any — the exact concurrent-interactive-spawns shape.
+	const boards = await Promise.all([mgr.spawnScoreboard(), mgr.spawnScoreboard(), mgr.spawnScoreboard(), mgr.spawnScoreboard(), mgr.spawnScoreboard()]);
+	for (const b of boards.slice(1)) expect(b).toBe(boards[0]); // one build object shared by every caller ⇒ one scan
+	expect(opusMid(boards[0])?.landed).toBe(7);
 });
