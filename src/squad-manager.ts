@@ -2927,7 +2927,7 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `land refused for ${opts.repo}: ${mode.reason}`);
 				return { ok: false, committed: false, merged: false, message: opts.message, detail: `forced-pr-mode-without-default-branch: ${mode.reason}` };
 			}
-			return landAgentPr({ ...opts, defaultBranch: mode.defaultBranch }, this.stateDir);
+			return landAgentPr({ ...opts, defaultBranch: mode.defaultBranch }, this.stateDir, this.automation.for("orphan-audit", opts.repo));
 		}
 		return landAgent(opts);
 	}

@@ -25,8 +25,10 @@ import { detectVerify } from "./intake.ts";
 import { proofGate } from "./proof.ts";
 import { gh, ghJson } from "./gh.ts";
 import { isAncestor, recordDoneProof } from "./done-proof.ts";
+import { cherryCheck, orphanedShas } from "./orphan-audit.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { applyRegressionGate, staleBranchReason, withRepoLandLock, type LandOpts, type LandResult } from "./land.ts";
+import type { AutomationRecorder } from "./automation-log.ts";
 
 // ── git / gate helpers ───────────────────────────────────────────────────────────────────────────
 // Deliberately duplicated (trimmed) copies of land.ts's own private `git()`/`runGate()` rather than
@@ -386,6 +388,50 @@ export async function assertMerged(input: { repo: string; defaultBranch: string;
 	return { ok: true, commit: input.branchTipSha, mergeCommit };
 }
 
+/**
+ * Post-merge orphan assertion (the guard behind FIVE manual-audit incidents — see MEMORY.md "omp-squad
+ * orphaned merged-PR audit"): runs AFTER `assertMerged` already passed, using the complementary check
+ * `scripts/orphan-audit.ts` sweeps the whole repo with (`git cherry`, src/orphan-audit.ts) —
+ * `assertMerged` only proves the branch TIP is reachable, which can hold even though individual
+ * commits' patches never actually landed (the `origin/<branch>` ref this daemon just pushed is shared
+ * with humans/other tooling, so "the tip is an ancestor" and "every commit this branch ever carried is
+ * in the default branch" are not the same claim). A finding here MUST NOT fail the land — the merge
+ * already happened, `gh pr merge` already returned success, and the DoneProof this is called before
+ * recording is otherwise sound. It only gets LOUD: one automation-log entry at `level: "error"` so the
+ * Observer/operator sees it, mirroring this module's own degrade-to-return-value error pattern (never
+ * throws — a `cherryCheck` failure here is itself reported, not swallowed, since "couldn't check" is a
+ * distinct, also-worth-surfacing outcome from "checked, clean").
+ *
+ * `method !== "merge"` (squash/rebase) is a KNOWN false-positive source: those methods rewrite history
+ * into commit(s) with no matching original patch-id, so `git cherry` routinely flags every original
+ * commit as `+` even though the (rewritten) content landed — `assertMerged` already proved reachability
+ * for those methods via `gh pr view`'s reported merge commit, which is the authoritative check. The
+ * entry is still recorded (never silently dropped — a real stacked-branch orphan looks identical to a
+ * squash false-positive from here), but tagged so a reader doesn't over-index on it.
+ */
+export async function assertNoOrphanedCommits(input: { repo: string; defaultBranch: string; branch: string; prNumber: number; prUrl: string; method: MergeMethod }, record?: AutomationRecorder): Promise<void> {
+	if (!record) return; // no recorder wired (e.g. a caller that doesn't care) ⇒ nothing to do
+	const upstream = `origin/${input.defaultBranch}`;
+	const head = `origin/${input.branch}`;
+	// Refresh the BRANCH's remote-tracking ref, not just the default's (the land path already fetched
+	// that): the incident this guards includes someone/something pushing MORE commits to the branch
+	// around the merge — invisible in the stale ref this daemon last pushed. Best-effort: a failed
+	// fetch leaves the last-known ref auditable, and cherryCheck reports its own ref errors.
+	await git(["fetch", "origin", input.branch], input.repo).catch(() => {});
+	const check = await cherryCheck(upstream, head, input.repo);
+	if (!check.ok) {
+		record({ level: "error", detail: `orphan check FAILED for merged PR #${input.prNumber} (${input.branch}): git cherry ${upstream} ${head} errored: ${check.error} — could not confirm content reached ${upstream}` });
+		return;
+	}
+	const orphans = orphanedShas(check.entries);
+	if (orphans.length === 0) return;
+	const caveat = input.method !== "merge" ? ` (method=${input.method} — squash/rebase commonly false-positives here; assertMerged's gh-pr-view reachability check is authoritative, cross-check scripts/orphan-audit.ts before treating this as a real orphan)` : "";
+	record({
+		level: "error",
+		detail: `PR #${input.prNumber} (${input.branch}, ${input.prUrl}) reports MERGED but git cherry ${upstream} ${head} still marks ${orphans.length} commit(s) as unreached: ${orphans.map((s) => s.slice(0, 12)).join(", ")}${caveat}`,
+	});
+}
+
 // ── landAgentPr — synchronous end-to-end ────────────────────────────────────────────────────────
 
 /** Bound the clean-automerge-and-retry loop to exactly ONE retry (guards against an infinite loop). */
@@ -395,10 +441,13 @@ const MAX_CLEAN_AUTOMERGE_RETRIES = 1;
  * PR-mode counterpart of land.ts's `landAgent`. `stateDir` is passed as a second argument rather than
  * folded into `LandOpts` — `land.ts` has no `stateDir` concept at all, and every other `LandOpts`
  * consumer (local mode) has no use for it, so keeping it out of the shared type is the less invasive
- * choice.
+ * choice. `onOrphan` (third, optional) is the post-merge orphan assertion's automation-log sink —
+ * see `assertNoOrphanedCommits`; undefined ⇒ the check still runs (cheap, local git only) but has
+ * nowhere to report a finding, so it becomes a silent no-op (mirrors every other best-effort
+ * degrade in this file rather than requiring every test/caller to wire a recorder).
  */
-export async function landAgentPr(opts: LandOpts & { defaultBranch: string }, stateDir: string): Promise<LandResult> {
-	return withRepoLandLock(opts.repo, () => landAgentPrLocked(opts, stateDir));
+export async function landAgentPr(opts: LandOpts & { defaultBranch: string }, stateDir: string, onOrphan?: AutomationRecorder): Promise<LandResult> {
+	return withRepoLandLock(opts.repo, () => landAgentPrLocked(opts, stateDir, onOrphan));
 }
 
 /**
@@ -409,10 +458,10 @@ export async function landAgentPr(opts: LandOpts & { defaultBranch: string }, st
  * BEFORE the real attempt, and only stamped onto the result if it actually landed something. A forced
  * land that happened to carry a fresh proof anyway is not flagged — no crying wolf, same as local.
  */
-async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, stateDir: string): Promise<LandResult> {
+async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, stateDir: string, onOrphan?: AutomationRecorder): Promise<LandResult> {
 	const forced = opts.requireProof === false;
 	const unproven = forced ? (await proofGate(opts.repo, opts.worktree, opts.branch, opts.verify)) !== undefined : false;
-	const result = await landAgentPrOnce(opts, stateDir, 0);
+	const result = await landAgentPrOnce(opts, stateDir, 0, onOrphan);
 	if (forced && unproven && result.ok && (result.merged || result.committed)) {
 		result.forcedWithoutProof = true;
 		result.detail = result.detail ? `${result.detail}; landed WITHOUT a passing proof gate (FORCED)` : "landed WITHOUT a passing proof gate (FORCED)";
@@ -420,7 +469,7 @@ async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, sta
 	return result;
 }
 
-async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number): Promise<LandResult> {
+async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, onOrphan?: AutomationRecorder): Promise<LandResult> {
 	const { repo, worktree, branch, message } = opts;
 
 	// In-place agent (no branch, or worktree === repo): nothing to merge, mirrors landAgentImpl.
@@ -504,7 +553,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			if (retry >= MAX_CLEAN_AUTOMERGE_RETRIES) {
 				return { ok: false, committed, merged: false, retryable: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `conflict in ${files.join(", ") || "unknown files"}` };
 			}
-			return attemptCleanAutomergeAndRetry(opts, stateDir, retry, ensure);
+			return attemptCleanAutomergeAndRetry(opts, stateDir, retry, ensure, onOrphan);
 		}
 
 		// Stale-branch gate (visual-plan-blocks incident, ported to PR mode via the SAME
@@ -569,6 +618,10 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	const assertion = await assertMerged({ repo, defaultBranch: opts.defaultBranch, branchTipSha: branchTip, prNumber: ensure.prNumber }, method);
 	if (!assertion.ok) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: assertion.detail };
 
+	// Orphan assertion (concern: post-merge guard) — additional to the reachability check just above,
+	// never blocking (the merge already happened): see `assertNoOrphanedCommits`'s doc comment.
+	await assertNoOrphanedCommits({ repo, defaultBranch: opts.defaultBranch, branch, prNumber: ensure.prNumber, prUrl: ensure.prUrl, method }, onOrphan);
+
 	recordDoneProof(stateDir, {
 		branch,
 		repo: repoIdentity(repo),
@@ -598,7 +651,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
  * the LLM `attemptAutoResolve` port to an origin-base scratch merge is explicitly CUT from this wave
  * (documented regression, DESIGN.md Risk #4); never silently drop the PR.
  */
-async function attemptCleanAutomergeAndRetry(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, ensure: EnsurePrResult): Promise<LandResult> {
+async function attemptCleanAutomergeAndRetry(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, ensure: EnsurePrResult, onOrphan?: AutomationRecorder): Promise<LandResult> {
 	const { worktree, branch, message } = opts;
 	const merge = await git(["merge", `origin/${opts.defaultBranch}`], worktree);
 	if (merge.code === 0) {
@@ -606,7 +659,7 @@ async function attemptCleanAutomergeAndRetry(opts: LandOpts & { defaultBranch: s
 		if (push.code !== 0) {
 			return { ok: false, committed: false, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `clean automerge of origin/${opts.defaultBranch} into ${branch} succeeded but push failed: ${push.stderr || push.stdout}` };
 		}
-		return landAgentPrOnce(opts, stateDir, retry + 1);
+		return landAgentPrOnce(opts, stateDir, retry + 1, onOrphan);
 	}
 	const files = (await git(["diff", "--name-only", "--diff-filter=U"], worktree)).stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 	await git(["merge", "--abort"], worktree).catch(() => {});

@@ -1157,8 +1157,9 @@ export type SquadEvent =
  *  default-off) rides the SAME reasoning read for a second, cheap drift classification, but reports
  *  on its OWN "sentinel" channel so its LLM spend/finds never inflate Scout's backlog numbers; Observer
  *  and Opportunity run pure/zero-token checks; Dispatcher polls Plane and spawns routed agents. */
-// "scope" is event-driven (scope-contract audit findings), not a periodic loop like the others.
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel";
+// "scope" and "orphan-audit" are event-driven (fired once per occurrence — a scope-contract
+// finding, a post-merge orphan-commit finding), not periodic loops like the others.
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit";
 
 /**
  * Structured reason an automation loop intentionally skipped a unit without doing work.
