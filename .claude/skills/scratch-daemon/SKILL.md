@@ -13,6 +13,15 @@ Re-derived painfully in at least six sessions (~10 spinups in one of them, 3 dis
 export OMP_SQUAD_STATE_DIR=$(mktemp -d /tmp/glance-scratch-XXXX)   # own state dir — the live daemon holds a lock on the real one
 export PORT=0                                                       # or pick a free port; never 7878 (live)
 export PATH="$PWD/node_modules/.bin:$PATH"                          # else `omp` isn't found
+# SAFETY (non-negotiable for scratch boots): loops OFF, or the scratch daemon will pull the REAL
+# Plane backlog and claim live tickets — this happened THREE times on 2026-07-08 (scratch daemons
+# claimed OMPSQ-422/423/425 and probe tickets). Plane secrets are ambient on this host.
+export OMP_SQUAD_AUTODISPATCH=0 OMP_SQUAD_AUTODRIVE=0 OMP_SQUAD_AUTOLAND=0
+export OMP_SQUAD_AUTOSUPERVISE=0 OMP_SQUAD_AUTO_SUPERVISE=0 OMP_SQUAD_LAND_CONFIRM=1
+# unset alone is NOT enough: the daemon unconditionally loads ~/.claude/secrets/plane.env at boot
+# (proven live 2026-07-08). Repoint HOME at an empty dir so no secrets file is readable:
+export HOME=$(mktemp -d /tmp/glance-scratch-home-XXXX)
+unset PLANE_API_KEY PLANE_API_TOKEN 2>/dev/null || true             # belt-and-suspenders on top
 nohup bun src/index.ts serve > "$OMP_SQUAD_STATE_DIR/daemon.log" 2>&1 &
 ```
 
