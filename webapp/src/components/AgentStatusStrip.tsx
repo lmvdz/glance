@@ -25,7 +25,7 @@ export interface AgentStatusStripProps {
   onImplement: () => void;
 }
 
-/** Exported for reuse by other agent-status surfaces (e.g. TopologyPanel) that want the same
+/** Exported for reuse by other agent-status surfaces that want the same
  *  status→color mapping without re-deriving it. */
 export const STATUS_DOT: Record<string, string> = {
   working: 'bg-emerald-500',

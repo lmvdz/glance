@@ -31,9 +31,10 @@ test("focusTaskSearch returns false when there's no document at all (SSR/no-DOM)
   expect(focusTaskSearch()).toBe(false);
 });
 
-// jumpToTaskSearch is the ⌘K/Ctrl+K handler's decision logic. The search box now only
-// mounts on the Tasks view (WorkbenchPane's isTaskScopedView), so this preserves the
-// "works from anywhere" keybinding contract by switching views first when needed.
+// jumpToTaskSearch is the palette's "Search tasks…" row handler (formerly the raw ⌘K
+// binding). The search box only mounts on the Tasks view (WorkbenchPane's
+// isTaskScopedView), so this preserves the "works from anywhere" contract by switching
+// views first when needed.
 test("jumpToTaskSearch focuses immediately when already on the Tasks view", () => {
   let focusCalls = 0;
   let scheduleCalls = 0;
@@ -50,7 +51,7 @@ test("jumpToTaskSearch focuses immediately when already on the Tasks view", () =
 });
 
 test("jumpToTaskSearch switches to the Tasks view first, then focuses on the next scheduled tick, from any other view", () => {
-  const nonTaskViews: AppView[] = ["attention", "active", "cockpit", "review", "automation"];
+  const nonTaskViews: AppView[] = ["fleet", "omp-graph", "capabilities", "org", "review"];
   for (const view of nonTaskViews) {
     let setViewCalls: AppView[] = [];
     let scheduledFn: (() => void) | undefined;
@@ -75,5 +76,5 @@ test("jumpToTaskSearch defaults to a real focus + a real scheduler when not over
   (globalThis as { document?: unknown }).document = { getElementById: () => null };
   // Called with only the required args — should not throw, and (since there's no
   // requestAnimationFrame/DOM in this test env) falls back to setTimeout.
-  expect(() => jumpToTaskSearch("attention", () => {})).not.toThrow();
+  expect(() => jumpToTaskSearch("fleet", () => {})).not.toThrow();
 });

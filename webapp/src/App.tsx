@@ -14,15 +14,8 @@ import { ToastContainer } from './components/ToastContainer';
 import { ThemeProvider } from './context/ThemeContext';
 import { AssistantChat } from './components/AssistantChat';
 import { CapabilityPanel } from './components/CapabilityPanel';
-import { AutomationPanel } from './components/AutomationPanel';
-import { FleetHealthPanel } from './components/FleetHealthPanel';
-import { HeatPanel } from './components/HeatPanel';
-import { ActivityHeatmapPanel } from './components/ActivityHeatmapPanel';
+import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
-import { ScoreboardPanel } from './components/ScoreboardPanel';
-import { TopologyPanel } from './components/TopologyPanel';
-import { KnowledgePanel } from './components/KnowledgePanel';
-import { FederationPanel } from './components/FederationPanel';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
@@ -49,24 +42,18 @@ const MainContent = () => {
   // the cwd project, so status==='file' never trips this; 'org' is the settings escape hatch.)
   if (status === 'authed' && !currentProject && view !== 'org') return <FirstRunSetup />;
 
-  {/* GRAPH-FOLD.md §6f: WorkspaceCockpit is now the unified Fleet view — "needs you" and "active
-      work" dissolved into its state-grouped roster. All three legacy view keys render it so
-      nothing breaks before U3 (owns the nav shrink + AppView key removal) lands. */}
-  if (view === 'attention') return <WorkspaceCockpit />;
+  {/* The four-item shell (GRAPH-FOLD.md §6e): Fleet · Tasks · Graph · Capabilities, plus the
+      routed-into views (org via the AccountMenu gear, intervene via a "Needs you" tap, review via
+      its deep-linkable hash). The eight dead keys aren't handled here because they can't ARRIVE
+      here: they're gone from the AppView union, and the one out-of-type-system source (the
+      localStorage-persisted view) is coerced through lib/viewAlias.ts's alias map before it ever
+      becomes state — automation/heat/… → omp-graph, fleet-health/attention/… → fleet,
+      federation → org, knowledge → omp-graph + the ⌘K palette auto-opening. */}
+  if (view === 'fleet') return <WorkspaceCockpit />;
   if (view === 'intervene') return <IntervenceView />;
   if (view === 'review') return <DesignReviewView />;
-  if (view === 'active') return <WorkspaceCockpit />;
-  if (view === 'cockpit') return <WorkspaceCockpit />;
   if (view === 'capabilities') return <CapabilityPanel />;
-  if (view === 'automation') return <AutomationPanel />;
-  if (view === 'fleet-health') return <FleetHealthPanel />;
-  if (view === 'heat') return <HeatPanel />;
-  if (view === 'activity-heatmap') return <ActivityHeatmapPanel />;
   if (view === 'omp-graph') return <OmpGraphPanel />;
-  if (view === 'scoreboard') return <ScoreboardPanel />;
-  if (view === 'topology') return <TopologyPanel />;
-  if (view === 'knowledge') return <KnowledgePanel />;
-  if (view === 'federation') return <FederationPanel />;
   if (view === 'org') return <OrgSettings />;
   if (view === 'tasks' && !selectedTaskId) return <TaskListView />;
 
@@ -137,6 +124,9 @@ export default function App() {
           <TaskProvider>
             <GlobalShortcuts />
             <AppContent />
+            {/* ⌘K opens the palette from EVERY view — mounted beside (not inside) AppContent so
+                no view-level conditional can unmount it. */}
+            <CommandPalette />
             <ToastContainer />
           </TaskProvider>
         </AuthGate>

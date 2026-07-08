@@ -11,7 +11,6 @@ import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
 import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS, fetchCheckpoints, resolveForkTarget, isForkCheckpointResponseCurrent, type CheckpointEntryDTO } from '../lib/agent-control';
 import { taskRef, issueIdentifier } from '../lib/task-model';
-import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
 import { traceIdForAgent } from '../lib/trace';
 import { pickWorkflowGraphAgent } from '../lib/workflowGraph';
@@ -491,7 +490,7 @@ function promptsFromContent(content: string): Map<string, string> {
 }
 
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, selectTask, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole, openReview } = useTaskContext();
+  const { tasks, selectedTaskId, selectTask, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole, openReview, openCommandPalette } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
@@ -1457,7 +1456,11 @@ export const TaskDetail = () => {
             onCancel={() => { setForkPickerAgentId(null); setForkCheckpoints([]); setForkSelectedSeq(null); }}
           />
         )}
-        <button onClick={() => focusTaskSearch()} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-amber-500" title="Focus task search (⌘K)" aria-label="Jump to search"><Search className="w-3.5 h-3.5" /> Jump <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
+        {/* ⌘K is the command palette now (GRAPH-FOLD.md §3) — this button and its chip mirror the
+            REAL binding; jump-to-task-search is one row inside the palette. Taste-review nit 4:
+            labeled "Search" (not "Jump") — it opens a search/command surface, and "Jump" no
+            longer describes what the click does. */}
+        <button onClick={openCommandPalette} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-amber-500" title="Command palette (⌘K)" aria-label="Open command palette"><Search className="w-3.5 h-3.5" /> Search <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
         <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
         <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isChatOpen ? 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
       </div>

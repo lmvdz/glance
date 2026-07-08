@@ -190,8 +190,8 @@ export const IntervenceView: React.FC = () => {
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-gray-500 dark:text-gray-400">
         <Inbox className="h-8 w-8" aria-hidden />
         <div className="text-sm">No agent selected to step into.</div>
-        <button onClick={() => setView('attention')} className="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800">
-          Go to Needs you
+        <button onClick={() => setView('fleet')} className="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800">
+          Go to Fleet
         </button>
       </div>
     );
@@ -211,8 +211,8 @@ export const IntervenceView: React.FC = () => {
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
       {/* Header */}
       <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-2 dark:border-gray-800 dark:bg-gray-950">
-        <button onClick={() => setView('attention')} className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100" aria-label="Back to Needs you">
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden /> Needs you
+        <button onClick={() => setView('fleet')} className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100" aria-label="Back to Fleet">
+          <ArrowLeft className="h-3.5 w-3.5" aria-hidden /> Fleet
         </button>
         <span className="text-gray-300 dark:text-gray-700">/</span>
         <span className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{agent.name || agent.id}</span>

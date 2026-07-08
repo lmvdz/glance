@@ -1,5 +1,5 @@
-/** Small emerald pill marking a decision (or other artifact) as captured by an agent — shared by the
- *  KnowledgePanel "Decisions on record" list and the TaskDetail decisions log so the two stay in sync. */
+/** Small emerald pill marking a decision (or other artifact) as captured by an agent — used by the
+ *  TaskDetail decisions log (previously also the KnowledgePanel, folded into the ⌘K palette). */
 export function AgentSourceBadge({ className = '' }: { className?: string }) {
   return (
     <span

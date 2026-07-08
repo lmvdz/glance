@@ -58,7 +58,10 @@ export const AccountMenu = () => {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-8 z-50 w-60 rounded-lg border border-gray-200 bg-white p-1 shadow-lg dark:border-gray-800 dark:bg-gray-900">
+        // Opens UPWARD: the menu's one mount point is the bottom bar of the workbench rail now
+        // (GRAPH-FOLD.md §6e — org/settings moved to the gear down there), so a downward panel
+        // would render off-viewport.
+        <div className="absolute bottom-8 right-0 z-50 w-60 rounded-lg border border-gray-200 bg-white p-1 shadow-lg dark:border-gray-800 dark:bg-gray-900">
           <div className="px-3 py-2">
             <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{user.name || '—'}</div>
             <div className="truncate text-xs text-gray-500 dark:text-gray-400">{user.email}</div>
