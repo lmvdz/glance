@@ -89,6 +89,109 @@ export function groupCommentsByHeading(comments: ArtifactCommentDTO[], docPath: 
   return map;
 }
 
+// ── in-place doc diff (reference 213221's signature move) ───────────────────────────────────────
+//
+// The revision diff renders INSIDE the rendered doc: a struck removed line and its ember-highlighted
+// replacement sit in place within the section that changed, not in a git-hunk block. These helpers
+// map a unified diff onto current-doc line numbers so the component can interleave rendered-markdown
+// runs with change rows. Anything that can't be located falls back to a raw block — honestly.
+
+export interface DocLineChange {
+  /** 1-based anchor in the CURRENT doc. For 'ins' it is the inserted line's own number; for 'del'
+   *  it is the current-doc line BEFORE which the removed line sat (bodyEnd+1 ⇒ trailing removal). */
+  line: number;
+  kind: 'ins' | 'del';
+  text: string;
+}
+
+/** Parse a single-file unified diff into current-doc-anchored line changes. `undefined` on any
+ *  parse anomaly — the caller must then fall back to rendering the raw diff wholesale. */
+export function parseDocChanges(diff: string): DocLineChange[] | undefined {
+  if (!diff.trim()) return [];
+  const out: DocLineChange[] = [];
+  let newLine = 0;
+  let inHunk = false;
+  for (const raw of diff.replace(/\n$/, '').split('\n')) {
+    if (raw.startsWith('@@')) {
+      const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+      if (!m) return undefined;
+      newLine = Number(m[1]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue; // file header lines (diff --git / index / --- / +++)
+    if (raw.startsWith('+')) {
+      out.push({ line: newLine, kind: 'ins', text: raw.slice(1) });
+      newLine++;
+    } else if (raw.startsWith('-')) {
+      out.push({ line: newLine, kind: 'del', text: raw.slice(1) });
+    } else if (raw.startsWith(' ') || raw === '') {
+      newLine++;
+    } else if (raw.startsWith('\\')) {
+      // "\ No newline at end of file" — metadata, not content
+    } else {
+      return undefined;
+    }
+  }
+  return out;
+}
+
+/** True when a change anchors inside a section's body range (dels may trail at bodyEnd+1). */
+export function changeInRange(change: DocLineChange, bodyStart: number, bodyEnd: number): boolean {
+  const cap = change.kind === 'del' ? bodyEnd + 1 : bodyEnd;
+  return change.line >= bodyStart && change.line <= cap;
+}
+
+export type SectionSegment =
+  | { kind: 'md'; text: string }
+  | { kind: 'changes'; rows: DocLineChange[] };
+
+/** Interleave a section's current-doc lines with its del/ins rows: unchanged runs come back as
+ *  markdown text (render them normally), contiguous changed runs as ordered rows (render them as
+ *  struck / highlighted lines in place). */
+export function sectionSegments(docLines: string[], bodyStart: number, bodyEnd: number, changes: DocLineChange[]): SectionSegment[] {
+  const byLine = new Map<number, DocLineChange[]>();
+  for (const change of changes) {
+    if (!changeInRange(change, bodyStart, bodyEnd)) continue;
+    const bucket = byLine.get(change.line);
+    if (bucket) bucket.push(change);
+    else byLine.set(change.line, [change]);
+  }
+  const segments: SectionSegment[] = [];
+  let mdRun: string[] = [];
+  let changeRun: DocLineChange[] = [];
+  const flushMd = () => { if (mdRun.length) { segments.push({ kind: 'md', text: mdRun.join('\n') }); mdRun = []; } };
+  const flushChanges = () => { if (changeRun.length) { segments.push({ kind: 'changes', rows: changeRun }); changeRun = []; } };
+  for (let ln = bodyStart; ln <= bodyEnd + 1; ln++) {
+    const here = byLine.get(ln) ?? [];
+    const dels = here.filter((c) => c.kind === 'del');
+    const ins = here.find((c) => c.kind === 'ins');
+    if (dels.length) { flushMd(); changeRun.push(...dels); }
+    if (ln > bodyEnd) break; // only trailing dels may anchor past the body
+    if (ins) { flushMd(); changeRun.push(ins); }
+    else { flushChanges(); mdRun.push(docLines[ln - 1] ?? ''); }
+  }
+  flushChanges();
+  flushMd();
+  return segments;
+}
+
+/** Changes that no section's body range claims (preamble, heading lines) — the component shows
+ *  these in a raw fallback block rather than silently dropping them. */
+export function unlocatedChanges(changes: DocLineChange[], headings: DocHeading[]): DocLineChange[] {
+  if (!headings.length) return [];
+  return changes.filter((change) => !headings.some((h) => changeInRange(change, h.bodyStart, h.bodyEnd)));
+}
+
+/** Headings whose body range contains at least one change — expanded by default in diff mode. */
+export function changedHeadings(changes: DocLineChange[], headings: DocHeading[]): Set<string> {
+  const out = new Set<string>();
+  for (const h of headings) {
+    if (changes.some((change) => changeInRange(change, h.bodyStart, h.bodyEnd))) out.add(h.heading);
+  }
+  return out;
+}
+
 // ── last-seen-revision tracking (the "changed since your last view" diff toggle) ────────────────
 
 const LAST_SEEN_PREFIX = 'glance.review.lastSeen';

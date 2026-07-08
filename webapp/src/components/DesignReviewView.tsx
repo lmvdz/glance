@@ -28,7 +28,7 @@ import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { ArrowLeft, Check, GitCompare, Sparkles } from 'lucide-react';
+import { ArrowLeft, Bot, Check, GitCompare, Sparkles } from 'lucide-react';
 import { useTaskContext } from '../context/TaskContext';
 import { apiJson } from '../lib/api';
 import type { ArtifactCommentDTO } from '../lib/dto';
@@ -40,7 +40,12 @@ import {
   reviewNarration,
   headingForComment,
   lastSeenKey,
+  parseDocChanges,
+  sectionSegments,
+  unlocatedChanges,
+  changedHeadings,
   type DocHeading,
+  type DocLineChange,
 } from '../lib/plan-doc-review';
 import { splitDiffLines, diffLineStats, type DiffLineKind } from '../lib/intervene';
 import { StatusChip } from './kit/StatusChip';
@@ -74,13 +79,27 @@ interface PlanDocReadPayload {
   sha: string;
 }
 
+// Strike treatment is brand-muted (reduced-opacity struck text), never raw red — red is reserved
+// for the semantic danger ramp, and brand.md wants exactly one warm signal (ember) per view.
 const DIFF_LINE_CLASS: Record<DiffLineKind, string> = {
   add: 'bg-ember/15 text-ink-text-body',
-  del: 'text-ink-text-subtle line-through decoration-red-400/70',
+  del: 'text-ink-text-subtle line-through opacity-60',
   hunk: 'text-ink-text-subtle',
   meta: 'hidden',
   ctx: 'text-ink-text-muted',
 };
+
+/** One in-place change row: a struck removed line, or its ember-highlighted replacement —
+ *  reference 213221's signature live-edit look, sitting INSIDE the rendered doc. */
+const ChangeRow: React.FC<{ row: DocLineChange }> = ({ row }) => (
+  <div
+    className={`whitespace-pre-wrap rounded px-1.5 py-0.5 font-mono text-xs leading-relaxed ${
+      row.kind === 'del' ? 'text-ink-text-subtle line-through opacity-60' : 'bg-ember/15 text-ink-text-body'
+    }`}
+  >
+    {row.text || ' '}
+  </div>
+);
 
 function authorInitial(author: string): string {
   return (author.trim()[0] ?? '?').toUpperCase();
@@ -88,7 +107,8 @@ function authorInitial(author: string): string {
 
 /** Humans and agents are visually distinct species everywhere they appear (UI-REFERENCES.md's
  *  shared visual DNA). Kit contract (X1): humans render in the `human` cool neutral-blue —
- *  matching StatusChip's tone — where the references used warm-pink; agents keep teal/mint. */
+ *  matching StatusChip's tone — where the references used warm-pink; agents keep teal/mint AND
+ *  a bot glyph, so the species distinction never rests on color alone. */
 function AuthorAvatar({ author, isAgent }: { author: string; isAgent: boolean }) {
   return (
     <span
@@ -97,7 +117,7 @@ function AuthorAvatar({ author, isAgent }: { author: string; isAgent: boolean })
       }`}
       title={author}
     >
-      {authorInitial(author)}
+      {isAgent ? <Bot className="h-3.5 w-3.5" aria-hidden="true" /> : authorInitial(author)}
     </span>
   );
 }
@@ -271,6 +291,11 @@ export const DesignReviewView: React.FC = () => {
   // Hooks stay above the early return (rules of hooks) — these are cheap even when unused.
   const diffLines = React.useMemo(() => splitDiffLines(diffText), [diffText]);
   const diffStats = diffLineStats(diffText);
+  const docLines = React.useMemo(() => (doc ? doc.content.split('\n') : []), [doc]);
+  // In-place diff mapping: undefined ⇒ the unified diff didn't parse cleanly, fall back wholesale.
+  const docChanges = React.useMemo(() => (showDiff ? parseDocChanges(diffText) : undefined), [showDiff, diffText]);
+  const diffSectionSet = React.useMemo(() => (docChanges ? changedHeadings(docChanges, headings) : new Set<string>()), [docChanges, headings]);
+  const strayChanges = React.useMemo(() => (docChanges ? unlocatedChanges(docChanges, headings) : []), [docChanges, headings]);
 
   if (!reviewTaskId) {
     return (
@@ -290,8 +315,8 @@ export const DesignReviewView: React.FC = () => {
         >
           <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" /> Back
         </button>
-        <div className="flex flex-1 flex-col items-center">
-          <div className="flex w-full max-w-xl items-center gap-3">
+        <div className="flex flex-1 flex-col">
+          <div className="flex w-full items-center gap-3">
             <MonoLabel>Design Review</MonoLabel>
             <div className="h-1 flex-1 overflow-hidden rounded-full bg-ink-surface-2">
               <div
@@ -304,7 +329,7 @@ export const DesignReviewView: React.FC = () => {
             </span>
           </div>
           {(gateOpen ? 'All comments resolved, ready to implement!' : narration) && (
-            <div className={`mt-1 text-xs ${gateOpen ? 'text-emerald-400' : 'text-ink-text-subtle'}`}>
+            <div className={`mt-1 text-center text-xs ${gateOpen ? 'text-emerald-400' : 'text-ink-text-subtle'}`}>
               {gateOpen ? 'All comments resolved, ready to implement!' : narration}
             </div>
           )}
@@ -317,7 +342,9 @@ export const DesignReviewView: React.FC = () => {
           {!doc ? (
             <div className="text-sm text-ink-text-subtle">Loading design doc…</div>
           ) : (
-            <div className="mx-auto max-w-2xl rounded-lg border border-ink-border bg-ink-panel p-5">
+            // Left-anchored and wide — the progress bar, doc, and comments rail read as ONE dense
+            // screen (the reference's layout), not a floating centered column with dead gutters.
+            <div className="max-w-3xl rounded-lg border border-ink-border bg-ink-panel p-5">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-sm">
                   <StatusChip tone="active">Design</StatusChip>
@@ -338,25 +365,33 @@ export const DesignReviewView: React.FC = () => {
                 </div>
               </div>
 
-              {showDiff ? (
-                // v1 renders the diff as classified unified-diff lines (strike removed / ember-highlight
-                // inserted), reusing lib/intervene.ts's diff classifier rather than the DOM-level
-                // rendered-markdown inline diff the reference shows — a deliberate v1 simplification
-                // (see this file's header note); the upgrade path is a rendered-markdown diff pass.
+              {showDiff && docChanges === undefined ? (
+                // The unified diff didn't parse into locatable line changes — fall back to the raw
+                // classified-line block for the whole doc rather than guess. Honest, and rare.
                 <pre className="overflow-x-auto rounded-md bg-ink-surface p-3 font-mono text-xs leading-relaxed">
                   {diffLines.filter((l) => l.kind !== 'meta').map((line) => (
                     <div key={line.i} className={`whitespace-pre-wrap px-1 ${DIFF_LINE_CLASS[line.kind]}`}>
-                      {line.text || ' '}
+                      {line.text || ' '}
                     </div>
                   ))}
                 </pre>
               ) : (
                 <div className="space-y-1">
+                  {showDiff && strayChanges.length > 0 && (
+                    // Changes that anchor outside every rendered section (the preamble, a heading
+                    // line itself) — shown as a raw block for those hunks only, never dropped.
+                    <div className="mb-3 rounded-md border border-ink-border bg-ink-surface p-3">
+                      <MonoLabel className="mb-1.5 block">Changes outside the sections below</MonoLabel>
+                      {strayChanges.map((row, i) => <ChangeRow key={`stray-${i}`} row={row} />)}
+                    </div>
+                  )}
                   {headings.map((h) => {
                     const isActive = h.heading === activeHeading;
+                    const hasChanges = showDiff && diffSectionSet.has(h.heading);
+                    const expanded = showDiff ? hasChanges || isActive : isActive;
                     const body = doc.content.split('\n').slice(h.bodyStart - 1, h.bodyEnd).join('\n');
                     return (
-                      <PanelSection key={h.heading} id={`review-heading-${encodeURIComponent(h.heading)}`} focused={isActive} title={
+                      <PanelSection key={h.heading} id={`review-heading-${encodeURIComponent(h.heading)}`} focused={showDiff ? hasChanges : isActive} title={
                         <button
                           onClick={() => setActiveHeading(h.heading)}
                           className="min-h-6 rounded text-left focus-visible:ring-2 focus-visible:ring-ember"
@@ -364,18 +399,54 @@ export const DesignReviewView: React.FC = () => {
                           {h.heading}
                         </button>
                       }>
-                        {isActive && (
+                        {expanded && (hasChanges && docChanges ? (
+                          // Reference 213221's signature move: the struck removed line and its
+                          // ember-highlighted replacement sit IN PLACE inside the rendered doc.
+                          <div className="space-y-1">
+                            {sectionSegments(docLines, h.bodyStart, h.bodyEnd, docChanges).map((segment, i) =>
+                              segment.kind === 'md' ? (
+                                segment.text.trim() ? (
+                                  <div key={`md-${i}`} className="prose prose-invert prose-sm max-w-none prose-headings:hidden">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{segment.text}</ReactMarkdown>
+                                  </div>
+                                ) : null
+                              ) : (
+                                <div key={`ch-${i}`}>
+                                  {segment.rows.map((row, j) => <ChangeRow key={j} row={row} />)}
+                                </div>
+                              ),
+                            )}
+                          </div>
+                        ) : (
                           <div className="prose prose-invert prose-sm max-w-none prose-headings:hidden">
                             <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{body}</ReactMarkdown>
                           </div>
-                        )}
+                        ))}
                       </PanelSection>
                     );
                   })}
                   {headings.length === 0 && (
-                    <div className="prose prose-invert prose-sm max-w-none">
-                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{doc.content}</ReactMarkdown>
-                    </div>
+                    showDiff && docChanges ? (
+                      <div className="space-y-1">
+                        {sectionSegments(docLines, 1, docLines.length, docChanges).map((segment, i) =>
+                          segment.kind === 'md' ? (
+                            segment.text.trim() ? (
+                              <div key={`md-${i}`} className="prose prose-invert prose-sm max-w-none">
+                                <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{segment.text}</ReactMarkdown>
+                              </div>
+                            ) : null
+                          ) : (
+                            <div key={`ch-${i}`}>
+                              {segment.rows.map((row, j) => <ChangeRow key={j} row={row} />)}
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    ) : (
+                      <div className="prose prose-invert prose-sm max-w-none">
+                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{doc.content}</ReactMarkdown>
+                      </div>
+                    )
                   )}
                 </div>
               )}

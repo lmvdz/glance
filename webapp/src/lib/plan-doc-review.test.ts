@@ -11,6 +11,10 @@ import {
   lastSeenKey,
   parseReviewHash,
   buildReviewHash,
+  parseDocChanges,
+  sectionSegments,
+  unlocatedChanges,
+  changedHeadings,
 } from './plan-doc-review';
 
 const DOC = `# sidebar-consolidation
@@ -151,5 +155,74 @@ describe('review hash route', () => {
   it('rejects a hash that is not a review deep link', () => {
     expect(parseReviewHash('#/tasks')).toBeUndefined();
     expect(parseReviewHash('')).toBeUndefined();
+  });
+});
+
+describe('parseDocChanges', () => {
+  const DIFF = [
+    'diff --git a/doc.md b/doc.md',
+    'index 111..222 100644',
+    '--- a/doc.md',
+    '+++ b/doc.md',
+    '@@ -3,3 +3,3 @@',
+    ' context line',
+    '-old line',
+    '+new line',
+    ' trailing context',
+  ].join('\n');
+
+  it('anchors del/ins pairs at the same current-doc line', () => {
+    const changes = parseDocChanges(DIFF)!;
+    expect(changes).toEqual([
+      { line: 4, kind: 'del', text: 'old line' },
+      { line: 4, kind: 'ins', text: 'new line' },
+    ]);
+  });
+
+  it('is [] for an empty diff and undefined on a malformed hunk header', () => {
+    expect(parseDocChanges('')).toEqual([]);
+    expect(parseDocChanges('@@ bogus @@\n stuff')).toBeUndefined();
+  });
+
+  it('rejects unexpected line prefixes inside a hunk', () => {
+    expect(parseDocChanges('@@ -1,1 +1,1 @@\n?weird')).toBeUndefined();
+  });
+});
+
+describe('sectionSegments / unlocatedChanges / changedHeadings', () => {
+  // Current doc: 1:# T, 2:'', 3:## A, 4:kept, 5:new line, 6:'', 7:## B, 8:same
+  const docLines = ['# T', '', '## A', 'kept', 'new line', '', '## B', 'same'];
+  const headings = parseHeadings(docLines.join('\n'));
+  const changes = [
+    { line: 5, kind: 'del' as const, text: 'old line' },
+    { line: 5, kind: 'ins' as const, text: 'new line' },
+  ];
+
+  it('interleaves markdown runs with in-place change rows', () => {
+    const a = headings.find((h) => h.heading === 'A')!;
+    const segments = sectionSegments(docLines, a.bodyStart, a.bodyEnd, changes);
+    expect(segments).toEqual([
+      { kind: 'md', text: 'kept' },
+      { kind: 'changes', rows: changes },
+      { kind: 'md', text: '' },
+    ]);
+  });
+
+  it('an unchanged section is one markdown run', () => {
+    const b = headings.find((h) => h.heading === 'B')!;
+    expect(sectionSegments(docLines, b.bodyStart, b.bodyEnd, changes)).toEqual([{ kind: 'md', text: 'same' }]);
+  });
+
+  it('emits a trailing del anchored just past the body', () => {
+    const b = headings.find((h) => h.heading === 'B')!;
+    const trailing = [{ line: b.bodyEnd + 1, kind: 'del' as const, text: 'removed tail' }];
+    const segments = sectionSegments(docLines, b.bodyStart, b.bodyEnd, trailing);
+    expect(segments[segments.length - 1]).toEqual({ kind: 'changes', rows: trailing });
+  });
+
+  it('flags preamble changes as unlocated and marks only changed headings', () => {
+    const preamble = [{ line: 1, kind: 'ins' as const, text: '# T2' }];
+    expect(unlocatedChanges([...changes, ...preamble], headings)).toEqual(preamble);
+    expect(changedHeadings(changes, headings)).toEqual(new Set(['A']));
   });
 });
