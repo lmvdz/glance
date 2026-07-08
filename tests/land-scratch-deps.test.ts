@@ -12,6 +12,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { installScratchDeps } from "../src/land-pr.ts";
 
+// The success-path install fetches the REAL npm registry. Inside the hermetic gate sandbox
+// (--network none, empty bun cache at HOME=/tmp) that can never succeed — skip it there,
+// mirroring the suite's `skipIf(!hasDocker)` convention. In production this machinery runs on
+// the HOST (installScratchDeps' own doc: "runs on the host with the daemon's env"), so the
+// skip costs nothing where the code actually executes.
+let hasRegistry = false;
+try {
+	hasRegistry = (await fetch("https://registry.npmjs.org/-/ping", { signal: AbortSignal.timeout(3000) })).status < 500;
+} catch {
+	hasRegistry = false;
+}
+
 async function tmp(): Promise<string> {
 	return mkdtemp(path.join(os.tmpdir(), "glance-scratch-deps-"));
 }
@@ -27,7 +39,7 @@ describe("installScratchDeps", () => {
 		}
 	});
 
-	test("provisions node_modules so a project-local bin resolves in the scratch tree", async () => {
+	test.skipIf(!hasRegistry)("provisions node_modules so a project-local bin resolves in the scratch tree", async () => {
 		const dir = await tmp();
 		try {
 			// A bun package that pins a real (cache-warm) dependency exposing a bin. `typescript`
