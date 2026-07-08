@@ -135,6 +135,7 @@ export const TranscriptTimeline = ({
   expanded,
   onToggle,
   onAnswer,
+  renderAfterFinal,
 }: {
   entries: TranscriptEntry[];
   /** Uncovered fresh/failed sends plus any still-in-flight pendingSends (review finding 2):
@@ -148,6 +149,12 @@ export const TranscriptTimeline = ({
   expanded: boolean;
   onToggle: () => void;
   onAnswer?: (requestId: string, value: string) => void;
+  /** Feature 2 D3: called with the full ordered `entries` array plus the run's settled
+   *  `finalEntry` once a run has stopped (never while `running`) — lets the caller decide whether
+   *  to surface a "Spawn a unit to build this" proposal card under THIS reply, without
+   *  `TranscriptTimeline` itself knowing anything about spawn/execution-loop semantics (it stays a
+   *  generic transcript renderer; `AssistantChat` + `spawnProposal.ts` own that decision). */
+  renderAfterFinal?: (entries: TranscriptEntry[], finalEntry: TranscriptEntry) => React.ReactNode;
 }) => {
   const { prologueEntries, promptEntries, workEntries, finalEntry } = splitTranscriptEntries(entries);
   // Deliberately scoped to `entries` (the real transcript, plus its prologue) — never
@@ -215,6 +222,7 @@ export const TranscriptTimeline = ({
         <div className="space-y-3">
           {renderEntry(finalEntry)}
           <DiffReviewPanel diffs={diffs} />
+          {renderAfterFinal?.(entries, finalEntry)}
         </div>
       )}
       {running && <DiffReviewPanel diffs={diffs} />}
