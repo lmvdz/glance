@@ -52,8 +52,9 @@ function matchType(signal: string): SessionType | null {
   return null;
 }
 
-/** Tone bucket per session type, for StatusChip-style coloring — ember (agent-active) family for
- *  every real phase, neutral for the untyped fallback so it visually reads as "less specific". */
-export function sessionTypeTone(type: SessionType): 'agent' | 'neutral' {
-  return type === 'Session' ? 'neutral' : 'agent';
+/** Tone bucket per session type for the kit StatusChip — ember (the agent/active role in the
+ *  kit's tone map) for every real derived phase, neutral for the untyped fallback so it visually
+ *  reads as "less specific" rather than dressing a guess up as knowledge. */
+export function sessionTypeTone(type: SessionType): 'ember' | 'neutral' {
+  return type === 'Session' ? 'neutral' : 'ember';
 }

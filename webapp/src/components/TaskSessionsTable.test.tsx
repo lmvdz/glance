@@ -30,22 +30,24 @@ describe('TaskSessionsTable', () => {
     expect(html).toContain('No sessions yet');
   });
 
-  test('renders one row per session with its status and type chip', () => {
+  test('renders one row per session with its status and type chip (kit vocabulary)', () => {
     const rows = sessionRowsFromAgents([agent({ id: 'a1', name: 'Design discussion: token refresh strategy', status: 'input', lastActivity: Date.now() })]);
     const html = renderToStaticMarkup(<TaskSessionsTable rows={rows} onOpenSession={() => {}} />);
     expect(html).toContain('Design discussion: token refresh strategy');
-    expect(html).toContain('>Design<');
-    expect(html).toContain('>input<');
+    // The kit StatusChip renders the KNOWN-map labels: input → NEEDS YOU; the free-text type
+    // label renders verbatim uppercased.
+    expect(html).toContain('>DESIGN<');
+    expect(html).toContain('>NEEDS YOU<');
   });
 
   test('the untyped Session fallback chip renders muted, visually distinct from real types', () => {
     const rows = sessionRowsFromAgents([
       agent({ id: 'a1', name: 'chat' }), // untyped → neutral tone
-      agent({ id: 'a2', name: 'Research prior art' }), // typed → agent tone
+      agent({ id: 'a2', name: 'Research prior art' }), // typed → ember tone
     ]);
     const html = renderToStaticMarkup(<TaskSessionsTable rows={rows} onOpenSession={() => {}} />);
-    // neutral tone (gray family) on the fallback; agent tone (amber family) on the real type
-    expect(html).toMatch(/border-gray-200[^>]*>Session</);
-    expect(html).toMatch(/border-amber-200[^>]*>Research</);
+    // neutral outline (gray) on the fallback; ember (accent var) on the real type
+    expect(html).toMatch(/border-gray-300[^>]*>SESSION</);
+    expect(html).toMatch(/var\(--wf-accent\)[^>]*>RESEARCH</);
   });
 });

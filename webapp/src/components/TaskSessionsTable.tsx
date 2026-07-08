@@ -1,6 +1,5 @@
 import React from 'react';
 import type { AgentDTO } from '../lib/dto';
-import { agentStatusBadgeClass } from '../lib/agent-badges';
 import { deriveSessionType, sessionTypeTone, type SessionType } from '../lib/sessionType';
 import { fmtSince } from '../lib/factoryStatus';
 import { StatusChip } from './kit/StatusChip';
@@ -55,7 +54,10 @@ export function TaskSessionsTable({ rows, onOpenSession }: { rows: TaskSessionRo
               className="cursor-pointer bg-white transition-colors hover:bg-gray-50 dark:bg-gray-950 dark:hover:bg-gray-900/60"
             >
               <td className="px-3 py-2 align-middle">
-                <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase border ${agentStatusBadgeClass(row.status)}`}>{row.status}</span>
+                {/* Kit chip = the universal state language (X1's KNOWN map: working→RUNNING solid
+                    ember, input→NEEDS YOU, stopped→DONE dim) so session rows and the cockpit never
+                    drift apart in vocabulary. */}
+                <StatusChip status={row.status} />
               </td>
               <td className="min-w-0 px-3 py-2 align-middle">
                 <div className="flex min-w-0 items-center gap-2">
@@ -63,7 +65,7 @@ export function TaskSessionsTable({ rows, onOpenSession }: { rows: TaskSessionRo
                   {/* Untyped "Session" renders muted (neutral tone) so a real derived type is
                       visually distinct from the honest fallback — the chip must not dress a
                       guess up as knowledge. */}
-                  <StatusChip tone={sessionTypeTone(row.type)}>{row.type}</StatusChip>
+                  <StatusChip status={row.type} tone={sessionTypeTone(row.type)} />
                 </div>
               </td>
               <td className="whitespace-nowrap px-3 py-2 text-right text-gray-400 dark:text-gray-500">

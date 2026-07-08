@@ -51,6 +51,6 @@ describe('TaskArtifactsRail', () => {
       />,
     );
     expect(html).toContain('done-proof');
-    expect(html).toContain('>green<');
+    expect(html).toContain('>GREEN<'); // kit StatusChip uppercases free-text labels
   });
 });

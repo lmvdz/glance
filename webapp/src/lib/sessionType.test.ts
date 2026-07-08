@@ -48,9 +48,9 @@ describe('deriveSessionType', () => {
 });
 
 describe('sessionTypeTone', () => {
-  test('every real phase is the agent-active tone; the untyped fallback is neutral', () => {
-    expect(sessionTypeTone('Research')).toBe('agent');
-    expect(sessionTypeTone('Implementation')).toBe('agent');
+  test('every real phase is the ember (agent-active) tone; the untyped fallback is neutral', () => {
+    expect(sessionTypeTone('Research')).toBe('ember');
+    expect(sessionTypeTone('Implementation')).toBe('ember');
     expect(sessionTypeTone('Session')).toBe('neutral');
   });
 });

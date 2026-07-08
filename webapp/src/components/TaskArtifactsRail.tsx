@@ -47,7 +47,7 @@ export function TaskArtifactsRail({
   const counts = React.useMemo(() => annotationCountByPath(comments), [comments]);
 
   return (
-    <PanelSection title="Artifacts" className="h-full">
+    <PanelSection title="Artifacts" className="h-full" bodyClassName="overflow-y-auto">
       <div className="divide-y divide-gray-100 dark:divide-gray-800">
         {documents.length === 0 && !doneProof && (
           <div className="px-3 py-6 text-center text-xs text-gray-400 dark:text-gray-500">No artifacts yet.</div>
@@ -80,7 +80,7 @@ export function TaskArtifactsRail({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 text-gray-700 dark:text-gray-300">
                 <span className="font-medium">done-proof</span>
-                <StatusChip tone={doneProof.verified === 'green' ? 'success' : doneProof.verified === 'red-baseline' ? 'warning' : 'neutral'}>{doneProof.verified}</StatusChip>
+                <StatusChip status={doneProof.verified} tone={doneProof.verified === 'green' ? 'success' : doneProof.verified === 'red-baseline' ? 'attention' : 'neutral'} />
               </div>
               <div className="mt-0.5 truncate font-mono text-[10px] text-gray-400 dark:text-gray-500">{doneProof.commit.slice(0, 10)} · {fmtSince(Math.max(0, Math.floor((Date.now() - doneProof.provenAt) / 1000)))}</div>
             </div>

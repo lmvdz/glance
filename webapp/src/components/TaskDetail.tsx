@@ -21,7 +21,6 @@ import { PlanFlowDiagram } from './PlanFlowDiagram';
 import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import { TaskSessionsTable, sessionRowsFromAgents } from './TaskSessionsTable';
 import { TaskArtifactsRail } from './TaskArtifactsRail';
-import { MonoLabel } from './kit/MonoLabel';
 import { Kbd } from './kit/Kbd';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
@@ -1619,7 +1618,7 @@ export const TaskDetail = () => {
                   {issueIdentifier(task) && (
                     <span className="rounded border border-gray-200 px-1.5 py-0.5 font-mono text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:text-gray-300">{issueIdentifier(task)}</span>
                   )}
-                  <MonoLabel>{task.properties.project.id}</MonoLabel>
+                  <span className="font-mono text-[11px] text-gray-500 dark:text-gray-400">{task.properties.project.id}</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -1627,7 +1626,7 @@ export const TaskDetail = () => {
                     onClick={() => setSessionComposerOpen((open) => !open)}
                     className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
                   >
-                    Create Session <Kbd>c</Kbd>
+                    Create Session <Kbd keys="c" />
                   </button>
                   <button
                     type="button"

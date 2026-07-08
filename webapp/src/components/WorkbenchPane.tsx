@@ -722,7 +722,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                       actually bound. */}
                   <button onClick={handleCreateTask} className="flex min-h-8 items-center justify-center gap-1 rounded px-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Create task" title="Create task (⌘N)">
                     <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                    <Kbd>⌘N</Kbd>
+                    <Kbd keys="⌘N" />
                   </button>
                 </div>
               </div>
