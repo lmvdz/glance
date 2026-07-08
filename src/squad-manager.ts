@@ -690,8 +690,16 @@ export class SquadManager extends EventEmitter {
 	private readonly scoutCursor: Map<string, number>;
 	/** Durable "explicitly rm'd, never resurrect" tombstone (rm-doesn't-stick incident) — keyed by
 	 *  agent id, NOT Plane issue id, so a later dispatch tick can still mint a fresh agent for a
-	 *  still-open issue. Consulted by reconnectLive/adoptOrphanedAgents; written by remove(). */
+	 *  still-open issue. Consulted by reconnectLive/adoptOrphanedAgents/loadPersisted; written by
+	 *  remove(); CLEARED by createWithId when an authorized creator deliberately reuses the id
+	 *  (deterministic workflow-branch ids must stay resurrectable by their parent's resume). */
 	private readonly removedLedger: RemovedLedger;
+	/** In-flight spawn-time dependency provisioning, keyed by agent id (cross-lineage review HIGH 1).
+	 *  createWithId KICKS provisioning here without awaiting it — the invariant is "the verify gate
+	 *  must not run before provisioning settles", NOT "the dispatch tick must wait", so the await
+	 *  lives in makeDriver's workflow execCommand instead. Entries self-delete on settle; awaiting a
+	 *  missing entry is a no-op (provisioning long since settled, or was never applicable). */
+	private readonly provisioning = new Map<string, Promise<void>>();
 	/** Observability spine for the background loops (scout/observer/opportunity/dispatch) — the surface
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
@@ -3522,6 +3530,16 @@ export class SquadManager extends EventEmitter {
 		}
 		const name = opts.name?.trim() || `agent-${++this.idSeq}`;
 		const id = explicitId ?? newAgentId(name);
+		// Cross-lineage review HIGH 2: an authorized creator deliberately reusing a tombstoned id is a
+		// legitimate resurrection, so the tombstone must clear — otherwise a workflow resume re-spawning
+		// a DETERMINISTIC branch id (deriveBranchAgentId is a pure function of runId/branchKey/nodeId)
+		// after an operator rm'd the stuck branch would run once and then silently vanish at the next
+		// restart (reconnectLive/adoptOrphanedAgents/loadPersisted all filter tombstoned ids). Fresh
+		// random ids virtually never hit this; explicit/deterministic ids are the real audience.
+		if (this.removedLedger.has(id)) {
+			this.removedLedger.delete(id);
+			this.log("info", `cleared removal tombstone for ${id} — explicitly re-created`);
+		}
 		const branch = opts.branch ?? `squad/${id}`;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
@@ -3657,7 +3675,7 @@ export class SquadManager extends EventEmitter {
 				// Non-git target dir: no isolation, but "spawn anywhere" still works. A real git checkout
 				// that fails worktree creation now throws instead (OMPSQ-40) — never run on the shared tree.
 				this.log("warn", `${opts.repo} is not a git repo — running agent in place (no isolation)`);
-			} else {
+			} else if (!opts.sandbox && kind !== "flue-service") {
 				// Live incident: every dispatched unit's verify-loop gate (`bun run check && bun run test`)
 				// died with `CATASTROPHE: node "escalate" exceeded its visit cap` because a bare `git worktree
 				// add` has no node_modules — the gate could never pass. `addWorktree`'s own symlink shortcut
@@ -3665,7 +3683,24 @@ export class SquadManager extends EventEmitter {
 				// non-workspace package (this repo's own webapp/). Provision for real, bounded + non-fatal —
 				// a failure here logs loudly but the spawn proceeds; the agent (or an operator) can still
 				// install its own deps rather than never getting a worktree at all.
-				await provisionWorktreeDeps(cwd, (msg) => this.log("warn", `spawn provisioning: ${msg}`));
+				//
+				// NOT awaited (cross-lineage review HIGH 1): Dispatcher.tick serially awaits each spawn, so
+				// an awaited cold install here stalls the whole dispatch tick (worst case ~minutes per
+				// issue). The invariant is only "the verify gate must not run before provisioning settles" —
+				// makeDriver's workflow execCommand awaits this promise before the FIRST gate command, and
+				// `this.provisioning` self-cleans on settle. provisionWorktreeDeps never rejects by design.
+				//
+				// Scope (cross-lineage review MEDIUM 5): host-side coding-agent kinds only. Sandbox spawns
+				// are skipped — the container is its own platform, and host-built node_modules (native
+				// modules, platform-specific bins) can be wrong inside the mount; land-pr's scratch gate
+				// deliberately differs (it host-installs because its docker gate bind-mounts the SAME host
+				// dir and gateExec is a host-arch container, per installScratchDeps' own doc). Flue-service
+				// is skipped — its driver runs from p.flue.dir, not this repo worktree, and commission()'s
+				// installWorker already provisions that dir.
+				const deps = this.spawnDepsInstaller(cwd).finally(() => {
+					if (this.provisioning.get(id) === deps) this.provisioning.delete(id);
+				});
+				this.provisioning.set(id, deps);
 			}
 		}
 
@@ -3822,6 +3857,12 @@ export class SquadManager extends EventEmitter {
 		return rec.dto;
 	}
 
+	/** Injectable seam over provisionWorktreeDeps (tests stub slow/failing installs without touching a
+	 *  real `bun install`). Kicked — not awaited — by createWithId; see `this.provisioning`. */
+	private spawnDepsInstaller(cwd: string): Promise<void> {
+		return provisionWorktreeDeps(cwd, (msg) => this.log("warn", `spawn provisioning: ${msg}`));
+	}
+
 	/** The harness descriptor backing a plain-agent record — undefined for workflow/flue kinds, which use
 	 *  their own drivers. Same resolution choke point makeDriver uses, so reattach/reconnect records get the
 	 *  same capability gating as freshly-created ones. */
@@ -3878,7 +3919,14 @@ export class SquadManager extends EventEmitter {
 			// daemon env (Plane/LLM keys, dashboard bearer) and no sandbox: the one gate that skipped the
 			// hardening every other gate enforces. Mount p.repo so the worktree's shared git object store
 			// stays reachable inside the sandbox.
-			const execCommand = (script: string, cwd: string) => execGatedCommand(script, cwd, { mounts: [p.repo] });
+			// Await any in-flight spawn provisioning FIRST (cross-lineage review HIGH 1): createWithId kicks
+			// the install without awaiting so the dispatch tick stays fast; the gate is the point the
+			// invariant actually binds ("never run the verify gate against an unprovisioned tree"). A
+			// missing/settled entry awaits nothing; provisionWorktreeDeps never rejects by design.
+			const execCommand = async (script: string, cwd: string) => {
+				await this.provisioning.get(p.id);
+				return execGatedCommand(script, cwd, { mounts: [p.repo] });
+			};
 			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold, reflection });
 		}
 		// Plain-agent path: resolve the harness (explicit `harness`, else the legacy `runtime` alias,
@@ -6745,6 +6793,13 @@ export class SquadManager extends EventEmitter {
 			for (const id of await this.unresolvedBranchIds(parent)) skipRestore.add(id);
 		}
 		for (const p of list) {
+			// rm-doesn't-stick fix (cross-lineage review MEDIUM 3): `--restore` was the one boot path that
+			// bypassed the tombstone entirely, re-creating every persisted record — including explicitly
+			// rm'd ones — under fresh ids. Same gate as reconnectLive/adoptOrphanedAgents.
+			if (this.removedLedger.has(p.id)) {
+				this.log("info", `skipped restoring ${p.name} (${p.id}) — explicitly removed (tombstoned)`);
+				continue;
+			}
 			if (p.kind === "flue-service" && p.flue) {
 				await this.restoreFlueMember(p).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 				continue;

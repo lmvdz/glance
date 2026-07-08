@@ -34,6 +34,12 @@ import { decodeJsonWith } from "./schema/external-json.ts";
 export interface RemovedLedger {
 	has(id: string): boolean;
 	add(id: string): void;
+	/** Clear a tombstone — an AUTHORIZED creator deliberately re-creating the id (createWithId's
+	 *  explicit-id paths: fork, spawnFleetBranch's deterministic workflow-branch ids). Without this,
+	 *  a workflow resume re-spawning a deterministic branch id after an operator `rm` would run once
+	 *  and then silently vanish at the next restart (every reattach/adopt/restore path filters
+	 *  tombstoned ids). Idempotent; a no-op for an untombstoned id. */
+	delete(id: string): void;
 }
 
 /** On-disk shape: a JSON array of tombstoned agent ids (written sorted by writeIds). A real Schema
@@ -73,6 +79,10 @@ export function openRemovedLedger(stateDir: string): RemovedLedger {
 		add(id) {
 			if (ids.has(id)) return;
 			ids.add(id);
+			writeIds(stateDir, ids);
+		},
+		delete(id) {
+			if (!ids.delete(id)) return;
 			writeIds(stateDir, ids);
 		},
 	};

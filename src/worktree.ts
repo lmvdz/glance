@@ -98,19 +98,27 @@ export async function installNodeModules(dir: string, timeoutMs = 120_000): Prom
  * repo's own `webapp/` is a separate, non-workspace package with its own `bun.lock`/`package.json`
  * that the symlink never reaches).
  *
+ * Warm fast-path: a package dir that ALREADY has `node_modules` (addWorktree's symlink shortcut,
+ * a prior provisioning pass, or an agent's own install) is skipped entirely rather than re-running
+ * `bun install` on every spawn. Deliberate staleness tradeoff: if the branch later changes its
+ * dependency set the warm skip won't refresh it — the agent (or the operator) installs the delta,
+ * and a stale install is strictly no worse than the pre-fix state (no install at all). Root and
+ * webapp/ provision CONCURRENTLY — they're independent packages, and a serial cold double-install
+ * was the dispatcher-stall worst case.
+ *
  * Deliberately non-fatal: logs loudly via `log` on any failure and returns regardless — a unit
  * whose auto-provisioning failed can still install its own deps (or an operator can), so a flaky
  * `bun install` must never block the spawn itself. No-ops (silently) for a dir with no root
  * `package.json` — nothing to provision for a non-bun repo.
  */
 export async function provisionWorktreeDeps(dir: string, log: (msg: string) => void = () => {}): Promise<void> {
-	const rootErr = await installNodeModules(dir);
-	if (rootErr) log(`dependency provisioning failed for ${dir} — the unit's verify gate may fail until deps are installed manually: ${rootErr}`);
-	const webapp = path.join(dir, "webapp");
-	if (existsSync(path.join(webapp, "package.json"))) {
-		const webappErr = await installNodeModules(webapp);
-		if (webappErr) log(`dependency provisioning failed for ${webapp} — the unit's verify gate may fail until deps are installed manually: ${webappErr}`);
-	}
+	const provisionOne = async (pkgDir: string): Promise<void> => {
+		if (!existsSync(path.join(pkgDir, "package.json"))) return; // non-bun dir — nothing to provision
+		if (existsSync(path.join(pkgDir, "node_modules"))) return; // warm — see the staleness tradeoff above
+		const err = await installNodeModules(pkgDir);
+		if (err) log(`dependency provisioning failed for ${pkgDir} — the unit's verify gate may fail until deps are installed manually: ${err}`);
+	};
+	await Promise.all([provisionOne(dir), provisionOne(path.join(dir, "webapp"))]);
 }
 
 /**

@@ -96,4 +96,22 @@ describe("provisionWorktreeDeps", () => {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	test("warm fast-path: a tree that already has node_modules is skipped, not re-installed (HIGH 1a)", async () => {
+		const dir = await tmp();
+		try {
+			// An UNRESOLVABLE dependency: if the warm skip failed to fire, bun install would run, fail,
+			// and log — so zero logs proves the install was never attempted, not that it succeeded.
+			await writeFile(path.join(dir, "package.json"), JSON.stringify({ name: "warm", dependencies: { "glance-does-not-exist-xyz": "999.999.999" } }));
+			await mkdir(path.join(dir, "node_modules")); // pre-provisioned (addWorktree symlink / prior pass / agent's own install)
+			await mkdir(path.join(dir, "webapp"));
+			await writeFile(path.join(dir, "webapp", "package.json"), JSON.stringify({ name: "warm-webapp", dependencies: { "glance-webapp-does-not-exist-xyz": "999.999.999" } }));
+			await mkdir(path.join(dir, "webapp", "node_modules"));
+			const logs: string[] = [];
+			await provisionWorktreeDeps(dir, (m) => logs.push(m));
+			expect(logs.length).toBe(0); // both installs skipped warm — neither unresolvable dep was ever fetched
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	}, 60_000);
 });

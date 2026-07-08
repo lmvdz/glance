@@ -25,13 +25,15 @@
  * mirroring the next evict+recreate cycle — and asserts the id never comes back.
  */
 import { afterAll, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentDriver } from "../src/agent-driver.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { openRemovedLedger } from "../src/removed-ledger.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { PersistedAgent } from "../src/types.ts";
+import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
@@ -54,6 +56,26 @@ async function makeRepo(): Promise<string> {
 	await git(["add", "."]);
 	await git(["commit", "-qm", "init"]);
 	return repo;
+}
+
+class NoopDriver extends EventEmitter implements AgentDriver {
+	readonly isReady = true;
+	readonly isAlive = true;
+	async start(): Promise<void> {}
+	async stop(): Promise<void> {}
+	async prompt(): Promise<void> {}
+	async abort(): Promise<unknown> {
+		return undefined;
+	}
+	async getState(): Promise<RpcSessionState> {
+		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+	}
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
+interface DriverFactoryHost {
+	makeDriver: (p: PersistedAgent) => AgentDriver;
 }
 
 function terminalWorkflowRecord(id: string, repo: string, worktree: string): PersistedAgent {
@@ -140,6 +162,81 @@ test("a fresh dispatch for the SAME issue after an rm gets a new, non-determinis
 	expect(second.id).not.toBe(first.id);
 	expect(mgr.getAgent(second.id)).toBeDefined();
 	await mgr.stop();
+});
+
+test("an authorized re-creation under a tombstoned id CLEARS the tombstone, and the resurrected run survives the next restart (HIGH 2)", async () => {
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-state5-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-wt5-"));
+	tmps.push(stateDir, worktreeBase);
+
+	// Deterministic-id shape: workflow branch ids derive purely from (runId, branchKey, nodeId), so a
+	// legitimate workflow resume RE-SPAWNS the exact id an operator may have rm'd minutes earlier.
+	const id = "br-1a2b3c4d-implement";
+
+	// Operator rm's the stuck branch — tombstoned durably (the rm-doesn't-stick fix).
+	const mgr1 = new SquadManager({ stateDir, worktreeBase });
+	await mgr1.applyCommand({ type: "remove", id, deleteWorktree: false });
+	expect(openRemovedLedger(stateDir).has(id)).toBe(true);
+
+	// A workflow resume (spawnFleetBranch → createInternal) deliberately re-creates the SAME id.
+	// Without the tombstone-clear, this run would execute once and then silently vanish at the next
+	// restart — reconnect/adopt/restore all filter tombstoned ids.
+	const mgr2 = new SquadManager({ stateDir, worktreeBase });
+	await mgr2.start();
+	(mgr2 as unknown as DriverFactoryHost).makeDriver = () => new NoopDriver();
+	interface InternalCreator {
+		createInternal(opts: Record<string, unknown>): Promise<{ id: string }>;
+	}
+	const dto = await (mgr2 as unknown as InternalCreator).createInternal({
+		explicitId: id,
+		name: "resumed-branch",
+		repo,
+		approvalMode: "yolo",
+		workflow: "verify",
+		// Terminal-marked state makes the record land on reconnectLive's unconditional reattachTerminal
+		// path in the next boot — the exact same-id reattach mechanism the incident traced — so mgr3
+		// below discriminates cleanly: tombstone still set ⇒ filtered/gone; cleared ⇒ present.
+		workflowState: terminalWorkflowRecord(id, repo, path.join(worktreeBase, "unused")).workflowState,
+		bypassCap: true,
+	});
+	expect(dto.id).toBe(id);
+	expect(openRemovedLedger(stateDir).has(id)).toBe(false); // durable clear — an authorized resurrection is intentional
+	await mgr2.stop();
+
+	// Next restart keeps the resurrected id on the roster instead of silently dropping it.
+	const mgr3 = new SquadManager({ stateDir, worktreeBase });
+	(mgr3 as unknown as DriverFactoryHost).makeDriver = () => new NoopDriver();
+	await mgr3.start();
+	try {
+		expect(mgr3.getAgent(id)).toBeDefined();
+	} finally {
+		await mgr3.stop();
+	}
+});
+
+test("loadPersisted (--restore) skips tombstoned records — the last boot path that bypassed the tombstone (MEDIUM 3)", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-state6-"));
+	tmps.push(stateDir);
+	const wt1 = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-restore-wt1-"));
+	const wt2 = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-restore-wt2-"));
+	tmps.push(wt1, wt2);
+
+	const removed: PersistedAgent = { id: "restore-removed-1", name: "removed-unit", repo: "(none)", worktree: wt1, approvalMode: "yolo" };
+	const kept: PersistedAgent = { id: "restore-kept-1", name: "kept-unit", repo: "(none)", worktree: wt2, approvalMode: "yolo" };
+	await new FileStore(stateDir).save({ agents: [removed, kept], transcripts: {}, features: [] });
+	openRemovedLedger(stateDir).add(removed.id); // a prior explicit rm
+
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => new NoopDriver();
+	await mgr.loadPersisted(); // the --restore CLI flow
+	try {
+		const names = mgr.list().map((a) => a.name);
+		expect(names).toContain("kept-unit");
+		expect(names).not.toContain("removed-unit");
+	} finally {
+		await mgr.stop();
+	}
 });
 
 test("a tombstoned id with a resumable checkpoint and an on-disk worktree is never re-adopted (fix (b), the adopt path)", async () => {
