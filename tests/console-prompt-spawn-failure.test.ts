@@ -28,7 +28,7 @@
  *  - the manager survives and keeps serving other agents.
  */
 
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -40,6 +40,18 @@ import { RbacDenied } from "../src/auth.ts";
 import { LOCAL_ACTOR } from "../src/federation.ts";
 import type { AgentDTO, AgentStatus, ClientCommand, PersistedAgent, RpcSessionState, SquadEvent } from "../src/types.ts";
 
+// Save/restore rather than a bare mutation: bun test runs every file in one process, so leaving
+// these set leaks into every later-loaded file. Found live via order-pollution in the full suite —
+// this file's un-restored OMP_SQUAD_AUTOSUPERVISE=0 silently broke both gate-class.test.ts's
+// default-auto-supervise assumption (a plain confirm no longer auto-answered and vanished from
+// pending, so its "gateClass toBeUndefined" assertion started passing for the wrong reason — an
+// absent entry — until a sibling case that reads the boolean directly caught it) and
+// lifecycle-settle-gate.test.ts's direct maybeAutoSupervise() call (suppressed early-return meant no
+// transcript entry was ever appended). Mirrors the same save/restore pattern already used in
+// tests/pending-ghost-expiry.test.ts for the same variable.
+const ENV_KEYS = ["OMP_SQUAD_AUTODISPATCH", "OMP_SQUAD_AUTODRIVE", "OMP_SQUAD_AUTOLAND", "OMP_SQUAD_AUTOSUPERVISE", "OMP_SQUAD_AUTO_SUPERVISE"] as const;
+const savedEnv: Record<string, string | undefined> = {};
+for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 process.env.OMP_SQUAD_AUTODRIVE = "0";
 process.env.OMP_SQUAD_AUTOLAND = "0";
@@ -47,6 +59,12 @@ process.env.OMP_SQUAD_AUTOSUPERVISE = "0";
 process.env.OMP_SQUAD_AUTO_SUPERVISE = "0";
 
 const tmps: string[] = [];
+afterAll(() => {
+	for (const k of ENV_KEYS) {
+		if (savedEnv[k] === undefined) delete process.env[k];
+		else process.env[k] = savedEnv[k];
+	}
+});
 afterEach(async () => {
 	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
 });
