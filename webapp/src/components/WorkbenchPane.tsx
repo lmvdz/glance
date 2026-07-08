@@ -1,11 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Activity,
   AlertCircle,
   Archive,
-  Bell,
   Boxes,
-  CalendarClock,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -13,32 +10,23 @@ import {
   Circle,
   Download,
   Filter,
-  GitBranch,
   Inbox,
-  Library,
   RotateCcw,
   Layers,
-  LayoutPanelLeft,
   ListChecks,
   Menu,
   Mic,
-  Network,
   Plus,
-  Radar,
   Search,
   Settings,
   Tag,
-  Thermometer,
   Trash2,
-  Trophy,
   Waypoints,
-  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import { getCategoryBadge } from '../utils';
 import { useTaskContext, type AppView, type TaskFilter, type ArchivedFeature } from '../context/TaskContext';
 import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus';
-import { activeWork } from '../lib/insights';
 import { taskRef } from '../lib/task-model';
 import { AccountMenu } from './AccountMenu';
 import { Kbd } from './kit/Kbd';
@@ -94,43 +82,18 @@ export function isTaskScopedView(view: AppView): boolean {
   return view === 'tasks';
 }
 
-/** Grouped VERTICAL navigation — a list that grows down instead of tab rows that
- *  overflow sideways. Sections give structure (the reference-timeline sidebar idiom). */
-const NAV_SECTIONS: { title: string; items: { view: AppView; label: string; icon: LucideIcon }[] }[] = [
-  {
-    title: 'Attention',
-    items: [
-      { view: 'attention', label: 'Needs you', icon: Bell },
-      { view: 'active', label: 'Active work', icon: Radar },
-      { view: 'cockpit', label: 'Cockpit', icon: LayoutPanelLeft },
-    ],
-  },
-  {
-    title: 'Plan',
-    items: [
-      { view: 'tasks', label: 'Tasks', icon: Inbox },
-      { view: 'capabilities', label: 'Capabilities', icon: Boxes },
-    ],
-  },
-  {
-    title: 'Observe',
-    items: [
-      { view: 'automation', label: 'Automation', icon: Zap },
-      { view: 'fleet-health', label: 'Fleet health', icon: Activity },
-      { view: 'heat', label: 'Heat map', icon: Thermometer },
-      { view: 'activity-heatmap', label: 'Activity rhythm', icon: CalendarClock },
-      { view: 'omp-graph', label: 'Graph', icon: Waypoints },
-      { view: 'scoreboard', label: 'Model scoreboard', icon: Trophy },
-      { view: 'topology', label: 'Topology', icon: GitBranch },
-    ],
-  },
-  {
-    title: 'Network',
-    items: [
-      { view: 'federation', label: 'Federation', icon: Network },
-      { view: 'knowledge', label: 'Knowledge base', icon: Library },
-    ],
-  },
+/**
+ * The four-item shell (GRAPH-FOLD.md §6e): Fleet · Tasks · Graph · Capabilities. The old
+ * Attention/Plan/Observe/Network sections are gone — the three attention views dissolved into
+ * Fleet (§6f), the five Observe pages folded into the Graph/header/inspector, Federation parked
+ * in Org settings, and the Knowledge base became the ⌘K palette's fabric search. Four items need
+ * no section headers; Org/settings moved to the gear at the bottom of the rail.
+ */
+export const NAV_ITEMS: { view: AppView; label: string; icon: LucideIcon; title: string }[] = [
+  { view: 'fleet', label: 'Fleet', icon: Layers, title: 'Fleet — roster, transcript, land rail' },
+  { view: 'tasks', label: 'Tasks', icon: Inbox, title: 'Tasks' },
+  { view: 'omp-graph', label: 'Graph', icon: Waypoints, title: 'Graph — the living temporal dashboard' },
+  { view: 'capabilities', label: 'Capabilities', icon: Boxes, title: 'Capabilities' },
 ];
 
 interface WorkbenchPaneProps {
@@ -242,7 +205,6 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     capabilities,
     publicCatalog,
     agents,
-    features,
   } = useTaskContext();
   // The "garbage bin": archived features, restorable or permanently deletable.
   const [showArchived, setShowArchived] = useState(false);
@@ -257,13 +219,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     // loadArchivedFeatures is a fresh closure each render; re-run only when the view changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
-  // Lightweight "needs you" count for the nav badge — blocked, errored, or ready to land.
-  // (The Attention panel does the full synthesis; this is just enough for a glanceable badge.)
+  // Lightweight "needs you" count for the Fleet nav badge — blocked, errored, or ready to land.
+  // (The Fleet roster does the full synthesis; this is just enough for a glanceable badge. §6g:
+  // the count must persist in the nav on EVERY view, so a blocked agent never waits off-screen.)
   const needsYouCount = agents.filter(
     (a) => a.status === 'input' || a.status === 'error' || a.pending.length > 0 || a.landReady,
   ).length;
-  // Live count of things currently being worked on — drives the Active nav badge.
-  const activeWorkCount = React.useMemo(() => activeWork(agents, features).length, [agents, features]);
   const [workspaceOpen, setWorkspaceOpen] = useState(true);
   const [drilled, setDrilled] = useState(false); // Tasks drill-down: hide the nav and focus the task list
   const showTaskDrill = view === 'tasks' && drilled;
@@ -391,22 +352,13 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     }
   };
 
-  const collapsedLabel = view === 'attention'
-    ? `Needs you${needsYouCount ? ` · ${needsYouCount}` : ''}`
-    : view === 'active'
-    ? `Active work${activeWorkCount ? ` · ${activeWorkCount}` : ''}`
-    : view === 'cockpit' ? 'Cockpit'
+  const collapsedLabel = view === 'fleet'
+    ? `Fleet${needsYouCount ? ` · ${needsYouCount} need you` : ''}`
     : view === 'tasks'
     ? `${filteredTasks.length} tasks${selectedTask ? ` · ${taskRef(selectedTask) ?? selectedTask.title}` : ''}`
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
-    : view === 'automation' ? 'Automation'
-    : view === 'fleet-health' ? 'Fleet Health'
-    : view === 'heat' ? 'Heat Map'
-    : view === 'activity-heatmap' ? 'Activity Rhythm'
     : view === 'omp-graph' ? 'Graph'
-    : view === 'topology' ? 'Topology'
-    : view === 'federation' ? 'Federation'
-    : view === 'knowledge' ? 'Knowledge'
+    : view === 'org' ? 'Settings'
     : '';
 
   if (collapsed) {
@@ -415,52 +367,38 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         <button onClick={onToggleCollapsed} className="mb-1 flex min-h-10 w-10 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" aria-label="Expand workbench pane" title="Expand workbench pane">
           <Menu className="h-4 w-4" aria-hidden="true" />
         </button>
-        <button onClick={() => setView('attention')} className={`relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'attention' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Needs you${needsYouCount ? ` (${needsYouCount})` : ''}`} title="Needs you">
-          <Bell className="h-4 w-4" aria-hidden="true" />
-          {needsYouCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-red-500" aria-hidden="true" />}
-        </button>
-        <button onClick={() => setView('active')} className={`mt-1 relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'active' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Active work${activeWorkCount ? ` (${activeWorkCount})` : ''}`} title="Active work">
-          <Radar className="h-4 w-4" aria-hidden="true" />
-          {activeWorkCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />}
-        </button>
-        <button onClick={() => setView('cockpit')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'cockpit' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Cockpit" title="Cockpit — per-agent transcript + land rail">
-          <LayoutPanelLeft className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('tasks')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'tasks' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Tasks" title="Tasks">
-          <Inbox className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('capabilities')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'capabilities' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Capabilities" title="Capabilities">
-          <Boxes className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('automation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'automation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Automation" title="Automation">
-          <Zap className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('fleet-health')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'fleet-health' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Fleet Health" title="Fleet Health">
-          <Activity className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('heat')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'heat' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Heat Map" title="Heat Map">
-          <Thermometer className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('activity-heatmap')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'activity-heatmap' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Activity Rhythm" title="Activity rhythm — day × hour">
-          <CalendarClock className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('omp-graph')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'omp-graph' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Graph" title="Graph — the living temporal dashboard">
-          <Waypoints className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('topology')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'topology' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Topology" title="Topology — the parent/child agent forest">
-          <GitBranch className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('federation')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'federation' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Federation" title="Federation">
-          <Network className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button onClick={() => setView('knowledge')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'knowledge' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Knowledge base" title="Knowledge base">
-          <Library className="h-4 w-4" aria-hidden="true" />
-        </button>
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          const isFleet = item.view === 'fleet';
+          return (
+            <button
+              key={item.view}
+              onClick={() => setView(item.view)}
+              className={`relative mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === item.view ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}
+              aria-label={isFleet && needsYouCount ? `${item.label} (${needsYouCount} need you)` : item.label}
+              title={item.title}
+            >
+              <Icon className="h-4 w-4" aria-hidden="true" />
+              {/* §6g: the needs-you count survives the collapse — a blocked agent must never
+                  quietly wait behind a folded rail. */}
+              {isFleet && needsYouCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-red-500" aria-hidden="true" />}
+            </button>
+          );
+        })}
         <div className="mt-3 flex h-full items-center">
           <div className="-rotate-90 whitespace-nowrap text-xs font-semibold uppercase tracking-widest text-gray-400">
             {collapsedLabel}
           </div>
         </div>
+        {/* The gear — org/settings live here now (GRAPH-FOLD.md §6e), not in the nav. */}
+        <button
+          onClick={() => setView('org')}
+          className={`mb-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'org' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}
+          aria-label="Organization settings"
+          title="Organization settings"
+        >
+          <Settings className="h-4 w-4" aria-hidden="true" />
+        </button>
         <div className={`mb-2 h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-gray-400'}`} title={connected ? 'Daemon live' : 'Daemon offline'} />
       </aside>
     );
@@ -481,7 +419,6 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             </span>
           </div>
           <div className="flex flex-shrink-0 items-center gap-1.5">
-            <AccountMenu />
             <button onClick={onToggleCollapsed} className="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Collapse workbench pane" title="Collapse workbench pane">
               <Menu className="h-4 w-4" aria-hidden="true" />
             </button>
@@ -500,55 +437,48 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <span className="ml-auto font-mono text-[11px] text-gray-400">{filteredTasks.length}</span>
           </button>
         ) : (
-          <nav className="mt-2 space-y-1.5">
-          {NAV_SECTIONS.map((section) => (
-            <div key={section.title}>
-              <div className="px-1 pb-0.5 text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">{section.title}</div>
-              <div className="space-y-0.5">
-                {section.items.map((item) => {
-                  const Icon = item.icon;
-                  const active = view === item.view;
-                  const badge = item.view === 'attention' ? needsYouCount : item.view === 'active' ? activeWorkCount : item.view === 'capabilities' ? capabilities.packs.length : 0;
-                  return (
-                    <button
-                      key={item.view}
-                      onClick={() => { setView(item.view); setDrilled(item.view === 'tasks'); }}
-                      aria-current={active ? 'page' : undefined}
-                      className={`group flex min-h-7 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active ? 'bg-amber-50 font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/70 dark:hover:text-gray-200'}`}
-                    >
-                      <Icon className={`h-4 w-4 flex-shrink-0 ${active ? '' : 'text-gray-400 group-hover:text-gray-500 dark:group-hover:text-gray-300'}`} aria-hidden="true" />
-                      <span className="flex-1 truncate text-left">{item.label}</span>
-                      {badge > 0 && (
-                        <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${active ? 'bg-amber-500 text-white' : item.view === 'attention' ? 'bg-red-500 text-white' : item.view === 'active' ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
-                          {badge}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+          <nav className="mt-2 space-y-0.5">
+          {NAV_ITEMS.map((item) => {
+            const Icon = item.icon;
+            const active = view === item.view;
+            const badge = item.view === 'fleet' ? needsYouCount : item.view === 'capabilities' ? capabilities.packs.length : 0;
+            return (
+              <button
+                key={item.view}
+                onClick={() => { setView(item.view); setDrilled(item.view === 'tasks'); }}
+                aria-current={active ? 'page' : undefined}
+                title={item.title}
+                className={`group flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active ? 'bg-amber-50 font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/70 dark:hover:text-gray-200'}`}
+              >
+                <Icon className={`h-4 w-4 flex-shrink-0 ${active ? '' : 'text-gray-400 group-hover:text-gray-500 dark:group-hover:text-gray-300'}`} aria-hidden="true" />
+                <span className="flex-1 truncate text-left">{item.label}</span>
+                {badge > 0 && (
+                  <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${active ? 'bg-amber-500 text-white' : item.view === 'fleet' ? 'bg-red-500 text-white' : 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
+                    {badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
           </nav>
         )}
 
         {showTaskScopedBlock && (
         <div className="mt-2">
-          <label className="sr-only" htmlFor="workbench-search">Search tasks or jump</label>
+          <label className="sr-only" htmlFor="workbench-search">Search tasks</label>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" aria-hidden="true" />
+            {/* No ⌘K chip here anymore: the hotkey opens the command palette now, not this box —
+                the palette's "Search tasks…" row is what routes here. A chip must never advertise
+                a key that isn't actually bound to this control. */}
             <input
               id="workbench-search"
               type="search"
-              className="w-full rounded-md border border-gray-200 bg-white py-1.5 pl-8 pr-20 text-xs text-gray-900 transition-colors duration-150 placeholder:text-gray-400 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+              className="w-full rounded-md border border-gray-200 bg-white py-1.5 pl-8 pr-3 text-xs text-gray-900 transition-colors duration-150 placeholder:text-gray-400 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
               placeholder="Search tasks by title or ID"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
             />
-            <div className="absolute right-2 top-1/2 flex -translate-y-1/2 gap-1 text-[10px] text-gray-400" aria-hidden="true">
-              <span className="rounded border border-gray-200 bg-gray-100 px-1 dark:border-gray-700 dark:bg-gray-800">Cmd</span>
-              <span className="rounded border border-gray-200 bg-gray-100 px-1 dark:border-gray-700 dark:bg-gray-800">K</span>
-            </div>
           </div>
         </div>
         )}
@@ -803,7 +733,19 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-gray-700 text-xs text-white">G</div>
             <span className="truncate text-xs">{connected ? 'Daemon live' : 'Daemon offline'}</span>
           </div>
-          <Settings className="h-4 w-4 flex-shrink-0 text-gray-400" aria-hidden="true" />
+          {/* The gear (GRAPH-FOLD.md §6e): org/settings left the nav — this is its home now.
+              AccountMenu (identity, push, sign-out; db mode only) sits beside it. */}
+          <div className="flex flex-shrink-0 items-center gap-1">
+            <AccountMenu />
+            <button
+              onClick={() => setView('org')}
+              className={`flex min-h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'org' ? 'bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-200' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+              aria-label="Organization settings"
+              title="Organization settings"
+            >
+              <Settings className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </div>
     </aside>

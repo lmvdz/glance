@@ -2,8 +2,7 @@
  * PanelShell — the one wrapper EVERY dashboard panel uses.
  *
  * Owns the shared <main> + sticky header + scrolling body so the four panels
- * (and this reference one) are visually identical down to the pixel. Matches the
- * established AutomationPanel idiom exactly; panels supply only an icon, title,
+ * (and this reference one) are visually identical down to the pixel. Panels supply only an icon, title,
  * optional subtitle/actions, and their body.
  */
 

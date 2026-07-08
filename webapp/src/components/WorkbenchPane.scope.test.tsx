@@ -14,11 +14,7 @@ test('isTaskScopedView is true only for the tasks view', () => {
 test('isTaskScopedView is false for every non-tasks view, including review', () => {
   // review (design-review) is task-adjacent but has its own dedicated context, so it
   // deliberately does NOT get the task-scoped block — a judgment call, see PR body.
-  const nonTaskViews: AppView[] = [
-    'attention', 'active', 'cockpit', 'capabilities', 'automation', 'fleet-health',
-    'heat', 'activity-heatmap', 'omp-graph', 'scoreboard', 'topology', 'federation',
-    'knowledge', 'org', 'intervene', 'review',
-  ];
+  const nonTaskViews: AppView[] = ['fleet', 'omp-graph', 'capabilities', 'org', 'intervene', 'review'];
   for (const view of nonTaskViews) {
     expect(isTaskScopedView(view)).toBe(false);
   }

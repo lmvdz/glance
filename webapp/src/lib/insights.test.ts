@@ -3,7 +3,6 @@ import {
   computeCapacity,
   capacityFractionLabel,
   detectCollisions,
-  churnHotspots,
   flappingAgents,
   automationDigest,
   attentionItems,
@@ -15,7 +14,6 @@ import {
   type GovernancePayload,
   type HealthSample,
   type UsageRun,
-  type HeatPayload,
   type AutomationRollup,
   type ServerActionItem,
 } from './insights';
@@ -203,43 +201,6 @@ describe('detectCollisions', () => {
   test('no live agents → empty', () => {
     expect(detectCollisions([run('a', ['x'])], [])).toEqual([]);
     expect(detectCollisions(null, null)).toEqual([]);
-  });
-});
-
-// ───────────────────────────── churnHotspots ─────────────────────────────
-
-describe('churnHotspots', () => {
-  const heat: HeatPayload = {
-    days: ['d1', 'd2', 'd3'],
-    tree: [
-      { id: 'src/a.ts', heat: [1, 2, 0] },
-      { id: 'src/b.ts', heat: [0, 0, 5] },
-      { id: 'src/cold.ts', heat: [0, 0, 0] },
-    ],
-  };
-
-  test('ranks by total heat desc and drops zero-heat files', () => {
-    const rows = churnHotspots(heat, []);
-    expect(rows.map((r) => r.path)).toEqual(['src/b.ts', 'src/a.ts']);
-    expect(rows[0].heat).toBe(5);
-    expect(rows[1].heat).toBe(3);
-  });
-
-  test('enriches each hotspot with distinct agent count', () => {
-    const runs = [run('a', ['src/a.ts']), run('b', ['src/a.ts']), run('a', ['src/b.ts'])];
-    const rows = churnHotspots(heat, runs);
-    const a = rows.find((r) => r.path === 'src/a.ts')!;
-    const b = rows.find((r) => r.path === 'src/b.ts')!;
-    expect(a.agentCount).toBe(2);
-    expect(b.agentCount).toBe(1);
-  });
-
-  test('respects the limit', () => {
-    expect(churnHotspots(heat, [], 1)).toHaveLength(1);
-  });
-
-  test('null heat → empty', () => {
-    expect(churnHotspots(null, [])).toEqual([]);
   });
 });
 

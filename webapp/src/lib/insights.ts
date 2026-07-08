@@ -292,55 +292,10 @@ export function detectCollisions(runs: UsageRun[] | null | undefined, agents: Ag
   return collisions;
 }
 
-// ───────────────────────────── churn hotspots ─────────────────────────────
-
-export interface ChurnHotspot {
-  path: string;
-  /** total touches across the window. */
-  heat: number;
-  /** how many distinct agents touched this file (from usage.runs.filesTouched). */
-  agentCount: number;
-  /** per-day touch counts aligned to heat.days. */
-  daily: number[];
-}
-
-/**
- * Rank the hottest files and enrich each with how many DISTINCT agents touched
- * it. Heat (per-day matrix) tells us WHERE work concentrates; agentCount tells us
- * whether that concentration is one focused agent or a contended hotspot.
- */
-export function churnHotspots(
-  heat: HeatPayload | null | undefined,
-  runs: UsageRun[] | null | undefined,
-  limit = 8,
-): ChurnHotspot[] {
-  const agentsByFile = new Map<string, Set<string>>();
-  for (const run of runs ?? []) {
-    for (const file of run.filesTouched ?? []) {
-      if (!file) continue;
-      let set = agentsByFile.get(file);
-      if (!set) agentsByFile.set(file, (set = new Set()));
-      set.add(run.agentId);
-    }
-  }
-
-  const tree = heat?.tree ?? [];
-  const rows: ChurnHotspot[] = tree.map((node) => {
-    const daily = node.heat ?? [];
-    const total = daily.reduce((a, b) => a + (b || 0), 0);
-    return {
-      path: node.id,
-      heat: total,
-      agentCount: agentsByFile.get(node.id)?.size ?? 0,
-      daily,
-    };
-  });
-
-  return rows
-    .filter((r) => r.heat > 0)
-    .sort((a, b) => b.heat - a.heat || b.agentCount - a.agentCount || a.path.localeCompare(b.path))
-    .slice(0, limit);
-}
+// churnHotspots (the HeatPanel magma tree's ranking) was deleted with the Heat map page —
+// GRAPH-FOLD.md §1 verdict: the churn tree is a data-dump, and churn-over-time is already the
+// pulse ridge. detectCollisions/flappingAgents survive: the Fleet view's NEEDS-YOU rows and the
+// Graph's collision marker are built on them.
 
 // ───────────────────────────── flapping agents ─────────────────────────────
 
