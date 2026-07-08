@@ -240,6 +240,13 @@ export function computeCapacity(gov: GovernancePayload | null | undefined): Capa
   return { used, cap, roomFor, verdict, headline, nextLimit, memPct, loadPct };
 }
 
+/** Render the used/cap pair for the capacity chip (taste-review nit 5). A plain "6/3" reads as a
+ *  fraction bug once `used` exceeds `cap` — which happens routinely (e.g. the WIP cap was lowered
+ *  while agents were already running) — so once over cap, spell it out instead of dividing. */
+export function capacityFractionLabel(used: number, cap: number): string {
+  return used > cap ? `${used} · cap ${cap}` : `${used}/${cap}`;
+}
+
 // ───────────────────────────── collisions ─────────────────────────────
 
 export interface Collision {
@@ -662,7 +669,12 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
     });
   }
 
-  // Resource pressure from capacity → raise-cap / nothing-to-do.
+  // Resource pressure from capacity → raise-cap / nothing-to-do. Deliberately NOT emitted for the
+  // routine "at WIP cap, no headroom" case (taste-review nit 4): a busy-but-healthy fleet sitting
+  // at its configured cap is normal operation, not a blocker — it's already the header's capacity
+  // chip (FactoryStatusStrip / WorkspaceCockpit's rail header), so a standing NEEDS YOU row for it
+  // just pushed real blockers down the rail. A genuinely saturated HOST (verdict === 'critical', an
+  // actual resource limit breached) is the rare case that still deserves its own "needs you" row.
   const cap = input.capacity;
   if (cap && cap.verdict === 'critical') {
     items.push({
@@ -670,15 +682,6 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
       severity: 'critical',
       kind: 'resource',
       title: 'Host is saturated',
-      detail: cap.headline,
-      action: { label: 'Raise cap', kind: 'raise-cap' },
-    });
-  } else if (cap && cap.verdict === 'warn' && cap.roomFor === 0) {
-    items.push({
-      id: 'resource:cap',
-      severity: 'warn',
-      kind: 'resource',
-      title: 'At WIP cap',
       detail: cap.headline,
       action: { label: 'Raise cap', kind: 'raise-cap' },
     });
