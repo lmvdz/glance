@@ -158,7 +158,7 @@ import { DAY_MS } from "./omp-graph/schema.ts";
 import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
-import { readChatAttachment, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
+import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
@@ -6577,6 +6577,16 @@ export class SquadManager extends EventEmitter {
 		if (reaped.length) this.log("info", `reaped ${reaped.length} orphan agent host(s): ${reaped.join(", ")}`);
 	}
 
+	/** Bonus hygiene for chat image attachments (security review MEDIUM 1 follow-up): age-based TTL
+	 *  sweep of this org's own `chat-attachments/` dir, on the same janitor cadence as
+	 *  `reapDeadWorktrees` (every ~12th poll tick, per-org — not gated by `skipGlobalJanitors` since
+	 *  each manager only ever sweeps its own `stateDir`). The hard ceiling is
+	 *  `writeChatAttachment`'s write-time quota check, which holds regardless of this sweep. */
+	private async reapStaleChatAttachmentsTick(): Promise<void> {
+		const reaped = await reapStaleChatAttachments(this.stateDir).catch(() => [] as string[]);
+		if (reaped.length) this.log("info", `reaped ${reaped.length} stale chat attachment(s)`);
+	}
+
 	private async poll(): Promise<void> {
 		const live = [...this.agents.values()].filter((r) => (r.dto.kind === "omp-operator" || r.dto.kind === "workflow") && r.agent.isReady && r.agent.isAlive);
 		await Promise.all(
@@ -6602,6 +6612,7 @@ export class SquadManager extends EventEmitter {
 				void this.sweepRegistries();
 			}
 			void this.reapDeadWorktrees();
+			void this.reapStaleChatAttachmentsTick();
 		}
 		void this.sampleHealth().then((h) => {
 			const key = h.warnings.join("|");

@@ -16,7 +16,9 @@ import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
+import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
 import { envBool, envInt } from "./config.ts";
+import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
@@ -1548,7 +1550,15 @@ export class SquadServer {
 				const saved = await manager.saveChatAttachment(decoded.success.dataUrl);
 				return Response.json(saved);
 			} catch (err) {
-				return new Response(err instanceof Error ? err.message : String(err), { status: 400 });
+				// MEDIUM 1 (disk-fill quota) and MEDIUM 2 (IHDR dimension bomb) — both are resource
+				// rejections, not shape/mime validation, so both surface as 413 rather than the generic
+				// 400 every other malformed-payload error on this route returns.
+				if (err instanceof ChatAttachmentQuotaExceededError || err instanceof ChatAttachmentDimensionError) {
+					return new Response(err.message, { status: 413 });
+				}
+				// errText, not the inline ternary — this is the one site the effect-migration ratchet's
+				// error-message-idiom baseline doesn't already budget for on this branch (see err-text.ts).
+				return new Response(errText(err), { status: 400 });
 			}
 		}
 		const mattachment = url.pathname.match(/^\/api\/chat-attachments\/([^/]+)$/);
