@@ -243,6 +243,16 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const closeCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
   const toggleCommandPalette = useCallback(() => setIsCommandPaletteOpen((open) => !open), []);
 
+  // Normalize the persisted key once per boot: after a dead key was coerced (heat → omp-graph,
+  // knowledge → omp-graph + palette, …) write the LIVE key back so the alias only fires once —
+  // otherwise a stale `knowledge` would re-open the palette on every reload forever.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (window.localStorage.getItem(VIEW_STORAGE_KEY) !== view) window.localStorage.setItem(VIEW_STORAGE_KEY, view);
+    // Mount-only: `view` here is the already-coerced initial state; later writes go through setView.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const selectTask = (id: string | null) => setSelectedTaskId(id);
 
   const addTask = (partialTask: Partial<Task>) => {
