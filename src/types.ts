@@ -560,6 +560,8 @@ export interface PlanAnnotationTarget {
 	quote?: string;
 	/** Anchors the annotation to a specific rendered plan block (data-block-id). */
 	blockId?: string;
+	/** Anchors the annotation to a markdown H2 section (design-review screen's section anchor). */
+	heading?: string;
 }
 
 export interface ArtifactCommentDTO {

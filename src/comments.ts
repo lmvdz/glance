@@ -21,6 +21,9 @@ export interface PlanAnnotationTarget {
   /** Anchors the annotation to a specific rendered plan block (data-block-id). Optional; the
    * append-only JSONL store + fold-on-read tolerate the new field, so no migration is needed. */
   blockId?: string;
+  /** Anchors the annotation to a markdown H2 section (e.g. "Desired End State") — the design-review
+   * screen's coarser anchor granularity (a whole section, not a line/block). Optional, additive. */
+  heading?: string;
 }
 
 export interface ArtifactComment {
