@@ -5,6 +5,7 @@ import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
 import { buildReviewHash, parseReviewHash } from '../lib/plan-doc-review';
 import { useSquad } from '../hooks/useSquad';
 import { coerceView, VIEW_STORAGE_KEY } from '../lib/viewAlias';
+import type { TasksListMode } from '../lib/pageContextDerive';
 import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
 export interface ToastInfo {
@@ -31,6 +32,15 @@ export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 function readStoredView(): string | null {
   if (typeof window === 'undefined') return null;
   return window.localStorage.getItem(VIEW_STORAGE_KEY);
+}
+
+/** D4/D8 (CANVAS-AND-PAGE-CHAT.md): the Tasks LIST|CANVAS toggle's persisted key. DEFAULT LIST —
+ *  the canvas is opt-in (red-team guard), so an absent/garbage value must fall back to 'list', not
+ *  merely "whatever wasn't 'list'". A pure function so the lazy `useState` initializer and any test
+ *  agree on exactly one coercion rule. */
+export const TASKS_VIEW_STORAGE_KEY = 'omp.tasks.view';
+export function initialTasksListMode(stored: string | null): TasksListMode {
+  return stored === 'canvas' ? 'canvas' : 'list';
 }
 
 /** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
@@ -75,6 +85,11 @@ interface TaskContextType {
   toasts: ToastInfo[];
   view: AppView;
   taskFilter: TaskFilter;
+  /** Feature 1 D4 (CANVAS-AND-PAGE-CHAT.md): the Tasks LIST|CANVAS toggle, persisted to
+   *  localStorage['omp.tasks.view'] mirroring 'omp.workbench.collapsed'. Lives here (not local
+   *  TaskListView state) so it survives that component unmounting behind TaskDetail — switching
+   *  modes never disturbs `selectedTaskId`, and vice versa; the two are independent state. */
+  tasksListMode: TasksListMode;
   isChatOpen: boolean;
   /** ⌘K palette (GRAPH-FOLD.md §3) — open everywhere, not scoped to a view. */
   isCommandPaletteOpen: boolean;
@@ -93,6 +108,7 @@ interface TaskContextType {
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
+  setTasksListMode: (mode: TasksListMode) => void;
   setIsChatOpen: (isOpen: boolean) => void;
   /** Subscribe to an agent's transcript AND open the chat panel focused on that agent. No-op if agentId is undefined. */
   openConsole: (agentId: string | undefined) => void;
@@ -165,6 +181,9 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   // gates a genuine single boot to exactly one toast.
   const knowledgeToastFiredRef = useRef(false);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
+  const [tasksListMode, setTasksListModeState] = useState<TasksListMode>(() =>
+    initialTasksListMode(typeof window === 'undefined' ? null : window.localStorage.getItem(TASKS_VIEW_STORAGE_KEY)),
+  );
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
   const [interveneAgentId, setInterveneAgentId] = useState<string | null>(null);
@@ -251,6 +270,14 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const setView = useCallback((next: AppView) => {
     setViewState(next);
     if (typeof window !== 'undefined') window.localStorage.setItem(VIEW_STORAGE_KEY, next);
+  }, []);
+
+  // Mirrors setView: the only mutator, persists on every flip so a reload lands back on the same
+  // mode. D8's default-LIST guard lives in `initialTasksListMode`, not here — this just persists
+  // whatever the toggle asked for.
+  const setTasksListMode = useCallback((next: TasksListMode) => {
+    setTasksListModeState(next);
+    if (typeof window !== 'undefined') window.localStorage.setItem(TASKS_VIEW_STORAGE_KEY, next);
   }, []);
 
   const openCommandPalette = useCallback(() => setIsCommandPaletteOpen(true), []);
@@ -409,7 +436,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, tasksListMode, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

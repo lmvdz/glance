@@ -20,6 +20,9 @@ import { useTaskContext } from '../context/TaskContext';
 import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus';
 import { taskRef } from '../lib/task-model';
 import { getCategoryBadge } from '../utils';
+import { CategoryCanvas } from './CategoryCanvas';
+import { Kbd } from './kit';
+import type { TasksListMode } from '../lib/pageContextDerive';
 import type { Task } from '../types';
 import type { AgentDTO } from '../lib/dto';
 
@@ -206,8 +209,56 @@ const SectionHeader: React.FC<{ title: string; count: number; hint?: string; ton
   </div>
 );
 
+// ── D4: the LIST | CANVAS segmented control ──────────────────────────────────
+// Kit-consistent with the taskFilter tabs in WorkbenchPane (amber-active pill), the same visual
+// language this file already uses for status/pin state elsewhere. Persisted state + the setter
+// live in TaskContext (mirrors `view`/`setView`) so the mode survives TaskListView unmounting
+// behind TaskDetail — `selectedTaskId` and `tasksListMode` are independent state, neither resets
+// the other (D4: "selectedTaskId shared across modes — switching preserves selection").
+const VIEW_MODES: Array<{ key: TasksListMode; label: string }> = [
+  { key: 'list', label: 'List' },
+  { key: 'canvas', label: 'Canvas' },
+];
+
+export const ViewModeToggle: React.FC<{ mode: TasksListMode; onChange: (mode: TasksListMode) => void }> = ({ mode, onChange }) => (
+  <div role="group" aria-label="Task view" className="flex items-center gap-0.5 rounded-md border border-gray-200 p-0.5 dark:border-gray-800">
+    {VIEW_MODES.map((m) => (
+      <button
+        key={m.key}
+        type="button"
+        onClick={() => onChange(m.key)}
+        aria-pressed={mode === m.key}
+        className={`min-h-6 rounded px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
+          mode === m.key
+            ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+            : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+        }`}
+      >
+        {m.label}
+      </button>
+    ))}
+  </div>
+);
+
 export const TaskListView: React.FC = () => {
-  const { tasks, agents, selectTask, updateTask } = useTaskContext();
+  const { tasks, agents, selectTask, updateTask, tasksListMode, setTasksListMode } = useTaskContext();
+
+  // The kbd hint below ("V") is a real binding, not decoration — scoped to this component's
+  // lifetime (i.e. only while Tasks' list/canvas surface, as opposed to TaskDetail, is mounted),
+  // same input-guard convention as GlobalShortcuts. Toggling never touches `selectedTaskId`.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      const target = e.target as HTMLElement;
+      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+      if (isInput) return;
+      if (e.key === 'v' || e.key === 'V') {
+        e.preventDefault();
+        setTasksListMode(tasksListMode === 'canvas' ? 'list' : 'canvas');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [tasksListMode, setTasksListMode]);
   const [pinned, setPinned] = useState<Set<string>>(new Set());
   const togglePin = (id: string): void => setPinned((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const changeStatus = (task: Task, s: StatusOption): void => updateTask(task.id, { status: taskStatusForGroup(s.group), properties: { ...task.properties, status: s.label } });
@@ -255,31 +306,57 @@ export const TaskListView: React.FC = () => {
         <Inbox className="h-4 w-4 text-blue-500" aria-hidden="true" />
         <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">All work items</h1>
         <span className="font-mono text-xs text-gray-400">{total}</span>
-        <span className="ml-auto text-[11px] text-gray-400">click a row for full detail · click status to change</span>
+        <span className="ml-auto flex items-center gap-3">
+          <span className="hidden text-[11px] text-gray-400 sm:inline">
+            {tasksListMode === 'list' ? 'click a row for full detail · click status to change' : 'click a category, then a plan, for full detail'}
+          </span>
+          <Kbd keys="V" label="list/canvas" />
+          <ViewModeToggle mode={tasksListMode} onChange={setTasksListMode} />
+        </span>
       </div>
 
-      <div className="flex flex-shrink-0 items-center gap-3 border-b border-gray-200 px-4 py-1.5 dark:border-gray-800">
-        {COLUMNS.map((col) => (
-          <div key={col.key} className={`text-[10px] font-semibold uppercase tracking-wider text-gray-400 ${col.cell}`}>{col.header}</div>
-        ))}
-      </div>
-
-      <div className="flex-1 overflow-y-auto scrollbar-custom">
-        {total === 0 ? (
-          <div className="flex flex-col items-center gap-2 py-24 text-center text-gray-500 dark:text-gray-400">
-            <Inbox className="h-8 w-8 text-gray-300 dark:text-gray-600" aria-hidden="true" />
-            <div className="text-sm font-medium">No work items yet</div>
-            <div className="text-xs">Plans and features land here as the fleet creates them.</div>
+      {tasksListMode === 'list' ? (
+        <>
+          <div className="flex flex-shrink-0 items-center gap-3 border-b border-gray-200 px-4 py-1.5 dark:border-gray-800">
+            {COLUMNS.map((col) => (
+              <div key={col.key} className={`text-[10px] font-semibold uppercase tracking-wider text-gray-400 ${col.cell}`}>{col.header}</div>
+            ))}
           </div>
-        ) : (
-          <>
-            {renderSection('Pinned', groups.pin, 'text-amber-500')}
-            {renderSection('In progress', groups.inProgress, 'text-emerald-500', 'active agents')}
-            {renderSection('Planned', groups.planned)}
-            {renderSection('Done', groups.done, 'text-blue-500')}
-          </>
-        )}
-      </div>
+
+          <div className="flex-1 overflow-y-auto scrollbar-custom">
+            {total === 0 ? (
+              <div className="flex flex-col items-center gap-2 py-24 text-center text-gray-500 dark:text-gray-400">
+                <Inbox className="h-8 w-8 text-gray-300 dark:text-gray-600" aria-hidden="true" />
+                <div className="text-sm font-medium">No work items yet</div>
+                <div className="text-xs">Plans and features land here as the fleet creates them.</div>
+              </div>
+            ) : (
+              <>
+                {renderSection('Pinned', groups.pin, 'text-amber-500')}
+                {renderSection('In progress', groups.inProgress, 'text-emerald-500', 'active agents')}
+                {renderSection('Planned', groups.planned)}
+                {renderSection('Done', groups.done, 'text-blue-500')}
+              </>
+            )}
+          </div>
+        </>
+      ) : (
+        // D4 filter interplay, decided + documented honestly (not left as a silent gap): the
+        // sidebar task-block's Open/Active/Done/All tabs AND its "Search tasks by title or ID" box
+        // (WorkbenchPane.tsx) are local state private to that rail — they were NEVER wired to this
+        // main-content list either (TaskListView's own `tasks` above is unfiltered by taskFilter or
+        // any search query; it always shows every task). Making canvas mode honor filters LIST
+        // itself doesn't honor would be a new, undocumented behavior split, not parity — so canvas
+        // gets exactly what list gets today: all tasks, ungated by the sidebar's search/filter.
+        // Wiring the sidebar's search box into the main content area (both modes) is real, separate
+        // scope (lifting searchQuery out of WorkbenchPane's local state) — left for a future unit.
+        //
+        // D6's dense ">24 satellites" overflow chip is the one place canvas needs a list-bound
+        // escape hatch: it has no category filter of its own, so `onShowMore` just flips back to
+        // LIST (all tasks) rather than a category-scoped filtered view — TaskListView has no
+        // category filter to hand it either, so this is the honest floor, not the ideal ceiling.
+        <CategoryCanvas tasks={tasks} onSelectTask={selectTask} onShowMore={() => setTasksListMode('list')} className="flex-1" />
+      )}
     </main>
   );
 };
