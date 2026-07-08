@@ -240,6 +240,8 @@ export const Composer = ({
   modelOptions,
   onModelChange,
   agent,
+  placeholder,
+  focusKey,
 }: {
   tasks: Task[];
   suggestionChips: SuggestionChip[];
@@ -252,9 +254,22 @@ export const Composer = ({
   modelOptions: ModelOption[];
   onModelChange: (model: string) => void;
   agent?: AgentDTO;
+  /** Override the textarea's placeholder — e.g. a blocked agent's pending-request placeholder, so
+   *  the composer visibly becomes the answer box for it (Fleet view §6b's "Composer prefilled for
+   *  free text": the request's own context primes the field's label rather than literal guessed
+   *  text — putting words in the operator's mouth for an open question would be presumptuous). */
+  placeholder?: string;
+  /** Changing this value refocuses the composer — used to snap focus onto the box the instant a
+   *  new pending request appears, without stomping whatever the operator is mid-typing. */
+  focusKey?: string | number;
 }) => {
   const [input, setInput] = useState('');
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (focusKey === undefined) return;
+    composerTextareaRef.current?.focus();
+  }, [focusKey]);
 
   // History recall (ArrowUp/ArrowDown) cycles this composer instance's own prior sends —
   // scoped to this mount rather than reaching into the parent's session store, since Composer
@@ -430,7 +445,7 @@ export const Composer = ({
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder="Type @ to link a task..."
+          placeholder={placeholder ?? 'Type @ to link a task...'}
           className="w-full bg-transparent border-none outline-none text-[13px] text-gray-900 dark:text-gray-200 px-3 py-2.5 resize-none overflow-y-auto"
           disabled={isLoading}
           rows={1}

@@ -23,10 +23,8 @@ import { ScoreboardPanel } from './components/ScoreboardPanel';
 import { TopologyPanel } from './components/TopologyPanel';
 import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
-import { AttentionPanel } from './components/AttentionPanel';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
-import { ActiveWorkPane } from './components/ActiveWorkPane';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
 import { FactoryStatusStrip } from './components/FactoryStatusStrip';
 import { OrgSettings } from './components/OrgSettings';
@@ -51,10 +49,13 @@ const MainContent = () => {
   // the cwd project, so status==='file' never trips this; 'org' is the settings escape hatch.)
   if (status === 'authed' && !currentProject && view !== 'org') return <FirstRunSetup />;
 
-  if (view === 'attention') return <AttentionPanel />;
+  {/* GRAPH-FOLD.md §6f: WorkspaceCockpit is now the unified Fleet view — "needs you" and "active
+      work" dissolved into its state-grouped roster. All three legacy view keys render it so
+      nothing breaks before U3 (owns the nav shrink + AppView key removal) lands. */}
+  if (view === 'attention') return <WorkspaceCockpit />;
   if (view === 'intervene') return <IntervenceView />;
   if (view === 'review') return <DesignReviewView />;
-  if (view === 'active') return <ActiveWorkPane />;
+  if (view === 'active') return <WorkspaceCockpit />;
   if (view === 'cockpit') return <WorkspaceCockpit />;
   if (view === 'capabilities') return <CapabilityPanel />;
   if (view === 'automation') return <AutomationPanel />;
