@@ -37,17 +37,36 @@ export function TaskArtifactsRail({
   doneProof,
   selectedPath,
   onSelect,
+  right,
+  toolbar,
+  className = 'h-full',
+  bodyClassName = 'overflow-y-auto',
 }: {
   documents: PipelineDocument[];
   comments: ArtifactCommentDTO[];
   doneProof: DoneProofDTO | null;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  /** Header-slot content (e.g. a doc-count + prev/next Kbd hints) — passed through to
+   *  {@link PanelSection}'s `right`. Optional so a standalone rail (no keyboard cycling context)
+   *  doesn't have to pass anything. */
+  right?: React.ReactNode;
+  /** Plan-level action row (Implement / Module / Sync tickets / …) rendered between the header
+   *  and the document list. These act on the whole plan, not one document, so they live here
+   *  rather than duplicated per-row — the one place TaskDetail's left pane wants them once the
+   *  doc-viewer toolbar's copy is deleted. */
+  toolbar?: React.ReactNode;
+  /** Override the outer panel sizing — the standalone right-rail placement wants `h-full` +
+   *  internal scroll; embedding this same component inline in a naturally-scrolling column
+   *  (TaskDetail's left pane) wants a plain block instead, so callers can pass `''` for both. */
+  className?: string;
+  bodyClassName?: string;
 }) {
   const counts = React.useMemo(() => annotationCountByPath(comments), [comments]);
 
   return (
-    <PanelSection title="Artifacts" className="h-full" bodyClassName="overflow-y-auto">
+    <PanelSection title="Artifacts" right={right} className={className} bodyClassName={bodyClassName}>
+      {toolbar}
       <div className="divide-y divide-gray-100 dark:divide-gray-800">
         {documents.length === 0 && !doneProof && (
           <div className="px-3 py-6 text-center text-xs text-gray-400 dark:text-gray-500">No artifacts yet.</div>
