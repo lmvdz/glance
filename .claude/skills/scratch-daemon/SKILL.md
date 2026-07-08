@@ -18,7 +18,10 @@ export PATH="$PWD/node_modules/.bin:$PATH"                          # else `omp`
 # claimed OMPSQ-422/423/425 and probe tickets). Plane secrets are ambient on this host.
 export OMP_SQUAD_AUTODISPATCH=0 OMP_SQUAD_AUTODRIVE=0 OMP_SQUAD_AUTOLAND=0
 export OMP_SQUAD_AUTOSUPERVISE=0 OMP_SQUAD_AUTO_SUPERVISE=0 OMP_SQUAD_LAND_CONFIRM=1
-unset PLANE_API_KEY PLANE_API_TOKEN 2>/dev/null || true             # belt-and-suspenders: no tracker reach at all
+# unset alone is NOT enough: the daemon unconditionally loads ~/.claude/secrets/plane.env at boot
+# (proven live 2026-07-08). Repoint HOME at an empty dir so no secrets file is readable:
+export HOME=$(mktemp -d /tmp/glance-scratch-home-XXXX)
+unset PLANE_API_KEY PLANE_API_TOKEN 2>/dev/null || true             # belt-and-suspenders on top
 nohup bun src/index.ts serve > "$OMP_SQUAD_STATE_DIR/daemon.log" 2>&1 &
 ```
 
