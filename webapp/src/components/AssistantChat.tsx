@@ -8,6 +8,9 @@ import { DiffReviewPanel, type AgentFileDiff } from './chat/DiffReviewPanel';
 import { Composer, type ModelOption, type SuggestionChip } from './chat/Composer';
 import { TranscriptTimeline, agentIsRunning, transcriptIsRunning } from './chat/TranscriptTimeline';
 import { toolView } from './chat/ToolCallGroup';
+import { SpawnProposalCard } from './chat/SpawnProposalCard';
+import { SpawnConfirmSheet } from './chat/SpawnConfirmSheet';
+import { SpawnStatusCard } from './chat/SpawnStatusCard';
 import { useChatStreamScroll } from '../hooks/chat/useChatStreamScroll';
 import { useChatNewMessages } from '../hooks/chat/useChatNewMessages';
 import { useTaskContext } from '../context/TaskContext';
@@ -17,6 +20,7 @@ import { apiJson, jsonInit } from '../lib/api';
 import { answerCommand, interruptCommand, interruptibleAgents } from '../lib/agent-control';
 import { activeWork, activeWorkDigest } from '../lib/insights';
 import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../lib/fleetActivity';
+import { spawnProposalFor, type SpawnedUnitRecord, type SpawnProposal } from '../lib/spawnProposal';
 import type { AgentDTO, TranscriptEntry } from '../lib/dto';
 import type { Task } from '../types';
 
@@ -50,6 +54,12 @@ export interface Session {
     stage?: string;
     agentId?: string;
   };
+  /** Feature 2 D3 LINK-BACK: every unit confirmed-and-spawned from this thread, in spawn order.
+   *  Persists with the rest of `Session` (same `localStorage` write below) so the thread stays the
+   *  durable "I asked → here's the PR" record across a reload — only the tiny record (id/agentId/
+   *  createdAt/prompt) is stored here; live status is always re-read from `agents` (see
+   *  `spawnCardStatus`'s doc for why nothing about the unit's current state is cached). */
+  spawnedUnits?: SpawnedUnitRecord[];
 }
 
 const CHAT_WIDTH_KEY = 'omp.assistantChat.width';
@@ -135,6 +145,8 @@ export const chatWidthFromClientX = (panelRight: number, clientX: number) => cla
 const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
 const EMPTY_DIFFS: AgentFileDiff[] = [];
 const EMPTY_MESSAGES: { timestamp: number }[] = [];
+const EMPTY_SPAWNED_UNITS: SpawnedUnitRecord[] = [];
+const EMPTY_AGENTS: AgentDTO[] = [];
 const PENDING_SEND_TIMEOUT_MS = 15_000;
 
 const transcriptDownloadText = (entry: TranscriptEntry) => {
@@ -355,6 +367,11 @@ export const ChatMessagesViewport = ({
   onToggleWork,
   onAnswer,
   isLoading,
+  renderAfterFinal,
+  spawnedUnits = EMPTY_SPAWNED_UNITS,
+  agents = EMPTY_AGENTS,
+  showToast,
+  onViewSpawnedRun,
 }: {
   entries: TranscriptEntry[];
   /** Uncovered fresh/failed sends + in-flight pendingSends — always-visible trailing
@@ -370,6 +387,14 @@ export const ChatMessagesViewport = ({
   onToggleWork: () => void;
   onAnswer?: (requestId: string, value: string) => void;
   isLoading: boolean;
+  /** Feature 2 D3 — forwarded straight to `TranscriptTimeline` (see its own doc). */
+  renderAfterFinal?: (entries: TranscriptEntry[], finalEntry: TranscriptEntry) => React.ReactNode;
+  /** Feature 2 D3 LINK-BACK — this session's spawned-unit records, rendered as pinned status cards
+   *  after the transcript, oldest first (the durable "I asked → here's the PR" record). */
+  spawnedUnits?: SpawnedUnitRecord[];
+  agents?: AgentDTO[];
+  showToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onViewSpawnedRun?: (agentId: string) => void;
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const { isLocked, scrollToBottom, scrollIfLocked } = useChatStreamScroll({ scrollRef });
@@ -402,7 +427,21 @@ export const ChatMessagesViewport = ({
             expanded={workExpanded}
             onToggle={onToggleWork}
             onAnswer={onAnswer}
+            renderAfterFinal={renderAfterFinal}
           />
+          {spawnedUnits.length > 0 && (
+            <div className="space-y-2" data-spawn-status-cards>
+              {[...spawnedUnits].sort((a, b) => a.createdAt - b.createdAt).map((record) => (
+                <SpawnStatusCard
+                  key={record.id}
+                  record={record}
+                  agent={agents.find((a) => a.id === record.agentId)}
+                  showToast={showToast ?? (() => undefined)}
+                  onViewRun={() => onViewSpawnedRun?.(record.agentId)}
+                />
+              ))}
+            </div>
+          )}
           {isLoading && (
             <div className="flex flex-col w-full items-start text-gray-800 dark:text-gray-300">
               <div className="text-[11px] text-gray-500 dark:text-gray-500 mb-2 flex items-center gap-2">
@@ -429,7 +468,7 @@ export const ChatMessagesViewport = ({
 };
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
-  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, showToast } = useTaskContext();
+  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, openConsole, showToast } = useTaskContext();
   // Feature 2 D1/D2: whichever view the operator is actually looking at right now — published by
   // that view's <PageContextScope> (see App.tsx/WorkspaceCockpit.tsx/OmpGraphPanel.tsx). Replaces
   // the old selectedTask-only assembly below with the live page, not just a maybe-selected task.
@@ -447,6 +486,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: 'omp default', value: '' }]);
   const [selectedModel, setSelectedModel] = useState('');
   const [chatWidth, setChatWidth] = useState(storedChatWidth);
+  // Feature 2 D3 — the confirmation gate's open/closed state. Non-null renders the
+  // SpawnConfirmSheet; setting it back to null is the ONLY way it closes (Cancel, or a
+  // successful confirm) — there is no auto-dismiss, no timeout (D3/D5: never auto-spawn).
+  const [spawnProposal, setSpawnProposal] = useState<SpawnProposal | null>(null);
   const [pendingSends, setPendingSends] = useState<TranscriptEntry[]>([]);
   const pendingSendTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const promotedPlanDirs = useRef<Set<string>>(new Set());
@@ -731,6 +774,34 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     }
   };
 
+  // Feature 2 D3 — the one place `/api/spawn` is ever called from this feature. `finalPrompt`
+  // already carries the operator's edited text, the fenced image reference(s), the serialized page
+  // context, and the standard contract line (assembled by SpawnConfirmSheet via
+  // `buildSpawnPrompt`) — this function's only job is the POST + the durable link-back write. A
+  // thrown error propagates back to the sheet (its own try/catch), which keeps itself open and
+  // shows it inline rather than silently discarding the operator's edited prompt.
+  const handleConfirmSpawn = async (finalPrompt: string) => {
+    const result = await apiJson<{ agent: AgentDTO }>('/api/spawn', jsonInit('POST', { prompt: finalPrompt }));
+    if (activeSessionId) {
+      const record: SpawnedUnitRecord = { id: `spawn:${Date.now()}:${Math.random().toString(36).slice(2)}`, agentId: result.agent.id, createdAt: Date.now(), prompt: finalPrompt };
+      setSessions((prev) => prev.map((session) => (session.id === activeSessionId
+        ? { ...session, spawnedUnits: [...(session.spawnedUnits ?? []), record] }
+        : session)));
+    }
+    showToast(`Spawned ${result.agent.name} — tracking it in this thread.`, 'success');
+    setSpawnProposal(null);
+  };
+
+  // "Target repo" line the confirm sheet shows (D3) — the human-readable name of whichever repo
+  // this chat's own /api/console session is scoped to (the same `currentProject?.id` handleSend
+  // already sends as `repo`). /api/spawn itself has no repo field (SpawnBodySchema is
+  // `{prompt, profileId}` only) — smart-spawn resolves the target from the prompt text + its own
+  // cwd/tracked-repo candidates (smart-spawn.ts's `pickRepoHeuristic`), so this label is purely
+  // informational, not wired to the request; `buildSpawnPrompt` also folds it into an explicit
+  // "Target repo: …" line in the prompt itself to nudge that heuristic toward the repo the operator
+  // is actually looking at.
+  const spawnRepoLabel = currentProject?.name || currentProject?.id || 'this repo';
+
   const downloadHistory = () => {
     if (!activeSession) return;
     const content = [...mainEntries, ...trailingEntries].map(transcriptDownloadText).join('\n\n-------------------\n\n');
@@ -919,7 +990,26 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
           showToast(`Answer sent to ${selectedAgent.name}`, 'success');
         } : undefined}
         isLoading={isLoading}
+        renderAfterFinal={(timelineEntries, finalEntry) => {
+          const proposal = spawnProposalFor(timelineEntries, finalEntry);
+          return proposal ? <SpawnProposalCard onPropose={() => setSpawnProposal(proposal)} /> : null;
+        }}
+        spawnedUnits={activeSession?.spawnedUnits}
+        agents={agents}
+        showToast={showToast}
+        onViewSpawnedRun={openConsole}
       />
+
+      {spawnProposal && (
+        <SpawnConfirmSheet
+          promptSeed={spawnProposal.promptSeed}
+          imagePaths={spawnProposal.imagePaths}
+          pageContextBlock={serializePageContextForPrompt(pageContext)}
+          repoLabel={spawnRepoLabel}
+          onCancel={() => setSpawnProposal(null)}
+          onConfirm={handleConfirmSpawn}
+        />
+      )}
 
       {/* Input Area */}
       <Composer
