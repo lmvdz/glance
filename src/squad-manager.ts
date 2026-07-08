@@ -3889,16 +3889,15 @@ export class SquadManager extends EventEmitter {
 				await agent.prompt(opts.task).catch((err) => this.fail(rec, err));
 			}
 		} catch (err) {
-			// start() (or its handshake) threw: the driver may have spawned a backing
-			// child/container before failing. Tear it down so it doesn't leak — nothing
-			// reaps ACP children or sandbox containers (OMPSQ-163, OMPSQ-146).
-			if (!started) {
-				await agent.stop().catch(() => {});
-				// The worktree was created before start() failed; nothing else reaps it, so a failed start
-				// leaks it forever (the gate's own failed-start test orphaned 500+ "squad-leaky" worktrees).
-				if (createdWorktree) await removeWorktree(repo, cwd).catch(() => {});
-			}
-			this.fail(rec, err);
+			// start() (or its handshake) threw. `started` can only be false here — nothing after it is set
+			// throws uncaught (setSessionName/prompt are both `.catch`-guarded above) — but keep the guard as
+			// a floor for the worktree teardown, which is unique to this path: the worktree was created before
+			// start() failed and nothing else reaps it (the gate's own failed-start test once orphaned 500+
+			// "squad-leaky" worktrees). settleSpawnFailure then stops the (possibly half-spawned) driver so no
+			// detached host / ACP child / sandbox container leaks (OMPSQ-163, OMPSQ-146) and marks error — the
+			// SAME shared stop-before-fail path the prompt/set-model/restart sites use.
+			if (!started && createdWorktree) await removeWorktree(repo, cwd).catch(() => {});
+			await this.settleSpawnFailure(rec, err);
 		}
 
 		await this.persist();
@@ -4247,15 +4246,19 @@ export class SquadManager extends EventEmitter {
 		try {
 			await rec.agent.start();
 		} catch (err) {
-			// Same class of failure as createWithId's spawn guard: the driver may have spawned a backing
-			// child before failing. Sibling of the console-chat prompt fix above — this is reachable from
-			// applyCommand's "commission" case (via CommissionExecutor's uncaught "onboard" runAction),
-			// which the WS/HTTP command routes fire off with `void applyCommand(...).catch(...)`. Fail the
-			// record loudly into "error" and tear the driver down, rather than leaving a phantom "idle"
-			// roster entry with a dead driver behind — then rethrow so commission()'s caller still learns
-			// the onboard step failed.
+			// Reachable from applyCommand's "commission" case (via CommissionExecutor's uncaught "onboard"
+			// runAction), which the WS/HTTP command routes fire off with `void applyCommand(...).catch(...)`.
+			// Deliberately NOT settleSpawnFailure here: that leaves a sticky "error" roster entry, which is
+			// right for the prompt/set-model/restart paths (those are real, operator-owned agents the user
+			// acts on) but WRONG for a never-onboarded flue worker — rethrowing propagates up through the
+			// commission workflow so commission() rejects (never returns a member), meaning an error record
+			// left here would be an owner-less roster ghost (the inconsistency the review flagged). Stop the
+			// possibly-half-spawned host so nothing leaks, then REMOVE the record entirely (mirrors
+			// reconcileParallelResume's teardown: delete + emit removed + persist) before rethrowing so the
+			// commission workflow still learns the onboard step failed.
 			await rec.agent.stop().catch(() => {});
-			this.fail(rec, err);
+			this.agents.delete(id);
+			this.emit("event", { type: "removed", id } satisfies SquadEvent);
 			await this.persist();
 			throw err;
 		}
@@ -4297,6 +4300,25 @@ export class SquadManager extends EventEmitter {
 		if (rec.agent.setSessionName) await rec.agent.setSessionName(`squad:${rec.dto.name}`).catch(() => {});
 		this.transition(rec, "idle", "connect-ok");
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * The ONE settle path for a `start()`/`ensureConnected` rejection on an in-roster agent — STOP the
+	 * (possibly half-spawned) driver, THEN mark the record's error state, always in that order.
+	 *
+	 * A failed spawn is not inert: `RpcAgent.start()` can spawn a detached agent-host and connect its
+	 * socket, then reject because the omp child died before ready (or the whole respawn budget expired) —
+	 * leaving a live orphan host + socket behind. ACP/sandbox drivers likewise fork a child/container
+	 * before a handshake can fail, and nothing else reaps them (OMPSQ-163, OMPSQ-146). Every failing
+	 * start()/reconnect used to hand-roll `await agent.stop().catch(()=>{})` + `fail()` (or, in three of
+	 * four sites, forget the stop entirely — the zombie-host class this repo fought all week). Funnelling
+	 * them through here keeps stop-before-fail from ever drifting apart again. createWithId layers
+	 * worktree teardown on top of this; the commission/onboard path removes the record entirely instead
+	 * (a never-onboarded worker shouldn't linger as a roster ghost) — see each call site.
+	 */
+	private async settleSpawnFailure(rec: AgentRecord, err: unknown): Promise<void> {
+		await rec.agent.stop().catch(() => {});
+		this.fail(rec, err);
 	}
 
 	private async promptConnected(rec: AgentRecord, message: string): Promise<void> {
@@ -4404,13 +4426,14 @@ export class SquadManager extends EventEmitter {
 				// applyCommand caller (the WS command handler, the HTTP command route) fires it with
 				// `void manager.applyCommand(...).catch(...)`: a rejection surfacing THERE is an unhandled
 				// promise rejection, which took the whole daemon down (reproduced: a console-chat prompt to an
-				// agent whose harness fails to (re)start). Route the failure through the same legible
-				// error-state surface every other spawn/prompt failure in this file uses, and stop — never let
-				// it become the agent's "first prompt" once it (maybe) reconnects later.
+				// agent whose harness fails to (re)start). settleSpawnFailure stops the half-spawned host
+				// (RpcAgent.start() can connect a detached host then reject before ready — a live orphan) and
+				// marks error, the same legible surface every other spawn/prompt failure uses. Never let the
+				// message become the agent's "first prompt" once it (maybe) reconnects later.
 				try {
 					await this.ensureConnected(rec);
 				} catch (err) {
-					this.fail(rec, err);
+					await this.settleSpawnFailure(rec, err);
 					break;
 				}
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
@@ -4428,15 +4451,29 @@ export class SquadManager extends EventEmitter {
 			case "set-model": {
 				const model = cmd.model.trim();
 				if (!model || !rec.agent.setModel) break;
+				// TWO distinct failure classes, deliberately NOT one try: ensureConnected transitioned the DTO
+				// to "starting" already, so a SPAWN failure here strands the agent in "starting" forever AND
+				// leaks the half-spawned host — settle it to error (stop + fail), the model note riding along.
+				// A setModel() failure AFTER a successful connect is different: the agent is live and healthy,
+				// just couldn't switch models — never stop/error a good agent over that; keep the old model and
+				// surface a note, as before.
 				try {
 					await this.ensureConnected(rec);
+				} catch (err) {
+					const detail = errText(err);
+					this.append(rec, "system", `model change failed: ${detail}`);
+					await this.settleSpawnFailure(rec, err);
+					void this.recordAudit(actor, "set-model", cmd.id, "error", detail);
+					break;
+				}
+				try {
 					await rec.agent.setModel(model);
 					rec.dto.model = model;
 					this.append(rec, "system", `model set to ${model}`);
 					this.emitAgent(rec);
 					void this.recordAudit(actor, "set-model", cmd.id, "ok", model);
 				} catch (err) {
-					const detail = err instanceof Error ? err.message : String(err);
+					const detail = errText(err);
 					this.append(rec, "system", `model change failed: ${detail}`);
 					void this.recordAudit(actor, "set-model", cmd.id, "error", detail);
 				}
@@ -4645,7 +4682,9 @@ export class SquadManager extends EventEmitter {
 			await fresh.start();
 			this.transition(rec, "idle", "connect-ok");
 		} catch (err) {
-			this.fail(rec, err);
+			// `fresh` is a brand-new driver that may have spawned a detached host then rejected before ready
+			// — bare fail() left that orphan alive. settleSpawnFailure stops it before marking error.
+			await this.settleSpawnFailure(rec, err);
 		}
 		this.emitAgent(rec);
 	}

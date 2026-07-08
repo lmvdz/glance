@@ -77,7 +77,9 @@ export const PATTERNS: Pattern[] = [
 		// 88→91: reland stale-baseline correction (no tagged-error hierarchy exists yet to migrate TO).
 		// 91→90: land()'s outcome-record block routes through squad-manager's `errText` helper
 		// (3 inline sites → 1 helper line) pending the tagged-error hierarchy — the ratchet only goes DOWN.
-		baseline: 90,
+		// 90→89: the set-model spawn-failure split (fix/spawnhost-unhandled-rejection) routes both of its
+		// detail strings through `errText` instead of the inline idiom — one net occurrence removed.
+		baseline: 89,
 	},
 ];
 
