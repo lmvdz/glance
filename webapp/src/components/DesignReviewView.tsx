@@ -79,6 +79,24 @@ interface PlanDocReadPayload {
   sha: string;
 }
 
+// Shared markdown treatment for every rendered doc block (both the plain body and the in-place
+// diff segments) — one constant so ink-toned table styling doesn't drift across the 4 render
+// sites. Modeled on TaskDetail's PLAN_MARKDOWN_CLASS (prose-th/prose-td border+padding), ported
+// to the ink ramp: a bare `prose-invert` gives tables zero cell padding and no header emphasis —
+// the reported "cells nearly touch" defect — and GFM tables need `remark-gfm` output styled
+// explicitly since Tailwind Typography's defaults assume the light `--tw-prose-*` vars.
+// NOTE: hiding markdown headings uses `prose-h1:hidden` … `prose-h6:hidden` explicitly, NOT the
+// `prose-headings` shorthand — @tailwindcss/typography's "headings" element GROUP literally
+// includes `th` (see its src/index.js), so `prose-headings:hidden` silently nukes every table's
+// header row too. That's why LEDGER.md's tables never showed a Unit/Lane/Work/… header: the
+// row was in the DOM (computed `display: none`) the entire time, not merely unstyled.
+const DOC_MARKDOWN_CLASS =
+  'prose prose-invert prose-sm max-w-none prose-h1:hidden prose-h2:hidden prose-h3:hidden prose-h4:hidden prose-h5:hidden prose-h6:hidden ' +
+  'prose-table:my-2 prose-table:text-xs ' +
+  'prose-th:border prose-th:border-ink-border prose-th:bg-ink-surface-2 prose-th:px-3 prose-th:py-2 ' +
+  'prose-th:font-mono prose-th:text-[10px] prose-th:font-semibold prose-th:uppercase prose-th:tracking-wide prose-th:text-ink-text-muted ' +
+  'prose-td:border prose-td:border-ink-border prose-td:px-3 prose-td:py-2 prose-td:align-top';
+
 // Strike treatment is brand-muted (reduced-opacity struck text), never raw red — red is reserved
 // for the semantic danger ramp, and brand.md wants exactly one warm signal (ember) per view.
 const DIFF_LINE_CLASS: Record<DiffLineKind, string> = {
@@ -311,7 +329,7 @@ export const DesignReviewView: React.FC = () => {
     // activates the kit's `dark:` PanelSection/StatusChip styling (custom-variant is
     // `.dark`-ancestor-scoped) even when the rest of the app is in light mode.
     <div className="dark flex h-full w-full flex-col overflow-hidden bg-ink text-ink-text-body">
-      <div className="flex items-center gap-4 border-b border-ink-border px-6 py-4">
+      <div className="flex items-center gap-4 border-b border-ink-border bg-panel px-6 py-4">
         <button
           onClick={closeReview}
           className="flex min-h-10 items-center gap-1.5 rounded-md px-2 text-xs text-ink-text-muted hover:bg-ink-surface-2 focus-visible:ring-2 focus-visible:ring-ember"
@@ -341,15 +359,25 @@ export const DesignReviewView: React.FC = () => {
         <div className="w-16" />
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+      {/* A CSS grid (not a flex row with a fixed-width rail) so the doc column and the comments
+          rail are structurally ADJACENT: the doc pane is a `1fr` track, not an unconstrained
+          flex-1 area with a narrower card floating inside it — the old layout's dead gutter
+          between the two (the reported "layout gulf") grew with viewport width because nothing
+          tied the card's width to the rail's position. The whole row is also capped + centered
+          (`max-w-[1600px] mx-auto`) so it reads as one composed dense screen rather than
+          stretching edge-to-edge on an ultrawide monitor. */}
+      <div className="mx-auto grid min-h-0 w-full max-w-[1600px] flex-1 grid-cols-[1fr_24rem]">
+        <div className="min-w-0 overflow-y-auto px-6 py-6">
           {!doc ? (
             <div className="text-sm text-ink-text-subtle">Loading design doc…</div>
           ) : (
-            // Left-anchored and wide — the progress bar, doc, and comments rail read as ONE dense
-            // screen (the reference's layout), not a floating centered column with dead gutters.
-            <div className="max-w-3xl rounded-lg border border-ink-border bg-panel p-5">
-              <div className="mb-4 flex items-center justify-between gap-3">
+            // No enclosing "doc card" here on purpose: each heading below is already its own
+            // PanelSection (bg-panel, bordered) sitting on the page's bg-ink backdrop — wrapping
+            // that in a SECOND bg-panel card (panel-on-panel, two near-identical hex values
+            // stacked) is exactly what read as "one flat pure-black field" with no visible
+            // layering. One level of card, not two.
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-sm">
                   <StatusChip status="Design" tone="ember" variant="dim" />
                   <span className="font-mono text-ink-text-muted">{doc.title}</span>
@@ -393,7 +421,14 @@ export const DesignReviewView: React.FC = () => {
                     const isActive = h.heading === activeHeading;
                     const hasChanges = showDiff && diffSectionSet.has(h.heading);
                     const expanded = showDiff ? hasChanges || isActive : isActive;
-                    const emphasized = showDiff ? hasChanges : isActive;
+                    // The ember ring is reserved for a section that ACTUALLY changed (diff mode) —
+                    // never for mere navigational focus. Applying it to `isActive` too (the old
+                    // behavior) rings the WHOLE section body, and a table-heavy section can be many
+                    // screens tall — scrolled inside it, only the ring's left/right edges stay on
+                    // screen, reading as a stray vertical rule down the table's border (the reported
+                    // defect). Focus is signaled by the header's own bold treatment instead, which
+                    // can't leak into the content below it.
+                    const changedRing = hasChanges;
                     const body = doc.content.split('\n').slice(h.bodyStart - 1, h.bodyEnd).join('\n');
                     return (
                       // Anchor id lives on the wrapper (kit's PanelSection has no id prop) so a
@@ -403,13 +438,14 @@ export const DesignReviewView: React.FC = () => {
                       <div
                         key={h.heading}
                         id={`review-heading-${encodeURIComponent(h.heading)}`}
-                        className={emphasized ? 'rounded-md ring-1 ring-ember/60' : undefined}
+                        className={changedRing ? 'rounded-md ring-1 ring-ember/60' : undefined}
                       >
                         <PanelSection
+                          bodyClassName="p-3"
                           title={
                             <button
                               onClick={() => setActiveHeading(h.heading)}
-                              className={`min-h-6 rounded text-left focus-visible:ring-2 focus-visible:ring-ember ${emphasized ? 'font-semibold text-ink-text' : ''}`}
+                              className={`min-h-6 rounded text-left focus-visible:ring-2 focus-visible:ring-ember ${isActive || hasChanges ? 'font-semibold text-ink-text' : ''}`}
                             >
                               {h.heading}
                             </button>
@@ -422,7 +458,7 @@ export const DesignReviewView: React.FC = () => {
                             {sectionSegments(docLines, h.bodyStart, h.bodyEnd, docChanges).map((segment, i) =>
                               segment.kind === 'md' ? (
                                 segment.text.trim() ? (
-                                  <div key={`md-${i}`} className="prose prose-invert prose-sm max-w-none prose-headings:hidden">
+                                  <div key={`md-${i}`} className={`overflow-x-auto ${DOC_MARKDOWN_CLASS}`}>
                                     <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{segment.text}</ReactMarkdown>
                                   </div>
                                 ) : null
@@ -434,7 +470,7 @@ export const DesignReviewView: React.FC = () => {
                             )}
                           </div>
                         ) : (
-                          <div className="prose prose-invert prose-sm max-w-none prose-headings:hidden">
+                          <div className={`overflow-x-auto ${DOC_MARKDOWN_CLASS}`}>
                             <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{body}</ReactMarkdown>
                           </div>
                         ))}
@@ -448,7 +484,7 @@ export const DesignReviewView: React.FC = () => {
                         {sectionSegments(docLines, 1, docLines.length, docChanges).map((segment, i) =>
                           segment.kind === 'md' ? (
                             segment.text.trim() ? (
-                              <div key={`md-${i}`} className="prose prose-invert prose-sm max-w-none">
+                              <div key={`md-${i}`} className={`overflow-x-auto ${DOC_MARKDOWN_CLASS}`}>
                                 <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{segment.text}</ReactMarkdown>
                               </div>
                             ) : null
@@ -460,7 +496,7 @@ export const DesignReviewView: React.FC = () => {
                         )}
                       </div>
                     ) : (
-                      <div className="prose prose-invert prose-sm max-w-none">
+                      <div className={`overflow-x-auto ${DOC_MARKDOWN_CLASS}`}>
                         <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{doc.content}</ReactMarkdown>
                       </div>
                     )
@@ -487,8 +523,8 @@ export const DesignReviewView: React.FC = () => {
           )}
         </div>
 
-        <div className="flex w-96 flex-shrink-0 flex-col border-l border-ink-border">
-          <div className="flex items-center gap-2 border-b border-ink-border px-4 py-3">
+        <div className="flex min-w-0 flex-col border-l border-ink-border">
+          <div className="flex items-center gap-2 border-b border-ink-border bg-panel px-4 py-3">
             <MonoLabel>Comments</MonoLabel>
             {/* Kit contract (X1): resolved-good is `success` green, never ember (ember = active). */}
             {gateOpen && <StatusChip status="All resolved" tone="success" variant="solid" />}
@@ -548,7 +584,7 @@ export const DesignReviewView: React.FC = () => {
           </div>
           <form
             onSubmit={(e) => { e.preventDefault(); void postComment(); }}
-            className="border-t border-ink-border p-3"
+            className="border-t border-ink-border bg-panel p-3"
           >
             {activeHeading && <div className="mb-1.5 text-[10px] text-ink-text-subtle">On: § {activeHeading}</div>}
             <textarea
