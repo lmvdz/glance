@@ -49,13 +49,19 @@ const RosterRow: React.FC<{
     type="button"
     onClick={onSelect}
     aria-current={selected ? 'true' : undefined}
-    className={`flex min-h-12 w-full flex-col items-start gap-1 border-b border-gray-100 px-3 py-2 text-left transition-colors dark:border-gray-900 ${
-      selected ? 'bg-[color:var(--wf-accent-soft)]' : 'hover:bg-gray-50 dark:hover:bg-gray-900/60'
+    className={`flex min-h-12 w-full flex-col items-start gap-1 border-b border-gray-100 px-3 py-2 text-left transition-colors dark:border-ink-border ${
+      selected ? 'bg-[color:var(--wf-accent-soft)]' : 'hover:bg-gray-50 dark:hover:bg-ink-surface/60'
     }`}
   >
     <div className="flex w-full items-center gap-2">
       <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-gray-900 dark:text-gray-100">{agent.name}</span>
-      <StatusChip status={agent.status} />
+      {/* Ember discipline (brand.md: "a spark, not a wash"): SOLID ember is reserved for the
+          selected/streaming thing — the center header. Non-selected live rows demote to dim
+          so a busy roster doesn't become a wall of solid ember. */}
+      <StatusChip
+        status={agent.status}
+        variant={!selected && (agent.status === 'working' || agent.status === 'starting') ? 'dim' : undefined}
+      />
     </div>
     <div className="flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
       {agent.branch && (
@@ -87,7 +93,7 @@ const LandRail: React.FC<{
   const landable = agent ? canLand(agent) : false;
 
   return (
-    <div className="flex h-full w-80 flex-shrink-0 flex-col gap-2 overflow-y-auto border-l border-gray-200 bg-gray-50/60 p-2 dark:border-gray-800 dark:bg-gray-950/60">
+    <div className="flex h-full w-80 flex-shrink-0 flex-col gap-2 overflow-y-auto border-l border-gray-200 bg-gray-50/60 p-2 dark:border-ink-border dark:bg-ink">
       <PanelSection
         title="Land"
         right={agent?.prState ? <StatusChip status={agent.prState} /> : agent?.landReady ? <StatusChip status="done" /> : null}
@@ -156,15 +162,17 @@ const LandRail: React.FC<{
        * Terminal tab — DELIBERATELY DEFERRED. The reference's right-rail Run/Terminal tab wraps a
        * real PTY cwd'd in the worktree; glance has no PTY backend today. Rather than silently drop
        * the affordance (which would make the layout diverge from the reference for no stated
-       * reason), this stub names the gap so it's a visible, sanctioned deferral, not a missed spot.
+       * reason), an inert muted label holds the slot so the deferral is visible without
+       * roadmap-voice filler. The active "Transcript" tab is furniture, not a live signal, so it
+       * stays neutral (ember discipline: solid ember belongs to the streaming thing only).
        */}
       <PanelSection title="Run" bodyClassName="p-0">
-        <div className="flex items-center gap-2 border-b border-gray-100 px-3 py-1.5 text-[11px] dark:border-gray-900">
-          <span className="rounded bg-[color:var(--wf-accent-soft)] px-1.5 py-0.5 font-semibold text-[color:var(--wf-accent)]">Transcript</span>
-          <button type="button" disabled aria-disabled="true" className="ml-auto flex cursor-not-allowed items-center gap-1 text-gray-400 dark:text-gray-600" title="No PTY backend exists yet — deliberately deferred">
+        <div className="flex items-center gap-2 border-b border-gray-100 px-3 py-1.5 text-[11px] dark:border-ink-border">
+          <span className="rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">Transcript</span>
+          <span className="ml-auto flex items-center gap-1 text-gray-400 dark:text-gray-600" title="No PTY backend exists yet — deliberately deferred">
             <TerminalIcon className="h-3 w-3" aria-hidden="true" />
-            Terminal (soon)
-          </button>
+            Terminal
+          </span>
         </div>
       </PanelSection>
     </div>
@@ -251,12 +259,17 @@ export const WorkspaceCockpit: React.FC = () => {
   };
 
   return (
-    <div className="flex h-full min-h-0 w-full">
+    // INK BY DEFAULT (taste-review nit 1): the cockpit is the data-forward screen that opts into
+    // brand.md's ink surface now — the scoped `dark` class forces the dark variant tree for this
+    // route regardless of the app theme, and the surfaces here use the ink/panel tokens from
+    // index.css (values verbatim from brand.md). The app-wide gray→ink migration is a named
+    // follow-up, not this pass.
+    <div className="dark flex h-full min-h-0 w-full bg-ink text-gray-100">
       {/*
        * Left rail — roster. Human decision: which unit do I look at next. (See RosterRow doc.)
        */}
-      <div className="flex h-full w-64 flex-shrink-0 flex-col border-r border-gray-200 dark:border-gray-800">
-        <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-200 px-3 py-2 dark:border-gray-800">
+      <div className="flex h-full w-64 flex-shrink-0 flex-col border-r border-gray-200 dark:border-ink-border">
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-200 bg-white px-3 py-2 dark:border-ink-border dark:bg-panel">
           <span className="flex items-center gap-1.5">
             <LayoutPanelLeft className="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
             <MonoLabel>Roster</MonoLabel>
@@ -288,13 +301,13 @@ export const WorkspaceCockpit: React.FC = () => {
       <div className="flex min-w-0 flex-1 flex-col">
         {selectedAgent ? (
           <>
-            <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-2 dark:border-gray-800 dark:bg-gray-950">
+            <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-2 dark:border-ink-border dark:bg-panel">
               <span className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{selectedAgent.name}</span>
               <StatusChip status={selectedAgent.status} />
               {selectedAgent.branch && <span className="truncate font-mono text-[11px] text-gray-400">{shortBranch(selectedAgent.branch)}</span>}
               <span className="ml-auto"><Kbd keys="]" label="next tab" /></span>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto bg-gray-50 p-3 dark:bg-gray-950 md:p-4">
+            <div className="min-h-0 flex-1 overflow-y-auto bg-gray-50 p-3 dark:bg-ink md:p-4">
               <div className="space-y-4">
                 <TranscriptTimeline
                   entries={transcriptEntries}

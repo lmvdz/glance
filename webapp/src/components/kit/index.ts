@@ -9,7 +9,7 @@
  *   PanelSection  — hairline-bordered boxy panel with a header slot
  *   DiffStat      — "+N -M" chip (green/red numerals)
  */
-export { StatusChip, type StatusChipProps, type StatusChipVariant } from './StatusChip';
+export { StatusChip, type StatusChipProps, type StatusChipVariant, type StatusChipTone } from './StatusChip';
 export { Kbd, type KbdProps } from './Kbd';
 export { MonoLabel } from './MonoLabel';
 export { PanelSection, type PanelSectionProps } from './PanelSection';

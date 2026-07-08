@@ -11,7 +11,16 @@
   --color-gray-900: #1e1e20;
   --color-gray-800: #282a2c;
   --color-gray-700: #3f4145;
-  
+
+  /* brand.md ink surface ramp (dark, brand-forward). The cockpit route renders on these by
+     default (the one data-forward screen that opted in); migrating the whole app from the
+     gray ramp to ink is a named follow-up, not this pass. Values are brand.md's, verbatim. */
+  --color-ink: #0A0A0B;
+  --color-panel: #0C0C0E;
+  --color-ink-surface: #151517;
+  --color-ink-border: #1C1C20;
+  --color-ink-border-2: #2A2A2E;
+
   --wf-paper: #f8fafc;
   --wf-paper-muted: #f1f5f9;
   --wf-surface: #ffffff;
