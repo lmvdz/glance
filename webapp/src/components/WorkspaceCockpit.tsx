@@ -43,6 +43,8 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { useTaskContext } from '../context/TaskContext';
+import { PageContextScope } from '../context/PageContext';
+import { deriveFleetPageContext } from '../lib/pageContextDerive';
 import { AgentLandControls } from './chat/AgentMetaBar';
 import { validationBadge, confidenceBadge, prStateBadgeLabel } from '../lib/agent-badges';
 import { canLand, answerCommand, interruptCommand, interruptibleAgents, restartCommand, setModelCommand } from '../lib/agent-control';
@@ -654,7 +656,16 @@ export const WorkspaceCockpit: React.FC = () => {
 
   const pendingForSelected = selectedAgent?.pending[0];
 
+  // PageContext (Feature 2 D1): roster group counts, the selected agent, NEEDS-YOU ids, and the
+  // capacity chip — the exact fields D1 names for Fleet, all local state this component already
+  // computed above (no duplicate fetch).
+  const pageContext = useMemo(
+    () => deriveFleetPageContext({ roster, selectedAgent, capacity, filterText: filter }),
+    [roster, selectedAgent, capacity, filter],
+  );
+
   return (
+    <PageContextScope value={pageContext}>
     <div className="dark flex h-full min-h-0 w-full bg-ink text-gray-100">
       {/* Left rail — the Fleet roster: state-grouped, NEEDS YOU pinned at top (never collapses,
           never scrolls away — §6g), everything else scrolling underneath. */}
@@ -860,5 +871,6 @@ export const WorkspaceCockpit: React.FC = () => {
 
       <LandRail agent={selectedAgent} diffs={selectedDiffs} showToast={showToast} />
     </div>
+    </PageContextScope>
   );
 };

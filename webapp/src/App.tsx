@@ -9,6 +9,15 @@ import { WorkbenchPane } from './components/WorkbenchPane';
 import { TaskDetail } from './components/TaskDetail';
 import { TaskListView } from './components/TaskListView';
 import { TaskProvider, useTaskContext } from './context/TaskContext';
+import { PageContextProvider, PageContextScope } from './context/PageContext';
+import {
+  deriveCapabilitiesPageContext,
+  deriveIntervenePageContext,
+  deriveOrgPageContext,
+  deriveReviewPageContext,
+  deriveTasksPageContext,
+  type TasksListMode,
+} from './lib/pageContextDerive';
 import { GlobalShortcuts } from './components/GlobalShortcuts';
 import { ToastContainer } from './components/ToastContainer';
 import { ThemeProvider } from './context/ThemeContext';
@@ -25,7 +34,17 @@ import { FirstRunSetup } from './components/FirstRunSetup';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
 import { PendingApproval } from './components/PendingApproval';
+import { PageContextDebugPanel } from './components/PageContextDebugPanel';
 import { Loader2 } from 'lucide-react';
+
+/** D4 (CANVAS-AND-PAGE-CHAT.md): the LIST|CANVAS toggle is a sibling unit (C3/C4) that may land
+ *  before or after this one — read the same persisted key defensively so Tasks' PageContext picks
+ *  up 'canvas' automatically the moment it exists, without needing to coordinate landing order.
+ *  Absent/garbage → 'list', the documented default. */
+function readTasksListMode(): TasksListMode {
+  if (typeof window === 'undefined') return 'list';
+  return window.localStorage.getItem('omp.tasks.view') === 'canvas' ? 'canvas' : 'list';
+}
 
 const readStoredBoolean = (key: string, fallback: boolean) => {
   if (typeof window === 'undefined') return fallback;
@@ -34,8 +53,32 @@ const readStoredBoolean = (key: string, fallback: boolean) => {
 };
 
 const MainContent = () => {
-  const { view, selectedTaskId, currentProject } = useTaskContext();
+  const { view, selectedTaskId, currentProject, tasks, taskFilter, agents, interveneAgentId, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
   const { status } = useAuth();
+
+  // Precomputed unconditionally (Rules of Hooks — useMemo can't sit behind the early FirstRunSetup
+  // return below) so re-publishing to PageContext only happens when the underlying data actually
+  // changes, not on every unrelated re-render (TaskContext's ~10-15s polls are frequent).
+  const tasksListMode = readTasksListMode();
+  const interveneAgent = React.useMemo(() => agents.find((a) => a.id === interveneAgentId), [agents, interveneAgentId]);
+  const reviewTask = React.useMemo(() => tasks.find((t) => t.id === reviewTaskId || t.sourceId === reviewTaskId), [tasks, reviewTaskId]);
+  const tasksPageContext = React.useMemo(
+    () => deriveTasksPageContext({ tasks, selectedTaskId, taskFilter, listMode: tasksListMode }),
+    [tasks, selectedTaskId, taskFilter, tasksListMode],
+  );
+  const intervenePageContext = React.useMemo(
+    () => deriveIntervenePageContext({ interveneAgentId, agent: interveneAgent }),
+    [interveneAgentId, interveneAgent],
+  );
+  const reviewPageContext = React.useMemo(
+    () => deriveReviewPageContext({ reviewTaskId, reviewDocPath, task: reviewTask }),
+    [reviewTaskId, reviewDocPath, reviewTask],
+  );
+  const capabilitiesPageContext = React.useMemo(
+    () => deriveCapabilitiesPageContext({ capabilities, publicCatalog }),
+    [capabilities, publicCatalog],
+  );
+  const orgPageContext = React.useMemo(() => deriveOrgPageContext(), []);
 
   // db-mode dead-end: a freshly-provisioned org has no project, so every view is empty and there's
   // no way to add the first repo. Route to onboarding until a project exists. (File mode always has
@@ -48,19 +91,55 @@ const MainContent = () => {
       here: they're gone from the AppView union, and the one out-of-type-system source (the
       localStorage-persisted view) is coerced through lib/viewAlias.ts's alias map before it ever
       becomes state — automation/heat/… → omp-graph, fleet-health/attention/… → fleet,
-      federation → org, knowledge → omp-graph + the ⌘K palette auto-opening. */}
+      federation → org, knowledge → omp-graph + the ⌘K palette auto-opening.
+
+      PageContext (Feature 2 D1): fleet + graph publish their OWN context from inside
+      WorkspaceCockpit/OmpGraphPanel — the data a PageContext needs there (selected agent, roster
+      groups; graph window/mode/inspector) is local component state those two own, not anything
+      MainContent has. Tasks/capabilities/intervene/review/org all derive purely from TaskContext,
+      which MainContent already reads above, so they're wrapped right here. */}
   if (view === 'fleet') return <WorkspaceCockpit />;
-  if (view === 'intervene') return <IntervenceView />;
-  if (view === 'review') return <DesignReviewView />;
-  if (view === 'capabilities') return <CapabilityPanel />;
+  if (view === 'intervene') {
+    return (
+      <PageContextScope value={intervenePageContext}>
+        <IntervenceView />
+      </PageContextScope>
+    );
+  }
+  if (view === 'review') {
+    return (
+      <PageContextScope value={reviewPageContext}>
+        <DesignReviewView />
+      </PageContextScope>
+    );
+  }
+  if (view === 'capabilities') {
+    return (
+      <PageContextScope value={capabilitiesPageContext}>
+        <CapabilityPanel />
+      </PageContextScope>
+    );
+  }
   if (view === 'omp-graph') return <OmpGraphPanel />;
-  if (view === 'org') return <OrgSettings />;
-  if (view === 'tasks' && !selectedTaskId) return <TaskListView />;
+  if (view === 'org') {
+    return (
+      <PageContextScope value={orgPageContext}>
+        <OrgSettings />
+      </PageContextScope>
+    );
+  }
+  if (view === 'tasks' && !selectedTaskId) {
+    return (
+      <PageContextScope value={tasksPageContext}>
+        <TaskListView />
+      </PageContextScope>
+    );
+  }
 
   return (
-    <>
+    <PageContextScope value={tasksPageContext}>
       <TaskDetail />
-    </>
+    </PageContextScope>
   );
 };
 
@@ -96,6 +175,9 @@ const AppContent = () => {
           <Bot className="h-4 w-4" aria-hidden="true" /> Agent
         </button>
       )}
+      {/* Dev-only debug readout (Feature 2 D1 acceptance: "each view's context in a debug readout")
+          — ⌃⇧D toggles it; no-ops entirely in production builds. */}
+      <PageContextDebugPanel />
     </div>
   );
 };
@@ -122,12 +204,17 @@ export default function App() {
       <AuthProvider>
         <AuthGate>
           <TaskProvider>
-            <GlobalShortcuts />
-            <AppContent />
-            {/* ⌘K opens the palette from EVERY view — mounted beside (not inside) AppContent so
-                no view-level conditional can unmount it. */}
-            <CommandPalette />
-            <ToastContainer />
+            {/* PageContextProvider sits ABOVE both the publishers (every MainContent view branch)
+                and the readers (AssistantChat's context assembly, the debug panel) — see
+                context/PageContext.tsx for why this can't just be threaded as a prop. */}
+            <PageContextProvider>
+              <GlobalShortcuts />
+              <AppContent />
+              {/* ⌘K opens the palette from EVERY view — mounted beside (not inside) AppContent so
+                  no view-level conditional can unmount it. */}
+              <CommandPalette />
+              <ToastContainer />
+            </PageContextProvider>
           </TaskProvider>
         </AuthGate>
       </AuthProvider>

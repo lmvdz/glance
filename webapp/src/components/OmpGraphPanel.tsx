@@ -12,6 +12,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw, Waypoints } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
+import { PageContextScope } from '../context/PageContext';
+import { deriveGraphPageContext } from '../lib/pageContextDerive';
 import { VerdictBadge } from './ui';
 import FleetPulseCanvas, { type DepthMetric, type DepthWeek } from '../omp-graph/FleetPulseCanvas';
 import Inspector from '../omp-graph/Inspector';
@@ -238,7 +240,12 @@ export const OmpGraphPanel: React.FC = () => {
     </div>
   );
 
+  // PageContext (Feature 2 D1): the time window, FLAT/RHYTHM mode, and the inspector's current
+  // kind+id — all local state this component already owns (no duplicate fetch).
+  const pageContext = useMemo(() => deriveGraphPageContext({ days, viz, sel }), [days, viz, sel]);
+
   return (
+    <PageContextScope value={pageContext}>
     <main className="flex h-full flex-1 flex-col overflow-hidden bg-white dark:bg-gray-950">
       <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-gray-200 px-4 py-2 dark:border-gray-800">
         <div className="flex min-w-0 items-center gap-3">
@@ -290,5 +297,6 @@ export const OmpGraphPanel: React.FC = () => {
         {model && sel && <Inspector sel={sel} model={model} attribution={attribution} onClose={close} onTrace={setTrace} />}
       </div>
     </main>
+    </PageContextScope>
   );
 };

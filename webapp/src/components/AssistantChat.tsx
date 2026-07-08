@@ -11,6 +11,8 @@ import { toolView } from './chat/ToolCallGroup';
 import { useChatStreamScroll } from '../hooks/chat/useChatStreamScroll';
 import { useChatNewMessages } from '../hooks/chat/useChatNewMessages';
 import { useTaskContext } from '../context/TaskContext';
+import { usePageContext } from '../context/PageContext';
+import { serializePageContextForPrompt } from '../lib/pageContextDerive';
 import { apiJson, jsonInit } from '../lib/api';
 import { answerCommand, interruptCommand, interruptibleAgents } from '../lib/agent-control';
 import { activeWork, activeWorkDigest } from '../lib/insights';
@@ -428,6 +430,10 @@ export const ChatMessagesViewport = ({
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, showToast } = useTaskContext();
+  // Feature 2 D1/D2: whichever view the operator is actually looking at right now — published by
+  // that view's <PageContextScope> (see App.tsx/WorkspaceCockpit.tsx/OmpGraphPanel.tsx). Replaces
+  // the old selectedTask-only assembly below with the live page, not just a maybe-selected task.
+  const pageContext = usePageContext();
   const [initialChatState] = useState(readInitialChatState);
   const [sessions, setSessions] = useState<Session[]>(initialChatState.sessions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialChatState.activeSessionId);
@@ -702,7 +708,12 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       const fleetSnapshot = activeWorkDigest(activeWork(agents, features));
       const activitySnapshot = fleetActivityDigest(fleetActivityRollup(audit), fleetActivityLines(audit, agents));
       const taskContext = selectedTask ? `\n\nCurrent feature context:\n${selectedTask.id} — ${selectedTask.title}\n${selectedTask.description}` : '';
-      const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}\n\n${activitySnapshot}${taskContext}`;
+      // Feature 2 D1/D2: whichever screen is actually open (Fleet/Tasks/Graph/Capabilities/
+      // Intervene/Review/Org) — fenced the same way the fleet/activity snapshots already are, so
+      // the model treats it as reference data, never an instruction. This is what makes the chat
+      // page-aware immediately, ahead of the screenshot/annotation work (P2).
+      const pageContextBlock = serializePageContextForPrompt(pageContext);
+      const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}\n\n${activitySnapshot}${taskContext}${pageContextBlock ? `\n\n${pageContextBlock}` : ''}`;
       sendConsoleCommand({ type: 'prompt', id: nextAgentId, message, displayText: textToSend, clientTurnId });
     } catch (error: any) {
       const timeout = pendingSendTimeouts.current.get(clientTurnId);
