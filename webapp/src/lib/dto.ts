@@ -1,6 +1,9 @@
 export type AgentStatus = "starting" | "working" | "idle" | "input" | "error" | "stopped";
 export type FeatureStage = "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
 export type WorktreeProofState = "none" | "failed" | "stale" | "fresh";
+/** Mirrors backend `FeatureCategory` (src/types.ts) — the operator override on `FeatureDTO.category`.
+ *  Absent ⇒ the client derives a bucket from title+planDir (task-model.ts), falling back to 'other'. */
+export type FeatureCategoryDTO = "frontend" | "devops" | "backend" | "mcp" | "database" | "other";
 
 
 export interface PendingRequest {
@@ -186,6 +189,8 @@ export interface FeatureDTO {
   statusCounts: Partial<Record<AgentStatus, number>>;
   issueIdentifiers?: string[];
   persisted?: boolean;
+  /** Manual category pin (operator override) — see `FeatureCategoryDTO`'s doc comment. */
+  category?: FeatureCategoryDTO;
   workflowStage?: string;
   workflowProgress?: { done: number; total: number };
   workflowProof?: WorktreeProofSummaryDTO;

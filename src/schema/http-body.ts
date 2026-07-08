@@ -191,6 +191,7 @@ export const FeaturePatchBodySchema = Schema.Struct({
 	description: Schema.optional(Schema.Unknown),
 	archived: Schema.optional(Schema.Unknown),
 	stageOverride: Schema.optional(Schema.Unknown),
+	category: Schema.optional(Schema.Unknown),
 	acceptanceCriteria: Schema.optional(Schema.Unknown),
 	decisions: Schema.optional(Schema.Unknown),
 	relationships: Schema.optional(Schema.Unknown),

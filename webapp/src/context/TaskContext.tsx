@@ -110,6 +110,10 @@ interface TaskContextType {
   loadArchivedFeatures: (repo?: string) => Promise<ArchivedFeature[]>;
   toggleTaskComplete: (id: string) => void;
   updateTask: (id: string, updates: Partial<Task>) => void;
+  /** Set (or clear, with `null`) the operator category override — a dedicated setter rather than
+   *  routing through `updateTask`'s Partial<Task> diff, since `undefined` there means "field not
+   *  provided", not "clear this override"; `null` is the only unambiguous "back to Auto" signal. */
+  setTaskCategory: (id: string, category: Task['category'] | null) => void;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   sendConsoleCommand: (command: ClientCommand) => void;
   subscribeConsole: (id: string) => void;
@@ -340,6 +344,16 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       .catch((error: Error) => showToast(error.message || 'Could not update feature', 'error'));
   };
 
+  const setTaskCategory = (id: string, category: Task['category'] | null) => {
+    const task = tasks.find((item) => item.id === id);
+    if (!task) return;
+    const featureId = task.sourceId ?? id;
+    void apiJson(`/api/features/${encodeURIComponent(featureId)}`, jsonInit('PATCH', { repo: task.properties.project.id, category }))
+      .then(() => squad.reload())
+      .then(() => showToast(category ? `Category set to ${category}` : 'Category reset to auto'))
+      .catch((error: Error) => showToast(error.message || 'Could not update category', 'error'));
+  };
+
   const installCapability = (packId: string) => {
     void apiJson('/api/capability-installs', jsonInit('POST', { packId, enable: true }))
       .then(() => squad.reload())
@@ -395,7 +409,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

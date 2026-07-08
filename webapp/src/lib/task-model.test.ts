@@ -70,6 +70,37 @@ test("issueIdentifier only returns a genuine Plane ticket id, never the plan-dir
   expect(issueIdentifier({ id: "a1b2c3d4-uuid" })).toBeNull();
 });
 
+// #category-honesty (CANVAS-AND-PAGE-CHAT.md D1): category was a 5-value union computed by a
+// regex over title+planDir, unmatched falling back to a silent 'mcp' junk-drawer default. These
+// three tests cover the fix's contract: an explicit stored override always wins; the regex still
+// derives the obvious buckets; and anything the regex doesn't recognize is honestly 'other', not
+// 'mcp'.
+test("taskCategory: an explicit feature.category override wins over the regex, even when the regex would match", () => {
+  // Title matches the frontend regex (/ui|web|frontend|react|css|dashboard/) — the override must
+  // still win, proving derivation order is override-first, not override-as-tiebreak.
+  const task = taskFromFeature({ ...feature, title: "Build web dashboard", category: "devops" }, [], {
+    id: feature.repo, name: "omp-squad", shortCode: "OS", colorClass: "bg-blue-500",
+  });
+  expect(task.category).toBe("devops");
+  expect(task.categoryOverride).toBe("devops");
+});
+
+test("taskCategory: no override, title matches nothing recognizable → 'other', not 'mcp'", () => {
+  const task = taskFromFeature({ ...feature, title: "Quarterly planning sync", planDir: undefined }, [], {
+    id: feature.repo, name: "omp-squad", shortCode: "OS", colorClass: "bg-blue-500",
+  });
+  expect(task.category).toBe("other");
+  expect(task.categoryOverride).toBeUndefined();
+});
+
+test("taskCategory: no override falls through to the regex-derived bucket", () => {
+  const task = taskFromFeature({ ...feature, title: "Migrate the schema", planDir: undefined }, [], {
+    id: feature.repo, name: "omp-squad", shortCode: "OS", colorClass: "bg-blue-500",
+  });
+  expect(task.category).toBe("database");
+  expect(task.categoryOverride).toBeUndefined();
+});
+
 test("taskFromFeature preserves proof provenance and readiness", () => {
   const task = taskFromFeature({ ...feature, worktrees: [{ agentId: "a1", agentName: "Agent", branch: "squad/a1", worktree: "/tmp/wt", changedFiles: 2, ahead: 1, behind: 0, readiness: "ahead", proof: { state: "fresh", ranAt: 123, artifacts: 1 } }], proof: { fresh: 1, failed: 0, stale: 0, none: 0, latestRanAt: 123, artifacts: 1 }, readiness: { ready: true, state: "ready", blockers: [], nextAction: "Land the verified candidate." }, planRevisionCandidates: [{ id: "c1", featureId: "feat-1", repo: feature.repo, planPath: "plans/web-dashboard/01.md", summary: "Tighten acceptance", state: "candidate", createdAt: 1, updatedAt: 1 }] }, [], {
     id: feature.repo,

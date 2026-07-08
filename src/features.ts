@@ -898,6 +898,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			issueIdentifiers: hasIssues ? issueIds : undefined,
 			persisted: true,
 			stageOverride: pf.stageOverride,
+			category: pf.category,
 			workflowAgentId: pf.workflowAgentId,
 			workflowStage: wfActive,
 			workflowProgress,

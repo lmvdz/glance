@@ -8,8 +8,39 @@ interface TaskPropertiesProps {
   task: Task;
 }
 
+/** Every value the category chip's select can pin — the full `Task['category']` union. */
+export const CATEGORY_OPTIONS: Task['category'][] = ['frontend', 'backend', 'devops', 'mcp', 'database', 'other'];
+
+export interface CategoryChipProps {
+  /** The effective (resolved) category — override if set, else derived, else 'other'. Drives the badge tone. */
+  category: Task['category'];
+  /** The raw override, if one is set. `undefined` ⇒ the select shows "Auto" as selected. */
+  override?: Task['category'];
+  onChange: (category: Task['category'] | null) => void;
+}
+
+/**
+ * The editable category chip — a native `<select>` styled to look like the existing read-only
+ * badge (D1: "an EDITABLE category chip ... a small select/menu on the existing chip"). Choosing
+ * "Auto" clears the override (`onChange(null)`); choosing an explicit value pins it. Kept pure
+ * (no context) so it SSR-renders standalone for every state without a TaskProvider.
+ */
+export const CategoryChip: React.FC<CategoryChipProps> = ({ category, override, onChange }) => (
+  <select
+    aria-label="Category"
+    value={override ?? ''}
+    onChange={(event) => onChange((event.target.value || null) as Task['category'] | null)}
+    className={`cursor-pointer appearance-none rounded border-0 px-1.5 py-0.5 text-[10px] font-medium outline-none focus:ring-2 focus:ring-amber-500/40 ${getCategoryBadge(category)}`}
+  >
+    <option value="">Auto · {category}</option>
+    {CATEGORY_OPTIONS.map((option) => (
+      <option key={option} value={option}>{option}</option>
+    ))}
+  </select>
+);
+
 export const TaskProperties = ({ task }: TaskPropertiesProps) => {
-  const { updateTask } = useTaskContext();
+  const { updateTask, setTaskCategory } = useTaskContext();
   const [isAddingTag, setIsAddingTag] = useState(false);
   const [newTagText, setNewTagText] = useState('');
 
@@ -65,9 +96,7 @@ export const TaskProperties = ({ task }: TaskPropertiesProps) => {
             <div className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-2 w-24">
               <Layers className="w-3.5 h-3.5" /> Category
             </div>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${getCategoryBadge(task.category)}`}>
-              {task.category}
-            </span>
+            <CategoryChip category={task.category} override={task.categoryOverride} onChange={(category) => setTaskCategory(task.id, category)} />
           </div>
 
           <div className="flex items-center justify-between">
