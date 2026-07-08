@@ -1654,6 +1654,17 @@ export const TaskDetail = () => {
                 onImplement={() => void startImplementation()}
               />
 
+              {/* Typed session pipeline (reference A) — first block under the header: "which of this
+                  task's sessions do I look at next, and what kind of work is each one doing?" Read
+                  from the same activeAgents the Agent-detail cockpit below renders; a row click
+                  scrolls to that agent's full control panel instead of duplicating its controls. */}
+              <div className="mb-6">
+                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
+                  Sessions <span className="text-gray-500 font-medium">{sessionRows.length}</span>
+                </div>
+                <TaskSessionsTable rows={sessionRows} onOpenSession={openSession} />
+              </div>
+
               {planFlowConcerns.length >= 2 && (
                 <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
                   <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
@@ -1773,16 +1784,6 @@ export const TaskDetail = () => {
               </div>
               </div>
               </details>
-
-              {/* Typed session pipeline (reference A) — the task-level view of "what work is
-                  happening", read from the same activeAgents the detailed cockpit below renders.
-                  Row click scrolls to that agent's full control panel rather than duplicating it. */}
-              <div className="mb-6">
-                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-                  Sessions <span className="text-gray-500 font-medium">{sessionRows.length}</span>
-                </div>
-                <TaskSessionsTable rows={sessionRows} onOpenSession={openSession} />
-              </div>
 
               {activeAgents.length > 0 && (
                 <div className="mb-6">
@@ -1961,7 +1962,7 @@ export const TaskDetail = () => {
           {/* Artifacts rail (reference A) — always visible once a task is open, independent of the
               Properties toggle; it's the answer to "what has this task produced", not a details
               drill-down like Properties is. */}
-          <aside className="hidden min-h-[22rem] w-64 flex-shrink-0 flex-col border-t border-gray-200 dark:border-gray-800 lg:flex lg:min-h-0 lg:border-l lg:border-t-0">
+          <aside className="hidden min-h-[22rem] w-64 flex-shrink-0 flex-col border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950 lg:flex lg:min-h-0 lg:border-l lg:border-t-0">
             <TaskArtifactsRail
               documents={planDocuments}
               comments={pipeline?.comments ?? []}

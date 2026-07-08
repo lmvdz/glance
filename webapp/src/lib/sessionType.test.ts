@@ -18,7 +18,7 @@ describe('deriveSessionType', () => {
     expect(deriveSessionType({})).toBe('Session');
   });
 
-  test('prefers the live workflow node label over the static agent name', () => {
+  test('uses the live workflow node label when the name carries no phase word', () => {
     const agent = {
       name: 'auth-middleware-refactor',
       workflowGraph: { version: 1 as const, name: 'research-plan-implement', nodes: [{ id: 'plan', kind: 'agent', label: 'Plan' }], edges: [], start: 'plan', exit: 'plan' },
@@ -27,13 +27,23 @@ describe('deriveSessionType', () => {
     expect(deriveSessionType(agent)).toBe('Plan');
   });
 
-  test('falls back to the name when the current node id has no matching graph node', () => {
+  test('a typed name wins over the live node label — type is spawn identity, not current phase', () => {
+    // Verified live: a research session sitting on its Verify node must still chip as Research.
     const agent = {
-      name: 'Research prior art',
+      name: 'research-profile-catalog-prior',
+      workflowGraph: { version: 1 as const, name: 'wf', nodes: [{ id: 'verify', kind: 'command', label: 'Verify' }], edges: [], start: 'verify', exit: 'verify' },
+      workflowState: { currentNode: 'verify', visits: {}, vars: {}, rollup: [] },
+    };
+    expect(deriveSessionType(agent)).toBe('Research');
+  });
+
+  test('falls back to Session when neither name nor current node label carries a phase word', () => {
+    const agent = {
+      name: 'chat',
       workflowGraph: { version: 1 as const, name: 'wf', nodes: [{ id: 'other', kind: 'agent', label: 'Something else' }], edges: [], start: 'other', exit: 'other' },
       workflowState: { currentNode: 'missing', visits: {}, vars: {}, rollup: [] },
     };
-    expect(deriveSessionType(agent)).toBe('Research');
+    expect(deriveSessionType(agent)).toBe('Session');
   });
 });
 

@@ -32,16 +32,24 @@ const TYPE_PATTERNS: ReadonlyArray<readonly [RegExp, SessionType]> = [
  *  fixture without constructing a full AgentDTO. */
 export type SessionTypeSource = Pick<AgentDTO, 'name' | 'workflowGraph' | 'workflowState'>;
 
-/** Classify one agent/session into a task-pipeline type chip. Live node label wins over the static
- *  name (a long-running workflow's phase changes over its life; the name was set once at spawn). */
+/** Classify one agent/session into a task-pipeline type chip. The spawn-time NAME wins: the chip
+ *  answers "what kind of session is this?", not "what phase is it in right now" (verified live: a
+ *  research session mid-Verify-node read as VERIFY when the node label won, conflating type with
+ *  phase — the status chip already covers liveness). The current workflow node's label is the
+ *  fallback for agents whose names carry no phase word at all. */
 export function deriveSessionType(agent: SessionTypeSource): SessionType {
+  const fromName = matchType(agent.name ?? '');
+  if (fromName) return fromName;
   const currentNodeId = agent.workflowState?.currentNode;
   const nodeLabel = currentNodeId ? agent.workflowGraph?.nodes.find((node) => node.id === currentNodeId)?.label : undefined;
-  const signal = nodeLabel ?? agent.name ?? '';
+  return (nodeLabel && matchType(nodeLabel)) || 'Session';
+}
+
+function matchType(signal: string): SessionType | null {
   for (const [pattern, type] of TYPE_PATTERNS) {
     if (pattern.test(signal)) return type;
   }
-  return 'Session';
+  return null;
 }
 
 /** Tone bucket per session type, for StatusChip-style coloring — ember (agent-active) family for
