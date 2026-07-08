@@ -268,6 +268,25 @@ export async function applyRegressionGate(p: {
 	const mergedRun = await runGate(fullSuite, p.repo);
 	if (mergedRun.code === 0) return null; // full suite clean on merged main
 
+	// Unrunnable gate ⇒ FAIL CLOSED (gate-image incident, second-order finding): exit 127 means the
+	// gate COMMAND could not even execute (command not found — e.g. `npm` missing from the sandbox
+	// image), not that the merged code is red. Without this check the environment failure reproduces
+	// IDENTICALLY on the base run below, the two extracted failure sets match, and
+	// decideRegressionGate reads it as "same pre-existing red baseline" — ALLOWING a land whose gate
+	// never actually ran. An unverifiable land must be refused, and it is retryable: the environment
+	// is the problem, not the branch — fix the image/toolchain and the same branch lands unchanged.
+	if (mergedRun.code === 127) {
+		await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
+		return {
+			ok: false,
+			committed: p.committed,
+			merged: false,
+			retryable: true,
+			message: p.message,
+			detail: `regression gate could not run (exit 127 — command not found): ${fullSuite}\n${truncate(mergedRun.output, 300)}`,
+		};
+	}
+
 	// Full suite failed on merged main — determine whether branch introduced new failures.
 	await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
 	const baseRun = await runGate(fullSuite, p.repo);

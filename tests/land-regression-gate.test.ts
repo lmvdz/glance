@@ -176,6 +176,31 @@ test("flag on + base has BASE_RED + branch removes it (fixes regression) → all
 	expect((await gitOut(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).not.toContain("BASE_RED");
 });
 
+test("UNRUNNABLE gate (exit 127 — command not found) FAILS CLOSED: refused retryable, never fail-open via matching env-failure sets", async () => {
+	// Second-order finding of the gate-image incident: a binary missing from the gate environment
+	// (e.g. `npm` absent from the sandbox image) makes the full suite die IDENTICALLY on merged and
+	// base — decideRegressionGate's set comparison then read it as "same pre-existing red baseline"
+	// and ALLOWED a land whose gate never ran. exit 127 must refuse (retryable — the env is the
+	// problem, not the branch) instead of merging unverified code.
+	process.env.OMP_SQUAD_REGRESSION_GATE = "1";
+	const repo = await gateRepo("rg-127-");
+	// The full-suite gate command now invokes a binary that cannot exist → bash exits 127 everywhere.
+	await fs.writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { check: "true", test: "glance-no-such-binary-xyz" } }));
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "gate uses a missing binary");
+	const head0 = await gitOut(repo, "rev-parse", "HEAD");
+	const wt = await branchWorktree(repo, "feat", { "feature.txt": "new\n" });
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true" });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.retryable).toBe(true); // environment failure — the branch is not at fault
+	expect(res.detail).toContain("could not run");
+	expect(res.detail).toContain("127");
+	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0); // main rolled back, nothing landed
+});
+
 test("flag on + autoresolve: conflict-resolved branch that introduces NEW_RED is rolled back before reviewer", async () => {
 	process.env.OMP_SQUAD_REGRESSION_GATE = "1";
 	process.env.OMP_SQUAD_AUTORESOLVE = "1";
