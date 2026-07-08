@@ -270,10 +270,11 @@ function commentFromApi(comment: ArtifactCommentDTO): TaskComment {
 
 
 const PLAN_MARKDOWN_CLASS = "prose prose-sm max-w-none dark:prose-invert prose-headings:scroll-mt-4 prose-headings:text-gray-900 dark:prose-headings:text-gray-100 prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-900 dark:prose-strong:text-gray-100 prose-code:rounded prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:text-gray-900 dark:prose-code:bg-gray-900 dark:prose-code:text-gray-100 prose-pre:border prose-pre:border-gray-200 prose-pre:bg-gray-50 prose-pre:text-gray-900 dark:prose-pre:border-gray-800 dark:prose-pre:bg-gray-950 dark:prose-pre:text-gray-100 prose-table:text-sm prose-th:border prose-th:border-gray-200 prose-th:bg-gray-50 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-gray-200 prose-td:px-3 prose-td:py-2 dark:prose-th:border-gray-800 dark:prose-th:bg-gray-900 dark:prose-td:border-gray-800";
-const PLAN_NAV_BUTTON_CLASS = "inline-flex min-h-8 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900 dark:focus-visible:ring-offset-gray-950";
-const PLAN_DOC_TAB_BASE_CLASS = "group min-h-9 max-w-56 flex-shrink-0 rounded-lg border px-2.5 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950";
-const PLAN_DOC_TAB_ACTIVE_CLASS = "border-amber-300 bg-amber-50 text-amber-800 shadow-sm dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200";
-const PLAN_DOC_TAB_IDLE_CLASS = "border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300 dark:hover:border-gray-700 dark:hover:bg-gray-900";
+// Compact plan-action button — the left-pane Artifacts toolbar's non-primary actions (Module,
+// Sync tickets, Clear orphans). Smaller than the old doc-viewer toolbar's nav-button class (now
+// deleted along with the toolbar it lived in) since it now lives inside a PanelSection toolbar
+// row rather than a full-width doc-viewer header.
+const ARTIFACT_ACTION_BUTTON_CLASS = "inline-flex min-h-7 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900";
 
 
 export const PlanMarkdown = React.forwardRef<HTMLElement, React.HTMLAttributes<HTMLElement> & { content: string }>(({ content, className = '', ...props }, ref) => (
@@ -664,6 +665,26 @@ export const TaskDetail = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedTaskId]);
+  // `[` / `]` cycle the selected plan document. This is the keyboard replacement for the
+  // doc-viewer toolbar's old visible Prev/Next buttons — one of three surfaces that all did the
+  // same "pick a plan doc" job (toolbar Prev/Next, the DOCUMENTS strip, the ARTIFACTS rail);
+  // consolidated down to the left-pane Artifacts section (TaskArtifactsRail below), with these
+  // keys plus its Kbd chips instead of duplicated on-screen nav buttons.
+  React.useEffect(() => {
+    if (!selectedTaskId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '[' && e.key !== ']') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      const path = e.key === '[' ? previousPlanPath : nextPlanPath;
+      if (!path) return;
+      e.preventDefault();
+      selectPlanDoc(path);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedTaskId, previousPlanPath, nextPlanPath, selectPlanDoc]);
   // Auto-subscribe the first working agent so transcript entries arrive via WS.
   React.useEffect(() => {
     const working = activeAgents.find((a) => a.status === 'working' || a.status === 'starting');
@@ -1251,157 +1272,28 @@ export const TaskDetail = () => {
     return (
       <>
         <div className="flex-shrink-0 border-b border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
-              <div className="min-w-0">
-                <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
-                  <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                  Plan markdown
-                </div>
-                <h2 className="truncate text-[15px] font-semibold text-gray-900 dark:text-gray-100">{selectedPlanDoc.title || selectedPlanDoc.file}</h2>
-                <div className="mt-1 truncate font-mono text-[11px] text-gray-500 dark:text-gray-400">{selectedPlanDoc.path}</div>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-gray-500 dark:text-gray-400">
-                  <span className="rounded-full bg-gray-100 px-2 py-0.5 font-medium text-gray-600 dark:bg-gray-900 dark:text-gray-300">{selectedPlanIndex + 1} of {planDocuments.length}</span>
-                  <span>Updated {formatWhen(selectedPlanDoc.updatedAt)}</span>
-                </div>
+          <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
+            <div className="min-w-0">
+              <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
+                <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                Plan markdown
               </div>
-              <div className="flex shrink-0 flex-col gap-2">
-                <div className="flex items-center gap-2" aria-label="Plan document navigation">
-                  <button
-                    type="button"
-                    disabled={!previousPlanPath}
-                    onClick={() => previousPlanPath && selectPlanDoc(previousPlanPath)}
-                    className={PLAN_NAV_BUTTON_CLASS}
-                    aria-label="Previous plan document"
-                  >
-                    <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-                    Prev
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!nextPlanPath}
-                    onClick={() => nextPlanPath && selectPlanDoc(nextPlanPath)}
-                    className={PLAN_NAV_BUTTON_CLASS}
-                    aria-label="Next plan document"
-                  >
-                    Next
-                    <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                  </button>
-                </div>
-                <div className="flex flex-wrap items-center justify-end gap-2" aria-label="Plan actions">
-                  <button
-                    type="button"
-                    disabled={planAction !== null}
-                    onClick={() => void startImplementation()}
-                    className="inline-flex min-h-8 items-center gap-1 rounded-md bg-gray-900 px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200 dark:focus-visible:ring-offset-gray-950"
-                  >
-                    <Bot className="h-4 w-4" aria-hidden="true" />
-                    {planAction === 'implement' ? 'Starting...' : 'Implement'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={planAction !== null}
-                    onClick={() => void createPlaneModule(false)}
-                    className={PLAN_NAV_BUTTON_CLASS}
-                  >
-                    <Box className="h-4 w-4" aria-hidden="true" />
-                    {planAction === 'module' ? 'Creating...' : 'Module'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={planAction !== null}
-                    onClick={() => void createPlaneModule(true)}
-                    className={PLAN_NAV_BUTTON_CLASS}
-                  >
-                    <Plus className="h-4 w-4" aria-hidden="true" />
-                    {planAction === 'module-tickets' ? 'Creating...' : 'Module + tickets'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={planAction !== null}
-                    onClick={() => void repairPlaneModule(false)}
-                    className={PLAN_NAV_BUTTON_CLASS}
-                  >
-                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                    {planAction === 'repair' ? 'Syncing...' : 'Sync tickets'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={planAction !== null}
-                    onClick={() => void repairPlaneModule(true)}
-                    className={PLAN_NAV_BUTTON_CLASS}
-                  >
-                    <X className="h-4 w-4" aria-hidden="true" />
-                    {planAction === 'clear-orphans' ? 'Clearing...' : 'Clear orphans'}
-                  </button>
-                </div>
-              </div>
+              <h2 className="truncate text-[15px] font-semibold text-gray-900 dark:text-gray-100">{selectedPlanDoc.title || selectedPlanDoc.file}</h2>
+              <div className="mt-1 truncate font-mono text-[11px] text-gray-500 dark:text-gray-400">{selectedPlanDoc.path}</div>
+              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updated {formatWhen(selectedPlanDoc.updatedAt)}</div>
             </div>
-            {planeLinks && (planeLinks.moduleUrl || planeLinks.tickets === null || (planeLinks.tickets?.length ?? 0) > 0) && (
-              <div className="flex flex-wrap items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-900/50 dark:text-gray-300" aria-label="Plane links">
-                <span className="inline-flex items-center gap-1 font-semibold text-gray-700 dark:text-gray-200">
-                  <Box className="h-3.5 w-3.5" aria-hidden="true" />
-                  Plane
-                </span>
-                {planeLinks.moduleUrl && (
-                  <a href={planeLinks.moduleUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-200 bg-white px-2 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-amber-300 dark:hover:bg-amber-950/40">
-                    Module linked
-                  </a>
-                )}
-                {planeLinks.tickets === null ? (
-                  <span className="rounded bg-amber-50 px-2 py-1 font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">Tickets unavailable</span>
-                ) : (
-                  <span className="rounded bg-gray-100 px-2 py-1 font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">{planeLinks.tickets.length} ticket{planeLinks.tickets.length === 1 ? '' : 's'}</span>
-                )}
-                {planeLinks.tickets?.slice(0, 4).map((ticket) => (
-                  <a key={ticket.identifier} href={ticket.url} target="_blank" rel="noreferrer" className="max-w-44 truncate rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300 dark:hover:bg-gray-900" title={`${ticket.identifier}: ${ticket.name}`}>
-                    {ticket.identifier}
-                  </a>
-                ))}
-                {(planeLinks.tickets?.length ?? 0) > 4 && <span className="text-gray-400">+{(planeLinks.tickets?.length ?? 0) - 4} more</span>}
-              </div>
+            {/* Document selection (Prev/Next, the Documents strip, action buttons) moved to the
+                left-pane Artifacts section — this pane keeps only content + its title line, plus
+                the review-flow link, which is specific to whichever doc is currently open here. */}
+            {featureId && (
+              <button
+                type="button"
+                onClick={() => openReview(featureId, selectedPlanDoc.path)}
+                className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-medium text-amber-700 hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300 dark:hover:bg-amber-950/40"
+              >
+                Design Review →
+              </button>
             )}
-            <div>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-[11px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Documents</div>
-                <div className="flex items-center gap-3">
-                  <div className="text-[11px] text-gray-400 dark:text-gray-500">{planDocuments.length} total</div>
-                  {featureId && selectedPlanDoc && (
-                    <button
-                      type="button"
-                      onClick={() => openReview(featureId, selectedPlanDoc.path)}
-                      className="min-h-8 rounded px-2 text-[11px] font-medium text-amber-700 hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300 dark:hover:bg-amber-950/40"
-                    >
-                      Design Review →
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-custom" aria-label="Plan documents">
-                {planDocuments.map((doc, index) => {
-                  const active = doc.path === selectedPlanDoc.path;
-                  const kind = planDocKind(doc.file, doc.concern);
-                  return (
-                    <button
-                      key={doc.path}
-                      type="button"
-                      onClick={() => selectPlanDoc(doc.path)}
-                      className={`${PLAN_DOC_TAB_BASE_CLASS} ${active ? PLAN_DOC_TAB_ACTIVE_CLASS : PLAN_DOC_TAB_IDLE_CLASS}`}
-                      aria-current={active ? 'page' : undefined}
-                      title={doc.path}
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold ${active ? 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200' : 'bg-gray-100 text-gray-500 group-hover:text-gray-700 dark:bg-gray-900 dark:text-gray-400 dark:group-hover:text-gray-200'}`}>{index + 1}</span>
-                        <span className="min-w-0">
-                          <span className="block truncate text-xs font-semibold">{doc.title || doc.file}</span>
-                          <span className="mt-0.5 block text-[10px] uppercase tracking-wider text-gray-400 dark:text-gray-500">{kind}</span>
-                        </span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
           </div>
         </div>
           <div ref={planScrollRef} className="relative flex-1 overflow-y-auto p-4 scrollbar-custom">
@@ -1689,6 +1581,88 @@ export const TaskDetail = () => {
                   Sessions <span className="text-gray-500 font-medium">{sessionRows.length}</span>
                 </div>
                 <TaskSessionsTable rows={sessionRows} onOpenSession={openSession} />
+              </div>
+
+              {/* Artifacts — the ONE doc-selection surface (reference A's rail, moved here per
+                  user direction instead of a fourth right-hand column). Selecting a doc drives the
+                  markdown pane on the right; plan-level actions (Implement/Module/tickets) live in
+                  its toolbar since they act on the whole plan, not one document. This replaces the
+                  doc-viewer toolbar's Prev/Next+actions and the DOCUMENTS strip, and the far-right
+                  ARTIFACTS rail — three surfaces that all did the same job. */}
+              <div className="mb-6">
+                <TaskArtifactsRail
+                  documents={planDocuments}
+                  comments={pipeline?.comments ?? []}
+                  doneProof={doneProof}
+                  selectedPath={selectedPlanDoc?.path ?? null}
+                  onSelect={selectPlanDoc}
+                  className=""
+                  bodyClassName=""
+                  right={
+                    planDocuments.length > 0 ? (
+                      <span className="flex items-center gap-1.5">
+                        <span>{selectedPlanIndex + 1}/{planDocuments.length}</span>
+                        <Kbd keys="[" />
+                        <Kbd keys="]" />
+                      </span>
+                    ) : undefined
+                  }
+                  toolbar={
+                    <div className="space-y-2 border-b border-gray-100 px-3 py-2 dark:border-gray-800">
+                      <div className="flex flex-wrap items-center gap-1.5" aria-label="Plan actions">
+                        <button
+                          type="button"
+                          disabled={planAction !== null}
+                          onClick={() => void startImplementation()}
+                          className="inline-flex min-h-7 items-center gap-1 rounded-md bg-gray-900 px-2 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                        >
+                          <Bot className="h-3.5 w-3.5" aria-hidden="true" />
+                          {planAction === 'implement' ? 'Starting...' : 'Implement'}
+                        </button>
+                        <button type="button" disabled={planAction !== null} onClick={() => void createPlaneModule(false)} className={ARTIFACT_ACTION_BUTTON_CLASS}>
+                          <Box className="h-3.5 w-3.5" aria-hidden="true" />
+                          {planAction === 'module' ? 'Creating...' : 'Module'}
+                        </button>
+                        <button type="button" disabled={planAction !== null} onClick={() => void createPlaneModule(true)} className={ARTIFACT_ACTION_BUTTON_CLASS}>
+                          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                          {planAction === 'module-tickets' ? 'Creating...' : 'Module + tickets'}
+                        </button>
+                        <button type="button" disabled={planAction !== null} onClick={() => void repairPlaneModule(false)} className={ARTIFACT_ACTION_BUTTON_CLASS}>
+                          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          {planAction === 'repair' ? 'Syncing...' : 'Sync tickets'}
+                        </button>
+                        <button type="button" disabled={planAction !== null} onClick={() => void repairPlaneModule(true)} className={ARTIFACT_ACTION_BUTTON_CLASS}>
+                          <X className="h-3.5 w-3.5" aria-hidden="true" />
+                          {planAction === 'clear-orphans' ? 'Clearing...' : 'Clear orphans'}
+                        </button>
+                      </div>
+                      {planeLinks && (planeLinks.moduleUrl || planeLinks.tickets === null || (planeLinks.tickets?.length ?? 0) > 0) && (
+                        <div className="flex flex-wrap items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5 text-[11px] text-gray-600 dark:border-gray-800 dark:bg-gray-900/50 dark:text-gray-300" aria-label="Plane links">
+                          <span className="inline-flex items-center gap-1 font-semibold text-gray-700 dark:text-gray-200">
+                            <Box className="h-3 w-3" aria-hidden="true" />
+                            Plane
+                          </span>
+                          {planeLinks.moduleUrl && (
+                            <a href={planeLinks.moduleUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-200 bg-white px-1.5 py-0.5 font-medium text-amber-700 transition-colors hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-amber-300 dark:hover:bg-amber-950/40">
+                              Module linked
+                            </a>
+                          )}
+                          {planeLinks.tickets === null ? (
+                            <span className="rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">Tickets unavailable</span>
+                          ) : (
+                            <span className="rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">{planeLinks.tickets.length} ticket{planeLinks.tickets.length === 1 ? '' : 's'}</span>
+                          )}
+                          {planeLinks.tickets?.slice(0, 4).map((ticket) => (
+                            <a key={ticket.identifier} href={ticket.url} target="_blank" rel="noreferrer" className="max-w-44 truncate rounded border border-gray-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300 dark:hover:bg-gray-900" title={`${ticket.identifier}: ${ticket.name}`}>
+                              {ticket.identifier}
+                            </a>
+                          ))}
+                          {(planeLinks.tickets?.length ?? 0) > 4 && <span className="text-gray-400">+{(planeLinks.tickets?.length ?? 0) - 4} more</span>}
+                        </div>
+                      )}
+                    </div>
+                  }
+                />
               </div>
 
               {planFlowConcerns.length >= 2 && (
@@ -1984,18 +1958,6 @@ export const TaskDetail = () => {
           </div>
           <aside className="flex min-h-[22rem] min-w-0 flex-1 flex-col border-t border-gray-200 bg-gray-50/60 dark:border-gray-800 dark:bg-gray-950/60 lg:min-h-0 lg:border-l lg:border-t-0">
             {renderPlanDocPane()}
-          </aside>
-          {/* Artifacts rail (reference A) — always visible once a task is open, independent of the
-              Properties toggle; it's the answer to "what has this task produced", not a details
-              drill-down like Properties is. */}
-          <aside className="hidden min-h-[22rem] w-64 flex-shrink-0 flex-col border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950 lg:flex lg:min-h-0 lg:border-l lg:border-t-0">
-            <TaskArtifactsRail
-              documents={planDocuments}
-              comments={pipeline?.comments ?? []}
-              doneProof={doneProof}
-              selectedPath={selectedPlanDoc?.path ?? null}
-              onSelect={selectPlanDoc}
-            />
           </aside>
           {showProperties && <TaskProperties task={task} />}
 

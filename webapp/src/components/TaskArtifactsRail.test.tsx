@@ -53,4 +53,44 @@ describe('TaskArtifactsRail', () => {
     expect(html).toContain('done-proof');
     expect(html).toContain('>GREEN<'); // kit StatusChip uppercases free-text labels
   });
+
+  // TaskDetail now embeds this rail directly in the left pane instead of a fixed-height right
+  // column, and hangs the plan-level action row (Implement/Module/…) plus doc-count + prev/next
+  // Kbd hints off it — these two slots are the seam that consolidation depends on.
+  test('renders a toolbar slot between the header and the document list', () => {
+    const html = renderToStaticMarkup(
+      <TaskArtifactsRail
+        documents={[]}
+        comments={[]}
+        doneProof={null}
+        selectedPath={null}
+        onSelect={() => {}}
+        toolbar={<div data-testid="plan-actions">Implement</div>}
+      />,
+    );
+    expect(html).toContain('plan-actions');
+    expect(html).toContain('Implement');
+  });
+
+  test('renders header-slot content passed via `right`', () => {
+    const html = renderToStaticMarkup(
+      <TaskArtifactsRail
+        documents={[doc({ file: '00-overview.md', path: 'plans/x/00-overview.md' })]}
+        comments={[]}
+        doneProof={null}
+        selectedPath={null}
+        onSelect={() => {}}
+        right={<span>1/3</span>}
+      />,
+    );
+    expect(html).toContain('1/3');
+  });
+
+  test('embeds without the standalone rail\'s fixed h-full sizing when className/bodyClassName are overridden', () => {
+    const html = renderToStaticMarkup(
+      <TaskArtifactsRail documents={[]} comments={[]} doneProof={null} selectedPath={null} onSelect={() => {}} className="" bodyClassName="" />,
+    );
+    expect(html).not.toContain('h-full');
+    expect(html).not.toContain('overflow-y-auto');
+  });
 });
