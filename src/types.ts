@@ -14,6 +14,7 @@ import type { TransitionReason } from "./agent-lifecycle.ts";
 import type { SubagentNode } from "./subagents.ts";
 import type { ModelLineage } from "./model-lineage.ts";
 import type { LensId } from "./lens-select.ts";
+import type { HarnessScorecard } from "./harness-scorecard.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -803,6 +804,14 @@ export interface AgentDTO {
 	adopted?: boolean;
 	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
 	queued?: boolean;
+	/** Pre-dispatch harness scorecard (advisory shadow, `harness-scorecard.ts`) — a static score of this
+	 *  unit's harness bundle across the five subsystems (instructions/tools/environment/state/feedback),
+	 *  computed once at `createWithId` and stamped here for display. COMPUTED, NOT PERSISTED: absent from
+	 *  `PersistedAgent`, so it is never written to state.json and never influences a restore/adopt path —
+	 *  a fresh score is always exactly as correct as this spawn's inputs, and an adopted/restored agent
+	 *  from before this shipped (or from a restart, which doesn't recompute it) simply renders without one.
+	 *  Advisory only: nothing reads this field to gate, delay, or retry a spawn. */
+	harnessScorecard?: HarnessScorecard;
 }
 
 /**
