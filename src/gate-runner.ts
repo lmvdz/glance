@@ -29,17 +29,18 @@
  * Async planner: returns argv + env + whether it is sandboxed; the three gate spawn sites
  * await it and execute. Host mode is byte-identical to the pre-sandbox behavior.
  *
- * IMAGE CONTRACT: the image must provide `bash`, the repo's toolchain (e.g. bun for bun repos),
- * AND `git`. Git is not optional: the gate cwd is a git WORKTREE (the main repo is bind-mounted
- * precisely so `.git` gitdir resolution works inside the container), and real suites spawn `git`
- * from test code (this repo alone has ~85 `Bun.spawn(["git", ...])` sites). The ompsq-432
- * incident proved the failure mode: `oven/bun:1` ships bash+bun but NO git, so every gated
- * full-suite verify died deterministically with `error: Executable not found in $PATH: "git"` —
- * while the same command passed on the host — and the unit burned its whole
- * codefix→fixup→escalate cascade on an environment defect it could never fix. Auto mode
- * therefore derives {@link DERIVED_SANDBOX_IMAGE} (base + git) locally at first use; an
- * operator-named image (`OMP_SQUAD_GATE_SANDBOX=<image>` / `OMP_SQUAD_GATE_SANDBOX_IMAGE`) is
- * honored verbatim and must satisfy the contract itself.
+ * IMAGE CONTRACT (empirical): the image must be able to run the repo's own verify command end to
+ * end — concretely, every binary in {@link SUITE_BINARIES}. Git is not optional (the gate cwd is a
+ * git WORKTREE — the main repo is bind-mounted precisely so `.git` gitdir resolution works inside
+ * the container — and this repo has ~85 `Bun.spawn(["git", ...])` test sites); jq drives the
+ * repo's own hook scripts; npm is what detectPackageManager hands the regression gate for non-bun
+ * lockfile shapes. Two incidents proved the failure mode: ompsq-432 (`oven/bun:1` has no git —
+ * every gated verify died with `Executable not found in $PATH: "git"` while passing on the host,
+ * burning the unit's whole codefix→fixup→escalate cascade) and ompsq-434 (no jq — the
+ * continue-loop hook's stdout parsed as EOF-empty). Auto mode therefore derives
+ * {@link DERIVED_SANDBOX_IMAGE} (base + suite deps) locally at first use; an operator-named image
+ * (`OMP_SQUAD_GATE_SANDBOX=<image>` / `OMP_SQUAD_GATE_SANDBOX_IMAGE`) is honored verbatim and
+ * must satisfy the contract itself.
  */
 
 import { gateEnv } from "./gate-env.ts";
@@ -61,12 +62,30 @@ export interface GateExec {
 export const DEFAULT_SANDBOX_IMAGE = "oven/bun:1";
 
 /**
- * The image auto mode actually runs: {@link DEFAULT_SANDBOX_IMAGE} + git, built locally at first
- * use (see the IMAGE CONTRACT in the header — the base image has no git, which killed every gated
- * full-suite verify in the ompsq-432 incident). Tag kept in sync with DEFAULT_SANDBOX_IMAGE by
- * hand; bump it if the base changes so a stale local build is never reused.
+ * The image auto mode actually runs: {@link DEFAULT_SANDBOX_IMAGE} + the suite's real runtime
+ * binaries, built locally at first use.
+ *
+ * EMPIRICAL RULE (how this list is maintained): the derived image must be able to run THIS repo's
+ * own gate (`bun run check && bun run test`) end to end — that in-image green run is the
+ * acceptance test, encoded as a live contract test in tests/gate-image.test.ts. Any NEW suite
+ * dependency must be added to {@link SUITE_BINARIES} + the Dockerfile layer in
+ * `buildDerivedImageReal` AND this tag bumped (the local build is cache-keyed by tag via
+ * `docker image inspect`, so an un-bumped tag means already-provisioned hosts silently keep the
+ * old image without the new binary). The failure mode when a binary is missing is worse than a
+ * red loop: the gate dies IDENTICALLY on both the merged and base runs (exit 127), which the
+ * regression gate used to read as "same pre-existing red baseline" and FAIL OPEN — merging
+ * unverified code (see land.ts's unrunnable-gate guard, added alongside this).
+ *
+ * Discovered set, each with the incident/test that proved it:
+ *   - git  ompsq-432: tests/harness-scorecard.test.ts:132 Bun.spawn(["git", ...]) — ~85 sites
+ *   - jq   ompsq-434: scripts/continue-loop.sh (driven by tests/continue-loop-hook.test.ts)
+ *   - npm  tests/land-pr.test.ts NEW_RED fixture: detectPackageManager legitimately resolves npm,
+ *          and the regression gate then runs `npm run …` inside the sandbox
  */
-export const DERIVED_SANDBOX_IMAGE = "glance-gate:bun1-git";
+export const DERIVED_SANDBOX_IMAGE = "glance-gate:bun1-v2";
+
+/** Binaries this repo's suite empirically requires inside the gate image (see the rule above). */
+export const SUITE_BINARIES = ["bash", "bun", "git", "jq", "npm"] as const;
 
 /** Host-owned vars that must NOT leak into a container (they'd shadow the image's own). */
 const HOST_ONLY = new Set(["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"]);
@@ -125,11 +144,11 @@ function warnGitlessFallbackOnce(detail: string): void {
 	warnedGitlessFallback = true;
 	// eslint-disable-next-line no-console
 	console.warn(
-		`[gate] failed to build the git-enabled sandbox image ${DERIVED_SANDBOX_IMAGE} (from ${DEFAULT_SANDBOX_IMAGE}) — ` +
-			`falling back to the bare base image, which has NO git: any gate that spawns git (worktree resolution, ` +
-			`spawn-based tests) will fail deterministically with 'Executable not found in $PATH: "git"'. ` +
-			`Fix the build (network/registry) or set OMP_SQUAD_GATE_SANDBOX_IMAGE to an image that includes git. ` +
-			`Build error: ${detail.slice(0, 400)}`,
+		`[gate] failed to build the suite-deps sandbox image ${DERIVED_SANDBOX_IMAGE} (from ${DEFAULT_SANDBOX_IMAGE}) — ` +
+			`falling back to the bare base image, which lacks ${SUITE_BINARIES.filter((b) => b !== "bash" && b !== "bun").join("/")}: gates that spawn them fail ` +
+			`deterministically ('Executable not found in $PATH'), and a gate command dying identically on merged+base ` +
+			`can slip past the regression comparison. Fix the build (network/registry) or set ` +
+			`OMP_SQUAD_GATE_SANDBOX_IMAGE to an image that satisfies the contract. Build error: ${detail.slice(0, 400)}`,
 	);
 }
 
@@ -150,7 +169,10 @@ async function buildDerivedImageReal(): Promise<string> {
 	try {
 		const inspect = Bun.spawn(["docker", "image", "inspect", DERIVED_SANDBOX_IMAGE], { stdout: "ignore", stderr: "ignore" });
 		if ((await inspect.exited) === 0) return DERIVED_SANDBOX_IMAGE;
-		const dockerfile = `FROM ${DEFAULT_SANDBOX_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*\n`;
+		// git+jq are tiny; npm (pulled with node) is the price of detectPackageManager legitimately
+		// resolving npm-driven gates (see the SUITE_BINARIES doc). Bump DERIVED_SANDBOX_IMAGE when
+		// this layer changes, or provisioned hosts keep serving the old image forever.
+		const dockerfile = `FROM ${DEFAULT_SANDBOX_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git jq npm && rm -rf /var/lib/apt/lists/*\n`;
 		const build = Bun.spawn(["docker", "build", "-t", DERIVED_SANDBOX_IMAGE, "-"], {
 			stdin: new TextEncoder().encode(dockerfile),
 			stdout: "ignore",
