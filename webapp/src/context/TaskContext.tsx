@@ -1,9 +1,10 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
 import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
 import { buildReviewHash, parseReviewHash } from '../lib/plan-doc-review';
 import { useSquad } from '../hooks/useSquad';
+import { coerceView, VIEW_STORAGE_KEY } from '../lib/viewAlias';
 import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
 export interface ToastInfo {
@@ -12,8 +13,25 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'attention' | 'active' | 'cockpit' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'scoreboard' | 'topology' | 'federation' | 'knowledge' | 'org' | 'intervene' | 'review';
+/**
+ * The four-item shell (GRAPH-FOLD.md §6e) + the views reached BY ROUTING INTO them rather than
+ * from the top-level rail: `org` (the AccountMenu gear), `intervene` (a "Needs you" tap),
+ * `review` (a design-review deep link). The eight retired keys (attention/active/cockpit/
+ * automation/fleet-health/heat/activity-heatmap/scoreboard/topology/federation/knowledge) are
+ * GONE from this union on purpose — any stale value (e.g. a pre-fold localStorage `view`) is
+ * coerced through `lib/viewAlias.ts` BEFORE it ever becomes state, so nothing outside this file
+ * can construct an AppView the render switch doesn't handle.
+ */
+export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'capabilities' | 'org' | 'intervene' | 'review';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
+
+/** Read the raw persisted view key (pre-coercion) — a plain function so both the `view` and
+ *  `isCommandPaletteOpen` lazy initializers read the SAME localStorage value without a second
+ *  `coerceView` call disagreeing (there's only one read; window/SSR-guarded). */
+function readStoredView(): string | null {
+  if (typeof window === 'undefined') return null;
+  return window.localStorage.getItem(VIEW_STORAGE_KEY);
+}
 
 /** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
 export interface ArchivedFeature {
@@ -58,6 +76,11 @@ interface TaskContextType {
   view: AppView;
   taskFilter: TaskFilter;
   isChatOpen: boolean;
+  /** ⌘K palette (GRAPH-FOLD.md §3) — open everywhere, not scoped to a view. */
+  isCommandPaletteOpen: boolean;
+  openCommandPalette: () => void;
+  closeCommandPalette: () => void;
+  toggleCommandPalette: () => void;
   /** The agent that was most recently opened via openConsole(). AssistantChat reacts to switch its active session. */
   openedConsoleAgentId: string | null;
   /** The agent the Intervene View is focused on (set by openIntervene). */
@@ -123,7 +146,10 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const projects = useMemo(() => projectsByTeam(squad.projects, squad.features), [squad.projects, squad.features]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastInfo[]>([]);
-  const [view, setView] = useState<AppView>('attention');
+  // Restore + coerce the persisted view in one lazy read (GRAPH-FOLD.md §3 alias/redirect map) —
+  // a stale pre-fold key (or garbage) never reaches state as anything but a real AppView.
+  const [view, setViewState] = useState<AppView>(() => coerceView(readStoredView()).view);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(() => coerceView(readStoredView()).openPalette);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
@@ -203,6 +229,19 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     window.addEventListener('hashchange', applyHash);
     return () => window.removeEventListener('hashchange', applyHash);
   }, []);
+
+  // The only mutator of `view` state — persists every navigation to localStorage so a reload
+  // restores the same screen. TypeScript already guarantees `next` is a live AppView (the dead
+  // keys aren't in the union), so this never needs to re-run it through coerceView; only the
+  // localStorage RESTORE path (above) reads a value that could be stale.
+  const setView = useCallback((next: AppView) => {
+    setViewState(next);
+    if (typeof window !== 'undefined') window.localStorage.setItem(VIEW_STORAGE_KEY, next);
+  }, []);
+
+  const openCommandPalette = useCallback(() => setIsCommandPaletteOpen(true), []);
+  const closeCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
+  const toggleCommandPalette = useCallback(() => setIsCommandPaletteOpen((open) => !open), []);
 
   const selectTask = (id: string | null) => setSelectedTaskId(id);
 
@@ -329,7 +368,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );
