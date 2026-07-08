@@ -527,9 +527,22 @@ const LoopBody: React.FC<{ sel: Extract<InspectSel, { kind: 'loop' }> }> = ({ se
 const CollisionBody: React.FC<{ sel: Extract<InspectSel, { kind: 'collision' }> }> = ({ sel }) => {
   const { agents, openConsole } = useTaskContext();
   const { file, agents: contested } = sel.collision;
+  // `contested` is a click-time snapshot (captured once, when the ⚠ marker was clicked); the rows
+  // below re-read each agent's CURRENT status from the live roster on every poll, so an agent can
+  // go idle (or leave the roster) without the header noticing. Recompute how many are still
+  // actually live right now so "live" never overclaims what a row can show underneath it — a row
+  // showing IDLE (or a departed agent showing no live badge at all) must not be counted.
+  const liveNow = contested.filter((a) => {
+    const cur = agents.find((x) => x.id === a.id);
+    return !!cur && cur.status !== 'idle';
+  }).length;
+  const headline =
+    liveNow === contested.length
+      ? `Collision — ${contested.length} live agent${contested.length === 1 ? '' : 's'}, one path`
+      : `Collision — ${liveNow} of ${contested.length} still live, one path`;
   return (
     <>
-      <div className="text-[13px] font-semibold text-[#ECE7DC]">Collision — {contested.length} live agents, one path</div>
+      <div className="text-[13px] font-semibold text-[#ECE7DC]">{headline}</div>
       <Meta>{file}</Meta>
       <Sect>Likely a merge conflict at land</Sect>
       {contested.map((a) => {

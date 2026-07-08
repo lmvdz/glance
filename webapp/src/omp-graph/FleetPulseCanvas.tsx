@@ -1058,8 +1058,11 @@ const DepthMassif: React.FC<{
           {m.label}
         </text>
       ))}
+      {/* Taste-review nit: this pane is reached by toggling FLAT→RHYTHM (the one-word DEPTH
+          relabel above), so its own heading must echo "RHYTHM" rather than the old "TERRAIN" —
+          word-level only, the massif geometry below is untouched. */}
       <text x={W - PAD_R} y={44} textAnchor="end" style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.14em', fill: INK.hi }}>
-        TERRAIN — {DEPTH_METRICS.find((m) => m.id === metric)?.label}
+        RHYTHM — {DEPTH_METRICS.find((m) => m.id === metric)?.label}
       </text>
       <text x={W - PAD_R} y={58} textAnchor="end" style={{ fontSize: 9, fill: INK.mid }}>
         {isCum ? 'strands: height cumulative $ · colour $/hr rate' : 'height = colour = intensity'}
