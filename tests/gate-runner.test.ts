@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_SANDBOX_IMAGE, execGatedCommand, GateSandboxUnavailableError, gateExec } from "../src/gate-runner.ts";
+import { DERIVED_SANDBOX_IMAGE, execGatedCommand, GateSandboxUnavailableError, gateExec } from "../src/gate-runner.ts";
 
 const HOST_SRC = { PATH: "/usr/bin", HOME: "/home/t", CI: "1", ANTHROPIC_API_KEY: "sk" } as NodeJS.ProcessEnv;
 
@@ -7,6 +7,9 @@ const HOST_SRC = { PATH: "/usr/bin", HOME: "/home/t", CI: "1", ANTHROPIC_API_KEY
 // box running the suite actually has docker (this box does not — the fallback path is the default).
 const noDocker = () => false;
 const hasDocker = () => true;
+// An image builder is injected wherever the auto path would otherwise really `docker build` the
+// git-enabled default image (the real, docker-gated build is covered in tests/gate-image.test.ts).
+const fakeBuild = async () => DERIVED_SANDBOX_IMAGE;
 
 test("host opt-out (OMP_SQUAD_GATE_SANDBOX=host): bash -lc with the scrubbed env — pre-sandbox behavior", async () => {
 	const plan = await gateExec("bun test", "/repo", { source: { ...HOST_SRC, OMP_SQUAD_GATE_SANDBOX: "host" }, dockerProbe: hasDocker });
@@ -48,19 +51,36 @@ test("sandbox network override + duplicate mounts collapse", async () => {
 	expect(argv.match(/-v \/repo:\/repo/g)?.length).toBe(1);
 });
 
-test("auto (default) + docker PRESENT: sandbox with the default image, no explicit env needed", async () => {
-	const plan = await gateExec("bun test", "/wt/x", { mounts: ["/repo"], source: { ...HOST_SRC }, dockerProbe: hasDocker });
+test("auto (default) + docker PRESENT: sandbox with the git-enabled derived image, no explicit env needed", async () => {
+	const plan = await gateExec("bun test", "/wt/x", { mounts: ["/repo"], source: { ...HOST_SRC }, dockerProbe: hasDocker, imageBuilder: fakeBuild });
 	expect(plan.sandboxed).toBe(true);
-	expect(plan.image).toBe(DEFAULT_SANDBOX_IMAGE);
+	expect(plan.image).toBe(DERIVED_SANDBOX_IMAGE); // NOT the bare base image — it has no git (ompsq-432)
 	expect(plan.argv[0]).toBe("docker");
 	expect(plan.argv.slice(-3)).toEqual(["bash", "-lc", "bun test"]);
 });
 
-test("auto (default) + docker PRESENT: OMP_SQUAD_GATE_SANDBOX_IMAGE picks the default image", async () => {
-	const plan = await gateExec("bun test", "/wt/x", { source: { ...HOST_SRC, OMP_SQUAD_GATE_SANDBOX_IMAGE: "my/repo-toolchain:2" }, dockerProbe: hasDocker });
+test("auto (default) + docker PRESENT: OMP_SQUAD_GATE_SANDBOX_IMAGE is honored verbatim and never triggers the derived build", async () => {
+	let built = false;
+	const plan = await gateExec("bun test", "/wt/x", {
+		source: { ...HOST_SRC, OMP_SQUAD_GATE_SANDBOX_IMAGE: "my/repo-toolchain:2" },
+		dockerProbe: hasDocker,
+		imageBuilder: async () => {
+			built = true;
+			return DERIVED_SANDBOX_IMAGE;
+		},
+	});
 	expect(plan.sandboxed).toBe(true);
-	expect(plan.image).toBe("my/repo-toolchain:2");
+	expect(plan.image).toBe("my/repo-toolchain:2"); // operator contract: their image, as named
 	expect(plan.argv).toContain("my/repo-toolchain:2");
+	expect(built).toBe(false); // no surprise docker build behind an explicit operator choice
+});
+
+test("auto (default) + docker PRESENT: a failed derived build degrades to whatever the builder resolves (never throws)", async () => {
+	// The real builder resolves the BARE base image on build failure (warn-once, legible). The plan
+	// layer must treat that as an ordinary image, keeping the gate sandboxed rather than erroring out.
+	const plan = await gateExec("bun test", "/wt/x", { source: { ...HOST_SRC }, dockerProbe: hasDocker, imageBuilder: async () => "oven/bun:1" });
+	expect(plan.sandboxed).toBe(true);
+	expect(plan.image).toBe("oven/bun:1");
 });
 
 test("auto (default) + docker ABSENT: graceful host fallback, stamped sandboxed:false", async () => {
@@ -75,9 +95,9 @@ test("STRICT + docker ABSENT: fails closed — refuses to run on the host", asyn
 });
 
 test("STRICT + docker PRESENT: sandboxes normally (no fail-closed)", async () => {
-	const plan = await gateExec("bun test", "/wt/x", { source: { OMP_SQUAD_GATE_SANDBOX_STRICT: "1" } as NodeJS.ProcessEnv, dockerProbe: hasDocker });
+	const plan = await gateExec("bun test", "/wt/x", { source: { OMP_SQUAD_GATE_SANDBOX_STRICT: "1" } as NodeJS.ProcessEnv, dockerProbe: hasDocker, imageBuilder: fakeBuild });
 	expect(plan.sandboxed).toBe(true);
-	expect(plan.image).toBe(DEFAULT_SANDBOX_IMAGE);
+	expect(plan.image).toBe(DERIVED_SANDBOX_IMAGE);
 });
 
 test("STRICT overrides the host opt-out: refuses rather than silently host-running", async () => {
@@ -85,14 +105,14 @@ test("STRICT overrides the host opt-out: refuses rather than silently host-runni
 });
 
 test("sandbox runs as the daemon's uid:gid with a writable HOME — container writes must not land root-owned on the host", async () => {
-	const plan = await gateExec("bun run build", "/wt/x", { source: { ...HOST_SRC }, dockerProbe: hasDocker });
+	const plan = await gateExec("bun run build", "/wt/x", { source: { ...HOST_SRC }, dockerProbe: hasDocker, imageBuilder: fakeBuild });
 	const argv = plan.argv.join(" ");
 	expect(argv).toContain(`--user ${process.getuid!()}:${process.getgid!()}`);
 	expect(argv).toContain("-e HOME=/tmp"); // the mapped uid has no passwd entry in the image; `/` is unwritable
 });
 
 test("OMP_SQUAD_GATE_SANDBOX_USER overrides the container user verbatim (root restores old behavior)", async () => {
-	const plan = await gateExec("true", "/repo", { source: { ...HOST_SRC, OMP_SQUAD_GATE_SANDBOX_USER: "root" }, dockerProbe: hasDocker });
+	const plan = await gateExec("true", "/repo", { source: { ...HOST_SRC, OMP_SQUAD_GATE_SANDBOX_USER: "root" }, dockerProbe: hasDocker, imageBuilder: fakeBuild });
 	const argv = plan.argv.join(" ");
 	expect(argv).toContain("--user root");
 	expect(argv).not.toContain(`--user ${process.getuid!()}`);
