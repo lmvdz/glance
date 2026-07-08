@@ -235,6 +235,41 @@ test("fabric snapshot is scoped and returns distilled facts with receipt provena
 	expect(snapshot.scout.map((s) => s.issue.id)).toEqual(["i-a"]);
 });
 
+test("(Knowledge-view incident) a human actor's fabric snapshot surfaces digests/receipts/hot-areas for agents no longer in the live roster", async () => {
+	// The live-repro shape: hundreds of digest/receipt files accumulate on disk over a daemon's
+	// life, but `scopeFor` handed a human actor the CURRENT live roster's ids as its "no
+	// restriction" proxy — so once an agent's run ended and it was pruned from the roster (the
+	// common case: a daemon with 0 agents running right now), its digest/receipt became invisible
+	// FOREVER even though the files sit right there under stateDir. Roster here has ZERO agents —
+	// the exact "nothing currently running" shape the operator hit.
+	const dir = await tmpDir("acf-historical-");
+	await writeDigest(dir, "ghost-1", "## digest from a completed, since-removed agent");
+	await writeDigest(dir, "ghost-2", "## another completed agent's digest");
+	await appendReceipt(dir, { agentId: "ghost-1", name: "ghost-1", repo: "/repo", runId: "run-g1", startedAt: 100, endedAt: 150, status: "stopped", toolCalls: 2, toolTally: {}, filesTouched: ["src/ghost.ts"] });
+
+	const humanActor = { id: "web:admin", origin: "local" as const, role: "admin" as const };
+	const snapshot = await buildFabricSnapshot({ actor: humanActor, agents: [], stateDir: dir, now: () => 1000 });
+
+	// `scope` (the live-roster view) is honestly empty — nothing is running — but that must not
+	// mean the whole knowledge base reads as empty: the historical facts are still on disk.
+	expect(snapshot.scope).toEqual([]);
+	expect(snapshot.digests.map((d) => d.source.agentId).sort()).toEqual(["ghost-1", "ghost-2"]);
+	// The digest's repo is recovered from its own receipt (no roster AgentDTO exists for it).
+	expect(snapshot.digests.find((d) => d.source.agentId === "ghost-1")?.source.repo).toBe("/repo");
+	expect(snapshot.hotAreas.map((h) => h.file)).toContain("src/ghost.ts");
+});
+
+test("(Knowledge-view incident) an agent-origin actor's scope is unaffected by the human unrestricted-read fix — still only its own subtree", async () => {
+	const dir = await tmpDir("acf-historical-agent-");
+	await writeDigest(dir, "a", "## a's own digest");
+	await writeDigest(dir, "ghost-off-roster", "## a digest belonging to nobody in a's scope");
+	const agents = [dto("a")];
+
+	const snapshot = await buildFabricSnapshot({ actor: agentActor("a"), agents, stateDir: dir, now: () => 1000 });
+
+	expect(snapshot.digests.map((d) => d.source.agentId)).toEqual(["a"]);
+});
+
 test("fabric decisions are repo-scoped even when the caller omits `repos` (no cross-repo leak)", async () => {
 	const dir = await tmpDir("acf-dec-");
 	const agents = [dto("a", { repo: "/repo-a" }), dto("other", { repo: "/repo-other" })];

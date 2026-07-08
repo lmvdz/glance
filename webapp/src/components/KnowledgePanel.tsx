@@ -189,6 +189,7 @@ const Overview: React.FC<{ snapshot: FabricSnapshot | null }> = ({ snapshot }) =
         <Library className="h-8 w-8 text-gray-300 dark:text-gray-700" aria-hidden="true" />
         <div className="text-sm font-semibold text-gray-600 dark:text-gray-300">The knowledge base is still warming up</div>
         <div className="text-xs text-gray-500 dark:text-gray-400">Decisions, session digests, and hot files appear here as agents do work.</div>
+        <div className="text-xs text-gray-400 dark:text-gray-500">Decision capture is off by default — set <code className="rounded bg-gray-100 dark:bg-gray-800 px-1 py-0.5 font-mono">OMP_SQUAD_DECISION_CAPTURE=1</code> to let agents record decisions here.</div>
       </div>
     );
   }

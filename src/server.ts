@@ -62,6 +62,10 @@ import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { planDocDiffSince, readPlanDoc } from "./plan-doc.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
+import type { FabricSnapshot } from "./fabric.ts";
+import { readAudit, type AuditQuery } from "./audit.ts";
+import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
+import { learningFlags, type MetricName, type MetricRollupRow } from "./metrics.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
 import { buildTaskClassMatrix, type TaskClassMatrixDoc } from "./omp-graph/task-class-matrix.ts";
@@ -116,7 +120,7 @@ import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendi
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
-import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role, RunReceipt } from "./types.ts";
+import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
@@ -576,7 +580,7 @@ export class SquadServer {
 	 *  every live org manager exactly like GET /api/agents does, instead of silently reading empty just
 	 *  because no root factory is configured. Returns undefined for any other pathname/method so the
 	 *  caller falls through to the single-manager route table below. */
-	private async handleObservability(url: URL, req: Request, managers: SquadManager[], role: Role): Promise<Response | undefined> {
+	private async handleObservability(url: URL, req: Request, managers: SquadManager[], role: Role, actor: Actor): Promise<Response | undefined> {
 		if (req.method !== "GET" || managers.length === 0) return undefined;
 		if (url.pathname === "/api/health") {
 			const h = await aggregateHealth(managers);
@@ -601,6 +605,68 @@ export class SquadServer {
 		if (url.pathname === "/api/graph/task-class") return Response.json(await taskClassPayload(managers, url));
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(managers, url));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(managers, role, this.dbMode, !!this.registry));
+		if (url.pathname === "/api/leases") {
+			const repo = url.searchParams.get("repo");
+			// File mode (no registry): the lease registry IS this one host's whole world — serve it
+			// directly, unchanged from before this fix. DB-registry mode: union each reachable
+			// manager's own org-scoped leases (see orgScopedLeasesAcross).
+			return Response.json(this.registry ? await this.orgScopedLeasesAcross(managers, repo) : await leasesFor(repo ?? process.cwd()));
+		}
+		if (url.pathname === "/api/fabric") {
+			const repo = url.searchParams.get("repo");
+			// fabric is org-safe in both modes: leases are keyed to the manager's own agents/repos,
+			// so includeLeases never leaks cross-org. Always include them (real data, even in DB mode).
+			return Response.json(await fabricSnapshotAcross(managers, actor, { repos: repo ? [repo] : undefined, includeLeases: true }));
+		}
+		if (url.pathname === "/api/fabric/search") {
+			// Ranked search over the SAME unioned-but-still-scoped snapshot — never widens what the
+			// actor can see beyond the break-glass union every other observability route already grants.
+			const repo = url.searchParams.get("repo");
+			const q = url.searchParams.get("q") ?? "";
+			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
+			const type = (url.searchParams.get("type") ?? undefined) as KbDocType | undefined;
+			const snapshot = await fabricSnapshotAcross(managers, actor, { repos: repo ? [repo] : undefined, includeLeases: true });
+			const results = q.trim() ? searchFabric(snapshot, q, { topK, type }) : [];
+			return Response.json({ query: q, results, counts: { agents: snapshot.agents.length, digests: snapshot.digests.length, hotAreas: snapshot.hotAreas.length, scout: snapshot.scout.length, leases: snapshot.leases.length, decisions: snapshot.decisions.length } });
+		}
+		if (url.pathname === "/api/audit") {
+			const q = url.searchParams;
+			const limit = Number(q.get("limit"));
+			return Response.json(
+				await auditPayloadAcross(managers, {
+					limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+					actor: q.get("actor") ?? undefined,
+					action: q.get("action") ?? undefined,
+					target: q.get("target") ?? undefined,
+				}),
+			);
+		}
+		if (url.pathname === "/api/automation") {
+			// Background-loop observability: recent events + per-loop rollups. ?loop= filters one loop,
+			// ?windowMs= sizes the rollup window (default 1h), ?meaningful=1 drops heartbeats, ?limit= caps the feed.
+			const q = url.searchParams;
+			const loopParam = q.get("loop");
+			const loop = loopParam === "scout" || loopParam === "observer" || loopParam === "opportunity" || loopParam === "dispatch" ? loopParam : undefined;
+			const limit = Number(q.get("limit"));
+			const windowMs = Number(q.get("windowMs"));
+			const sinceMs = Number(q.get("sinceMs"));
+			return Response.json(
+				await automationPayloadAcross(managers, {
+					loop,
+					limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+					windowMs: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined,
+					sinceMs: Number.isFinite(sinceMs) && sinceMs > 0 ? sinceMs : undefined,
+					meaningfulOnly: q.get("meaningful") === "1",
+				}),
+			);
+		}
+		if (url.pathname === "/api/metrics/learning-loop") {
+			// Agentic-learning-loop baseline (concern 01): current flag resolution + per-metric rollups
+			// (first-try-green, fixups-to-green, escalation, land-failure-streak, primer-empty), so every
+			// later concept in the loop can be A/B-compared against this. ?windowMs= sizes the rollup window.
+			const windowMs = Number(url.searchParams.get("windowMs"));
+			return Response.json(learningLoopPayloadAcross(managers, Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
+		}
 		return undefined;
 	}
 
@@ -1060,7 +1126,7 @@ export class SquadServer {
 		// it must be checked before the `!manager` gate below: a bootstrap-admin without a root factory
 		// has no single `manager` (orgId stayed unresolved above) but DOES have live org managers to
 		// aggregate. A tenant session's set is always its own 1-manager array, so isolation is unaffected.
-		const observabilityResponse = await this.handleObservability(url, req, this.observabilityManagers(bootstrapAdmin, manager), role);
+		const observabilityResponse = await this.handleObservability(url, req, this.observabilityManagers(bootstrapAdmin, manager), role, actor);
 		if (observabilityResponse) return observabilityResponse;
 		if (!manager) return this.noFleet(req, url);
 		// Authenticated feedback routes live in ./feedback-routes.ts (the pre-auth widget
@@ -1387,30 +1453,8 @@ export class SquadServer {
 			const repo = url.searchParams.get("repo");
 			return Response.json(repo ? await who(repo) : await all());
 		}
-		if (url.pathname === "/api/leases") {
-			const repo = url.searchParams.get("repo");
-			// Single-manager / file mode: serve the requested repo (or cwd) directly.
-			// DB-registry mode: the lease registry is machine-wide, so scope to repos THIS org's
-			// fleet actually works on — never blanket-empty, never leak another org's leases.
-			if (!this.registry) return Response.json(await leasesFor(repo ?? process.cwd()));
-			return Response.json(await this.orgScopedLeases(manager, repo));
-		}
-		if (url.pathname === "/api/fabric") {
-			const repo = url.searchParams.get("repo");
-			// fabric is org-safe in both modes: leases are keyed to the manager's own agents/repos,
-			// so includeLeases never leaks cross-org. Always include them (real data, even in DB mode).
-			return Response.json(await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: true }));
-		}
-		if (url.pathname === "/api/fabric/search") {
-			// Ranked search over the SAME scoped snapshot — never widens what the actor can see.
-			const repo = url.searchParams.get("repo");
-			const q = url.searchParams.get("q") ?? "";
-			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
-			const type = (url.searchParams.get("type") ?? undefined) as KbDocType | undefined;
-			const snapshot = await manager.fabric(actor, { repos: repo ? [repo] : undefined, includeLeases: true });
-			const results = q.trim() ? searchFabric(snapshot, q, { topK, type }) : [];
-			return Response.json({ query: q, results, counts: { agents: snapshot.agents.length, digests: snapshot.digests.length, hotAreas: snapshot.hotAreas.length, scout: snapshot.scout.length, leases: snapshot.leases.length, decisions: snapshot.decisions.length } });
-		}
+		// /api/leases and the rest of the fabric/audit/automation/metrics-learning-loop observability
+		// family are handled by handleObservability (above, before the `!manager` gate) — see its doc.
 		if (url.pathname === "/api/opportunities") {
 			const repos = url.searchParams.get("repo") ? [url.searchParams.get("repo") as string] : (planeRepos().length ? planeRepos() : manager.projects().map((p) => p.repo));
 			const issues = (await Promise.all(repos.map((repo) => listPlaneIssues(repo).catch(() => null)))).flatMap((x) => x ?? []);
@@ -1435,44 +1479,6 @@ export class SquadServer {
 				if (err instanceof RbacDenied) return new Response(err.message, { status: 403 });
 				return new Response(err instanceof Error ? err.message : String(err), { status: 400 });
 			}
-		}
-		if (url.pathname === "/api/audit") {
-			const q = url.searchParams;
-			const limit = Number(q.get("limit"));
-			return Response.json(
-				await manager.auditLog({
-					limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
-					actor: q.get("actor") ?? undefined,
-					action: q.get("action") ?? undefined,
-					target: q.get("target") ?? undefined,
-				}),
-			);
-		}
-		if (url.pathname === "/api/automation") {
-			// Background-loop observability: recent events + per-loop rollups. ?loop= filters one loop,
-			// ?windowMs= sizes the rollup window (default 1h), ?meaningful=1 drops heartbeats, ?limit= caps the feed.
-			const q = url.searchParams;
-			const loopParam = q.get("loop");
-			const loop = loopParam === "scout" || loopParam === "observer" || loopParam === "opportunity" || loopParam === "dispatch" ? loopParam : undefined;
-			const limit = Number(q.get("limit"));
-			const windowMs = Number(q.get("windowMs"));
-			const sinceMs = Number(q.get("sinceMs"));
-			return Response.json(
-				manager.automationActivity({
-					loop,
-					limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
-					windowMs: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined,
-					sinceMs: Number.isFinite(sinceMs) && sinceMs > 0 ? sinceMs : undefined,
-					meaningfulOnly: q.get("meaningful") === "1",
-				}),
-			);
-		}
-		if (url.pathname === "/api/metrics/learning-loop") {
-			// Agentic-learning-loop baseline (concern 01): current flag resolution + per-metric rollups
-			// (first-try-green, fixups-to-green, escalation, land-failure-streak, primer-empty), so every
-			// later concept in the loop can be A/B-compared against this. ?windowMs= sizes the rollup window.
-			const windowMs = Number(url.searchParams.get("windowMs"));
-			return Response.json(manager.learningMetricsSnapshot(Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
 		}
 		if (url.pathname === "/api/factory/status") {
 			// First-glance liveness: per autonomous loop, whether it's flag-enabled, actually armed, the
@@ -1837,6 +1843,25 @@ export class SquadServer {
 		return out;
 	}
 
+	/** Same "must not lie by omission" bar as usagePayload/heatPayload: a bootstrap-admin's break-
+	 *  glass array can be several live org managers, so union each one's own org-scoped leases
+	 *  rather than reading only the single (possibly wrong/absent) `manager`. A tenant session's
+	 *  array is always its own 1 manager (see `observabilityManagers`), so this is a no-op union. */
+	private async orgScopedLeasesAcross(managers: SquadManager[], repo: string | null): Promise<LeaseEntry[]> {
+		const perManager = await Promise.all(managers.map((m) => this.orgScopedLeases(m, repo)));
+		const seen = new Set<string>();
+		const out: LeaseEntry[] = [];
+		for (const list of perManager) {
+			for (const lease of list) {
+				const key = `${lease.repo} ${lease.id}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				out.push(lease);
+			}
+		}
+		return out;
+	}
+
 	stop(): void {
 		this.singleManager?.off("event", this.onEvent);
 		if (this.registry) this.registry.onEvent = () => {};
@@ -1935,6 +1960,112 @@ export async function tracePayload(manager: SquadManager, id: string): Promise<T
  *  them rather than reading only the first (which would silently drop every other org's history). */
 async function allReceiptsAcross(managers: SquadManager[]): Promise<RunReceipt[]> {
 	return (await Promise.all(managers.map((m) => m.allReceipts()))).flat();
+}
+
+/**
+ * Knowledge-view incident, layer 1: `/api/fabric` and `/api/fabric/search` used to read the single
+ * per-request `manager` like a plain feature route (post `!manager` gate), instead of joining
+ * `handleObservability`'s break-glass union — the exact disease #113 fixed for graph/usage/heat/
+ * activity/action-items/governance/health. A bootstrap-admin without a root factory (the daemon's
+ * default: `OMP_SQUAD_ROOT_FACTORY` unset) never resolves a single `manager` at all and fell
+ * through to `noFleet`'s bare `[]`; even WITH a root factory, this route's own `manager` would
+ * only ever be the root's, silently omitting every other live org's facts. Unions each reachable
+ * manager's own `.fabric()` — a tenant session's array is always its own 1 manager (see
+ * `observabilityManagers`), so this is a no-op union for it; isolation is unaffected.
+ */
+async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts: { repos?: string[]; includeLeases?: boolean }): Promise<FabricSnapshot> {
+	const snapshots = await Promise.all(managers.map((m) => m.fabric(actor, opts)));
+	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [] };
+	return {
+		actor: actor.id,
+		generatedAt: Math.max(...snapshots.map((s) => s.generatedAt)),
+		scope: [...new Set(snapshots.flatMap((s) => s.scope))].sort(),
+		agents: snapshots.flatMap((s) => s.agents),
+		digests: snapshots.flatMap((s) => s.digests),
+		hotAreas: snapshots
+			.flatMap((s) => s.hotAreas)
+			.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file))
+			.slice(0, 50),
+		scout: snapshots.flatMap((s) => s.scout),
+		leases: snapshots.flatMap((s) => s.leases),
+		decisions: snapshots.flatMap((s) => s.decisions),
+		failures: snapshots.flatMap((s) => s.failures),
+	};
+}
+
+/** Same disease, `/api/audit`: union each manager's own audit log (fetched uncapped via `limit: 0`,
+ *  matching `readAudit`'s own "<=0 ⇒ no cap" contract) before re-sorting newest-first and applying
+ *  the CALLER's requested limit — a per-manager pre-merge cap would silently drop entries that
+ *  should have made the merged top-N. */
+async function auditPayloadAcross(managers: SquadManager[], query: AuditQuery): Promise<AuditEntry[]> {
+	const perManager = await Promise.all(managers.map((m) => m.auditLog({ ...query, limit: 0 })));
+	const merged = perManager.flat().sort((a, b) => b.at - a.at || b.id - a.id);
+	const limit = query.limit ?? 200;
+	return limit > 0 ? merged.slice(0, limit) : merged;
+}
+
+function mergeAutomationRollups(rows: AutomationRollupRow[][]): AutomationRollupRow[] {
+	const merged = new Map<AutomationLoop, AutomationRollupRow>();
+	for (const list of rows) {
+		for (const r of list) {
+			const cur = merged.get(r.loop) ?? { loop: r.loop, events: 0, llmCalls: 0, found: 0, filed: 0, spawned: 0, errors: 0, lastAt: 0 };
+			cur.events += r.events;
+			cur.llmCalls += r.llmCalls;
+			cur.found += r.found;
+			cur.filed += r.filed;
+			cur.spawned += r.spawned;
+			cur.errors += r.errors;
+			if (r.lastAt >= cur.lastAt) {
+				cur.lastAt = r.lastAt;
+				cur.lastSkipReason = r.lastSkipReason;
+			}
+			merged.set(r.loop, cur);
+		}
+	}
+	return [...merged.values()].sort((a, b) => a.loop.localeCompare(b.loop));
+}
+
+/** Same disease, `/api/automation`: union each manager's recent events (fetched uncapped, same
+ *  `limit: 0` convention as auditPayloadAcross) then re-sort/re-limit, and sum the per-loop rollups
+ *  field-by-field (a straight count/sum aggregation — `lastAt`/`lastSkipReason` take the max). */
+async function automationPayloadAcross(managers: SquadManager[], query: AutomationQuery & { windowMs?: number }): Promise<{ events: AutomationEvent[]; rollup: AutomationRollupRow[] }> {
+	const perManager = await Promise.all(managers.map((m) => m.automationActivity({ ...query, limit: 0 })));
+	const merged = perManager.flatMap((r) => r.events).sort((a, b) => b.at - a.at || b.id - a.id);
+	const limit = query.limit ?? 200;
+	return { events: limit > 0 ? merged.slice(0, limit) : merged, rollup: mergeAutomationRollups(perManager.map((r) => r.rollup)) };
+}
+
+function mergeMetricRollups(rows: MetricRollupRow[][]): MetricRollupRow[] {
+	const merged = new Map<MetricName, MetricRollupRow>();
+	for (const list of rows) {
+		for (const r of list) {
+			const cur = merged.get(r.name) ?? { name: r.name, count: 0, sum: 0, avg: 0 };
+			cur.count += r.count;
+			cur.sum += r.sum;
+			cur.avg = cur.count ? cur.sum / cur.count : 0;
+			if (r.byTag) {
+				cur.byTag ??= {};
+				for (const [tagKey, tagVals] of Object.entries(r.byTag)) {
+					cur.byTag[tagKey] ??= {};
+					for (const [val, bucket] of Object.entries(tagVals)) {
+						const b = (cur.byTag[tagKey][val] ??= { count: 0, sum: 0, avg: 0 });
+						b.count += bucket.count;
+						b.sum += bucket.sum;
+						b.avg = b.count ? b.sum / b.count : 0;
+					}
+				}
+			}
+			merged.set(r.name, cur);
+		}
+	}
+	return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Same disease, `/api/metrics/learning-loop`: `flags` is pure env resolution (`learningFlags()`),
+ *  identical regardless of which manager answers, so it's read once; the per-metric rollups are
+ *  summed across every reachable manager. */
+function learningLoopPayloadAcross(managers: SquadManager[], windowMs?: number): { flags: ReturnType<typeof learningFlags>; rollup: MetricRollupRow[] } {
+	return { flags: learningFlags(), rollup: mergeMetricRollups(managers.map((m) => m.learningMetricsSnapshot(windowMs).rollup)) };
 }
 
 async function usagePayload(managers: SquadManager[], url: URL): Promise<{
