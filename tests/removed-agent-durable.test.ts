@@ -205,7 +205,7 @@ test("rm by NAME on a live, resident agent resolves to the real id, stops it, an
 		await mgr2.stop();
 	}
 	await mgr.stop();
-});
+}, 30_000); // live omp spawns — bun's 5s default flakes under full-suite load (siblings in squad.test.ts use 30-40s)
 
 test("rm by a name that matches MULTIPLE live agents refuses to guess — tombstones the raw string, neither agent's real id", async () => {
 	const repo = await makeRepo();
@@ -228,7 +228,7 @@ test("rm by a name that matches MULTIPLE live agents refuses to guess — tombst
 	expect(mgr.getAgent(a.id)).toBeDefined();
 	expect(mgr.getAgent(b.id)).toBeDefined();
 	await mgr.stop();
-});
+}, 30_000); // live omp spawns — bun's 5s default flakes under full-suite load (siblings in squad.test.ts use 30-40s)
 
 test("rm on a live, resident agent still removes it from the roster (no regression on the ordinary path)", async () => {
 	const repo = await makeRepo();
@@ -243,7 +243,7 @@ test("rm on a live, resident agent still removes it from the roster (no regressi
 	expect(mgr.getAgent(dto.id)).toBeUndefined();
 	expect(openRemovedLedger(stateDir).has(dto.id)).toBe(true);
 	await mgr.stop();
-});
+}, 30_000); // live omp spawns — bun's 5s default flakes under full-suite load (siblings in squad.test.ts use 30-40s)
 
 test("a fresh dispatch for the SAME issue after an rm gets a new, non-deterministic agent id — not blacklisted", async () => {
 	const repo = await makeRepo();
@@ -261,7 +261,7 @@ test("a fresh dispatch for the SAME issue after an rm gets a new, non-determinis
 	expect(second.id).not.toBe(first.id);
 	expect(mgr.getAgent(second.id)).toBeDefined();
 	await mgr.stop();
-});
+}, 30_000); // live omp spawns — bun's 5s default flakes under full-suite load (siblings in squad.test.ts use 30-40s)
 
 test("an authorized re-creation under a tombstoned id CLEARS the tombstone, and the resurrected run survives the next restart (HIGH 2)", async () => {
 	const repo = await makeRepo();

@@ -133,7 +133,13 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		if (this.opts.appendSystemPrompt) cmd.push("--append-system-prompt", this.opts.appendSystemPrompt);
 		if (this.opts.bin) cmd.push("--bin", this.opts.bin);
 		if (this.opts.harness) cmd.push("--harness", this.opts.harness);
-		const proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
+		// env is passed EXPLICITLY as the live process.env: Bun.spawn without `env` inherits the
+		// process's ORIGINAL environ, silently dropping runtime mutations (verified: a var set via
+		// `process.env.X = …` is invisible to a default-env child). The test preload's hermetic model
+		// source (tests/setup.ts's dummy ANTHROPIC_API_KEY) — and any operator tooling that adjusts
+		// env in-process before spawning agents — must reach the host, or omp boots model-less and
+		// every spawn times out inside the gate sandbox while "working" on logged-in hosts.
+		const proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, env: { ...process.env } });
 		proc.unref();
 	}
 

@@ -14,13 +14,29 @@
  */
 
 import { expect, test } from "bun:test";
-import { DEFAULT_SANDBOX_IMAGE, DERIVED_SANDBOX_IMAGE, defaultGateImage, gateExec } from "../src/gate-runner.ts";
+import { DEFAULT_SANDBOX_IMAGE, DERIVED_SANDBOX_IMAGE, SUITE_BINARIES, defaultGateImage, gateExec } from "../src/gate-runner.ts";
 
 let hasDocker = false;
 try {
 	hasDocker = (await Bun.spawn(["docker", "version"], { stdout: "ignore", stderr: "ignore" }).exited) === 0;
 } catch {
 	hasDocker = false;
+}
+
+// Forced mode (review MEDIUM): a skipped contract test is decorative on hosts that are SUPPOSED to
+// have docker. Under CI=1 or OMP_SQUAD_REQUIRE_DOCKER_TESTS=1 (exempted from setup.ts's env sweep),
+// docker being absent FAILS the run with a legible message instead of silently skipping the whole
+// image contract. Default local behavior (skip when docker is missing) is unchanged.
+const requireDocker = process.env.CI === "1" || process.env.OMP_SQUAD_REQUIRE_DOCKER_TESTS === "1";
+if (requireDocker && !hasDocker) {
+	test("gate-image contract REQUIRES docker on this host (CI=1 / OMP_SQUAD_REQUIRE_DOCKER_TESTS=1)", () => {
+		throw new Error(
+			"docker is unavailable but the gate-image suite-binaries contract is REQUIRED here " +
+				"(CI=1 or OMP_SQUAD_REQUIRE_DOCKER_TESTS=1). Skipping would make the contract decorative: " +
+				"a gitless/jqless gate image would ship unnoticed and every sandboxed verify would die at " +
+				"its first spawn (ompsq-432/ompsq-434). Install/start docker, or unset the requirement.",
+		);
+	});
 }
 
 /** First run may `docker build` (apt-get over the network); cached runs are near-instant. */
@@ -43,11 +59,30 @@ test.skipIf(!hasDocker)(
 );
 
 test.skipIf(!hasDocker)(
-	"the derived image still satisfies the rest of the contract: bash + bun (everything the base provided)",
+	"suite-critical binaries contract: every SUITE_BINARIES entry resolves in the derived image",
 	async () => {
+		// The empirical rule from gate-runner.ts: the image must carry every binary the repo's own
+		// suite spawns. One probe run, all binaries — a missing one prints MISSING:<name> and fails.
 		const image = await defaultGateImage();
-		const proc = Bun.spawn(["docker", "run", "--rm", image, "bash", "-lc", "command -v bash && bun --version && git --version"], { stdout: "pipe", stderr: "ignore" });
+		const probe = SUITE_BINARIES.map((b) => `command -v ${b} >/dev/null || { echo "MISSING:${b}"; exit 1; }`).join("\n");
+		const proc = Bun.spawn(["docker", "run", "--rm", image, "bash", "-lc", probe], { stdout: "pipe", stderr: "pipe" });
+		const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+		expect(`${out}${err}`).not.toContain("MISSING:");
 		expect(await proc.exited).toBe(0);
+	},
+	BUILD_TIMEOUT_MS,
+);
+
+test.skipIf(!hasDocker)(
+	"jq runs in the derived image — the ompsq-434 continue-loop hook regression",
+	async () => {
+		// scripts/continue-loop.sh parses its stdin/oracle with jq; with jq missing its stdout was
+		// EOF-empty and every verify visit died in tests/continue-loop-hook.test.ts.
+		const image = await defaultGateImage();
+		const proc = Bun.spawn(["docker", "run", "--rm", image, "bash", "-lc", `echo '{"decision":"block"}' | jq -r .decision`], { stdout: "pipe", stderr: "ignore" });
+		const out = await new Response(proc.stdout).text();
+		expect(await proc.exited).toBe(0);
+		expect(out.trim()).toBe("block");
 	},
 	BUILD_TIMEOUT_MS,
 );

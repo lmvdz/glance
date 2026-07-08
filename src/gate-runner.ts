@@ -29,17 +29,18 @@
  * Async planner: returns argv + env + whether it is sandboxed; the three gate spawn sites
  * await it and execute. Host mode is byte-identical to the pre-sandbox behavior.
  *
- * IMAGE CONTRACT: the image must provide `bash`, the repo's toolchain (e.g. bun for bun repos),
- * AND `git`. Git is not optional: the gate cwd is a git WORKTREE (the main repo is bind-mounted
- * precisely so `.git` gitdir resolution works inside the container), and real suites spawn `git`
- * from test code (this repo alone has ~85 `Bun.spawn(["git", ...])` sites). The ompsq-432
- * incident proved the failure mode: `oven/bun:1` ships bash+bun but NO git, so every gated
- * full-suite verify died deterministically with `error: Executable not found in $PATH: "git"` —
- * while the same command passed on the host — and the unit burned its whole
- * codefix→fixup→escalate cascade on an environment defect it could never fix. Auto mode
- * therefore derives {@link DERIVED_SANDBOX_IMAGE} (base + git) locally at first use; an
- * operator-named image (`OMP_SQUAD_GATE_SANDBOX=<image>` / `OMP_SQUAD_GATE_SANDBOX_IMAGE`) is
- * honored verbatim and must satisfy the contract itself.
+ * IMAGE CONTRACT (empirical): the image must be able to run the repo's own verify command end to
+ * end — concretely, every binary in {@link SUITE_BINARIES}. Git is not optional (the gate cwd is a
+ * git WORKTREE — the main repo is bind-mounted precisely so `.git` gitdir resolution works inside
+ * the container — and this repo has ~85 `Bun.spawn(["git", ...])` test sites); jq drives the
+ * repo's own hook scripts; npm is what detectPackageManager hands the regression gate for non-bun
+ * lockfile shapes. Two incidents proved the failure mode: ompsq-432 (`oven/bun:1` has no git —
+ * every gated verify died with `Executable not found in $PATH: "git"` while passing on the host,
+ * burning the unit's whole codefix→fixup→escalate cascade) and ompsq-434 (no jq — the
+ * continue-loop hook's stdout parsed as EOF-empty). Auto mode therefore derives
+ * {@link DERIVED_SANDBOX_IMAGE} (base + suite deps) locally at first use; an operator-named image
+ * (`OMP_SQUAD_GATE_SANDBOX=<image>` / `OMP_SQUAD_GATE_SANDBOX_IMAGE`) is honored verbatim and
+ * must satisfy the contract itself.
  */
 
 import { gateEnv } from "./gate-env.ts";
@@ -55,18 +56,43 @@ export interface GateExec {
 	sandboxed: boolean;
 	/** The image used when `sandboxed`; undefined for host exec. */
 	image?: string;
+	/**
+	 * True when auto mode WANTED the suite-deps derived image but its build failed and the plan
+	 * fell back to the bare base image (missing git/jq/npm). A failed gate in a degraded sandbox
+	 * is presumptively an ENVIRONMENT failure, not a code failure — {@link gateRunUnrunnable}
+	 * consumes this so land paths refuse (retryable) instead of misreading it as a red baseline.
+	 */
+	degraded?: boolean;
 }
 
 /** Base sandbox image for a bun repo when docker is present and no image was named. */
 export const DEFAULT_SANDBOX_IMAGE = "oven/bun:1";
 
 /**
- * The image auto mode actually runs: {@link DEFAULT_SANDBOX_IMAGE} + git, built locally at first
- * use (see the IMAGE CONTRACT in the header — the base image has no git, which killed every gated
- * full-suite verify in the ompsq-432 incident). Tag kept in sync with DEFAULT_SANDBOX_IMAGE by
- * hand; bump it if the base changes so a stale local build is never reused.
+ * The image auto mode actually runs: {@link DEFAULT_SANDBOX_IMAGE} + the suite's real runtime
+ * binaries, built locally at first use.
+ *
+ * EMPIRICAL RULE (how this list is maintained): the derived image must be able to run THIS repo's
+ * own gate (`bun run check && bun run test`) end to end — that in-image green run is the
+ * acceptance test, encoded as a live contract test in tests/gate-image.test.ts. Any NEW suite
+ * dependency must be added to {@link SUITE_BINARIES} + the Dockerfile layer in
+ * `buildDerivedImageReal` AND this tag bumped (the local build is cache-keyed by tag via
+ * `docker image inspect`, so an un-bumped tag means already-provisioned hosts silently keep the
+ * old image without the new binary). The failure mode when a binary is missing is worse than a
+ * red loop: the gate dies IDENTICALLY on both the merged and base runs (exit 127), which the
+ * regression gate used to read as "same pre-existing red baseline" and FAIL OPEN — merging
+ * unverified code (see land.ts's unrunnable-gate guard, added alongside this).
+ *
+ * Discovered set, each with the incident/test that proved it:
+ *   - git  ompsq-432: tests/harness-scorecard.test.ts:132 Bun.spawn(["git", ...]) — ~85 sites
+ *   - jq   ompsq-434: scripts/continue-loop.sh (driven by tests/continue-loop-hook.test.ts)
+ *   - npm  tests/land-pr.test.ts NEW_RED fixture: detectPackageManager legitimately resolves npm,
+ *          and the regression gate then runs `npm run …` inside the sandbox
  */
-export const DERIVED_SANDBOX_IMAGE = "glance-gate:bun1-git";
+export const DERIVED_SANDBOX_IMAGE = "glance-gate:bun1-v2";
+
+/** Binaries this repo's suite empirically requires inside the gate image (see the rule above). */
+export const SUITE_BINARIES = ["bash", "bun", "git", "jq", "npm"] as const;
 
 /** Host-owned vars that must NOT leak into a container (they'd shadow the image's own). */
 const HOST_ONLY = new Set(["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"]);
@@ -125,11 +151,11 @@ function warnGitlessFallbackOnce(detail: string): void {
 	warnedGitlessFallback = true;
 	// eslint-disable-next-line no-console
 	console.warn(
-		`[gate] failed to build the git-enabled sandbox image ${DERIVED_SANDBOX_IMAGE} (from ${DEFAULT_SANDBOX_IMAGE}) — ` +
-			`falling back to the bare base image, which has NO git: any gate that spawns git (worktree resolution, ` +
-			`spawn-based tests) will fail deterministically with 'Executable not found in $PATH: "git"'. ` +
-			`Fix the build (network/registry) or set OMP_SQUAD_GATE_SANDBOX_IMAGE to an image that includes git. ` +
-			`Build error: ${detail.slice(0, 400)}`,
+		`[gate] failed to build the suite-deps sandbox image ${DERIVED_SANDBOX_IMAGE} (from ${DEFAULT_SANDBOX_IMAGE}) — ` +
+			`falling back to the bare base image, which lacks ${SUITE_BINARIES.filter((b) => b !== "bash" && b !== "bun").join("/")}: gates that spawn them fail ` +
+			`deterministically ('Executable not found in $PATH'), and a gate command dying identically on merged+base ` +
+			`can slip past the regression comparison. Fix the build (network/registry) or set ` +
+			`OMP_SQUAD_GATE_SANDBOX_IMAGE to an image that satisfies the contract. Build error: ${detail.slice(0, 400)}`,
 	);
 }
 
@@ -150,7 +176,10 @@ async function buildDerivedImageReal(): Promise<string> {
 	try {
 		const inspect = Bun.spawn(["docker", "image", "inspect", DERIVED_SANDBOX_IMAGE], { stdout: "ignore", stderr: "ignore" });
 		if ((await inspect.exited) === 0) return DERIVED_SANDBOX_IMAGE;
-		const dockerfile = `FROM ${DEFAULT_SANDBOX_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*\n`;
+		// git+jq are tiny; npm (pulled with node) is the price of detectPackageManager legitimately
+		// resolving npm-driven gates (see the SUITE_BINARIES doc). Bump DERIVED_SANDBOX_IMAGE when
+		// this layer changes, or provisioned hosts keep serving the old image forever.
+		const dockerfile = `FROM ${DEFAULT_SANDBOX_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git jq npm && rm -rf /var/lib/apt/lists/*\n`;
 		const build = Bun.spawn(["docker", "build", "-t", DERIVED_SANDBOX_IMAGE, "-"], {
 			stdin: new TextEncoder().encode(dockerfile),
 			stdout: "ignore",
@@ -262,7 +291,12 @@ export async function gateExec(
 		// image has no git, which is fatal to any real gate (see the header + ompsq-432).
 		const named = source.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim();
 		const image = named || (await (opts.imageBuilder ? opts.imageBuilder() : defaultGateImage()));
-		return sandboxPlan(command, cwd, image, source, env, opts.mounts);
+		const plan = sandboxPlan(command, cwd, image, source, env, opts.mounts);
+		// The builder resolves the bare base image ONLY on build failure — mark the plan degraded so
+		// callers (gateRunUnrunnable) can refuse to trust a failed run in it instead of misreading a
+		// missing-binary death as a code failure.
+		if (!named && image === DEFAULT_SANDBOX_IMAGE) plan.degraded = true;
+		return plan;
 	}
 	if (strict) throw new GateSandboxUnavailableError("OMP_SQUAD_GATE_SANDBOX_STRICT=1 but docker is unavailable — refusing to run the gate on the host (fail-closed)");
 	warnHostFallbackOnce("docker is unavailable");
@@ -284,4 +318,50 @@ export async function execGatedCommand(
 	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	return { code: await proc.exited, stdout, stderr };
+}
+
+// ── Unrunnable-gate classifier ─────────────────────────────────────────────────────────────────
+
+/** The slice of a gate run the classifier consumes (matches land.ts's runGate shape + `degraded`). */
+export interface GateRunLike {
+	code: number;
+	output: string;
+	/** From the plan (GateExec.degraded): the sandbox fell back to the bare base image. */
+	degraded?: boolean;
+}
+
+/** Executable-resolution failure shapes across the shells/runtimes gates run under (bash, sh, Bun). */
+const NOT_FOUND_RE = /Executable not found in \$PATH|command not found|not found in \$PATH|is not recognized as an internal or external command/i;
+/** bun test's explicit nothing-ran markers. Deliberately narrow — only confidently parseable shapes. */
+const ZERO_TESTS_RE = /\bRan 0 tests\b|did not match any test files/i;
+/** bun test's summary marker that at least one test demonstrably executed ("N pass", N ≥ 1). */
+const TESTS_RAN_RE = /\b[1-9]\d* pass\b/;
+
+/**
+ * Did this FAILED gate run demonstrably NOT exercise the code under test? Returns a human-readable
+ * reason when the failure is an ENVIRONMENT failure (the command never really ran), undefined when
+ * the run should be judged on its failures like any red suite.
+ *
+ * THE DESIGN PRINCIPLE (cross-review of the gate-image incident): a gate must fail CLOSED whenever
+ * it demonstrably did not exercise the code. Exit 127 is one signal, not the definition — the same
+ * missing-binary death can surface as a non-127 exit with an executable-not-found message (Bun
+ * throws before the shell propagates 127), or as a red run inside a DEGRADED bare-base sandbox.
+ * Both land paths that compare merged-vs-base failure sets (applyRegressionGate, verifyMerged's
+ * red-baseline allowance) previously treated "identical failures on both sides" as a pre-existing
+ * red baseline — but two identical ENVIRONMENT failures prove nothing about the code, and the land
+ * silently proceeded unverified.
+ *
+ * Conservative by construction: if the output carries bun test's "N pass" (N ≥ 1) summary marker,
+ * the suite demonstrably executed and this NEVER classifies the run as unrunnable — a real red
+ * suite whose captured failure text happens to contain "command not found" (fixtures testing
+ * missing-binary handling) is still judged on its failures, not misread as an env failure.
+ */
+export function gateRunUnrunnable(run: GateRunLike, command?: string): string | undefined {
+	if (run.code === 0) return undefined; // green is green
+	if (run.code === 127) return "exit 127 — the gate command itself could not execute (command not found)";
+	if (TESTS_RAN_RE.test(run.output)) return undefined; // tests demonstrably ran — a real red, judge it on failures
+	if (NOT_FOUND_RE.test(run.output)) return "gate output shows an executable-resolution failure and no test ever ran — the environment lacks a binary the gate needs";
+	if (run.degraded) return `gate ran inside the DEGRADED bare sandbox image (${DEFAULT_SANDBOX_IMAGE} — the ${DERIVED_SANDBOX_IMAGE} build failed) and no test ever ran`;
+	if (command && /\btest\b/.test(command) && ZERO_TESTS_RE.test(run.output)) return "test gate executed zero tests — the suite never ran";
+	return undefined;
 }

@@ -14,6 +14,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { installNodeModules, provisionWorktreeDeps } from "../src/worktree.ts";
 
+// The success-path installs fetch the REAL npm registry. Inside the hermetic gate sandbox
+// (--network none, empty bun cache at HOME=/tmp) they can never succeed — skip them there,
+// mirroring the suite's `skipIf(!hasDocker)` convention. In production provisioning runs on the
+// HOST at spawn time (warm cache + network), so the skip costs nothing where the code executes.
+// The FAILURE-path tests stay unguarded: offline, an unresolvable dep still fails exactly as
+// asserted (error string, bounded, non-fatal).
+let hasRegistry = false;
+try {
+	hasRegistry = (await fetch("https://registry.npmjs.org/-/ping", { signal: AbortSignal.timeout(3000) })).status < 500;
+} catch {
+	hasRegistry = false;
+}
+
 async function tmp(): Promise<string> {
 	return mkdtemp(path.join(os.tmpdir(), "glance-wt-provision-"));
 }
@@ -29,7 +42,7 @@ describe("installNodeModules", () => {
 		}
 	});
 
-	test("provisions node_modules for a real bun package", async () => {
+	test.skipIf(!hasRegistry)("provisions node_modules for a real bun package", async () => {
 		const dir = await tmp();
 		try {
 			await writeFile(path.join(dir, "package.json"), JSON.stringify({ name: "wt-fixture", version: "0.0.0", dependencies: { typescript: "6.0.3" } }));
@@ -73,7 +86,7 @@ describe("provisionWorktreeDeps", () => {
 		}
 	}, 60_000);
 
-	test("installs a nested webapp/ package that a root-only install would never reach", async () => {
+	test.skipIf(!hasRegistry)("installs a nested webapp/ package that a root-only install would never reach", async () => {
 		const dir = await tmp();
 		try {
 			await writeFile(path.join(dir, "package.json"), JSON.stringify({ name: "root", version: "0.0.0" })); // no deps — no-op root install

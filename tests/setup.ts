@@ -17,6 +17,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 for (const k of Object.keys(process.env)) {
+	// OMP_SQUAD_REQUIRE_DOCKER_TESTS survives the sweep: it addresses the TEST RUN itself (force the
+	// docker-gated gate-image contract to FAIL instead of skip when docker is absent — CI hardening),
+	// not daemon behavior under test, so scrubbing it would make the knob impossible to use at all.
+	if (k === "OMP_SQUAD_REQUIRE_DOCKER_TESTS") continue;
 	if (k.startsWith("PLANE_") || k.startsWith("OMP_SQUAD_") || k.startsWith("GLANCE_")) delete process.env[k];
 }
 
@@ -26,6 +30,17 @@ for (const k of Object.keys(process.env)) {
 // The sandbox PLANNER itself is unit-tested in gate-runner.test.ts with an injected docker probe.
 // A test that specifically wants sandbox planning overrides this per-test and restores it.
 process.env.OMP_SQUAD_GATE_SANDBOX = "host";
+
+// Hermetic model source for spawned inner agents: several integration tests spawn a REAL `omp`
+// process (RpcAgent spawn, SquadManager create, rm-by-name on a live agent) which refuses to boot
+// with no model source at all ("No models available. Use /login or set an API key"). On an
+// operator host this was invisibly satisfied by ~/.omp login state or a real exported key — but
+// inside the hermetic gate sandbox (HOME=/tmp, gateEnv-scrubbed env) there is neither, and every
+// omp spawn timed out its test. A DUMMY key lets omp reach `ready` (keys are validated at turn
+// time, and no test drives an LLM turn); it is set only when absent so an operator's real key —
+// today's implicit behavior — is untouched. Deliberately invalid: an accidental real API call
+// fails instead of spending.
+process.env.ANTHROPIC_API_KEY ??= "glance-test-dummy-key-not-real";
 
 // Point the fleet state dir at a throwaway. presence/leases (ttl-registry) and any daemon a test spins up
 // now live here instead of the operator's real state dir (~/.glance / legacy ~/.omp/squad) — the source
