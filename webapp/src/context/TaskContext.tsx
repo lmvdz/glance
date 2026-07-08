@@ -90,6 +90,13 @@ interface TaskContextType {
    *  TaskListView state) so it survives that component unmounting behind TaskDetail — switching
    *  modes never disturbs `selectedTaskId`, and vice versa; the two are independent state. */
   tasksListMode: TasksListMode;
+  /** Taste-review nit 3 (CANVAS-AND-PAGE-CHAT.md D6): the Category Canvas's "+N more" overflow
+   *  chip promised a FILTERED list (that category's plans) but landed on the full unfiltered one —
+   *  List mode had no category filter to hand it. Lives here (not local TaskListView state) so it
+   *  survives a round trip through TaskDetail, the same reason `tasksListMode` isn't local:
+   *  clicking a satellite in the filtered list opens TaskDetail, and coming back should not have
+   *  silently dropped the filter. `null` = unfiltered. */
+  taskCategoryFilter: string | null;
   isChatOpen: boolean;
   /** ⌘K palette (GRAPH-FOLD.md §3) — open everywhere, not scoped to a view. */
   isCommandPaletteOpen: boolean;
@@ -109,6 +116,8 @@ interface TaskContextType {
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
   setTasksListMode: (mode: TasksListMode) => void;
+  /** Set (or clear, with `null`) the List-mode category filter (taste-review nit 3). */
+  setTaskCategoryFilter: (categoryId: string | null) => void;
   setIsChatOpen: (isOpen: boolean) => void;
   /** Subscribe to an agent's transcript AND open the chat panel focused on that agent. No-op if agentId is undefined. */
   openConsole: (agentId: string | undefined) => void;
@@ -184,6 +193,10 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [tasksListMode, setTasksListModeState] = useState<TasksListMode>(() =>
     initialTasksListMode(typeof window === 'undefined' ? null : window.localStorage.getItem(TASKS_VIEW_STORAGE_KEY)),
   );
+  // Taste-review nit 3: ephemeral (not persisted) — unlike `tasksListMode`, there's no honest
+  // "last filter" to restore across a reload; it's a transient in-session scope, set exactly by
+  // the canvas's overflow chip or cleared by the list's own filter chip.
+  const [taskCategoryFilter, setTaskCategoryFilter] = useState<string | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
   const [interveneAgentId, setInterveneAgentId] = useState<string | null>(null);
@@ -436,7 +449,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, tasksListMode, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );
