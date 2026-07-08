@@ -1,10 +1,8 @@
 /**
- * "Jump to search" — the target of the ⌘K / Ctrl+K shortcut and the "Jump" buttons.
- *
- * The header advertises "Search tasks or jump · ⌘K" and TaskDetail renders a "Jump ⌘K"
- * button, but nothing was wired to either — pressing ⌘K or clicking Jump did nothing.
- * This focuses the workbench task-search box (which already filters the task list), the
- * conventional behavior for that affordance.
+ * "Jump to task search" — focuses the workbench task-search box (which already filters the
+ * task list). Originally the direct target of the ⌘K binding (PR #124); since the command
+ * palette took over that hotkey (GRAPH-FOLD.md §3), this is invoked by the palette's
+ * "Search tasks…" row instead.
  */
 
 import type { AppView } from '../context/TaskContext';
@@ -28,12 +26,11 @@ export function focusTaskSearch(): boolean {
 }
 
 /**
- * Global ⌘K/Ctrl+K handler. The search input now only mounts on the Tasks view (the
- * task-scoped sidebar block was hidden everywhere else — see WorkbenchPane's
- * isTaskScopedView), so a bare focusTaskSearch() would silently no-op from any other
- * screen. Keep the keybinding global: if we're not on Tasks, switch there first and
- * focus on the next scheduled tick — the input doesn't exist in the DOM until that
- * render lands, so focusing synchronously would still miss it.
+ * The palette's "Search tasks…" row handler (formerly the raw ⌘K binding). The search input
+ * only mounts on the Tasks view (see WorkbenchPane's isTaskScopedView), so a bare
+ * focusTaskSearch() would silently no-op from any other screen: if we're not on Tasks,
+ * switch there first and focus on the next scheduled tick — the input doesn't exist in the
+ * DOM until that render lands, so focusing synchronously would still miss it.
  */
 export function jumpToTaskSearch(
   view: AppView,

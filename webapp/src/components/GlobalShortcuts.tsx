@@ -1,19 +1,18 @@
 import React, { useEffect } from 'react';
 import { useTaskContext } from '../context/TaskContext';
-import { jumpToTaskSearch } from '../lib/jump';
 
 export const GlobalShortcuts = () => {
-  const { addTask, deleteTask, selectedTaskId, view, setView } = useTaskContext();
+  const { addTask, deleteTask, selectedTaskId, toggleCommandPalette } = useTaskContext();
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // ⌘K / Ctrl+K — jump to the task-search box. Handled BEFORE the input guard so it works
-      // from anywhere (including while typing), the conventional behavior for a jump shortcut.
-      // The search box only renders on the Tasks view now, so this also switches views first
-      // when called from elsewhere (see jumpToTaskSearch).
+      // ⌘K / Ctrl+K — toggle the command palette (GRAPH-FOLD.md §3). Handled BEFORE the input
+      // guard so it works from anywhere, including while typing — the conventional palette
+      // binding. The old direct jump-to-task-search behavior (PR #124) lives on as the palette's
+      // "Search tasks…" row instead of being the raw hotkey.
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
-        jumpToTaskSearch(view, setView);
+        toggleCommandPalette();
         return;
       }
 
@@ -41,7 +40,7 @@ export const GlobalShortcuts = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [addTask, deleteTask, selectedTaskId, view, setView]);
+  }, [addTask, deleteTask, selectedTaskId, toggleCommandPalette]);
 
   return null;
 };
