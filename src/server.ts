@@ -16,7 +16,9 @@ import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
+import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
 import { envBool, envInt } from "./config.ts";
+import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
@@ -29,6 +31,7 @@ import {
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
 	CapabilitySourceBodySchema,
+	ChatAttachmentCreateBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	decodeBody,
@@ -1545,6 +1548,35 @@ export class SquadServer {
 			const profileId = typeof body.profileId === "string" ? body.profileId : undefined;
 			const dto = await manager.create({ repo, name: "chat", model, profileId, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
 			return Response.json({ agentId: dto.id });
+		}
+		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image
+		// persists here as a chat ARTIFACT (org-scoped by `manager`, size/PNG-magic-validated in
+		// chat-attachment.ts) — the composer then folds its returned `path` into the outgoing prompt
+		// text as a fenced untrusted-data reference, since neither /api/console nor the prompt
+		// command carry an inline image channel today (see chat-attachment.ts's header comment).
+		if (url.pathname === "/api/chat-attachments" && req.method === "POST") {
+			const decoded = decodeBody(ChatAttachmentCreateBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("dataUrl required", { status: 400 });
+			try {
+				const saved = await manager.saveChatAttachment(decoded.success.dataUrl);
+				return Response.json(saved);
+			} catch (err) {
+				// MEDIUM 1 (disk-fill quota) and MEDIUM 2 (IHDR dimension bomb) — both are resource
+				// rejections, not shape/mime validation, so both surface as 413 rather than the generic
+				// 400 every other malformed-payload error on this route returns.
+				if (err instanceof ChatAttachmentQuotaExceededError || err instanceof ChatAttachmentDimensionError) {
+					return new Response(err.message, { status: 413 });
+				}
+				// errText, not the inline ternary — this is the one site the effect-migration ratchet's
+				// error-message-idiom baseline doesn't already budget for on this branch (see err-text.ts).
+				return new Response(errText(err), { status: 400 });
+			}
+		}
+		const mattachment = url.pathname.match(/^\/api\/chat-attachments\/([^/]+)$/);
+		if (mattachment && req.method === "GET") {
+			const bytes = await manager.getChatAttachment(decodeURIComponent(mattachment[1]));
+			if (!bytes) return new Response("not found", { status: 404 });
+			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));

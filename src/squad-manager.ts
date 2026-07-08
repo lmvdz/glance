@@ -158,6 +158,7 @@ import { DAY_MS } from "./omp-graph/schema.ts";
 import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
@@ -6156,6 +6157,20 @@ export class SquadManager extends EventEmitter {
 		return readDigest(this.stateDir, id);
 	}
 
+	/** Persist a pasted/dropped/captured/annotated chat image (Feature 2 D2) into THIS manager's
+	 *  own `stateDir` — org-scoped for free, since callers only ever reach a manager already
+	 *  resolved for their org (see server.ts's `managerFor(actor)`). Throws a short message on an
+	 *  invalid/oversized/non-PNG payload; never writes a byte in that case. */
+	async saveChatAttachment(dataUrl: string): Promise<SavedChatAttachment> {
+		return writeChatAttachment(this.stateDir, dataUrl);
+	}
+
+	/** Read a previously-saved chat attachment back (org-scoped the same way). `undefined` if the
+	 *  id is malformed or no such attachment exists in this manager's stateDir. */
+	async getChatAttachment(id: string): Promise<Buffer | undefined> {
+		return readChatAttachment(this.stateDir, id);
+	}
+
 	/** Route an extension UI request to a pending entry (and opt-in auto-answer). Protected so a test can drive it. */
 	protected onUi(rec: AgentRecord, req: RpcExtensionUIRequest): void {
 		let added: PendingRequest | undefined;
@@ -6630,6 +6645,16 @@ export class SquadManager extends EventEmitter {
 		if (reaped.length) this.log("info", `reaped ${reaped.length} orphan agent host(s): ${reaped.join(", ")}`);
 	}
 
+	/** Bonus hygiene for chat image attachments (security review MEDIUM 1 follow-up): age-based TTL
+	 *  sweep of this org's own `chat-attachments/` dir, on the same janitor cadence as
+	 *  `reapDeadWorktrees` (every ~12th poll tick, per-org — not gated by `skipGlobalJanitors` since
+	 *  each manager only ever sweeps its own `stateDir`). The hard ceiling is
+	 *  `writeChatAttachment`'s write-time quota check, which holds regardless of this sweep. */
+	private async reapStaleChatAttachmentsTick(): Promise<void> {
+		const reaped = await reapStaleChatAttachments(this.stateDir).catch(() => [] as string[]);
+		if (reaped.length) this.log("info", `reaped ${reaped.length} stale chat attachment(s)`);
+	}
+
 	private async poll(): Promise<void> {
 		const live = [...this.agents.values()].filter((r) => (r.dto.kind === "omp-operator" || r.dto.kind === "workflow") && r.agent.isReady && r.agent.isAlive);
 		await Promise.all(
@@ -6655,6 +6680,7 @@ export class SquadManager extends EventEmitter {
 				void this.sweepRegistries();
 			}
 			void this.reapDeadWorktrees();
+			void this.reapStaleChatAttachmentsTick();
 		}
 		void this.sampleHealth().then((h) => {
 			const key = h.warnings.join("|");

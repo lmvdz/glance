@@ -323,6 +323,13 @@ export const AgentVisionBodySchema = Schema.Struct({
 	url: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/chat-attachments — `dataUrl` required (a `data:image/png;base64,...` payload; Feature
+ *  2 D2, chat-attachment.ts). Mime/size/PNG-magic validation happens post-decode in
+ *  `decodeChatAttachmentDataUrl` — this schema only asserts the envelope shape. */
+export const ChatAttachmentCreateBodySchema = Schema.Struct({
+	dataUrl: Schema.String,
+});
+
 /** POST /api/tasks/:id/start — no required field (`repo` falls back to `process.cwd()`). */
 export const TaskStartBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),

@@ -1,7 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Sparkles, ArrowUp, Square, Loader2, Paperclip, X } from 'lucide-react';
+import { Camera, ImagePlus, Loader2, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
 import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
+import { ImageAnnotator, type Annotation } from './ImageAnnotator';
+import {
+  captureElementToPng,
+  downscaleToPng,
+  isRasterImageType,
+  joinImagePromptRefs,
+  nextImageAttachmentId,
+  uploadChatAttachment,
+} from '../../lib/imageAttachment';
 import type { AgentDTO } from '../../lib/dto';
 import type { Task } from '../../types';
 
@@ -111,6 +120,25 @@ export interface PasteChip {
   content: string;
 }
 
+/**
+ * An attached image (paste/drop/capture — Feature 2 D2), always the already-downscaled PNG data
+ * URL (see imageAttachment.ts's `downscaleToPng`/`captureElementToPng`) — never the raw
+ * clipboard/dropped bytes, so the ≤2048px/≤4MB/EXIF-stripped guarantee (D5) holds from the moment
+ * it lands in this state, not just at upload time. `annotations` accumulates as the operator boxes
+ * or pins the image; `flattened` becomes true once "Done" in the annotator has baked them into
+ * `dataUrl` (re-annotating after that re-opens the annotator against the flattened image itself —
+ * v1 doesn't keep the pre-annotation original around for editing).
+ */
+export interface ImageAttachment {
+  id: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+  annotations: Annotation[];
+  /** True once at least one "Done" pass has flattened annotations into `dataUrl`. */
+  annotated: boolean;
+}
+
 /** Fold pasted-text chips into the outgoing message: fenced, appended after the typed text, in
  *  the order they were attached — this is the honest home for "attach" (04 removed the
  *  decorative button; nothing was ever wired to it). Runs before the parent's context-blob
@@ -171,6 +199,45 @@ export const ComposerAttachmentChip = ({
         </div>
       </div>
     )}
+  </div>
+);
+
+/** One attached image's thumbnail — remove + annotate affordances, and a small ember-accented dot
+ *  once it carries at least one annotation (so "did I already mark this up?" is answerable at a
+ *  glance, not by reopening the annotator). Extracted for the same static-markup-testability reason
+ *  as `ComposerAttachmentChip`. */
+export const ComposerImageThumb = ({
+  image,
+  onAnnotate,
+  onRemove,
+}: {
+  image: ImageAttachment;
+  onAnnotate: () => void;
+  onRemove: () => void;
+}) => (
+  <div className="group relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
+    <img src={image.dataUrl} alt="Attached" className="h-full w-full object-cover" />
+    {image.annotations.length > 0 && (
+      <span className="absolute bottom-1 left-1 h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden title={`${image.annotations.length} annotation${image.annotations.length === 1 ? '' : 's'}`} />
+    )}
+    <div className="absolute inset-0 flex items-start justify-end gap-0.5 bg-black/0 p-0.5 opacity-0 transition-opacity group-hover:bg-black/20 group-hover:opacity-100 focus-within:opacity-100">
+      <button
+        type="button"
+        aria-label="Annotate image"
+        onClick={onAnnotate}
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-gray-700 hover:bg-white dark:bg-gray-900/90 dark:text-gray-200"
+      >
+        <Pencil className="h-3 w-3" aria-hidden />
+      </button>
+      <button
+        type="button"
+        aria-label="Remove image"
+        onClick={onRemove}
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-gray-700 hover:bg-white dark:bg-gray-900/90 dark:text-gray-200"
+      >
+        <X className="h-3 w-3" aria-hidden />
+      </button>
+    </div>
   </div>
 );
 
@@ -282,6 +349,62 @@ export const Composer = ({
   const [chips, setChips] = useState<PasteChip[]>([]);
   const [expandedChipId, setExpandedChipId] = useState<string | null>(null);
 
+  // Images into the conversation (Feature 2 D2): paste/drop/capture attach a downscaled PNG here;
+  // `annotatingId` opens the ImageAnnotator modal for that one attachment. `isSending` is separate
+  // from the parent's `isLoading` (which reflects the AGENT's running state) — it covers the
+  // window where `submit` is awaiting the per-image upload round trip, before `onSend` even fires.
+  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [annotatingId, setAnnotatingId] = useState<string | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const addImageFromSource = async (source: Blob | string) => {
+    try {
+      const downscaled = await downscaleToPng(source);
+      setImages((prev) => [...prev, { id: nextImageAttachmentId(), ...downscaled, annotations: [], annotated: false }]);
+      setAttachError(null);
+    } catch {
+      setAttachError('Could not read that image — try a different file.');
+    }
+  };
+
+  const addImageFiles = (files: Iterable<File>) => {
+    for (const file of files) {
+      if (isRasterImageType(file.type)) void addImageFromSource(file);
+    }
+  };
+
+  const removeImage = (id: string) => {
+    setImages((prev) => prev.filter((img) => img.id !== id));
+    setAnnotatingId((prev) => (prev === id ? null : prev));
+  };
+
+  const handleAnnotateDone = (id: string, flattenedDataUrl: string, annotations: Annotation[]) => {
+    setImages((prev) => prev.map((img) => (img.id === id ? { ...img, dataUrl: flattenedDataUrl, annotations, annotated: annotations.length > 0 } : img)));
+    setAnnotatingId(null);
+  };
+
+  const handleCaptureView = async () => {
+    const el = document.getElementById('omp-main-content');
+    if (!el) {
+      setAttachError('Nothing to capture — no page content found.');
+      return;
+    }
+    setIsCapturing(true);
+    try {
+      const captured = await captureElementToPng(el);
+      setImages((prev) => [...prev, { id: nextImageAttachmentId(), ...captured, annotations: [], annotated: false }]);
+      setAttachError(null);
+    } catch {
+      setAttachError('Could not capture the current view — try a screenshot + paste instead.');
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
   // `@`-mention combobox — caret-anchored via the composer textarea's real selection, not a
   // split(' ') heuristic. Task filtering stays synchronous over `tasks`; the `triggers` array
   // is extensible so a future `/` command menu slots in beside it.
@@ -314,16 +437,33 @@ export const Composer = ({
     composerTextareaRef.current?.select();
   }, [recallState]);
 
-  const submit = () => {
+  const submit = async () => {
     const typed = input.trim();
-    if ((!typed && chips.length === 0) || isLoading) return;
-    const textToSend = assembleSendText(typed, chips);
-    setInput('');
-    setChips([]);
-    setExpandedChipId(null);
-    if (typed) setPromptHistory((prev) => pushPromptHistory(prev, typed));
-    setRecallState(INITIAL_RECALL_STATE);
-    onSend(textToSend);
+    if ((!typed && chips.length === 0 && images.length === 0) || isLoading || isSending) return;
+    setIsSending(true);
+    try {
+      // Upload every attached image BEFORE the turn goes out — the outgoing text needs each
+      // one's server-assigned path to fence in (D2/D5's artifact-path transport decision;
+      // imageAttachment.ts's header comment covers why there's no inline-image channel to use
+      // instead). A failed upload aborts the whole send rather than silently dropping the image
+      // or sending a broken reference — the draft (text/chips/images) is left intact so the
+      // operator can just retry.
+      const uploaded = await Promise.all(images.map((img) => uploadChatAttachment(img.dataUrl)));
+      const imageRefs = joinImagePromptRefs(uploaded.map((u) => u.path));
+      const textToSend = [assembleSendText(typed, chips), imageRefs].filter(Boolean).join('\n\n');
+      setInput('');
+      setChips([]);
+      setExpandedChipId(null);
+      setImages([]);
+      setAttachError(null);
+      if (typed) setPromptHistory((prev) => pushPromptHistory(prev, typed));
+      setRecallState(INITIAL_RECALL_STATE);
+      onSend(textToSend);
+    } catch {
+      setAttachError('Could not attach one or more images — check your connection and try sending again.');
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -350,15 +490,56 @@ export const Composer = ({
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      submit();
+      void submit();
     }
   };
 
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // Image paste (Feature 2 D2) — checked FIRST: a screenshot copied to the clipboard often also
+    // carries an (empty or placeholder) text item, and the image is always the intent when present.
+    const items = e.clipboardData?.items;
+    const imageFiles: File[] = [];
+    if (items) {
+      for (const item of items) {
+        if (isRasterImageType(item.type)) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+    }
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      addImageFiles(imageFiles);
+      return;
+    }
     const text = e.clipboardData?.getData('text') ?? '';
     if (!shouldChipPaste(text)) return; // short paste — let it land in the textarea as usual
     e.preventDefault();
     setChips((prev) => [...prev, { id: `chip:${Date.now()}:${Math.random().toString(36).slice(2)}`, label: pasteChipLabel(text), content: text }]);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return; // still inside the drop zone
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    setIsDragOver(false);
+    addImageFiles(files);
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) addImageFiles(e.target.files);
+    e.target.value = ''; // allow re-selecting the same file consecutively
   };
 
   const removeChip = (id: string) => {
@@ -395,7 +576,17 @@ export const Composer = ({
         ))}
       </div>
 
-      <div className="relative bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl flex flex-col focus-within:border-gray-400 dark:focus-within:border-gray-600 transition-colors">
+      <div
+        className={`relative bg-gray-50 dark:bg-gray-900 border rounded-xl flex flex-col transition-colors ${isDragOver ? 'border-amber-500 ring-2 ring-amber-500/30' : 'border-gray-200 dark:border-gray-800 focus-within:border-gray-400 dark:focus-within:border-gray-600'}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {isDragOver && (
+          <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-xl bg-amber-50/90 text-xs font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+            Drop image to attach
+          </div>
+        )}
 
         {mentionMenu.isOpen && (
           <div
@@ -439,6 +630,20 @@ export const Composer = ({
           </div>
         )}
 
+        {images.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-2.5 pt-2" aria-label="Attached images">
+            {images.map((image) => (
+              <ComposerImageThumb key={image.id} image={image} onAnnotate={() => setAnnotatingId(image.id)} onRemove={() => removeImage(image.id)} />
+            ))}
+          </div>
+        )}
+
+        {attachError && (
+          <div className="px-2.5 pt-2 text-[11px] text-red-600 dark:text-red-400" role="alert">
+            {attachError}
+          </div>
+        )}
+
         <textarea
           ref={composerTextareaRef}
           value={input}
@@ -447,7 +652,7 @@ export const Composer = ({
           onPaste={handlePaste}
           placeholder={placeholder ?? 'Type @ to link a task...'}
           className="w-full bg-transparent border-none outline-none text-[13px] text-gray-900 dark:text-gray-200 px-3 py-2.5 resize-none overflow-y-auto"
-          disabled={isLoading}
+          disabled={isLoading || isSending}
           rows={1}
           {...mentionMenu.comboboxProps}
         />
@@ -464,16 +669,49 @@ export const Composer = ({
               ))}
             </select>
             <ComposerStats agent={agent} />
+            <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileInputChange} />
+            <button
+              type="button"
+              aria-label="Attach image"
+              title="Attach image"
+              onClick={() => fileInputRef.current?.click()}
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
+            >
+              <ImagePlus className="h-4 w-4" aria-hidden />
+            </button>
+            <button
+              type="button"
+              aria-label="Capture view"
+              title="Capture view"
+              disabled={isCapturing}
+              onClick={() => void handleCaptureView()}
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800"
+            >
+              {isCapturing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Camera className="h-4 w-4" aria-hidden />}
+            </button>
           </div>
           <ComposerSendButton
             isStopShown={isStopShown}
             stopPending={stopPending}
-            canSend={(!!input.trim() || chips.length > 0) && !isLoading}
-            onSend={() => submit()}
+            canSend={(!!input.trim() || chips.length > 0 || images.length > 0) && !isLoading && !isSending}
+            onSend={() => void submit()}
             onStop={onStop}
           />
         </div>
       </div>
+
+      {annotatingId && (() => {
+        const image = images.find((img) => img.id === annotatingId);
+        if (!image) return null;
+        return (
+          <ImageAnnotator
+            image={image}
+            initialAnnotations={image.annotations}
+            onDone={(flattenedDataUrl, annotations) => handleAnnotateDone(image.id, flattenedDataUrl, annotations)}
+            onCancel={() => setAnnotatingId(null)}
+          />
+        );
+      })()}
     </div>
   );
 };

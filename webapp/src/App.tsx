@@ -147,7 +147,10 @@ const AppContent = () => {
           fleet must never again be indistinguishable from a dead one, on any screen. */}
       <div className="flex min-w-0 flex-1 flex-col">
         <FactoryStatusStrip />
-        <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Feature 2 D2's "Capture view" button snapshots exactly this element (see
+            imageAttachment.ts's captureElementToPng) — the id is the stable target, independent
+            of which view is currently mounted inside it. */}
+        <div id="omp-main-content" className="flex min-h-0 flex-1 overflow-hidden">
           <MainContent />
         </div>
       </div>
