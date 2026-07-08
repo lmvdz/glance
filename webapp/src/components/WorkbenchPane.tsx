@@ -18,6 +18,7 @@ import {
   Library,
   RotateCcw,
   Layers,
+  LayoutPanelLeft,
   ListChecks,
   Menu,
   Mic,
@@ -87,6 +88,7 @@ const NAV_SECTIONS: { title: string; items: { view: AppView; label: string; icon
     items: [
       { view: 'attention', label: 'Needs you', icon: Bell },
       { view: 'active', label: 'Active work', icon: Radar },
+      { view: 'cockpit', label: 'Cockpit', icon: LayoutPanelLeft },
     ],
   },
   {
@@ -376,6 +378,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     ? `Needs you${needsYouCount ? ` · ${needsYouCount}` : ''}`
     : view === 'active'
     ? `Active work${activeWorkCount ? ` · ${activeWorkCount}` : ''}`
+    : view === 'cockpit' ? 'Cockpit'
     : view === 'tasks'
     ? `${filteredTasks.length} tasks${selectedTask ? ` · ${taskRef(selectedTask) ?? selectedTask.title}` : ''}`
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
@@ -402,6 +405,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         <button onClick={() => setView('active')} className={`mt-1 relative flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'active' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label={`Active work${activeWorkCount ? ` (${activeWorkCount})` : ''}`} title="Active work">
           <Radar className="h-4 w-4" aria-hidden="true" />
           {activeWorkCount > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />}
+        </button>
+        <button onClick={() => setView('cockpit')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'cockpit' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Cockpit" title="Cockpit — per-agent transcript + land rail">
+          <LayoutPanelLeft className="h-4 w-4" aria-hidden="true" />
         </button>
         <button onClick={() => setView('tasks')} className={`mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'tasks' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`} aria-label="Tasks" title="Tasks">
           <Inbox className="h-4 w-4" aria-hidden="true" />
