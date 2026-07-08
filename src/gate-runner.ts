@@ -18,7 +18,8 @@
  *
  * Env knobs:
  *   - OMP_SQUAD_GATE_SANDBOX          image | `host`/`off`/`0`/`disable` (opt-out) | unset (auto)
- *   - OMP_SQUAD_GATE_SANDBOX_IMAGE    default image used in auto mode (falls back to DEFAULT_SANDBOX_IMAGE)
+ *   - OMP_SQUAD_GATE_SANDBOX_IMAGE    default image used in auto mode (unset ⇒ DERIVED_SANDBOX_IMAGE,
+ *                                     the git-enabled local build of DEFAULT_SANDBOX_IMAGE)
  *   - OMP_SQUAD_GATE_SANDBOX_DISABLE  truthy ⇒ force host exec (same as `=host`)
  *   - OMP_SQUAD_GATE_SANDBOX_STRICT   `1` ⇒ fail closed: refuse to run on the host if docker is absent
  *   - OMP_SQUAD_GATE_SANDBOX_NETWORK  container network (default `none`)
@@ -26,8 +27,19 @@
  *                                     set `root` to restore the old root-in-container behavior)
  *
  * Async planner: returns argv + env + whether it is sandboxed; the three gate spawn sites
- * await it and execute. Host mode is byte-identical to the pre-sandbox behavior. The image
- * must provide `bash` and the repo's toolchain (e.g. an `oven/bun` derivative for bun repos).
+ * await it and execute. Host mode is byte-identical to the pre-sandbox behavior.
+ *
+ * IMAGE CONTRACT: the image must provide `bash`, the repo's toolchain (e.g. bun for bun repos),
+ * AND `git`. Git is not optional: the gate cwd is a git WORKTREE (the main repo is bind-mounted
+ * precisely so `.git` gitdir resolution works inside the container), and real suites spawn `git`
+ * from test code (this repo alone has ~85 `Bun.spawn(["git", ...])` sites). The ompsq-432
+ * incident proved the failure mode: `oven/bun:1` ships bash+bun but NO git, so every gated
+ * full-suite verify died deterministically with `error: Executable not found in $PATH: "git"` —
+ * while the same command passed on the host — and the unit burned its whole
+ * codefix→fixup→escalate cascade on an environment defect it could never fix. Auto mode
+ * therefore derives {@link DERIVED_SANDBOX_IMAGE} (base + git) locally at first use; an
+ * operator-named image (`OMP_SQUAD_GATE_SANDBOX=<image>` / `OMP_SQUAD_GATE_SANDBOX_IMAGE`) is
+ * honored verbatim and must satisfy the contract itself.
  */
 
 import { gateEnv } from "./gate-env.ts";
@@ -45,8 +57,16 @@ export interface GateExec {
 	image?: string;
 }
 
-/** Sane default sandbox image for a bun repo when docker is present and no image was named. */
+/** Base sandbox image for a bun repo when docker is present and no image was named. */
 export const DEFAULT_SANDBOX_IMAGE = "oven/bun:1";
+
+/**
+ * The image auto mode actually runs: {@link DEFAULT_SANDBOX_IMAGE} + git, built locally at first
+ * use (see the IMAGE CONTRACT in the header — the base image has no git, which killed every gated
+ * full-suite verify in the ompsq-432 incident). Tag kept in sync with DEFAULT_SANDBOX_IMAGE by
+ * hand; bump it if the base changes so a stale local build is never reused.
+ */
+export const DERIVED_SANDBOX_IMAGE = "glance-gate:bun1-git";
 
 /** Host-owned vars that must NOT leak into a container (they'd shadow the image's own). */
 const HOST_ONLY = new Set(["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"]);
@@ -88,10 +108,61 @@ export function dockerAvailable(): Promise<boolean> {
 	return dockerProbeCache;
 }
 
-/** Reset the cached docker probe + one-time warning (tests only). */
+/** Reset the cached docker probe + derived-image build + one-time warnings (tests only). */
 export function resetGateSandboxState(): void {
 	dockerProbeCache = undefined;
 	warnedHostFallback = false;
+	derivedImageCache = undefined;
+	warnedGitlessFallback = false;
+}
+
+/** Per-process memo of the derived-image build (docker's own image store is the cross-process cache). */
+let derivedImageCache: Promise<string> | undefined;
+let warnedGitlessFallback = false;
+
+function warnGitlessFallbackOnce(detail: string): void {
+	if (warnedGitlessFallback) return;
+	warnedGitlessFallback = true;
+	// eslint-disable-next-line no-console
+	console.warn(
+		`[gate] failed to build the git-enabled sandbox image ${DERIVED_SANDBOX_IMAGE} (from ${DEFAULT_SANDBOX_IMAGE}) — ` +
+			`falling back to the bare base image, which has NO git: any gate that spawns git (worktree resolution, ` +
+			`spawn-based tests) will fail deterministically with 'Executable not found in $PATH: "git"'. ` +
+			`Fix the build (network/registry) or set OMP_SQUAD_GATE_SANDBOX_IMAGE to an image that includes git. ` +
+			`Build error: ${detail.slice(0, 400)}`,
+	);
+}
+
+/**
+ * Build (once) and return the git-enabled default gate image. Fast path: the image already exists
+ * in the local docker store from a previous daemon run — `docker image inspect` is cheap and
+ * offline. Slow path: one `docker build` from an inline Dockerfile (base + git via apt, layer
+ * cache makes reruns free). On ANY build failure this degrades to the bare base image with a
+ * one-time legible warning naming the exact consequence — never a hard error, so an offline host
+ * keeps the pre-derivation behavior instead of losing its sandbox entirely.
+ */
+export function defaultGateImage(): Promise<string> {
+	if (!derivedImageCache) derivedImageCache = buildDerivedImageReal();
+	return derivedImageCache;
+}
+
+async function buildDerivedImageReal(): Promise<string> {
+	try {
+		const inspect = Bun.spawn(["docker", "image", "inspect", DERIVED_SANDBOX_IMAGE], { stdout: "ignore", stderr: "ignore" });
+		if ((await inspect.exited) === 0) return DERIVED_SANDBOX_IMAGE;
+		const dockerfile = `FROM ${DEFAULT_SANDBOX_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*\n`;
+		const build = Bun.spawn(["docker", "build", "-t", DERIVED_SANDBOX_IMAGE, "-"], {
+			stdin: new TextEncoder().encode(dockerfile),
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+		const stderr = await new Response(build.stderr).text();
+		if ((await build.exited) === 0) return DERIVED_SANDBOX_IMAGE;
+		warnGitlessFallbackOnce(stderr.trim() || "docker build exited non-zero");
+	} catch (err) {
+		warnGitlessFallbackOnce(String(err)); // String(Error) keeps "Error: <message>" — fine for a warning detail
+	}
+	return DEFAULT_SANDBOX_IMAGE;
 }
 
 function warnHostFallbackOnce(reason: string): void {
@@ -166,7 +237,7 @@ function sandboxPlan(command: string, cwd: string, image: string, source: NodeJS
 export async function gateExec(
 	command: string,
 	cwd: string,
-	opts: { mounts?: string[]; source?: NodeJS.ProcessEnv; dockerProbe?: () => boolean | Promise<boolean> } = {},
+	opts: { mounts?: string[]; source?: NodeJS.ProcessEnv; dockerProbe?: () => boolean | Promise<boolean>; imageBuilder?: () => Promise<string> } = {},
 ): Promise<GateExec> {
 	const source = opts.source ?? process.env;
 	const env = gateEnv(source);
@@ -186,7 +257,11 @@ export async function gateExec(
 	// Auto (default): sandbox if docker is usable, else a legible host fallback (or fail closed under STRICT).
 	const available = await (opts.dockerProbe ? opts.dockerProbe() : dockerAvailable());
 	if (available) {
-		const image = source.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim() || DEFAULT_SANDBOX_IMAGE;
+		// Operator-named default image: honored verbatim (it must satisfy the IMAGE CONTRACT itself).
+		// Built-in default: the git-enabled derivative, built locally at first use — the bare base
+		// image has no git, which is fatal to any real gate (see the header + ompsq-432).
+		const named = source.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim();
+		const image = named || (await (opts.imageBuilder ? opts.imageBuilder() : defaultGateImage()));
 		return sandboxPlan(command, cwd, image, source, env, opts.mounts);
 	}
 	if (strict) throw new GateSandboxUnavailableError("OMP_SQUAD_GATE_SANDBOX_STRICT=1 but docker is unavailable — refusing to run the gate on the host (fail-closed)");

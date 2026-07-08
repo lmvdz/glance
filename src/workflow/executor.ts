@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "../agent-driver.ts";
 import { fenceUntrusted } from "../digest.ts";
+import { GateSemaphore, sharedGateSemaphore } from "../gate-semaphore.ts";
 import { isOn, learningFlags } from "../metrics.ts";
 import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
 import type { NodeExecutor, NodeResult, RunContext, StageEvent, WorkflowNode } from "./types.ts";
@@ -45,6 +46,21 @@ export interface SingleAgentExecutorOptions {
 	gate: (node: WorkflowNode, options: string[]) => Promise<string>;
 	/** Run a command node. Default: bash via Bun.spawn in `cwd`. */
 	execCommand?: (script: string, cwd: string) => Promise<CommandResult>;
+	/**
+	 * Serializes command-node execution against every OTHER unit's command nodes in this process
+	 * (root + org managers alike — see gate-semaphore.ts). Default: the shared process-wide
+	 * singleton (`OMP_SQUAD_GATE_CONCURRENCY`, default 1 = fully serialized). Inject a private
+	 * instance in tests so they don't contend with each other via the real singleton.
+	 */
+	gateSemaphore?: GateSemaphore;
+	/**
+	 * Factory legibility: fired when a command node has waited >30s for the gate semaphore (still
+	 * queued, hasn't started running yet). Default: a console.error line ("verify queued behind N
+	 * gates…"). Injected in tests to assert without spying on the console.
+	 */
+	onGateWait?: (node: WorkflowNode, elapsedMs: number, aheadInQueue: number) => void;
+	/** Override the 30s gate-wait warning threshold (tests only; production uses the semaphore's default). */
+	gateWarnAfterMs?: number;
 	/** Resolve an `@relative.md` prompt reference. Default: read it from `cwd`-relative dir. */
 	readPromptRef?: (ref: string) => Promise<string>;
 	/** Per-node agent turn timeout. */
@@ -281,17 +297,41 @@ export class SingleAgentExecutor implements NodeExecutor {
 		}
 	}
 
+	/**
+	 * Gate-concurrency fix (spawn-heavy-flake-under-load incident): full-suite verify/codefix
+	 * commands are the expensive, spawn-heavy work that thrashes when several units' workflows run
+	 * them at the same time on one host. Every command node acquires the shared gate semaphore
+	 * BEFORE running its script and releases it in a `finally` (so a thrown/rejected exec never
+	 * deadlocks the gate for the next queued unit). This is entirely inside `runCommand` — invisible
+	 * to the engine's routing/visit-cap math, which already recorded this attempt's visit before
+	 * calling in here (engine.ts increments `shared.visits[current]` before `execute()`), so however
+	 * long this node waits queued behind other gates, it can never burn an EXTRA visit or trip the
+	 * cap early — it only delays when the one counted attempt actually runs.
+	 */
 	async runCommand(node: WorkflowNode, _ctx: RunContext): Promise<NodeResult> {
 		const script = node.script ?? "";
 		if (!script.trim()) return { outcome: "failed", text: `command node "${node.id}" has no script` };
 		const run = this.opts.execCommand ?? defaultExecCommand;
-		const { code, stdout, stderr } = await run(script, this.opts.cwd);
-		const combined = [stdout, stderr].filter((s) => s.trim()).join("\n").trim();
-		const truncated = combined.length > MAX_CONTEXT_OUTPUT ? `${combined.slice(0, MAX_CONTEXT_OUTPUT)}\n…(truncated)` : combined;
-		const shown = code !== 0 && looksUnprovisioned(code, combined, this.opts.cwd) ? `[environment not provisioned — dependencies missing, not a code failure]\n${truncated}` : truncated;
-		this.opts.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `$ ${node.label ?? node.id} → exit ${code}\n${shown || "(no output)"}` } });
-		this.opts.emit({ type: "message_end" });
-		return { outcome: code === 0 ? "succeeded" : "failed", text: shown };
+		const gate = this.opts.gateSemaphore ?? sharedGateSemaphore();
+		const release = await gate.acquire((elapsedMs, aheadInQueue) => this.logGateWait(node, elapsedMs, aheadInQueue), this.opts.gateWarnAfterMs);
+		try {
+			const { code, stdout, stderr } = await run(script, this.opts.cwd);
+			const combined = [stdout, stderr].filter((s) => s.trim()).join("\n").trim();
+			const truncated = combined.length > MAX_CONTEXT_OUTPUT ? `${combined.slice(0, MAX_CONTEXT_OUTPUT)}\n…(truncated)` : combined;
+			const shown = code !== 0 && looksUnprovisioned(code, combined, this.opts.cwd) ? `[environment not provisioned — dependencies missing, not a code failure]\n${truncated}` : truncated;
+			this.opts.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `$ ${node.label ?? node.id} → exit ${code}\n${shown || "(no output)"}` } });
+			this.opts.emit({ type: "message_end" });
+			return { outcome: code === 0 ? "succeeded" : "failed", text: shown };
+		} finally {
+			release();
+		}
+	}
+
+	/** Factory legibility for a queued gate (default channel: console.error; injectable for tests). */
+	private logGateWait(node: WorkflowNode, elapsedMs: number, aheadInQueue: number): void {
+		const msg = `[gate] "${node.id}" verify queued behind ${aheadInQueue} gate${aheadInQueue === 1 ? "" : "s"} — waited ${Math.round(elapsedMs / 1000)}s so far`;
+		if (this.opts.onGateWait) this.opts.onGateWait(node, elapsedMs, aheadInQueue);
+		else console.error(msg);
 	}
 
 	async humanGate(node: WorkflowNode, options: string[], ctx: RunContext): Promise<string> {
