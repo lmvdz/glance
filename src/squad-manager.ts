@@ -4244,7 +4244,21 @@ export class SquadManager extends EventEmitter {
 		const rec: AgentRecord = { dto, agent: this.makeDriver(persisted), options: persisted, harness: this.harnessFor(persisted), transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() };
 		this.agents.set(id, rec);
 		this.wire(rec);
-		await rec.agent.start();
+		try {
+			await rec.agent.start();
+		} catch (err) {
+			// Same class of failure as createWithId's spawn guard: the driver may have spawned a backing
+			// child before failing. Sibling of the console-chat prompt fix above — this is reachable from
+			// applyCommand's "commission" case (via CommissionExecutor's uncaught "onboard" runAction),
+			// which the WS/HTTP command routes fire off with `void applyCommand(...).catch(...)`. Fail the
+			// record loudly into "error" and tear the driver down, rather than leaving a phantom "idle"
+			// roster entry with a dead driver behind — then rethrow so commission()'s caller still learns
+			// the onboard step failed.
+			await rec.agent.stop().catch(() => {});
+			this.fail(rec, err);
+			await this.persist();
+			throw err;
+		}
 		this.append(rec, "system", `commissioned · gate ${report.checks.map((c) => `${c.name}=${c.status}`).join(" ")}${verified ? " · verified" : ""}`);
 		this.emitAgent(rec);
 		await this.persist();
@@ -4383,7 +4397,22 @@ export class SquadManager extends EventEmitter {
 					this.append(rec, "system", `prompt refused — this run is terminal (${rec.options.workflowState.terminal.reason}). Fork from a checkpoint to try again.`);
 					break;
 				}
-				await this.ensureConnected(rec);
+				// A harness that can't start (bad bin, cold-start death that exhausts the respawn budget, …)
+				// throws out of ensureConnected. This call sat BARE here — unlike promptConnected just below,
+				// which every caller wraps in `.catch((err) => this.fail(rec, err))` — so the rejection had no
+				// catcher anywhere in this function and propagated straight out of applyCommand. Every
+				// applyCommand caller (the WS command handler, the HTTP command route) fires it with
+				// `void manager.applyCommand(...).catch(...)`: a rejection surfacing THERE is an unhandled
+				// promise rejection, which took the whole daemon down (reproduced: a console-chat prompt to an
+				// agent whose harness fails to (re)start). Route the failure through the same legible
+				// error-state surface every other spawn/prompt failure in this file uses, and stop — never let
+				// it become the agent's "first prompt" once it (maybe) reconnects later.
+				try {
+					await this.ensureConnected(rec);
+				} catch (err) {
+					this.fail(rec, err);
+					break;
+				}
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
 				// `text` is the durable audit/debug record — the full context-augmented message the
 				// agent actually received. `displayText` (when the client sent one) is the user's bare

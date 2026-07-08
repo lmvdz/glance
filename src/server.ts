@@ -786,8 +786,19 @@ export class SquadServer {
 						return;
 					}
 					// Carry the socket's granted tier; applyCommand denies a command above it (logged there).
+					// This is a fire-and-forget dispatch (a WS message handler, no reply channel to report a
+					// failure on) — `void`-ing the call means ANY rejection that escapes this `.catch` becomes
+					// an unhandled promise rejection with no further catcher in the chain. Rethrowing a
+					// non-RbacDenied error here (the old behavior) manufactured exactly that: a console-chat
+					// prompt to an agent whose harness failed to (re)start propagated an ensureConnected
+					// rejection through applyCommand, landed here, got rethrown, and the resulting orphaned
+					// rejection took the whole daemon down. RbacDenied is already logged inside applyCommand
+					// (denied-command audit trail) so it's a silent no-op here; anything else is a genuine bug
+					// upstream that should have been caught into the agent's own error state — log it loudly so
+					// it's never lost, but never let it become a floating rejection again.
 					void m.applyCommand(cmd, actor).catch((err) => {
-						if (!(err instanceof RbacDenied)) throw err;
+						if (err instanceof RbacDenied) return;
+						console.error(`[ws] applyCommand("${cmd.type}") failed unexpectedly:`, err);
 					});
 				},
 			},
