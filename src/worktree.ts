@@ -7,6 +7,7 @@ import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { existsSync, symlinkSync } from "node:fs";
+import { errText } from "./err-text.ts";
 
 export interface GitResult {
 	code: number;
@@ -60,6 +61,65 @@ export interface CreatedWorktree {
 // load. Safe to retry. A genuine failure (bad branch, path conflict, corruption) won't match → fails fast.
 const TRANSIENT_LOCK = /lock|unable to create|cannot lock|already (exists|locked)|another git process/i;
 const RETRY_DELAYS_MS = [100, 300]; // ponytail: 3 attempts (2 backoffs); fleet lock contention clears in ms
+
+/**
+ * Bounded `bun install` in a single directory. Skipped (returns `null`) when `dir` has no
+ * `package.json` — a non-bun dir/repo. On a real failure returns a truncated error string;
+ * NEVER throws, so a caller can treat this as advisory. `timeoutMs` kills a hung install
+ * (a dependency-provisioning step must not be able to block a spawn forever).
+ *
+ * Shared by `installScratchDeps` (land-pr.ts's disposable scratch-merge worktree) and
+ * `provisionWorktreeDeps` below (a freshly-cut unit/fork worktree) — both need the identical
+ * "does this dir even have a package.json, and if so did `bun install` actually succeed" check.
+ */
+export async function installNodeModules(dir: string, timeoutMs = 120_000): Promise<string | null> {
+	if (!existsSync(path.join(dir, "package.json"))) return null;
+	try {
+		const proc = Bun.spawn(["bun", "install"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		const timer = setTimeout(() => proc.kill(), timeoutMs);
+		try {
+			const [, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			if (code !== 0) return `dep install failed in ${dir}: ${err.trim().slice(0, 300)}`;
+			return null;
+		} finally {
+			clearTimeout(timer);
+		}
+	} catch (e) {
+		return `bun install failed to start in ${dir}: ${errText(e)}`;
+	}
+}
+
+/**
+ * Provision a freshly-cut worktree so the repo's verify gate (`bun run check`, `bun run test`, …)
+ * can actually run in it, instead of dying with "command not found" (exit 127) because
+ * `node_modules` never existed. Every dispatched unit's worktree is created bare by `git worktree
+ * add` — `addWorktree`'s own symlink-the-parent's-`node_modules` shortcut only helps when the
+ * PRIMARY checkout already has `node_modules` installed, and never helps a nested package (this
+ * repo's own `webapp/` is a separate, non-workspace package with its own `bun.lock`/`package.json`
+ * that the symlink never reaches).
+ *
+ * Warm fast-path: a package dir that ALREADY has `node_modules` (addWorktree's symlink shortcut,
+ * a prior provisioning pass, or an agent's own install) is skipped entirely rather than re-running
+ * `bun install` on every spawn. Deliberate staleness tradeoff: if the branch later changes its
+ * dependency set the warm skip won't refresh it — the agent (or the operator) installs the delta,
+ * and a stale install is strictly no worse than the pre-fix state (no install at all). Root and
+ * webapp/ provision CONCURRENTLY — they're independent packages, and a serial cold double-install
+ * was the dispatcher-stall worst case.
+ *
+ * Deliberately non-fatal: logs loudly via `log` on any failure and returns regardless — a unit
+ * whose auto-provisioning failed can still install its own deps (or an operator can), so a flaky
+ * `bun install` must never block the spawn itself. No-ops (silently) for a dir with no root
+ * `package.json` — nothing to provision for a non-bun repo.
+ */
+export async function provisionWorktreeDeps(dir: string, log: (msg: string) => void = () => {}): Promise<void> {
+	const provisionOne = async (pkgDir: string): Promise<void> => {
+		if (!existsSync(path.join(pkgDir, "package.json"))) return; // non-bun dir — nothing to provision
+		if (existsSync(path.join(pkgDir, "node_modules"))) return; // warm — see the staleness tradeoff above
+		const err = await installNodeModules(pkgDir);
+		if (err) log(`dependency provisioning failed for ${pkgDir} — the unit's verify gate may fail until deps are installed manually: ${err}`);
+	};
+	await Promise.all([provisionOne(dir), provisionOne(path.join(dir, "webapp"))]);
+}
 
 /**
  * Create (or reuse) a worktree for `repo` checked out to `branch`.

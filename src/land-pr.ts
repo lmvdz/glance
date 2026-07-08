@@ -15,7 +15,6 @@
  * reconcile from (concern 07's backstop loop).
  */
 
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -29,6 +28,7 @@ import { isAncestor, recordDoneProof } from "./done-proof.ts";
 import { cherryCheck, orphanedShas } from "./orphan-audit.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { applyRegressionGate, staleBranchReason, withRepoLandLock, type LandOpts, type LandResult } from "./land.ts";
+import { installNodeModules } from "./worktree.ts";
 import type { AutomationRecorder } from "./automation-log.ts";
 
 // ── git / gate helpers ───────────────────────────────────────────────────────────────────────────
@@ -78,8 +78,10 @@ function truncate(s: string, n: number): string {
  * `mkScratchWorktree` is a bare `git worktree add` — it has NO node_modules, so an
  * acceptance/regression gate that shells out to a project-local binary (`tsc`,
  * `bun run check`, …) dies with `command not found` / exit 127 and BLOCKS an
- * otherwise-landable branch. The daemon already installs unit worktrees the same way
- * (SquadManager.installWorker); the scratch-merge worktree needs the same provisioning.
+ * otherwise-landable branch. `worktree.ts`'s `provisionWorktreeDeps` provisions a freshly-cut
+ * UNIT worktree the same way at spawn time — this is the scratch-merge counterpart, thin
+ * wrapper over the same `installNodeModules` primitive so both call sites share one
+ * detect-package.json/bounded-install/truncated-error implementation.
  *
  * Runs on the host with the daemon's env (warm bun cache + network), so it is fast and
  * populates the bind-mounted dir the sandboxed gate later sees. Skipped for non-bun repos
@@ -87,11 +89,8 @@ function truncate(s: string, n: number): string {
  * null on success/skip — deps that can't install mean the gate can't be trusted.
  */
 export async function installScratchDeps(scratch: string): Promise<string | null> {
-	if (!existsSync(path.join(scratch, "package.json"))) return null;
-	const proc = Bun.spawn(["bun", "install"], { cwd: scratch, stdout: "pipe", stderr: "pipe" });
-	const [, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-	if ((await proc.exited) !== 0) return `scratch dep install failed: ${err.trim().slice(0, 300)}`;
-	return null;
+	const err = await installNodeModules(scratch);
+	return err ? `scratch dep install failed: ${err}` : null;
 }
 
 /** "owner/repo" from repoIdentity()'s "host/owner/repo" key — gh must be addressed by slug, not host
