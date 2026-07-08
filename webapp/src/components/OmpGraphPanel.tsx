@@ -18,8 +18,10 @@ import Inspector from '../omp-graph/Inspector';
 import { buildPulseModel, hourBins } from '../omp-graph/pulse-model';
 import { normalizeAttribution, normalizeGraphDoc } from '../omp-graph/normalize';
 import { mergeGraphDocs } from '../omp-graph/merge';
+import { trackCollisions, type CollisionTrackMap } from '../omp-graph/collision-track';
 import type { InspectSel } from '../omp-graph/inspect';
 import type { AttributionDoc, GraphDocWire, ProvenanceDoc } from '../omp-graph/types';
+import { detectCollisions, type Collision, type UsagePayload } from '../lib/insights';
 
 const RANGES = [7, 14, 30] as const;
 const DAY_MS = 24 * 3_600_000;
@@ -55,6 +57,12 @@ export const OmpGraphPanel: React.FC = () => {
   // re-centers then — NOT on the 20s poll or a lazy history extend, which must leave
   // the user's pan/zoom untouched.
   const [resetKey, setResetKey] = useState(0);
+  // Collision marker (GRAPH-FOLD.md §2/§4/§5): ≥2 LIVE agents holding the same path. Polled
+  // independently of the graph window (usage.runs has no time-range param worth tying to `days`),
+  // then gated through the min-dwell tracker so a sub-second overlap never flashes on AGENT RUNS.
+  const [usage, setUsage] = useState<UsagePayload | null>(null);
+  const [collisions, setCollisions] = useState<Collision[]>([]);
+  const collisionTrackRef = useRef<CollisionTrackMap>(new Map());
 
   // a slow response for an old range must not overwrite a newer one
   const reqId = useRef(0);
@@ -165,6 +173,37 @@ export const OmpGraphPanel: React.FC = () => {
     return buildPulseModel(older ? mergeGraphDocs(older, doc) : doc, agents);
   }, [older, doc, agents]);
 
+  // Poll /api/usage on the same cadence the (dying) Heat/Federation/Attention panels already use —
+  // independent of the graph window, since usage.runs isn't range-scoped by `days`.
+  useEffect(() => {
+    let live = true;
+    const loadUsage = async (): Promise<void> => {
+      try {
+        const u = await apiJson<UsagePayload>('/api/usage?limit=200');
+        if (live) setUsage(u);
+      } catch {
+        /* transient — next poll retries */
+      }
+    };
+    void loadUsage();
+    const iv = setInterval(() => void loadUsage(), 10_000);
+    return () => {
+      live = false;
+      clearInterval(iv);
+    };
+  }, []);
+
+  // detectCollisions already scopes to the LIVE roster (LIVE_STATUSES in lib/insights.ts), so a
+  // stale/un-reaped lease on a removed agent can never seed a collision here — the "code
+  // defensively" half of the guard. trackCollisions adds the min-dwell gate: a fresh overlap must
+  // persist before it's allowed to render (the "don't flash" half).
+  const rawCollisions = useMemo(() => detectCollisions(usage?.runs, agents), [usage, agents]);
+  useEffect(() => {
+    const { confirmed, next } = trackCollisions(rawCollisions, collisionTrackRef.current, Date.now());
+    collisionTrackRef.current = next;
+    setCollisions(confirmed);
+  }, [rawCollisions]);
+
   const onInspect = useCallback((s: InspectSel) => {
     setSel(s);
     if (s.kind !== 'ticket') setTrace(null);
@@ -245,6 +284,7 @@ export const OmpGraphPanel: React.FC = () => {
             onReachStart={loadOlder}
             loadingOlder={loadingOlder}
             atHistoryLimit={atHistoryLimit}
+            collisions={collisions}
           />
         )}
         {model && sel && <Inspector sel={sel} model={model} attribution={attribution} onClose={close} onTrace={setTrace} />}

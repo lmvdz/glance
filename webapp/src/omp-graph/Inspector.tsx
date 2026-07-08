@@ -12,6 +12,9 @@ import { apiFetch, apiJson } from '../lib/api';
 import { answerCommand, canLand, landToast, type LandResultDTO } from '../lib/agent-control';
 import { useTaskContext } from '../context/TaskContext';
 import { CommitView } from '../components/GraphDetail';
+import type { AgentDTO } from '../lib/dto';
+import type { AutomationRollup, Collision } from '../lib/insights';
+import { pct, usd, type Scoreboard } from '../lib/scoreboard';
 import type { AttributionDoc, ProvenanceDoc } from './types';
 import { normalizeProvenance } from './normalize';
 import type { PulseModel } from './pulse-model';
@@ -192,8 +195,86 @@ const NeedsBody: React.FC = () => {
   );
 };
 
+/** Hex tone for a land-rate, matching the CostBody plan-worth convention below (this pane never
+ *  uses Tailwind color classes — everything is an inline hex against the dark canvas). */
+const rateHex = (r: number | null): string => (r == null ? '#565C68' : r >= 0.75 ? '#4CAF7A' : r >= 0.5 ? '#E8B24A' : '#E5484D');
+
+/** Model scoreboard — land-rate / land-rate-per-tier / $-per-landed, folded into the `cost` tab as a
+ *  SECTION (GRAPH-FOLD.md §1: "Model scoreboard … extend the existing cost inspector … same (graph)
+ *  endpoint", §5 guard #1: a section inside the existing routed body, never new top-level chrome). */
+const ScoreboardBody: React.FC = () => {
+  const [sb, setSb] = useState<Scoreboard | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let live = true;
+    apiJson<Scoreboard>('/api/graph/scoreboard')
+      .then((d) => live && setSb(d))
+      .catch(() => live && setErr('could not load the scoreboard'));
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (err) return <Meta>{err}</Meta>;
+  if (!sb) return <Meta>loading the scoreboard…</Meta>;
+  if (!sb.models.length) return <Meta>no landed/rejected outcomes recorded yet — the scoreboard fills in as units land.</Meta>;
+  const models = [...sb.models].sort((a, b) => (b.landRate ?? -1) - (a.landRate ?? -1));
+  const tierOf = (m: Scoreboard['models'][number], tier: string) => m.byTier.find((t) => t.tier === tier)?.landRate ?? null;
+  return (
+    <>
+      <Sect>Model scoreboard — which model is worth routing to</Sect>
+      <Meta>land-rate = landed ÷ (landed + rejected); $/landed change = daemon spend ÷ changes actually landed.</Meta>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full border-collapse font-mono text-[10.5px] tabular-nums" aria-label="Model scoreboard: land-rate by tier and cost per landed change">
+          <thead>
+            <tr>
+              <th className="border-b border-[#232936] px-1.5 py-1 text-left text-[9px] uppercase tracking-wider text-[#565C68]">model</th>
+              <th className="border-b border-[#232936] px-1.5 py-1 text-right text-[9px] uppercase tracking-wider text-[#565C68]">land rate</th>
+              <th className="border-b border-[#232936] px-1.5 py-1 text-right text-[9px] uppercase tracking-wider text-[#565C68]">light</th>
+              <th className="border-b border-[#232936] px-1.5 py-1 text-right text-[9px] uppercase tracking-wider text-[#565C68]">mid</th>
+              <th className="border-b border-[#232936] px-1.5 py-1 text-right text-[9px] uppercase tracking-wider text-[#565C68]">heavy</th>
+              <th className="border-b border-[#232936] px-1.5 py-1 text-right text-[9px] uppercase tracking-wider text-[#565C68]">$/landed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {models.map((m) => (
+              <tr key={m.model}>
+                <td className="border-b border-[#171B23] px-1.5 py-1 text-[#9BA0AB]">
+                  <span className="mr-1.5 inline-block h-[7px] w-[7px] rounded-sm" style={{ background: modelColor(m.model) }} />
+                  {m.model}
+                </td>
+                <td className="border-b border-[#171B23] px-1.5 py-1 text-right font-semibold" style={{ color: rateHex(m.landRate) }}>
+                  {pct(m.landRate)}
+                </td>
+                <td className="border-b border-[#171B23] px-1.5 py-1 text-right" style={{ color: rateHex(tierOf(m, 'light')) }}>{pct(tierOf(m, 'light'))}</td>
+                <td className="border-b border-[#171B23] px-1.5 py-1 text-right" style={{ color: rateHex(tierOf(m, 'mid')) }}>{pct(tierOf(m, 'mid'))}</td>
+                <td className="border-b border-[#171B23] px-1.5 py-1 text-right" style={{ color: rateHex(tierOf(m, 'heavy')) }}>{pct(tierOf(m, 'heavy'))}</td>
+                <td className="border-b border-[#171B23] px-1.5 py-1 text-right text-[#ECE7DC]">{usd(m.costPerLandedChange)}</td>
+              </tr>
+            ))}
+            <tr>
+              <td className="px-1.5 py-1 font-semibold text-[#ECE7DC]">fleet total</td>
+              <td className="px-1.5 py-1 text-right font-semibold" style={{ color: rateHex(sb.totals.landed + sb.totals.rejected > 0 ? sb.totals.landed / (sb.totals.landed + sb.totals.rejected) : null) }}>
+                {sb.totals.landed}/{sb.totals.landed + sb.totals.rejected}
+              </td>
+              <td className="px-1.5 py-1" colSpan={3} />
+              <td className="px-1.5 py-1 text-right font-semibold text-[#ECE7DC]">{usd(sb.totals.totalCostUsd)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+};
+
 const CostBody: React.FC<{ attribution: AttributionDoc | null }> = ({ attribution }) => {
-  if (!attribution) return <Meta>attribution unavailable</Meta>;
+  // The scoreboard is a separate /api/graph/scoreboard fetch and renders regardless of whether the
+  // attribution matrix loaded — the two signals are independent, both graph-sourced.
+  if (!attribution) return (
+    <>
+      <Meta>attribution unavailable</Meta>
+      <ScoreboardBody />
+    </>
+  );
   const a = attribution;
   const totals = (rec: Record<string, number[]>, k: string): number => rec[k]?.reduce((x, y) => x + y, 0) ?? 0;
   return (
@@ -260,6 +341,7 @@ const CostBody: React.FC<{ attribution: AttributionDoc | null }> = ({ attributio
       ) : (
         <Meta>set OMP_SQUAD_PLAN_MONTHLY (and _NAME) on the daemon for the worth verdict.</Meta>
       )}
+      <ScoreboardBody />
     </>
   );
 };
@@ -309,10 +391,28 @@ const HourBody: React.FC<{ at: number; model: PulseModel; attribution: Attributi
   );
 };
 
+/** One parent/child row in the lineage subtree — a live roster agent, "Open" jumps to its transcript. */
+const LineageRow: React.FC<{ role: string; a: AgentDTO; onOpen: () => void }> = ({ role, a, onOpen }) => (
+  <div className="mt-2 flex items-center justify-between gap-2 border-b border-[#171B23] pb-2 last:border-none">
+    <span className="min-w-0 flex-1">
+      <div className="font-mono text-[9px] font-semibold tracking-[0.14em] text-[#565C68]">{role}</div>
+      <div className="mt-0.5 truncate text-xs text-[#ECE7DC]">{a.name} · {a.status}</div>
+    </span>
+    <Btn onClick={onOpen}>Open</Btn>
+  </div>
+);
+
 const RunBody: React.FC<{ sel: Extract<InspectSel, { kind: 'run' }> }> = ({ sel }) => {
   const { agents, openConsole } = useTaskContext();
   const s = sel.session;
   const agent = s.agentId ? agents.find((a) => a.id === s.agentId) : undefined;
+  // Topology fold (GRAPH-FOLD.md §1 "Topology" row): what spawned what, right now — zero backend,
+  // read straight off the live roster the panel already holds. Workflow-branch lineage keys on
+  // parentId (src/squad-manager.ts's spawnFleetBranch); task-spawned subagents are already inline.
+  const parent = agent?.parentId ? agents.find((a) => a.id === agent.parentId) : undefined;
+  const children = agent ? agents.filter((a) => a.parentId === agent.id && a.id !== agent.id) : [];
+  const subagents = agent?.subagents ?? [];
+  const hasLineage = !!parent || children.length > 0 || subagents.length > 0;
   return (
     <>
       <div className="text-[13px] font-semibold text-[#ECE7DC]">
@@ -338,6 +438,126 @@ const RunBody: React.FC<{ sel: Extract<InspectSel, { kind: 'run' }> }> = ({ sel 
         </>
       )}
       {!agent && <Meta>run finished — its receipt is this pill; the transcript lives with the (removed) agent.</Meta>}
+      {hasLineage && (
+        <>
+          <Sect>Lineage — what spawned what, right now</Sect>
+          {parent && <LineageRow role="PARENT" a={parent} onOpen={() => openConsole(parent.id)} />}
+          {children.map((c) => (
+            <LineageRow key={c.id} role="CHILD BRANCH" a={c} onOpen={() => openConsole(c.id)} />
+          ))}
+          {subagents.map((sa) => (
+            <Step key={sa.id} color="#6B7280" k="SUBAGENT" v={`${sa.agent} · ${sa.status}`} s={sa.task ?? sa.description} />
+          ))}
+        </>
+      )}
+    </>
+  );
+};
+
+// Nominal cadence per loop. Duplicated (intentionally — see omp-graph/types.ts's note on
+// client/server duplication) from insights.ts's private loopIntervalMs, rather than exporting it
+// from a shared lib file a sibling fold unit (U2, Needs-you/AttentionPanel) is concurrently editing.
+const LOOP_CADENCE_MS: Record<string, number> = { scout: 60_000, dispatch: 30_000, scope: 24 * 60 * 60_000 };
+const DEFAULT_CADENCE_MS = 300_000;
+const loopCadenceMs = (loop: string): number => LOOP_CADENCE_MS[loop] ?? DEFAULT_CADENCE_MS;
+const fmtCadence = (ms: number): string => (ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)}h` : ms >= 60_000 ? `${Math.round(ms / 60_000)}m` : `${Math.round(ms / 1000)}s`);
+// Only Scout has a real, env-configured LLM budget (OMP_SQUAD_SCOUT_MAX_CALLS_PER_HOUR, default 30 —
+// src/scout.ts); other loops have no budget concept, so the row simply doesn't render for them.
+const LOOP_BUDGET_CAP: Record<string, number> = { scout: 30 };
+
+// The server's own rollup default (AutomationLog.rollup, automation-log.ts) is a 1h trailing window —
+// right for the live Automation panel, but this pane can be opened from a LOOP note anywhere in the
+// visible 7/14/30-day graph window, so a 1h default would silently blank "last run" for anything but
+// the most recent tick. Ask for the full week explicitly instead.
+const LOOP_ROLLUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/** `loop` tab enrichment (GRAPH-FOLD.md §1: "Enrich the loop tab with per-loop last-run/cadence/
+ *  Scout-budget. No new lane."). Fetches the same /api/automation rollup the (dying) Automation
+ *  panel reads, scoped to this loop's tick. */
+const LoopBody: React.FC<{ sel: Extract<InspectSel, { kind: 'loop' }> }> = ({ sel }) => {
+  const [rollup, setRollup] = useState<AutomationRollup[] | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let live = true;
+    apiJson<{ rollup?: AutomationRollup[] }>(`/api/automation?limit=1&windowMs=${LOOP_ROLLUP_WINDOW_MS}`)
+      .then((d) => live && setRollup(Array.isArray(d?.rollup) ? d.rollup : []))
+      .catch(() => live && setErr('could not load the automation rollup'));
+    return () => {
+      live = false;
+    };
+  }, []);
+  const row = rollup?.find((r) => r.loop === sel.sub);
+  const cadence = loopCadenceMs(sel.sub);
+  const cap = LOOP_BUDGET_CAP[sel.sub];
+  return (
+    <>
+      <div className="text-[13px] font-semibold text-[#ECE7DC]">
+        {sel.sub.toUpperCase()} · {sel.label}
+      </div>
+      <Meta>from automation.jsonl — the Automation panel's data, scoped to this tick.</Meta>
+      <Sect>Loop health</Sect>
+      {err && <Meta>{err}</Meta>}
+      {!err && !rollup && <Meta>loading…</Meta>}
+      {row && (
+        <>
+          <Step
+            color="#4E7FDB"
+            k="LAST RUN"
+            v={row.lastAt > 0 ? fmtWhen(row.lastAt) : 'never (this window)'}
+            s={row.lastSkipReason ? `last tick: ${row.lastSkipReason}` : undefined}
+          />
+          <Step color="#9BA0AB" k="CADENCE" v={`every ~${fmtCadence(cadence)}`} s={`${row.events} events · ${row.filed} filed · ${row.spawned ?? 0} spawned this window`} />
+          {cap != null && (
+            <Step
+              color={row.llmCalls >= cap ? '#E5484D' : '#4CAF7A'}
+              k="LLM BUDGET"
+              v={`${row.llmCalls}/${cap} calls`}
+              s={row.llmCalls >= cap ? 'budget exhausted — this loop is capped out' : undefined}
+            />
+          )}
+        </>
+      )}
+      {rollup && !row && <Meta>no rollup entry for this loop in the current window.</Meta>}
+    </>
+  );
+};
+
+/** `collision` inspector body (GRAPH-FOLD.md §2/§5): ≥2 LIVE agents editing the same path. Only ever
+ *  reachable by clicking the ⚠ marker on AGENT RUNS, which itself only renders when confirmed. */
+const CollisionBody: React.FC<{ sel: Extract<InspectSel, { kind: 'collision' }> }> = ({ sel }) => {
+  const { agents, openConsole } = useTaskContext();
+  const { file, agents: contested } = sel.collision;
+  // `contested` is a click-time snapshot (captured once, when the ⚠ marker was clicked); the rows
+  // below re-read each agent's CURRENT status from the live roster on every poll, so an agent can
+  // go idle (or leave the roster) without the header noticing. Recompute how many are still
+  // actually live right now so "live" never overclaims what a row can show underneath it — a row
+  // showing IDLE (or a departed agent showing no live badge at all) must not be counted.
+  const liveNow = contested.filter((a) => {
+    const cur = agents.find((x) => x.id === a.id);
+    return !!cur && cur.status !== 'idle';
+  }).length;
+  const headline =
+    liveNow === contested.length
+      ? `Collision — ${contested.length} live agent${contested.length === 1 ? '' : 's'}, one path`
+      : `Collision — ${liveNow} of ${contested.length} still live, one path`;
+  return (
+    <>
+      <div className="text-[13px] font-semibold text-[#ECE7DC]">{headline}</div>
+      <Meta>{file}</Meta>
+      <Sect>Likely a merge conflict at land</Sect>
+      {contested.map((a) => {
+        const live = agents.find((x) => x.id === a.id);
+        return (
+          <div key={a.id} className="mt-2 flex items-center justify-between gap-2 border-b border-[#171B23] pb-2 last:border-none">
+            <span className="min-w-0 flex-1">
+              <div className="font-mono text-[9px] font-semibold tracking-[0.14em] text-[#565C68]">{live?.status.toUpperCase() ?? 'AGENT'}</div>
+              <div className="mt-0.5 truncate text-xs text-[#ECE7DC]">{a.name}</div>
+            </span>
+            {live && <Btn onClick={() => openConsole(a.id)}>Open</Btn>}
+          </div>
+        );
+      })}
+      <Meta>consider steering one agent off this file, or landing the other first.</Meta>
     </>
   );
 };
@@ -407,12 +627,8 @@ export const Inspector: React.FC<{
         {sel.kind === 'cost' && <CostBody attribution={attribution} />}
         {sel.kind === 'hour' && <HourBody at={sel.at} model={model} attribution={attribution} />}
         {sel.kind === 'run' && <RunBody sel={sel} />}
-        {sel.kind === 'loop' && (
-          <>
-            <div className="text-[13px] font-semibold text-[#ECE7DC]">{sel.sub.toUpperCase()} · {sel.label}</div>
-            <Meta>from automation.jsonl — the Automation panel's data, scoped to this tick.</Meta>
-          </>
-        )}
+        {sel.kind === 'loop' && <LoopBody sel={sel} />}
+        {sel.kind === 'collision' && <CollisionBody sel={sel} />}
         {sel.kind === 'meeting' && (
           <>
             <div className="text-[13px] font-semibold text-[#ECE7DC]">{sel.label}</div>

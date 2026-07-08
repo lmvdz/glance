@@ -22,6 +22,7 @@ import type { AttributionDoc, ProvenanceDoc } from './types';
 import type { PulseModel, PulseSession } from './pulse-model';
 import { HOUR_MS } from './pulse-model';
 import type { InspectSel } from './inspect';
+import type { Collision } from '../lib/insights';
 
 // ── palette (the locked color grammar) ────────────────────────────────────────
 const INK = { hi: '#ECE7DC', mid: '#9BA0AB', low: '#565C68', faint: '#363B46' };
@@ -133,6 +134,9 @@ interface Props {
   loadingOlder?: boolean;
   /** No more history to load (hit the max lookback) — stop asking. */
   atHistoryLimit?: boolean;
+  /** Confirmed (past the min-dwell gate) file collisions — ≥2 LIVE agents on one path. Render-only-
+   *  when-present: an empty array (the common case) draws nothing extra on AGENT RUNS. */
+  collisions?: Collision[];
 }
 
 interface Hover {
@@ -144,7 +148,7 @@ interface Hover {
   ring?: { cx: number; cy: number; r: number; color: string } | { rect: [number, number, number, number]; color: string };
 }
 
-export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, repoLabel, onInspect, trace, viz, onViz, depthWeeks, depthMetric, onDepthMetric, resetKey = 0, onReachStart, loadingOlder = false, atHistoryLimit = false }) => {
+export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, repoLabel, onInspect, trace, viz, onViz, depthWeeks, depthMetric, onDepthMetric, resetKey = 0, onReachStart, loadingOlder = false, atHistoryLimit = false, collisions = [] }) => {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(1200);
@@ -249,6 +253,13 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
     }
     return out;
   }, [model.start, model.end]);
+
+  // Contested-agent-id → its collision, for the AGENT RUNS marker. Empty in the common (calm) case.
+  const collisionByAgent = useMemo(() => {
+    const m = new Map<string, Collision>();
+    for (const c of collisions) for (const a of c.agents) if (!m.has(a.id)) m.set(a.id, c);
+    return m;
+  }, [collisions]);
 
   const binAt = (t: number): number => Math.min(model.bins - 1, Math.max(0, Math.floor((t - model.start) / HOUR_MS)));
   const maxCost = useMemo(() => Math.max(0.001, ...model.cost), [model.cost]);
@@ -531,24 +542,44 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
         const rx0 = Math.max(x(s.t0), PAD_L);
         const rx1 = Math.min(x(s.t1), W - PAD_R);
         if (rx1 <= rx0) return null;
+        // COLLISION marker (GRAPH-FOLD.md §2/§5): only when this pill's agent is one of ≥2 LIVE
+        // agents holding the same path AND the overlap has cleared the min-dwell gate upstream
+        // (collisions passed in are already confirmed) — so the common case renders nothing here.
+        const collision = s.agentId ? collisionByAgent.get(s.agentId) : undefined;
         return (
-          <rect
-            key={i}
-            data-hit
-            x={rx0}
-            y={SESS_TOP + s.row * SESS_ROW_H}
-            width={Math.max(2, rx1 - rx0)}
-            height={5}
-            rx={2.5}
-            fill={SESS_COL[s.status]}
-            opacity={s.status === 'working' ? 0.85 : 0.7}
-            className={s.status === 'blocked' ? 'fp-pulse' : undefined}
-            filter={s.status === 'blocked' ? 'url(#fp-glow)' : undefined}
-            cursor="pointer"
-            role="button"
-            aria-label={`Agent run, ${s.status}`}
-            onClick={() => onInspect({ kind: 'run', session: s })}
-          />
+          <g key={i}>
+            <rect
+              data-hit
+              x={rx0}
+              y={SESS_TOP + s.row * SESS_ROW_H}
+              width={Math.max(2, rx1 - rx0)}
+              height={5}
+              rx={2.5}
+              fill={SESS_COL[s.status]}
+              opacity={s.status === 'working' ? 0.85 : 0.7}
+              className={s.status === 'blocked' ? 'fp-pulse' : undefined}
+              filter={s.status === 'blocked' ? 'url(#fp-glow)' : undefined}
+              cursor="pointer"
+              role="button"
+              aria-label={`Agent run, ${s.status}`}
+              onClick={() => onInspect({ kind: 'run', session: s })}
+            />
+            {collision && (
+              <text
+                data-hit
+                x={rx1 + 4}
+                y={SESS_TOP + s.row * SESS_ROW_H + 7}
+                style={{ fontSize: 10, fill: ALERT, fontWeight: 700 }}
+                className="fp-pulse"
+                cursor="pointer"
+                role="button"
+                aria-label={`Collision: ${collision.agents.map((a) => a.name).join(' & ')} are both editing ${collision.file}`}
+                onClick={() => onInspect({ kind: 'collision', collision, at: model.nowMs })}
+              >
+                ⚠
+              </text>
+            )}
+          </g>
         );
       })}
       <text x={PAD_L + 6} y={METRO_Y - 8} style={{ fontSize: 9, fill: INK.mid, letterSpacing: '0.06em' }}>{model.sessions.length} runs · packed</text>
@@ -698,6 +729,9 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
         <text x={PAD_L} y={TOPLINE} style={{ fontSize: 9, letterSpacing: '0.2em', fill: INK.low }}>
           {repoLabel.toUpperCase()} · FLEET ACTIVITY
         </text>
+        {/* GRAPH-FOLD.md §1/§5: DEPTH *is* activity-rhythm (8w × 168h) — the standalone Activity
+            rhythm page DROPS in the fold, and this toggle affordance takes over its name. Relabel
+            only: the massif itself is pixel-unchanged, this is strictly a one-word swap. */}
         {(['flat', 'depth'] as const).map((m, i) => (
           <text
             key={m}
@@ -714,7 +748,7 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
               onViz(m);
             }}
           >
-            {m.toUpperCase()}
+            {m === 'depth' ? 'RHYTHM' : m.toUpperCase()}
           </text>
         ))}
         <text x={W - PAD_R} y={TOPLINE} textAnchor="end" style={{ fontSize: 9, letterSpacing: '0.2em', fill: INK.low }}>
@@ -1024,8 +1058,11 @@ const DepthMassif: React.FC<{
           {m.label}
         </text>
       ))}
+      {/* Taste-review nit: this pane is reached by toggling FLAT→RHYTHM (the one-word DEPTH
+          relabel above), so its own heading must echo "RHYTHM" rather than the old "TERRAIN" —
+          word-level only, the massif geometry below is untouched. */}
       <text x={W - PAD_R} y={44} textAnchor="end" style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.14em', fill: INK.hi }}>
-        TERRAIN — {DEPTH_METRICS.find((m) => m.id === metric)?.label}
+        RHYTHM — {DEPTH_METRICS.find((m) => m.id === metric)?.label}
       </text>
       <text x={W - PAD_R} y={58} textAnchor="end" style={{ fontSize: 9, fill: INK.mid }}>
         {isCum ? 'strands: height cumulative $ · colour $/hr rate' : 'height = colour = intensity'}
