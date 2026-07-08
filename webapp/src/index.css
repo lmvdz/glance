@@ -38,6 +38,26 @@
   --wf-success: #16a34a;
   --wf-shadow-soft: 0 1px 2px rgb(15 23 42 / 0.06), 0 8px 24px rgb(15 23 42 / 0.08);
 
+  /* Taste-review nit 4 (Category Canvas, CANVAS-AND-PAGE-CHAT.md Feature 1): categoryCanvas.ts's
+   * per-category rim/label color used ONE flat hex (a deep -700/-800 shade per hue, the same
+   * values `utils.ts`'s `getCategoryBadge` uses for its light-pastel-bg list chip — chosen to read
+   * on WHITE) regardless of theme. Measuring it properly (WCAG relative-luminance contrast) flips
+   * the assumption this nit started from: those deep shades pass AA comfortably on light
+   * `--wf-surface` (white; e.g. frontend `#b91c1c` ≈ 8.5:1) but drop to ~2.5:1 against dark
+   * `--wf-surface`'s near-black — BELOW the 4.5:1 floor for the small rim-label text that uses
+   * this color directly. Dark mode's overall brand feel still read fine (the ink atmosphere +
+   * ember accent carry it), which is why this went unnoticed; light mode's plainer chrome (fixed
+   * below, alongside this) is what actually exposed "generic-reading" as the complaint. Split
+   * into a per-theme pair — light keeps the original AA-passing hexes (preserves list-badge hue
+   * sync), dark gets the lighter -300/-400 shade of the same hue family (mirrors how
+   * `--wf-danger`/`--wf-success` are already themed) for real legibility against near-black. */
+  --cc-rim-frontend: #b91c1c;
+  --cc-rim-devops: #c2410c;
+  --cc-rim-backend: #4338ca;
+  --cc-rim-mcp: #6d28d9;
+  --cc-rim-database: #15803d;
+  --cc-rim-other: #6b7280;
+
   /* Brand ember accent + extended ink-text ramp (brand.md), layered onto the ink surface ramp
    * above rather than re-declaring it — `--color-ink`/`--color-panel`/`--color-ink-surface`/
    * `--color-ink-border*` already exist (cockpit route); the design-review screen (also
@@ -71,6 +91,16 @@
   --wf-warning: #fbbf24;
   --wf-success: #4ade80;
   --wf-shadow-soft: 0 1px 2px rgb(0 0 0 / 0.28), 0 12px 32px rgb(0 0 0 / 0.32);
+
+  /* Taste-review nit 4: the DARK half of the pair — the actual measured fix (see the `:root`
+   * comment above). Lighter -300/-400 shade of each hue so the rim/label stays ≥ AA against the
+   * near-black canvas surface, instead of the original deep -700/-800 shade that measured ~2.5:1. */
+  --cc-rim-frontend: #f87171;
+  --cc-rim-devops: #fb923c;
+  --cc-rim-backend: #818cf8;
+  --cc-rim-mcp: #c4b5fd;
+  --cc-rim-database: #4ade80;
+  --cc-rim-other: #9ca3af;
 }
 
 @layer base {

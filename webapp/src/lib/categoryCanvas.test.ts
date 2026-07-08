@@ -8,8 +8,10 @@ import {
   layoutCanvas,
   layoutCategoryRing,
   layoutSatellites,
+  maxSafeSatelliteRadius,
   overflowChipPosition,
   polarToXY,
+  SATELLITE_CHIP_HALF_DIAGONAL,
   CATEGORY_ORDER,
 } from "./categoryCanvas";
 import type { Task } from "../types";
@@ -208,51 +210,71 @@ test("layoutCanvas is deterministic for a fixed selection", () => {
   expect(layoutCanvas(buckets, "backend", CONFIG)).toEqual(layoutCanvas(buckets, "backend", CONFIG));
 });
 
-// ── satellites: dense wrap + overflow ────────────────────────────────────────────
+// ── satellites: two-ring density + overflow (taste-review nit 1) ────────────────
 
-const SAT_CONFIG = { centerX: 400, centerY: 300, radius: 150 };
+const SAT_CONFIG = { centerX: 400, centerY: 300, radius: 150, outerRadius: 210, ringCapacity: 6 };
 
-test("layoutSatellites: fewer than the cap → everyone visible, no overflow", () => {
+test("layoutSatellites: fewer than ringCapacity → everyone on ring 0, no overflow", () => {
   const tasks = Array.from({ length: 5 }, (_, i) => task({ id: `t${i}`, title: `Task ${i}` }));
   const { satellites, overflow } = layoutSatellites(tasks, SAT_CONFIG);
   expect(satellites.length).toBe(5);
+  expect(satellites.every((s) => s.ring === 0)).toBe(true);
   expect(overflow.length).toBe(0);
+});
+
+test("layoutSatellites: more than ringCapacity but within maxVisible spills onto ring 1, at the outer radius", () => {
+  const tasks = Array.from({ length: 10 }, (_, i) => task({ id: `t${i}`, title: `Task ${i}` }));
+  const { satellites, overflow } = layoutSatellites(tasks, { ...SAT_CONFIG, maxVisible: 12 });
+  expect(overflow.length).toBe(0);
+  const ring0 = satellites.filter((s) => s.ring === 0);
+  const ring1 = satellites.filter((s) => s.ring === 1);
+  expect(ring0.length).toBe(6); // ringCapacity
+  expect(ring1.length).toBe(4); // the remaining 10 - 6
+  for (const s of ring0) expect(Math.hypot(s.x - SAT_CONFIG.centerX, s.y - SAT_CONFIG.centerY)).toBeCloseTo(SAT_CONFIG.radius, 6);
+  for (const s of ring1) expect(Math.hypot(s.x - SAT_CONFIG.centerX, s.y - SAT_CONFIG.centerY)).toBeCloseTo(SAT_CONFIG.outerRadius, 6);
 });
 
 test("layoutSatellites: exactly maxVisible → still no overflow chip needed", () => {
-  const tasks = Array.from({ length: 24 }, (_, i) => task({ id: `t${i}`, title: `Task ${i}` }));
-  const { satellites, overflow } = layoutSatellites(tasks, SAT_CONFIG);
-  expect(satellites.length).toBe(24);
+  const tasks = Array.from({ length: 12 }, (_, i) => task({ id: `t${i}`, title: `Task ${i}` }));
+  const { satellites, overflow } = layoutSatellites(tasks, { ...SAT_CONFIG, maxVisible: 12 });
+  expect(satellites.length).toBe(12);
   expect(overflow.length).toBe(0);
 });
 
-test("layoutSatellites: dense (>24) folds the excess behind a virtual +N more slot", () => {
-  const tasks = Array.from({ length: 30 }, (_, i) => task({ id: `t${i}`, title: `Task ${String(i).padStart(2, "0")}` }));
-  const { satellites, overflow } = layoutSatellites(tasks, SAT_CONFIG);
-  expect(satellites.length).toBe(23); // maxVisible - 1, room left for the chip
-  expect(overflow.length).toBe(7); // 30 - 23
-  expect(satellites.length + overflow.length).toBe(30);
+test("layoutSatellites: dense (beyond maxVisible) folds the excess behind a virtual +N more slot on ring 1", () => {
+  const tasks = Array.from({ length: 23 }, (_, i) => task({ id: `t${i}`, title: `Task ${String(i).padStart(2, "0")}` }));
+  const { satellites, overflow, overflowChip } = layoutSatellites(tasks, { ...SAT_CONFIG, maxVisible: 12 });
+  expect(satellites.length).toBe(11); // maxVisible - 1, room left for the chip
+  expect(overflow.length).toBe(12); // 23 - 11
+  expect(satellites.length + overflow.length).toBe(23);
+  expect(overflowChip).not.toBeNull();
+  expect(overflowChip!.ring).toBe(1);
+  // the chip sits on the outer ring, same as every ring-1 satellite
+  expect(Math.hypot(overflowChip!.x - SAT_CONFIG.centerX, overflowChip!.y - SAT_CONFIG.centerY)).toBeCloseTo(SAT_CONFIG.outerRadius, 6);
 });
 
 test("layoutSatellites: needs-you satellites survive the fold ahead of everything else", () => {
   const tasks = [
-    ...Array.from({ length: 23 }, (_, i) => task({ id: `t${i}`, title: `zzz${i}` })), // sorts after "blocked"
+    ...Array.from({ length: 9 }, (_, i) => task({ id: `t${i}`, title: `zzz${i}` })), // sorts after "blocked"
     task({ id: "urgent", title: "aaa-urgent", tags: ["blocked"] }),
   ];
-  const { satellites, overflow } = layoutSatellites(tasks, { ...SAT_CONFIG, maxVisible: 10 });
+  const { satellites, overflow } = layoutSatellites(tasks, { ...SAT_CONFIG, maxVisible: 5 });
   expect(satellites.some((s) => s.id === "urgent")).toBe(true);
   expect(overflow.some((t) => t.id === "urgent")).toBe(false);
 });
 
-test("layoutSatellites is deterministic and positions land on the given radius from center", () => {
-  const tasks = Array.from({ length: 4 }, (_, i) => task({ id: `t${i}`, title: `Task ${i}` }));
-  const a = layoutSatellites(tasks, SAT_CONFIG);
-  const b = layoutSatellites(tasks, SAT_CONFIG);
+test("layoutSatellites is deterministic across both rings", () => {
+  const tasks = Array.from({ length: 10 }, (_, i) => task({ id: `t${i}`, title: `Task ${i}` }));
+  const a = layoutSatellites(tasks, { ...SAT_CONFIG, maxVisible: 12 });
+  const b = layoutSatellites(tasks, { ...SAT_CONFIG, maxVisible: 12 });
   expect(a).toEqual(b);
-  for (const s of a.satellites) {
-    const dist = Math.hypot(s.x - SAT_CONFIG.centerX, s.y - SAT_CONFIG.centerY);
-    expect(dist).toBeCloseTo(SAT_CONFIG.radius, 6);
-  }
+});
+
+test("layoutSatellites: no ring-capacity override falls back to a single ring at `radius` for a small set", () => {
+  const tasks = Array.from({ length: 4 }, (_, i) => task({ id: `t${i}`, title: `Task ${i}` }));
+  const { satellites } = layoutSatellites(tasks, { centerX: 400, centerY: 300, radius: 150 });
+  expect(satellites.every((s) => s.ring === 0)).toBe(true);
+  for (const s of satellites) expect(Math.hypot(s.x - 400, s.y - 300)).toBeCloseTo(150, 6);
 });
 
 test("layoutSatellites: pct reads acceptance-criteria completion; null when there are no criteria", () => {
@@ -263,10 +285,69 @@ test("layoutSatellites: pct reads acceptance-criteria completion; null when ther
   expect(satellites.find((s) => s.id === "b")!.pct).toBeNull();
 });
 
-test("overflowChipPosition: null when nothing overflowed; otherwise sits in the trailing ring slot", () => {
+test("overflowChipPosition: null when nothing overflowed; otherwise sits on the outer ring, in the trailing slot", () => {
   expect(overflowChipPosition(5, false, SAT_CONFIG)).toBeNull();
   const pos = overflowChipPosition(5, true, SAT_CONFIG);
   expect(pos).not.toBeNull();
+  expect(pos!.ring).toBe(1);
   const dist = Math.hypot(pos!.x - SAT_CONFIG.centerX, pos!.y - SAT_CONFIG.centerY);
-  expect(dist).toBeCloseTo(SAT_CONFIG.radius, 6);
+  expect(dist).toBeCloseTo(SAT_CONFIG.outerRadius, 6);
+});
+
+// ── collision safety: satellites vs. the receded perimeter category nodes (nit 1) ──────────────
+
+test("maxSafeSatelliteRadius: for the canvas's real viewport, the safe radius leaves the perimeter zone entirely clear", () => {
+  const config = { width: 800, height: 560 };
+  const safe = maxSafeSatelliteRadius(config);
+  const perimeterRadius = Math.min(config.width, config.height) * 0.38 * 1.3;
+  const perimeterNodeR = 28 * 0.75;
+  // even a satellite chip centered exactly at `safe` radius, extended by its full footprint,
+  // never reaches the near edge of the perimeter node band
+  expect(safe + SATELLITE_CHIP_HALF_DIAGONAL).toBeLessThanOrEqual(perimeterRadius - perimeterNodeR);
+});
+
+test("maxSafeSatelliteRadius grows with a larger viewport and never goes negative for a tiny one", () => {
+  expect(maxSafeSatelliteRadius({ width: 1600, height: 1200 })).toBeGreaterThan(maxSafeSatelliteRadius({ width: 800, height: 560 }));
+  expect(maxSafeSatelliteRadius({ width: 40, height: 40 })).toBeGreaterThanOrEqual(0);
+});
+
+test("a dense (23-satellite) category, laid out at the collision-safe radii, never overlaps the receded perimeter nodes", () => {
+  // Mirrors CategoryCanvas.tsx's real geometry: VIEWPORT 800x560, the same config layoutCanvas uses
+  // for perimeter placement, and the component's RING_GAP/RING_CAPACITY/MAX_SATELLITES constants.
+  const canvasConfig = { width: 800, height: 560 };
+  const safeRadius = maxSafeSatelliteRadius(canvasConfig);
+  const RING_GAP = 46;
+  const innerRadius = Math.min(160, safeRadius - RING_GAP);
+  const outerRadius = Math.min(innerRadius + RING_GAP, safeRadius);
+
+  const buckets = groupTasksByCategory([
+    task({ id: "frontend-bucket", category: "frontend" }),
+    ...Array.from({ length: 23 }, (_, i) => task({ id: `dense${i}`, category: "backend", title: `Dense ${i}` })),
+  ]);
+  const nodes = layoutCanvas(buckets, "backend", canvasConfig);
+  const perimeterNodes = nodes.filter((n) => n.id !== "backend"); // every receded sibling
+
+  const backendBucket = buckets.find((b) => b.id === "backend")!;
+  const { satellites, overflowChip } = layoutSatellites(backendBucket.tasks, {
+    centerX: canvasConfig.width / 2,
+    centerY: canvasConfig.height / 2,
+    radius: innerRadius,
+    outerRadius,
+    ringCapacity: 6,
+    maxVisible: 12,
+  });
+
+  const centerX = canvasConfig.width / 2, centerY = canvasConfig.height / 2;
+  for (const perimeterNode of perimeterNodes) {
+    const perimeterDist = Math.hypot(perimeterNode.targetX - centerX, perimeterNode.targetY - centerY);
+    for (const sat of satellites) {
+      const satDist = Math.hypot(sat.x - centerX, sat.y - centerY);
+      // every satellite's full chip footprint stays strictly inside the perimeter node's near edge
+      expect(satDist + SATELLITE_CHIP_HALF_DIAGONAL).toBeLessThan(perimeterDist - perimeterNode.targetR);
+    }
+    if (overflowChip) {
+      const chipDist = Math.hypot(overflowChip.x - centerX, overflowChip.y - centerY);
+      expect(chipDist + SATELLITE_CHIP_HALF_DIAGONAL).toBeLessThan(perimeterDist - perimeterNode.targetR);
+    }
+  }
 });

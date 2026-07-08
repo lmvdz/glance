@@ -33,16 +33,27 @@ export function categoryLabel(id: string): string {
   return CATEGORY_LABELS[id] ?? (id.charAt(0).toUpperCase() + id.slice(1));
 }
 
-/** SVG rim-stroke hex per category — the same hue family as `utils.ts`'s `getCategoryBadge` text
- *  color (kept in sync deliberately: the list-row chip and the canvas rim should read as the same
- *  category identity), never used as a fill wash per brand.md's "one warm ember accent" rule. */
+/** SVG rim-stroke color per category — the same hue family as `utils.ts`'s `getCategoryBadge`
+ *  text color (kept in sync deliberately: the list-row chip and the canvas rim should read as the
+ *  same category identity), never used as a fill wash per brand.md's "one warm ember accent"
+ *  rule.
+ *
+ *  Taste-review nit 4: these used to be one flat hex per category — measuring it (WCAG contrast)
+ *  showed those deep -700/-800 shades actually pass AA fine on the light canvas surface (white)
+ *  but drop to ~2.5:1, below AA, against the dark surface's near-black — the opposite of what
+ *  "brand only lands in dark" suggested. Each value is now a CSS custom property reference
+ *  (`--cc-rim-*`, index.css) with a per-theme pair: light keeps the original AA-passing hexes
+ *  (preserving the list-badge hue sync), dark gets a lighter shade of the same hue for real
+ *  legibility — the same mechanism `--wf-accent`/`--wf-danger`/`--wf-success` already use. The
+ *  literal hex after the comma (the light value) is the fallback for any renderer that can't
+ *  resolve CSS custom properties. */
 export const CATEGORY_RIM_COLOR: Record<string, string> = {
-  frontend: "#b91c1c",
-  devops: "#c2410c",
-  backend: "#4338ca",
-  mcp: "#6d28d9",
-  database: "#15803d",
-  other: "#6b7280",
+  frontend: "var(--cc-rim-frontend, #b91c1c)",
+  devops: "var(--cc-rim-devops, #c2410c)",
+  backend: "var(--cc-rim-backend, #4338ca)",
+  mcp: "var(--cc-rim-mcp, #6d28d9)",
+  database: "var(--cc-rim-database, #15803d)",
+  other: "var(--cc-rim-other, #6b7280)",
 };
 
 export function categoryRimColor(id: string): string {
@@ -241,6 +252,32 @@ export function layoutCanvas(buckets: CategoryBucket[], selectedId: string | nul
   });
 }
 
+// ── satellite/perimeter collision safety (taste-review nit 1) ─────────────────
+//
+// Dense-orbit collisions: at ~23 satellites the original single-ring layout let a satellite's
+// RENDERED CHIP reach past the receded perimeter category nodes even though its ring-center
+// offset never did — the old cap (`VIEWPORT.height / 2 - 40`) bounded the node's center radius,
+// not its footprint. A satellite chip (CategoryCanvas.tsx's `SatelliteChip`, `max-w-[120px]` ×
+// ~44px tall) can extend up to `SATELLITE_CHIP_HALF_DIAGONAL` past its own center in the worst
+// case, so any cap on satellite radius has to subtract that footprint, not just the node radius.
+
+/** Half-diagonal of the largest satellite chip footprint (`max-w-[120px]` × ~44px, per
+ *  CategoryCanvas.tsx's `SatelliteChip`) — the real bounding box a satellite can occupy, not just
+ *  its center offset. `hypot(120/2, 44/2)`, rounded up. */
+export const SATELLITE_CHIP_HALF_DIAGONAL = 64;
+
+/** The greatest center-radius a satellite (or its "+N more" chip) can sit at without any part of
+ *  its bounding box reaching the receded perimeter category nodes — derived from the SAME
+ *  perimeter geometry `layoutCanvas` uses (perimeter ring radius, its node radius, and the label
+ *  chip that renders just below each perimeter node), so the two families of nodes are provably
+ *  non-overlapping for a given config rather than eyeballed at one viewport size. */
+export function maxSafeSatelliteRadius(config: CanvasLayoutConfig): number {
+  const perimeterRadius = config.perimeterRadius ?? (config.ringRadius ?? Math.min(config.width, config.height) * 0.38) * 1.3;
+  const perimeterNodeR = config.perimeterNodeRadius ?? (config.minNodeRadius ?? DEFAULTS.minNodeRadius) * 0.75;
+  const labelBuffer = 26; // the category chip's label renders just below the node (translate-y offset + text)
+  return Math.max(0, perimeterRadius - perimeterNodeR - labelBuffer - SATELLITE_CHIP_HALF_DIAGONAL);
+}
+
 // ── satellite (plan) layout ────────────────────────────────────────────────────
 
 export interface SatelliteNode {
@@ -252,21 +289,41 @@ export interface SatelliteNode {
   pct: number | null;
   needsYou: boolean;
   staggerIndex: number;
+  /** 0 = inner orbit, 1 = outer orbit (taste-review nit 1: two concentric rings once a category
+   *  is dense, rather than crowding everyone onto one ring that collides with itself and with the
+   *  receded perimeter nodes). */
+  ring: number;
 }
 
 export interface SatelliteLayoutResult {
   satellites: SatelliteNode[];
-  /** Tasks folded behind the "+N more" chip (D6: >~24 satellites virtualize). Empty when everything fit. */
+  /** Tasks folded behind the "+N more" chip (dense categories virtualize). Empty when everything fit. */
   overflow: Task[];
+  /** Position of the "+N more" chip, when there's overflow — always on the outer ring, past every
+   *  visible satellite, so it never crowds ring 0. `null` when nothing overflowed. */
+  overflowChip: { x: number; y: number; angle: number; ring: number } | null;
 }
 
 export interface SatelliteLayoutConfig {
   centerX: number;
   centerY: number;
+  /** Inner-ring radius. Used alone when everything fits on one ring. */
   radius: number;
-  /** Hard cap on rendered nodes (real satellites + the overflow chip, if any). D6 says "~24". */
+  /** Outer-ring radius, used once the visible count exceeds `ringCapacity`. Defaults to
+   *  `radius + DEFAULT_RING_GAP` — callers doing collision-safe sizing (see
+   *  `maxSafeSatelliteRadius`) should pass both radii explicitly. */
+  outerRadius?: number;
+  /** How many satellites fit comfortably on one ring before the layout spills the rest onto the
+   *  second, wider concentric ring. Kept low deliberately (taste-review nit 1: "cap visible
+   *  satellites lower before overlap" + "split into two rings" — this does both). */
+  ringCapacity?: number;
+  /** Hard cap on rendered nodes (real satellites + the overflow chip, if any), across BOTH rings. */
   maxVisible?: number;
 }
+
+const DEFAULT_RING_GAP = 46;
+const DEFAULT_RING_CAPACITY = 6;
+const DEFAULT_MAX_VISIBLE = 12;
 
 /** needs-you first, then title — so when a category is dense, the blocked work is what survives
  *  into the visible set rather than being the first thing folded behind "+N more". */
@@ -276,29 +333,60 @@ function satelliteOrder(a: Task, b: Task): number {
   return a.title.localeCompare(b.title);
 }
 
+/**
+ * Two concentric rings, not one crowded one (taste-review nit 1). The first `ringCapacity`
+ * visible tasks sit on the inner ring at `radius`; the rest sit on a second, wider ring at
+ * `outerRadius`. Each ring gets its own angular slot count, so density on one ring never crowds
+ * the other. The "+N more" chip (when there's overflow) always occupies the last outer-ring slot.
+ */
 export function layoutSatellites(tasks: Task[], config: SatelliteLayoutConfig): SatelliteLayoutResult {
-  const maxVisible = config.maxVisible ?? 24;
+  const maxVisible = config.maxVisible ?? DEFAULT_MAX_VISIBLE;
+  const ringCapacity = config.ringCapacity ?? DEFAULT_RING_CAPACITY;
+  const outerRadius = config.outerRadius ?? config.radius + DEFAULT_RING_GAP;
+
   const sorted = [...tasks].sort(satelliteOrder);
   const overflow = sorted.length > maxVisible ? sorted.slice(maxVisible - 1) : [];
   const visible = overflow.length > 0 ? sorted.slice(0, maxVisible - 1) : sorted;
-  // the overflow chip occupies one more ring slot alongside the visible satellites
-  const slotCount = visible.length + (overflow.length > 0 ? 1 : 0);
 
-  const satellites: SatelliteNode[] = visible.map((task, i) => {
-    const angle = angleForIndex(i, slotCount);
-    const { x, y } = polarToXY(config.centerX, config.centerY, config.radius, angle);
-    return { id: task.id, title: task.title, angle, x, y, pct: acceptancePct(task), needsYou: isNeedsYou(task), staggerIndex: i };
-  });
+  const ring0Tasks = visible.slice(0, ringCapacity);
+  const ring1Tasks = visible.slice(ringCapacity);
+  const hasOverflow = overflow.length > 0;
+  // the overflow chip occupies one more ring-1 slot alongside ring 1's real satellites (or, if
+  // ring 1 is otherwise empty, it's the only occupant of ring 1)
+  const ring1SlotCount = ring1Tasks.length + (hasOverflow ? 1 : 0);
 
-  return { satellites, overflow };
+  const satellites: SatelliteNode[] = [
+    ...ring0Tasks.map((task, i) => {
+      const angle = angleForIndex(i, ring0Tasks.length);
+      const { x, y } = polarToXY(config.centerX, config.centerY, config.radius, angle);
+      return { id: task.id, title: task.title, angle, x, y, pct: acceptancePct(task), needsYou: isNeedsYou(task), staggerIndex: i, ring: 0 };
+    }),
+    ...ring1Tasks.map((task, i) => {
+      const angle = angleForIndex(i, ring1SlotCount);
+      const { x, y } = polarToXY(config.centerX, config.centerY, outerRadius, angle);
+      return { id: task.id, title: task.title, angle, x, y, pct: acceptancePct(task), needsYou: isNeedsYou(task), staggerIndex: ring0Tasks.length + i, ring: 1 };
+    }),
+  ];
+
+  let overflowChip: SatelliteLayoutResult["overflowChip"] = null;
+  if (hasOverflow) {
+    const angle = angleForIndex(ring1Tasks.length, ring1SlotCount);
+    const { x, y } = polarToXY(config.centerX, config.centerY, outerRadius, angle);
+    overflowChip = { x, y, angle, ring: 1 };
+  }
+
+  return { satellites, overflow, overflowChip };
 }
 
-/** Angle + position of the trailing "+N more" chip, when there is overflow — placed in the same
- *  ring slot sequence the visible satellites use (last slot), so it reads as "one more of these". */
-export function overflowChipPosition(visibleCount: number, hasOverflow: boolean, config: SatelliteLayoutConfig): { x: number; y: number; angle: number } | null {
+/** Angle + position of the trailing "+N more" chip, when there is overflow — standalone helper
+ *  mirroring `layoutSatellites`'s internal chip placement (same math, exposed separately for
+ *  callers/tests that only have the ring-1 visible count on hand, not the full task list). Always
+ *  lands on the outer ring, past every ring-1 satellite. */
+export function overflowChipPosition(ring1VisibleCount: number, hasOverflow: boolean, config: SatelliteLayoutConfig): { x: number; y: number; angle: number; ring: number } | null {
   if (!hasOverflow) return null;
-  const slotCount = visibleCount + 1;
-  const angle = angleForIndex(visibleCount, slotCount);
-  const { x, y } = polarToXY(config.centerX, config.centerY, config.radius, angle);
-  return { x, y, angle };
+  const outerRadius = config.outerRadius ?? config.radius + DEFAULT_RING_GAP;
+  const slotCount = ring1VisibleCount + 1;
+  const angle = angleForIndex(ring1VisibleCount, slotCount);
+  const { x, y } = polarToXY(config.centerX, config.centerY, outerRadius, angle);
+  return { x, y, angle, ring: 1 };
 }

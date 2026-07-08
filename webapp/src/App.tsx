@@ -16,7 +16,6 @@ import {
   deriveOrgPageContext,
   deriveReviewPageContext,
   deriveTasksPageContext,
-  type TasksListMode,
 } from './lib/pageContextDerive';
 import { GlobalShortcuts } from './components/GlobalShortcuts';
 import { ToastContainer } from './components/ToastContainer';
@@ -37,15 +36,6 @@ import { PendingApproval } from './components/PendingApproval';
 import { PageContextDebugPanel } from './components/PageContextDebugPanel';
 import { Loader2 } from 'lucide-react';
 
-/** D4 (CANVAS-AND-PAGE-CHAT.md): the LIST|CANVAS toggle is a sibling unit (C3/C4) that may land
- *  before or after this one — read the same persisted key defensively so Tasks' PageContext picks
- *  up 'canvas' automatically the moment it exists, without needing to coordinate landing order.
- *  Absent/garbage → 'list', the documented default. */
-function readTasksListMode(): TasksListMode {
-  if (typeof window === 'undefined') return 'list';
-  return window.localStorage.getItem('omp.tasks.view') === 'canvas' ? 'canvas' : 'list';
-}
-
 const readStoredBoolean = (key: string, fallback: boolean) => {
   if (typeof window === 'undefined') return fallback;
   const stored = window.localStorage.getItem(key);
@@ -53,13 +43,12 @@ const readStoredBoolean = (key: string, fallback: boolean) => {
 };
 
 const MainContent = () => {
-  const { view, selectedTaskId, currentProject, tasks, taskFilter, agents, interveneAgentId, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
+  const { view, selectedTaskId, currentProject, tasks, taskFilter, tasksListMode, agents, interveneAgentId, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
   const { status } = useAuth();
 
   // Precomputed unconditionally (Rules of Hooks — useMemo can't sit behind the early FirstRunSetup
   // return below) so re-publishing to PageContext only happens when the underlying data actually
   // changes, not on every unrelated re-render (TaskContext's ~10-15s polls are frequent).
-  const tasksListMode = readTasksListMode();
   const interveneAgent = React.useMemo(() => agents.find((a) => a.id === interveneAgentId), [agents, interveneAgentId]);
   const reviewTask = React.useMemo(() => tasks.find((t) => t.id === reviewTaskId || t.sourceId === reviewTaskId), [tasks, reviewTaskId]);
   const tasksPageContext = React.useMemo(

@@ -25,17 +25,25 @@ import { StatusChip, Kbd, MonoLabel } from "./kit";
 import {
   categoryRimColor,
   groupTasksByCategory,
-  isNeedsYou,
   layoutCanvas,
   layoutSatellites,
-  overflowChipPosition,
+  maxSafeSatelliteRadius,
   type CanvasNode,
   type SatelliteNode,
 } from "../lib/categoryCanvas";
 
 const VIEWPORT = { width: 800, height: 560 };
-const SATELLITE_RADIUS = 160;
-const MAX_SATELLITES = 24;
+// Taste-review nit 1 (dense-orbit collisions): the satellite ring radius is capped by
+// `maxSafeSatelliteRadius`, computed from the SAME perimeter geometry `layoutCanvas` uses for the
+// receded sibling category nodes — so satellites (inner AND outer ring) can never grow into the
+// zone those nodes occupy, however dense the category. See categoryCanvas.ts for the full math.
+const SAFE_SATELLITE_RADIUS = maxSafeSatelliteRadius(VIEWPORT);
+const RING_GAP = 46;
+const BASE_INNER_RADIUS = 92;
+const RING_CAPACITY = 6;
+const MAX_SATELLITES = 12; // 6 inner + 6 outer, before the "+N more" chip takes over — down from
+// 24 (single ring) because the old cap only bounded a satellite's CENTER, not its rendered chip
+// footprint, which is what actually collided with the perimeter nodes and with itself.
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(() => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -95,7 +103,11 @@ interface CategoryNodeViewProps {
 
 /** The decorative rim + count — MUST live inside the `<svg>` (an SVG `<g>` rendered under a
  *  plain `<div>` is invalid markup and silently fails to position: the browser drops it out of
- *  the SVG coordinate system entirely, so every node's circle/text collapses to one spot). */
+ *  the SVG coordinate system entirely, so every node's circle/text collapses to one spot).
+ *
+ *  Taste-review nit 2: the needs-you signal used to be a bare 5px dot here (invisible in
+ *  evidence). It's promoted to `NeedsYouRingBadge` — a real, legible count pill in the DOM
+ *  overlay (see below) — so this SVG layer no longer renders it at all. */
 const CategoryNodeSvg: React.FC<{ node: CanvasNode; reducedMotion: boolean }> = ({ node, reducedMotion }) => {
   const rim = categoryRimColor(node.id);
   return (
@@ -114,13 +126,40 @@ const CategoryNodeSvg: React.FC<{ node: CanvasNode; reducedMotion: boolean }> = 
         vectorEffect="non-scaling-stroke"
         opacity={node.faded ? 0.35 : 1}
       />
-      {node.needsYouCount > 0 && (
-        <circle cx={node.targetR * 0.68} cy={-node.targetR * 0.68} r={5} fill="var(--wf-accent)" opacity={node.faded ? 0.5 : 1} />
-      )}
       <text textAnchor="middle" dominantBaseline="central" y={-2} fontSize={node.selected ? 15 : 12} fontFamily="JetBrains Mono, ui-monospace" fill="var(--wf-text)" opacity={node.faded ? 0.5 : node.dimmed ? 0.45 : 1}>
         {node.openCount}
       </text>
     </g>
+  );
+};
+
+/** Taste-review nit 2 (D8's own red-team question — "the needs-you signal is a 5px dot invisible
+ *  in evidence"): a small, legible COUNT BADGE at the node's upper-right, using the same visual
+ *  grammar as the nav's needs-you badge (FactoryStatusStrip's `NeedsYouBadge`: a ping ring + a
+ *  solid pill + a number) so "which category has the most blocked work" is answerable at a
+ *  glance — not just in the aria-label. Deliberately EMBER, not the nav badge's red: this is a
+ *  glance-affordance, not a system alarm, and `--wf-accent` (`index.css`) already resolves to
+ *  real ember hex in BOTH themes (`#F0A35A` light / `#F5B678` dark) — the same variable
+ *  `ProgressRing` above already uses for its "in progress" stroke, so this reuses it rather than
+ *  hardcoding a hex, which also gives it the correct per-theme ember shade for free (taste-review
+ *  nit 4's light-mode pass). Lives in the DOM overlay (not the SVG) so the count is real text, not
+ *  a decorative shape. */
+const NeedsYouRingBadge: React.FC<{ node: CanvasNode }> = ({ node }) => {
+  if (node.needsYouCount <= 0) return null;
+  const bx = node.targetX + node.targetR * 0.66;
+  const by = node.targetY - node.targetR * 0.66;
+  return (
+    <span
+      data-testid="needs-you-ring-badge"
+      className="pointer-events-none absolute flex items-center justify-center"
+      style={{ left: pct(bx, VIEWPORT.width), top: pct(by, VIEWPORT.height), transform: "translate(-50%, -50%)", opacity: node.faded ? 0.6 : 1 }}
+      aria-hidden="true"
+    >
+      <span className="absolute inset-0 animate-ping rounded-full opacity-60" style={{ backgroundColor: "var(--wf-accent)" }} />
+      <span className="relative flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 font-mono text-[9px] font-bold leading-none text-black" style={{ backgroundColor: "var(--wf-accent)" }}>
+        {node.needsYouCount}
+      </span>
+    </span>
   );
 };
 
@@ -163,7 +202,7 @@ const SatelliteChip: React.FC<{ sat: SatelliteNode; index: number; reducedMotion
   <button
     type="button"
     onClick={(e) => { e.stopPropagation(); onSelect(); }}
-    className="absolute flex min-h-[44px] min-w-[44px] max-w-[168px] flex-col items-start gap-1 rounded-md border border-[color:var(--wf-border,#2A2A2E)] bg-[color:var(--wf-surface)] px-2 py-1.5 text-left shadow-sm outline-none transition-transform hover:border-[color:var(--wf-accent)] focus-visible:ring-2 focus-visible:ring-[color:var(--wf-accent)] focus-visible:ring-offset-2"
+    className="absolute flex min-h-[44px] min-w-[44px] max-w-[120px] flex-col items-start gap-1 rounded-md border border-[color:var(--wf-border,#2A2A2E)] bg-[color:var(--wf-surface)] px-2 py-1.5 text-left shadow-sm outline-none transition-transform hover:border-[color:var(--wf-accent)] focus-visible:ring-2 focus-visible:ring-[color:var(--wf-accent)] focus-visible:ring-offset-2"
     style={{
       left: pct(sat.x, VIEWPORT.width),
       top: pct(sat.y, VIEWPORT.height),
@@ -213,18 +252,29 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
   const totalOpen = useMemo(() => buckets.reduce((sum, b) => sum + b.openCount, 0), [buckets]);
   const nodes = useMemo(() => layoutCanvas(buckets, selectedCategoryId, VIEWPORT), [buckets, selectedCategoryId]);
   const selectedBucket = selectedCategoryId ? buckets.find((b) => b.id === selectedCategoryId) : undefined;
-  // Denser categories get a wider satellite ring so chips have room to breathe — capped by the
-  // viewport so it never pushes satellites past the visible canvas.
-  const satRadius = selectedBucket
-    ? Math.min(SATELLITE_RADIUS + Math.max(0, Math.min(selectedBucket.tasks.length, MAX_SATELLITES) - 6) * 6, VIEWPORT.height / 2 - 40)
-    : SATELLITE_RADIUS;
+  // Taste-review nit 1: the inner ring grows modestly with density, but both it and the outer
+  // ring are hard-capped at `SAFE_SATELLITE_RADIUS` — the radius at which even the FULL chip
+  // footprint (not just the node center) still clears the receded perimeter category nodes. Two
+  // concentric rings (inner + inner+RING_GAP) share that density instead of crowding one ring.
+  const innerRadius = selectedBucket
+    ? Math.min(BASE_INNER_RADIUS + Math.max(0, Math.min(selectedBucket.tasks.length, MAX_SATELLITES) - RING_CAPACITY) * 4, SAFE_SATELLITE_RADIUS - RING_GAP)
+    : BASE_INNER_RADIUS;
+  const outerRadius = Math.min(innerRadius + RING_GAP, SAFE_SATELLITE_RADIUS);
   const satelliteLayout = useMemo(
-    () => (selectedBucket ? layoutSatellites(selectedBucket.tasks, { centerX: VIEWPORT.width / 2, centerY: VIEWPORT.height / 2, radius: satRadius, maxVisible: MAX_SATELLITES }) : null),
-    [selectedBucket, satRadius],
+    () =>
+      selectedBucket
+        ? layoutSatellites(selectedBucket.tasks, {
+            centerX: VIEWPORT.width / 2,
+            centerY: VIEWPORT.height / 2,
+            radius: innerRadius,
+            outerRadius,
+            ringCapacity: RING_CAPACITY,
+            maxVisible: MAX_SATELLITES,
+          })
+        : null,
+    [selectedBucket, innerRadius, outerRadius],
   );
-  const overflowPos = satelliteLayout && selectedBucket
-    ? overflowChipPosition(satelliteLayout.satellites.length, satelliteLayout.overflow.length > 0, { centerX: VIEWPORT.width / 2, centerY: VIEWPORT.height / 2, radius: satRadius })
-    : null;
+  const overflowPos = satelliteLayout?.overflowChip ?? null;
 
   const focusIndex = focusedCategoryId ? buckets.findIndex((b) => b.id === focusedCategoryId) : -1;
   const moveFocus = (dir: -1 | 1): void => {
@@ -246,10 +296,16 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
 
   return (
     <div
-      className={`relative flex h-full flex-1 flex-col overflow-hidden bg-white dark:bg-gray-950 ${className ?? ""}`}
+      // Taste-review nit 4: the frame now uses the SAME `--wf-surface`/`--wf-border` tokens the
+      // rest of the app's chrome does, instead of an ad hoc `bg-white dark:bg-gray-950` /
+      // `border-gray-200 dark:border-gray-800` pairing that happened to look similar but didn't
+      // actually move with the app's real light/dark tokens (the plain-gray chrome, on top of
+      // hue-family rim colors under-tuned for light backgrounds, is what read as "generic bubble
+      // chart" — see the `--cc-rim-*` fix above for the other half).
+      className={`relative flex h-full flex-1 flex-col overflow-hidden bg-[color:var(--wf-surface)] ${className ?? ""}`}
       data-testid="category-canvas"
     >
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 px-5 py-3 dark:border-gray-800">
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-[color:var(--wf-border)] px-5 py-3">
         <MonoLabel>Categories</MonoLabel>
         {selectedBucket ? (
           <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-xs">
@@ -257,7 +313,7 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
               All categories
             </button>
             <span className="text-gray-400">/</span>
-            <span className="text-gray-700 dark:text-gray-300">{selectedBucket.label}</span>
+            <span className="text-[color:var(--wf-text)]">{selectedBucket.label}</span>
           </nav>
         ) : (
           <span className="text-[11px] text-gray-400">select a category to see its plans</span>
@@ -298,6 +354,7 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
               registerRef={(el) => { buttonRefs.current[i] = el; }}
             />
           ))}
+          {nodes.map((node) => <NeedsYouRingBadge key={`needs-you-${node.id}`} node={node} />)}
         </div>
 
         {selectedBucket && selectedBucket.tasks.length === 0 && (
@@ -317,7 +374,7 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
               e.stopPropagation();
               onShowMore?.(selectedBucket.id, satelliteLayout.overflow.map((t) => t.id));
             }}
-            className="absolute flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-dashed border-gray-400 bg-[color:var(--wf-surface)] px-2 text-[11px] font-medium text-gray-500 outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--wf-accent)]"
+            className="absolute flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-dashed border-[color:var(--wf-border-strong)] bg-[color:var(--wf-surface)] px-2 text-[11px] font-medium text-[color:var(--wf-text-muted)] outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--wf-accent)]"
             style={{ left: pct(overflowPos.x, VIEWPORT.width), top: pct(overflowPos.y, VIEWPORT.height), transform: "translate(-50%, -50%)" }}
           >
             +{satelliteLayout.overflow.length} more

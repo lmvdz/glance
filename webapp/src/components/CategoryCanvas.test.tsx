@@ -35,7 +35,7 @@ test("idle: renders all canonical categories, including empty ones (dimmed via r
   expect(html).toContain("select a category to see its plans");
 });
 
-test("idle: a category with concentrated needs-you work renders an ember indicator dot", () => {
+test("idle: a category with concentrated needs-you work renders the ember count badge (taste-review nit 2)", () => {
   const tasks = [
     task({ id: "a", category: "database", tags: ["blocked"] }),
     task({ id: "b", category: "database", tags: ["input"] }),
@@ -48,6 +48,19 @@ test("idle: a category with concentrated needs-you work renders an ember indicat
   expect(html).toContain("Database: 2 open, 2 needs you");
   expect(html).toContain("Frontend: 1 open");
   expect(html).not.toContain("Frontend: 1 open, ");
+  // the promoted badge (not a 5px SVG dot): a legible ember pill with the real count as text,
+  // plus the ping ring, reusing `var(--wf-accent)` (already real ember hex in both themes).
+  expect(html).toContain('data-testid="needs-you-ring-badge"');
+  expect(html).toContain(">2<"); // the count itself renders as real text, not a decorative shape
+  expect(html).toContain("animate-ping");
+});
+
+test("idle: a category with NO needs-you work renders no badge at all (not a zero-count pill)", () => {
+  const tasks = [task({ id: "a", category: "frontend" })];
+  const html = renderToStaticMarkup(
+    <CategoryCanvasView tasks={tasks} selectedCategoryId={null} onSelectCategory={noop} onSelectTask={noop} onBack={noop} />,
+  );
+  expect(html).not.toContain('data-testid="needs-you-ring-badge"');
 });
 
 test("selected: breadcrumb appears, siblings recede (aria-current on the selected node only)", () => {
@@ -68,12 +81,23 @@ test("selected category with no plans yet shows its own calm sub-empty-state, no
   expect(html).toContain("No plans yet in DevOps.");
 });
 
-test("dense: more than 24 plans in the selected category renders the +N more overflow chip", () => {
+test("dense: a large category renders the +N more overflow chip (taste-review nit 1: cap lowered, two rings)", () => {
   const many = Array.from({ length: 30 }, (_, i) => task({ id: `t${i}`, category: "frontend", title: `Task ${i}` }));
   const html = renderToStaticMarkup(
     <CategoryCanvasView tasks={many} selectedCategoryId="frontend" onSelectCategory={noop} onSelectTask={noop} onBack={noop} />,
   );
-  expect(html).toContain("+7 more");
+  // MAX_SATELLITES is now 12 (6 inner + 6 outer), down from 24 — the fold happens earlier, on
+  // purpose, so satellites never crowd each other or the receded perimeter nodes.
+  expect(html).toContain("+19 more");
+});
+
+test("dense: a 23-satellite category (the reported collision scenario) renders exactly the collision-safe count, no crash", () => {
+  const many = Array.from({ length: 23 }, (_, i) => task({ id: `t${i}`, category: "backend", title: `Dense ${i}` }));
+  const html = renderToStaticMarkup(
+    <CategoryCanvasView tasks={many} selectedCategoryId="backend" onSelectCategory={noop} onSelectTask={noop} onBack={noop} />,
+  );
+  expect(html).toContain("+12 more"); // 23 - 11 visible
+  expect(html).toContain("Dense 0"); // needs-you-free, alphabetical: at least one visible chip renders
 });
 
 test("zero open across every category renders the calm one-liner instead of a dimmed ring", () => {
