@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { taskFromFeature, taskRef } from "./task-model";
+import { issueIdentifier, taskFromFeature, taskRef } from "./task-model";
 import type { FeatureDTO } from "./dto";
 
 const feature: FeatureDTO = {
@@ -58,6 +58,16 @@ test("taskRef falls back to the plan slug when the id is a synthetic feature id"
 test("taskRef returns null for a bare synthetic id with no plan dir — no UUID noise in the list", () => {
   expect(taskRef({ id: "a1b2c3d4-9999", planDir: undefined })).toBeNull();
   expect(taskRef({ id: "plan:repo:something", planDir: undefined })).toBeNull();
+});
+
+// The task-detail header's issue-id chip must only ever show a REAL tracker id — never a plan-dir
+// slug dressed up as one (taskRef's broader fallback is right for the task-LIST secondary handle,
+// wrong for a chip whose whole point is "this is the Plane ticket").
+test("issueIdentifier only returns a genuine Plane ticket id, never the plan-dir fallback", () => {
+  expect(issueIdentifier({ id: "feat-1", displayId: "OMPSQ-306" })).toBe("OMPSQ-306");
+  expect(issueIdentifier({ id: "OMP-1" })).toBe("OMP-1");
+  expect(issueIdentifier({ id: "plan:repo:plans/visual-plan-demo", displayId: undefined })).toBeNull();
+  expect(issueIdentifier({ id: "a1b2c3d4-uuid" })).toBeNull();
 });
 
 test("taskFromFeature preserves proof provenance and readiness", () => {

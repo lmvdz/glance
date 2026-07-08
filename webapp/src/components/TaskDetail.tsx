@@ -10,7 +10,7 @@ import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
 import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS, fetchCheckpoints, resolveForkTarget, isForkCheckpointResponseCurrent, type CheckpointEntryDTO } from '../lib/agent-control';
-import { taskRef } from '../lib/task-model';
+import { taskRef, issueIdentifier } from '../lib/task-model';
 import { focusTaskSearch } from '../lib/jump';
 import { summarizeTask } from '../lib/taskStatus';
 import { traceIdForAgent } from '../lib/trace';
@@ -19,9 +19,12 @@ import { AgentStatusStrip } from './AgentStatusStrip';
 import { TranscriptTimeline } from './chat/TranscriptTimeline';
 import { PlanFlowDiagram } from './PlanFlowDiagram';
 import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
+import { TaskSessionsTable, sessionRowsFromAgents } from './TaskSessionsTable';
+import { TaskArtifactsRail } from './TaskArtifactsRail';
+import { Kbd } from './kit/Kbd';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
-import type { AgentDTO, ArtifactCommentDTO, PlanAnnotationTargetDTO, TransitionEntry } from '../lib/dto';
+import type { AgentDTO, ArtifactCommentDTO, DoneProofDTO, PlanAnnotationTargetDTO, TransitionEntry } from '../lib/dto';
 import { prStateBadgeClass, prStateBadgeLabel, agentStatusBadgeClass } from '../lib/agent-badges';
 
 interface PipelineConcern {
@@ -38,7 +41,7 @@ interface PipelineConcern {
   touches: string[];
 }
 
-interface PipelineDocument {
+export interface PipelineDocument {
   file: string;
   path: string;
   title: string;
@@ -487,7 +490,7 @@ function promptsFromContent(content: string): Map<string, string> {
 }
 
 export const TaskDetail = () => {
-  const { tasks, selectedTaskId, selectTask, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole } = useTaskContext();
+  const { tasks, selectedTaskId, selectTask, updateTask, isChatOpen, setIsChatOpen, addTaskComment, agents, commentEvents, resolvedCommentEvents, showToast, reload, sendConsoleCommand, transcripts, subscribeConsole, openReview } = useTaskContext();
   const { theme, toggleTheme } = useTheme();
   const [newCriteriaText, setNewCriteriaText] = React.useState('');
   const [isAddingCriteria, setIsAddingCriteria] = React.useState(false);
@@ -501,6 +504,13 @@ export const TaskDetail = () => {
   const [pipeline, setPipeline] = React.useState<PipelinePayload | null>(null);
   const [planeLinks, setPlaneLinks] = React.useState<PlaneLinks | null>(null);
   const [comments, setComments] = React.useState<TaskComment[]>([]);
+  const [doneProof, setDoneProof] = React.useState<DoneProofDTO | null>(null);
+  // "Create Session" composer — a minimal inline prompt box, not a modal, matching the reference's
+  // one-click primary action; the human decision it serves is "start a fresh session on this task
+  // without leaving the task view".
+  const [sessionComposerOpen, setSessionComposerOpen] = React.useState(false);
+  const [sessionComposerText, setSessionComposerText] = React.useState('');
+  const [creatingSession, setCreatingSession] = React.useState(false);
 
   const [annotationText, setAnnotationText] = React.useState('');
   const [annotationDraft, setAnnotationDraft] = React.useState<AnnotationDraft | null>(null);
@@ -558,6 +568,13 @@ export const TaskDetail = () => {
   const planAnnotations = React.useMemo(() => comments.filter((comment) => comment.kind === 'plan-annotation' && comment.annotation), [comments]);
   const regularComments = React.useMemo(() => comments.filter((comment) => comment.kind !== 'plan-annotation'), [comments]);
   const activeAgents = React.useMemo(() => agents.filter((agent) => task && agent.repo === task.properties.project.id && (agent.featureId === featureId || pipeline?.agentIds.includes(agent.id))), [agents, featureId, pipeline?.agentIds, task]);
+  // Typed-session pipeline (reference A) over the same activeAgents the detailed per-agent panel
+  // below already renders — one source of truth, two presentations (map vs. cockpit).
+  const sessionRows = React.useMemo(() => sessionRowsFromAgents(activeAgents), [activeAgents]);
+  const openSession = React.useCallback((agentId: string) => {
+    const el = document.getElementById(`agent-${agentId}`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
   // The webapp could never stop a running agent — the kill command + send path existed but no button
   // sent it. `kill` keeps the agent in the roster (restartable), so this is a safe two-click "Stop".
   const stopTargets = React.useMemo(() => stoppableAgents(activeAgents), [activeAgents]);
@@ -632,6 +649,21 @@ export const TaskDetail = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [workflowFlowFocus]);
+  // `c` opens the Create Session composer while a task is open — the reference treats keyboard
+  // hints as first-class chrome, so the chip on the button is backed by a real binding. View-scoped
+  // (this component only mounts with a task selected) with the same input guard GlobalShortcuts uses.
+  React.useEffect(() => {
+    if (!selectedTaskId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'c' || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      e.preventDefault();
+      setSessionComposerOpen(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedTaskId]);
   // Auto-subscribe the first working agent so transcript entries arrive via WS.
   React.useEffect(() => {
     const working = activeAgents.find((a) => a.status === 'working' || a.status === 'starting');
@@ -852,6 +884,19 @@ export const TaskDetail = () => {
     setPlaneLinks(payload ? { ...payload, tickets: Array.isArray(payload.tickets) ? payload.tickets : null } : payload);
   }, [featureId]);
 
+  // Artifacts rail's done-proof row — best-effort, never blocks the rest of the rail if it 404s or
+  // the daemon predates this route (an old daemon just never returns a proof, same failure mode as
+  // every other optional badge on this page).
+  const loadDoneProof = React.useCallback(async () => {
+    if (!featureId || !repo) return;
+    try {
+      const payload = await apiJson<{ doneProof: DoneProofDTO | null }>(`/api/features/${encodeURIComponent(featureId)}/done-proof?repo=${encodeURIComponent(repo)}`);
+      setDoneProof(payload?.doneProof ?? null);
+    } catch {
+      setDoneProof(null);
+    }
+  }, [featureId, repo]);
+
   // Persist a flow-diagram concern edit (STATUS and/or blockers), then refresh the pipeline.
   const editConcern = React.useCallback(async (file: string, patch: { status?: string; blockedBy?: number[] }) => {
     if (!featureId || !repo) return;
@@ -871,10 +916,14 @@ export const TaskDetail = () => {
     setPlaneLinks(null);
     setComments(task?.comments ?? []);
     setSelectedDoc(null);
+    setDoneProof(null);
+    setSessionComposerOpen(false);
+    setSessionComposerText('');
     if (!task || !featureId || !repo) return;
     void loadPipeline().catch(() => undefined);
     void loadPlaneLinks().catch(() => undefined);
-  }, [loadPipeline, loadPlaneLinks, task?.id, featureId, repo]);
+    void loadDoneProof().catch(() => undefined);
+  }, [loadPipeline, loadPlaneLinks, loadDoneProof, task?.id, featureId, repo]);
 
   React.useEffect(() => {
     if (!featureId || !repo) return;
@@ -1086,6 +1135,27 @@ export const TaskDetail = () => {
       showToast(error instanceof Error ? error.message : 'Could not start implementation', 'error');
     } finally {
       setPlanAction(null);
+    }
+  };
+
+  // "Create Session" primary action (reference A's header button) — spawns a plain agent linked to
+  // this task via the same POST /api/features/:id/agents route startImplementation already uses,
+  // just with a free-form task description instead of a fixed "Implement: <title>" prompt.
+  const createSession = async () => {
+    const prompt = sessionComposerText.trim();
+    if (!task || !featureId || !repo || !prompt) return;
+    setCreatingSession(true);
+    try {
+      await apiJson(`/api/features/${encodeURIComponent(featureId)}/agents`, jsonInit('POST', { repo, task: prompt }));
+      showToast('Session started', 'success');
+      setSessionComposerOpen(false);
+      setSessionComposerText('');
+      void reload().catch(() => undefined);
+      void loadPipeline().catch(() => undefined);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not start session', 'error');
+    } finally {
+      setCreatingSession(false);
     }
   };
 
@@ -1538,7 +1608,57 @@ export const TaskDetail = () => {
                 </div>
               </div>
 
-              <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-gray-900 dark:text-gray-100 mb-5 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
+              <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
+
+              {/* Task pipeline header (reference A): issue-id chip + repo path give the "what is
+                  this and where does it live" answer at a glance; Create Session / Create Design
+                  Discussion are the two primary actions the reference always shows here. */}
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  {issueIdentifier(task) && (
+                    <span className="rounded border border-gray-200 px-1.5 py-0.5 font-mono text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:text-gray-300">{issueIdentifier(task)}</span>
+                  )}
+                  <span className="font-mono text-[11px] text-gray-500 dark:text-gray-400">{task.properties.project.id}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSessionComposerOpen((open) => !open)}
+                    className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+                  >
+                    Create Session <Kbd keys="c" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openReview(task.id)}
+                    title="Design discussions are X3's screen (feat/ui-design-review)"
+                    className="inline-flex min-h-8 items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 focus-visible:ring-2 focus-visible:ring-amber-500"
+                  >
+                    Create Design Discussion <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+              {sessionComposerOpen && (
+                <div className="mb-5 flex gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2.5 dark:border-gray-800 dark:bg-gray-900/40">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={sessionComposerText}
+                    onChange={(e) => setSessionComposerText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void createSession(); if (e.key === 'Escape') setSessionComposerOpen(false); }}
+                    placeholder="What should this session do?"
+                    className="flex-1 rounded border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200"
+                  />
+                  <button
+                    type="button"
+                    disabled={creatingSession || !sessionComposerText.trim()}
+                    onClick={() => void createSession()}
+                    className="rounded bg-gray-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                  >
+                    {creatingSession ? 'Starting…' : 'Start'}
+                  </button>
+                </div>
+              )}
 
               <AgentStatusStrip
                 status={taskStatus}
@@ -1548,6 +1668,17 @@ export const TaskDetail = () => {
                 onRestart={(agentId) => { sendConsoleCommand(restartCommand(agentId)); showToast('Restarting…', 'info'); }}
                 onImplement={() => void startImplementation()}
               />
+
+              {/* Typed session pipeline (reference A) — first block under the header: "which of this
+                  task's sessions do I look at next, and what kind of work is each one doing?" Read
+                  from the same activeAgents the Agent-detail cockpit below renders; a row click
+                  scrolls to that agent's full control panel instead of duplicating its controls. */}
+              <div className="mb-6">
+                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
+                  Sessions <span className="text-gray-500 font-medium">{sessionRows.length}</span>
+                </div>
+                <TaskSessionsTable rows={sessionRows} onOpenSession={openSession} />
+              </div>
 
               {planFlowConcerns.length >= 2 && (
                 <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
@@ -1672,7 +1803,7 @@ export const TaskDetail = () => {
               {activeAgents.length > 0 && (
                 <div className="mb-6">
                   <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-                    Agents <span className="text-gray-500 font-medium">{activeAgents.length}</span>
+                    Agent detail <span className="text-gray-500 font-medium">{activeAgents.length}</span>
                   </div>
                   <div className="space-y-2">
                     {activeAgents.map((agent) => {
@@ -1681,7 +1812,7 @@ export const TaskDetail = () => {
                       const isAwaiting = agent.status === 'input' || agent.pending.length > 0;
                       const statusColor = agent.status === 'working' ? 'text-emerald-600 dark:text-emerald-400' : agent.status === 'error' ? 'text-red-500' : agent.status === 'input' ? 'text-amber-500' : agent.status === 'stopped' ? 'text-gray-400' : 'text-blue-500';
                       return (
-                        <div key={agent.id} className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+                        <div key={agent.id} id={`agent-${agent.id}`} className="scroll-mt-4 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
                           <div className="flex items-center justify-between gap-2 px-3 py-2">
                             <div className="min-w-0 flex items-center gap-2">
                               <span className={`text-[11px] font-semibold uppercase rounded px-1.5 py-0.5 border ${agentStatusBadgeClass(agent.status)}`}>{agent.status}</span>
@@ -1842,6 +1973,18 @@ export const TaskDetail = () => {
           </div>
           <aside className="flex min-h-[22rem] min-w-0 flex-1 flex-col border-t border-gray-200 bg-gray-50/60 dark:border-gray-800 dark:bg-gray-950/60 lg:min-h-0 lg:border-l lg:border-t-0">
             {renderPlanDocPane()}
+          </aside>
+          {/* Artifacts rail (reference A) — always visible once a task is open, independent of the
+              Properties toggle; it's the answer to "what has this task produced", not a details
+              drill-down like Properties is. */}
+          <aside className="hidden min-h-[22rem] w-64 flex-shrink-0 flex-col border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950 lg:flex lg:min-h-0 lg:border-l lg:border-t-0">
+            <TaskArtifactsRail
+              documents={planDocuments}
+              comments={pipeline?.comments ?? []}
+              doneProof={doneProof}
+              selectedPath={selectedPlanDoc?.path ?? null}
+              onSelect={selectPlanDoc}
+            />
           </aside>
           {showProperties && <TaskProperties task={task} />}
 

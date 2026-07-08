@@ -11,7 +11,7 @@ export interface ToastInfo {
   type: 'success' | 'error' | 'info';
 }
 
-export type AppView = 'attention' | 'active' | 'cockpit' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'scoreboard' | 'topology' | 'federation' | 'knowledge' | 'org' | 'intervene';
+export type AppView = 'attention' | 'active' | 'cockpit' | 'tasks' | 'capabilities' | 'automation' | 'fleet-health' | 'heat' | 'activity-heatmap' | 'omp-graph' | 'scoreboard' | 'topology' | 'federation' | 'knowledge' | 'org' | 'intervene' | 'review';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** One soft-deleted feature in the "garbage bin" (GET /api/features/archived). */
@@ -61,6 +61,8 @@ interface TaskContextType {
   openedConsoleAgentId: string | null;
   /** The agent the Intervene View is focused on (set by openIntervene). */
   interveneAgentId: string | null;
+  /** The task the Design Review view (X3's `/review/:taskId` screen) is focused on, set by openReview(). */
+  reviewTaskId: string | null;
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
@@ -69,6 +71,9 @@ interface TaskContextType {
   openConsole: (agentId: string | undefined) => void;
   /** Focus the full-screen Intervene View on an agent (subscribe + route). The step-in surface off a "Needs you" tap. */
   openIntervene: (agentId: string | undefined) => void;
+  /** Route to the Design Review screen for a task (X3's territory — this only sets the nav state
+   *  the "Create Design Discussion →" action needs; the screen itself lives in feat/ui-design-review). */
+  openReview: (taskId: string | undefined) => void;
   selectTask: (id: string | null) => void;
   addTask: (task: Partial<Task>) => void;
   deleteTask: (id: string) => void;
@@ -118,6 +123,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
   const [interveneAgentId, setInterveneAgentId] = useState<string | null>(null);
+  const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
@@ -161,6 +167,15 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     squad.subscribe(agentId);
     setInterveneAgentId(agentId);
     setView('intervene');
+  };
+
+  // Route to the design-review screen for a task. Mirrors openIntervene's state-machine-nav pattern
+  // (no path router exists in this webapp — see Explore findings in the Wave 4 ledger) so X3's
+  // `/review/:taskId` screen has somewhere to read its target id from without inventing new infra.
+  const openReview = (taskId: string | undefined) => {
+    if (!taskId) return;
+    setReviewTaskId(taskId);
+    setView('review');
   };
 
   const selectTask = (id: string | null) => setSelectedTaskId(id);
@@ -288,7 +303,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, interveneAgentId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, interveneAgentId, reviewTaskId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

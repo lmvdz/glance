@@ -125,6 +125,26 @@ export interface FeatureReadinessDTO { ready: boolean; state: FeatureReadinessSt
 export type PlanRevisionCandidateStateDTO = "candidate" | "accepted" | "rejected" | "superseded";
 export interface PlanRevisionCandidateDTO { id: string; featureId: string; repo: string; planPath: string; producerAgentId?: string; runId?: string; traceId?: string; summary: string; diffRef?: string; state: PlanRevisionCandidateStateDTO; reason?: string; reviewer?: string; createdAt: number; updatedAt: number }
 
+/** Mirrors src/done-proof.ts's DoneProof — the ONE artifact that authorizes a Done write or PR-mode
+ *  reachability claim. Surfaced read-only in the task-pipeline artifacts rail (GET
+ *  /api/features/:id/done-proof); purely advisory there, never a gate. */
+export interface DoneProofDTO {
+  branch: string;
+  repo: string;
+  issueId?: string;
+  issueIdentifier?: string;
+  mode: "local" | "pr";
+  method?: "merge" | "squash" | "rebase";
+  commit: string;
+  mergeCommit?: string;
+  baseRef: string;
+  verified: "green" | "red-baseline" | "unverified";
+  detail: string;
+  provenAt: number;
+  prNumber?: number;
+  prUrl?: string;
+}
+
 export interface PlanAnnotationTargetDTO {
   planPath: string;
   lineStart?: number;

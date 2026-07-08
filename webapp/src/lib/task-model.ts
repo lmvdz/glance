@@ -124,9 +124,20 @@ const PLANE_ID_RE = /^[A-Z][A-Z0-9]+-\d+$/;
  * noise, not a handle, so the row simply leads with its human title instead.
  */
 export function taskRef(task: Pick<Task, "id" | "displayId" | "planDir">): string | null {
+  const identifier = issueIdentifier(task);
+  if (identifier) return identifier;
+  if (task.planDir) return task.planDir.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
+  return null;
+}
+
+/**
+ * The genuine Plane issue identifier for a task, distinct from `taskRef`'s broader fallback (which
+ * also accepts a plan-dir slug as a handle). Used for the task-detail header's issue-id chip — that
+ * chip should only ever show a real tracker id, never a plan-dir name dressed up as one.
+ */
+export function issueIdentifier(task: Pick<Task, "id" | "displayId">): string | null {
   if (task.displayId && PLANE_ID_RE.test(task.displayId)) return task.displayId;
   if (PLANE_ID_RE.test(task.id)) return task.id;
-  if (task.planDir) return task.planDir.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
   return null;
 }
 

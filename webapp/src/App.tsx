@@ -25,6 +25,7 @@ import { KnowledgePanel } from './components/KnowledgePanel';
 import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
 import { IntervenceView } from './components/IntervenceView';
+import { DesignReviewView } from './components/DesignReviewView';
 import { ActiveWorkPane } from './components/ActiveWorkPane';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
 import { FactoryStatusStrip } from './components/FactoryStatusStrip';
@@ -52,6 +53,7 @@ const MainContent = () => {
 
   if (view === 'attention') return <AttentionPanel />;
   if (view === 'intervene') return <IntervenceView />;
+  if (view === 'review') return <DesignReviewView />;
   if (view === 'active') return <ActiveWorkPane />;
   if (view === 'cockpit') return <WorkspaceCockpit />;
   if (view === 'capabilities') return <CapabilityPanel />;

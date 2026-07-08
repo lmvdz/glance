@@ -68,7 +68,7 @@ import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, wit
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
-import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof } from "./done-proof.ts";
+import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof, type DoneProof } from "./done-proof.ts";
 import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
@@ -6039,6 +6039,26 @@ export class SquadManager extends EventEmitter {
 
 	async getUnresolvedComments(repo: string, subject: string): Promise<ArtifactComment[]> {
 		return readComments(this.stateDir, { repo, subject, unresolved: true });
+	}
+
+	/** Best-effort done-proof lookup for a feature — feeds the task-pipeline artifacts rail (Wave 4
+	 *  X2's "cheaply derivable" done-proof surfacing). Tries each linked Plane issue identifier first
+	 *  (the most specific key a proof can be filed under), then each worktree's branch. Read-only and
+	 *  purely advisory: this never gates anything, mirroring done-proof.ts's own ledger contract. */
+	async doneProofForFeature(featureId: string, repo?: string): Promise<DoneProof | undefined> {
+		const list = await this.features(repo);
+		const feature = list.find((f) => f.id === featureId);
+		if (!feature) return undefined;
+		for (const identifier of feature.issueIdentifiers ?? []) {
+			const proof = getDoneProofByIssue(this.stateDir, identifier);
+			if (proof) return proof;
+		}
+		for (const wt of feature.worktrees ?? []) {
+			if (!wt.branch) continue;
+			const proof = getDoneProofByBranch(this.stateDir, wt.branch);
+			if (proof) return proof;
+		}
+		return undefined;
 	}
 
 	/** Saved cold-start resume digest for an agent ("" if none yet). */
