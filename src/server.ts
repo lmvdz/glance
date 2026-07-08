@@ -89,6 +89,14 @@ import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
 
+/** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
+ *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
+ *  scoped by `deliverPeerMessage`/RBAC within the caller's own manager, not agent ownership, so it's
+ *  deliberately excluded here (unlike squad-manager's private `commandTarget`, which audits it). */
+function commandAgentTarget(cmd: ClientCommand): string | undefined {
+	return "id" in cmd ? cmd.id : undefined;
+}
+
 function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> {
 	const out: Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> = {};
 	if (!body || typeof body !== "object") return out;
@@ -278,6 +286,11 @@ interface SocketData {
 	role: Role;
 	/** Org whose fleet this socket sees (DB-registry mode); undefined in file mode / no active org. */
 	orgId?: string;
+	/** True iff this socket authenticated via the on-box loopback break-glass bearer token (no
+	 *  session) in DB-registry mode — the SAME identity `bootstrapAdmin` names on the HTTP path.
+	 *  Lets `resolveCommandManager` route a mutating command to the agent's actual owning manager
+	 *  instead of always the root factory. Never true for a tenant session socket. */
+	bootstrapAdmin?: boolean;
 }
 
 /** Resolved better-auth session shape we read (subset; structural typing tolerates better-auth's wider type). */
@@ -519,6 +532,45 @@ export class SquadServer {
 		return [...(this.singleManager ? [this.singleManager] : []), ...(this.registry?.liveManagers() ?? [])];
 	}
 
+	/**
+	 * The rm-doesn't-stick incident, layer 3: `managerFor(actor)` (via `fleetForOrg`) hard-codes the
+	 * bootstrap admin's org to `ROOT_FACTORY_ORG`, so every mutating command from that identity always
+	 * dispatched to the root factory — even one naming an agent that actually lives on a lazily-created
+	 * ORG manager (`ManagerRegistry`'s per-org fleet). `resolveRemovalId` (squad-manager.ts) then missed
+	 * it in the root's own live roster AND persisted store, fell back to tombstoning the raw identifier
+	 * in the ROOT's ledger, and reported success — a no-op that looked like it worked.
+	 *
+	 * Fix: for the bootstrap-admin identity ONLY, a command that names a target agent (by id or bare
+	 * display name) is resolved against the SAME break-glass union `observabilityManagers` already
+	 * built for the GET read-path (#113) — the root factory plus every currently live org manager —
+	 * instead of blindly using `defaultManager`. A tenant session is never bootstrap-admin (see the
+	 * `bootstrapAdmin` predicate at its call sites), so its commands are completely unaffected and stay
+	 * confined to its own single-manager array, exactly as before.
+	 *
+	 * Resolution order mirrors `resolveRemovalId`'s own "never guess" rule, just widened across
+	 * managers instead of within one: an exact id match (unambiguous) first, then a name match that is
+	 * unique across the WHOLE union. Returns:
+	 *  - `defaultManager` unchanged when the actor isn't bootstrap-admin, there's no registry, or the
+	 *    command carries no agent target (create/snapshot/commission/message) — byte-identical to the
+	 *    pre-fix routing.
+	 *  - the actual owning manager when the target is found live somewhere in the union (the fix).
+	 *  - `undefined` when the actor IS bootstrap-admin, the command DOES name a target, and that target
+	 *    is live in NO candidate manager — an honest "not found" instead of silently forwarding to the
+	 *    root and letting its tombstone-anyway fallback (a deliberate safety net for ITS OWN
+	 *    evict/recreate race, not this cross-manager one) report false success.
+	 */
+	private resolveCommandManager(cmd: ClientCommand, bootstrapAdmin: boolean, defaultManager: SquadManager | undefined): SquadManager | undefined {
+		if (!bootstrapAdmin || !this.registry) return defaultManager;
+		const target = commandAgentTarget(cmd);
+		if (!target) return defaultManager;
+		const candidates = this.observabilityManagers(true, defaultManager);
+		for (const m of candidates) if (m.list().some((a) => a.id === target)) return m;
+		const byName = candidates.filter((m) => m.list().some((a) => a.name === target));
+		if (byName.length === 1) return byName[0];
+		if (byName.length > 1) console.warn(`[server] bootstrap-admin command "${cmd.type}" target "${target}" matched ${byName.length} live managers by name — refusing to guess`);
+		return undefined;
+	}
+
 	/** GET-only fleet-wide observability routes, resolved against `managers` (see `observabilityManagers`)
 	 *  instead of the single per-request `manager` — so the bootstrap-admin break-glass view aggregates
 	 *  every live org manager exactly like GET /api/agents does, instead of silently reading empty just
@@ -651,8 +703,15 @@ export class SquadServer {
 					const cmd = decoded.success;
 					// Route to the socket's org fleet (registry mode) or the single manager; org never from the wire.
 					const actor = this.actorForSocket(ws);
-					const m = await this.managerFor(actor);
-					if (!m) return;
+					const defaultManager = await this.managerFor(actor);
+					if (!defaultManager) return;
+					// Bootstrap-admin cross-manager routing (mirrors the HTTP /api/command path below and
+					// #113's GET read-path union): a command naming a target agent may own live on a
+					// different org manager than the root factory `defaultManager` resolved to. A tenant
+					// session socket is never `bootstrapAdmin` (see the WS handshake above), so this is a
+					// no-op for it — `m` is always `defaultManager`, exactly as before.
+					const m = this.resolveCommandManager(cmd, !!ws.data.bootstrapAdmin, defaultManager);
+					if (!m) return; // bootstrap-admin named a target live in no manager — honest no-op (WS has no per-command response channel to report 404 on)
 					// Transcript replay is unicast to the requesting socket.
 					if (cmd.type === "subscribe") {
 						for (const entry of m.getTranscript(cmd.id)) {
@@ -700,10 +759,14 @@ export class SquadServer {
 			if (this.dbMode && !this.originAllowed(req)) return new Response("forbidden origin", { status: 403 });
 			let role: Role | null;
 			let orgId: string | undefined;
+			let bootstrapAdmin = false;
 			if (this.auth) {
 				// DB mode: loopback admin token bootstraps; otherwise the session cookie rides the upgrade headers.
 				if (this.loopbackBootstrapAdmin(req, server)) {
 					role = "admin";
+					// Same break-glass identity the HTTP path names `bootstrapAdmin` — only meaningful (and only
+					// ever true) with a registry, matching that predicate exactly (see the POST /api/command gate).
+					bootstrapAdmin = !!this.registry;
 					// On-box operator: bucket this socket to the root factory (if one exists) so it sees the roster.
 					if (this.singleManager) orgId = ROOT_FACTORY_ORG;
 				} else {
@@ -720,8 +783,8 @@ export class SquadServer {
 			}
 			if (role === null) return new Response("unauthorized", { status: 401 });
 			const upgraded = this.auth
-				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId } })
-				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
+				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, bootstrapAdmin } })
+				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, bootstrapAdmin }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
 			if (upgraded) return undefined;
 			return new Response("websocket upgrade failed", { status: 426 });
 		}
@@ -1627,10 +1690,17 @@ export class SquadServer {
 				const result = await manager.commission(cmd.spec, { install: true }, actor);
 				return Response.json(result);
 			}
+			// Bootstrap-admin cross-manager routing (rm-doesn't-stick, layer 3): `manager` above is always
+			// the root factory for this identity (`fleetForOrg`'s hard-coded `ROOT_FACTORY_ORG`), which is
+			// wrong for a command naming an agent that actually lives on a different org's live manager.
+			// `resolveCommandManager` is a no-op (returns `manager` unchanged) for every non-bootstrap-admin
+			// caller — tenant sessions stay exactly as confined as before.
+			const owner = this.resolveCommandManager(cmd, bootstrapAdmin, manager);
+			if (!owner) return new Response("agent not found", { status: 404 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
-				await manager.applyCommand(cmd, actor);
+				await owner.applyCommand(cmd, actor);
 			} catch (err) {
 				if (err instanceof RbacDenied) return new Response("forbidden", { status: 403 });
 				throw err;
