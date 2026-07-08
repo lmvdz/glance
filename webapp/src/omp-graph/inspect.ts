@@ -4,6 +4,7 @@
  */
 
 import type { PulseSession } from './pulse-model';
+import type { Collision } from '../lib/insights';
 
 export type InspectSel =
   | { kind: 'commit'; sha: string; label: string; at: number }
@@ -14,7 +15,11 @@ export type InspectSel =
   | { kind: 'cost' }
   | { kind: 'loop'; sub: string; label: string; at: number }
   | { kind: 'meeting'; label: string; at: number }
-  | { kind: 'week'; index: number; label: string };
+  | { kind: 'week'; index: number; label: string }
+  /** ≥2 LIVE agents holding the same path — the unified Heat/Federation collision signal,
+   *  folded into the Graph (GRAPH-FOLD.md §2). Render-only-when-present: the marker and this
+   *  selection only ever exist while the collision is live (see collision-track.ts's min-dwell). */
+  | { kind: 'collision'; collision: Collision; at: number };
 
 export const SEL_COLOR: Record<InspectSel['kind'], string> = {
   commit: '#F2913D',
@@ -26,4 +31,5 @@ export const SEL_COLOR: Record<InspectSel['kind'], string> = {
   loop: '#4E7FDB',
   meeting: '#2FB6D6',
   week: '#C9B79A',
+  collision: '#E5484D',
 };
