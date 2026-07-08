@@ -34,6 +34,12 @@ export interface AgentDriver extends EventEmitter {
 	readonly isReady: boolean;
 	/** True while the backing process/worker is usable. */
 	readonly isAlive: boolean;
+	/** Local OS pid of the backing omp/pi child process, when the driver has one (RpcAgent, from the
+	 *  agent-host meta frame). Undefined for drivers with no local child (ACP/sandbox/flue/workflow).
+	 *  Used to release file leases (leases.ts) keyed `omp:<pid>` — that is exactly the session string
+	 *  lease-hook.ts mints from its OWN `process.pid` inside the child, i.e. this same pid — when the
+	 *  agent is removed, so a dead agent never leaves a lease behind for the manager to reason about. */
+	readonly pid?: number;
 
 	/** Bring the driver live; resolve on "ready" (or reject on early failure/timeout). */
 	start(timeoutMs?: number): Promise<void>;

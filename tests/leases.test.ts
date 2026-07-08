@@ -6,7 +6,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { claimLease, type LeaseEntry, heartbeatSession, holdersOf, leasesFor, mirrorLease, releaseSession } from "../src/leases.ts";
+import { claimLease, type LeaseEntry, heartbeatSession, holdersOf, leasesFor, mirrorLease, reapDeadSessions, releaseSession } from "../src/leases.ts";
 import { repoIdentity } from "../src/repo-identity.ts";
 
 const sessions: Array<{ session: string; repo: string }> = [];
@@ -140,4 +140,63 @@ test("stale leases (no heartbeat within TTL) drop out", async () => {
 	expect((await leasesFor(repo, 60_000)).length).toBe(1);
 	// A negative TTL puts the cutoff in the future → the entry is treated as stale (and pruned), deterministically, no sleep.
 	expect((await leasesFor(repo, -1)).length).toBe(0);
+});
+
+// ── pid-liveness backstop (removal/reap release, GRAPH-FOLD U4) ──────────────
+//
+// Federation observed leases 22h-4d old belonging to agents that had been REMOVED — the graceful
+// release path (lease-hook.ts's own session_shutdown, or the manager releasing by known pid on an
+// explicit remove) never runs for a hard kill / crash / orphan-host reap. `reapDeadSessions` is the
+// repo-agnostic backstop: a lease's session is minted verbatim as `omp:<pid>` (lease-hook.ts), so a
+// dead local pid is unambiguous proof the session is gone, independent of heartbeat freshness.
+
+/** A definitely-dead, definitely-not-reused-within-this-test pid: spawn a trivial process and wait for
+ *  Bun to reap it — `process.kill(pid, 0)` then reliably throws ESRCH. */
+async function deadPid(): Promise<number> {
+	const proc = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
+	await proc.exited;
+	return proc.pid;
+}
+
+test("reapDeadSessions releases a lease whose omp:<pid> session's process is gone; live pids and non-omp sessions are untouched", async () => {
+	const repo = await tmpRepo();
+	const dead = await deadPid();
+
+	await claimLease({ repo, file: "dead.ts", session: `omp:${dead}` });
+	await claimLease({ repo, file: "live.ts", session: `omp:${process.pid}` }); // this test process — definitely alive
+	await claimLease({ repo, file: "other.ts", session: "alice:7" }); // not omp:<pid>-shaped at all
+	sessions.push({ session: `omp:${dead}`, repo }, { session: `omp:${process.pid}`, repo }, { session: "alice:7", repo });
+	expect((await leasesFor(repo)).length).toBe(3);
+
+	// reapDeadSessions scans EVERY repo bucket on the host (it's a machine-wide backstop, by design —
+	// see its own doc comment), so its total `removed` count is not scoped to this test's repo when the
+	// suite runs other files' lease fixtures concurrently; assert the effect on THIS repo's bucket
+	// instead of the global count (mirrors ttl-registry.test.ts's own `toBeGreaterThanOrEqual` sweep
+	// assertion, for the same cross-test-isolation reason).
+	const removed = await reapDeadSessions();
+	expect(removed).toBeGreaterThanOrEqual(1);
+
+	const live = await leasesFor(repo);
+	expect(live.map((l) => l.file).sort()).toEqual(["live.ts", "other.ts"]);
+});
+
+test("reapDeadSessions never touches a mirrored cross-host lease, even one whose session happens to be pid-shaped and locally dead", async () => {
+	const repo = await tmpRepo();
+	const dead = await deadPid();
+	const peerLease: LeaseEntry = {
+		id: "ignored",
+		repo: "/peer/path",
+		file: "src/peer.ts",
+		operator: "alice",
+		session: `omp:${dead}`, // coincidentally shaped like a local session, but it's alice's REMOTE pid
+		host: "alice-box",
+		since: Date.now(),
+		heartbeat: Date.now(),
+	};
+	await mirrorLease(repo, peerLease);
+	sessions.push({ session: `omp:${dead}`, repo });
+
+	await reapDeadSessions();
+	const live = await leasesFor(repo);
+	expect(live.map((l) => l.file)).toContain("src/peer.ts"); // untouched — host mismatch guards it
 });

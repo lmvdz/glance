@@ -19,6 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { repoIdentity } from "./repo-identity.ts";
@@ -74,6 +75,78 @@ const reg = ttlRegistry<LeaseEntry>({ subdir: "leases", ttlMs: LEASE_TTL_MS, isR
 /** Remove leases dirs for repos/worktrees with no live lease (called periodically by the daemon). */
 export function sweepLeases(): Promise<number> {
 	return reg.sweep();
+}
+
+/** A lease claimed by lease-hook.ts always keys `session` as `omp:<pid>` of ITS OWN process (see
+ *  lease-hook.ts's `const session = \`omp:${process.pid}\``). Anything else (a raw operator string, a
+ *  mirrored peer's `alice:7`, …) never matches — this backstop only ever touches leases minted by that
+ *  one hook. */
+const LOCAL_OMP_SESSION_RE = /^omp:(\d+)$/;
+
+/** True iff a LOCAL process with this pid is currently running (POSIX signal-0 probe: no signal is
+ *  actually delivered, ESRCH ⇒ dead, EPERM ⇒ alive-but-foreign-owner, anything else ⇒ alive). */
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException)?.code === "EPERM";
+	}
+}
+
+/**
+ * Repo-agnostic backstop: release every lease minted by a LOCAL `omp:<pid>` session whose process no
+ * longer exists on this host — regardless of TTL/heartbeat freshness. `claimLease`/`releaseSession`
+ * cover the graceful paths (an agent's own session_shutdown hook, or the manager releasing-by-known-pid
+ * on an explicit remove), but a hard kill, crash, or orphan-host reap (agent-host.ts's `proc.kill()`,
+ * reapOrphanHosts) never runs an in-process hook and the manager may no longer have the (agent id →
+ * repo) mapping needed to target a scoped release — those leases would otherwise sit until the
+ * heartbeat itself ages out (LEASE_TTL_MS) purely by luck of nothing refreshing it. Pid liveness is a
+ * stronger, immediate signal: the process is either gone or it isn't, independent of heartbeat cadence.
+ * Scans every repo bucket under the leases root (mirrors ttl-registry's own prune-on-read scan, so cost
+ * is the same order as a `sweep()`); never touches a mirrored cross-host entry (its `host` field is the
+ * REMOTE peer's, never this host's — `omp:<pid>` on our host can't mean anything about a foreign pid).
+ * Best-effort: called from the same periodic janitor as sweepLeases(); a read/rm failure on one entry
+ * must never abort the scan of the rest.
+ */
+/** Effectively-unbounded ttl for reg.read()'s own age filter — reapDeadSessions must see EVERY entry
+ *  regardless of how stale its heartbeat is (that's exactly the case that matters: an agent removed
+ *  hours or days ago) and judge it purely on pid liveness. `Date.now() - ttl` must not go so deeply
+ *  negative it overflows/misbehaves, so this is a large-but-finite 100 years, not Infinity. */
+const UNBOUNDED_TTL_MS = 100 * 365 * 24 * 3600_000;
+
+export async function reapDeadSessions(): Promise<number> {
+	const hostname = os.hostname();
+	let names: string[];
+	try {
+		names = await fsp.readdir(reg.root);
+	} catch {
+		return 0;
+	}
+	let removed = 0;
+	for (const name of names) {
+		const dir = path.join(reg.root, name);
+		let entries: LeaseEntry[];
+		try {
+			// Unbounded TTL: liveness is the ONLY test here. A real heartbeat-age prune is already
+			// sweepLeases()'s job — passing LEASE_TTL_MS-adjacent values here would silently let that
+			// other mechanism's read-time deletion claim credit for (and pre-empt observing) entries
+			// this function exists specifically to catch: ones stale for HOURS TO DAYS, not seconds.
+			entries = await reg.read(dir, UNBOUNDED_TTL_MS);
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (entry.host !== hostname) continue;
+			const m = LOCAL_OMP_SESSION_RE.exec(entry.session);
+			if (!m) continue;
+			const pid = Number(m[1]);
+			if (isPidAlive(pid)) continue;
+			await fsp.rm(path.join(dir, `${entry.id}.json`), { force: true }).catch(() => {});
+			removed++;
+		}
+	}
+	return removed;
 }
 
 /** Claim or refresh a lease on a file. Returns the lease id. */
