@@ -26,6 +26,7 @@ import { FederationPanel } from './components/FederationPanel';
 import { AttentionPanel } from './components/AttentionPanel';
 import { IntervenceView } from './components/IntervenceView';
 import { ActiveWorkPane } from './components/ActiveWorkPane';
+import { WorkspaceCockpit } from './components/WorkspaceCockpit';
 import { FactoryStatusStrip } from './components/FactoryStatusStrip';
 import { OrgSettings } from './components/OrgSettings';
 import { FirstRunSetup } from './components/FirstRunSetup';
@@ -52,6 +53,7 @@ const MainContent = () => {
   if (view === 'attention') return <AttentionPanel />;
   if (view === 'intervene') return <IntervenceView />;
   if (view === 'active') return <ActiveWorkPane />;
+  if (view === 'cockpit') return <WorkspaceCockpit />;
   if (view === 'capabilities') return <CapabilityPanel />;
   if (view === 'automation') return <AutomationPanel />;
   if (view === 'fleet-health') return <FleetHealthPanel />;
