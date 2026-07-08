@@ -122,15 +122,26 @@ function cleanScoutTitle(name: string): string {
 	return name.replace(/^\[scout\]\s*/i, "").replace(/^do-?not-?auto-?land:\s*/i, "").trim();
 }
 
-async function receiptAgentIds(stateDir: string, scope: Set<string>): Promise<string[]> {
+/** `scope: undefined` means unrestricted (every id on disk) — see `buildFabricSnapshot`'s
+ *  `readScope` doc for why a human actor must get this instead of a live-roster-derived Set. */
+async function receiptAgentIds(stateDir: string, scope: Set<string> | undefined): Promise<string[]> {
 	const names = await getStorageBackend().readdir(path.join(stateDir, "receipts"));
-	return names.filter((n) => n.endsWith(".jsonl")).map((n) => n.slice(0, -6)).filter((id) => scope.has(id));
+	const ids = names.filter((n) => n.endsWith(".jsonl")).map((n) => n.slice(0, -6));
+	return scope ? ids.filter((id) => scope.has(id)) : ids;
 }
 
-async function scopedReceipts(stateDir: string, scope: Set<string>): Promise<RunReceipt[]> {
+async function scopedReceipts(stateDir: string, scope: Set<string> | undefined): Promise<RunReceipt[]> {
 	const out: RunReceipt[] = [];
 	for (const id of await receiptAgentIds(stateDir, scope)) out.push(...(await readReceipts(stateDir, id).catch(() => [])));
 	return out;
+}
+
+/** Every agent id with a persisted digest file on disk, regardless of live-roster membership.
+ *  Mirrors `receiptAgentIds`'s directory-listing approach so a digest survives its agent being
+ *  pruned from the live roster (completed/removed) exactly like a receipt already does. */
+async function digestAgentIds(stateDir: string): Promise<string[]> {
+	const names = await getStorageBackend().readdir(path.join(stateDir, "digests")).catch(() => []);
+	return names.filter((n) => n.endsWith(".md")).map((n) => n.slice(0, -3));
 }
 
 export function hotAreasFromReceipts(receipts: RunReceipt[], now = Date.now()): FabricHotAreaFact[] {
@@ -210,7 +221,22 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 	const generatedAt = deps.now?.() ?? Date.now();
 	const scope = scopeFor(deps.actor, deps.agents);
 	const scopedAgents = deps.agents.filter((a) => scope.has(a.id));
-	const receipts = await scopedReceipts(deps.stateDir, scope);
+
+	// The empty-Knowledge-view incident: for a human actor, `scopeFor` returns the CURRENT live
+	// roster's ids as its "no restriction" proxy — correct for picking which AgentDTOs appear in
+	// `agents` below (a live-roster view IS the right semantics there), but wrong for every OTHER
+	// fact type that's read straight off disk (receipts → hot areas, digest files, scout). Once an
+	// agent's run ends and it's pruned from the live roster (the common case — a daemon with 0
+	// currently-running agents but hundreds of historical receipt/digest files), a roster-derived
+	// scope never contains its id again, so `scopedReceipts`/digest reads silently returned nothing
+	// FOREVER, even though the files sit right there under `stateDir`. Agent actors keep the real
+	// restricted scope unchanged (their own subtree — a genuine security boundary, not a roster-
+	// membership accident: `scopeFor`'s agent branch only ever admits roster-known ids anyway, so
+	// `readScope` is never wider than `scope` for them). `undefined` here means "unrestricted read
+	// of every id found on disk" — the `receiptAgentIds`/`digestAgentIds` directory listings.
+	const readScope = deps.actor.origin === "agent" ? scope : undefined;
+
+	const receipts = await scopedReceipts(deps.stateDir, readScope);
 	const latestRun = new Map<string, RunReceipt>();
 	for (const r of receipts) if (!latestRun.get(r.agentId) || (latestRun.get(r.agentId)?.startedAt ?? 0) < r.startedAt) latestRun.set(r.agentId, r);
 
@@ -232,19 +258,35 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		},
 	}));
 
+	// Union the live-roster ids (always included — a just-started agent may have a digest before its
+	// repo/name ever lands on disk elsewhere) with every digest file on disk when unrestricted
+	// (`readScope` undefined). An agent actor's restricted set adds nothing beyond `scopedAgents`
+	// (see the `readScope` doc above), so this is a no-op for that branch.
+	const digestRepoById = new Map(scopedAgents.map((a) => [a.id, a.repo]));
+	const digestIds = new Set(scopedAgents.map((a) => a.id));
+	if (!readScope) for (const id of await digestAgentIds(deps.stateDir)) digestIds.add(id);
+
 	const digests: FabricDigestFact[] = [];
-	for (const a of scopedAgents) {
-		const digest = await readDigest(deps.stateDir, a.id).catch(() => "");
+	for (const id of digestIds) {
+		const digest = await readDigest(deps.stateDir, id).catch(() => "");
 		if (digest) {
-			const run = latestRun.get(a.id);
-			digests.push({ type: "digest", source: { agentId: a.id, runId: run?.runId, repo: a.repo }, digest, ts: run?.endedAt ?? run?.startedAt });
+			const run = latestRun.get(id);
+			digests.push({ type: "digest", source: { agentId: id, runId: run?.runId, repo: digestRepoById.get(id) ?? run?.repo }, digest, ts: run?.endedAt ?? run?.startedAt });
 		}
 	}
 
-	const repos = [...new Set(deps.repos?.length ? deps.repos : scopedAgents.map((a) => a.repo))];
+	// Same disk-vs-roster fallback as digests: when there's no explicit `?repo=` AND no live agent
+	// in scope, fall back to every repo this actor's own PERSISTED features know about (still never
+	// unrestricted — decisions below are filtered to this exact set) rather than silently resolving
+	// to an empty repo list just because nothing happens to be running right now.
+	const repos = [
+		...new Set(
+			deps.repos?.length ? deps.repos : scopedAgents.length ? scopedAgents.map((a) => a.repo) : (deps.features ?? []).map((f) => f.repo),
+		),
+	];
 	const repoSet = new Set(repos);
 	const issueLists = await Promise.all(repos.map((repo) => (deps.listIssues ? deps.listIssues(repo).catch(() => null) : Promise.resolve(null))));
-	const scout = await loadScoutFacts(deps.stateDir, issueLists.flatMap((x) => x ?? []), scope);
+	const scout = await loadScoutFacts(deps.stateDir, issueLists.flatMap((x) => x ?? []), readScope);
 
 	const namesById = new Map(scopedAgents.map((a) => [a.id, a.name]));
 	const idsByName = new Map(scopedAgents.map((a) => [a.name, a.id]));

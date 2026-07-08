@@ -23,11 +23,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { appendReceipt } from "../src/receipts.ts";
+import { writeDigest } from "../src/digest.ts";
+import { claimLease } from "../src/leases.ts";
+import type { AutomationLog } from "../src/automation-log.ts";
+import type { LearningMetrics } from "../src/metrics.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { ManagerRegistry } from "../src/manager-registry.ts";
 import { SquadServer, type AuthInstance } from "../src/server.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { Actor, RunReceipt } from "../src/types.ts";
+import type { Actor, AgentDTO, RunReceipt } from "../src/types.ts";
 
 const operator: Actor = { id: "test-op", origin: "local" };
 
@@ -213,4 +217,124 @@ test("bootstrap-admin WITH a root factory: aggregate unions the root manager AND
 		await rootMgr.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}
+});
+
+/** Test-only seam (same trick tests/agent-context-fabric.test.ts already uses): SquadManager's
+ *  `agents` map is intentionally private, but a live roster entry only needs a `.dto` for `.list()`
+ *  and every route that reads it — no real driver/process required. */
+function injectLiveAgent(mgr: SquadManager, dto: AgentDTO): void {
+	// `transcript: []` + a no-op `agent.detach()` are required — `stop()`'s teardown path (persist +
+	// detach-not-kill) touches both on every live record (see squad-manager.ts's persistNow/stop), so
+	// a bare `{ dto }` throws when the test fixture's `registry.stopAll()` cleanup runs.
+	(mgr as unknown as { agents: Map<string, { dto: AgentDTO; transcript: unknown[]; agent: { detach?(): void } }> }).agents.set(dto.id, {
+		dto,
+		transcript: [],
+		agent: { detach() {} },
+	});
+}
+
+function agentDto(id: string, repo: string): AgentDTO {
+	return { id, name: id, status: "idle", kind: "omp-operator", repo, worktree: `/wt/${id}`, approvalMode: "write", pending: [], lastActivity: 0, messageCount: 0 };
+}
+
+/**
+ * Same disease (Knowledge-view incident, layer 1), the rest of the read family this fix also
+ * covers: /api/fabric(+search), /api/leases, /api/audit, /api/automation, /api/metrics/learning-loop
+ * ALL used to read the single per-request `manager` post-`!manager`-gate, exactly like
+ * graph/usage/heat did pre-#113 — so a bootstrap-admin without a root factory got the bare `noFleet`
+ * `[]`/undefined instead of the union every other observability route now gets. Root-factory-OFF is
+ * the daemon's documented default shape (see file doc), so this is the realistic repro, not an edge case.
+ */
+async function startedServerWithFacts(token: string): Promise<{ url: string; root: string; orgAManager: SquadManager; orgBManager: SquadManager }> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "obs-bootstrap-facts-"));
+	const registry = new ManagerRegistry({ root, store: (orgId) => new FileStore(path.join(root, "orgs", orgId)), operator });
+	const orgAManager = await registry.get("orgA");
+	const orgBManager = await registry.get("orgB");
+	process.env.GLANCE_STATE_DIR = root;
+
+	// digests (fabric)
+	await writeDigest(path.join(root, "orgs", "orgA"), "agent-orgA", "## orgA session digest");
+	await writeDigest(path.join(root, "orgs", "orgB"), "agent-orgB", "## orgB session digest");
+
+	// live agents + leases (fabric.agents / leases) — orgScopedLeases derives its repo set from
+	// each org's OWN live roster, so a lease only surfaces once its org has an agent on that repo.
+	injectLiveAgent(orgAManager, agentDto("agent-orgA", "/repo/orgA"));
+	injectLiveAgent(orgBManager, agentDto("agent-orgB", "/repo/orgB"));
+	await claimLease({ repo: "/repo/orgA", file: "src/orgA.ts", session: "agent-orgA" });
+	await claimLease({ repo: "/repo/orgB", file: "src/orgB.ts", session: "agent-orgB" });
+
+	// audit
+	await orgAManager.recordAudit(operator, "create", "agent-orgA", "ok");
+	await orgBManager.recordAudit(operator, "create", "agent-orgB", "ok");
+
+	// automation (private field seam — no public recorder API; `AutomationLog.for(loop)` is the
+	// exact currying every real loop uses, see squad-manager.ts's `this.automation.for(...)`)
+	(orgAManager as unknown as { automation: AutomationLog }).automation.for("scout", "/repo/orgA")({ llmCalls: 1, found: 2, filed: 1 });
+	(orgBManager as unknown as { automation: AutomationLog }).automation.for("scout", "/repo/orgB")({ llmCalls: 3, found: 1, filed: 0 });
+
+	// learning-loop metrics (same private-field seam as automation)
+	(orgAManager as unknown as { learningMetrics: LearningMetrics }).learningMetrics.record("first-try-green", 1);
+	(orgBManager as unknown as { learningMetrics: LearningMetrics }).learningMetrics.record("first-try-green", 0);
+
+	const server = new SquadServer(undefined, { port: 0, auth: authStub(), registry, token });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await registry.stopAll();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	return { url, root, orgAManager, orgBManager };
+}
+
+test("bootstrap-admin bearer token: fabric/leases/audit/automation/metrics ALSO reach the aggregate live-manager fleet (the same #113 disease, extended)", async () => {
+	const token = "bootstrap-admin-token-fabric-obs";
+	const { url } = await startedServerWithFacts(token);
+
+	// /api/fabric — the Knowledge-view incident's actual repro: both orgs' digests must be present,
+	// not just whichever manager `managerFor` happened to resolve first (here: neither, pre-fix).
+	const fabric = await fetch(`${url}/api/fabric`, { headers: bearer(token) }).then((r) => r.json());
+	expect(fabric.digests.map((d: { source: { agentId?: string } }) => d.source.agentId).sort()).toEqual(["agent-orgA", "agent-orgB"]);
+
+	const search = await fetch(`${url}/api/fabric/search?q=digest`, { headers: bearer(token) }).then((r) => r.json());
+	expect(search.counts.digests).toBe(2);
+
+	// /api/leases — union of both orgs' own org-scoped leases.
+	const leases = await fetch(`${url}/api/leases`, { headers: bearer(token) }).then((r) => r.json());
+	expect(leases.map((l: { session: string }) => l.session).sort()).toEqual(["agent-orgA", "agent-orgB"]);
+
+	// /api/audit — merged newest-first across both orgs.
+	const audit = await fetch(`${url}/api/audit`, { headers: bearer(token) }).then((r) => r.json());
+	expect(audit.map((a: { target: string | null }) => a.target).sort()).toEqual(["agent-orgA", "agent-orgB"]);
+
+	// /api/automation — events unioned, rollup summed per loop.
+	const automation = await fetch(`${url}/api/automation`, { headers: bearer(token) }).then((r) => r.json());
+	expect(automation.events.length).toBe(2);
+	const scoutRollup = automation.rollup.find((r: { loop: string }) => r.loop === "scout");
+	expect(scoutRollup.llmCalls).toBe(4); // 1 (orgA) + 3 (orgB)
+	expect(scoutRollup.found).toBe(3); // 2 (orgA) + 1 (orgB)
+	expect(scoutRollup.filed).toBe(1);
+
+	// /api/metrics/learning-loop — per-metric rollup summed across both orgs.
+	const metrics = await fetch(`${url}/api/metrics/learning-loop`, { headers: bearer(token) }).then((r) => r.json());
+	const ftgRow = metrics.rollup.find((r: { name: string }) => r.name === "first-try-green");
+	expect(ftgRow.count).toBe(2);
+	expect(ftgRow.sum).toBe(1); // 1 (orgA) + 0 (orgB)
+	expect(ftgRow.avg).toBeCloseTo(0.5, 5);
+});
+
+test("DB-registry org session: fabric/leases/audit/automation stay scoped to that org's own manager, never the other org's", async () => {
+	const token = "bootstrap-admin-token-fabric-isolation";
+	const { url } = await startedServerWithFacts(token);
+
+	const fabricA = await fetch(`${url}/api/fabric`, { headers: cookie("orgA") }).then((r) => r.json());
+	expect(fabricA.digests.map((d: { source: { agentId?: string } }) => d.source.agentId)).toEqual(["agent-orgA"]);
+
+	const leasesA = await fetch(`${url}/api/leases`, { headers: cookie("orgA") }).then((r) => r.json());
+	expect(leasesA.map((l: { session: string }) => l.session)).toEqual(["agent-orgA"]);
+
+	const auditA = await fetch(`${url}/api/audit`, { headers: cookie("orgA") }).then((r) => r.json());
+	expect(auditA.map((a: { target: string | null }) => a.target)).toEqual(["agent-orgA"]);
+
+	const automationA = await fetch(`${url}/api/automation`, { headers: cookie("orgA") }).then((r) => r.json());
+	expect(automationA.events.length).toBe(1);
 });
