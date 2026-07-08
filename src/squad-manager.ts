@@ -140,8 +140,9 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
-import { recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
+import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { shadowCostCheck } from "./cost-gate.ts";
+import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
@@ -191,6 +192,13 @@ import {
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
+/**
+ * How long a built spawn scoreboard is served from cache (see `spawnScoreboard()`). Outcome data
+ * only changes on lands, and the board feeds a routing TIE-BREAKER (never a gate/veto), so a
+ * minutes-stale read is immaterial — while the alternative is an O(lifetime-receipts) directory
+ * walk + parse on EVERY interactive `POST /api/spawn` once `OMP_SQUAD_MODEL_OUTCOMES=1`.
+ */
+export const SPAWN_SCOREBOARD_TTL_MS = 60_000;
 /**
  * Consecutive failed auto-lands before the manager PARKS a branch instead of re-merging it. The
  * count is read from the persistent audit log (consecutiveLandFailures), so it survives daemon
@@ -670,6 +678,11 @@ export class SquadManager extends EventEmitter {
 	/** Pauses auto-dispatch while the model subscription is rate-limited (5h/weekly cap). Fed by agents'
 	 *  auto_retry_start usage-limit events; consulted by the dispatcher before it spawns. */
 	private readonly rateLimit = new RateLimitGate();
+	/** TTL cache for `spawnScoreboard()` (see its doc): the last built board + build time. */
+	private scoreboardCache?: { at: number; board: Scoreboard };
+	/** Single-flight slot for `spawnScoreboard()` rebuilds — concurrent TTL-expired callers await the
+	 *  same scan instead of each walking the whole receipts directory. Cleared on settle (either way). */
+	private scoreboardInflight?: Promise<Scoreboard>;
 	private orchestrator?: Orchestrator;
 	/** Observers — one per configured Plane repo so every repo's backlog is audited (OMPSQ-137). */
 	private readonly observers: Observer[] = [];
@@ -5647,6 +5660,44 @@ export class SquadManager extends EventEmitter {
 	 *  reaped agents and post-restart history stay visible — a per-live-agent read hides all of it. */
 	async allReceipts(): Promise<RunReceipt[]> {
 		return readAllReceipts(this.stateDir);
+	}
+
+	/**
+	 * Interactive-spawn cost/outcome scoreboard (research-sirvir/03, the dead-wire fix): closes over
+	 * the manager's own PRIVATE `this.stateDir` — mirrors `allReceipts()` above and the
+	 * `shadowCostCheck(this.stateDir, …)` call pattern — so a DB-mode org-scoped manager (a private
+	 * `stateDir = root/orgs/orgId`, see `manager-registry.ts`) reads its OWN tenant's ledger, never the
+	 * global `resolveStateDir()` root, which would read the wrong (empty, for every tenant) ledger
+	 * while recording happens under the org dir. `readModelOutcomes`/`buildScoreboard` already apply
+	 * research-sirvir/02's `modelFamily` normalization, so a `smart-spawn.ts` candidate lookup
+	 * (`"opus"`/`DEFAULT_MODEL_FAMILY`) hits regardless of the raw id shape a receipt or ledger row
+	 * carries.
+	 *
+	 * TTL + single-flight cached (cross-lineage review of PR #114): `readAllReceipts` is an
+	 * O(lifetime-receipts) directory walk + parse (hundreds of files on a mature install), and with
+	 * `OMP_SQUAD_MODEL_OUTCOMES=1` EVERY interactive `POST /api/spawn` hits this — so the built board
+	 * is cached per manager instance for `SPAWN_SCOREBOARD_TTL_MS`, and concurrent requests during a
+	 * rebuild share ONE in-flight promise instead of racing N full scans. v1 is TTL-only (no
+	 * invalidation hooks): the upgrade path, if minutes-stale ever matters, is to invalidate from
+	 * `recordModelOutcome`/`appendReceipt` — but outcome data only changes on lands, so staleness
+	 * bounded by the TTL is immaterial for a routing tie-breaker. A rebuild FAILURE is not cached
+	 * (the in-flight slot clears on rejection), so one bad scan can't poison the TTL window.
+	 */
+	async spawnScoreboard(): Promise<Scoreboard> {
+		const now = Date.now();
+		if (this.scoreboardCache && now - this.scoreboardCache.at < SPAWN_SCOREBOARD_TTL_MS) return this.scoreboardCache.board;
+		if (!this.scoreboardInflight) {
+			this.scoreboardInflight = (async () => {
+				try {
+					const board = buildScoreboard(await readAllReceipts(this.stateDir), readModelOutcomes(this.stateDir));
+					this.scoreboardCache = { at: Date.now(), board };
+					return board;
+				} finally {
+					this.scoreboardInflight = undefined; // success or failure: next TTL-expired call starts a fresh scan
+				}
+			})();
+		}
+		return this.scoreboardInflight;
 	}
 
 	async trace(id: string): Promise<TraceResponse> {

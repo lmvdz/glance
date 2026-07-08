@@ -1,10 +1,27 @@
 # Cost-weighted selection — bounded, null-safe, tie-breaker not veto
 
-STATUS: open
+STATUS: in-review (PR feat/sirvir-04-03-cost-and-wire — bounded two-stage shift shipped, see notes)
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/smart-spawn.ts, src/attribution-scoreboard.ts
+
+## Implementation notes (Wave 3, W4)
+Implemented as a TWO-STAGE win condition in `shiftedModel` (src/smart-spawn.ts), no blended sum:
+(a) QUALITY WIN — candidate beats the incumbent's trusted land-rate by >= `MIN_EDGE`; fires
+independent of cost, so a genuine escalation is never vetoed. (b) COST TIE-BREAK — only for a
+candidate that does NOT already clear (a): fires when the candidate's land-rate is within the new
+`COST_TIE_EPSILON` (0.05, deliberately << `MIN_EDGE`) of the incumbent's AND both
+`costPerLandedChange` values are non-null AND the candidate is cheaper. Either cost being `null`
+skips the tie-break cleanly (no division, no unbounded ratio, no `-Infinity`) — the exact failure
+mode the red-team confirmed in the drafted formula. Signature changed from a raw `OutcomesReader`
+closure to a `Scoreboard` (from `attribution-scoreboard.ts`'s `buildScoreboard`), per the concern's
+own recommendation, so land-rate-per-`(model,tier)` and cost-per-model come from one source; the
+acknowledged per-model-vs-per-tier cost/land-rate scope mismatch is documented in `shiftedModel`'s
+doc comment, not fixed (out of scope, no per-tier cost data exists). Tests: tests/smart-spawn.test.ts
+rewritten onto `buildScoreboard` fixtures — all original invariants (S1 regressions, MIN_SAMPLES/
+MIN_EDGE floors, explicit-model-never-overridden) plus new (a)/(b)/(c) cost-tie-break/no-veto/
+null-safety cases from this concern's Verify section.
 
 ## Goal
 Fold $/landed-change into model selection so a proven-cheaper model is preferred at equal quality and an expensive model must *earn* its premium — without the formula silently disabling itself or inverting the existing "escalate to opus for hard work" behavior. This is "free-lane gating" (default cheap, escalate on measured underperformance) expressed as a cost weight, not a separate feature.
