@@ -90,6 +90,18 @@ describe('buildFleetRoster — state grouping', () => {
     expect(roster.virtualNeeds.map((i) => i.kind)).toEqual(['collision']);
   });
 
+  test('taste-review nit 4: a busy-but-healthy fleet sitting at its WIP cap is calm, not a standing NEEDS YOU row', () => {
+    // Two working agents, nothing actually blocked, capacity just has no headroom left (warn,
+    // roomFor 0) — the routine, frequent state a busy fleet sits in most of the time. It must NOT
+    // manufacture a "needs you" row: that's already the header's capacity chip's job.
+    const agents = [agent('a1', 'working', { lastActivity: Date.now() }), agent('a2', 'working', { lastActivity: Date.now() })];
+    const capacity = { used: 2, cap: 2, roomFor: 0, verdict: 'warn' as const, headline: 'at WIP cap (2/2) — new work queues', memPct: 40, loadPct: 40 };
+    const attn = attentionItems({ agents, capacity });
+    const roster = buildFleetRoster(agents, attn, activeWork(agents, []));
+    expect(roster.needs).toEqual([]);
+    expect(roster.virtualNeeds).toEqual([]);
+  });
+
   test('a live agent joined to a real plan/feature (has a planDir) carries its planItem for the row line-2 chip', () => {
     const agents = [agent('a1', 'working', { featureId: 'f1', lastActivity: Date.now() })];
     const features = [feature('f1', { title: 'Ship the thing', planDir: 'plans/ship-the-thing', agentIds: ['a1'], workflowProgress: { done: 2, total: 5 } })];

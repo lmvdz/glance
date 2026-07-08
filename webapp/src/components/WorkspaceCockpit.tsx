@@ -60,6 +60,7 @@ import {
   activeWork,
   activeWorkAction,
   computeCapacity,
+  capacityFractionLabel,
   detectCollisions,
   type AttentionItem,
   type ActiveWorkItem,
@@ -110,14 +111,18 @@ const PlanLine: React.FC<{ item?: ActiveWorkItem }> = ({ item }) => {
 
 /** Tier-1 inline answer: one-click preset options rendered directly on the roster row (§6b) —
  *  answers WITHOUT changing the selection. Only rendered when the pending request actually
- *  carries options; free-text answers are tier 2 (the detail pane's banner + Composer). */
+ *  carries options; free-text answers are tier 2 (the detail pane's banner + Composer).
+ *
+ *  Ember discipline (taste-review nit 1): hover is amber, matching the trailing action chip's
+ *  "act here" grammar — one answer color, not two (the selection highlight below uses the
+ *  brand's ember `--wf-accent`, a DIFFERENT signal — "you're looking at this" vs "act on this"). */
 const InlineOptions: React.FC<{ options: string[]; onPick: (opt: string) => void }> = ({ options, onPick }) => (
   <div className="mt-1.5 flex flex-wrap gap-1">
     {options.map((opt) => (
       <button
         key={opt}
         onClick={(e) => { e.stopPropagation(); onPick(opt); }}
-        className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 transition-colors hover:border-[color:var(--wf-accent)] hover:bg-[color:var(--wf-accent-soft)] focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200"
+        className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 transition-colors hover:border-amber-400 hover:bg-amber-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200 dark:hover:border-amber-600 dark:hover:bg-amber-950/30"
       >
         {opt}
       </button>
@@ -127,15 +132,21 @@ const InlineOptions: React.FC<{ options: string[]; onPick: (opt: string) => void
 
 /** The row's one-move trailing chip. "Land" deliberately never fires the mutation from here —
  *  land stays in the right rail (§6b) — clicking it (like Answer/View/Vetoed-Review) just selects
- *  the row so the detail pane + LandRail take over; only Restart and Raise-cap act immediately. */
-const RowActionChip: React.FC<{ action: AttentionItem['action']; onClick: () => void }> = ({ action, onClick }) => {
+ *  the row so the detail pane + LandRail take over; only Restart and Raise-cap act immediately.
+ *
+ *  Ember discipline (taste-review nit 1): a busy NEEDS YOU group used to render a solid amber-500
+ *  chip on EVERY actionable row at once — a wash, not a spark. `mostUrgent` is true only for the
+ *  single top-ranked row (attn is already severity→recency sorted, so index 0 of the visible NEEDS
+ *  YOU rows IS the most urgent); every other row's action — even an "Answer"/"Restart" kind that
+ *  would otherwise qualify — demotes to the same outline treatment as View/Land. */
+const RowActionChip: React.FC<{ action: AttentionItem['action']; onClick: () => void; mostUrgent: boolean }> = ({ action, onClick, mostUrgent }) => {
   if (!action) return null;
-  const primary = action.kind === 'answer' || action.kind === 'steer' || action.kind === 'restart';
+  const solid = mostUrgent && (action.kind === 'answer' || action.kind === 'steer' || action.kind === 'restart');
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onClick(); }}
       className={`flex-shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
-        primary
+        solid
           ? 'bg-amber-500 text-white hover:bg-amber-600'
           : 'border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300'
       }`}
@@ -152,10 +163,11 @@ const RosterAgentRow: React.FC<{
   row: FleetAgentRow;
   selected: boolean;
   diffCounts: { added: number; removed: number };
+  mostUrgent?: boolean;
   onSelect: () => void;
   onRowAction: (row: FleetAgentRow) => void;
   onInlineAnswer: (agentId: string, requestId: string, value: string) => void;
-}> = ({ row, selected, diffCounts, onSelect, onRowAction, onInlineAnswer }) => {
+}> = ({ row, selected, diffCounts, mostUrgent = false, onSelect, onRowAction, onInlineAnswer }) => {
   const { agent, attn, planItem } = row;
   const pending = agent.pending[0];
   const showInlineOptions = attn?.kind === 'blocked' && !!pending?.options?.length;
@@ -196,9 +208,18 @@ const RosterAgentRow: React.FC<{
       {showInlineOptions && (
         <InlineOptions options={pending!.options!} onPick={(opt) => onInlineAnswer(agent.id, pending!.id, opt)} />
       )}
-      {attn?.action && (
+      {/* Redundant-affordance fix (taste-review nit 2): when the row already renders real
+       *  one-click inline options, the trailing "Answer" chip only ever re-selected the row —
+       *  a louder, do-nothing-extra duplicate of a control that's already right there (and the
+       *  whole row is itself a click target). Suppressing it read cleaner live than relabeling to
+       *  "Open": the row's own click-to-select is self-evident (cursor-pointer + hover state), so
+       *  a second, differently-worded chip for the exact same "select this row" move was still
+       *  noise — it just moved the redundancy instead of removing it. Every other action kind
+       *  (Restart, Steer, Land, View, Raise-cap) keeps its chip; only the inline-options case
+       *  had a genuine duplicate. */}
+      {attn?.action && !showInlineOptions && (
         <div className="mt-0.5 flex w-full justify-end">
-          <RowActionChip action={attn.action} onClick={() => onRowAction(row)} />
+          <RowActionChip action={attn.action} onClick={() => onRowAction(row)} mostUrgent={mostUrgent} />
         </div>
       )}
     </div>
@@ -221,7 +242,7 @@ const VirtualNeedsRow: React.FC<{ item: AttentionItem; onOpen: (agentId?: string
         <div className="truncate text-[12px] font-medium text-gray-900 dark:text-gray-100">{item.title}</div>
         {item.detail && <div className="truncate text-[11px] text-gray-500 dark:text-gray-400" title={item.detail}>{item.detail}</div>}
       </button>
-      {item.action?.kind === 'raise-cap' && <RowActionChip action={item.action} onClick={onRaiseCap} />}
+      {item.action?.kind === 'raise-cap' && <RowActionChip action={item.action} onClick={onRaiseCap} mostUrgent={false} />}
     </div>
   );
 };
@@ -257,21 +278,29 @@ const UnstaffedRow: React.FC<{ row: FleetUnstaffedRow; busy: boolean; onStaff: (
 };
 
 /** A group section header — plain for the always-expanded groups, a toggle for IDLE/DONE (the
- *  only group collapsed by default, §6a/d). */
-const GroupHeader: React.FC<{ title: string; count: number; collapsed?: boolean; onToggle?: () => void }> = ({ title, count, collapsed, onToggle }) => {
+ *  only group collapsed by default, §6a/d).
+ *
+ *  `tone="ember"` (taste-review nit 3) is reserved for the pinned NEEDS YOU header: a faint ember
+ *  left-border + tint so it visibly reads as "special" inside the rail rather than looking
+ *  identical to LAND READY/WORKING's plain gray headers — it's the one group that never collapses
+ *  and is pinned above everything else, so its header should say so at a glance. */
+const GroupHeader: React.FC<{ title: string; count: number; collapsed?: boolean; onToggle?: () => void; tone?: 'default' | 'ember' }> = ({ title, count, collapsed, onToggle, tone = 'default' }) => {
   const body = (
     <>
       <MonoLabel>{title}</MonoLabel>
       <span className="text-[10px] text-gray-400">{count}</span>
     </>
   );
+  const toneCls = tone === 'ember'
+    ? 'border-l-2 border-l-[color:var(--wf-accent)] bg-[color:var(--wf-accent-soft)]'
+    : 'bg-gray-50/60 dark:bg-ink-surface/40';
   if (!onToggle) {
-    return <div className="flex items-center gap-2 border-y border-gray-100 bg-gray-50/60 px-3 py-1 dark:border-ink-border dark:bg-ink-surface/40">{body}</div>;
+    return <div className={`flex items-center gap-2 border-y border-gray-100 px-3 py-1 dark:border-ink-border ${toneCls}`}>{body}</div>;
   }
   return (
     <button
       onClick={onToggle}
-      className="flex w-full items-center gap-2 border-y border-gray-100 bg-gray-50/60 px-3 py-1 text-left transition-colors hover:bg-gray-100 dark:border-ink-border dark:bg-ink-surface/40 dark:hover:bg-ink-surface/70"
+      className={`flex w-full items-center gap-2 border-y border-gray-100 px-3 py-1 text-left transition-colors hover:bg-gray-100 dark:border-ink-border dark:hover:bg-ink-surface/70 ${toneCls}`}
       aria-expanded={!collapsed}
     >
       {body}
@@ -652,7 +681,7 @@ export const WorkspaceCockpit: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-3 text-[10px] text-gray-400">
-            <span title={capacity.headline}>{capacity.used}/{capacity.cap} agents</span>
+            <span title={capacity.headline}>{capacityFractionLabel(capacity.used, capacity.cap)} agents</span>
             <span className="truncate" title={activityRollup.headline}>{activityRollup.headline}</span>
           </div>
           <div className="relative">
@@ -670,7 +699,7 @@ export const WorkspaceCockpit: React.FC = () => {
         {/* NEEDS YOU — pinned, never collapses. Own scroll cap so a pathological number of
             blocked agents can't swallow the whole rail; everything else scrolls below it. */}
         <div className="flex-shrink-0 border-b border-gray-200 dark:border-ink-border">
-          <GroupHeader title="Needs you" count={needsCount} />
+          <GroupHeader title="Needs you" count={needsCount} tone="ember" />
           {needsCount === 0 ? (
             <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-emerald-600 dark:text-emerald-400">
               {calmLine(filteredWorking.length, capacity.roomFor)}
@@ -680,12 +709,13 @@ export const WorkspaceCockpit: React.FC = () => {
               {roster.virtualNeeds.map((item) => (
                 <VirtualNeedsRow key={item.id} item={item} onOpen={onVirtualNeedsOpen} onRaiseCap={onRaiseCap} />
               ))}
-              {filteredNeeds.map((row) => (
+              {filteredNeeds.map((row, i) => (
                 <RosterAgentRow
                   key={row.agent.id}
                   row={row}
                   selected={row.agent.id === selectedAgent?.id}
                   diffCounts={aggregateDiffCounts(diffsById.get(row.agent.id) ?? [])}
+                  mostUrgent={i === 0}
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}

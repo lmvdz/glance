@@ -29,7 +29,7 @@ import {
   type FactoryStatus,
   type FactoryLoopReport,
 } from '../lib/factoryStatus';
-import { computeCapacity, detectCollisions, attentionItems, type CapacitySummary, type GovernancePayload, type UsagePayload } from '../lib/insights';
+import { computeCapacity, capacityFractionLabel, detectCollisions, attentionItems, type CapacitySummary, type GovernancePayload, type UsagePayload } from '../lib/insights';
 import { toneClasses } from './ui';
 
 // ─── heartbeat dot ───────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ const CapacityChip: React.FC<{ capacity: CapacitySummary; ncpu?: number; costUsd
       <div className="flex min-w-0 flex-col leading-tight">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-semibold text-gray-900 dark:text-gray-100">
-            {capacity.used}/{capacity.cap}
+            {capacityFractionLabel(capacity.used, capacity.cap)}
           </span>
           <span className={`text-[10px] font-semibold uppercase tracking-wide ${t.text}`}>
             {capacity.verdict === 'healthy' ? 'flowing' : capacity.verdict === 'warn' ? 'at cap' : 'throttled'}

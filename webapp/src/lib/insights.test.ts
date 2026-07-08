@@ -1,6 +1,7 @@
 import { expect, test, describe } from 'bun:test';
 import {
   computeCapacity,
+  capacityFractionLabel,
   detectCollisions,
   churnHotspots,
   flappingAgents,
@@ -141,6 +142,23 @@ describe('computeCapacity', () => {
     expect(c.used).toBe(0);
     expect(c.cap).toBe(0);
     expect(c.roomFor).toBe(0);
+  });
+});
+
+// ───────────────────────────── capacityFractionLabel (taste-review nit 5) ─────────────────────────────
+
+describe('capacityFractionLabel', () => {
+  test('used <= cap → plain fraction', () => {
+    expect(capacityFractionLabel(2, 3)).toBe('2/3');
+    expect(capacityFractionLabel(3, 3)).toBe('3/3');
+  });
+
+  test('used > cap (e.g. WIP cap lowered while agents were already running) → "used · cap N", not a bogus fraction', () => {
+    expect(capacityFractionLabel(6, 3)).toBe('6 · cap 3');
+  });
+
+  test('0/0 (no governance yet) stays a fraction, not "0 · cap 0"', () => {
+    expect(capacityFractionLabel(0, 0)).toBe('0/0');
   });
 });
 
@@ -406,6 +424,21 @@ describe('attentionItems', () => {
     expect(items[0].kind).toBe('resource');
     expect(items[0].severity).toBe('critical');
     expect(items[0].action?.kind).toBe('raise-cap');
+  });
+
+  test('taste-review nit 4: routine "at WIP cap" (warn, no headroom) is NOT a needs-you row — it is already the header capacity chip', () => {
+    const items = attentionItems({
+      capacity: { used: 3, cap: 3, roomFor: 0, verdict: 'warn', headline: 'at WIP cap (3/3) — new work queues', memPct: 40, loadPct: 40 },
+    });
+    expect(items).toEqual([]);
+  });
+
+  test('taste-review nit 4: a genuinely saturated host (critical) still gets a needs-you row even at roomFor 0', () => {
+    const items = attentionItems({
+      capacity: { used: 1, cap: 3, roomFor: 0, verdict: 'critical', headline: 'host is saturated — host load blocks new agents', memPct: 50, loadPct: 130 },
+    });
+    expect(items.filter((i) => i.kind === 'resource')).toHaveLength(1);
+    expect(items[0].title).toBe('Host is saturated');
   });
 
   test('sorts critical → warn → ok', () => {
