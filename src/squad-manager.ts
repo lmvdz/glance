@@ -158,6 +158,7 @@ import { DAY_MS } from "./omp-graph/schema.ts";
 import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { readChatAttachment, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
@@ -6086,6 +6087,20 @@ export class SquadManager extends EventEmitter {
 	/** Saved cold-start resume digest for an agent ("" if none yet). */
 	async getDigest(id: string): Promise<string> {
 		return readDigest(this.stateDir, id);
+	}
+
+	/** Persist a pasted/dropped/captured/annotated chat image (Feature 2 D2) into THIS manager's
+	 *  own `stateDir` — org-scoped for free, since callers only ever reach a manager already
+	 *  resolved for their org (see server.ts's `managerFor(actor)`). Throws a short message on an
+	 *  invalid/oversized/non-PNG payload; never writes a byte in that case. */
+	async saveChatAttachment(dataUrl: string): Promise<SavedChatAttachment> {
+		return writeChatAttachment(this.stateDir, dataUrl);
+	}
+
+	/** Read a previously-saved chat attachment back (org-scoped the same way). `undefined` if the
+	 *  id is malformed or no such attachment exists in this manager's stateDir. */
+	async getChatAttachment(id: string): Promise<Buffer | undefined> {
+		return readChatAttachment(this.stateDir, id);
 	}
 
 	/** Route an extension UI request to a pending entry (and opt-in auto-answer). Protected so a test can drive it. */

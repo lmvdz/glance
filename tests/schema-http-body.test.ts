@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Schema } from "effect";
 import { Result } from "effect";
 import {
+	ChatAttachmentCreateBodySchema,
 	CommentsCreateBodySchema,
 	decodeBody,
 	decodeBodyOrEmpty,
@@ -129,6 +130,15 @@ test("FederationCommandBodySchema: cmd stays Schema.Unknown so it is never key-s
 	const r = decodeBody(FederationCommandBodySchema, { to: "peer-1", cmd });
 	expect(Result.isSuccess(r)).toBe(true);
 	if (Result.isSuccess(r)) expect(r.success.cmd).toEqual(cmd); // every field survives, none stripped
+});
+
+test("ChatAttachmentCreateBodySchema: dataUrl required; mime/size/PNG-magic checks stay post-decode", () => {
+	const r = decodeBody(ChatAttachmentCreateBodySchema, { dataUrl: "data:image/png;base64,iVBORw0KGgo=" });
+	expect(Result.isSuccess(r)).toBe(true);
+	if (Result.isSuccess(r)) expect(r.success).toEqual({ dataUrl: "data:image/png;base64,iVBORw0KGgo=" });
+
+	expect(Result.isFailure(decodeBody(ChatAttachmentCreateBodySchema, {}))).toBe(true); // no dataUrl
+	expect(Result.isFailure(decodeBody(ChatAttachmentCreateBodySchema, { dataUrl: 5 }))).toBe(true); // not a string
 });
 
 test("bespoke endpoint schemas are not mirrors of a types.ts interface (documented, not a defect)", () => {

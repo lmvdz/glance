@@ -29,6 +29,7 @@ import {
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
 	CapabilitySourceBodySchema,
+	ChatAttachmentCreateBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	decodeBody,
@@ -1534,6 +1535,27 @@ export class SquadServer {
 			const profileId = typeof body.profileId === "string" ? body.profileId : undefined;
 			const dto = await manager.create({ repo, name: "chat", model, profileId, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
 			return Response.json({ agentId: dto.id });
+		}
+		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image
+		// persists here as a chat ARTIFACT (org-scoped by `manager`, size/PNG-magic-validated in
+		// chat-attachment.ts) — the composer then folds its returned `path` into the outgoing prompt
+		// text as a fenced untrusted-data reference, since neither /api/console nor the prompt
+		// command carry an inline image channel today (see chat-attachment.ts's header comment).
+		if (url.pathname === "/api/chat-attachments" && req.method === "POST") {
+			const decoded = decodeBody(ChatAttachmentCreateBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("dataUrl required", { status: 400 });
+			try {
+				const saved = await manager.saveChatAttachment(decoded.success.dataUrl);
+				return Response.json(saved);
+			} catch (err) {
+				return new Response(err instanceof Error ? err.message : String(err), { status: 400 });
+			}
+		}
+		const mattachment = url.pathname.match(/^\/api\/chat-attachments\/([^/]+)$/);
+		if (mattachment && req.method === "GET") {
+			const bytes = await manager.getChatAttachment(decodeURIComponent(mattachment[1]));
+			if (!bytes) return new Response("not found", { status: 404 });
+			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
