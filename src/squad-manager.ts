@@ -77,7 +77,7 @@ import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlis
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
-import { sweepLeases } from "./leases.ts";
+import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
@@ -4869,6 +4869,7 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `removing agent "${rec.dto.name}" with ${liveChildren.length} live child(ren) — they become orphaned roots in the topology view`);
 		}
 		await rec.agent.stop();
+		await this.releaseAgentLeases(rec);
 		if (deleteWorktree && !rec.options.repo.startsWith("(")) {
 			await removeWorktree(rec.options.repo, rec.options.worktree).catch(() => {});
 		}
@@ -4880,6 +4881,25 @@ export class SquadManager extends EventEmitter {
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
 		return true;
+	}
+
+	/** Release every file lease the removed agent's own omp process was holding (leases.ts). Only
+	 *  RpcAgent-backed drivers (the omp harness, the only one lease-hook.ts is wired into) expose a
+	 *  `pid` — a lease's `session` is minted by that hook as `omp:<pid>` of its OWN process, which is
+	 *  this same pid as seen from the daemon side (agent-host.ts's `proc.pid`, mirrored onto RpcAgent
+	 *  via the `{"__sq":"meta",pid}` frame). Other drivers (ACP/sandbox/flue/workflow) never claim
+	 *  leases, so a missing pid here is a legitimate no-op, not a gap. Called BEFORE the worktree/agent
+	 *  bookkeeping in `remove()` above so a lease never outlives the agent record that held it — this
+	 *  was previously the entire gap: `remove()` tombstoned the id and stopped the process but left any
+	 *  lease it held to expire on its own heartbeat TTL (or not, if something kept the file fresh), so a
+	 *  Federation page reader saw a removed agent still "holding" a file for as long as that TTL window. */
+	private async releaseAgentLeases(rec: AgentRecord): Promise<void> {
+		const pid = rec.agent.pid;
+		if (pid === undefined) return;
+		if (rec.options.repo.startsWith("(")) return; // synthetic/no-repo agents never claim leases
+		await releaseSession(`omp:${pid}`, rec.options.repo).catch((err) => {
+			this.log("warn", `lease release failed for ${rec.dto.id}: ${errText(err)}`);
+		});
 	}
 
 	// ── Event wiring ──────────────────────────────────────────────────────────
@@ -6617,11 +6637,14 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Periodically remove stale per-repo/worktree dirs from the leases/presence/proof registries — each
-	 *  unique worktree mints a fresh key, so without this they accumulate one folder per agent forever. */
+	 *  unique worktree mints a fresh key, so without this they accumulate one folder per agent forever.
+	 *  Also runs the pid-liveness lease backstop (reapDeadSessions): `releaseAgentLeases` covers the
+	 *  explicit `remove()` path, but a hard kill / crash / orphan-host reap never runs that call site, so
+	 *  this catches those the same way sweepLeases() catches plain heartbeat staleness. */
 	private async sweepRegistries(): Promise<void> {
 		try {
-			const [l, p, pr] = await Promise.all([sweepLeases(), sweepPresence(), sweepProofs()]);
-			if (l + p + pr > 0) this.log("info", `swept stale registry dirs — ${l} leases, ${p} presence, ${pr} proofs`);
+			const [l, dead, p, pr] = await Promise.all([sweepLeases(), reapDeadSessions(), sweepPresence(), sweepProofs()]);
+			if (l + dead + p + pr > 0) this.log("info", `swept stale registry dirs — ${l} leases, ${dead} dead-pid leases, ${p} presence, ${pr} proofs`);
 		} catch {
 			/* best-effort cleanup */
 		}

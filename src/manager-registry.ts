@@ -22,7 +22,7 @@ import { envInt } from "./config.ts";
 import { pruneStaleSockets, reapOrphanHosts } from "./agent-host.ts";
 import type { Store } from "./dal/store.ts";
 import { NullFederationBus } from "./federation.ts";
-import { sweepLeases } from "./leases.ts";
+import { reapDeadSessions, sweepLeases } from "./leases.ts";
 import { sweepPresence } from "./presence.ts";
 import { sweepProofs } from "./proof.ts";
 import { SquadManager } from "./squad-manager.ts";
@@ -189,6 +189,9 @@ export class ManagerRegistry {
 	private async reapGlobal(): Promise<void> {
 		await reapOrphanHosts(await this.protectedIds()).catch(() => []);
 		await pruneStaleSockets().catch(() => []);
-		await Promise.all([sweepLeases(), sweepPresence(), sweepProofs()]).catch(() => []);
+		// reapDeadSessions is the repo-agnostic pid-liveness lease backstop (leases.ts) — per-org
+		// managers run with skipGlobalJanitors, so THIS is the only place a hard kill / crash / orphan
+		// reap's leases get cleaned in DB/org mode (the per-org manager's own sweepRegistries never runs).
+		await Promise.all([sweepLeases(), reapDeadSessions(), sweepPresence(), sweepProofs()]).catch(() => []);
 	}
 }
