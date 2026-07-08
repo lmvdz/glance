@@ -60,6 +60,7 @@ import {
 } from "./schema/http-body.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
+import { planDocDiffSince, readPlanDoc } from "./plan-doc.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
 import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
@@ -250,12 +251,13 @@ function planAnnotationTarget(value: unknown): PlanAnnotationTarget | undefined 
 	const lineEnd = typeof rec.lineEnd === "number" && Number.isInteger(rec.lineEnd) && rec.lineEnd > 0 ? rec.lineEnd : lineStart;
 	const quote = typeof rec.quote === "string" && rec.quote.trim() ? rec.quote.trim().slice(0, 4000) : undefined;
 	const blockId = typeof rec.blockId === "string" && rec.blockId.trim() ? rec.blockId.trim() : undefined;
-	return { planPath, lineStart, lineEnd, quote, blockId };
+	const heading = typeof rec.heading === "string" && rec.heading.trim() ? rec.heading.trim().slice(0, 200) : undefined;
+	return { planPath, lineStart, lineEnd, quote, blockId, heading };
 }
 
 function planAnnotationPrompt(feature: FeatureDTO, comment: ArtifactCommentDTO): string {
 	const a = comment.annotation;
-	const where = a ? `${a.planPath}${a.lineStart ? `:${a.lineStart}${a.lineEnd && a.lineEnd !== a.lineStart ? `-${a.lineEnd}` : ""}` : ""}` : "the linked plan";
+	const where = a ? `${a.planPath}${a.heading ? ` (§ ${a.heading})` : ""}${a.lineStart ? `:${a.lineStart}${a.lineEnd && a.lineEnd !== a.lineStart ? `-${a.lineEnd}` : ""}` : ""}` : "the linked plan";
 	const quote = a?.quote ? `\n\nSelected plan text:\n> ${a.quote.replace(/\n/g, "\n> ")}` : "";
 	return `Update the plan for feature "${feature.title}" (${feature.id}).
 
@@ -1294,6 +1296,24 @@ export class SquadServer {
 			const dto = await manager.create({ repo, name: "plan-reviser", task: message, featureId, approvalMode: "write", autoRoute: false, track: true, owns: feature.planDir ? [feature.planDir] : undefined }, actor);
 			await manager.addPlanRevisionCandidate({ repo, featureId, planPath: comment.annotation?.planPath ?? feature.planDir ?? "plans", producerAgentId: dto.id, summary: comment.body, diffRef: comment.annotation?.planPath }, actor);
 			return Response.json({ agentId: dto.id, mode });
+		}
+		// Single plan-doc read + revision diff, for the design-review screen (/review/:taskId in the
+		// webapp): a path-guarded read of one markdown file plus its git history, so the client can
+		// render "changed since your last view" without pulling the whole feature pipeline payload.
+		if (url.pathname === "/api/plan-doc" && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const docPath = url.searchParams.get("path") ?? "";
+			if (!docPath.trim()) return new Response("path required", { status: 400 });
+			const doc = await readPlanDoc(repo, docPath);
+			return doc ? Response.json(doc) : new Response("no such doc", { status: 404 });
+		}
+		if (url.pathname === "/api/plan-doc/diff" && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const docPath = url.searchParams.get("path") ?? "";
+			const since = url.searchParams.get("since") ?? "";
+			if (!docPath.trim()) return new Response("path required", { status: 400 });
+			if (!since.trim()) return new Response("since required", { status: 400 });
+			return Response.json(await planDocDiffSince(repo, docPath, since));
 		}
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
 		// /api/health and the rest of the graph/usage/heat/activity/action-items/governance observability

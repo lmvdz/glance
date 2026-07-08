@@ -37,6 +37,21 @@
   --wf-warning: #d97706;
   --wf-success: #16a34a;
   --wf-shadow-soft: 0 1px 2px rgb(15 23 42 / 0.06), 0 8px 24px rgb(15 23 42 / 0.08);
+
+  /* Brand ember accent + extended ink-text ramp (brand.md), layered onto the ink surface ramp
+   * above rather than re-declaring it — `--color-ink`/`--color-panel`/`--color-ink-surface`/
+   * `--color-ink-border*` already exist (cockpit route); the design-review screen (also
+   * ink-by-default) adds only what's genuinely new: a second surface tone, the ember accent
+   * itself, and a full text ramp instead of the bare `--wf-text*` trio. */
+  --color-ink-surface-2: #0f0f11;
+  --color-ember: #f0a35a;
+  --color-ember-link: #f0b478;
+  --color-ember-hi: #fff6ea;
+  --color-ink-text: #f4f4f5;
+  --color-ink-text-body: #e7e7e9;
+  --color-ink-text-label: #c7c7cc;
+  --color-ink-text-muted: #8a8a90;
+  --color-ink-text-subtle: #5c5c62;
 }
 
 .dark {

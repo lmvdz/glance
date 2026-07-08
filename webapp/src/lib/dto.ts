@@ -152,6 +152,8 @@ export interface PlanAnnotationTargetDTO {
   quote?: string;
   /** Anchors the annotation to a specific rendered plan block (data-block-id). Additive/optional. */
   blockId?: string;
+  /** Anchors the annotation to a markdown H2 section — the design-review screen's anchor. */
+  heading?: string;
 }
 
 export interface ArtifactCommentDTO {

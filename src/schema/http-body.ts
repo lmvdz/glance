@@ -267,6 +267,8 @@ export const AnnotationCreateBodySchema = Schema.Struct({
 	lineEnd: Schema.optional(Schema.Unknown),
 	quote: Schema.optional(Schema.Unknown),
 	blockId: Schema.optional(Schema.Unknown),
+	/** Design-review section anchor (an H2 heading text) — additive, optional. */
+	heading: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/features/:id/annotations/:id/send — no required field (`mode` defaults to "planner"). */
