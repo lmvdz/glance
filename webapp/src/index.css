@@ -223,6 +223,21 @@
   }
 }
 
+/* Command palette entrance (taste-review nit 2): a fast, subtle scale+fade — GPU
+   transform/opacity only, per brand.md's ~150ms micro-interaction beat (the palette is a quick
+   overlay, not a full-page settle, so it uses the faster beat rather than login-rise's 0.5s).
+   Reduced-motion-safe below. */
+@keyframes palette-rise {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 @layer utilities {
   .login-rise {
     animation: login-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -230,6 +245,10 @@
 
   .pill-rise {
     animation: pill-rise 0.18s ease-out both;
+  }
+
+  .palette-rise {
+    animation: palette-rise 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   /* ToolCallGroup's collapsed <-> expanded transition (astryx pattern):
@@ -256,6 +275,7 @@
   .shimmer-bg,
   .login-rise,
   .pill-rise,
+  .palette-rise,
   .tool-group-rows {
     animation: none;
     transition: none;

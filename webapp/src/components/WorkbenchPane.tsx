@@ -30,6 +30,7 @@ import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus'
 import { taskRef } from '../lib/task-model';
 import { AccountMenu } from './AccountMenu';
 import { Kbd } from './kit/Kbd';
+import { MonoLabel } from './kit/MonoLabel';
 import { GlanceLogo } from './GlanceLogo';
 import type { Task } from '../types';
 
@@ -80,6 +81,39 @@ export function compareTaskRail(a: Task, b: Task, sortBy: 'attention' | 'creatio
  */
 export function isTaskScopedView(view: AppView): boolean {
   return view === 'tasks';
+}
+
+/**
+ * Rail footer context line (taste-review nit 1, GRAPH-FOLD.md §6e follow-up): the task-scoped
+ * block above only renders on Tasks, so every other view left the expanded rail's middle area an
+ * empty void below four short nav rows — reads as unfinished, not deliberate. One calm line,
+ * anchored to the existing footer strip (never a new panel), gives every view a reason for the
+ * space. Empty string means "render nothing" — Tasks itself stays silent here since the
+ * task-scoped block already fills the rail. Pure + exported so the per-view copy is unit-tested.
+ */
+export function railFooterContext(
+  view: AppView,
+  ctx: { needsYouCount: number; packCount: number; catalogCount: number },
+): string {
+  switch (view) {
+    case 'fleet':
+      return ctx.needsYouCount > 0
+        ? `${ctx.needsYouCount} agent${ctx.needsYouCount === 1 ? ' needs' : 's need'} you`
+        : 'All clear — nothing needs you';
+    case 'omp-graph':
+      return 'Fleet activity, cost, and lineage over time';
+    case 'capabilities':
+      return `${ctx.packCount} trusted pack${ctx.packCount === 1 ? '' : 's'} · ${ctx.catalogCount} in the catalog`;
+    case 'org':
+      return 'Organization and peer settings';
+    case 'intervene':
+      return 'Stepping into one agent';
+    case 'review':
+      return 'Design review';
+    case 'tasks':
+    default:
+      return '';
+  }
 }
 
 /**
@@ -351,6 +385,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
       default: return 'bg-gray-300';
     }
   };
+
+  const footerContext = railFooterContext(view, {
+    needsYouCount,
+    packCount: capabilities.packs.length,
+    catalogCount: publicCatalog.length,
+  });
 
   const collapsedLabel = view === 'fleet'
     ? `Fleet${needsYouCount ? ` · ${needsYouCount} need you` : ''}`
@@ -724,6 +764,13 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
       </div>
 
       <div className="border-t border-gray-200 dark:border-gray-800">
+        {/* Taste-review nit 1: the calm footer-anchored context line — non-Tasks views only, the
+            task-scoped block above already speaks for Tasks. */}
+        {footerContext && (
+          <div className="border-b border-gray-100 px-3 py-2 dark:border-gray-800/50">
+            <MonoLabel>{footerContext}</MonoLabel>
+          </div>
+        )}
         <button onClick={exportTasks} className="flex min-h-10 w-full items-center gap-2 border-b border-gray-200 px-3 text-xs text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
           <Download className="h-4 w-4" aria-hidden="true" />
           Export Snapshot

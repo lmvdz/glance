@@ -160,7 +160,10 @@ export const CommandPalette: React.FC = () => {
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        className="w-full max-w-xl overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl dark:border-[#2A2A2E] dark:bg-[#0C0C0E]"
+        // Taste-review nit 2: a ~150ms scale+fade entrance (brand.md's micro-interaction beat,
+        // GPU transform/opacity only) so the palette settles in instead of appearing instantly.
+        // `.palette-rise` is a no-op transition/animation under prefers-reduced-motion.
+        className="palette-rise w-full max-w-xl overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl dark:border-[#2A2A2E] dark:bg-[#0C0C0E]"
         onKeyDown={onKeyDown}
       >
         {/* Search input — the palette's one focal point (brand.md: one ember signal per view). */}

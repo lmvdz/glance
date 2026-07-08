@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from 'react';
 import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
@@ -150,6 +150,16 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   // a stale pre-fold key (or garbage) never reaches state as anything but a real AppView.
   const [view, setViewState] = useState<AppView>(() => coerceView(readStoredView()).view);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(() => coerceView(readStoredView()).openPalette);
+  // Taste-review nit 3: `openPalette` is true for exactly one coercion — a stale `knowledge` key
+  // (see viewAlias.ts) — so it doubles as "did THIS boot teleport here from the dead Knowledge
+  // page". Captured once at mount (like the two reads above) so the one-time toast below never
+  // re-derives it from a localStorage read that the normalization effect has since overwritten.
+  const [bootCoercedFromKnowledge] = useState<boolean>(() => coerceView(readStoredView()).openPalette);
+  // Belt-and-suspenders against StrictMode's dev-mode double-invoke of mount effects (verified
+  // live: without this, the toast below fired twice on one real page load) — a ref survives the
+  // synthetic unmount/remount cycle StrictMode runs on the SAME component instance, so it still
+  // gates a genuine single boot to exactly one toast.
+  const knowledgeToastFiredRef = useRef(false);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('open');
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
@@ -249,6 +259,13 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (window.localStorage.getItem(VIEW_STORAGE_KEY) !== view) window.localStorage.setItem(VIEW_STORAGE_KEY, view);
+    // Taste-review nit 3: the `knowledge` coercion lands on Graph with the palette already open
+    // but empty — silent unless you know why. One toast, once (bootCoercedFromKnowledge is fixed
+    // at mount, and the write above retires the `knowledge` key so a reload never re-fires it).
+    if (bootCoercedFromKnowledge && !knowledgeToastFiredRef.current) {
+      knowledgeToastFiredRef.current = true;
+      showToast('Knowledge base is now ⌘K — search opens in the command palette.', 'info');
+    }
     // Mount-only: `view` here is the already-coerced initial state; later writes go through setView.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
