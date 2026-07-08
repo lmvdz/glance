@@ -131,6 +131,105 @@ test('rm on a terminal-marked workflow durably tombstones the id, even when the 
 	}
 });
 
+/**
+ * THE TEST THAT WAS MISSING (tombstone-by-name incident): every test above drives `rm` with the
+ * agent's true id directly. The live incident drove it with the agent's bare display NAME instead
+ * (`glance rm ompsq-422`, not `glance rm ompsq-422-mrb7dh74-3-528e10f5`) — exactly what a human
+ * operator types, since the roster UI/CLI list agents by name. Before the fix, `remove()` tombstoned
+ * the raw name string verbatim; every resurrection guard filters by the record's real `id`, which
+ * never equals the bare name, so the tombstone protected nothing and the persisted record — never
+ * actually removed under its real id — reattached verbatim on the very next restart.
+ */
+test("rm by NAME on a terminal-marked, non-resident workflow record resolves to the real id and durably tombstones it — survives restart", async () => {
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-byname-state-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-byname-wt-"));
+	tmps.push(stateDir, worktreeBase);
+
+	const id = "ompsq-422-mrb7dh74-3-528e10f5";
+	const name = "ompsq-422";
+	// Seed the persisted store directly — simulates the record surviving from a PRIOR manager
+	// instance/boot (the exact eviction-race window in DB-root mode), named after its Plane ticket.
+	const record = terminalWorkflowRecord(id, repo, path.join(worktreeBase, "stuck"));
+	record.name = name;
+	await new FileStore(stateDir).save({ agents: [record], transcripts: {}, features: [] });
+
+	// A manager instance that never called start() — `this.agents` is empty, reproducing the race
+	// where `rm` lands on an instance that hasn't (re)loaded the persisted row yet. The operator
+	// types the ticket's short name, not the internal suffixed id.
+	const racyMgr = new SquadManager({ stateDir, worktreeBase });
+	await racyMgr.applyCommand({ type: "remove", id: name, deleteWorktree: false });
+
+	// THE FIX: the tombstone must be keyed on the record's REAL id — the resurrection guards only
+	// ever check `p.id`, never the display name. Without this, `has(id)` is false here and the
+	// assertion below (restart resurrection) fails exactly as it did live.
+	expect(openRemovedLedger(stateDir).has(id)).toBe(true);
+	// Defense-in-depth: the raw name is ALSO recorded alongside the resolved id (never in place of it).
+	expect(openRemovedLedger(stateDir).has(name)).toBe(true);
+
+	// Simulate restart: a FRESH manager instance against the SAME stateDir (the next evict+recreate
+	// cycle in DB-root mode, or a plain daemon restart) must never resurrect the record via
+	// reconnectLive's terminal-reattach path, adoptOrphanedAgents, or loadPersisted.
+	const mgr2 = new SquadManager({ stateDir, worktreeBase });
+	await mgr2.start();
+	try {
+		expect(mgr2.getAgent(id)).toBeUndefined();
+		expect(mgr2.list().find((a) => a.id === id || a.name === name)).toBeUndefined();
+	} finally {
+		await mgr2.stop();
+	}
+});
+
+test("rm by NAME on a live, resident agent resolves to the real id, stops it, and tombstones the id (not just the name)", async () => {
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-byname-state2-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-byname-wt2-"));
+	tmps.push(stateDir, worktreeBase);
+
+	const mgr = new SquadManager({ stateDir, worktreeBase });
+	await mgr.start();
+	const dto = await mgr.create({ name: "chat", repo, approvalMode: "yolo" });
+	expect(dto.id).not.toBe(dto.name); // sanity: newAgentId always suffixes, id and name diverge
+
+	await mgr.applyCommand({ type: "remove", id: dto.name, deleteWorktree: false });
+	expect(mgr.getAgent(dto.id)).toBeUndefined();
+	expect(openRemovedLedger(stateDir).has(dto.id)).toBe(true);
+
+	// A fresh manager over the same stateDir must not reattach it either (belt-and-suspenders on top
+	// of the in-process removal above).
+	const mgr2 = new SquadManager({ stateDir, worktreeBase });
+	await mgr2.start();
+	try {
+		expect(mgr2.getAgent(dto.id)).toBeUndefined();
+	} finally {
+		await mgr2.stop();
+	}
+	await mgr.stop();
+});
+
+test("rm by a name that matches MULTIPLE live agents refuses to guess — tombstones the raw string, neither agent's real id", async () => {
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-ambiguous-state-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-ambiguous-wt-"));
+	tmps.push(stateDir, worktreeBase);
+
+	const mgr = new SquadManager({ stateDir, worktreeBase });
+	await mgr.start();
+	const a = await mgr.create({ name: "dup", repo, approvalMode: "yolo" });
+	const b = await mgr.create({ name: "dup", repo, approvalMode: "yolo" });
+	expect(a.id).not.toBe(b.id);
+
+	const found = await (mgr as unknown as { remove(id: string, deleteWorktree: boolean): Promise<boolean> }).remove("dup", false);
+	expect(found).toBe(false); // "dup" never equals either real id, so `this.agents.get("dup")` misses
+	expect(openRemovedLedger(stateDir).has("dup")).toBe(true); // fallback: raw string tombstoned
+	expect(openRemovedLedger(stateDir).has(a.id)).toBe(false); // neither real id was touched — no guess
+	expect(openRemovedLedger(stateDir).has(b.id)).toBe(false);
+	// Both agents are untouched — an ambiguous name is not silently resolved to an arbitrary one.
+	expect(mgr.getAgent(a.id)).toBeDefined();
+	expect(mgr.getAgent(b.id)).toBeDefined();
+	await mgr.stop();
+});
+
 test("rm on a live, resident agent still removes it from the roster (no regression on the ordinary path)", async () => {
 	const repo = await makeRepo();
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "removed-agent-state2-"));

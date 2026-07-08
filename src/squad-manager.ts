@@ -4807,14 +4807,61 @@ export class SquadManager extends EventEmitter {
 		return entries.map((e) => ({ seq: e.seq, at: e.at, currentNode: e.currentNode, outcome: e.outcome }));
 	}
 
-	/** Returns true when `id` was actually resident and removed, false when it wasn't found in THIS
-	 *  manager instance's live roster. Either way the id is durably tombstoned first (see
-	 *  removed-ledger.ts) — an explicit `rm` must stick even when it races a DB-root org's
-	 *  evict/lazily-recreate cycle and lands on an instance where `id` hasn't been reattached yet;
-	 *  without the tombstone, the persisted row survives untouched and the NEXT `start()` (the very
-	 *  next eviction cycle) reattaches it verbatim via reconnectLive's terminal-workflow path. */
-	private async remove(id: string, deleteWorktree: boolean): Promise<boolean> {
-		this.removedLedger.add(id);
+	/**
+	 * Resolve a caller-supplied removal identifier to the record's canonical `id` — the
+	 * tombstone-by-name incident's fix (see removed-ledger.ts's doc). `glance rm <x>` (and any other
+	 * name-based caller) may pass either the true id or the agent's bare display NAME; every
+	 * resurrection guard (reconnectLive/adoptOrphanedAgents/loadPersisted) filters tombstones by the
+	 * record's real id, so tombstoning an unresolved name protects nothing.
+	 *
+	 * Order: (1) exact id match against the LIVE roster — the fast, unambiguous path every existing
+	 * caller already uses; (2) a unique-by-name match against the LIVE roster; (3) the same two
+	 * checks against the PERSISTED snapshot, for the eviction-race window where the target isn't
+	 * resident in THIS instance at all (a DB-root org manager just recreated). A name that matches
+	 * more than one record (live or persisted) is deliberately left unresolved — guessing which one
+	 * the operator meant risks tombstoning the wrong record's id instead.
+	 */
+	private async resolveRemovalId(identifier: string): Promise<string | undefined> {
+		if (this.agents.has(identifier)) return identifier;
+		const liveByName = [...this.agents.values()].filter((r) => r.dto.name === identifier);
+		if (liveByName.length === 1) return liveByName[0].dto.id;
+		if (liveByName.length > 1) {
+			this.log("warn", `rm "${identifier}" matched ${liveByName.length} live agents by name — refusing to guess, tombstoning the raw string instead`);
+			return undefined;
+		}
+		try {
+			if (!(await this.store.hasState())) return undefined;
+			const persisted = (await this.store.load()).agents;
+			if (persisted.some((p) => p.id === identifier)) return identifier;
+			const persistedByName = persisted.filter((p) => p.name === identifier);
+			if (persistedByName.length === 1) return persistedByName[0].id;
+			if (persistedByName.length > 1) {
+				this.log("warn", `rm "${identifier}" matched ${persistedByName.length} persisted agents by name — refusing to guess, tombstoning the raw string instead`);
+			}
+		} catch {
+			/* best-effort resolution; fall through to the raw-string fallback below */
+		}
+		return undefined;
+	}
+
+	/** Returns true when the resolved id was actually resident and removed, false when it wasn't
+	 *  found in THIS manager instance's live roster. Either way the record's canonical id is durably
+	 *  tombstoned first (see removed-ledger.ts) — an explicit `rm` must stick even when it races a
+	 *  DB-root org's evict/lazily-recreate cycle and lands on an instance where the target hasn't
+	 *  been reattached yet; without the tombstone, the persisted row survives untouched and the NEXT
+	 *  `start()` (the very next eviction cycle) reattaches it verbatim via reconnectLive's
+	 *  terminal-workflow path.
+	 *
+	 *  `identifier` may be the true id OR the agent's display name (tombstone-by-name incident):
+	 *  `resolveRemovalId` resolves it to the canonical id FIRST, and that resolved id — never the raw
+	 *  identifier — is what gets tombstoned and what every resurrection guard checks. When resolution
+	 *  genuinely fails (no live or persisted match by id or name), the raw identifier is tombstoned as
+	 *  a last-resort fallback so an operator's `rm` for a truly-unknown string still leaves a record,
+	 *  and the name is recorded alongside the resolved id as defense-in-depth (`add`'s second param). */
+	private async remove(identifier: string, deleteWorktree: boolean): Promise<boolean> {
+		const resolved = await this.resolveRemovalId(identifier);
+		const id = resolved ?? identifier;
+		this.removedLedger.add(id, identifier);
 		const rec = this.agents.get(id);
 		if (!rec) return false;
 		const liveChildren = [...this.agents.values()].filter((r) => r.dto.parentId === id && r.dto.id !== id);

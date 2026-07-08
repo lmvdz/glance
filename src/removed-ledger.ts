@@ -24,6 +24,17 @@
  * the underlying issue must remain dispatchable — a later dispatch tick mints a fresh,
  * non-deterministic agent id (`newAgentId`) for a still-open issue, which is a DIFFERENT string
  * and so is never shadowed by this ledger.
+ *
+ * SEQUEL — tombstone-by-name incident: `remove()`'s original fix above tombstoned whatever string
+ * the caller passed as `id`, unvalidated. The CLI's `glance rm <name>` (and any other name-based
+ * caller) passes the agent's DISPLAY NAME, not its id — every resurrection guard filters by the
+ * record's real `id` (e.g. `ompsq-422-mrb7dh74-3-528e10f5`), which never equals the bare name
+ * (e.g. `ompsq-422`). Result: the ledger filled up with names that shadow nothing, the live record
+ * was never actually removed from the persisted snapshot under its real id, and the next restart
+ * reattached it verbatim — `rm` "worked" (the CLI printed "removed") and the agent came back
+ * anyway. `remove()` now resolves any caller-supplied identifier (id OR name, live OR persisted) to
+ * the record's canonical id FIRST, and tombstones that — the name is only ever added alongside it,
+ * never in place of it (see `add`'s `alsoTombstone` param).
  */
 
 import path from "node:path";
@@ -33,12 +44,19 @@ import { decodeJsonWith } from "./schema/external-json.ts";
 
 export interface RemovedLedger {
 	has(id: string): boolean;
-	add(id: string): void;
+	/** Tombstone the record's canonical id. `alsoTombstone` is optional defense-in-depth (the
+	 *  tombstone-by-name incident): when the caller resolved a bare display NAME to this id (an
+	 *  operator's `rm <name>` — see squad-manager.ts's `remove()`), the raw name is ALSO written into
+	 *  the same array so a future filter that (incorrectly) queries by name still hits. The id is the
+	 *  correctness fix; the name is belt-and-suspenders and never required to be present. */
+	add(id: string, alsoTombstone?: string): void;
 	/** Clear a tombstone — an AUTHORIZED creator deliberately re-creating the id (createWithId's
 	 *  explicit-id paths: fork, spawnFleetBranch's deterministic workflow-branch ids). Without this,
 	 *  a workflow resume re-spawning a deterministic branch id after an operator `rm` would run once
 	 *  and then silently vanish at the next restart (every reattach/adopt/restore path filters
-	 *  tombstoned ids). Idempotent; a no-op for an untombstoned id. */
+	 *  tombstoned ids). Idempotent; a no-op for an untombstoned id. Only clears the exact id passed —
+	 *  a defense-in-depth name entry (see `add`) is deliberately left alone, since it may belong to an
+	 *  unrelated record that happens to share the removed one's display name. */
 	delete(id: string): void;
 }
 
@@ -76,10 +94,17 @@ export function openRemovedLedger(stateDir: string): RemovedLedger {
 		has(id) {
 			return ids.has(id);
 		},
-		add(id) {
-			if (ids.has(id)) return;
-			ids.add(id);
-			writeIds(stateDir, ids);
+		add(id, alsoTombstone) {
+			let changed = false;
+			if (!ids.has(id)) {
+				ids.add(id);
+				changed = true;
+			}
+			if (alsoTombstone && alsoTombstone !== id && !ids.has(alsoTombstone)) {
+				ids.add(alsoTombstone);
+				changed = true;
+			}
+			if (changed) writeIds(stateDir, ids);
 		},
 		delete(id) {
 			if (!ids.delete(id)) return;
