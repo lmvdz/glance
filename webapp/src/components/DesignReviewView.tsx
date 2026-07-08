@@ -306,7 +306,11 @@ export const DesignReviewView: React.FC = () => {
   }
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden bg-ink text-ink-text-body">
+    // INK BY DEFAULT, same idiom as WorkspaceCockpit (index.css / brand.md): this screen opts
+    // into the ink/ember surface regardless of the app-wide theme. The `dark` class here is what
+    // activates the kit's `dark:` PanelSection/StatusChip styling (custom-variant is
+    // `.dark`-ancestor-scoped) even when the rest of the app is in light mode.
+    <div className="dark flex h-full w-full flex-col overflow-hidden bg-ink text-ink-text-body">
       <div className="flex items-center gap-4 border-b border-ink-border px-6 py-4">
         <button
           onClick={closeReview}
@@ -344,10 +348,10 @@ export const DesignReviewView: React.FC = () => {
           ) : (
             // Left-anchored and wide — the progress bar, doc, and comments rail read as ONE dense
             // screen (the reference's layout), not a floating centered column with dead gutters.
-            <div className="max-w-3xl rounded-lg border border-ink-border bg-ink-panel p-5">
+            <div className="max-w-3xl rounded-lg border border-ink-border bg-panel p-5">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-sm">
-                  <StatusChip tone="active">Design</StatusChip>
+                  <StatusChip status="Design" tone="ember" variant="dim" />
                   <span className="font-mono text-ink-text-muted">{doc.title}</span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -389,16 +393,28 @@ export const DesignReviewView: React.FC = () => {
                     const isActive = h.heading === activeHeading;
                     const hasChanges = showDiff && diffSectionSet.has(h.heading);
                     const expanded = showDiff ? hasChanges || isActive : isActive;
+                    const emphasized = showDiff ? hasChanges : isActive;
                     const body = doc.content.split('\n').slice(h.bodyStart - 1, h.bodyEnd).join('\n');
                     return (
-                      <PanelSection key={h.heading} id={`review-heading-${encodeURIComponent(h.heading)}`} focused={showDiff ? hasChanges : isActive} title={
-                        <button
-                          onClick={() => setActiveHeading(h.heading)}
-                          className="min-h-6 rounded text-left focus-visible:ring-2 focus-visible:ring-ember"
+                      // Anchor id lives on the wrapper (kit's PanelSection has no id prop) so a
+                      // future scroll-to-section can still target `review-heading-<heading>`; the
+                      // emphasis ring also lives outside PanelSection's own border so it never
+                      // fights the kit's default border color at equal specificity.
+                      <div
+                        key={h.heading}
+                        id={`review-heading-${encodeURIComponent(h.heading)}`}
+                        className={emphasized ? 'rounded-md ring-1 ring-ember/60' : undefined}
+                      >
+                        <PanelSection
+                          title={
+                            <button
+                              onClick={() => setActiveHeading(h.heading)}
+                              className={`min-h-6 rounded text-left focus-visible:ring-2 focus-visible:ring-ember ${emphasized ? 'font-semibold text-ink-text' : ''}`}
+                            >
+                              {h.heading}
+                            </button>
+                          }
                         >
-                          {h.heading}
-                        </button>
-                      }>
                         {expanded && (hasChanges && docChanges ? (
                           // Reference 213221's signature move: the struck removed line and its
                           // ember-highlighted replacement sit IN PLACE inside the rendered doc.
@@ -422,7 +438,8 @@ export const DesignReviewView: React.FC = () => {
                             <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{body}</ReactMarkdown>
                           </div>
                         ))}
-                      </PanelSection>
+                        </PanelSection>
+                      </div>
                     );
                   })}
                   {headings.length === 0 && (
@@ -474,7 +491,7 @@ export const DesignReviewView: React.FC = () => {
           <div className="flex items-center gap-2 border-b border-ink-border px-4 py-3">
             <MonoLabel>Comments</MonoLabel>
             {/* Kit contract (X1): resolved-good is `success` green, never ember (ember = active). */}
-            {gateOpen && <StatusChip tone="success">All resolved</StatusChip>}
+            {gateOpen && <StatusChip status="All resolved" tone="success" variant="solid" />}
           </div>
           <div className="flex-1 space-y-3 overflow-y-auto p-4">
             {forDoc.length === 0 && <div className="text-xs text-ink-text-subtle">No comments yet. Say what should change.</div>}
