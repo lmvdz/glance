@@ -117,6 +117,38 @@ test("updateFeature adopts a derived plan feature and persists task-detail edits
 	expect(got?.decisions?.[0]?.text).toBe("Keep it small");
 });
 
+// #category-honesty (CANVAS-AND-PAGE-CHAT.md D1): the stored category override round-trips
+// through state.json exactly like stageOverride does, including adopting a derived plan feature
+// on first write and surviving a full manager restart (loadPersisted from disk, not memory).
+test("updateFeature persists a category override across a restart, and it can be cleared back to null", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-category-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await fs.mkdir(path.join(repo, "plans", "ctx"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "ctx", "01.md"), "# Ctx\nSTATUS: todo\n");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "p2-category-state-"));
+	tmps.push(stateDir);
+
+	const mgr = new SquadManager({ stateDir });
+	managers.push(mgr);
+	const id = `plan:${repo}:plans/ctx`;
+	const edited = await mgr.updateFeature(id, { repo, category: "devops" });
+	expect(edited?.category).toBe("devops");
+	await mgr.stop();
+	managers.length = 0;
+
+	const restored = new SquadManager({ stateDir });
+	managers.push(restored);
+	await restored.loadPersisted();
+	const got = (await restored.features(repo)).find((feature) => feature.id === id);
+	expect(got?.category).toBe("devops"); // survived the restart — read from disk, not memory
+
+	const cleared = await restored.updateFeature(id, { repo, category: null });
+	expect(cleared?.category).toBeUndefined();
+	const gotAfterClear = (await restored.features(repo)).find((feature) => feature.id === id);
+	expect(gotAfterClear?.category).toBeUndefined();
+});
+
 test("archiving a derived plan feature suppresses the scanned plan dir", async () => {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "p2-archive-plan-"));
 	tmps.push(repo);

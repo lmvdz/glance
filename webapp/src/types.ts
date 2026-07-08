@@ -58,7 +58,13 @@ export interface Task {
   /** plans/<name>/ directory when this task is a plan — the readable handle the list shows. */
   planDir?: string;
   title: string;
-  category: 'frontend' | 'devops' | 'backend' | 'mcp' | 'database';
+  /** Effective category — `categoryOverride` if set, else a regex-derived bucket over
+   *  title+planDir, else the honest 'other' fallback (never a silent default). */
+  category: 'frontend' | 'devops' | 'backend' | 'mcp' | 'database' | 'other';
+  /** The raw operator override behind `category` (mirrors `FeatureDTO.category`), if one is set.
+   *  `undefined` means "no override — category is derived"; the editable chip uses this to show
+   *  whether Auto or a manual pin is in effect. */
+  categoryOverride?: Task['category'];
   duration: string;
   status: 'todo' | 'active' | 'done';
   dueDate?: string;

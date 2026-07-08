@@ -28,13 +28,20 @@ function taskStatus(feature: FeatureDTO, agents: AgentDTO[]): Task["status"] {
   return "todo";
 }
 
+/**
+ * Derivation order: operator override wins outright; otherwise a regex over title+planDir;
+ * otherwise the honest 'other' fallback. 'other' replaces a prior silent 'mcp' default — the
+ * regex never actually produces 'mcp' (nothing routes there), so 'mcp' stays a real bucket a
+ * human can still pick via the override, but nothing falls into it by accident anymore.
+ */
 function taskCategory(feature: FeatureDTO): Task["category"] {
+  if (feature.category) return feature.category;
   const text = `${feature.title} ${feature.planDir ?? ""}`.toLowerCase();
   if (/ui|web|frontend|react|css|dashboard/.test(text)) return "frontend";
   if (/db|sql|data|store|schema|migration/.test(text)) return "database";
   if (/ci|deploy|git|land|worktree|ops|infra/.test(text)) return "devops";
   if (/api|server|auth|backend|route/.test(text)) return "backend";
-  return "mcp";
+  return "other";
 }
 
 function priority(feature: FeatureDTO): Task["priority"] {
@@ -85,6 +92,7 @@ export function taskFromFeature(feature: FeatureDTO, agents: AgentDTO[], project
     planDir: feature.planDir,
     title: feature.title,
     category: taskCategory(feature),
+    categoryOverride: feature.category,
     duration: duration(feature),
     status: taskStatus(feature, activeAgents),
     priority: priority(feature),

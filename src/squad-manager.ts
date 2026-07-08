@@ -94,6 +94,7 @@ import type {
 	FeatureDTO,
 	PersistedFeature,
 	FeatureStage,
+	FeatureCategory,
 	FeatureCriterion,
 	FeatureDecision,
 	FeatureRelationship,
@@ -2264,12 +2265,13 @@ export class SquadManager extends EventEmitter {
 		return "recorded";
 	}
 
-	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
+	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; category?: FeatureCategory | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
 		const pf = this.featureStore.get(id) ?? await this.adoptDerivedFeature(id, patch.repo);
 		if (!pf) return undefined;
 		const wasArchived = !!pf.archived;
 		if (patch.title !== undefined) pf.title = patch.title;
 		if (patch.stageOverride !== undefined) pf.stageOverride = patch.stageOverride ?? undefined;
+		if (patch.category !== undefined) pf.category = patch.category ?? undefined;
 		if (patch.archived !== undefined) pf.archived = patch.archived;
 		if (patch.description !== undefined) pf.description = patch.description;
 		if (patch.acceptanceCriteria !== undefined) pf.acceptanceCriteria = patch.acceptanceCriteria;

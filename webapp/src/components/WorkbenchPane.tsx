@@ -41,7 +41,7 @@ const taskFilters: Array<{ key: TaskFilter; label: string }> = [
   { key: 'all', label: 'All' },
 ];
 
-const categories: Array<'all' | Task['category']> = ['all', 'frontend', 'backend', 'devops', 'mcp', 'database'];
+const categories: Array<'all' | Task['category']> = ['all', 'frontend', 'backend', 'devops', 'mcp', 'database', 'other'];
 
 /**
  * Task-rail search predicate — matches the placeholder's promise ("by title or ID"). Tests the title,

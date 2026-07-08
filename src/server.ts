@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
-import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
+import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
 import { envBool, envInt } from "./config.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
@@ -1230,12 +1230,13 @@ export class SquadServer {
 		const mfpatch = url.pathname.match(/^\/api\/features\/([^/]+)$/);
 		if (mfpatch && req.method === "PATCH") {
 			const body = decodeBodyOrEmpty(FeaturePatchBodySchema, await req.json().catch(() => null));
-			const patch: { title?: string; stageOverride?: FeatureStage | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[] } = {};
+			const patch: { title?: string; stageOverride?: FeatureStage | null; category?: FeatureCategory | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[] } = {};
 			if ("repo" in body && typeof body.repo === "string") patch.repo = body.repo;
 			if ("title" in body && typeof body.title === "string") patch.title = body.title;
 			if ("description" in body && typeof body.description === "string") patch.description = body.description;
 			if ("archived" in body && typeof body.archived === "boolean") patch.archived = body.archived;
 			if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
+			if ("category" in body) patch.category = typeof body.category === "string" ? (body.category as FeatureCategory) : null;
 			if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
 			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions);
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);

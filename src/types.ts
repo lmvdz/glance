@@ -317,6 +317,15 @@ export interface ProjectDTO {
 /** Lifecycle stage of a feature — derived from observable evidence (plan dir, agents, land status). */
 export type FeatureStage = "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
 
+/**
+ * Work-area bucket for a feature. Client-derived by default (a regex over title+planDir, see
+ * webapp/src/lib/task-model.ts's `taskCategory`) — `'other'` is the honest fallback for anything
+ * the regex doesn't recognize (replacing a prior silent 'mcp' default, which turned that bucket
+ * into a junk drawer). `category` on `FeatureDTO`/`PersistedFeature` below is the OPERATOR OVERRIDE:
+ * when set it wins outright; absent, the client falls back to the regex, then to 'other'.
+ */
+export type FeatureCategory = "frontend" | "devops" | "backend" | "mcp" | "database" | "other";
+
 /** Per-branch land readiness — the heart of the "needs Land to test" / "can't cleanly land" signal. */
 export type LandReadiness = "clean" | "uncommitted" | "ahead" | "diverged" | "merged" | "no-branch";
 
@@ -528,6 +537,9 @@ export interface FeatureDTO {
 	persisted?: boolean;
 	/** Manual stage pin (persisted features only). */
 	stageOverride?: FeatureStage;
+	/** Manual category pin (persisted features only) — see `FeatureCategory`'s doc comment for the
+	 *  override/derive/fallback order. Absent ⇒ the client derives one from title+planDir. */
+	category?: FeatureCategory;
 	archived?: boolean;
 	/** When Fabro-driven: the research-plan-implement workflow agent running this feature. */
 	workflowAgentId?: string;
@@ -968,6 +980,9 @@ export interface PersistedFeature {
 	repo: string;
 	/** Manual stage pin; otherwise the stage is fully derived. */
 	stageOverride?: FeatureStage;
+	/** Manual category pin; otherwise the client derives one (regex over title+planDir, 'other'
+	 *  fallback). See `FeatureCategory`'s doc comment. */
+	category?: FeatureCategory;
 	/** Repo-relative provenance. */
 	origin?: { planDir?: string; briefPath?: string };
 	plane?: { moduleId?: string; moduleUrl?: string; issueIdentifiers?: string[] };
