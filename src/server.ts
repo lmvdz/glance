@@ -1215,6 +1215,15 @@ export class SquadServer {
 			const candidates = await manager.listPlanRevisionCandidates({ repo: f.repo, featureId: f.id });
 			return Response.json({ feature: f, readiness: f.readiness, concerns, documents, issues, comments, candidates, agentIds: f.agentIds });
 		}
+		// Wave 4 X2 (task-pipeline artifacts rail): read-only, viewer-tier by the same blanket default
+		// as every other GET here (see restActionTier in authz.ts) — no per-route auth code needed.
+		// org-scoped via `manager` (managerFor(actor)), same as the pipeline route above.
+		const mfproof = url.pathname.match(/^\/api\/features\/([^/]+)\/done-proof$/);
+		if (mfproof && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const doneProof = await manager.doneProofForFeature(decodeURIComponent(mfproof[1]), repo);
+			return Response.json({ doneProof: doneProof ?? null });
+		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 		const mcand = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates$/);
 		if (mcand && req.method === "GET") {
