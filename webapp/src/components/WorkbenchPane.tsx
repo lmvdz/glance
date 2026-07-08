@@ -41,6 +41,7 @@ import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus'
 import { activeWork } from '../lib/insights';
 import { taskRef } from '../lib/task-model';
 import { AccountMenu } from './AccountMenu';
+import { Kbd } from './kit/Kbd';
 import { GlanceLogo } from './GlanceLogo';
 import type { Task } from '../types';
 
@@ -716,8 +717,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                   <button onClick={handleVoiceToTask} className={`flex min-h-8 min-w-8 items-center justify-center rounded transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isListening ? 'bg-red-100 text-red-500 dark:bg-red-900/30' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`} aria-label="Create task from voice" title="Create task from voice">
                     <Mic className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
-                  <button onClick={handleCreateTask} className="flex min-h-8 min-w-8 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Create task" title="Create task">
+                  {/* Kbd chip mirrors the REAL binding GlobalShortcuts registers (⌘/Ctrl+N) — the
+                      reference shows a bare `N`, but a chip must never advertise a key that isn't
+                      actually bound. */}
+                  <button onClick={handleCreateTask} className="flex min-h-8 items-center justify-center gap-1 rounded px-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Create task" title="Create task (⌘N)">
                     <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    <Kbd>⌘N</Kbd>
                   </button>
                 </div>
               </div>

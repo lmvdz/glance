@@ -37,4 +37,15 @@ describe('TaskSessionsTable', () => {
     expect(html).toContain('>Design<');
     expect(html).toContain('>input<');
   });
+
+  test('the untyped Session fallback chip renders muted, visually distinct from real types', () => {
+    const rows = sessionRowsFromAgents([
+      agent({ id: 'a1', name: 'chat' }), // untyped → neutral tone
+      agent({ id: 'a2', name: 'Research prior art' }), // typed → agent tone
+    ]);
+    const html = renderToStaticMarkup(<TaskSessionsTable rows={rows} onOpenSession={() => {}} />);
+    // neutral tone (gray family) on the fallback; agent tone (amber family) on the real type
+    expect(html).toMatch(/border-gray-200[^>]*>Session</);
+    expect(html).toMatch(/border-amber-200[^>]*>Research</);
+  });
 });

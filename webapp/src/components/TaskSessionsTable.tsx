@@ -1,7 +1,7 @@
 import React from 'react';
 import type { AgentDTO } from '../lib/dto';
 import { agentStatusBadgeClass } from '../lib/agent-badges';
-import { deriveSessionType, type SessionType } from '../lib/sessionType';
+import { deriveSessionType, sessionTypeTone, type SessionType } from '../lib/sessionType';
 import { fmtSince } from '../lib/factoryStatus';
 import { StatusChip } from './kit/StatusChip';
 
@@ -60,7 +60,10 @@ export function TaskSessionsTable({ rows, onOpenSession }: { rows: TaskSessionRo
               <td className="min-w-0 px-3 py-2 align-middle">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate text-gray-800 dark:text-gray-200">{row.name}</span>
-                  <StatusChip tone="agent">{row.type}</StatusChip>
+                  {/* Untyped "Session" renders muted (neutral tone) so a real derived type is
+                      visually distinct from the honest fallback — the chip must not dress a
+                      guess up as knowledge. */}
+                  <StatusChip tone={sessionTypeTone(row.type)}>{row.type}</StatusChip>
                 </div>
               </td>
               <td className="whitespace-nowrap px-3 py-2 text-right text-gray-400 dark:text-gray-500">

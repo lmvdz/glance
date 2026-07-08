@@ -22,6 +22,7 @@ import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import { TaskSessionsTable, sessionRowsFromAgents } from './TaskSessionsTable';
 import { TaskArtifactsRail } from './TaskArtifactsRail';
 import { MonoLabel } from './kit/MonoLabel';
+import { Kbd } from './kit/Kbd';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
 import type { AgentDTO, ArtifactCommentDTO, DoneProofDTO, PlanAnnotationTargetDTO, TransitionEntry } from '../lib/dto';
@@ -649,6 +650,21 @@ export const TaskDetail = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [workflowFlowFocus]);
+  // `c` opens the Create Session composer while a task is open — the reference treats keyboard
+  // hints as first-class chrome, so the chip on the button is backed by a real binding. View-scoped
+  // (this component only mounts with a task selected) with the same input guard GlobalShortcuts uses.
+  React.useEffect(() => {
+    if (!selectedTaskId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'c' || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      e.preventDefault();
+      setSessionComposerOpen(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedTaskId]);
   // Auto-subscribe the first working agent so transcript entries arrive via WS.
   React.useEffect(() => {
     const working = activeAgents.find((a) => a.status === 'working' || a.status === 'starting');
@@ -1611,7 +1627,7 @@ export const TaskDetail = () => {
                     onClick={() => setSessionComposerOpen((open) => !open)}
                     className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
                   >
-                    Create Session
+                    Create Session <Kbd>c</Kbd>
                   </button>
                   <button
                     type="button"
