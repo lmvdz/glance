@@ -23,6 +23,22 @@ try {
 	hasDocker = false;
 }
 
+// Forced mode (review MEDIUM): a skipped contract test is decorative on hosts that are SUPPOSED to
+// have docker. Under CI=1 or OMP_SQUAD_REQUIRE_DOCKER_TESTS=1 (exempted from setup.ts's env sweep),
+// docker being absent FAILS the run with a legible message instead of silently skipping the whole
+// image contract. Default local behavior (skip when docker is missing) is unchanged.
+const requireDocker = process.env.CI === "1" || process.env.OMP_SQUAD_REQUIRE_DOCKER_TESTS === "1";
+if (requireDocker && !hasDocker) {
+	test("gate-image contract REQUIRES docker on this host (CI=1 / OMP_SQUAD_REQUIRE_DOCKER_TESTS=1)", () => {
+		throw new Error(
+			"docker is unavailable but the gate-image suite-binaries contract is REQUIRED here " +
+				"(CI=1 or OMP_SQUAD_REQUIRE_DOCKER_TESTS=1). Skipping would make the contract decorative: " +
+				"a gitless/jqless gate image would ship unnoticed and every sandboxed verify would die at " +
+				"its first spawn (ompsq-432/ompsq-434). Install/start docker, or unset the requirement.",
+		);
+	});
+}
+
 /** First run may `docker build` (apt-get over the network); cached runs are near-instant. */
 const BUILD_TIMEOUT_MS = 300_000;
 

@@ -56,6 +56,13 @@ export interface GateExec {
 	sandboxed: boolean;
 	/** The image used when `sandboxed`; undefined for host exec. */
 	image?: string;
+	/**
+	 * True when auto mode WANTED the suite-deps derived image but its build failed and the plan
+	 * fell back to the bare base image (missing git/jq/npm). A failed gate in a degraded sandbox
+	 * is presumptively an ENVIRONMENT failure, not a code failure — {@link gateRunUnrunnable}
+	 * consumes this so land paths refuse (retryable) instead of misreading it as a red baseline.
+	 */
+	degraded?: boolean;
 }
 
 /** Base sandbox image for a bun repo when docker is present and no image was named. */
@@ -284,7 +291,12 @@ export async function gateExec(
 		// image has no git, which is fatal to any real gate (see the header + ompsq-432).
 		const named = source.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim();
 		const image = named || (await (opts.imageBuilder ? opts.imageBuilder() : defaultGateImage()));
-		return sandboxPlan(command, cwd, image, source, env, opts.mounts);
+		const plan = sandboxPlan(command, cwd, image, source, env, opts.mounts);
+		// The builder resolves the bare base image ONLY on build failure — mark the plan degraded so
+		// callers (gateRunUnrunnable) can refuse to trust a failed run in it instead of misreading a
+		// missing-binary death as a code failure.
+		if (!named && image === DEFAULT_SANDBOX_IMAGE) plan.degraded = true;
+		return plan;
 	}
 	if (strict) throw new GateSandboxUnavailableError("OMP_SQUAD_GATE_SANDBOX_STRICT=1 but docker is unavailable — refusing to run the gate on the host (fail-closed)");
 	warnHostFallbackOnce("docker is unavailable");
@@ -306,4 +318,50 @@ export async function execGatedCommand(
 	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	return { code: await proc.exited, stdout, stderr };
+}
+
+// ── Unrunnable-gate classifier ─────────────────────────────────────────────────────────────────
+
+/** The slice of a gate run the classifier consumes (matches land.ts's runGate shape + `degraded`). */
+export interface GateRunLike {
+	code: number;
+	output: string;
+	/** From the plan (GateExec.degraded): the sandbox fell back to the bare base image. */
+	degraded?: boolean;
+}
+
+/** Executable-resolution failure shapes across the shells/runtimes gates run under (bash, sh, Bun). */
+const NOT_FOUND_RE = /Executable not found in \$PATH|command not found|not found in \$PATH|is not recognized as an internal or external command/i;
+/** bun test's explicit nothing-ran markers. Deliberately narrow — only confidently parseable shapes. */
+const ZERO_TESTS_RE = /\bRan 0 tests\b|did not match any test files/i;
+/** bun test's summary marker that at least one test demonstrably executed ("N pass", N ≥ 1). */
+const TESTS_RAN_RE = /\b[1-9]\d* pass\b/;
+
+/**
+ * Did this FAILED gate run demonstrably NOT exercise the code under test? Returns a human-readable
+ * reason when the failure is an ENVIRONMENT failure (the command never really ran), undefined when
+ * the run should be judged on its failures like any red suite.
+ *
+ * THE DESIGN PRINCIPLE (cross-review of the gate-image incident): a gate must fail CLOSED whenever
+ * it demonstrably did not exercise the code. Exit 127 is one signal, not the definition — the same
+ * missing-binary death can surface as a non-127 exit with an executable-not-found message (Bun
+ * throws before the shell propagates 127), or as a red run inside a DEGRADED bare-base sandbox.
+ * Both land paths that compare merged-vs-base failure sets (applyRegressionGate, verifyMerged's
+ * red-baseline allowance) previously treated "identical failures on both sides" as a pre-existing
+ * red baseline — but two identical ENVIRONMENT failures prove nothing about the code, and the land
+ * silently proceeded unverified.
+ *
+ * Conservative by construction: if the output carries bun test's "N pass" (N ≥ 1) summary marker,
+ * the suite demonstrably executed and this NEVER classifies the run as unrunnable — a real red
+ * suite whose captured failure text happens to contain "command not found" (fixtures testing
+ * missing-binary handling) is still judged on its failures, not misread as an env failure.
+ */
+export function gateRunUnrunnable(run: GateRunLike, command?: string): string | undefined {
+	if (run.code === 0) return undefined; // green is green
+	if (run.code === 127) return "exit 127 — the gate command itself could not execute (command not found)";
+	if (TESTS_RAN_RE.test(run.output)) return undefined; // tests demonstrably ran — a real red, judge it on failures
+	if (NOT_FOUND_RE.test(run.output)) return "gate output shows an executable-resolution failure and no test ever ran — the environment lacks a binary the gate needs";
+	if (run.degraded) return `gate ran inside the DEGRADED bare sandbox image (${DEFAULT_SANDBOX_IMAGE} — the ${DERIVED_SANDBOX_IMAGE} build failed) and no test ever ran`;
+	if (command && /\btest\b/.test(command) && ZERO_TESTS_RE.test(run.output)) return "test gate executed zero tests — the suite never ran";
+	return undefined;
 }

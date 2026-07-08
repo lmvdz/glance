@@ -201,6 +201,64 @@ test("UNRUNNABLE gate (exit 127 — command not found) FAILS CLOSED: refused ret
 	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0); // main rolled back, nothing landed
 });
 
+test("HIGH 1: NON-127 executable-not-found gate (bare-image scenario) FAILS CLOSED — never a fake red-baseline match", async () => {
+	// The bare-image fallback shape: the gate command RUNS (bash is fine) but a binary it needs is
+	// missing, printing "command not found" and exiting 1 (not 127 — e.g. Bun.spawn throws and the
+	// runner exits 1, or a sub-step swallows the code). Identical output on merged and base used to
+	// produce matching failure sets => "pre-existing red baseline" => fail-open land.
+	process.env.OMP_SQUAD_REGRESSION_GATE = "1";
+	const repo = await gateRepo("rg-notfound-");
+	await fs.writeFile(
+		path.join(repo, "gate.sh"),
+		["#!/bin/sh", "echo 'error: Executable not found in $PATH: \"git\"' >&2", "exit 1"].join("\n"),
+	);
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "gate dies on a missing executable without exit 127");
+	const head0 = await gitOut(repo, "rev-parse", "HEAD");
+	const wt = await branchWorktree(repo, "feat", { "feature.txt": "new\n" });
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true" });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.retryable).toBe(true);
+	expect(res.detail).toContain("could not run");
+	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0); // rolled back, nothing landed
+});
+
+test("HIGH 2: acceptance gate whose binary is absent (127 on merged AND base) FAILS CLOSED — no red-baseline re-merge", async () => {
+	// verifyMerged's red-baseline allowance: v red + base red => re-merge and land "onto a red
+	// baseline". With the verify BINARY missing, both runs die 127 identically — previously that
+	// landed as ok:true "landed onto a red baseline" (unverified code on main). Now: refused
+	// retryable, main stays at head0.
+	process.env.OMP_SQUAD_REGRESSION_GATE = "0"; // isolate the ACCEPTANCE path (regression gate off)
+	const repo = await gateRepo("rg-accept-127-");
+	const head0 = await gitOut(repo, "rev-parse", "HEAD");
+	const wt = await branchWorktree(repo, "feat", { "feature.txt": "new\n" });
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "glance-no-such-binary-xyz" });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.retryable).toBe(true);
+	expect(res.detail).toContain("acceptance gate could not run");
+	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0); // main rolled back — no unverified land
+});
+
+test("HIGH 2 guard-rail: a GENUINE red baseline (gate ran, real failures) still lands — the allowance survives the classifier", async () => {
+	// The classifier must not break brownfield lands: base genuinely red (gate executed, printed a
+	// real failure) + clean branch => the red-baseline allowance still applies.
+	process.env.OMP_SQUAD_REGRESSION_GATE = "0";
+	const repo = await gateRepo("rg-accept-genuine-red-", { baseRed: true });
+	const wt = await branchWorktree(repo, "feat", { "feature.txt": "new\n" });
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "sh gate.sh" });
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect(res.detail).toContain("red baseline");
+});
+
 test("flag on + autoresolve: conflict-resolved branch that introduces NEW_RED is rolled back before reviewer", async () => {
 	process.env.OMP_SQUAD_REGRESSION_GATE = "1";
 	process.env.OMP_SQUAD_AUTORESOLVE = "1";

@@ -17,6 +17,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 for (const k of Object.keys(process.env)) {
+	// OMP_SQUAD_REQUIRE_DOCKER_TESTS survives the sweep: it addresses the TEST RUN itself (force the
+	// docker-gated gate-image contract to FAIL instead of skip when docker is absent — CI hardening),
+	// not daemon behavior under test, so scrubbing it would make the knob impossible to use at all.
+	if (k === "OMP_SQUAD_REQUIRE_DOCKER_TESTS") continue;
 	if (k.startsWith("PLANE_") || k.startsWith("OMP_SQUAD_") || k.startsWith("GLANCE_")) delete process.env[k];
 }
 

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DERIVED_SANDBOX_IMAGE, execGatedCommand, GateSandboxUnavailableError, gateExec } from "../src/gate-runner.ts";
+import { DERIVED_SANDBOX_IMAGE, execGatedCommand, GateSandboxUnavailableError, gateExec, gateRunUnrunnable } from "../src/gate-runner.ts";
 
 const HOST_SRC = { PATH: "/usr/bin", HOME: "/home/t", CI: "1", ANTHROPIC_API_KEY: "sk" } as NodeJS.ProcessEnv;
 
@@ -81,6 +81,52 @@ test("auto (default) + docker PRESENT: a failed derived build degrades to whatev
 	const plan = await gateExec("bun test", "/wt/x", { source: { ...HOST_SRC }, dockerProbe: hasDocker, imageBuilder: async () => "oven/bun:1" });
 	expect(plan.sandboxed).toBe(true);
 	expect(plan.image).toBe("oven/bun:1");
+	expect(plan.degraded).toBe(true); // marked so gateRunUnrunnable can refuse a failed run in the bare image
+});
+
+test("an operator-NAMED image is never marked degraded, even when it equals the bare base", async () => {
+	const plan = await gateExec("bun test", "/wt/x", { source: { ...HOST_SRC, OMP_SQUAD_GATE_SANDBOX_IMAGE: "oven/bun:1" }, dockerProbe: hasDocker });
+	expect(plan.image).toBe("oven/bun:1");
+	expect(plan.degraded).toBeUndefined(); // the operator chose it — their contract, not a fallback
+});
+
+// ── gateRunUnrunnable — the shared unrunnable-gate classifier ───────────────────────────────────
+
+test("gateRunUnrunnable: exit 127 is unrunnable regardless of output", () => {
+	expect(gateRunUnrunnable({ code: 127, output: "" })).toContain("127");
+	expect(gateRunUnrunnable({ code: 127, output: "12 pass\n1 fail" })).toContain("127"); // top-level 127 wins: the COMMAND could not run
+});
+
+test("gateRunUnrunnable: executable-not-found shapes with no test executed are unrunnable", () => {
+	expect(gateRunUnrunnable({ code: 1, output: 'error: Executable not found in $PATH: "git"' })).toContain("executable");
+	expect(gateRunUnrunnable({ code: 1, output: "bash: line 1: jq: command not found" })).toContain("executable");
+	expect(gateRunUnrunnable({ code: 1, output: "'npm' is not recognized as an internal or external command" })).toContain("executable");
+});
+
+test("gateRunUnrunnable: a run whose output carries bun's 'N pass' marker is NEVER unrunnable — the suite demonstrably executed", () => {
+	// A real red suite whose captured failure text contains "command not found" (fixtures testing
+	// missing-binary handling) must be judged on its failures, not misread as an env failure.
+	expect(gateRunUnrunnable({ code: 1, output: "expected 'command not found' in output\n 2071 pass\n 1 fail" })).toBeUndefined();
+});
+
+test("gateRunUnrunnable: zero tests executed on a test gate is unrunnable — only for confidently parseable shapes", () => {
+	expect(gateRunUnrunnable({ code: 1, output: "The following filters did not match any test files" }, "bun run check && bun run test")).toContain("zero tests");
+	expect(gateRunUnrunnable({ code: 1, output: "Ran 0 tests across 0 files." }, "bun test")).toContain("zero tests");
+	// Not a test gate => the zero-tests signal never fires (a build command legitimately runs no tests).
+	expect(gateRunUnrunnable({ code: 1, output: "Ran 0 tests across 0 files." }, "cargo build")).toBeUndefined();
+	// No command context => conservative, no zero-tests classification.
+	expect(gateRunUnrunnable({ code: 1, output: "Ran 0 tests across 0 files." })).toBeUndefined();
+});
+
+test("gateRunUnrunnable: a failed run in a DEGRADED bare-image sandbox with no test executed is unrunnable", () => {
+	expect(gateRunUnrunnable({ code: 1, output: "some inscrutable failure", degraded: true })).toContain("DEGRADED");
+	// ...but if tests demonstrably ran, even a degraded sandbox produced a judgeable red.
+	expect(gateRunUnrunnable({ code: 1, output: " 30 pass\n 2 fail", degraded: true })).toBeUndefined();
+});
+
+test("gateRunUnrunnable: green runs and ordinary red runs are runnable", () => {
+	expect(gateRunUnrunnable({ code: 0, output: "" })).toBeUndefined();
+	expect(gateRunUnrunnable({ code: 1, output: "(fail) new.test.ts > introduced" }, "bun run check && bun run test")).toBeUndefined();
 });
 
 test("auto (default) + docker ABSENT: graceful host fallback, stamped sandboxed:false", async () => {

@@ -12,7 +12,7 @@
 
 import { detectVerify } from "./intake.ts";
 import { envBool } from "./config.ts";
-import { gateExec } from "./gate-runner.ts";
+import { gateExec, gateRunUnrunnable } from "./gate-runner.ts";
 import { proofGate, recordProof } from "./proof.ts";
 import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
@@ -173,8 +173,8 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 	return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output + sandbox flag. */
-async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string; sandboxed: boolean }> {
+/** Run a verification command, killing it after `timeoutMs`. Returns exit code + combined output + sandbox flags. */
+async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string; sandboxed: boolean; degraded?: boolean }> {
 	// gateExec: scrubbed env always; hermetic docker container by default when docker is usable (else a
 	// legible host fallback). A strict-mode fail-closed throw here rolls up as a failed gate (blocks the land).
 	let plan: Awaited<ReturnType<typeof gateExec>>;
@@ -191,7 +191,7 @@ async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{
 			new Response(proc.stderr).text(),
 			proc.exited,
 		]);
-		return { code, output: `${stdout}${stderr}`.trim(), sandboxed: plan.sandboxed };
+		return { code, output: `${stdout}${stderr}`.trim(), sandboxed: plan.sandboxed, degraded: plan.degraded };
 	} finally {
 		clearTimeout(timer);
 	}
@@ -268,14 +268,16 @@ export async function applyRegressionGate(p: {
 	const mergedRun = await runGate(fullSuite, p.repo);
 	if (mergedRun.code === 0) return null; // full suite clean on merged main
 
-	// Unrunnable gate ⇒ FAIL CLOSED (gate-image incident, second-order finding): exit 127 means the
-	// gate COMMAND could not even execute (command not found — e.g. `npm` missing from the sandbox
-	// image), not that the merged code is red. Without this check the environment failure reproduces
-	// IDENTICALLY on the base run below, the two extracted failure sets match, and
-	// decideRegressionGate reads it as "same pre-existing red baseline" — ALLOWING a land whose gate
-	// never actually ran. An unverifiable land must be refused, and it is retryable: the environment
-	// is the problem, not the branch — fix the image/toolchain and the same branch lands unchanged.
-	if (mergedRun.code === 127) {
+	// Unrunnable gate ⇒ FAIL CLOSED (gate-image incident, second-order finding): a gate that
+	// demonstrably never exercised the code (command not found, degraded bare-image sandbox, zero
+	// tests executed — see gateRunUnrunnable for the signal set) reproduces IDENTICALLY on the base
+	// run below; the two extracted failure sets then match and decideRegressionGate reads it as
+	// "same pre-existing red baseline" — ALLOWING a land whose gate never actually ran. Both runs
+	// must be RUNNABLE before their failure sets mean anything. Refusal is retryable: the
+	// environment is the problem, not the branch — fix the image/toolchain and the branch lands
+	// unchanged.
+	const mergedUnrunnable = gateRunUnrunnable(mergedRun, fullSuite);
+	if (mergedUnrunnable) {
 		await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
 		return {
 			ok: false,
@@ -283,13 +285,26 @@ export async function applyRegressionGate(p: {
 			merged: false,
 			retryable: true,
 			message: p.message,
-			detail: `regression gate could not run (exit 127 — command not found): ${fullSuite}\n${truncate(mergedRun.output, 300)}`,
+			detail: `regression gate could not run (${mergedUnrunnable}): ${fullSuite}\n${truncate(mergedRun.output, 300)}`,
 		};
 	}
 
 	// Full suite failed on merged main — determine whether branch introduced new failures.
 	await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
 	const baseRun = await runGate(fullSuite, p.repo);
+	// The BASE run must be runnable too: comparing a real merged red against an unrunnable base
+	// would mis-attribute every merged failure as "new" (or worse). Same fail-closed refusal.
+	const baseUnrunnable = baseRun.code !== 0 ? gateRunUnrunnable(baseRun, fullSuite) : undefined;
+	if (baseUnrunnable) {
+		return {
+			ok: false,
+			committed: p.committed,
+			merged: false,
+			retryable: true,
+			message: p.message,
+			detail: `regression gate could not run on BASE (${baseUnrunnable}): ${fullSuite}\n${truncate(baseRun.output, 300)}`,
+		};
+	}
 	const baseFailures = baseRun.code !== 0 ? extractGateFailures(baseRun.output) : [];
 	const mergedFailures = extractGateFailures(mergedRun.output);
 	const { allow, newRegressions } = decideRegressionGate(baseFailures, mergedFailures);
@@ -454,6 +469,22 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
 		await git(["reset", "--hard", head0], repo).catch(() => {});
+		// Unrunnable acceptance gate ⇒ FAIL CLOSED (same shared classifier as applyRegressionGate):
+		// "both sides red" is only a valid red-baseline allowance when both runs actually EXERCISED
+		// the code. A missing binary (127 / executable-not-found) or a degraded bare-image sandbox
+		// dies identically on merged and base, and the re-merge below would land unverified code
+		// under a "red baseline" label. Retryable — the environment, not the branch, is broken.
+		const mergedGateUnrunnable = gateRunUnrunnable(v, gate);
+		if (mergedGateUnrunnable) {
+			return {
+				ok: false,
+				committed,
+				merged: false,
+				retryable: true,
+				message,
+				detail: `acceptance gate could not run (${mergedGateUnrunnable}): ${gate} — refusing to land unverified; main rolled back\n${truncate(v.output, 300)}`,
+			};
+		}
 		const base = await runGate(gate, repo); // main == head0 now
 		if (base.code === 0) {
 			// Base was green ⇒ the branch introduced the failure ⇒ keep main green, block (unchanged).
@@ -463,6 +494,18 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 				merged: false,
 				message,
 				detail: `merged ${branch} but verification failed (${gate}) — rolled main back to keep it green:\n${truncate(v.output, 800)}`,
+			};
+		}
+		// The base run must be runnable too before "base was already red" means anything.
+		const baseGateUnrunnable = gateRunUnrunnable(base, gate);
+		if (baseGateUnrunnable) {
+			return {
+				ok: false,
+				committed,
+				merged: false,
+				retryable: true,
+				message,
+				detail: `acceptance gate could not run on BASE (${baseGateUnrunnable}): ${gate} — refusing the red-baseline allowance; main stays at head0\n${truncate(base.output, 300)}`,
 			};
 		}
 		// Base was already red ⇒ main was never green; refusing would wedge every land on a brownfield
