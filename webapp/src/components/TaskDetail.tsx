@@ -1364,7 +1364,18 @@ export const TaskDetail = () => {
             <div>
               <div className="mb-2 flex items-center justify-between gap-3">
                 <div className="text-[11px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Documents</div>
-                <div className="text-[11px] text-gray-400 dark:text-gray-500">{planDocuments.length} total</div>
+                <div className="flex items-center gap-3">
+                  <div className="text-[11px] text-gray-400 dark:text-gray-500">{planDocuments.length} total</div>
+                  {featureId && selectedPlanDoc && (
+                    <button
+                      type="button"
+                      onClick={() => openReview(featureId, selectedPlanDoc.path)}
+                      className="min-h-8 rounded px-2 text-[11px] font-medium text-amber-700 hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300 dark:hover:bg-amber-950/40"
+                    >
+                      Design Review →
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-custom" aria-label="Plan documents">
                 {planDocuments.map((doc, index) => {

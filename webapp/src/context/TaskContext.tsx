@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState, ReactNo
 import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
+import { buildReviewHash, parseReviewHash } from '../lib/plan-doc-review';
 import { useSquad } from '../hooks/useSquad';
 import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
@@ -61,8 +62,11 @@ interface TaskContextType {
   openedConsoleAgentId: string | null;
   /** The agent the Intervene View is focused on (set by openIntervene). */
   interveneAgentId: string | null;
-  /** The task the Design Review view (X3's `/review/:taskId` screen) is focused on, set by openReview(). */
+  /** The task (feature) the Design Review screen is focused on (set by openReview). Mirrors the
+   *  deep-linkable `#/review/:taskId[?doc=...]` hash so a refresh/share lands on the same review. */
   reviewTaskId: string | null;
+  /** The specific plan-doc path being reviewed, when the caller named one (else the feature's first doc). */
+  reviewDocPath: string | undefined;
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
@@ -71,9 +75,10 @@ interface TaskContextType {
   openConsole: (agentId: string | undefined) => void;
   /** Focus the full-screen Intervene View on an agent (subscribe + route). The step-in surface off a "Needs you" tap. */
   openIntervene: (agentId: string | undefined) => void;
-  /** Route to the Design Review screen for a task (X3's territory — this only sets the nav state
-   *  the "Create Design Discussion →" action needs; the screen itself lives in feat/ui-design-review). */
-  openReview: (taskId: string | undefined) => void;
+  /** Route to the design-review screen for one task's plan doc (`/review/:taskId`). */
+  openReview: (taskId: string, docPath?: string) => void;
+  /** Leave the Design Review screen back to Tasks (keeps the task selected, so TaskDetail resumes). */
+  closeReview: () => void;
   selectTask: (id: string | null) => void;
   addTask: (task: Partial<Task>) => void;
   deleteTask: (id: string) => void;
@@ -124,6 +129,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [openedConsoleAgentId, setOpenedConsoleAgentId] = useState<string | null>(null);
   const [interveneAgentId, setInterveneAgentId] = useState<string | null>(null);
   const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
+  const [reviewDocPath, setReviewDocPath] = useState<string | undefined>(undefined);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
@@ -169,14 +175,34 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     setView('intervene');
   };
 
-  // Route to the design-review screen for a task. Mirrors openIntervene's state-machine-nav pattern
-  // (no path router exists in this webapp — see Explore findings in the Wave 4 ledger) so X3's
-  // `/review/:taskId` screen has somewhere to read its target id from without inventing new infra.
-  const openReview = (taskId: string | undefined) => {
-    if (!taskId) return;
+  // Design Review has no react-router (this SPA doesn't use one anywhere), but the reference
+  // treats it as a real route — so it's deep-linkable via a `#/review/:taskId[?doc=...]` hash,
+  // synced both ways: openReview/closeReview write the hash, and a hashchange listener (below)
+  // restores the view on a fresh load or back/forward navigation.
+  const openReview = (taskId: string, docPath?: string) => {
     setReviewTaskId(taskId);
+    setReviewDocPath(docPath);
     setView('review');
+    window.location.hash = buildReviewHash({ taskId, docPath });
   };
+
+  const closeReview = () => {
+    setView('tasks');
+    if (window.location.hash.startsWith('#/review/')) history.replaceState(null, '', window.location.pathname + window.location.search);
+  };
+
+  useEffect(() => {
+    const applyHash = () => {
+      const parsed = parseReviewHash(window.location.hash);
+      if (!parsed) return;
+      setReviewTaskId(parsed.taskId);
+      setReviewDocPath(parsed.docPath);
+      setView('review');
+    };
+    applyHash();
+    window.addEventListener('hashchange', applyHash);
+    return () => window.removeEventListener('hashchange', applyHash);
+  }, []);
 
   const selectTask = (id: string | null) => setSelectedTaskId(id);
 
@@ -303,7 +329,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, interveneAgentId, reviewTaskId, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, isChatOpen, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );
