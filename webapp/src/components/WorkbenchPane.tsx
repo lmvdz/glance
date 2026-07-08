@@ -81,6 +81,19 @@ export function compareTaskRail(a: Task, b: Task, sortBy: 'attention' | 'creatio
   return (b.properties.createdAt ?? 0) - (a.properties.createdAt ?? 0);
 }
 
+/**
+ * The task-scoped control block — search, the Open/Active/Done/All filter tabs, the
+ * progress bar, the workspace tree, and the capability registry card — is task-list
+ * context, not global chrome. It used to render on every view (cockpit, attention, the
+ * observability panels, ...) because none of that JSX was gated on `view` at all. Scoped
+ * to the Tasks view only: the 'review' (design-review) screen is also task-adjacent but
+ * has its own dedicated context, so it deliberately gets the nav-only rail too — see the
+ * PR body for that call. Exported + pure so the scoping rule is unit-tested.
+ */
+export function isTaskScopedView(view: AppView): boolean {
+  return view === 'tasks';
+}
+
 /** Grouped VERTICAL navigation — a list that grows down instead of tab rows that
  *  overflow sideways. Sections give structure (the reference-timeline sidebar idiom). */
 const NAV_SECTIONS: { title: string; items: { view: AppView; label: string; icon: LucideIcon }[] }[] = [
@@ -254,6 +267,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const [workspaceOpen, setWorkspaceOpen] = useState(true);
   const [drilled, setDrilled] = useState(false); // Tasks drill-down: hide the nav and focus the task list
   const showTaskDrill = view === 'tasks' && drilled;
+  // Search / filter tabs / progress / workspace tree / capability registry: task-list
+  // context, not global chrome — only render on the Tasks view (list or detail).
+  const showTaskScopedBlock = isTaskScopedView(view);
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
@@ -516,6 +532,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </nav>
         )}
 
+        {showTaskScopedBlock && (
         <div className="mt-2">
           <label className="sr-only" htmlFor="workbench-search">Search tasks or jump</label>
           <div className="relative">
@@ -524,7 +541,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               id="workbench-search"
               type="search"
               className="w-full rounded-md border border-gray-200 bg-white py-1.5 pl-8 pr-20 text-xs text-gray-900 transition-colors duration-150 placeholder:text-gray-400 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
-              placeholder={view === 'tasks' ? 'Search tasks by title or ID' : 'Search or jump'}
+              placeholder="Search tasks by title or ID"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
             />
@@ -534,9 +551,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             </div>
           </div>
         </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto scrollbar-custom">
+        {showTaskScopedBlock && (
+        <>
         <div className="border-b border-gray-200 p-3 dark:border-gray-800">
           <div className="grid grid-cols-4 gap-1">
             {taskFilters.map((filter) => (
@@ -768,6 +788,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               </div>
             </div>
           </section>
+        )}
+        </>
         )}
       </div>
 
