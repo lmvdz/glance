@@ -67,7 +67,7 @@ import {
 } from "./schema/http-body.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
-import { planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
+import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
@@ -1521,6 +1521,12 @@ export class SquadServer {
 			const rec = decoded.success;
 			const planPath = rec.planPath.trim();
 			const summary = rec.summary.trim();
+			// KEYSTONE gate (security review HIGH 1a — reject at the source): a candidate's planPath is
+			// what a PASSED plan-vote later commits into the shared checkout, bypassing the code-land gate.
+			// Constrain it to plan MARKDOWN under plans/ HERE so a candidate naming, e.g., "src/server.ts"
+			// or "package.json" can never be created. onVotePassed re-validates the same rule immediately
+			// before committing (defense in depth).
+			if (!isPlanDocPath(planPath)) return new Response("planPath must be a plan markdown doc under plans/ (e.g. plans/foo/01-bar.md)", { status: 400 });
 			return Response.json(await manager.addPlanRevisionCandidate({ repo, featureId, planPath, summary, producerAgentId: typeof rec.producerAgentId === "string" ? rec.producerAgentId : undefined, runId: typeof rec.runId === "string" ? rec.runId : undefined, traceId: typeof rec.traceId === "string" ? rec.traceId : undefined, diffRef: typeof rec.diffRef === "string" ? rec.diffRef : undefined }, actor));
 		}
 		const mcandState = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates\/([^/]+)\/(accept|reject|supersede)$/);

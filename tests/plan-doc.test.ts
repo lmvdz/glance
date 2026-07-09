@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { planDocDiffSince, planDocHeadRevision, readPlanDoc, resolveSafeDocPath } from "../src/plan-doc.ts";
+import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc, resolveSafeDocPath } from "../src/plan-doc.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -20,6 +20,26 @@ test("resolveSafeDocPath refuses a path that escapes the repo root", () => {
   expect(resolveSafeDocPath(repo, "plans/foo.md")).toBe(path.resolve(repo, "plans/foo.md"));
   expect(resolveSafeDocPath(repo, "../../etc/passwd")).toBeUndefined();
   expect(resolveSafeDocPath(repo, "/etc/passwd")).toBeUndefined();
+});
+
+test("isPlanDocPath: the KEYSTONE gate — only plan markdown under plans/ (security review HIGH 1)", () => {
+  // Accepted: plan markdown under plans/, any depth.
+  expect(isPlanDocPath("plans/foo/01-bar.md")).toBe(true);
+  expect(isPlanDocPath("plans/x.md")).toBe(true);
+  expect(isPlanDocPath("plans/a/b/c/deep.MD")).toBe(true); // case-insensitive extension
+  // Rejected: source/config files a passing vote must NEVER be able to commit.
+  expect(isPlanDocPath("src/server.ts")).toBe(false);
+  expect(isPlanDocPath("package.json")).toBe(false);
+  expect(isPlanDocPath("plans/evil.ts")).toBe(false); // under plans/ but not markdown
+  expect(isPlanDocPath("plans/../src/server.ts.md")).toBe(false); // traversal out of plans/
+  expect(isPlanDocPath("plans/../../etc/passwd.md")).toBe(false);
+  expect(isPlanDocPath("notplans/x.md")).toBe(false); // not rooted at plans/
+  expect(isPlanDocPath("plansX/x.md")).toBe(false); // prefix, not the plans/ dir
+  expect(isPlanDocPath("plans")).toBe(false); // the dir itself, not a doc
+  expect(isPlanDocPath("plans/")).toBe(false);
+  expect(isPlanDocPath("/abs/plans/x.md")).toBe(false); // absolute
+  expect(isPlanDocPath("")).toBe(false);
+  expect(isPlanDocPath("plans/./x.md")).toBe(false); // current-dir segment
 });
 
 test("readPlanDoc returns undefined for a missing file, not a throw", async () => {

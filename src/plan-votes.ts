@@ -29,10 +29,13 @@ export function nextPlanVoteId(now = Date.now()): string {
 
 type OpenRoundSnapshot = Omit<PlanVoteRound, "state" | "casts" | "closedAt" | "closedReason">;
 
+type PlanVoteCommitOutcome = "committed" | "superseded" | "failed";
+
 type PlanVoteEvent =
 	| { type: "open"; round: OpenRoundSnapshot }
 	| { type: "cast"; roundId: string; actorId: string; choice: PlanVoteChoice; at: number }
-	| { type: "close"; roundId: string; state: Exclude<PlanVoteState, "voting">; at: number; reason?: string };
+	| { type: "close"; roundId: string; state: Exclude<PlanVoteState, "voting">; at: number; reason?: string }
+	| { type: "commit"; roundId: string; at: number; outcome: PlanVoteCommitOutcome; sha?: string; detail?: string };
 
 async function appendPlanVoteEvent(baseDir: string, ev: PlanVoteEvent): Promise<void> {
 	await getStorageBackend().appendDurable(planVotesPath(baseDir), `${JSON.stringify(ev)}\n`);
@@ -96,6 +99,17 @@ export async function closePlanVoteRound(baseDir: string, roundId: string, state
 	await appendPlanVoteEvent(baseDir, { type: "close", roundId, state, at, reason });
 }
 
+/**
+ * Record the commit-on-pass unit's durable outcome for a round (PLAN-VOTE-COMMIT.md §D/§H3) — the
+ * idempotency marker `onVotePassed` checks BEFORE doing any git work. Fold keeps the FIRST commit
+ * event per round (see `listPlanVoteRounds`), same "idempotent by construction" discipline as
+ * `closePlanVoteRound`: a crash-and-retry or a future non-locked caller that re-invokes
+ * `onVotePassed` for an already-decided round is a guaranteed no-op, never a double commit.
+ */
+export async function recordPlanVoteCommit(baseDir: string, roundId: string, outcome: PlanVoteCommitOutcome, opts: { sha?: string; detail?: string; at?: number } = {}): Promise<void> {
+	await appendPlanVoteEvent(baseDir, { type: "commit", roundId, at: opts.at ?? Date.now(), outcome, sha: opts.sha, detail: opts.detail });
+}
+
 export interface PlanVoteQuery {
 	repo?: string;
 	featureId?: string;
@@ -109,6 +123,7 @@ export async function listPlanVoteRounds(baseDir: string, q: PlanVoteQuery = {})
 	const order: string[] = [];
 	const castsByRound = new Map<string, Map<string, PlanVoteCast>>();
 	const closed = new Set<string>(); // first close wins
+	const committed = new Set<string>(); // first commit event wins
 	for (const line of text.split("\n")) {
 		if (!line.trim()) continue;
 		let parsed: unknown;
@@ -133,6 +148,16 @@ export async function listPlanVoteRounds(baseDir: string, q: PlanVoteQuery = {})
 				round.state = ev.state;
 				round.closedAt = ev.at;
 				round.closedReason = ev.reason;
+			}
+		} else if (ev.type === "commit") {
+			if (committed.has(ev.roundId)) continue;
+			committed.add(ev.roundId);
+			const round = byId.get(ev.roundId);
+			if (round) {
+				round.commitOutcome = ev.outcome;
+				round.commitAt = ev.at;
+				round.commitSha = ev.sha;
+				round.commitDetail = ev.detail;
 			}
 		}
 	}
