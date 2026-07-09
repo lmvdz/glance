@@ -153,7 +153,7 @@ import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
-import { planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
+import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
@@ -6324,9 +6324,10 @@ export class SquadManager extends EventEmitter {
 	 * (or worse, clobbering) whatever changed underneath.
 	 */
 	private async onVotePassed(round: PlanVoteRound): Promise<void> {
-		// Idempotency guard: re-read the durable round rather than trusting the possibly-stale object the
-		// caller passed in. Once `commitOutcome` is set (by ANY prior attempt — committed, superseded, or
-		// failed), every subsequent call for this round is a pure no-op.
+		// Idempotency fast-path: re-read the durable round rather than trusting the possibly-stale object
+		// the caller passed in. Once `commitOutcome` is set (committed/superseded/failed), a repeat call is
+		// a no-op. Re-checked again INSIDE the repo-land lock below (the authoritative check) — this is
+		// just to skip taking the lock in the overwhelming common case.
 		const rounds = await readPlanVoteRounds(this.stateDir, { repo: round.repo, featureId: round.featureId });
 		const current = rounds.find((r) => r.id === round.id) ?? round;
 		if (current.commitOutcome) {
@@ -6334,82 +6335,133 @@ export class SquadManager extends EventEmitter {
 			return;
 		}
 
-		const candidates = await readPlanRevisionCandidates(this.stateDir, {});
-		const candidate = candidates.find((c) => c.id === round.candidateId);
-		if (!candidate) {
-			await recordPlanVoteCommit(this.stateDir, round.id, "failed", { detail: `candidate ${round.candidateId} no longer exists` });
-			void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "error", `candidate ${round.candidateId} vanished`);
-			this.emitFeaturesChanged();
-			return;
-		}
+		// HIGH 3 (TOCTOU vs every other daemon git writer): the base-SHA guard → write → commit critical
+		// section runs under the SAME repo-wide land lock landAgent uses (land.ts:withRepoLandLock), nested
+		// under the per-feature vote lock the caller already holds. So the shared-tree mutation is atomic
+		// against concurrent lands AND other votes — no writer can move the doc between our check and write.
+		await withRepoLandLock(round.repo, async () => {
+			// Authoritative idempotency re-check, now that we hold the land lock (a racing writer/second
+			// onVotePassed could have finalized while we waited for it).
+			const recheck = (await readPlanVoteRounds(this.stateDir, { repo: round.repo, featureId: round.featureId })).find((r) => r.id === round.id);
+			if (recheck?.commitOutcome) {
+				this.log("info", `plan-vote ${round.id} onVotePassed: already ${recheck.commitOutcome} (under lock) — no-op`);
+				return;
+			}
 
-		// §H3 base-SHA guard: the doc's CURRENT committed SHA must still match what the round snapshotted
-		// at call time. A mismatch means the doc moved under the voters — refuse, never commit.
-		const nowBaseSha = await planDocHeadRevision(round.repo, round.planPath);
-		if (nowBaseSha !== round.baseSha) {
-			const detail = `plan doc ${round.planPath} moved (base was ${round.baseSha || "(none)"}, now ${nowBaseSha || "(none)"}) — revision changed under the vote; re-call the vote`;
-			await recordPlanVoteCommit(this.stateDir, round.id, "superseded", { detail });
-			await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "superseded", LOCAL_ACTOR.id, detail);
-			void this.recordAudit(LOCAL_ACTOR, "plan-vote.superseded", round.id, "error", detail);
-			this.emitFeaturesChanged();
-			return;
-		}
+			const candidate = (await readPlanRevisionCandidates(this.stateDir, {})).find((c) => c.id === round.candidateId);
+			if (!candidate) {
+				await recordPlanVoteCommit(this.stateDir, round.id, "failed", { detail: `candidate ${round.candidateId} no longer exists` });
+				void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "error", `candidate ${round.candidateId} vanished`);
+				this.emitFeaturesChanged();
+				return;
+			}
 
-		const fail = async (detail: string) => {
-			await recordPlanVoteCommit(this.stateDir, round.id, "failed", { detail });
-			void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "error", detail);
-			this.emitFeaturesChanged();
-		};
+			const fail = async (detail: string) => {
+				await recordPlanVoteCommit(this.stateDir, round.id, "failed", { detail });
+				void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "error", detail);
+				this.emitFeaturesChanged();
+			};
 
-		if (!round.revisionSha) return fail("no revision to land — the producer branch tip was never resolved at call time");
-		const abs = resolveSafeDocPath(round.repo, round.planPath);
-		if (!abs) return fail(`refusing an unsafe doc path: ${round.planPath}`);
+			const accept = async (sha: string, detail: string, auditDetail: string) => {
+				await recordPlanVoteCommit(this.stateDir, round.id, "committed", { sha, detail });
+				await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "accepted", LOCAL_ACTOR.id, detail);
+				void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "ok", auditDetail);
+				this.emitFeaturesChanged();
+			};
 
-		const tipCheck = await hardenedGit(["-C", round.repo, "cat-file", "-e", `${round.revisionSha}^{commit}`]);
-		if (tipCheck.code !== 0) return fail(`revision ${round.revisionSha} is not a reachable commit in ${round.repo} (producer branch/worktree gone before the vote closed)`);
+			// HIGH 1b (KEYSTONE — re-validate the path immediately before committing, never trust a stored
+			// path): a PASS commits `planPath`'s content into the shared checkout bypassing the code-land
+			// gate. Even though candidate creation already rejects non-plan-doc paths (server.ts), re-enforce
+			// here so a persisted-state tamper / future non-HTTP caller can never make the vote commit code.
+			if (!isPlanDocPath(round.planPath)) return fail(`refusing to commit a non-plan-doc path: ${round.planPath} (must be plan markdown under plans/)`);
+			const abs = resolveSafeDocPath(round.repo, round.planPath);
+			if (!abs) return fail(`refusing an unsafe doc path: ${round.planPath}`);
 
-		// Never overwrite a manually-dirty doc in the operator checkout — same "refuse rather than
-		// clobber" discipline landAgent applies to the whole main tree (land.ts's mainStatus guard),
-		// scoped here to just the one path we're about to write.
-		const dirty = await hardenedGit(["-C", round.repo, "status", "--porcelain", "--", round.planPath]);
-		if (dirty.code === 0 && dirty.stdout.trim().length > 0) return fail(`${round.planPath} has uncommitted changes in the operator checkout — refusing to overwrite them`);
+			// Codex hardening: `revisionSha` comes from storage — treat it as an OBJECT ID, not any rev git
+			// might resolve (a branch name / "HEAD" / "@" could point somewhere unintended). Require a hex
+			// object id, then confirm it names a real commit object.
+			if (!round.revisionSha) return fail("no revision to land — the producer branch tip was never resolved at call time");
+			if (!/^[0-9a-f]{7,64}$/i.test(round.revisionSha)) return fail(`revision ${round.revisionSha} is not a valid git object id`);
+			const tipCheck = await hardenedGit(["-C", round.repo, "cat-file", "-e", `${round.revisionSha}^{commit}`]);
+			if (tipCheck.code !== 0) return fail(`revision ${round.revisionSha} is not a reachable commit in ${round.repo} (producer branch/worktree gone before the vote closed)`);
 
-		const content = await hardenedGit(["-C", round.repo, "show", `${round.revisionSha}:${round.planPath}`]);
-		if (content.code !== 0) return fail(`could not read ${round.planPath} at ${round.revisionSha}: ${content.stderr || content.stdout}`);
+			// §H3 base-SHA guard, now UNDER the land lock (HIGH 3): the doc's CURRENT committed SHA must still
+			// match what the round snapshotted at call time. A mismatch means the doc moved under the voters.
+			const nowBaseSha = await planDocHeadRevision(round.repo, round.planPath);
+			if (nowBaseSha !== round.baseSha) {
+				// MEDIUM 5 (crash between commit and marker): a mismatch might be OUR OWN prior commit whose
+				// idempotency marker never got written (crash in the gap). Before declaring "superseded",
+				// check whether the newest commit touching this doc carries THIS round's `Vote-round:` trailer
+				// — if so, we already landed it; reconcile to committed/accepted rather than false-superseding.
+				const head = await hardenedGit(["-C", round.repo, "log", "-1", "--format=%B", "--", round.planPath]);
+				if (head.code === 0 && head.stdout.includes(`Vote-round: ${round.id}`)) {
+					await accept(nowBaseSha, `plan vote ${round.id} passed — reconciled to already-landed ${nowBaseSha} (marker recovered after a crash)`, `${round.planPath} reconciled to ${nowBaseSha} (crash recovery)`);
+					this.log("info", `plan-vote ${round.id} reconciled to already-committed ${nowBaseSha}`);
+					return;
+				}
+				const detail = `plan doc ${round.planPath} moved (base was ${round.baseSha || "(none)"}, now ${nowBaseSha || "(none)"}) — revision changed under the vote; re-call the vote`;
+				await recordPlanVoteCommit(this.stateDir, round.id, "superseded", { detail });
+				await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "superseded", LOCAL_ACTOR.id, detail);
+				void this.recordAudit(LOCAL_ACTOR, "plan-vote.superseded", round.id, "error", detail);
+				this.emitFeaturesChanged();
+				return;
+			}
 
-		await fs.writeFile(abs, content.stdout, "utf8");
+			// Never overwrite a manually-dirty doc in the operator checkout — same "refuse rather than
+			// clobber" discipline landAgent applies to the whole main tree (land.ts's mainStatus guard),
+			// scoped here to just the one path.
+			const dirty = await hardenedGit(["-C", round.repo, "status", "--porcelain", "--", round.planPath]);
+			if (dirty.code === 0 && dirty.stdout.trim().length > 0) return fail(`${round.planPath} has uncommitted changes in the operator checkout — refusing to overwrite them`);
 
-		// No-op content (the reviser's revision is byte-identical to what's already committed): nothing
-		// to land, but the vote's outcome is still honored — accept the candidate against the existing HEAD.
-		const afterWrite = await hardenedGit(["-C", round.repo, "status", "--porcelain", "--", round.planPath]);
-		if (afterWrite.code === 0 && afterWrite.stdout.trim().length === 0) {
-			const headSha = (await hardenedGit(["-C", round.repo, "rev-parse", "HEAD"])).stdout.trim();
-			await recordPlanVoteCommit(this.stateDir, round.id, "committed", { sha: headSha, detail: "revision identical to the current committed doc — nothing new to land" });
-			await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "accepted", LOCAL_ACTOR.id, `plan vote ${round.id} passed (no-op — content unchanged)`);
-			void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "ok", `${round.planPath} unchanged at ${headSha}`);
-			this.emitFeaturesChanged();
-			return;
-		}
+			const content = await hardenedGit(["-C", round.repo, "show", `${round.revisionSha}:${round.planPath}`]);
+			if (content.code !== 0) return fail(`could not read ${round.planPath} at ${round.revisionSha}: ${content.stderr || content.stdout}`);
 
-		const add = await hardenedGit(["-C", round.repo, "add", "--", round.planPath]);
-		if (add.code !== 0) return fail(`git add failed: ${add.stderr || add.stdout}`);
+			// HIGH 4 (never leave the shared tree dirty): from here we mutate the working tree. Any failure
+			// after the write MUST restore the doc to its pre-write committed content — `git reset` only
+			// unstages, it doesn't revert file contents, so we hard-restore from HEAD (the base we verified
+			// above) and unstage. `committed` gates the restore off once the commit succeeds.
+			let committed = false;
+			try {
+				await fs.writeFile(abs, content.stdout, "utf8");
 
-		const planDir = path.dirname(round.planPath);
-		const approvers = round.casts.filter((c) => c.choice === "approve").map((c) => c.actorId);
-		const trailers = [...approvers.map((id) => `Approved-by: ${id}`), `Vote-round: ${round.id}`].join("\n");
-		const message = `plan(${planDir}): adopt reviewed revision — ${candidate.summary}\n\n${trailers}`;
-		const commit = await hardenedGit(["-C", round.repo, "commit", "-m", message]);
-		if (commit.code !== 0) {
-			await hardenedGit(["-C", round.repo, "reset", "--", round.planPath]).catch(() => undefined);
-			return fail(`git commit failed: ${commit.stderr || commit.stdout}`);
-		}
-		const newSha = (await hardenedGit(["-C", round.repo, "rev-parse", "HEAD"])).stdout.trim();
+				// No-op content (byte-identical to the committed doc): honor the vote by accepting the
+				// candidate against the existing HEAD — nothing to commit.
+				const afterWrite = await hardenedGit(["-C", round.repo, "status", "--porcelain", "--", round.planPath]);
+				if (afterWrite.code === 0 && afterWrite.stdout.trim().length === 0) {
+					committed = true; // nothing to restore — the write was a no-op
+					const headSha = (await hardenedGit(["-C", round.repo, "rev-parse", "HEAD"])).stdout.trim();
+					await accept(headSha, `plan vote ${round.id} passed (no-op — content unchanged)`, `${round.planPath} unchanged at ${headSha}`);
+					return;
+				}
 
-		await recordPlanVoteCommit(this.stateDir, round.id, "committed", { sha: newSha });
-		await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "accepted", LOCAL_ACTOR.id, `plan vote ${round.id} passed — landed ${newSha}`);
-		void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "ok", `${round.planPath} -> ${newSha} (${approvers.length} approver(s))`);
-		this.log("info", `plan-vote ${round.id} PASSED and COMMITTED ${round.planPath} -> ${newSha}`);
-		this.emitFeaturesChanged();
+				const planDir = path.dirname(round.planPath);
+				// MEDIUM 6 (trailer injection): candidate.summary and actorIds are attacker-influenceable —
+				// a summary or id carrying an embedded newline could forge `Approved-by:`/`Vote-round:`
+				// trailers. Collapse every interpolated value to a single line (strip CR/LF + other control
+				// chars) so injected newlines can't fabricate metadata.
+				const oneLine = (s: string) => s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+				const approvers = round.casts.filter((c) => c.choice === "approve").map((c) => oneLine(c.actorId)).filter((id) => id.length > 0);
+				const subject = `plan(${oneLine(planDir)}): adopt reviewed revision — ${oneLine(candidate.summary)}`;
+				const trailers = [...approvers.map((id) => `Approved-by: ${id}`), `Vote-round: ${oneLine(round.id)}`].join("\n");
+				const message = `${subject}\n\n${trailers}`;
+
+				// HIGH 2 (unscoped commit sweeps pre-staged files): `--only -- <planPath>` records ONLY this
+				// path's working-tree content, ignoring anything else already staged in the shared checkout.
+				const commit = await hardenedGit(["-C", round.repo, "commit", "--only", "-m", message, "--", round.planPath]);
+				if (commit.code !== 0) return fail(`git commit failed: ${commit.stderr || commit.stdout}`);
+				committed = true;
+				const newSha = (await hardenedGit(["-C", round.repo, "rev-parse", "HEAD"])).stdout.trim();
+				await accept(newSha, `plan vote ${round.id} passed — landed ${newSha}`, `${round.planPath} -> ${newSha} (${approvers.length} approver(s))`);
+				this.log("info", `plan-vote ${round.id} PASSED and COMMITTED ${round.planPath} -> ${newSha}`);
+			} finally {
+				if (!committed) {
+					// Restore the shared checkout: unstage anything we touched, then hard-restore the file's
+					// content from HEAD. Best-effort — the fail()/superseded record already captured the outcome.
+					await hardenedGit(["-C", round.repo, "reset", "-q", "--", round.planPath]).catch(() => undefined);
+					await hardenedGit(["-C", round.repo, "checkout", "-q", "HEAD", "--", round.planPath]).catch(() => undefined);
+				}
+			}
+		});
 	}
 
 	/** Best-effort done-proof lookup for a feature — feeds the task-pipeline artifacts rail (Wave 4

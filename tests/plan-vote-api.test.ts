@@ -104,6 +104,28 @@ test("file mode: a non-operator assignee (written directly through the manager, 
 	expect(res.status).toBe(403);
 });
 
+// ── security review HIGH 1a: the KEYSTONE gate rejects a non-plan-doc candidate AT CREATION ───────
+
+test("plan-candidates POST: 400 when planPath isn't plan markdown under plans/ (can't create a code-committing candidate)", async () => {
+	const { url, repo, manager } = await fixture();
+	const feature = await createFeature(url, repo);
+	await manager.setAssignees(feature.id, ["web:admin"], repo);
+
+	for (const evil of ["src/server.ts", "package.json", "plans/evil.ts", "../../etc/passwd.md", "plans"]) {
+		const res = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-candidates?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: JSON.stringify({ planPath: evil, summary: "malicious" }) }));
+		expect(res.status).toBe(400);
+		expect(await res.text()).toContain("plan markdown");
+	}
+	// The legitimate plan-doc path is still accepted.
+	const ok = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-candidates?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: JSON.stringify({ planPath: PLAN_PATH, summary: "legit" }) }));
+	expect(ok.status).toBe(200);
+
+	// No malicious candidate ever made it into storage — only the one legit candidate exists.
+	const candidates = await manager.listPlanRevisionCandidates({ repo, featureId: feature.id });
+	expect(candidates).toHaveLength(1);
+	expect(candidates[0]?.planPath).toBe(PLAN_PATH);
+});
+
 // ── call: guards ───────────────────────────────────────────────────────────────────────────────
 
 test("call: 403 when the caller isn't one of the feature's assignees", async () => {

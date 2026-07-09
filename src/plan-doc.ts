@@ -26,6 +26,31 @@ export function resolveSafeDocPath(repo: string, docPath: string): string | unde
 	return abs.startsWith(root) ? abs : undefined;
 }
 
+/**
+ * True iff `docPath` is a plan MARKDOWN doc: repo-relative (never absolute), rooted at `plans/`, no
+ * `..` traversal, and ending in `.md` (case-insensitive). This is the KEYSTONE gate for commit-on-pass
+ * (PLAN-VOTE-COMMIT.md security review HIGH 1): a plan-vote's PASSED outcome commits `docPath`'s
+ * content into the shared checkout, bypassing the code-land gate — so the path it may ever touch MUST
+ * be constrained to plan markdown under `plans/`, never a source/config file. Enforced at BOTH
+ * candidate creation (reject at the source) AND immediately before the commit (never trust a stored
+ * path). Uses POSIX-normalized segments so a Windows-style separator or a `.` segment can't sneak
+ * past. Deliberately does NOT touch the filesystem — a pure lexical predicate, safe to call anywhere.
+ */
+export function isPlanDocPath(docPath: string): boolean {
+	if (typeof docPath !== "string" || docPath.length === 0) return false;
+	if (path.isAbsolute(docPath)) return false;
+	const norm = docPath.replaceAll("\\", "/");
+	if (!norm.toLowerCase().endsWith(".md")) return false;
+	const segments = norm.split("/");
+	if (segments[0] !== "plans") return false; // must be rooted at plans/
+	if (segments.length < 2) return false; // "plans" alone (or "plans/") is a dir, not a doc
+	// No traversal or empty/current-dir segments anywhere (…/../…, //, /./).
+	for (const seg of segments) {
+		if (seg === "" || seg === "." || seg === "..") return false;
+	}
+	return true;
+}
+
 export interface PlanDocRead {
 	path: string;
 	content: string;
