@@ -138,7 +138,7 @@ import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPath
 import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, provisionWorktreeDeps, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
-import { changedFiles } from "./explore.ts";
+import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
@@ -2871,10 +2871,13 @@ export class SquadManager extends EventEmitter {
 				// agent's LAST finalized RunReceipt (`lastReceipt`, hoisted above alongside `effectiveModel`
 				// so both this row-write and the model-outcome ledger write above key on the SAME receipt
 				// read). `readReceipts` returns rows in append order, so the last entry is the most recent
-				// run; its `filesTouched` (git-status-derived at that run's finish()) already reflects every
-				// prior turn's uncommitted changes too, since nothing is committed until land()'s own
-				// commitWip. Undefined when no run ever finalized for this agent (e.g. a re-adopted/direct
-				// land with no receipt on disk) — never fabricated.
+				// run; its `filesTouched` is now BASE-RELATIVE (`runFilesTouched` → `filesTouchedSinceBase`),
+				// spanning committed and uncommitted work alike. It used to be a bare `git status` probe,
+				// resting on "nothing is committed until land()'s own commitWip" — false for any agent that
+				// commits its own work, and false for every unit now that `commitAgentWip` sweeps before
+				// verify. That assumption zeroed 16 of 18 rows in this host's live ledger.
+				// Undefined when no run ever finalized for this agent (e.g. a re-adopted/direct land with no
+				// receipt on disk) — never fabricated.
 				// fixupCount: the SAME workflow-engine visit counter (`WorkflowRunState.visits.fixup`)
 				// concern 01's fixups-to-green metric (recordWorkflowOutcomeMetrics above) and
 				// digestReward's firstTryGreen already read. IN-RUN churn, not post-merge regression — see
@@ -5885,6 +5888,40 @@ export class SquadManager extends EventEmitter {
 	 * the accumulator so the next turn starts fresh. Idempotent per run via the
 	 * accumulator's `finalized` flag (agent_end + exit can both fire).
 	 */
+	/**
+	 * The unit's real blast radius: every file it has touched since forking from its base, committed or
+	 * not. Feeds the receipt, and through it `scoreConfidence`'s `filesTouched` term and the
+	 * task-outcomes ledger.
+	 *
+	 * A bare `git status` probe (what this used to be) counts only UNCOMMITTED paths, so a unit that
+	 * committed its own work reported ZERO files touched — and `confidence.ts` reads `<= 3` as a
+	 * small-change BONUS, `> 12` as a penalty, with confidence gating auto-land. Live ledger on this
+	 * host: 16 of 18 rows carried `filesTouched: 0`, one of them for a change that really touched 16
+	 * files. `commitAgentWip` (the daemon's own pre-verify sweep) makes committed work the normal case,
+	 * so this had to become base-relative or the signal would have gone permanently to zero.
+	 *
+	 * Base: `origin/<default>` in PR mode (where the unit forked from), else the shared checkout's HEAD —
+	 * the same base `land()` merges into. An in-place agent (no branch of its own) has no fork point;
+	 * its working tree IS the change.
+	 */
+	private async runFilesTouched(rec: AgentRecord): Promise<string[]> {
+		const { repo, worktree, branch } = rec.dto;
+		if (!branch || path.resolve(worktree) === path.resolve(repo)) return changedFiles(worktree);
+		try {
+			const mode = await this.resolveLandModeFor(repo);
+			let baseRef: string | undefined;
+			if (mode.mode === "pr" && mode.defaultBranch) baseRef = `origin/${mode.defaultBranch}`;
+			else {
+				const head = await hardenedGit(["rev-parse", "HEAD"], { cwd: repo });
+				baseRef = head.code === 0 ? head.stdout.trim() : undefined;
+			}
+			if (!baseRef) return changedFiles(worktree);
+			return await filesTouchedSinceBase(worktree, baseRef);
+		} catch {
+			return changedFiles(worktree); // never let a receipt fail over a metric
+		}
+	}
+
 	private async finalizeRun(rec: AgentRecord): Promise<void> {
 		const run = rec.run;
 		if (!run || run.finalized) return;
@@ -5898,7 +5935,7 @@ export class SquadManager extends EventEmitter {
 		// is itself first-model-wins (never overwrites an explicit start()-time model), so this is a
 		// pure gap-fill, not a behavior change for a run that already resolved its model earlier.
 		if (rec.dto.model) run.noteModel(rec.dto.model);
-		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
+		run.finish(rec.dto.status, await this.runFilesTouched(rec));
 		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
 		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it
 		// survives the run — the input Epic 5's confidence scorer reads via buildDigest.
