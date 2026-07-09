@@ -1,0 +1,25 @@
+# Live endpoint transcript — feat/plan-assignees
+# Scratch daemon (SAFE BOOT: all autonomy flags off, HOME repointed), file mode, port 7893.
+# Date: Thu Jul  9 00:46:26 UTC 2026
+
+$ curl /api/auth/mode
+{"mode":"file","allowSignup":false,"socialProviders":[],"sso":false}
+
+$ POST /api/features  {title:'Plan voting demo'}  → default-seed
+  (feature id: feat-mrcs25hb-pdmv)
+$ GET /api/features/:id/assignees   # round-trips the seeded default
+{"assignees":["lars"]}
+
+$ PUT .../assignees {assignees:['lars']}   # valid operator identity → 200
+{"id":"feat-mrcs25hb-pdmv","title":"Plan voting demo","repo":"/home/lars/sui/omp-squad/.claude/worktrees/agent-a88770ecfa580be79","assignees":["lars"],"createdAt":1783557456959,"updatedAt":1783557986660}  [http 200]
+
+$ PUT .../assignees {assignees:['db:stranger']}   # file mode rejects non-operator → 400
+file mode has a single operator (lars); multi-user voting needs DB mode  [http 400]
+
+
+$ PUT .../assignees {assignees:'nope'}   # malformed body → 400 (schema)
+assignees (string[]) required  [http 400]
+
+
+# Every one of the 34 live features carries a seeded assignee (default = operator 'lars'):
+  features: 34  | with assignees: 34  | A=0: 0

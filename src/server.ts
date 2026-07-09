@@ -18,6 +18,7 @@ import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
 import { envBool, envInt } from "./config.ts";
+import { invalidFileAssignees, invalidOrgAssignees } from "./feature-assignees.ts";
 import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
@@ -27,6 +28,7 @@ import {
 	AgentVisionBodySchema,
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
+	AssigneesBodySchema,
 	CapabilityInstallBodySchema,
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
@@ -1135,6 +1137,10 @@ export class SquadServer {
 					? { ...actorForRole(role), orgId }
 					: actorForRole(role);
 		const manager = await this.managerFor(actor);
+		// Seed identity for features created this request: a real signed-in user's `db:<userId>` when
+		// there's a session, else undefined ⇒ the manager falls back to its own operator identity
+		// (file mode, or an on-box bootstrap admin with no session). Never seeds a role-derived id.
+		const featureAuthor = session ? actor.id : undefined;
 		// Fleet-wide GET observability (graph/usage/heat/activity/action-items/governance) is resolved
 		// against the SAME break-glass audience as GET /api/agents above (see observabilityManagers) so
 		// it must be checked before the `!manager` gate below: a bootstrap-admin without a root factory
@@ -1215,7 +1221,7 @@ export class SquadServer {
 			const body = decoded.success;
 			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 			const planDir = typeof body.planDir === "string" ? body.planDir : undefined;
-			manager.createFeature({ title: body.title, repo, planDir });
+			manager.createFeature({ title: body.title, repo, planDir, author: featureAuthor });
 			return Response.json({ ok: true });
 		}
 		if (url.pathname === "/api/features/from-plan" && req.method === "POST") {
@@ -1228,7 +1234,7 @@ export class SquadServer {
 			const fallbackTitle = typeof body.title === "string" && body.title.trim() ? body.title.trim() : path.basename(planDir).replace(/[-_]+/g, " ");
 			const title = planTitle ?? fallbackTitle;
 			const existing = (await manager.features(repo)).find((f) => f.planDir === planDir);
-			const pf = existing ?? manager.createFeature({ title, repo, planDir });
+			const pf = existing ?? manager.createFeature({ title, repo, planDir, author: featureAuthor });
 			return Response.json(pf);
 		}
 		if (url.pathname === "/api/features/auto" && req.method === "POST") {
@@ -1238,7 +1244,7 @@ export class SquadServer {
 			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 			const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : body.goal.trim().slice(0, 48);
 			const model = typeof body.model === "string" && body.model ? body.model : undefined;
-			const { feature, agent } = await manager.createAutoFeature({ title, repo, goal: body.goal.trim(), model });
+			const { feature, agent } = await manager.createAutoFeature({ title, repo, goal: body.goal.trim(), model, author: featureAuthor });
 			return Response.json({ feature, agentId: agent.id });
 		}
 		const mfpatch = url.pathname.match(/^\/api\/features\/([^/]+)$/);
@@ -1262,6 +1268,36 @@ export class SquadServer {
 			const plane = url.searchParams.get("plane") === "detach" ? "detach" : "keep";
 			const result = await manager.deleteFeature(decodeURIComponent(mfpatch[1]), { repo, plane });
 			return result.deleted ? Response.json(result) : new Response("no such feature", { status: 404 });
+		}
+		// Human assignees — the substrate for plan voting (a later vote is majority-of-all-assignees).
+		// GET is viewer-readable; PUT is admin-only (see restActionTier). Identity validation is
+		// mode-aware: DB mode checks each id against the active org's roster; file mode collapses to
+		// the single operator identity.
+		const mfassign = url.pathname.match(/^\/api\/features\/([^/]+)\/assignees$/);
+		if (mfassign && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? undefined;
+			const assignees = await manager.featureAssignees(decodeURIComponent(mfassign[1]), repo);
+			return assignees ? Response.json({ assignees }) : new Response("no such feature", { status: 404 });
+		}
+		if (mfassign && req.method === "PUT") {
+			const decoded = decodeBody(AssigneesBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("assignees (string[]) required", { status: 400 });
+			const requested = [...new Set(decoded.success.assignees)];
+			const repo = url.searchParams.get("repo") ?? undefined;
+			const orgId = session?.session.activeOrganizationId ?? undefined;
+			if (this.dbMode && this.db && orgId) {
+				// DB mode: every assignee must be a real member of the caller's active org.
+				const unknown = invalidOrgAssignees(requested, await listOrgMembers(this.db.db, orgId));
+				if (unknown.length) return new Response(`not org members: ${unknown.join(", ")}`, { status: 400 });
+			} else {
+				// File mode (or an on-box operator with no org roster): the only valid assignee is the
+				// single operator identity — multi-user voting needs DB mode.
+				const operatorId = manager.operatorId;
+				const unknown = invalidFileAssignees(requested, operatorId);
+				if (unknown.length) return new Response(`file mode has a single operator (${operatorId}); multi-user voting needs DB mode`, { status: 400 });
+			}
+			const pf = await manager.setAssignees(decodeURIComponent(mfassign[1]), requested, repo);
+			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
 		}
 		const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
 		if (mflink && req.method === "POST") {

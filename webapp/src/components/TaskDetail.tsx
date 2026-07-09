@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { MarkdownComponents, PlanBlockContext } from './PlanBlocks';
 import { AgentSourceBadge } from './AgentSourceBadge';
 import { TaskProperties } from './TaskProperties';
+import { AssigneesEditor } from './AssigneesEditor';
 import { ProofProvenancePanel } from './ProofProvenancePanel';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
@@ -1787,6 +1788,8 @@ export const TaskDetail = () => {
               </div>
               </div>
               </details>
+
+              {featureId && <AssigneesEditor featureId={featureId} repo={repo} />}
 
               {activeAgents.length > 0 && (
                 <div className="mb-6">

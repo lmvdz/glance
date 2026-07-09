@@ -182,6 +182,10 @@ export interface FeatureDTO {
   stage: FeatureStage;
   planDir?: string;
   agentIds: string[];
+  /** Human assignees — user identity strings (`db:<userId>` in DB mode, the operator identity in
+   *  file mode). The substrate for plan voting (a later vote is majority-of-all-assignees). Always
+   *  present (seeded on first persist; legacy features default to `[operator]`). */
+  assignees: string[];
   worktrees: FeatureWorktreeStatusDTO[];
   unlandedFiles: number;
   divergent: boolean;

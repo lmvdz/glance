@@ -70,6 +70,9 @@ export function restActionTier(method: string, pathname: string): Role {
 	if (/^\/api\/agents\/[^/]+\/(land|vision)$/.test(pathname) || /^\/api\/features\/[^/]+\/(land|verify)$/.test(pathname)) {
 		return "admin";
 	}
+	// Assignees are the plan-vote substrate: any viewer may read them; only an admin may reassign
+	// (a reassignment changes who the future majority-of-assignees vote counts).
+	if (/^\/api\/features\/[^/]+\/assignees$/.test(pathname)) return method === "GET" ? "viewer" : "admin";
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }

@@ -841,7 +841,7 @@ export function featureReadiness(feature: Pick<FeatureDTO, "stage" | "blocked" |
 }
 
 /** Build the feature list for one repo: persisted features (explicit membership) + unadopted plan dirs + unassigned agents. */
-export async function buildFeatures(repo: string, agents: AgentDTO[], persisted: PersistedFeature[] = []): Promise<FeatureDTO[]> {
+export async function buildFeatures(repo: string, agents: AgentDTO[], persisted: PersistedFeature[] = [], operatorId = "local"): Promise<FeatureDTO[]> {
 	const features: FeatureDTO[] = [];
 	const assigned = new Set<string>();
 	const adoptedDirs = new Set<string>();
@@ -890,6 +890,9 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			stage,
 			planDir: pf.origin?.planDir,
 			agentIds: members.map((a) => a.id),
+			// Backward-compatible: a feature persisted before assignees existed (or with an empty array)
+			// defaults to the single operator identity so the vote substrate is never A=0.
+			assignees: pf.assignees && pf.assignees.length ? pf.assignees : [operatorId],
 			worktrees,
 			unlandedFiles,
 			divergent,
@@ -928,6 +931,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			stage,
 			planDir: pd.dir,
 			agentIds: [],
+			assignees: [operatorId],
 			worktrees: [],
 			unlandedFiles: 0,
 			divergent: false,
@@ -960,6 +964,7 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 			repo,
 			stage,
 			agentIds: [a.id],
+			assignees: [operatorId],
 			worktrees,
 			unlandedFiles,
 			divergent,

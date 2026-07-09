@@ -197,6 +197,13 @@ export const FeaturePatchBodySchema = Schema.Struct({
 	relationships: Schema.optional(Schema.Unknown),
 });
 
+/** PUT /api/features/:id/assignees — `assignees` (a string[] of user identities) required. Each id
+ *  is validated post-decode against the org roster (DB mode) or the operator identity (file mode);
+ *  the schema only asserts the envelope is `{ assignees: string[] }`, rejecting a non-array body. */
+export const AssigneesBodySchema = Schema.Struct({
+	assignees: Schema.Array(Schema.String),
+});
+
 /** POST /api/features/:id/agents — either a `task` (creates+links a new agent) or an
  *  `agentId` (links/unlinks an existing one); neither is unconditionally required. */
 export const FeatureAgentsLinkBodySchema = Schema.Struct({

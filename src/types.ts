@@ -522,6 +522,11 @@ export interface FeatureDTO {
 	planDir?: string;
 	/** Roster agent ids that belong to this feature. */
 	agentIds: string[];
+	/** Human assignees — user identity strings (`db:<userId>` in DB mode, the operator identity in
+	 *  file mode). The substrate for plan voting: a later vote is majority-of-all-assignees. Always
+	 *  present on the DTO (seeded to `[author]`/`[operator]` on first persist; a legacy persisted
+	 *  feature with no stored value defaults to `[operator]`). */
+	assignees: string[];
 	/** Per-branch land status for member worktrees. */
 	worktrees: FeatureWorktreeStatus[];
 	/** Σ changedFiles across member worktrees — the board's amber "unlanded" number. */
@@ -983,6 +988,10 @@ export interface PersistedFeature {
 	/** Manual category pin; otherwise the client derives one (regex over title+planDir, 'other'
 	 *  fallback). See `FeatureCategory`'s doc comment. */
 	category?: FeatureCategory;
+	/** Human assignees — user identity strings (`db:<userId>` in DB mode, the operator identity in
+	 *  file mode). Seeded to `[author ?? operator]` on first persist. Absent on features persisted
+	 *  before this field existed ⇒ the DTO defaults them to `[operator]` (backward-compatible parse). */
+	assignees?: string[];
 	/** Repo-relative provenance. */
 	origin?: { planDir?: string; briefPath?: string };
 	plane?: { moduleId?: string; moduleUrl?: string; issueIdentifiers?: string[] };
