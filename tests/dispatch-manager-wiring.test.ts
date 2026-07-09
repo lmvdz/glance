@@ -166,16 +166,32 @@ async function makeWiredManager(): Promise<{ mgr: SquadManager; issuesRef: { cur
 	};
 }
 
-test("today (no verified second provider lane): a cap on ANY provider still freezes the whole real-manager tick", async () => {
+test("no verified second provider lane: a cap on ANY provider still freezes the whole real-manager tick", async () => {
+	// The pre-grok world: hold grok unverified so the fleet has no vendor-pinned lane at all. The ladder
+	// deps are wired but inert, and the legacy no-arg top-of-tick check freezes everything on any cap.
+	await withHarnessOverride("grok", { verified: false }, async () => {
+		const { mgr, stop } = await makeWiredManager();
+		const internals = mgr as unknown as ManagerInternals;
+		expect(internals.dispatcher).toBeDefined();
+
+		// A provider that would NEVER match this fleet's resolved (default-harness, no-model) provider.
+		internals.rateLimit.note("429 usage limit", 10 * 60_000, "openai");
+		const spawned = await internals.dispatcher!.tick();
+		expect(spawned).toBe(0);
+		await stop();
+	});
+}, 20_000);
+
+test("grok makes the lane REAL out of the box: a mismatched cap no longer freezes the default-harness tick", async () => {
+	// No override — this is the shipped registry. grok is verified:true and pinned to `xai`, so
+	// hasSecondVerifiedProviderLane() is true through the REAL wired closure and an "openai" cap must
+	// not touch units that resolve to the default (anthropic) bucket. This is the ladder going live.
 	const { mgr, stop } = await makeWiredManager();
 	const internals = mgr as unknown as ManagerInternals;
-	expect(internals.dispatcher).toBeDefined(); // the ladder deps are wired, but inert without a second lane
 
-	// A provider that would NEVER match this fleet's resolved (default-harness, no-model) provider —
-	// under the legacy no-arg top-of-tick check this still freezes everything, exactly as before the ladder.
 	internals.rateLimit.note("429 usage limit", 10 * 60_000, "openai");
 	const spawned = await internals.dispatcher!.tick();
-	expect(spawned).toBe(0);
+	expect(spawned).toBe(2);
 	await stop();
 }, 20_000);
 
