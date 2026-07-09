@@ -195,7 +195,10 @@ test("call → cast: A=1 auto-passes, is audited, and leaves the candidate for t
 	const getAfter = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-vote?repo=${encodeURIComponent(repo)}`, authed()).then((res) => res.json());
 	expect(getAfter.round.state).toBe("passed");
 
-	// The candidate is UNTOUCHED by a pass — commit-on-pass is a later unit's job (the onVotePassed seam).
+	// Commit-on-pass (onVotePassed) DOES run now — but `repo` here is a plain temp dir, not a real git
+	// repo, so there's no producer branch/tip to resolve at call time (revisionSha comes back "") and
+	// it fails closed rather than landing anything: the candidate stays "candidate" for a human to
+	// notice. See tests/plan-vote-commit.test.ts for the real-git commit-lands-cleanly money-shot.
 	const candidates = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-candidates?repo=${encodeURIComponent(repo)}`, authed()).then((res) => res.json());
 	expect(candidates.find((c: { id: string }) => c.id === candidate.id)?.state).toBe("candidate");
 
@@ -246,12 +249,15 @@ test("cast: 404 on a round from a different feature", async () => {
 // feature-assignees.test.ts and plan-annotations-api.test.ts's second test drive multi-actor
 // scenarios: through the manager directly, with an explicit actor id per call) ──────────────────
 
-test("2 of 3 approve → PASSED, decided EARLY (before the 3rd casts), candidate left for commit-on-pass", async () => {
+test("2 of 3 approve → PASSED, decided EARLY (before the 3rd casts); commit-on-pass runs but can't land this fixture's fake revision", async () => {
 	const { manager, repo } = await fixture();
 	const pf = manager.createFeature({ title: "Multi-voter", repo });
 	await manager.setAssignees(pf.id, ["db:u1", "db:u2", "db:u3"], repo);
 	const candidate = await manager.addPlanRevisionCandidate({ repo, featureId: pf.id, planPath: PLAN_PATH, summary: "multi-voter change" });
-	const round = await openRound(manager, { featureId: pf.id, repo, planPath: PLAN_PATH, candidateId: candidate.id, baseSha: "sha1", revisionSha: "sha2", assignees: ["db:u1", "db:u2", "db:u3"], openedBy: "db:u1" });
+	// `fixture()`'s repo is a plain temp dir, not a git repo, so its real `planDocHeadRevision` is "" —
+	// baseSha must match that (not a fake non-empty literal) or V4's base-SHA guard (onVotePassed,
+	// squad-manager.ts) would misfire "superseded" against a doc that never actually moved.
+	const round = await openRound(manager, { featureId: pf.id, repo, planPath: PLAN_PATH, candidateId: candidate.id, baseSha: "", revisionSha: "sha2", assignees: ["db:u1", "db:u2", "db:u3"], openedBy: "db:u1" });
 
 	const r1 = await manager.castPlanVote(pf.id, round.id, "db:u1", "approve", "db:u1");
 	expect(r1.round.state).toBe("voting"); // 1/3 — not yet decided
@@ -259,8 +265,13 @@ test("2 of 3 approve → PASSED, decided EARLY (before the 3rd casts), candidate
 	expect(r2.round.state).toBe("passed"); // 2/3 > 1.5 — decided WITHOUT the 3rd vote
 	expect(r2.quorum).toMatchObject({ approvals: 2, pending: 1, decided: true, passed: true });
 
+	// Commit-on-pass DID run (this unit's job now) — but "sha2" isn't a real commit in a real repo, so
+	// it fails closed rather than landing anything: the candidate is left as "candidate" for a human to
+	// notice, never silently accepted. See tests/plan-vote-commit.test.ts for the real-git money-shot.
+	const closed = (await manager.listPlanVoteRounds({ repo, featureId: pf.id })).find((r) => r.id === round.id);
+	expect(closed?.commitOutcome).toBe("failed");
 	const candidates = await manager.listPlanRevisionCandidates({ repo, featureId: pf.id });
-	expect(candidates.find((c) => c.id === candidate.id)?.state).toBe("candidate"); // untouched — V4's job
+	expect(candidates.find((c) => c.id === candidate.id)?.state).toBe("candidate");
 });
 
 test("2 of 3 reject → candidate transitions to rejected, plan tree untouched", async () => {

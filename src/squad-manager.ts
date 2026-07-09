@@ -152,7 +152,8 @@ import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } 
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
-import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, tallyPlanVoteRound } from "./plan-votes.ts";
+import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
+import { planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
@@ -6299,20 +6300,116 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * SEAM FOR THE COMMIT-ON-PASS UNIT (PLAN-VOTE-COMMIT.md §D/§G4): called once per passing round,
-	 * the instant it transitions to "passed", with that round (its `baseSha`/`revisionSha`/
-	 * `assignees` already snapshotted at call time). The per-feature `withVoteLock` guarantees a
-	 * single fire even under a concurrent deciding-cast race — but V4's implementation MUST STILL be
-	 * idempotent (guard on a durable `committedAt`/candidate-already-accepted marker) as belt-and-
-	 * braces against a crash between close and commit, or a future non-locked caller. That unit
-	 * replaces this no-op with: land the candidate's producing branch scoped to `round.planPath`'s
-	 * dir (reuse `landAgent`/land.ts), refusing if the plan doc's CURRENT committed SHA has since
-	 * moved past `round.baseSha` (the base-SHA guard, §H3), then
-	 * `transitionPlanRevisionCandidate(round.candidateId, "accepted", ...)`. This unit's scope is the
-	 * vote round + quorum math only — it never commits.
+	 * COMMIT-ON-PASS (PLAN-VOTE-COMMIT.md §D/§H3): fires once per passing round, the instant it
+	 * transitions to "passed", with that round's `baseSha`/`revisionSha`/`assignees`/`casts` already
+	 * snapshotted at call time. The per-feature `withVoteLock` guarantees a single fire even under a
+	 * concurrent deciding-cast race, but this is STILL defense-in-depth idempotent (guarded on the
+	 * round's durable `commitOutcome` marker) against a crash between close and commit, or a future
+	 * non-locked caller.
+	 *
+	 * Scoped doc-only merge, not a full `landAgent`: this lands one reviewed markdown file, not a code
+	 * branch through the acceptance/regression/stale/risk gates that exist to protect a shared code
+	 * tree from a whole branch's unverified changes. `revisionSha` (the producer branch's tip, resolved
+	 * at call time) is a real commit object in the SAME repo's object database — every squad worktree
+	 * is a `git worktree add` of this repo, so its history is reachable from the operator checkout by
+	 * SHA alone, with no dependency on the producer's worktree still existing (it may already be
+	 * reaped by the time a slow vote closes). `git show <sha>:<path>` reads the doc's content at that
+	 * revision directly; `git add` + `git commit` land it, scoped to that one path.
+	 *
+	 * The base-SHA guard (§H3, mandatory): if the plan doc's CURRENT committed SHA has moved past
+	 * `round.baseSha` since the round opened (someone else committed to it mid-vote), the vote's
+	 * premise — "the assignees approved exactly this diff against exactly this base" — no longer
+	 * holds. Refuse to commit, mark the round `commitOutcome: "superseded"` and the candidate
+	 * `"superseded"`, and surface a clear "re-call the vote" outcome rather than silently merging over
+	 * (or worse, clobbering) whatever changed underneath.
 	 */
 	private async onVotePassed(round: PlanVoteRound): Promise<void> {
-		this.log("info", `plan-vote ${round.id} PASSED for candidate ${round.candidateId} (${round.planPath}) — awaiting commit-on-pass wiring`);
+		// Idempotency guard: re-read the durable round rather than trusting the possibly-stale object the
+		// caller passed in. Once `commitOutcome` is set (by ANY prior attempt — committed, superseded, or
+		// failed), every subsequent call for this round is a pure no-op.
+		const rounds = await readPlanVoteRounds(this.stateDir, { repo: round.repo, featureId: round.featureId });
+		const current = rounds.find((r) => r.id === round.id) ?? round;
+		if (current.commitOutcome) {
+			this.log("info", `plan-vote ${round.id} onVotePassed: already ${current.commitOutcome} — no-op`);
+			return;
+		}
+
+		const candidates = await readPlanRevisionCandidates(this.stateDir, {});
+		const candidate = candidates.find((c) => c.id === round.candidateId);
+		if (!candidate) {
+			await recordPlanVoteCommit(this.stateDir, round.id, "failed", { detail: `candidate ${round.candidateId} no longer exists` });
+			void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "error", `candidate ${round.candidateId} vanished`);
+			this.emitFeaturesChanged();
+			return;
+		}
+
+		// §H3 base-SHA guard: the doc's CURRENT committed SHA must still match what the round snapshotted
+		// at call time. A mismatch means the doc moved under the voters — refuse, never commit.
+		const nowBaseSha = await planDocHeadRevision(round.repo, round.planPath);
+		if (nowBaseSha !== round.baseSha) {
+			const detail = `plan doc ${round.planPath} moved (base was ${round.baseSha || "(none)"}, now ${nowBaseSha || "(none)"}) — revision changed under the vote; re-call the vote`;
+			await recordPlanVoteCommit(this.stateDir, round.id, "superseded", { detail });
+			await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "superseded", LOCAL_ACTOR.id, detail);
+			void this.recordAudit(LOCAL_ACTOR, "plan-vote.superseded", round.id, "error", detail);
+			this.emitFeaturesChanged();
+			return;
+		}
+
+		const fail = async (detail: string) => {
+			await recordPlanVoteCommit(this.stateDir, round.id, "failed", { detail });
+			void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "error", detail);
+			this.emitFeaturesChanged();
+		};
+
+		if (!round.revisionSha) return fail("no revision to land — the producer branch tip was never resolved at call time");
+		const abs = resolveSafeDocPath(round.repo, round.planPath);
+		if (!abs) return fail(`refusing an unsafe doc path: ${round.planPath}`);
+
+		const tipCheck = await hardenedGit(["-C", round.repo, "cat-file", "-e", `${round.revisionSha}^{commit}`]);
+		if (tipCheck.code !== 0) return fail(`revision ${round.revisionSha} is not a reachable commit in ${round.repo} (producer branch/worktree gone before the vote closed)`);
+
+		// Never overwrite a manually-dirty doc in the operator checkout — same "refuse rather than
+		// clobber" discipline landAgent applies to the whole main tree (land.ts's mainStatus guard),
+		// scoped here to just the one path we're about to write.
+		const dirty = await hardenedGit(["-C", round.repo, "status", "--porcelain", "--", round.planPath]);
+		if (dirty.code === 0 && dirty.stdout.trim().length > 0) return fail(`${round.planPath} has uncommitted changes in the operator checkout — refusing to overwrite them`);
+
+		const content = await hardenedGit(["-C", round.repo, "show", `${round.revisionSha}:${round.planPath}`]);
+		if (content.code !== 0) return fail(`could not read ${round.planPath} at ${round.revisionSha}: ${content.stderr || content.stdout}`);
+
+		await fs.writeFile(abs, content.stdout, "utf8");
+
+		// No-op content (the reviser's revision is byte-identical to what's already committed): nothing
+		// to land, but the vote's outcome is still honored — accept the candidate against the existing HEAD.
+		const afterWrite = await hardenedGit(["-C", round.repo, "status", "--porcelain", "--", round.planPath]);
+		if (afterWrite.code === 0 && afterWrite.stdout.trim().length === 0) {
+			const headSha = (await hardenedGit(["-C", round.repo, "rev-parse", "HEAD"])).stdout.trim();
+			await recordPlanVoteCommit(this.stateDir, round.id, "committed", { sha: headSha, detail: "revision identical to the current committed doc — nothing new to land" });
+			await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "accepted", LOCAL_ACTOR.id, `plan vote ${round.id} passed (no-op — content unchanged)`);
+			void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "ok", `${round.planPath} unchanged at ${headSha}`);
+			this.emitFeaturesChanged();
+			return;
+		}
+
+		const add = await hardenedGit(["-C", round.repo, "add", "--", round.planPath]);
+		if (add.code !== 0) return fail(`git add failed: ${add.stderr || add.stdout}`);
+
+		const planDir = path.dirname(round.planPath);
+		const approvers = round.casts.filter((c) => c.choice === "approve").map((c) => c.actorId);
+		const trailers = [...approvers.map((id) => `Approved-by: ${id}`), `Vote-round: ${round.id}`].join("\n");
+		const message = `plan(${planDir}): adopt reviewed revision — ${candidate.summary}\n\n${trailers}`;
+		const commit = await hardenedGit(["-C", round.repo, "commit", "-m", message]);
+		if (commit.code !== 0) {
+			await hardenedGit(["-C", round.repo, "reset", "--", round.planPath]).catch(() => undefined);
+			return fail(`git commit failed: ${commit.stderr || commit.stdout}`);
+		}
+		const newSha = (await hardenedGit(["-C", round.repo, "rev-parse", "HEAD"])).stdout.trim();
+
+		await recordPlanVoteCommit(this.stateDir, round.id, "committed", { sha: newSha });
+		await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "accepted", LOCAL_ACTOR.id, `plan vote ${round.id} passed — landed ${newSha}`);
+		void this.recordAudit(LOCAL_ACTOR, "plan-vote.commit", round.id, "ok", `${round.planPath} -> ${newSha} (${approvers.length} approver(s))`);
+		this.log("info", `plan-vote ${round.id} PASSED and COMMITTED ${round.planPath} -> ${newSha}`);
+		this.emitFeaturesChanged();
 	}
 
 	/** Best-effort done-proof lookup for a feature — feeds the task-pipeline artifacts rail (Wave 4

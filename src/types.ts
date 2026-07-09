@@ -557,6 +557,18 @@ export interface PlanVoteRound {
 	casts: PlanVoteCast[];
 	closedAt?: number;
 	closedReason?: string;
+	/** The commit-on-pass unit's durable outcome marker (PLAN-VOTE-COMMIT.md §D/§H3) — folded from the
+	 *  FIRST "commit" event for this round, exactly like `closedAt`/`closedReason` fold the first
+	 *  "close" event. Once set, `onVotePassed` is a no-op on any further call for this round (the
+	 *  idempotency guard): "committed" (the doc revision landed), "superseded" (the doc's committed SHA
+	 *  moved since `baseSha` was snapshotted — refused, never committed), or "failed" (a non-supersede
+	 *  reason the commit couldn't proceed, e.g. no resolvable revision). Absent ⇒ never attempted. */
+	commitOutcome?: "committed" | "superseded" | "failed";
+	commitAt?: number;
+	/** The new commit SHA landed on the operator checkout's default branch, when `commitOutcome ===
+	 *  "committed"`. */
+	commitSha?: string;
+	commitDetail?: string;
 }
 
 /**

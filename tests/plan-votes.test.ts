@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { castPlanVote, closePlanVoteRound, currentPlanVoteRound, listPlanVoteRounds, openPlanVoteRound, planVoteGateOpen, planVotesPath, tallyPlanVoteRound } from "../src/plan-votes.ts";
+import { castPlanVote, closePlanVoteRound, currentPlanVoteRound, listPlanVoteRounds, openPlanVoteRound, planVoteGateOpen, planVotesPath, recordPlanVoteCommit, tallyPlanVoteRound } from "../src/plan-votes.ts";
 import type { ArtifactComment } from "../src/comments.ts";
 
 async function tmp(): Promise<string> {
@@ -123,6 +123,53 @@ test("tallyPlanVoteRound adapts the folded round straight into computeVoteQuorum
 		const [got] = await listPlanVoteRounds(dir, { repo: "/r", featureId: "feat" });
 		const quorum = tallyPlanVoteRound(got!);
 		expect(quorum).toMatchObject({ assignees: 3, approvals: 2, rejects: 0, pending: 1, decided: true, passed: true });
+	} finally {
+		await fsp.rm(dir, { recursive: true, force: true });
+	}
+});
+
+// ── recordPlanVoteCommit (the commit-on-pass unit's durable idempotency marker) ─────────────────
+
+test("recordPlanVoteCommit folds onto the round; a second commit event is ignored (first wins, idempotent)", async () => {
+	const dir = await tmp();
+	try {
+		const round = await openPlanVoteRound(dir, { featureId: "feat", repo: "/r", planPath: "p.md", candidateId: "c1", baseSha: "abc", revisionSha: "def", assignees: ["a1"], openedBy: "a1" });
+		await closePlanVoteRound(dir, round.id, "passed", "sole assignee auto-pass (1 > 0.5)");
+		await recordPlanVoteCommit(dir, round.id, "committed", { sha: "newsha1", at: 10 });
+		await recordPlanVoteCommit(dir, round.id, "superseded", { detail: "should be ignored", at: 20 }); // race — must not overwrite
+
+		const [got] = await listPlanVoteRounds(dir, { repo: "/r", featureId: "feat" });
+		expect(got?.commitOutcome).toBe("committed");
+		expect(got?.commitSha).toBe("newsha1");
+		expect(got?.commitAt).toBe(10);
+	} finally {
+		await fsp.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("recordPlanVoteCommit(superseded) folds detail, no sha", async () => {
+	const dir = await tmp();
+	try {
+		const round = await openPlanVoteRound(dir, { featureId: "feat", repo: "/r", planPath: "p.md", candidateId: "c1", baseSha: "abc", revisionSha: "def", assignees: ["a1"], openedBy: "a1" });
+		await closePlanVoteRound(dir, round.id, "passed", "sole assignee auto-pass (1 > 0.5)");
+		await recordPlanVoteCommit(dir, round.id, "superseded", { detail: "plan doc moved" });
+
+		const [got] = await listPlanVoteRounds(dir, { repo: "/r", featureId: "feat" });
+		expect(got?.commitOutcome).toBe("superseded");
+		expect(got?.commitDetail).toBe("plan doc moved");
+		expect(got?.commitSha).toBeUndefined();
+	} finally {
+		await fsp.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a round with no commit event has commitOutcome undefined — the untouched-by-commit-on-pass default", async () => {
+	const dir = await tmp();
+	try {
+		const round = await openPlanVoteRound(dir, { featureId: "feat", repo: "/r", planPath: "p.md", candidateId: "c1", baseSha: "", revisionSha: "", assignees: ["a1"], openedBy: "a1" });
+		await closePlanVoteRound(dir, round.id, "rejected", "failed vote");
+		const [got] = await listPlanVoteRounds(dir, { repo: "/r", featureId: "feat" });
+		expect(got?.commitOutcome).toBeUndefined();
 	} finally {
 		await fsp.rm(dir, { recursive: true, force: true });
 	}
