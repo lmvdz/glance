@@ -265,6 +265,21 @@ export const PlanCandidateTransitionBodySchema = Schema.Struct({
 	reason: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/features/:id/plan-vote/call — no required field. `candidateId` is optional (absent ⇒
+ *  the handler resolves the feature's current head "candidate"-state `PlanRevisionCandidate`). */
+export const PlanVoteCallBodySchema = Schema.Struct({
+	candidateId: Schema.optional(Schema.Unknown),
+	deadlineMs: Schema.optional(Schema.Unknown),
+});
+
+/** POST /api/features/:id/plan-vote/cast — `roundId` and `choice` both required (`choice` is
+ *  further narrowed to "approve"|"reject" post-decode, mirroring every other loosely-typed-then-
+ *  handler-checked string field in this file). */
+export const PlanVoteCastBodySchema = Schema.Struct({
+	roundId: Schema.String,
+	choice: Schema.String,
+});
+
 /** POST /api/features/:id/annotations — `body`+`planPath` (nested inside the envelope) are
  *  jointly required via the existing `planAnnotationTarget` helper, which runs post-decode
  *  unchanged; nothing here is unconditionally required. */

@@ -11,6 +11,8 @@ import {
 	FederationCommandBodySchema,
 	OrgPatchBodySchema,
 	PlanCandidateCreateBodySchema,
+	PlanVoteCallBodySchema,
+	PlanVoteCastBodySchema,
 	PushSubscriptionBodySchema,
 } from "../src/schema/http-body.ts";
 
@@ -139,6 +141,26 @@ test("ChatAttachmentCreateBodySchema: dataUrl required; mime/size/PNG-magic chec
 
 	expect(Result.isFailure(decodeBody(ChatAttachmentCreateBodySchema, {}))).toBe(true); // no dataUrl
 	expect(Result.isFailure(decodeBody(ChatAttachmentCreateBodySchema, { dataUrl: 5 }))).toBe(true); // not a string
+});
+
+test("PlanVoteCallBodySchema: no required field; candidateId/deadlineMs pass through as Unknown", () => {
+	const r = decodeBody(PlanVoteCallBodySchema, { candidateId: "c1", deadlineMs: 60000 });
+	expect(Result.isSuccess(r)).toBe(true);
+	if (Result.isSuccess(r)) expect(r.success).toEqual({ candidateId: "c1", deadlineMs: 60000 });
+
+	// An empty/missing body decodes fine (both fields optional) — the handler resolves the head
+	// candidate itself when candidateId is absent.
+	expect(Result.isSuccess(decodeBody(PlanVoteCallBodySchema, {}))).toBe(true);
+});
+
+test("PlanVoteCastBodySchema: roundId and choice both required", () => {
+	const r = decodeBody(PlanVoteCastBodySchema, { roundId: "pv1", choice: "approve" });
+	expect(Result.isSuccess(r)).toBe(true);
+	if (Result.isSuccess(r)) expect(r.success).toEqual({ roundId: "pv1", choice: "approve" });
+
+	expect(Result.isFailure(decodeBody(PlanVoteCastBodySchema, { choice: "approve" }))).toBe(true); // no roundId
+	expect(Result.isFailure(decodeBody(PlanVoteCastBodySchema, { roundId: "pv1" }))).toBe(true); // no choice
+	expect(Result.isFailure(decodeBody(PlanVoteCastBodySchema, { roundId: "pv1", choice: 5 }))).toBe(true); // choice not a string
 });
 
 test("bespoke endpoint schemas are not mirrors of a types.ts interface (documented, not a defect)", () => {

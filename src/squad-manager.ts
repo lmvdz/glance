@@ -100,6 +100,8 @@ import type {
 	FeatureRelationship,
 	PlanRevisionCandidate,
 	PlanRevisionCandidateState,
+	PlanVoteChoice,
+	PlanVoteRound,
 	AgentStatus,
 	AutomationEvent,
 	CommandInfo,
@@ -150,6 +152,8 @@ import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } 
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
+import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, tallyPlanVoteRound } from "./plan-votes.ts";
+import type { VoteQuorum } from "./plan-vote-quorum.ts";
 import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
@@ -6199,6 +6203,80 @@ export class SquadManager extends EventEmitter {
 
 	async getUnresolvedComments(repo: string, subject: string): Promise<ArtifactComment[]> {
 		return readComments(this.stateDir, { repo, subject, unresolved: true });
+	}
+
+	// ── Plan-vote rounds (PLAN-VOTE-COMMIT.md — the majority-of-assignees gate) ───────────────────
+	// Business-rule guards ("no existing open round", "A>0", "reviewGateOpen") live in server.ts's
+	// route handler, same "pure storage, caller validates" split as setAssignees/comments above —
+	// these methods just persist + audit + emit.
+
+	/** Open a new round. Caller (server.ts) has already checked: no open round exists, the
+	 *  assignee roster is non-empty, and reviewGateOpen. */
+	async openPlanVote(input: OpenPlanVoteInput, actor: Actor | string = LOCAL_ACTOR): Promise<PlanVoteRound> {
+		const round = await openPlanVoteRound(this.stateDir, input);
+		void this.recordAudit(actor, "plan-vote.call", round.id, "ok", `${round.planPath} — ${round.assignees.length} assignee(s)`);
+		this.emitFeaturesChanged();
+		return round;
+	}
+
+	async listPlanVoteRounds(q: { repo?: string; featureId?: string } = {}): Promise<PlanVoteRound[]> {
+		return readPlanVoteRounds(this.stateDir, q);
+	}
+
+	/** The currently-open round for a feature, or undefined — what `/plan-vote/call`'s 409 guard
+	 *  and the GET endpoint's "current round" both read. */
+	async currentPlanVote(repo: string, featureId: string): Promise<PlanVoteRound | undefined> {
+		return readCurrentPlanVoteRound(this.stateDir, repo, featureId);
+	}
+
+	/**
+	 * Cast one assignee's approve/reject on an open round. Idempotent per actor (last write wins —
+	 * no double-vote, no "already voted" error). Folds the tally after the cast and, once
+	 * `computeVoteQuorum` reports `decided`, closes the round:
+	 *   - PASSED: calls the `onVotePassed` seam (the commit-on-pass unit's hand-off point — this
+	 *     unit deliberately does NOT commit/land anything).
+	 *   - REJECTED: transitions the round's candidate to "rejected" (discarded, plan unchanged).
+	 * Membership (`actorId` ∈ round.assignees) is the CALLER's job (server.ts's app-layer check on
+	 * top of the REST admin gate) — this method stores whatever it's given, same contract as
+	 * `setAssignees`. Throws if no such round exists, or it's already closed.
+	 */
+	async castPlanVote(roundId: string, actorId: string, choice: PlanVoteChoice, actor: Actor | string = LOCAL_ACTOR): Promise<{ round: PlanVoteRound; quorum: VoteQuorum }> {
+		const before = (await readPlanVoteRounds(this.stateDir, {})).find((r) => r.id === roundId);
+		if (!before) throw new Error(`no such plan-vote round: ${roundId}`);
+		if (before.state !== "voting") throw new Error(`plan-vote round ${roundId} is already ${before.state}`);
+		await appendPlanVoteCast(this.stateDir, roundId, actorId, choice);
+		let round = (await readPlanVoteRounds(this.stateDir, {})).find((r) => r.id === roundId);
+		if (!round) throw new Error(`plan-vote round ${roundId} vanished mid-cast`);
+		const quorum = tallyPlanVoteRound(round);
+		void this.recordAudit(actor, "plan-vote.cast", roundId, "ok", `${actorId} ${choice}`);
+		if (quorum.decided && round.state === "voting") {
+			const outcome: "passed" | "rejected" = quorum.passed ? "passed" : "rejected";
+			await appendPlanVoteClose(this.stateDir, roundId, outcome, quorum.reason);
+			round = { ...round, state: outcome, closedAt: Date.now(), closedReason: quorum.reason };
+			void this.recordAudit(actor, `plan-vote.${outcome}`, roundId, "ok", quorum.reason);
+			if (outcome === "passed") {
+				await this.onVotePassed(round);
+			} else {
+				const reviewer = typeof actor === "string" ? actor : actor.id;
+				await transitionPlanRevisionCandidate(this.stateDir, round.candidateId, "rejected", reviewer, `plan vote failed: ${quorum.reason}`);
+				void this.recordAudit(actor, "plan-vote.candidate-rejected", round.candidateId, "ok", quorum.reason);
+			}
+		}
+		this.emitFeaturesChanged();
+		return { round, quorum };
+	}
+
+	/**
+	 * SEAM FOR THE COMMIT-ON-PASS UNIT (PLAN-VOTE-COMMIT.md §D/§G4): called exactly once, the
+	 * instant a round transitions to "passed", with that round (its `baseSha`/`revisionSha`/
+	 * `assignees` already snapshotted at call time). That unit replaces this no-op with: land the
+	 * candidate's producing branch scoped to `round.planPath`'s dir (reuse `landAgent`/land.ts),
+	 * refusing if the plan doc's CURRENT committed SHA has since moved past `round.baseSha`
+	 * (the base-SHA guard, §H3), then `transitionPlanRevisionCandidate(round.candidateId,
+	 * "accepted", ...)`. This unit's scope is the vote round + quorum math only — it never commits.
+	 */
+	private async onVotePassed(round: PlanVoteRound): Promise<void> {
+		this.log("info", `plan-vote ${round.id} PASSED for candidate ${round.candidateId} (${round.planPath}) — awaiting commit-on-pass wiring`);
 	}
 
 	/** Best-effort done-proof lookup for a feature — feeds the task-pipeline artifacts rail (Wave 4
