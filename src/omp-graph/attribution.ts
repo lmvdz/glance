@@ -50,6 +50,8 @@ export function modelFamily(model?: string): string {
 	if (m.includes("haiku")) return "haiku";
 	if (m.includes("gpt") || m.includes("codex") || /\bo[34]\b/.test(m)) return "openai";
 	if (m.includes("gemini")) return "gemini";
+	// xAI: `grok-4.5`, `grok-composer-2.5-fast`, `x-ai/grok-4.5` (the openrouter spec shape).
+	if (m.includes("grok")) return "grok";
 	return m ? "other" : "unknown";
 }
 

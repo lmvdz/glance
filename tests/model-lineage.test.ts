@@ -46,14 +46,27 @@ describe("modelLineage", () => {
 			haiku: "claude-haiku-4-5",
 			openai: "gpt-5.5",
 			gemini: "gemini-2.5-pro",
+			grok: "grok-4.5",
 			other: "mistral-large",
 			unknown: "",
 		};
 		const seen = new Set(Object.values(probes).map((m) => modelFamily(m)));
-		expect(seen).toEqual(new Set(["fable", "opus", "sonnet", "haiku", "openai", "gemini", "other", "unknown"]));
+		expect(seen).toEqual(new Set(["fable", "opus", "sonnet", "haiku", "openai", "gemini", "grok", "other", "unknown"]));
 		for (const m of Object.values(probes)) {
-			expect(["anthropic", "openai", "google", "unknown"]).toContain(modelLineage(m));
+			expect(["anthropic", "openai", "google", "xai", "unknown"]).toContain(modelLineage(m));
 		}
+	});
+
+	test("xai/grok: both provider spellings, the bare family, and concrete model ids", () => {
+		// openrouter's catalog ships `x-ai/…`; xAI's first-party spec is `xai/…`. Both are real.
+		expect(modelLineage("x-ai/grok-4.5")).toBe("xai");
+		expect(modelLineage("xai/grok-4.5")).toBe("xai");
+		// bare family name (the family-keyed scoreboard shape) and concrete ids
+		expect(modelLineage("grok")).toBe("xai");
+		expect(modelLineage("grok-4.5")).toBe("xai");
+		expect(modelLineage("grok-composer-2.5-fast")).toBe("xai");
+		// a grok model must never be mistaken for the fleet's default Anthropic lineage
+		expect(modelLineage("grok-4.5")).not.toBe(DEFAULT_PROVIDER);
 	});
 });
 
@@ -62,6 +75,9 @@ describe("harnessLineage", () => {
 		expect(harnessLineage("gemini")).toBe("google");
 		expect(harnessLineage("claude-code")).toBe("anthropic");
 		expect(harnessLineage("codex")).toBe("openai");
+		// grok's CLI serves only xAI models, so the harness name alone is a sound vendor claim.
+		expect(harnessLineage("grok")).toBe("xai");
+		expect(harnessLineage("GROK")).toBe("xai"); // case-insensitive, like the others
 	});
 	test("multi-model runtimes do not imply a vendor", () => {
 		expect(harnessLineage("omp")).toBe("unknown");

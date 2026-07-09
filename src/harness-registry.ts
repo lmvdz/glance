@@ -102,9 +102,13 @@ export function listHarnesses(includeUnverified = unverifiedHarnessesEnabled()):
  * plans/research-sirvir/06-degradation-ladder.md) to have any real differentiation to act on. omp/pi/
  * opencode are multi-model runtimes with NO static vendor pin (`harnessLineage` reads "unknown" for
  * all three — see model-lineage.ts), so this stays false until a vendor-pinned ACP harness (claude-code,
- * gemini, codex) is BOTH registered `verified:true` AND distinct from the default harness's lineage.
- * Today none of the three are verified, so this is false and dispatch.ts logs the ladder as inert
- * instead of silently no-oping (the concern's explicit "name it, don't fake it" requirement).
+ * gemini, codex, grok) is BOTH registered `verified:true` AND distinct from the default harness's lineage.
+ *
+ * As of the grok registration (2026-07-09) this is TRUE on a default `omp` fleet: grok is `verified:true`
+ * (live ACP smoke) and pinned to `xai`, which differs from omp's `unknown` baseline. The ladder is
+ * therefore ACTIVE, not inert — dispatch.ts now has a real second subscription lane to pause against,
+ * which is exactly what concern 06 was built for. Removing grok (or flipping it back to `verified:false`)
+ * returns this to false and the ladder to its logged-inert state.
  *
  * VERIFIED-ONLY by contract: `listHarnesses(false)` — the OMP_SQUAD_UNVERIFIED_HARNESS=1 escape hatch
  * (which lets `listHarnesses()`' default surface unverified harnesses on create UIs) must NOT let an
@@ -239,3 +243,38 @@ registerHarness({ name: "claude-code", protocol: "acp", bin: "npx", acpCommand: 
 /** codex — via the `codex-acp` adapter over `codex app-server`. Adapter is mid-migration between
  *  orgs; pin a version before relying on it. */
 registerHarness({ name: "codex", protocol: "acp", bin: "npx", acpCommand: ["npx", "-y", "@agentclientprotocol/codex-acp"], capabilities: ACP_CAPS, verified: false, note: "adapter mid-migration between orgs — pin a version" });
+
+/**
+ * grok (xAI Grok Build) — native first-party ACP, no adapter: `grok agent stdio`.
+ *
+ * LIVE-VERIFIED 2026-07-09 against grok v0.2.93 (the bar opencode had to clear — a green fake-server
+ * test does not count, see concern 08): `initialize` returns protocolVersion 1 with
+ * `agentCapabilities:{loadSession:true, promptCapabilities:{embeddedContext:true}, mcpCapabilities:
+ * {http:true,sse:true}}`, and `session/new` returns a real sessionId plus `models.availableModels:
+ * [grok-4.5 (500k ctx, supportsReasoningEffort), grok-composer-2.5-fast]`.
+ *
+ * This is glance's FIRST vendor-pinned VERIFIED harness, so it is what flips
+ * `hasSecondVerifiedProviderLane()` true and activates the degradation ladder (see that doc).
+ *
+ * Capabilities are deliberately conservative, matching what the ACP driver actually drives — not what
+ * grok advertises:
+ *  - `resumable:false` even though grok advertises `loadSession:true`, because SquadManager does not
+ *    drive `session/load` yet (identical call to opencode's). Claiming true would feed the reattach
+ *    path an agent it cannot actually restore.
+ *  - `thinking:false` even though grok exposes `supportsReasoningEffort`, because AcpAgentDriver has no
+ *    thinking-level channel to carry it.
+ *  - `contextInjection:"none"`: grok's MCP capabilities are real (http+sse) and are the eventual
+ *    concern-06 route, but we don't wire an MCP context server yet. Named, not faked.
+ *
+ * Auth is a cached token (`grok login` → ~/.grok/auth.json), NOT an env API key — so a spawned unit
+ * inherits the operator's session and no key needs to reach the worktree.
+ */
+registerHarness({
+	name: "grok",
+	protocol: "acp",
+	bin: "grok",
+	acpCommand: ["grok", "agent", "stdio"],
+	capabilities: ACP_CAPS,
+	verified: true,
+	note: "native first-party ACP (grok agent stdio); initialize + session/new live-verified; vendor-pinned xai — activates the degradation ladder",
+});

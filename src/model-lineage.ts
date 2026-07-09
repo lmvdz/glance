@@ -13,7 +13,7 @@
 
 import { modelFamily } from "./omp-graph/attribution.ts";
 
-export type ModelLineage = "anthropic" | "openai" | "google" | "unknown";
+export type ModelLineage = "anthropic" | "openai" | "google" | "xai" | "unknown";
 
 /** Provider token (before the first "/") → lineage, for the vendor-qualified specs omp's `pickModel`
  *  accepts (`anthropic/claude-sonnet-4-5`, `openai/gpt-5`, `google-vertex/gemini-2.5-pro`). The poll
@@ -25,6 +25,10 @@ const PROVIDER_LINEAGE: Record<string, ModelLineage> = {
 	google: "google",
 	"google-vertex": "google",
 	gemini: "google",
+	// Both spellings are real: openrouter's catalog ships `x-ai/grok-4.5` (see ingest/openrouter.ts),
+	// while xAI's own first-party spec is `xai/…`. Neither may fall through to the family heuristic.
+	xai: "xai",
+	"x-ai": "xai",
 };
 
 /** `modelFamily()` result → vendor lineage. `opus|sonnet|haiku|fable` are all Anthropic; `other`/
@@ -36,6 +40,7 @@ const FAMILY_LINEAGE: Record<string, ModelLineage> = {
 	fable: "anthropic",
 	openai: "openai",
 	gemini: "google",
+	grok: "xai",
 };
 
 /**
@@ -75,6 +80,9 @@ const HARNESS_LINEAGE: Record<string, ModelLineage> = {
 	gemini: "google",
 	"claude-code": "anthropic",
 	codex: "openai",
+	// grok (xAI) is vendor-pinned by construction: the CLI serves only xAI models (`grok models` ⇒
+	// grok-4.5, grok-composer-2.5-fast), so the harness name alone is a sound lineage claim.
+	grok: "xai",
 };
 
 export function harnessLineage(harness?: string): ModelLineage {

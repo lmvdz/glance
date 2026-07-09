@@ -40,20 +40,22 @@ function validatorModel(): string {
 	return process.env.OMP_SQUAD_VALIDATOR_MODEL ?? "opus";
 }
 
-/** The judge harness (plans/cross-lineage-review/ concern 05): "omp" (default, Claude-lineage judge)
- *  or "codex" (OpenAI-lineage judge via the codex CLI — opt-in, off until its live-verify test passes). */
+/** The judge harness (plans/cross-lineage-review/ concern 05): "omp" (default, Claude-lineage judge),
+ *  "codex" (OpenAI-lineage judge via the codex CLI), or "grok" (xAI-lineage judge via the grok CLI).
+ *  Both foreign lineages are opt-in via OMP_SQUAD_VALIDATOR_HARNESS. */
 function validatorHarness(): string {
 	return process.env.OMP_SQUAD_VALIDATOR_HARNESS ?? "omp";
 }
 
 /**
  * The reviewer that will ACTUALLY run, as one source of truth for BOTH judge selection and the
- * lineage stamp — so the record can never claim a cross-vendor review that didn't happen. The codex
- * reviewer is chosen only when configured AND the binary is present; if codex is absent we fall back
- * to the omp judge at selection time and the stamp honestly says anthropic (no codex ran).
+ * lineage stamp — so the record can never claim a cross-vendor review that didn't happen. A foreign
+ * reviewer is chosen only when configured AND its binary is present; if the binary is absent we fall
+ * back to the omp judge at selection time and the stamp honestly says anthropic (no foreign judge ran).
  */
-function activeReviewer(): { model: string; lineage: ModelLineage; harness: "omp" | "codex" } {
+function activeReviewer(): { model: string; lineage: ModelLineage; harness: "omp" | "codex" | "grok" } {
 	if (validatorHarness() === "codex" && Bun.which("codex")) return { model: "codex", lineage: "openai", harness: "codex" };
+	if (validatorHarness() === "grok" && Bun.which("grok")) return { model: "grok", lineage: "xai", harness: "grok" };
 	return { model: validatorModel(), lineage: modelLineage(validatorModel()), harness: "omp" };
 }
 
@@ -135,6 +137,33 @@ export function parseCodexVerdict(raw: string): RawVerdict | undefined {
 	return found ?? parseRawVerdict(raw);
 }
 
+/**
+ * Parse a verdict from `grok -p --json-schema` output. Unlike codex, grok CONSTRAINS the model to the
+ * schema and returns one pretty-printed envelope on stdout:
+ *   `{ "text": "<the json as a string>", "structuredOutput": { … }, "stopReason": …, "sessionId": … }`
+ * So we take `structuredOutput` directly (the already-parsed object), fall back to parsing the `text`
+ * mirror, and only then to a whole-blob extract. NOTE the envelope is multi-line pretty JSON, so a
+ * line-by-line scan (parseCodexVerdict's strategy) would never match — deliberately whole-blob first.
+ */
+export function parseGrokVerdict(raw: string): RawVerdict | undefined {
+	const envelope = extractJsonObject(raw);
+	if (envelope) {
+		const structured = envelope.structuredOutput;
+		if (structured && typeof structured === "object") {
+			const direct = coerceVerdict(structured as Record<string, unknown>);
+			if (direct) return direct;
+		}
+		if (typeof envelope.text === "string") {
+			const embedded = coerceVerdict(extractJsonObject(envelope.text));
+			if (embedded) return embedded;
+		}
+		// The envelope may itself BE the verdict (e.g. --output-format plain, no schema).
+		const asVerdict = coerceVerdict(envelope);
+		if (asVerdict) return asVerdict;
+	}
+	return undefined;
+}
+
 /** Best-effort dig for the assistant text in a codex event object (`agent_message`/`item` shapes seen
  *  in src/ingest/codex.ts). Returns undefined if none — the caller then tries other lines. */
 function pickCodexText(obj: Record<string, unknown>): string | undefined {
@@ -183,10 +212,62 @@ function codexJudge(): Judge {
 		});
 }
 
+/**
+ * grok judge — a third-lineage (xAI) reviewer via the grok CLI, uncorrelated with BOTH the Anthropic
+ * author and the OpenAI codex judge. `--json-schema` constrains the model to the verdict shape, so the
+ * output is machine-parseable by construction rather than scraped (see `parseGrokVerdict`). Sandboxed
+ * `read-only` (Landlock on Linux, irreversible once applied) and `dontAsk`, so a judge can never edit
+ * the tree it is judging; web search off so the verdict depends only on the diff. Stdin is closed —
+ * grok is an agentic CLI and would otherwise wait on a TTY. A miss/timeout/unparseable run degrades to
+ * `undefined` → an honest xai-lineage `abstain`, never a fabricated pass.
+ */
+function grokJudge(): Judge {
+	return ({ criteria, diff, proof }) =>
+		decideTyped<RawVerdict | undefined>({
+			bin: "grok",
+			args: [
+				"-p",
+				`${SYSTEM_PROMPT}\n\n${judgeUserPrompt(criteria, diff, proof)}`,
+				"--sandbox",
+				"read-only",
+				"--permission-mode",
+				"dontAsk",
+				"--disable-web-search",
+				"--json-schema",
+				GROK_VERDICT_SCHEMA,
+			],
+			parse: parseGrokVerdict,
+			fallback: undefined,
+			timeoutMs: envInt("OMP_SQUAD_VALIDATOR_GROK_TIMEOUT_MS", 120_000),
+		});
+}
+
+/** The verdict shape, handed to `grok --json-schema` so the model cannot emit prose around it.
+ *  Mirrors `SYSTEM_PROMPT`'s contract and `coerceVerdict`'s reader — keep the three in step. */
+const GROK_VERDICT_SCHEMA = JSON.stringify({
+	type: "object",
+	properties: {
+		perCriterion: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: { id: { type: "string" }, satisfied: { type: "boolean" }, note: { type: "string" } },
+				required: ["id", "satisfied"],
+			},
+		},
+		confidence: { type: "number" },
+		rationale: { type: "string" },
+	},
+	required: ["perCriterion"],
+});
+
 /** Selects the judge harness, kept in lockstep with `activeReviewer()` so the running reviewer and the
  *  stamped reviewer lineage never disagree. */
 function defaultJudge(): Judge {
-	return activeReviewer().harness === "codex" ? codexJudge() : ompJudge();
+	const harness = activeReviewer().harness;
+	if (harness === "codex") return codexJudge();
+	if (harness === "grok") return grokJudge();
+	return ompJudge();
 }
 
 // ── Perspective-diversified review: out-of-criteria lens judges ───────────────────────────────────
