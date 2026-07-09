@@ -174,3 +174,111 @@ gate image + serialized gates + fail-closed regression/acceptance classifier all
 gates flaking under host load → X5. Also: factory is burning WIP slots on X3's stray probe
 tickets (OMPSQ-431/436 — goal "reply DONE and stop immediately"); user should delete them.
 | X3 | design-review loop | feat/ui-design-review | sonnet | **built: draft PR #120** (597/0 +15; heading anchor on PlanAnnotationTarget; N/M gate advisory; strike/ember-insert revision diff; live-driven on real sirvir doc; NOTE: stray empty Plane tickets OMPSQ-431/436 for user to delete) — opus taste review running |
+
+**WAVE 6 CLOSED 2026-07-08: 7 PRs #133–#139 MERGED (main e71854e → 2156 tests, 2 known
+order-pollution flakes that pass 8/8 in isolation, tsc clean). The app now has: honest categories
+(#133, override+other), the category canvas (#134/#136, D8 PASS via needs-you ring badge), the
+page-contextual chat (#135 PageContext + #138 annotated images, security-hardened), the daemon-crash
+fix (#137, settleSpawnFailure — the bug that killed U3), and THE EXECUTION LOOP (#139 — annotate →
+confirm sheet → real unit spawns against glance → live status card; proven end-to-end on a scratch
+daemon). #139 rebase took main's hardened chat-attachment.ts (grep-verified, security fixes survived).
+Daemon live on Wave 6 (pid 1669978).
+
+## Wave 7 — ONE GREEN LOOP (opened 2026-07-09, base: main @ 374b4ae)
+
+New goal (user): *"make glance the only place a user wants to be for working with ai to build things."*
+Spec: `plans/orchestration/ONE-GREEN-LOOP.md`.
+
+**THE FINDING.** glance has **never once finished**. Across both managers, 17 days, 1,708 recorded land
+attempts: **zero autonomously-dispatched units have ever merged.** Every PR of Waves 1–6 was landed by
+hand from Claude Code. Cause = a two-condition interlock, both halves individually correct:
+`land-mode.ts` probe 4 forced `local` mode on any non-default checkout ("deliberate operator checkout
+wins"), and `land.ts:422` refuses a local merge into a dirty checkout, `retryable: true` — so it
+retried forever and never escalated. **1,381/1,686 (82%)** of all land attempts died there. Probe 5
+sealed it independently by comparing `HEAD` (not `refs/heads/<default>`) to `origin/<default>`.
+The tracked files jamming the gate at diagnosis time were `LEDGER.md` and a plan doc — this file.
+Also: in local mode, units fork from the operator's **feature-branch HEAD**, not `origin/main`.
+65/65 `catastrophe` events are one identical event: `node "escalate" exceeded its visit cap (2)`.
+`task-outcomes.jsonl` has **1 row**; no `model-outcomes` store exists. `land-pr.ts` (shipped 2026-07-03,
+the founding brief's #1 fix) has **never executed**.
+
+| Unit | Work | Status |
+|---|---|---|
+| G1 | land-mode probe 4/5 rewrite: a non-default checkout no longer forces local; probe 5 reads `refs/heads/<default>` + fails closed on fetch failure. Plus `transplantedCommitsReason` gate (land-pr.ts) and `ffHealOne` TOCTOU re-check. | **done, unstaged** — 20/20 land-mode, 7/7 transplant, 70/70 land suites, tsc clean; live probe on this dirty off-main checkout now returns `pr`; ff-heal guard mutation-proven; reviewed by grok-4.5 **and** gpt-5.6-sol (3 confirmed findings, all fixed) |
+| G2 | make death-by-escalation legible: the escalate visit cap files a Needs-you row with gate output + reason instead of a silent `catastrophe` audit line | queued |
+| G3 | **run the factory to completion once, watched** (scratch daemon, file mode, all loops off, `LAND_CONFIRM=1`, one real unit: wire the unreachable `openIntervene`). Fixed nothing first. | **RAN 2026-07-09** — unit produced the right change; **still could not land.** Acceptance (fleet-opened draft PR) NOT reached: the push is outward-facing, awaits operator |
+| G3a | **the next interlock: nothing in the loop ever commits.** Workflow stages are `Implement → Verify → exit`, no commit stage; agent ends dirty and says "Done"; `proofGate` refuses a dirty worktree ⇒ no proof ⇒ `landReady` never set ⇒ orchestrator escalates ⇒ **escalate-cap catastrophe (65/65)**. `land()` swept WIP *before* its proof gate — so a human could land what the fleet structurally could not | **✔ DONE — THE LOOP CLOSED.** `commitAgentWip()` + new `settleWork` orchestrator dep (runs before `stateKey` reads HEAD) + `verifyFeature` member sweep. **Proven unattended on a throwaway repo:** agent told NOT to commit → `commit-wip ok` → `verify ok (dirty:false, sandboxed:true)` → **`landReady: true`** (never before reached) → one-tap Land `merged:true`. First completed loop in this system's history |
+| G3b | gate does not cover the webapp: root `tsc` excludes it and `bunfig [test] root="tests"` excludes `webapp/**/*.test.tsx`. Live: the unit passed `bun run check` while failing webapp tsc (required prop at 0 of 4 call sites) — a fail-open of the Wave-4 class | **✔ DONE.** `check` adds `tsc -p webapp/tsconfig.json`; `test` adds `cd webapp && bun test`. **Nearly re-broke the factory:** `installScratchDeps` installed ROOT deps only, so PR-mode acceptance would fail non-retryably on `webapp/node_modules` and park green branches (codex) → now provisions nested packages, fail-closed |
+| G3c | steering is swallowed inside a workflow: an operator `prompt` re-entered `stage: Implement`, re-answered the ORIGINAL goal, re-ran Verify, exited. R4 reproduced live | **✔ DONE.** `WorkflowDriver.prompt` guarded on `!runActive`, which is ALSO true after a run finishes ⇒ a steer re-ran the whole graph with the steer text as its "goal". Now a `hasRun` latch: first prompt = goal, all later prompts steer the live agent; a rejected steer surfaces `⚠ steer not delivered` instead of `.catch(()=>{})`. **PROVEN LIVE:** steer → `commit-wip` → `verify` → `land ok (merged)`, workflow did NOT re-run, unit stayed `working` for the whole steer turn |
+
+**G3c's fix introduced/exposed three more, all caught by cross-lineage review — the steering lane would
+have shipped broken.** (1) grok, High: `isStreaming = runActive` meant a unit **being steered reported
+IDLE while its agent wrote files**, so `commitAgentWip`/verify/land could take a half-written tree → now
+`runActive || promptInFlight || (innerTurnOpen && inner.isAlive)`, with the inner turn's lifecycle frames
+forwarded outside a run. (2) codex, Medium: one busy flag was wrong both ways — cleared on a send-reject
+after `agent_start` (idle over a live turn) and never cleared on a missed `agent_end` (stranded
+"working" forever, never landed) → split into `promptInFlight` + `innerTurnOpen`; a dead inner and
+`execRun`'s finally both end a turn; the `tester` lineage no longer clears the coder's. (3) codex, High:
+the orchestrator's in-memory `staged`/`landed` sets are keyed by ids a steered agent's edits never
+change, and their guards run BEFORE `agentHasWork` — so **work produced by a steer was skipped forever**
+→ new `Orchestrator.invalidate()`, called on every prompt, clearing `staged`/`landed`/`halted`
+(un-halting is deliberate: that is what "step in" means).
+| G3d | the last outward-facing step: let the FLEET push + open a draft PR on GitHub | **✔ DONE — operator-authorized. THE ACCEPTANCE TEST PASSES.** Unit told to edit files only (no shell, no commit) → `verify error (dirty)` → `commit-wip ok` → `verify ok` → `landReady:true` → push + `gh pr create --draft` → **[PR #149](https://github.com/lmvdz/glance/pull/149)**, draft/OPEN/MERGEABLE, +194/−2, held for one-tap merge. The first PR glance ever opened for itself. Verified by hand afterwards: 4/4 call sites wired, webapp tsc clean, 815 webapp tests |
+| G3e | PR #149's commit was titled `wip(…): sweep uncommitted work before verify` — daemon plumbing as a permanent commit subject | **✔ DONE.** Subject is now `<ISSUE-ID>: <issue name>`, else `squad(<name>): agent changes` (land()'s shape); sweep provenance moved to the body |
+| G4 | close the learning loop (`task-outcomes`/`model-outcomes` are empty) — now unblocked, since units can finally reach a land | queued |
+
+**CAVEAT on #149's green:** units fork from `origin/main`, which does not yet carry G3b, so the unit's
+own gate ran `tsc --noEmit` (no webapp) and `bunfig [test] root="tests"` (no webapp tests). Its green was
+weaker than it looked. Land G1/G3a/G3b/G3e before trusting a webapp unit's own gate.
+Final gate on this branch: **2377 backend + 804 webapp, 0 fail, tsc clean on both projects.**
+
+**Cross-lineage review of G3a/G3b (autonomous git-write ⇒ both lineages).** grok: `verifyFeature` was
+still on the old interlock (the orchestrator routes feature units through it, not `verifyAgent`), and
+the in-place guard's textual `path.resolve` let a symlinked worktree commit on the operator's checkout
+(→ `fs.realpath`). codex: the `installScratchDeps` root-only install above; `verifyFeature` returned
+**`ok:true` on an EMPTY member set** (`[].every()` is `true` — green on work it never ran → fails closed);
+and the sweep moved HEAD *after* `stateKey` derived from it, re-driving durable `halted`/`verified`
+records on restart (→ sweep hoisted into `settleWork`, ahead of `stateKey`). Both: "idle" ≠ quiescent →
+idle dwell (`OMP_SQUAD_WIP_SWEEP_DWELL_MS`, 3s) + status re-check before the write; residual documented.
+Gate: **2376 backend + 804 webapp, 0 fail, tsc clean.** Five guards mutation-proven.
+
+Parked for the acceptance test: branch `squad/stepin-mrdy6a2o-1-d2ae8116` (`881bfdc`, 2 files, +134/−6,
+gate-green under docker) — the unit's real work, awaiting permission to push + open its draft PR.
+
+Ops traps recorded 2026-07-09: `bun --no-env-file` still admitted the repo `.env` when the daemon was
+launched **from the repo cwd** → DB mode against the real `~/.glance/glance.db`, and every mutation
+answered `403 no active organization` (`server.ts:721` `noFleet`). Launch from a cwd with no `.env`, and
+assert the file-mode `federation:` boot line rather than trusting the flag. Also: `rtk` mangles bash
+`grep` — three "zero match" results this session were false (use `rtk proxy grep` or python).
+
+Cross-lineage review paid for itself again: grok caught the now-false `ffHealOne` invariant, codex
+caught the transplant hazard and the fail-open fetch that grok's pass cleared. Neither found a
+pr-mode write to the shared checkout. Both were verified against source before acting.
+
+**USER-ONLY (permission layer):** delete the 35 stale `squad/*` branches and junk tickets
+OMPSQ-427/428/431/436/437/438.
+
+## Known debt (carried, not blocking)
+- 2 order-pollution test flakes (lifecycle-settle-gate, gate-class) — pass in isolation, fail only
+  under full-suite ordering; muddy every run. → cleanup unit dispatched.
+- Junk Plane tickets OMPSQ-427/428/431/436/437/438 (probe/error) + 3 stale research branches —
+  USER-only deletes (permission layer).
+- Category canvas D8 junk-drawer TRIPWIRE: if OTHER-bucket dominance persists after override adoption,
+  cut the canvas per D8.
+- P3 proposal-trigger is v1 (gates on attachment presence, not model intent) — upgrade path noted.
+
+**PLAN VOTE-AND-COMMIT FEATURE COMPLETE 2026-07-08: 6 PRs #141–#146 MERGED (main 374b4ae → 2306/0).**
+User's vision built end to end: collaborate on a plan (existing design-review loop) → call a vote →
+plan assignees approve/reject → majority-of-all-assignees commits the revision to plans/, rejection
+discards clean. Units: #141 exit-classification fix (the reported bug: completed one-shot exiting via
+signal is DONE not error), #142 real assignees (none existed — feature members were agents), #143
+vote backend + quorum (codex found 3 concurrency/authz holes → per-feature voteLock mirror of
+withRepoLandLock), #144 commit-on-pass (codex SECURITY found 4H+2M incl. a plans/**-only gate bypass
+that could commit arbitrary code via crafted planPath → hardened: plans/**+.md guard at creation AND
+commit, --only pathspec commit, withRepoLandLock atomicity, clean-on-failure, trailer sanitize),
+#145 vote panel (opus SHIP-WITH-NITS, clean labels + focus rings), #146 file-mode identity (operator
+bearer couldn't vote — web:role ≠ operator.id). MONEY-SHOT proven live: `plan(plans/x): adopt reviewed
+revision` committed with Approved-by: alice/bob co-author trailers. Spec: PLAN-VOTE-COMMIT.md.
+Design finding: assignees only real in DB mode (user's daemon is DB mode ✓); file mode = solo audited
+auto-pass. Codex reviews on the git-write + concurrency cores caught the class of bug that must not
+ship in "commit code on a vote."
