@@ -28,10 +28,11 @@ import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { ArrowLeft, Bot, Check, GitCompare, Sparkles } from 'lucide-react';
+import { ArrowLeft, Bot, Check, GitCompare, Sparkles, Vote } from 'lucide-react';
 import { useTaskContext } from '../context/TaskContext';
+import { useAuth } from '../context/AuthContext';
 import { apiJson } from '../lib/api';
-import type { ArtifactCommentDTO } from '../lib/dto';
+import type { ArtifactCommentDTO, PlanRevisionCandidateDTO } from '../lib/dto';
 import {
   parseHeadings,
   commentsForDoc,
@@ -47,6 +48,26 @@ import {
   type DocHeading,
   type DocLineChange,
 } from '../lib/plan-doc-review';
+import {
+  ASSIGNEE_VOTE_LABEL,
+  ASSIGNEE_VOTE_TONE,
+  assigneeVoteState,
+  candidateStateById,
+  canCallVote,
+  canCastVote,
+  headOpenCandidate,
+  isViewerAssignee,
+  planDirOf,
+  quorumLine,
+  tallyLine,
+  viewerActorId,
+  viewerChoice,
+  votePanelState,
+  voteThreshold,
+  type PlanVoteChoiceDTO,
+  type PlanVoteRoundDTO,
+  type VoteQuorumDTO,
+} from '../lib/plan-vote';
 import { splitDiffLines, diffLineStats, type DiffLineKind } from '../lib/intervene';
 import { StatusChip } from './kit/StatusChip';
 import { MonoLabel } from './kit/MonoLabel';
@@ -67,10 +88,13 @@ interface PipelineFeatureLite {
 }
 
 interface ReviewPipelinePayload {
-  feature?: { createdAt?: number; updatedAt?: number };
+  feature?: { createdAt?: number; updatedAt?: number; assignees?: string[] };
   documents: PlanDocPipelineDoc[];
   comments: ArtifactCommentDTO[];
   agentIds: string[];
+  /** Plan-revision candidates for this feature (any state) — the vote panel's "is there a head
+   *  revision to vote on" input (PLAN-VOTE-COMMIT.md §C). */
+  candidates: PlanRevisionCandidateDTO[];
 }
 
 interface PlanDocReadPayload {
@@ -151,10 +175,17 @@ function relativeAgo(at: number): string {
 }
 
 export const DesignReviewView: React.FC = () => {
-  const { tasks, agents, reviewTaskId, reviewDocPath, closeReview, showToast } = useTaskContext();
+  const { tasks, agents, features, reviewTaskId, reviewDocPath, closeReview, showToast } = useTaskContext();
+  const { status: authStatus, me } = useAuth();
   const task = tasks.find((t) => t.id === reviewTaskId || t.sourceId === reviewTaskId);
   const featureId = task?.sourceId ?? task?.id ?? reviewTaskId ?? '';
   const repo = task?.properties.project.id ?? '';
+
+  // Viewer identity for the vote panel's authz — mirrors the server's own actor.id resolution
+  // (server.ts: `db:${session.user.id}` in DB mode; file mode has no client-visible per-user
+  // identity, so `isViewerAssignee` handles that case structurally instead of by id comparison).
+  const authMode = authStatus === 'file' ? 'file' : 'db';
+  const viewerId = authMode === 'db' && me ? viewerActorId('db', me.user.id) : undefined;
 
   const [pipeline, setPipeline] = React.useState<ReviewPipelinePayload | null>(null);
   const [doc, setDoc] = React.useState<PlanDocPipelineDoc | null>(null);
@@ -168,8 +199,18 @@ export const DesignReviewView: React.FC = () => {
   const [posting, setPosting] = React.useState(false);
   const [sendingId, setSendingId] = React.useState<string | null>(null);
   const [creatingSession, setCreatingSession] = React.useState(false);
+  const [voteRound, setVoteRound] = React.useState<PlanVoteRoundDTO | null>(null);
+  const [voteQuorum, setVoteQuorum] = React.useState<VoteQuorumDTO | null>(null);
+  const [calling, setCalling] = React.useState(false);
+  const [castingChoice, setCastingChoice] = React.useState<PlanVoteChoiceDTO | null>(null);
 
-  // Load the feature pipeline (documents list + comments + linked agents) once repo/featureId are known.
+  // Load the feature pipeline (documents list + comments + candidates + linked agents), and
+  // re-poll on every WS features-changed event (same idiom as the vote-round effect below):
+  // `addPlanRevisionCandidate`/`transitionPlanRevisionCandidate`/comment resolve all call
+  // `emitFeaturesChanged()`, so a fresh candidate or a newly-resolved comment posted by another
+  // voter shows up here without the viewer needing to leave and re-enter the screen — otherwise a
+  // NEW head candidate (e.g. superseding a just-passed one) would sit invisible behind the stale
+  // `pipeline.candidates` this effect used to only fetch once on mount.
   React.useEffect(() => {
     if (!repo || !featureId) return;
     let alive = true;
@@ -181,7 +222,27 @@ export const DesignReviewView: React.FC = () => {
       })
       .catch(() => { /* the feature may not exist yet in this repo (e.g. before its first plan doc) */ });
     return () => { alive = false; };
-  }, [repo, featureId]);
+  }, [repo, featureId, features]);
+
+  // The vote round rides the feature payload: `openPlanVote`/`castPlanVote` both call
+  // `emitFeaturesChanged()` (squad-manager.ts), which bumps `features` to a new array reference on
+  // every connected client (useSquad's `features-changed` handler). Depending on `features` here
+  // means every voter's screen re-polls GET /plan-vote the instant anyone calls or casts — the
+  // "all voters see live updates" requirement — without needing a bespoke per-round WS channel.
+  React.useEffect(() => {
+    if (!repo || !featureId) return;
+    let alive = true;
+    apiJson<{ round: PlanVoteRoundDTO | null; quorum: VoteQuorumDTO | null }>(
+      `/api/features/${encodeURIComponent(featureId)}/plan-vote?repo=${encodeURIComponent(repo)}`,
+    )
+      .then((payload) => {
+        if (!alive) return;
+        setVoteRound(payload.round);
+        setVoteQuorum(payload.quorum);
+      })
+      .catch(() => { /* no round yet, or the feature isn't resolvable in this repo */ });
+    return () => { alive = false; };
+  }, [repo, featureId, features]);
 
   // Read the doc's live content + head SHA, and fold in the "have I seen this revision" check
   // against localStorage — the "changed since your last view" diff toggle's whole data source.
@@ -209,6 +270,24 @@ export const DesignReviewView: React.FC = () => {
   const progress = React.useMemo(() => (docPath ? reviewProgress(comments, docPath) : { resolved: 0, total: 0 }), [comments, docPath]);
   const gateOpen = docPath ? reviewGateOpen(comments, docPath) : false;
   const narration = docPath ? reviewNarration(comments, docPath) : '';
+
+  // The vote panel's inputs (PLAN-VOTE-COMMIT.md §C) — all pure derivation lives in lib/plan-vote.ts.
+  const candidates = pipeline?.candidates ?? [];
+  const assignees = pipeline?.feature?.assignees ?? [];
+  const headCandidate = React.useMemo(() => headOpenCandidate(candidates), [candidates]);
+  const roundCandidateState = React.useMemo(() => candidateStateById(candidates, voteRound?.candidateId), [candidates, voteRound]);
+  const panelState = React.useMemo(
+    () => votePanelState({ gateOpen, headCandidateId: headCandidate?.id, round: voteRound ?? undefined, roundCandidateState }),
+    [gateOpen, headCandidate, voteRound, roundCandidateState],
+  );
+  const viewerIsAssignee = isViewerAssignee(authMode, viewerId, assignees);
+  const showCallButton = canCallVote(panelState, viewerIsAssignee);
+  const showCastControls = canCastVote(panelState, viewerIsAssignee);
+  // File mode has no client-visible per-user id (see `viewerActorId`), but is architecturally
+  // single-operator: whoever holds the daemon's bearer token IS the one (and only) assignee, so
+  // that assignee's row is always "me" for rendering the interactive chip / "did I already vote".
+  const effectiveViewerId = authMode === 'file' ? assignees[0] : viewerId;
+  const myChoice = viewerChoice(effectiveViewerId, voteRound ?? undefined);
 
   // Default the focused section to the oldest UNRESOLVED comment's heading (the thing most in need
   // of attention right now); fall back to the first heading once everything's resolved.
@@ -303,6 +382,48 @@ export const DesignReviewView: React.FC = () => {
       showToast(error instanceof Error ? error.message : 'Could not start the session', 'error');
     } finally {
       setCreatingSession(false);
+    }
+  };
+
+  // The terminal panel's vote gate (PLAN-VOTE-COMMIT.md §C/§D). This unit only calls/casts and
+  // renders the round's state — the actual commit-on-pass (landing the candidate branch once a
+  // round passes) is a separate unit's seam (squad-manager.ts's `onVotePassed`); the response here
+  // just reflects whatever the server already decided.
+  const callVote = async () => {
+    if (!featureId || !repo) return;
+    setCalling(true);
+    try {
+      const result = await apiJson<{ round: PlanVoteRoundDTO; quorum: VoteQuorumDTO }>(
+        `/api/features/${encodeURIComponent(featureId)}/plan-vote/call?repo=${encodeURIComponent(repo)}`,
+        { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+      );
+      setVoteRound(result.round);
+      setVoteQuorum(result.quorum);
+      showToast(`Vote called — ${quorumLine(result.round.assignees.length)}`, 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not call a vote', 'error');
+    } finally {
+      setCalling(false);
+    }
+  };
+
+  // Reconcile-on-response rather than optimistic: the server owns the quorum decision (including
+  // whether THIS cast is the one that decides the round), so the authoritative round+quorum in the
+  // response is the source of truth, never a locally-guessed tally.
+  const castVote = async (choice: PlanVoteChoiceDTO) => {
+    if (!featureId || !repo || !voteRound) return;
+    setCastingChoice(choice);
+    try {
+      const result = await apiJson<{ round: PlanVoteRoundDTO; quorum: VoteQuorumDTO }>(
+        `/api/features/${encodeURIComponent(featureId)}/plan-vote/cast?repo=${encodeURIComponent(repo)}`,
+        { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ roundId: voteRound.id, choice }) },
+      );
+      setVoteRound(result.round);
+      setVoteQuorum(result.quorum);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not cast your vote', 'error');
+    } finally {
+      setCastingChoice(null);
     }
   };
 
@@ -504,7 +625,10 @@ export const DesignReviewView: React.FC = () => {
                 </div>
               )}
 
-              {gateOpen && (
+              {/* No head plan-revision candidate — the legacy path, unchanged: spawn the
+                  implementation session straight off the reviewed doc. Advisory-only, by design:
+                  this button starts a session; it does not gate dispatch/land. */}
+              {panelState === 'no-candidate' && (
                 <div className="mt-6 rounded-lg border border-emerald-800/50 bg-emerald-950/20 p-4 text-center">
                   <div className="mb-3 text-sm font-medium text-emerald-400">All comments resolved — ready to implement!</div>
                   <button
@@ -515,8 +639,119 @@ export const DesignReviewView: React.FC = () => {
                     <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                     {creatingSession ? 'Starting…' : 'Create implementation session'}
                   </button>
-                  {/* Advisory-only, by design: this button starts a session; it does not gate
-                      dispatch/land. That integration is a later, red-teamable concern. */}
+                </div>
+              )}
+
+              {/* A head candidate exists: the primary terminal action is the vote, not the
+                  implementation session (PLAN-VOTE-COMMIT.md §C) — "Call for vote" is
+                  assignee-only, hidden here for a non-assignee viewer. "expired" re-offers the
+                  same call (re-call to retry). */}
+              {(panelState === 'ready-to-call' || panelState === 'expired') && (
+                <div className="mt-6 rounded-lg border border-emerald-800/50 bg-emerald-950/20 p-4 text-center" data-vote-state={panelState}>
+                  <div className="mb-3 text-sm font-medium text-emerald-400">
+                    {panelState === 'expired' ? 'Vote expired — re-call to retry' : 'All comments resolved — ready to implement!'}
+                  </div>
+                  {showCallButton ? (
+                    <button
+                      onClick={() => void callVote()}
+                      disabled={calling}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-md bg-ember px-4 py-2 text-xs font-semibold text-ink shadow-[0_0_0_1px_rgba(240,163,90,0.3)] transition-colors hover:bg-ember-link disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+                    >
+                      <Vote className="h-3.5 w-3.5" aria-hidden="true" />
+                      {calling ? 'Calling…' : 'Call for vote'}
+                    </button>
+                  ) : (
+                    <div className="text-xs text-ink-text-subtle">Only a feature assignee can call a vote on this revision.</div>
+                  )}
+                </div>
+              )}
+
+              {/* A round is open: quorum line + per-assignee chips + live tally. The viewer's own
+                  chip (if they're an assignee) is the interactive approve/reject control; every
+                  other assignee's chip is read-only live state. */}
+              {panelState === 'voting' && voteRound && voteQuorum && (
+                <div className="mt-6 rounded-lg border border-ink-border-2 bg-ink-surface p-4" data-vote-state="voting">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <MonoLabel>Plan vote</MonoLabel>
+                    <span className="font-mono text-xs text-ink-text-muted">{quorumLine(voteQuorum.assignees)}</span>
+                  </div>
+                  <div className="mb-3 h-1 overflow-hidden rounded-full bg-ink-surface-2">
+                    <div
+                      className="h-full rounded-full bg-emerald-400 transition-[width] duration-300"
+                      style={{ width: voteQuorum.assignees ? `${Math.min(100, (voteQuorum.approvals / voteThreshold(voteQuorum.assignees)) * 100)}%` : '0%' }}
+                    />
+                  </div>
+                  <div className="mb-3 flex flex-wrap items-center gap-1.5">
+                    {voteRound.assignees.map((assigneeId) => {
+                      const state = assigneeVoteState(assigneeId, voteRound);
+                      const isMe = assigneeId === effectiveViewerId;
+                      if (isMe && showCastControls) {
+                        return (
+                          <div key={assigneeId} className="inline-flex items-center gap-0.5 rounded-[3px] border border-ink-border-2 p-0.5" data-vote-chip="viewer">
+                            <button
+                              type="button"
+                              disabled={castingChoice !== null}
+                              onClick={() => void castVote('approve')}
+                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors disabled:opacity-50 ${myChoice === 'approve' ? 'bg-emerald-400 text-black' : 'text-emerald-400 hover:bg-emerald-950/40'}`}
+                            >
+                              {castingChoice === 'approve' ? 'Approving…' : 'You: approve'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={castingChoice !== null}
+                              onClick={() => void castVote('reject')}
+                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors disabled:opacity-50 ${myChoice === 'reject' ? 'bg-red-400 text-black' : 'text-red-400 hover:bg-red-950/40'}`}
+                            >
+                              {castingChoice === 'reject' ? 'Rejecting…' : 'You: reject'}
+                            </button>
+                          </div>
+                        );
+                      }
+                      return (
+                        <StatusChip
+                          key={assigneeId}
+                          status={`${isMe ? 'You' : assigneeId} · ${ASSIGNEE_VOTE_LABEL[state]}`}
+                          tone={ASSIGNEE_VOTE_TONE[state]}
+                          variant={state === 'pending' ? 'outline' : 'solid'}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="text-center text-xs text-ink-text-muted">{tallyLine(voteQuorum)}</div>
+                  {!showCastControls && !viewerIsAssignee && (
+                    <div className="mt-2 text-center text-xs text-ink-text-subtle">Only this round's assignees may cast a vote.</div>
+                  )}
+                </div>
+              )}
+
+              {/* Terminal PASS: emerald throughout. Before V4's commit-on-pass lands the candidate
+                  branch the candidate is still just "candidate"-state (untouched by a pass) — this
+                  reflects that gap honestly rather than claiming a commit that hasn't happened yet.
+                  Once the candidate flips to "accepted", the implementation-session action re-enables. */}
+              {(panelState === 'passed-pending' || panelState === 'committed') && (
+                <div className="mt-6 rounded-lg border border-emerald-800/50 bg-emerald-950/20 p-4 text-center" data-vote-state={panelState}>
+                  <div className="mb-3 text-sm font-medium text-emerald-400">
+                    {panelState === 'committed'
+                      ? `Committed to ${voteRound ? planDirOf(voteRound.planPath) : 'plans/'}`
+                      : 'Passed — committing plan revision…'}
+                  </div>
+                  {panelState === 'committed' && (
+                    <button
+                      onClick={() => void createImplementationSession()}
+                      disabled={creatingSession}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-md bg-ember px-4 py-2 text-xs font-semibold text-ink shadow-[0_0_0_1px_rgba(240,163,90,0.3)] transition-colors hover:bg-ember-link disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                      {creatingSession ? 'Starting…' : 'Create implementation session'}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Terminal REJECT: revision discarded, shared tree never touched — nothing to undo. */}
+              {panelState === 'rejected' && (
+                <div className="mt-6 rounded-lg border border-red-900/50 bg-red-950/10 p-4 text-center" data-vote-state="rejected">
+                  <div className="text-sm font-medium text-red-400">Rejected — revision discarded, plan unchanged</div>
                 </div>
               )}
             </div>
