@@ -195,6 +195,28 @@ test("grok makes the lane REAL out of the box: a mismatched cap no longer freeze
 	await stop();
 }, 20_000);
 
+test("the ladder going live does NOT open a hole: an unknown-provider cap still freezes default units", async () => {
+	// The safety half of the flip, on the SHIPPED registry (no override). Default-harness units carry no
+	// model, so they resolve to "unknown", which RateLimitGate folds into DEFAULT_PROVIDER ("anthropic").
+	// A cap noted with no readable provider must therefore still pause every one of them — otherwise
+	// activating the ladder would have converted a fail-safe freeze into a fail-open dispatch.
+	const { mgr, stop } = await makeWiredManager();
+	const internals = mgr as unknown as ManagerInternals;
+
+	internals.rateLimit.note("429 usage limit", 10 * 60_000, "unknown");
+	expect(await internals.dispatcher!.tick()).toBe(0);
+	await stop();
+}, 20_000);
+
+test("the ladder going live does NOT open a hole: an anthropic cap still freezes default units", async () => {
+	const { mgr, stop } = await makeWiredManager();
+	const internals = mgr as unknown as ManagerInternals;
+
+	internals.rateLimit.note("429 usage limit", 10 * 60_000, "anthropic");
+	expect(await internals.dispatcher!.tick()).toBe(0);
+	await stop();
+}, 20_000);
+
 test("a real second verified provider lane: a MISMATCHED cap no longer blocks the real-manager tick", async () => {
 	await withHarnessOverride("codex", { verified: true }, async () => {
 		const { mgr, stop } = await makeWiredManager();

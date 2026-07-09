@@ -65,8 +65,18 @@ describe("modelLineage", () => {
 		expect(modelLineage("grok")).toBe("xai");
 		expect(modelLineage("grok-4.5")).toBe("xai");
 		expect(modelLineage("grok-composer-2.5-fast")).toBe("xai");
-		// a grok model must never be mistaken for the fleet's default Anthropic lineage
-		expect(modelLineage("grok-4.5")).not.toBe(DEFAULT_PROVIDER);
+	});
+
+	test("'grok' is matched as a TOKEN, not a substring — an English verb must not fabricate a vendor", () => {
+		// This family feeds the rate-limit bucket: mis-mapping a vendor routes a unit around its real
+		// provider's cap. `includes("grok")` would have called all of these xAI.
+		expect(modelFamily("ollama/my-grokking-model")).toBe("other");
+		expect(modelLineage("ollama/my-grokking-model")).toBe("unknown");
+		expect(modelLineage("mistral/grokking-experiment")).toBe("unknown");
+		expect(modelLineage("some-grokked-model")).toBe("unknown");
+		// ...while every real xAI id shape still resolves.
+		expect(modelLineage("x-ai/grok-4.5")).toBe("xai");
+		expect(modelLineage("grok_4_5")).toBe("xai"); // underscore is a token boundary too
 	});
 });
 

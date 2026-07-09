@@ -23,6 +23,7 @@ import {
 	hasSecondVerifiedProviderLane,
 	listHarnesses,
 	registerHarness,
+	resolveAcpCommand,
 	resolveBin,
 	resolveHarness,
 	resolveHarnessName,
@@ -357,6 +358,26 @@ test("grok: registered as a verified first-party ACP harness pinned to xai", () 
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
 	expect(listHarnesses().map((h) => h.name)).toContain("grok");
+});
+
+test("resolveAcpCommand: grok's --model precedes the `stdio` subcommand, or the CLI rejects it", () => {
+	// LIVE: `grok agent stdio --model grok-4.5` ⇒ exit with "unexpected argument '--model'".
+	//       `grok agent --model grok-4.5 stdio` ⇒ a real ACP initialize response.
+	// This is the regression guard for that: a modeled grok unit must never be spawned with a trailing
+	// --model. The bug was invisible to the initialize smoke, which passes no model at all.
+	const grok = getHarness("grok")!;
+	expect(resolveAcpCommand(grok, "grok-4.5")).toEqual(["grok", "agent", "--model", "grok-4.5", "stdio"]);
+	expect(resolveAcpCommand(grok, "grok-4.5")).not.toEqual(["grok", "agent", "stdio", "--model", "grok-4.5"]);
+	// No model pinned ⇒ the plain launch command, untouched.
+	expect(resolveAcpCommand(grok, undefined)).toEqual(["grok", "agent", "stdio"]);
+});
+
+test("resolveAcpCommand: the DEFAULT trailing-append still holds for flag-style ACP harnesses", () => {
+	const opencode = getHarness("opencode")!;
+	expect(resolveAcpCommand(opencode, "some-model")).toEqual(["opencode", "acp", "--model", "some-model"]);
+	expect(resolveAcpCommand(opencode, undefined)).toEqual(["opencode", "acp"]);
+	// omp-rpc harnesses carry no acpCommand ⇒ undefined, never a fabricated argv.
+	expect(resolveAcpCommand(getHarness("omp")!, "opus")).toBeUndefined();
 });
 
 test("globalDefaultHarness honors GLANCE_HARNESS, else omp", () => {

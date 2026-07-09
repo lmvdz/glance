@@ -12,7 +12,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { parseGrokVerdict } from "../src/validator.ts";
+import { parseCodexVerdict, parseGrokVerdict } from "../src/validator.ts";
 
 const VERDICT = { perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: false, note: "auth missing" }], confidence: 0.8, rationale: "one criterion unmet" };
 
@@ -46,19 +46,11 @@ test("a bare verdict object (no envelope) still parses — plain stdout, no sche
 	expect(r?.perCriterion.map((c) => c.satisfied)).toEqual([true, false]);
 });
 
-test("the multi-line pretty envelope parses — a line-by-line scan would find nothing", () => {
+test("the multi-line pretty envelope parses (codex's line-by-line strategy would return undefined here)", () => {
+	// The real regression this pins: if someone ever routes grok through `parseCodexVerdict`, the pretty
+	// envelope yields nothing. Assert the CONTRAST directly rather than restating the helper's framing.
 	const raw = envelope(VERDICT);
-	expect(raw.includes("\n")).toBe(true);
-	// No single line of the pretty envelope is itself a complete JSON object carrying the verdict.
-	const anyLineIsVerdict = raw.split("\n").some((l) => {
-		try {
-			const o: unknown = JSON.parse(l.trim());
-			return !!o && typeof o === "object" && Array.isArray((o as Record<string, unknown>).perCriterion);
-		} catch {
-			return false;
-		}
-	});
-	expect(anyLineIsVerdict).toBe(false);
+	expect(parseCodexVerdict(raw)?.perCriterion).toBeUndefined();
 	expect(parseGrokVerdict(raw)?.perCriterion).toHaveLength(2);
 });
 

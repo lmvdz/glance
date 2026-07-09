@@ -51,6 +51,12 @@ export interface HarnessDescriptor {
 	/** ACP-only: the full launch command, e.g. `["gemini","--acp"]`, `["opencode","acp"]`,
 	 *  `["npx","-y","@zed-industries/claude-code-acp"]`. omp-rpc harnesses leave this undefined. */
 	acpCommand?: string[];
+	/** ACP-only: how a pinned model joins the launch argv. The DEFAULT appends `--model <m>` to the end
+	 *  of `acpCommand`, which is right for flag-style entrypoints (`auggie --acp --model m`). It is WRONG
+	 *  for harnesses whose model flag belongs to a PARENT command rather than the ACP subcommand — grok's
+	 *  `--model` is an option of `grok agent`, so `grok agent stdio --model m` dies with "unexpected
+	 *  argument '--model'" (live-verified). Such harnesses override this to place the flag correctly. */
+	acpModelArgv?: (model: string) => string[];
 	/** omp-rpc-only: the approval-flag dialect (omp uses `--approval-mode <mode>`, pi uses
 	 *  `--approve`/`--no-approve`). Kept here so the arg builder never hardcodes per-harness knowledge. */
 	approvalArgs?: (mode: string) => string[];
@@ -150,6 +156,20 @@ export function resolveHarness(p: { harness?: string; runtime?: string }): Harne
 	const d = registry.get(name);
 	if (!d) throw new Error(`unknown harness "${name}" — registered: ${[...registry.keys()].join(", ") || "(none)"}`);
 	return d;
+}
+
+/**
+ * The full ACP launch argv for a descriptor, with an optional pinned model folded in. THE one place
+ * that knows how a model joins an ACP command line — call sites must never re-append `--model`
+ * themselves, because the flag's correct POSITION is per-harness (see `acpModelArgv`).
+ *
+ * Returns undefined for non-ACP (omp-rpc) harnesses, which carry no acpCommand.
+ */
+export function resolveAcpCommand(d: HarnessDescriptor, model?: string): string[] | undefined {
+	if (!d.acpCommand) return undefined;
+	if (!model) return [...d.acpCommand];
+	if (d.acpModelArgv) return d.acpModelArgv(model);
+	return [...d.acpCommand, "--model", model];
 }
 
 /** Resolve the binary (argv[0]) for a descriptor: per-agent override > GLANCE_BIN for the default
@@ -274,6 +294,12 @@ registerHarness({
 	protocol: "acp",
 	bin: "grok",
 	acpCommand: ["grok", "agent", "stdio"],
+	// `--model` is an option of `grok agent`, NOT of its `stdio` subcommand: the default trailing-append
+	// would spawn `grok agent stdio --model m`, which exits with "unexpected argument '--model'".
+	// LIVE-VERIFIED both ways (v0.2.93) — the flag must precede the subcommand. Found by an adversarial
+	// cross-lineage review of this very commit; the initial `initialize` smoke passed no model and so
+	// never exercised the argv a modeled unit actually spawns.
+	acpModelArgv: (model) => ["grok", "agent", "--model", model, "stdio"],
 	capabilities: ACP_CAPS,
 	verified: true,
 	note: "native first-party ACP (grok agent stdio); initialize + session/new live-verified; vendor-pinned xai — activates the degradation ladder",
