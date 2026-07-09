@@ -15,6 +15,7 @@
  * reconcile from (concern 07's backstop loop).
  */
 
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -89,8 +90,20 @@ function truncate(s: string, n: number): string {
  * null on success/skip — deps that can't install mean the gate can't be trusted.
  */
 export async function installScratchDeps(scratch: string): Promise<string | null> {
-	const err = await installNodeModules(scratch);
-	return err ? `scratch dep install failed: ${err}` : null;
+	// Nested, non-workspace packages need their own install — `worktree.ts`'s `provisionWorktreeDeps`
+	// already provisions `<dir>` AND `<dir>/webapp` for exactly this reason. This path used to install
+	// only the root, which was invisible while the repo's gate (`bun run check && bun run test`) never
+	// entered `webapp/`. The moment the gate started typechecking and testing the webapp, a PR-mode
+	// scratch merge would fail on missing `webapp/node_modules` (react-markdown, recharts, …) and return
+	// a NON-retryable acceptance failure — parking an otherwise-green branch. Found by cross-lineage
+	// review (gpt-5.6-sol) of the gate-coverage change; the two provisioners must stay in step.
+	//
+	// Fail CLOSED and concurrently, unlike `provisionWorktreeDeps`: deps that can't install here mean the
+	// gate about to run cannot be trusted, and the caller surfaces this string as a gate failure.
+	const pkgDirs = [scratch, path.join(scratch, "webapp")].filter((d) => existsSync(path.join(d, "package.json")));
+	const errs = (await Promise.all(pkgDirs.map(async (d) => ({ dir: d, err: await installNodeModules(d) })))).filter((r) => r.err);
+	if (errs.length === 0) return null;
+	return `scratch dep install failed: ${errs.map((e) => `${e.dir}: ${e.err}`).join("; ")}`;
 }
 
 /** "owner/repo" from repoIdentity()'s "host/owner/repo" key — gh must be addressed by slug, not host
@@ -472,6 +485,50 @@ async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, sta
 	return result;
 }
 
+/**
+ * Refuse to publish commits the operator never asked us to publish.
+ *
+ * A unit branch normally forks from `origin/<default>`, so everything in `origin/<default>..<branch>`
+ * is the agent's own work. But `resolveWorktree` REUSES an existing branch ref verbatim and ignores
+ * the caller's start point (`worktree.ts`'s `exists ? ["worktree","add",dir,branch] : …startPoint`),
+ * so a `squad/*` branch created back when the daemon forked from the operator's local HEAD still
+ * carries that operator's commits. Local mode used to merge such a branch back into the same checkout
+ * it came from — a no-op for those commits. PR mode pushes the whole branch and merges it into the
+ * REMOTE default, which would publish the operator's private, unpushed work as a side effect of
+ * landing an unrelated unit.
+ *
+ * Guard: any commit this PR would publish that is also reachable from a local branch OUTSIDE
+ * `refs/heads/squad/` is a transplant. Stacked `squad/*` branches are deliberately allowed (a unit
+ * forked from another unit is still fleet work). Refusal is NOT retryable — retrying cannot fix
+ * lineage, and a silent retry loop is exactly how the dirty-main interlock stayed invisible for
+ * 1,381 attempts. Found by cross-lineage review (gpt-5.6-sol + grok-4.5) of the probe-4 removal.
+ */
+export async function transplantedCommitsReason(repo: string, branch: string, defaultBranch: string): Promise<string | undefined> {
+	const publishing = await git(["rev-list", `origin/${defaultBranch}..${branch}`], repo);
+	if (publishing.code !== 0 || !publishing.stdout) return undefined;
+	// `--exclude` patterns are interpreted the way the FOLLOWING ref option interprets its own pattern:
+	// for `--branches` that means relative to `refs/heads/`, so a fully-qualified `refs/heads/squad/*`
+	// silently matches nothing and every branch — including this one — counts as foreign. (Caught by a
+	// negative test: the gate flagged the agent's own commit.)
+	const foreign = await git(["rev-list", "--exclude=squad/*", `--exclude=${branch}`, "--branches", "--not", `origin/${defaultBranch}`], repo);
+	if (foreign.code !== 0 || !foreign.stdout) return undefined;
+	const foreignShas = new Set(foreign.stdout.split("\n").filter(Boolean));
+	const stolen = publishing.stdout.split("\n").filter((s) => s && foreignShas.has(s));
+	if (stolen.length === 0) return undefined;
+	const shown = await Promise.all(
+		stolen.slice(0, 3).map(async (sha) => {
+			const subj = await git(["log", "-1", "--format=%h %s", sha], repo);
+			return subj.code === 0 ? subj.stdout : sha.slice(0, 8);
+		}),
+	);
+	const more = stolen.length > 3 ? ` (+${stolen.length - 3} more)` : "";
+	return (
+		`transplant gate blocked ${branch}: it would publish ${stolen.length} commit(s) to origin/${defaultBranch} that belong to a ` +
+		`local non-fleet branch, not to this unit — ${shown.join("; ")}${more}. This branch was forked from an operator branch ` +
+		`(pre-PR-mode units forked from the local checkout's HEAD). Rebase it onto origin/${defaultBranch} and re-verify, or delete it.`
+	);
+}
+
 async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, onOrphan?: AutomationRecorder): Promise<LandResult> {
 	const { repo, worktree, branch, message } = opts;
 
@@ -514,6 +571,10 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 				: `no changes to land (${branch} has no commits ahead of origin/${opts.defaultBranch}, and nothing to commit)`,
 		};
 	}
+
+	// Lineage gate — BEFORE the first push. Everything below this line is remote-visible.
+	const transplant = await transplantedCommitsReason(repo, branch, opts.defaultBranch);
+	if (transplant) return { ok: false, retryable: false, committed, merged: false, message, mode: "pr", detail: transplant };
 
 	const ensure = await ensurePr({
 		repo,
