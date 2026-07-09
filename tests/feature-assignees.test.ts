@@ -11,7 +11,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildFeatures } from "../src/features.ts";
-import { invalidFileAssignees, invalidOrgAssignees, orgMemberAssigneeId } from "../src/feature-assignees.ts";
+import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee, orgMemberAssigneeId } from "../src/feature-assignees.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { Actor, PersistedFeature } from "../src/types.ts";
 import type { OrgMember } from "../src/org-admin.ts";
@@ -52,6 +52,43 @@ test("file mode: the only valid assignee is the operator identity", () => {
 	expect(invalidFileAssignees(["local"], "local")).toEqual([]);
 	expect(invalidFileAssignees(["local", "db:u1"], "local")).toEqual(["db:u1"]);
 	expect(invalidFileAssignees([], "local")).toEqual([]);
+});
+
+// ── isVoteAssignee: the plan-vote call/cast membership predicate (mode-aware) ─────────────────
+
+test("isVoteAssignee: DB mode is strict — no fallback for a non-member, even an admin", () => {
+	const actor: Actor = { id: "db:u9", origin: "local", role: "admin" };
+	expect(isVoteAssignee(actor, ["db:u1", "db:u2"], { dbMode: true, operatorId: "local" })).toBe(false);
+	expect(isVoteAssignee(actor, ["db:u9", "db:u2"], { dbMode: true, operatorId: "local" })).toBe(true); // exact match still works
+});
+
+test("isVoteAssignee: file mode — THE GAP — a web:admin bearer actor never literally equals the default-seeded operator id, but IS authorized as the operator", () => {
+	const actor: Actor = { id: "web:admin", origin: "local", role: "admin" };
+	// The default-seeded assignee is the operator's own identity ("local"), never "web:admin" — a
+	// literal-id check can NEVER pass here, which is exactly the reported gap.
+	expect(["local"].includes(actor.id)).toBe(false);
+	expect(isVoteAssignee(actor, ["local"], { dbMode: false, operatorId: "local" })).toBe(true);
+});
+
+test("isVoteAssignee: file mode — an operator-tier bearer actor is also authorized as the operator", () => {
+	const actor: Actor = { id: "web:operator", origin: "local", role: "operator" };
+	expect(isVoteAssignee(actor, ["local"], { dbMode: false, operatorId: "local" })).toBe(true);
+});
+
+test("isVoteAssignee: file mode — a viewer-tier bearer actor is never authorized (read-only)", () => {
+	const actor: Actor = { id: "web:viewer", origin: "local", role: "viewer" };
+	expect(isVoteAssignee(actor, ["local"], { dbMode: false, operatorId: "local" })).toBe(false);
+});
+
+test("isVoteAssignee: file mode — an assignee list that ISN'T the operator still 403s (no blanket admin bypass)", () => {
+	const actor: Actor = { id: "web:admin", origin: "local", role: "admin" };
+	expect(isVoteAssignee(actor, ["someone-else"], { dbMode: false, operatorId: "local" })).toBe(false);
+});
+
+test("isVoteAssignee: an exact literal id match wins in either mode (no need to fall through)", () => {
+	const actor: Actor = { id: "web:admin", origin: "local", role: "admin" };
+	expect(isVoteAssignee(actor, ["web:admin", "db:u2"], { dbMode: false, operatorId: "local" })).toBe(true);
+	expect(isVoteAssignee(actor, ["web:admin", "db:u2"], { dbMode: true, operatorId: "local" })).toBe(true);
 });
 
 // ── default-seed at build time ────────────────────────────────────────────────────────────────
