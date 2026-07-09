@@ -58,6 +58,14 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("POST", "/api/push/subscribe")).toBe("viewer");
 	// agent verify runs the acceptance command (non-destructive) — stays operator, unlike feature verify.
 	expect(restActionTier("POST", "/api/agents/a1/verify")).toBe("operator");
+	// Assignees are the plan-vote substrate: read is viewer, reassigning is admin.
+	expect(restActionTier("GET", "/api/features/f1/assignees")).toBe("viewer");
+	expect(restActionTier("PUT", "/api/features/f1/assignees")).toBe("admin");
+	// Plan-vote rounds: reading the current round/tally is viewer; calling/casting are admin (the
+	// finer actor-∈-assignees check happens app-layer, in server.ts, on top of this tier).
+	expect(restActionTier("GET", "/api/features/f1/plan-vote")).toBe("viewer");
+	expect(restActionTier("POST", "/api/features/f1/plan-vote/call")).toBe("admin");
+	expect(restActionTier("POST", "/api/features/f1/plan-vote/cast")).toBe("admin");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {

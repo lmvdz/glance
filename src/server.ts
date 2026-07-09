@@ -59,13 +59,17 @@ import {
 	OrgPatchBodySchema,
 	PlanCandidateCreateBodySchema,
 	PlanCandidateTransitionBodySchema,
+	PlanVoteCallBodySchema,
+	PlanVoteCastBodySchema,
 	PushSubscriptionBodySchema,
 	SpawnBodySchema,
 	TaskStartBodySchema,
 } from "./schema/http-body.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
-import { planDocDiffSince, readPlanDoc } from "./plan-doc.ts";
+import { planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
+import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
+import { hardenedGit } from "./git-harden.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
@@ -1298,6 +1302,92 @@ export class SquadServer {
 			}
 			const pf = await manager.setAssignees(decodeURIComponent(mfassign[1]), requested, repo);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
+		}
+		// Plan-vote rounds (PLAN-VOTE-COMMIT.md) — the majority-of-assignees gate a plan-revision
+		// candidate must clear before a (later, separate unit's) commit lands it. GET is
+		// viewer-readable; call/cast are admin-gated (restActionTier) PLUS an app-layer check that the
+		// actor is one of THIS feature's assignees — the vote's real authorization boundary, finer
+		// than the coarse role tier (mirrors the /assignees PUT's mode-aware validation above).
+		const mfvoteCall = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-vote\/call$/);
+		if (mfvoteCall && req.method === "POST") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(mfvoteCall[1]);
+			const feature = (await manager.features(repo)).find((f) => f.id === featureId);
+			if (!feature) return new Response("no such feature", { status: 404 });
+			const assignees = feature.assignees ?? [];
+			// A=0 first: with no assignees the membership check below would ALWAYS 403 (nobody can ever
+			// be "in" an empty roster), silently masking the more useful "assign someone first" message.
+			// In practice `feature.assignees` is never actually empty (buildFeatures/feature-assignees.ts
+			// default a cleared or legacy-missing list back to `[operator]`) — this is defense-in-depth
+			// for that invariant, not a reachable path today.
+			if (assignees.length === 0) return new Response("assign someone first", { status: 400 });
+			// Call-time authz uses the LIVE assignee list — the snapshot is TAKEN here, at call. (Cast
+			// authz, by contrast, uses the round's frozen roster — see the cast handler below.)
+			if (!assignees.includes(actor.id)) return new Response("only a feature assignee may call a vote", { status: 403 });
+			// Fast 409 for the common case; the authoritative, race-proof check-and-open happens
+			// atomically inside manager.openPlanVote (per-feature lock) and returns { conflict } below.
+			if (await manager.currentPlanVote(repo, featureId)) return new Response("a vote is already open for this feature", { status: 409 });
+			const body = decodeBodyOrEmpty(PlanVoteCallBodySchema, await req.json().catch(() => null));
+			const candidates = await manager.listPlanRevisionCandidates({ repo, featureId, state: "candidate" });
+			const requestedId = typeof body.candidateId === "string" ? body.candidateId : undefined;
+			const candidate = requestedId
+				? candidates.find((c) => c.id === requestedId)
+				: [...candidates].sort((a, b) => b.createdAt - a.createdAt)[0];
+			if (!candidate) return new Response(requestedId ? "no such open candidate" : "no head candidate to vote on", { status: 400 });
+			const docPath = candidate.planPath;
+			const comments = await manager.listComments({ repo, subject: featureId });
+			if (!planVoteGateOpen(comments, docPath)) return new Response("unresolved review comments — resolve them before calling a vote", { status: 400 });
+			const baseSha = await planDocHeadRevision(repo, docPath);
+			// Candidate branch tip — best-effort: a missing/unresolvable producer agent or branch never
+			// blocks calling the vote (the collaborative back-and-forth is the point), it just leaves
+			// revisionSha "" for the later commit-on-pass unit to notice it has nothing to land.
+			let revisionSha = "";
+			if (candidate.producerAgentId) {
+				const agent = manager.list().find((a) => a.id === candidate.producerAgentId);
+				if (agent?.branch) {
+					const rev = await hardenedGit(["rev-parse", agent.branch], { cwd: agent.repo || repo });
+					if (rev.code === 0) revisionSha = rev.stdout.trim();
+				}
+			}
+			const deadlineMs = typeof body.deadlineMs === "number" ? body.deadlineMs : undefined;
+			const opened = await manager.openPlanVote({ featureId, repo, planPath: docPath, candidateId: candidate.id, baseSha, revisionSha, assignees, openedBy: actor.id, deadlineMs }, actor);
+			if ("conflict" in opened) return new Response("a vote is already open for this feature", { status: 409 });
+			return Response.json({ round: opened, quorum: tallyPlanVoteRound(opened) });
+		}
+		const mfvoteCast = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-vote\/cast$/);
+		if (mfvoteCast && req.method === "POST") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(mfvoteCast[1]);
+			const decoded = decodeBody(PlanVoteCastBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response('roundId and choice ("approve"|"reject") required', { status: 400 });
+			const { roundId, choice: rawChoice } = decoded.success;
+			const choice = rawChoice === "approve" || rawChoice === "reject" ? rawChoice : undefined;
+			if (!choice) return new Response('choice must be "approve" or "reject"', { status: 400 });
+			const rounds = await manager.listPlanVoteRounds({ repo, featureId });
+			const round = rounds.find((r) => r.id === roundId);
+			if (!round) return new Response("no such vote round", { status: 404 });
+			// HIGH 2: authorize against the round's CALL-TIME snapshot roster, NOT the live
+			// feature.assignees — editing assignees mid-round must not let a non-snapshot actor cast
+			// (whom quorum ignores → a stranded round) nor block a snapshot voter. The snapshot is the
+			// quorum denominator, so it must also be the cast-authz set.
+			if (!round.assignees.includes(actor.id)) return new Response("only an assignee of this vote round may cast", { status: 403 });
+			if (round.state !== "voting") return new Response(`vote round already ${round.state}`, { status: 409 });
+			try {
+				const result = await manager.castPlanVote(featureId, roundId, actor.id, choice, actor);
+				return Response.json(result);
+			} catch (err) {
+				// A race between two concurrent casts both observing "voting" above (the round closed in
+				// between) is the only realistic way manager.castPlanVote's own locked guards throw here.
+				return new Response(errText(err), { status: 409 });
+			}
+		}
+		const mfvoteGet = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-vote$/);
+		if (mfvoteGet && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const featureId = decodeURIComponent(mfvoteGet[1]);
+			const rounds = await manager.listPlanVoteRounds({ repo, featureId });
+			const round = rounds.find((r) => r.state === "voting") ?? rounds[rounds.length - 1];
+			return Response.json(round ? { round, quorum: tallyPlanVoteRound(round) } : { round: null, quorum: null });
 		}
 		const mflink = url.pathname.match(/^\/api\/features\/([^/]+)\/agents$/);
 		if (mflink && req.method === "POST") {

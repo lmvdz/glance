@@ -506,6 +506,59 @@ export interface PlanRevisionCandidate {
 	createdAt: number;
 	updatedAt: number;
 }
+
+export type PlanVoteChoice = "approve" | "reject";
+
+/** A round starts "voting" and is set exactly once, the instant `computeVoteQuorum`
+ *  (plan-vote-quorum.ts) reports `decided` — by a cast, never by a client explicitly "closing" it.
+ *  `expired`/`superseded` are reserved for a later unit (no expiry sweep or supersede-on-newer-
+ *  candidate wiring exists yet — see PLAN-VOTE-COMMIT.md §H3); this unit only ever produces
+ *  "voting" | "passed" | "rejected". */
+export type PlanVoteState = "voting" | "passed" | "rejected" | "expired" | "superseded";
+
+/** One assignee's cast, folded from the append-only log (last write per actor wins). */
+export interface PlanVoteCast {
+	actorId: string;
+	choice: PlanVoteChoice;
+	at: number;
+}
+
+/**
+ * A plan-vote round — the majority-of-assignees gate a `PlanRevisionCandidate` must clear before a
+ * commit lands it. Append-only `plan-votes.jsonl`, fold-on-read exactly like `comments.ts`'s
+ * `ArtifactComment` (see plan-votes.ts for the event log + fold). Snapshots its quorum denominator
+ * (`assignees`) and its commit target (`baseSha`/`revisionSha`) at CALL time so voters commit
+ * exactly what they saw — a later assignee change or a superseding candidate never silently
+ * reweights an in-flight vote (PLAN-VOTE-COMMIT.md §H3's base-SHA guard is enforced by the later
+ * commit-on-pass unit, which reads these two fields; opening/casting never checks them).
+ */
+export interface PlanVoteRound {
+	id: string;
+	featureId: string;
+	repo: string;
+	/** The plan doc this round (and its gating plan-annotation comments) anchor to. */
+	planPath: string;
+	candidateId: string;
+	/** The plan doc's committed SHA at call time (`planDocHeadRevision`) — the base a later commit
+	 *  must still match. Empty string when the doc has no commit history yet. */
+	baseSha: string;
+	/** The candidate-producing agent's branch tip at call time — what a PASSED vote would land.
+	 *  Empty string when no producing agent/branch could be resolved (best-effort, non-fatal: the
+	 *  vote still runs, but the later commit-on-pass unit can't land without one). */
+	revisionSha: string;
+	/** Assignee roster snapshot at call time — the fixed quorum denominator for this round, even if
+	 *  the feature's live assignees change mid-vote. */
+	assignees: string[];
+	openedBy: string;
+	openedAt: number;
+	deadlineMs?: number;
+	state: PlanVoteState;
+	/** Per-assignee casts, folded (one entry per actorId — last write wins). */
+	casts: PlanVoteCast[];
+	closedAt?: number;
+	closedReason?: string;
+}
+
 /**
  * A Feature — a cross-cutting unit of work spanning a plan dir and/or a set of agents/worktrees.
  * Phase 1: fully DERIVED at read time (no persistence) from plan dirs + the roster + live git.

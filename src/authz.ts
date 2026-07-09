@@ -73,6 +73,12 @@ export function restActionTier(method: string, pathname: string): Role {
 	// Assignees are the plan-vote substrate: any viewer may read them; only an admin may reassign
 	// (a reassignment changes who the future majority-of-assignees vote counts).
 	if (/^\/api\/features\/[^/]+\/assignees$/.test(pathname)) return method === "GET" ? "viewer" : "admin";
+	// Plan-vote rounds: reading the current round/tally is viewer; calling a vote and casting a
+	// ballot are consequential (a cast can auto-close a round and, on pass, hands off to the
+	// commit-on-pass seam) so both are admin-gated here, same tier as assignee reassignment — the
+	// FINER "is this actor even one of the round's assignees" check happens app-layer, in
+	// server.ts, on top of this tier gate (feature-assignees.ts's membership helpers).
+	if (/^\/api\/features\/[^/]+\/plan-vote(\/(call|cast))?$/.test(pathname)) return method === "GET" ? "viewer" : "admin";
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }
