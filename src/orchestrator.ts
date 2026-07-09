@@ -40,6 +40,13 @@ export interface OrchestratorDeps {
 	 * merge), `verifyAgent` runs the acceptance gate in its worktree, `landAgentWork` merges it.
 	 * When absent, plain agents are left untouched (back-compat with feature-only callers/tests).
 	 */
+	/**
+	 * Settle a finished agent's uncommitted work into a commit on its own branch, before anything reads
+	 * its HEAD. Nothing else in a unit's lifecycle commits, and the proof gate refuses a dirty worktree —
+	 * without this every unit's verify fails and it dies at the escalate cap. Must be idempotent and a
+	 * no-op for busy / in-place / clean agents. See `SquadManager.commitAgentWip`.
+	 */
+	settleWork?: (agentId: string) => Promise<void>;
 	verifyAgent?: (agentId: string) => Promise<boolean>;
 	/**
 	 * Land a plain agent's OWN branch. true ⇒ merged; false ⇒ blocked (retry, then park); "staged" ⇒
@@ -194,9 +201,18 @@ export class Orchestrator {
 			const feat = a.featureId;
 			const plain = feat === undefined;
 			const workId = feat ?? `agent:${a.id}`;
+			if (this.halted.has(a.id)) continue; // escalated / parked in-memory — agent-id keyed, needs no stateKey
+			// Settle the finished agent's uncommitted work into a commit BEFORE `stateKey` reads HEAD.
+			// `stateKey` is HEAD-derived and every durable `verifying`/`verified`/`staged`/`halted` record
+			// below is written under it; sweeping later (inside the verify hook, where it started life)
+			// moved HEAD out from under those records, so a restart re-drove decisions that were already
+			// durably made. Found by cross-lineage review (gpt-5.6-sol). A durable halt recorded against
+			// the OLD tree deliberately no longer matches the new one: the tree changed, so the decision
+			// is genuinely fresh. No-op for clean/busy/in-place agents.
+			if (this.deps.settleWork) await this.deps.settleWork(a.id);
 			const stateKey = await this.stateKey(a);
 			const lockKey = stateKey ?? workId;
-			if (this.halted.has(a.id) || (stateKey !== undefined && this.deps.persist?.isHalted(stateKey))) continue; // escalated / parked — the auto-loop no longer acts on it
+			if (stateKey !== undefined && this.deps.persist?.isHalted(stateKey)) continue; // durably escalated / parked
 			if (this.landed.has(workId) || this.staged.has(workId) || (stateKey !== undefined && (this.deps.persist?.isLanded(stateKey) || this.deps.persist?.isStaged(stateKey)))) continue; // already merged, or held for one-tap Land
 			if (this.verifyLandLocks.has(lockKey)) continue;
 			if (plain) {
@@ -387,6 +403,26 @@ export class Orchestrator {
 	private markStaged(workId: string, a: AgentDTO, stateKey?: string): void {
 		this.staged.add(workId);
 		this.persistCritical("staged", stateKey, a, this.deps.log ?? (() => {}));
+	}
+
+	/**
+	 * A human just gave this unit a new instruction — every decision already taken about it is stale.
+	 *
+	 * `staged`/`landed` are in-memory sets keyed by `workId` (`agent:<id>` or the featureId), and `halted`
+	 * by agent id. NONE of those keys change when a steered agent edits files, so once a unit had been
+	 * verified-and-staged the tick loop skipped it forever (`orchestrator.ts`'s `landed.has`/`staged.has`
+	 * guards run BEFORE `agentHasWork`). The durable, HEAD-derived `stateKey` records correctly go stale on
+	 * their own; the in-memory sets cannot. So work produced by a steer was never verified and never
+	 * landed — the steering lane would have shipped broken. Found by cross-lineage review (gpt-5.6-sol).
+	 *
+	 * Un-halting is deliberate and part of the same idea: a parked/escalated unit that a human explicitly
+	 * steers should resume. That is what "step in" means.
+	 */
+	invalidate(agentId: string, featureId?: string): void {
+		const workId = featureId ?? `agent:${agentId}`;
+		this.staged.delete(workId);
+		this.landed.delete(workId);
+		this.halted.delete(agentId);
 	}
 
 	/**

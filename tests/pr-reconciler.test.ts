@@ -487,6 +487,13 @@ test("prReconcileTick: ff-heals a repo strictly behind origin/<default> while ch
 	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(originMain); // healed
 });
 
+/**
+ * Now load-bearing. This used to pass vacuously: `resolveLandMode` refused pr mode outright on a
+ * non-default checkout (old probe 4), so `ffHealOne` bailed at `mode !== "pr"` and never reached its
+ * own `current !== defaultBranch` guard. That interlock was removed — pr mode is valid off-default —
+ * so this test is the ONLY thing standing between a feature checkout and `merge --ff-only`. Verified
+ * by mutation: deleting the guard in `ffHealOne` turns this test red.
+ */
 test("prReconcileTick: does NOT ff-heal a repo checked out on a non-default branch", async () => {
 	const stateDir = await tmpDir("reconcile-ffheal-nondefault-state-");
 	const { repo, origin } = await convergedRepo("reconcile-ffheal-nondefault-");
