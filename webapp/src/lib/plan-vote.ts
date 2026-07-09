@@ -223,6 +223,34 @@ export function viewerChoice(actorId: string | undefined, round: PlanVoteRoundDT
   return round.casts.find((c) => c.actorId === actorId)?.choice;
 }
 
+// ── human-readable assignee labels (strip internal scheme noise) ────────────────────────────────
+
+/** The user-id portion of an actor id: `db:<userId>` / `web:<role>` → `<userId>`/`<role>`; any
+ *  id without a known scheme prefix passes through unchanged. Mirrors AssigneesEditor's `userIdOf`,
+ *  extended to the `web:` scheme the file-mode operator/role actors also carry. */
+export function stripActorScheme(actorId: string): string {
+  const m = /^(?:db|web):(.+)$/.exec(actorId);
+  return m ? m[1] : actorId;
+}
+
+/**
+ * The label to render for one assignee's chip — clean human text, never internal scheme noise
+ * (PLAN-VOTE-COMMIT.md §C's "per-assignee chips" read like the reference UIs, not `db:<uuid>`):
+ *   - the viewer's own id → "You";
+ *   - else a real display name from the org-member roster the DB-mode picker already fetches, keyed
+ *     by the scheme-stripped user id, when one is known;
+ *   - else the bare id with its `db:`/`web:` scheme prefix stripped.
+ * The FULL id is still what authz/casting use — this is display-only.
+ */
+export function assigneeLabel(
+  actorId: string,
+  opts: { viewerId?: string; nameByUserId?: ReadonlyMap<string, string> } = {},
+): string {
+  if (opts.viewerId && actorId === opts.viewerId) return 'You';
+  const bare = stripActorScheme(actorId);
+  return opts.nameByUserId?.get(bare) ?? bare;
+}
+
 // ── the "Committed to plans/<dir>" terminal line ────────────────────────────────────────────────
 
 /** The plan directory a round's `planPath` (a single markdown file, e.g. "plans/ctx/01-spec.md")

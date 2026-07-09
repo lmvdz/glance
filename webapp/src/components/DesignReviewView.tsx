@@ -51,6 +51,7 @@ import {
 import {
   ASSIGNEE_VOTE_LABEL,
   ASSIGNEE_VOTE_TONE,
+  assigneeLabel,
   assigneeVoteState,
   candidateStateById,
   canCallVote,
@@ -203,6 +204,10 @@ export const DesignReviewView: React.FC = () => {
   const [voteQuorum, setVoteQuorum] = React.useState<VoteQuorumDTO | null>(null);
   const [calling, setCalling] = React.useState(false);
   const [castingChoice, setCastingChoice] = React.useState<PlanVoteChoiceDTO | null>(null);
+  // Real display names for assignee chips, keyed by scheme-stripped user id (DB mode only — the
+  // roster endpoint is org-scoped). Best-effort: a viewer who can't read it just gets clean
+  // id-without-prefix labels (assigneeLabel's fallback), never internal `db:` scheme noise.
+  const [memberNames, setMemberNames] = React.useState<Map<string, string>>(() => new Map());
 
   // Load the feature pipeline (documents list + comments + candidates + linked agents), and
   // re-poll on every WS features-changed event (same idiom as the vote-round effect below):
@@ -288,6 +293,29 @@ export const DesignReviewView: React.FC = () => {
   // that assignee's row is always "me" for rendering the interactive chip / "did I already vote".
   const effectiveViewerId = authMode === 'file' ? assignees[0] : viewerId;
   const myChoice = viewerChoice(effectiveViewerId, voteRound ?? undefined);
+  // Fold the signed-in user's own name into the map so the viewer's non-interactive chip (a
+  // resolved round, where nobody's chip is a control) still reads as a name, not a raw id — the
+  // roster fetch below never includes "me" for a non-admin viewer.
+  const nameByUserId = React.useMemo(() => {
+    const map = new Map(memberNames);
+    if (me) map.set(me.user.id, me.user.name || me.user.email || me.user.id);
+    return map;
+  }, [memberNames, me]);
+
+  // Best-effort org-member roster for real chip labels (DB mode; org-scoped, so a non-admin viewer
+  // simply gets an empty list and falls back to id-without-prefix). Same source AssigneesEditor's
+  // DB-mode picker reads.
+  React.useEffect(() => {
+    if (authMode !== 'db') return;
+    let alive = true;
+    apiJson<Array<{ userId: string; name: string; email: string }>>('/api/org/members')
+      .then((members) => {
+        if (!alive) return;
+        setMemberNames(new Map(members.map((m) => [m.userId, m.name || m.email || m.userId] as const)));
+      })
+      .catch(() => { /* viewer without roster read access — id-without-prefix labels are the fallback */ });
+    return () => { alive = false; };
+  }, [authMode]);
 
   // Default the focused section to the oldest UNRESOLVED comment's heading (the thing most in need
   // of attention right now); fall back to the first heading once everything's resolved.
@@ -692,7 +720,7 @@ export const DesignReviewView: React.FC = () => {
                               type="button"
                               disabled={castingChoice !== null}
                               onClick={() => void castVote('approve')}
-                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors disabled:opacity-50 ${myChoice === 'approve' ? 'bg-emerald-400 text-black' : 'text-emerald-400 hover:bg-emerald-950/40'}`}
+                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink disabled:opacity-50 ${myChoice === 'approve' ? 'bg-emerald-400 text-black' : 'text-emerald-400 hover:bg-emerald-950/40'}`}
                             >
                               {castingChoice === 'approve' ? 'Approving…' : 'You: approve'}
                             </button>
@@ -700,7 +728,7 @@ export const DesignReviewView: React.FC = () => {
                               type="button"
                               disabled={castingChoice !== null}
                               onClick={() => void castVote('reject')}
-                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors disabled:opacity-50 ${myChoice === 'reject' ? 'bg-red-400 text-black' : 'text-red-400 hover:bg-red-950/40'}`}
+                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink disabled:opacity-50 ${myChoice === 'reject' ? 'bg-red-400 text-black' : 'text-red-400 hover:bg-red-950/40'}`}
                             >
                               {castingChoice === 'reject' ? 'Rejecting…' : 'You: reject'}
                             </button>
@@ -710,7 +738,7 @@ export const DesignReviewView: React.FC = () => {
                       return (
                         <StatusChip
                           key={assigneeId}
-                          status={`${isMe ? 'You' : assigneeId} · ${ASSIGNEE_VOTE_LABEL[state]}`}
+                          status={`${assigneeLabel(assigneeId, { viewerId: effectiveViewerId, nameByUserId })} · ${ASSIGNEE_VOTE_LABEL[state]}`}
                           tone={ASSIGNEE_VOTE_TONE[state]}
                           variant={state === 'pending' ? 'outline' : 'solid'}
                         />

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   ASSIGNEE_VOTE_LABEL,
   ASSIGNEE_VOTE_TONE,
+  assigneeLabel,
   assigneeVoteState,
   candidateStateById,
   canCallVote,
@@ -10,6 +11,7 @@ import {
   isViewerAssignee,
   planDirOf,
   quorumLine,
+  stripActorScheme,
   tallyLine,
   viewerActorId,
   viewerChoice,
@@ -223,6 +225,34 @@ describe('viewerChoice', () => {
   it('returns the viewer\'s own folded cast', () => {
     const r = round({ casts: [{ actorId: 'db:u1', choice: 'reject', at: 1 }] });
     expect(viewerChoice('db:u1', r)).toBe('reject');
+  });
+});
+
+describe('stripActorScheme', () => {
+  it('strips db: and web: scheme prefixes', () => {
+    expect(stripActorScheme('db:u1')).toBe('u1');
+    expect(stripActorScheme('web:admin')).toBe('admin');
+  });
+  it('passes a schemeless id through unchanged', () => {
+    expect(stripActorScheme('local')).toBe('local');
+  });
+});
+
+describe('assigneeLabel', () => {
+  it('renders "You" for the viewer\'s own id', () => {
+    expect(assigneeLabel('db:kyle', { viewerId: 'db:kyle' })).toBe('You');
+  });
+  it('prefers a real display name from the roster (keyed by scheme-stripped id)', () => {
+    const names = new Map([['sarah', 'Sarah Connor']]);
+    expect(assigneeLabel('db:sarah', { viewerId: 'db:kyle', nameByUserId: names })).toBe('Sarah Connor');
+  });
+  it('falls back to the id WITHOUT its scheme prefix — never raw db:/web: noise', () => {
+    expect(assigneeLabel('db:mo', {})).toBe('mo');
+    expect(assigneeLabel('web:admin', { nameByUserId: new Map() })).toBe('admin');
+  });
+  it('"You" wins even when a name is also known for the viewer', () => {
+    const names = new Map([['kyle', 'Kyle Reese']]);
+    expect(assigneeLabel('db:kyle', { viewerId: 'db:kyle', nameByUserId: names })).toBe('You');
   });
 });
 
