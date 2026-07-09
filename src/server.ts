@@ -1437,6 +1437,19 @@ export class SquadServer {
 				await manager.applyCommand({ type: "prompt", id: agentId, message }, actor);
 				return Response.json({ agentId, mode });
 			}
+			// Live incident (exit-classification bug, fixed in squad-manager.ts's wire() exit handler): a
+			// plan-reviser turn completing and its ACP process tearing down via SIGTERM looked identical to a
+			// crash, surfacing as an "errored"/"needs you" row with an apparently empty Changes panel. The
+			// SECOND half of that symptom is not a bug: this agent's own worktree diff (the per-agent
+			// Land/Changes tab) is CORRECTLY empty of anything landable — a plan-doc revision never goes
+			// through the normal git-merge Land flow. It deliberately stays UNCOMMITTED: the product design is
+			// a collaborative back-and-forth, then a majority vote of the plan's assignees, and only a
+			// passing vote commits (that vote→commit step is a separate, incoming feature — not built here).
+			// The real legibility surface for "plan updated, awaiting review" already exists below —
+			// `addPlanRevisionCandidate` registers a `state: "candidate"` row the instant this fires, rendered
+			// by ProofProvenancePanel's "Plan revision candidates" list (labeled "pending review" there) —
+			// so a completed plan-reviser turn was already visible there the whole time; only the false
+			// "errored" status (now fixed) made it look broken.
 			const dto = await manager.create({ repo, name: "plan-reviser", task: message, featureId, approvalMode: "write", autoRoute: false, track: true, owns: feature.planDir ? [feature.planDir] : undefined }, actor);
 			await manager.addPlanRevisionCandidate({ repo, featureId, planPath: comment.annotation?.planPath ?? feature.planDir ?? "plans", producerAgentId: dto.id, summary: comment.body, diffRef: comment.annotation?.planPath }, actor);
 			return Response.json({ agentId: dto.id, mode });

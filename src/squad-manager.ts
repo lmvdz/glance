@@ -543,6 +543,14 @@ interface AgentRecord {
 	thinkingEntry?: TranscriptEntry;
 	/** True between agent_start/turn_start and agent_end. */
 	streaming: boolean;
+	/** Set true the first time an `agent_end` frame lands (a fully completed turn — end_turn, cancel,
+	 *  refusal, and error all fire it per acp-agent-driver.ts / the RpcAgent-side equivalent). Read by the
+	 *  `exit` handler below: a process exit AFTER at least one completed turn, with the agent currently at
+	 *  rest (not streaming, nothing pending), is a normal one-shot/session teardown — including a
+	 *  signal-kill exit code (143 SIGTERM, 130 SIGINT, 137 SIGKILL) — never a crash. Never reset back to
+	 *  false; once an agent has proven it can finish a turn, a LATER exit is judged by the CURRENT
+	 *  streaming/pending state, not by re-demanding a fresh completed turn. */
+	completedTurn?: boolean;
 	/** Live subagent (task-spawned children) tree for this agent. */
 	subs: SubagentTracker;
 	/** Available slash commands (builtin + skills + extensions) reported by the agent. */
@@ -4651,6 +4659,10 @@ export class SquadManager extends EventEmitter {
 		const fresh = this.makeDriver(rec.options, cold);
 		rec.agent = fresh;
 		rec.streaming = false;
+		// A fresh driver is a fresh process/session — any turn completion recorded against the OLD one must
+		// not immunize a crash of the NEW one against the exit classifier above (a restarted agent that dies
+		// before completing a turn on this attempt is a genuine crash, not teardown of an already-finished run).
+		rec.completedTurn = false;
 		// callerOwnsStatus: clear pending without letting setPending derive+record its own transition —
 		// otherwise a working agent with an already-empty queue would get a spurious working->idle
 		// "pending-cancel" ledger entry immediately ahead of the real "restart" one below.
@@ -5024,7 +5036,24 @@ export class SquadManager extends EventEmitter {
 			// Guard preserved verbatim — an exit reported for an already-stopped agent (e.g. our own
 			// kill/restart already flipped it) stays inert exactly as today.
 			if (rec.dto.status !== "stopped") {
-				this.transition(rec, code === 0 ? "stopped" : "error", code === 0 ? "exit-clean" : "exit-error", code !== 0 ? { error: `agent exited (code ${code})` } : undefined);
+				// Live incident: a one-shot ACP agent (plan-reviser) completed its turn (agent_end fired,
+				// WORKING→IDLE), then ~8s later its process exited 143 (SIGTERM) as normal one-shot teardown.
+				// The old rule (`code===0 ? stopped : error`) treated ANY non-zero code as a crash, so a
+				// perfectly successful run got flagged error + surfaced as "needs you"/Restart. The honest
+				// rule: an exit is a crash only if the agent had NOT already finished its work at the moment
+				// it died. "Finished its work" = it has completed at least one turn (`completedTurn`, set by
+				// the agent_end handler above) AND it is currently at rest — not mid-stream, nothing pending
+				// — right now. Under that rule ANY exit code (including signal-kill codes: 143 SIGTERM, 130
+				// SIGINT, 137 SIGKILL) after a completed, at-rest turn is clean teardown. A crash before any
+				// completed turn, or a death mid-stream / with an unanswered pending request, still stays
+				// error exactly as before — this never masks a genuine crash.
+				const cleanTeardown = code === 0 || (rec.completedTurn === true && !rec.streaming && rec.dto.pending.length === 0);
+				this.transition(
+					rec,
+					cleanTeardown ? "stopped" : "error",
+					cleanTeardown ? "exit-clean" : "exit-error",
+					cleanTeardown ? undefined : { error: `agent exited (code ${code})` },
+				);
 				this.emitAgent(rec);
 			}
 			void this.finalizeRun(rec);
@@ -5159,6 +5188,7 @@ export class SquadManager extends EventEmitter {
 				this.finishAssistantStream(rec);
 				rec.streaming = false;
 				rec.dto.activity = undefined;
+				rec.completedTurn = true; // a fully completed turn — see the field comment; feeds the exit classifier
 				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
 				break;
