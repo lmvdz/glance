@@ -6,6 +6,17 @@ function formatWhen(ts?: number): string {
   return ts ? new Date(ts).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'never';
 }
 
+/** A plan-reviser's edit deliberately stays uncommitted — plan revisions land only via a majority
+ *  vote of the plan's assignees (a separate, incoming feature owns that commit step), never
+ *  auto-committed on completion. The raw wire state name "candidate" reads as jargon here; "pending
+ *  review" is the honest plain-language label for the same fact — this row exists specifically so a
+ *  completed plan-reviser turn is legible as "plan updated, awaiting review" instead of nothing (the
+ *  per-agent Land/Changes tab is correctly empty for this agent: there's no git-merge landing step to
+ *  show, the doc edit isn't a mergeable branch — this candidates list is the real surface for it). */
+function candidateStateLabel(state: string): string {
+  return state === 'candidate' ? 'pending review' : state;
+}
+
 export function ProofProvenancePanel({ task }: { task: Task }) {
   const data = task.proofProvenance;
   if (!data) return null;
@@ -50,7 +61,7 @@ export function ProofProvenancePanel({ task }: { task: Task }) {
           {data.candidates.map((candidate) => (
             <div key={candidate.id} className="rounded-lg bg-blue-50 p-2 text-xs text-blue-900 dark:bg-blue-950/40 dark:text-blue-100">
               <div className="font-medium">{candidate.summary}</div>
-              <div>{candidate.planPath} · {candidate.state}{candidate.producerAgentId ? ` · ${candidate.producerAgentId}` : ''}</div>
+              <div>{candidate.planPath} · {candidateStateLabel(candidate.state)}{candidate.producerAgentId ? ` · ${candidate.producerAgentId}` : ''}</div>
             </div>
           ))}
         </div>

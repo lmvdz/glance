@@ -34,4 +34,9 @@ test("ProofProvenancePanel renders source, proof, readiness, worktrees, and cand
   expect(html).toContain("Re-run proof against current HEAD.");
   expect(html).toContain("squad/a1");
   expect(html).toContain("Candidate plan edit");
+  // A "candidate" plan revision reads as "pending review" — plain-language, not wire jargon (a
+  // plan-reviser's edit deliberately stays uncommitted pending a majority vote of the plan's
+  // assignees; this row is the honest "plan updated, awaiting review" surface for that).
+  expect(html).toContain("pending review");
+  expect(html).not.toContain("plans/proof/01.md · candidate");
 });
