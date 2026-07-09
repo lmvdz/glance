@@ -347,12 +347,23 @@ two are no longer hypothetical:** a unit now goes dirty-worktree → commit → 
 work a steer produces is swept, verified and landed like any other. That was the missing lane for design
 work — the 12-to-15-round screenshot loops the founding brief called "most of the real work".
 
-Still open: **G4** (the learning ledger is one row; it stays empty until real lands accumulate — now
-unblocked), and landing G1/G3a/G3b/G3c/G3e themselves, so the fleet's *own* gate covers the webapp
-(units fork from `origin/main`, which does not yet carry any of this).
+All of G1–G4 is now on **draft PR #150** (`fix/one-green-loop`, base `main`), six commits, rebased off
+`origin/main` so it carries none of `feat/grok-harness` (#147). Gate on that branch: **2382 backend +
+804 webapp, 0 fail**, `tsc` clean on both projects, effect-ratchet green. Thirteen guards are
+mutation-proven — delete the guard, the test goes red.
 
-Final gate on `feat/grok-harness`: **2390 backend + 804 webapp, 0 fail, tsc clean on both projects,
-effect-ratchet green.** Ten guards mutation-proven across the four fixes.
+Known, pre-existing, and unrelated: the full suite has intermittent order-pollution flakes (one per run
+in two of three runs, a *different* test each time; every one passes in isolation on a clean tree). The
+ledger already tracks this as debt.
+
+**Still open:**
+- Merging #150 and #149. Until #150 is on `main`, units fork from a base without the gate fix, so a
+  webapp unit's own gate still does not typecheck or test `webapp/`.
+- The operator's live daemon on :7878 runs the pre-fix code — its audit still shows
+  `verify error: worktree has uncommitted changes` at 18:15 today. It picks up the fix on restart
+  after #150 lands.
+- The residual sweep race (an agent's own child process writing during `commitAgentWip`) that no lock
+  can close, narrowed by an idle dwell and documented rather than hidden.
 
 ### Cross-lineage review of G3a/G3b (autonomous git-write ⇒ both lineages, per policy)
 
@@ -377,9 +388,25 @@ Complementary again; every finding verified against source before acting.
 Gate after all of it: **2376 backend + 804 webapp, 0 fail, tsc clean on both projects.** Four guards
 mutation-proven (delete the guard → the test goes red): the ff-heal branch check, the `settleWork`
 sweep, the `verifyFeature` member sweep, the symlink in-place guard, and the empty-member fail-closed.
-- **G4 — close the learning loop.** `task-outcomes.jsonl` has one row and `model-outcomes` has no file,
-  so every routing decision, cost tie-break and scoreboard reads an empty table. They stay empty until
-  G3 produces the first real outcome. Re-verify *after* G3, not before.
+- **G4 — close the learning loop. ✔ DONE (and the premise was confirmed, then a real defect found).**
+  The ledgers were empty *because nothing ever landed* — exactly the prediction. Re-checked after G3,
+  against the operator's own live daemon (which had begun landing units on another repo during this
+  session): `model-outcomes.json` now holds `{"openai::light":{"landed":11,...},"opus::light":{...}}`
+  and `task-outcomes.jsonl` holds 18 rows — 12 landed, 6 rejected, models and cost attributed. The
+  learning loop was never broken; it was starved.
+
+  But the rows are wrong in one field. **`filesTouched` was `git status --porcelain`** — uncommitted
+  paths only — so any unit that committed its own work reported **zero files touched**. That number
+  feeds `confidence.ts`, which scores `<= 3` as a small-blast-radius **bonus** (+0.1) and `> 12` as a
+  penalty (−0.2), and **confidence gates auto-land**. A twenty-file change scored as if it touched
+  nothing and got the bonus. Live evidence: **16 of 18 rows carry `filesTouched: 0`**, one of them for a
+  change that really touched 16 files. `commitAgentWip` would have driven the signal permanently to zero.
+
+  Fixed with `filesTouchedSinceBase`: committed ∪ working-tree changes, diffed from the **merge base**
+  (a busy base branch must not inflate every unit), `.omp/` evidence excluded, falling back to the old
+  probe when the base is unresolvable — never throws, never fabricates. The codebase already knew:
+  `changedFilesVsBase`, used by the produces audit, documents that the receipt's `filesTouched` "both
+  under- and over-states the real change set". This aligns the two.
 
 ### Deliberately not doing yet, and why
 

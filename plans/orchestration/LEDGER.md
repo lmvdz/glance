@@ -225,7 +225,20 @@ change, and their guards run BEFORE `agentHasWork` — so **work produced by a s
 (un-halting is deliberate: that is what "step in" means).
 | G3d | the last outward-facing step: let the FLEET push + open a draft PR on GitHub | **✔ DONE — operator-authorized. THE ACCEPTANCE TEST PASSES.** Unit told to edit files only (no shell, no commit) → `verify error (dirty)` → `commit-wip ok` → `verify ok` → `landReady:true` → push + `gh pr create --draft` → **[PR #149](https://github.com/lmvdz/glance/pull/149)**, draft/OPEN/MERGEABLE, +194/−2, held for one-tap merge. The first PR glance ever opened for itself. Verified by hand afterwards: 4/4 call sites wired, webapp tsc clean, 815 webapp tests |
 | G3e | PR #149's commit was titled `wip(…): sweep uncommitted work before verify` — daemon plumbing as a permanent commit subject | **✔ DONE.** Subject is now `<ISSUE-ID>: <issue name>`, else `squad(<name>): agent changes` (land()'s shape); sweep provenance moved to the body |
-| G4 | close the learning loop (`task-outcomes`/`model-outcomes` are empty) — now unblocked, since units can finally reach a land | queued |
+| G4 | close the learning loop (`task-outcomes`/`model-outcomes` are empty) | **✔ DONE.** Premise confirmed: the ledgers were empty *because nothing ever landed*. Re-checked post-G3 against the operator's own live daemon: `model-outcomes.json` = `openai::light landed 11`, `opus::light landed 1`; `task-outcomes.jsonl` = 18 rows (12 landed / 6 rejected), models + cost attributed. **New defect found in the rows:** `filesTouched` was `git status --porcelain` (uncommitted only), so any unit that committed its own work reported **0 files touched** — and `confidence.ts` reads `<=3` as a small-blast-radius BONUS, `>12` as a penalty, with confidence gating auto-land. **16 of 18 live rows carry `filesTouched: 0`**, one for a change that really touched 16 files; `commitAgentWip` would have zeroed it permanently. Fixed via `filesTouchedSinceBase` (committed ∪ working tree, from the MERGE BASE, `.omp/` excluded, falls back rather than throwing) |
+
+**WAVE 7 LANDED AS DRAFT PR #150** (`fix/one-green-loop` → `main`, 6 commits, rebased off origin/main so
+it carries none of `feat/grok-harness` #147). Gate: **2382 backend + 804 webapp, 0 fail**, tsc clean on
+both projects, effect-ratchet green. 13 guards mutation-proven. Suite has intermittent order-pollution
+flakes (one per run in 2 of 3 runs, a different test each time, all green in isolation on a clean tree) —
+the debt already recorded below.
+
+**OPERATOR NOTES.** (1) A live glance daemon is running on :7878 against another repo (game project);
+its audit at 18:15 today still shows `verify error: worktree has uncommitted changes` — the interlock,
+in production. It picks up the fix on restart after #150 lands. (2) An orphaned `agent-host` process
+(pid 485663, `stepin-…-wf`) points at a deleted scratch worktree; the permission layer correctly refused
+to let me kill a process I could not prove I created. (3) Still USER-ONLY: the 35 stale `squad/*`
+branches and junk tickets OMPSQ-427/428/431/436/437/438.
 
 **CAVEAT on #149's green:** units fork from `origin/main`, which does not yet carry G3b, so the unit's
 own gate ran `tsc --noEmit` (no webapp) and `bunfig [test] root="tests"` (no webapp tests). Its green was
