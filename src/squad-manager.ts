@@ -2228,23 +2228,31 @@ export class SquadManager extends EventEmitter {
 		// even before any agent runs — otherwise a fresh daemon (0 agents) renders an empty planner.
 		const repos = repo !== undefined ? [repo] : [...new Set([...list.map((a) => a.repo), ...persisted.map((f) => f.repo), ...planeRepos()])];
 		const out: FeatureDTO[] = [];
-		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r), persisted)));
+		for (const r of repos) out.push(...(await buildFeatures(r, list.filter((a) => a.repo === r), persisted, this.operator.id)));
 		for (const feature of out) feature.planRevisionCandidates = await this.listPlanRevisionCandidates({ repo: feature.repo, featureId: feature.id });
 		return out;
 	}
 
-	createFeature(opts: { title: string; repo: string; planDir?: string; stageOverride?: FeatureStage }): PersistedFeature {
+	/** The single operator identity this manager acts as (`db:<userId>`-style base actor in DB mode,
+	 *  `LOCAL_ACTOR.id` in file mode) — the default assignee for features created here. */
+	get operatorId(): string {
+		return this.operator.id;
+	}
+
+	createFeature(opts: { title: string; repo: string; planDir?: string; stageOverride?: FeatureStage; author?: string }): PersistedFeature {
 		const id = `feat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 		const now = Date.now();
-		const pf: PersistedFeature = { id, title: opts.title.trim() || "feature", repo: opts.repo, stageOverride: opts.stageOverride, origin: opts.planDir ? { planDir: opts.planDir } : undefined, createdAt: now, updatedAt: now };
+		// Seed the human assignee list so the vote substrate is never A=0: the creating author (a
+		// real `db:<userId>` in DB mode) when known, else this manager's operator identity.
+		const pf: PersistedFeature = { id, title: opts.title.trim() || "feature", repo: opts.repo, stageOverride: opts.stageOverride, origin: opts.planDir ? { planDir: opts.planDir } : undefined, assignees: [opts.author ?? this.operator.id], createdAt: now, updatedAt: now };
 		this.featureStore.set(id, pf);
 		this.emitFeaturesChanged();
 		return pf;
 	}
 
 	/** Spawn a research-plan-implement workflow agent and wrap it in a feature whose stage tracks the live run. */
-	async createAutoFeature(opts: { title: string; repo: string; goal: string; model?: string }): Promise<{ feature: PersistedFeature; agent: AgentDTO }> {
-		const pf = this.createFeature({ title: opts.title, repo: opts.repo });
+	async createAutoFeature(opts: { title: string; repo: string; goal: string; model?: string; author?: string }): Promise<{ feature: PersistedFeature; agent: AgentDTO }> {
+		const pf = this.createFeature({ title: opts.title, repo: opts.repo, author: opts.author });
 		const name = opts.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || undefined;
 		const agent = await this.create({ repo: opts.repo, name, workflow: "research-plan-implement", task: opts.goal, featureId: pf.id, approvalMode: "yolo", model: opts.model });
 		pf.workflowAgentId = agent.id;
@@ -2299,6 +2307,34 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `plan dir ${patch.archived ? "archive" : "restore"} failed for ${pf.origin.planDir}: ${String(err)}`);
 			}
 		}
+		this.emitFeaturesChanged();
+		return pf;
+	}
+
+	/**
+	 * The human assignees for a feature (the vote substrate). Reads the derived DTO so it works for
+	 * BOTH persisted and plan-dir/agent-derived features without forcing an adopt-on-read — a legacy
+	 * persisted feature with no stored value surfaces the defaulted `[operator]` here. Returns
+	 * `undefined` only when no such feature exists.
+	 */
+	async featureAssignees(id: string, repo?: string): Promise<string[] | undefined> {
+		const f = (await this.features(repo)).find((x) => x.id === id);
+		return f ? f.assignees : undefined;
+	}
+
+	/**
+	 * Replace a feature's human assignees (the vote substrate). Resolves the feature the SAME way
+	 * updateFeature does — adopting a plan-derived feature that isn't yet persisted — so it works for
+	 * exactly the features the board shows. Membership/identity VALIDATION is the caller's job (the
+	 * server checks DB-mode ids against the org roster, file-mode against the operator identity);
+	 * this is pure storage. De-dupes while preserving order. Returns the feature, or undefined if
+	 * none resolves.
+	 */
+	async setAssignees(id: string, assignees: string[], repo?: string): Promise<PersistedFeature | undefined> {
+		const pf = this.featureStore.get(id) ?? (await this.adoptDerivedFeature(id, repo));
+		if (!pf) return undefined;
+		pf.assignees = [...new Set(assignees)];
+		pf.updatedAt = Date.now();
 		this.emitFeaturesChanged();
 		return pf;
 	}
@@ -2384,6 +2420,9 @@ export class SquadManager extends EventEmitter {
 			decisions: found.decisions,
 			relationships: found.relationships,
 			contextBundle: found.contextBundle,
+			// The derived DTO already carries a defaulted assignee list (buildFeatures seeds it to
+			// [operator]); persist it verbatim so adoption doesn't reset the vote substrate.
+			assignees: found.assignees.length ? found.assignees : [this.operator.id],
 			createdAt: now,
 			updatedAt: now,
 		};
