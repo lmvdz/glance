@@ -117,8 +117,8 @@ stays retrievable.
 `src/fabric-search.ts`). Add an "offload" write path (blob → fabric doc + pointer id) and a
 retrieval tool for units/validators.
 **Value for glance**: today the validator judges a diff truncated to 12,000 chars and a proof tail
-truncated to 2,000 (`src/validator.ts:181-182,302-303`) — veto/confidence are computed on a lossy
-view of exactly the artifact under review; `src/land-pr.ts:636` truncates acceptance-gate output to
+truncated to 2,000 (`src/validator.ts:153,222`) — veto/confidence are computed on a lossy
+view of exactly the artifact under review; `src/land-pr.ts:588` truncates acceptance-gate output to
 600 chars in the failure detail. Pointer + search keeps the signal without blowing context.
 **Where**: `src/validator.ts`, `src/land-pr.ts`, `src/fabric.ts`, `src/fabric-search.ts`; optionally
 the unit cold-start primer (pointers instead of inlined content).
@@ -129,7 +129,7 @@ the unit cold-start primer (pointers instead of inlined content).
 *registered-unverified (hidden until live smoke proves)* / *detected, with an honest manual plan* /
 *unsupported* — with one authoritative list surface; the system never claims to have wired what it
 hasn't.
-**Mechanism**: widen `verified: boolean` (`src/harness-registry.ts:74`) to a tier field; surface the
+**Mechanism**: widen `verified: boolean` (`src/harness-registry.ts:68`) to a tier field; surface the
 matrix in the create UI and a `squadctl harnesses` listing; keep the existing "hidden until live
 smoke" discipline as the promotion path between tiers.
 **Value for glance**: the registry already half-does this (unverified harnesses hidden, concern-08
@@ -187,8 +187,11 @@ doesn't follow redirects, document that as the load-bearing property.
 
 ## Recommendation
 
-Intel is actionable but **none of it should preempt G3** (run the factory to completion once —
-`plans/orchestration/ONE-GREEN-LOOP.md`). Sequencing: fold **#1** into the post-G3 fleet-learning
-work before the router consumes the ledger; run **#4** as a standalone grok sweep any time (it
-needs no daemon changes); **#2/#3/#6** are small standalone PRs; **#5** rides the agent-profiles
-plan. Adopt nothing from EAP as a dependency.
+*(updated 2026-07-09, post-G3: the one-green-loop closed — first completed unattended
+land in the system's history; see `plans/orchestration/ONE-GREEN-LOOP.md`. G4 = learning ledger
+is next.)*
+
+Sequencing: **#1 is now the timely borrow** — G4 is exactly the fleet-learning ledger, so bake the
+success-coupled accounting doctrine into the schema *as part of G4*, before the router consumes it.
+Run **#4** as a standalone grok sweep any time (it needs no daemon changes); **#2/#3/#6** are small
+standalone PRs; **#5** rides the agent-profiles plan. Adopt nothing from EAP as a dependency.
