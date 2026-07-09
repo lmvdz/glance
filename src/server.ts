@@ -18,7 +18,7 @@ import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
 import { envBool, envInt } from "./config.ts";
-import { invalidFileAssignees, invalidOrgAssignees } from "./feature-assignees.ts";
+import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
 import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
@@ -1322,8 +1322,10 @@ export class SquadServer {
 			// for that invariant, not a reachable path today.
 			if (assignees.length === 0) return new Response("assign someone first", { status: 400 });
 			// Call-time authz uses the LIVE assignee list — the snapshot is TAKEN here, at call. (Cast
-			// authz, by contrast, uses the round's frozen roster — see the cast handler below.)
-			if (!assignees.includes(actor.id)) return new Response("only a feature assignee may call a vote", { status: 403 });
+			// authz, by contrast, uses the round's frozen roster — see the cast handler below.) Mode-aware:
+			// in file mode a bearer actor IS the single operator (isVoteAssignee, feature-assignees.ts) —
+			// otherwise the default-seeded operator identity could never call its own feature's vote.
+			if (!isVoteAssignee(actor, assignees, { dbMode: this.dbMode, operatorId: manager.operatorId })) return new Response("only a feature assignee may call a vote", { status: 403 });
 			// Fast 409 for the common case; the authoritative, race-proof check-and-open happens
 			// atomically inside manager.openPlanVote (per-feature lock) and returns { conflict } below.
 			if (await manager.currentPlanVote(repo, featureId)) return new Response("a vote is already open for this feature", { status: 409 });
@@ -1369,11 +1371,18 @@ export class SquadServer {
 			// HIGH 2: authorize against the round's CALL-TIME snapshot roster, NOT the live
 			// feature.assignees — editing assignees mid-round must not let a non-snapshot actor cast
 			// (whom quorum ignores → a stranded round) nor block a snapshot voter. The snapshot is the
-			// quorum denominator, so it must also be the cast-authz set.
-			if (!round.assignees.includes(actor.id)) return new Response("only an assignee of this vote round may cast", { status: 403 });
+			// quorum denominator, so it must also be the cast-authz set. Mode-aware for the same reason
+			// as the call handler above: in file mode a bearer actor IS the single operator.
+			if (!isVoteAssignee(actor, round.assignees, { dbMode: this.dbMode, operatorId: manager.operatorId })) return new Response("only an assignee of this vote round may cast", { status: 403 });
 			if (round.state !== "voting") return new Response(`vote round already ${round.state}`, { status: 409 });
+			// The cast is stored (and tallied — computeVoteQuorum keys casts by actorId against
+			// round.assignees) under the ASSIGNEE identity, not necessarily the literal bearer id: in file
+			// mode isVoteAssignee just authorized this actor as the operator via the operatorId fallback,
+			// so recording the cast under the operator's own snapshot-roster id (rather than "web:admin",
+			// which is never in round.assignees) is what makes it actually count toward quorum.
+			const castActorId = round.assignees.includes(actor.id) ? actor.id : manager.operatorId;
 			try {
-				const result = await manager.castPlanVote(featureId, roundId, actor.id, choice, actor);
+				const result = await manager.castPlanVote(featureId, roundId, castActorId, choice, actor);
 				return Response.json(result);
 			} catch (err) {
 				// A race between two concurrent casts both observing "voting" above (the round closed in

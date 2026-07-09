@@ -59,6 +59,51 @@ async function createCandidate(url: string, repo: string, featureId: string, sum
 	return fetch(`${url}/api/features/${encodeURIComponent(featureId)}/plan-candidates?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: JSON.stringify({ planPath: PLAN_PATH, summary }) })).then((res) => res.json());
 }
 
+// ── file-mode identity gap: the DEFAULT-seeded assignee (operatorId, e.g. "local") vs the
+// bearer-token role actor every file-mode request carries (`web:admin`) — never explicitly
+// re-assigned via setAssignees, exactly the state a fresh feature is in the moment it's created ───
+
+test("file mode: the operator's own bearer actor can call a vote on a feature's DEFAULT-seeded assignee (no explicit setAssignees)", async () => {
+	const { url, repo, manager } = await fixture();
+	const feature = await createFeature(url, repo);
+	// Never called manager.setAssignees — this IS the default seed (feature-assignees.ts: [operatorId]).
+	expect(await manager.featureAssignees(feature.id, repo)).toEqual([manager.operatorId]);
+	await openReviewGate(url, repo, feature.id);
+	await createCandidate(url, repo, feature.id);
+
+	const res = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-vote/call?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: "{}" }));
+	expect(res.status).toBe(200);
+	const body = await res.json();
+	expect(body.round.state).toBe("voting");
+});
+
+test("file mode: the operator's own bearer actor can cast on a round whose snapshot assignees is the DEFAULT operator id", async () => {
+	const { url, repo, manager } = await fixture();
+	const feature = await createFeature(url, repo);
+	await openReviewGate(url, repo, feature.id);
+	await createCandidate(url, repo, feature.id);
+
+	const called = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-vote/call?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: "{}" })).then((res) => res.json());
+	expect(called.round.assignees).toEqual([manager.operatorId]);
+
+	const cast = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-vote/cast?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: JSON.stringify({ roundId: called.round.id, choice: "approve" }) }));
+	expect(cast.status).toBe(200);
+	const body = await cast.json();
+	expect(body.round.state).toBe("passed"); // A=1 (solo operator) auto-passes
+	expect(body.quorum.reason).toContain("sole assignee auto-pass");
+});
+
+test("file mode: a non-operator assignee (written directly through the manager, bypassing the PUT restriction) still 403s a bearer actor — no blanket admin bypass", async () => {
+	const { url, repo, manager } = await fixture();
+	const feature = await createFeature(url, repo);
+	await manager.setAssignees(feature.id, ["someone-else"], repo); // never the operator
+	await openReviewGate(url, repo, feature.id);
+	await createCandidate(url, repo, feature.id);
+
+	const res = await fetch(`${url}/api/features/${encodeURIComponent(feature.id)}/plan-vote/call?repo=${encodeURIComponent(repo)}`, authed({ method: "POST", body: "{}" }));
+	expect(res.status).toBe(403);
+});
+
 // ── call: guards ───────────────────────────────────────────────────────────────────────────────
 
 test("call: 403 when the caller isn't one of the feature's assignees", async () => {
