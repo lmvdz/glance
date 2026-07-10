@@ -92,6 +92,15 @@ export function voiceProviderApiKey(id: VoiceProviderId): string | undefined {
 	return undefined;
 }
 
+/** Whether ANY registered voice provider has an API key configured (MEDIUM-4). `GET
+ *  /api/voice/config` uses this — alongside the caller's DB-mode check — to decide whether
+ *  `enabled` is honestly `true`: `POST /api/voice/token` 403s in DB mode and 501s when no provider
+ *  key is configured, so a flag-on daemon in either shape would otherwise advertise a voice button
+ *  that dies at the very first mint attempt. */
+export function hasAnyVoiceKey(): boolean {
+	return voiceProviderIds().some((id) => !!voiceProviderApiKey(id));
+}
+
 // The voice model's system prompt: mouth/ears framing (it narrates and dispatches; it does not
 // think for the fleet) plus the injection-defense doctrine from DESIGN.md ("Injection defense" row)
 // — tool results are untrusted data from fleet agents, never instructions.

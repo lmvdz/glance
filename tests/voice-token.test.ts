@@ -21,7 +21,7 @@ import { restActionTier } from "../src/authz.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer, type AuthInstance } from "../src/server.ts";
-import { isKnownVoiceProvider, mintVoiceToken, VOICE_SESSION_TOOLS } from "../src/voice-token.ts";
+import { hasAnyVoiceKey, isKnownVoiceProvider, mintVoiceToken, VOICE_SESSION_TOOLS } from "../src/voice-token.ts";
 
 const OPENAI_MINT_URL = "https://api.openai.com/v1/realtime/client_secrets";
 const realFetch = globalThis.fetch;
@@ -236,16 +236,43 @@ test("GET /api/voice/config: viewer tier gets {enabled} ONLY (no providers key);
 	expect((await adminRes.json()).providers).toBeDefined();
 });
 
-test("GET /api/voice/config advertises only providers whose API key is configured — enabled-but-keyless lists none", async () => {
+test("MEDIUM-4: GET /api/voice/config reports {enabled:false} — not {enabled:true, providers:[]} — when no provider key is configured at all", async () => {
 	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
 	delete process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY;
 	const { url } = await startServer({ token: "admin-tok", roleTokens: { operator: "op-tok" } });
 	const res = await fetch(`${url}/api/voice/config`, { headers: { authorization: "Bearer op-tok" } });
 	expect(res.status).toBe(200);
+	// The config probe is the one honest discovery channel: POST /api/voice/token would 501 for
+	// EVERY provider right now (none has a key), so the probe must not show a button that dies at
+	// the first mint attempt — {enabled:true, providers:[]} would still render a (dead) button.
+	expect(await res.json()).toEqual({ enabled: false });
+});
+
+test("MEDIUM-4: GET /api/voice/config reports {enabled:false} in DB mode even with a provider key configured (POST /api/voice/token 403s in DB mode regardless)", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	const { url } = await startServer({ auth: dbAuthStub() });
+	const res = await fetch(`${url}/api/voice/config`, { headers: { cookie: "session=member1" } });
+	expect(res.status).toBe(200);
+	expect(await res.json()).toEqual({ enabled: false });
+});
+
+test("MEDIUM-4: GET /api/voice/config reports {enabled:true, providers:[...]} in file mode with a real key configured (the happy path is unaffected)", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	const { url } = await startServer({ token: "admin-tok", roleTokens: { operator: "op-tok" } });
+	const res = await fetch(`${url}/api/voice/config`, { headers: { authorization: "Bearer op-tok" } });
+	expect(res.status).toBe(200);
 	const body = await res.json();
-	// The config probe is the one honest discovery channel: a provider whose mint would 501 must
-	// not be advertised (review finding M2 on concern 05).
-	expect(body).toEqual({ enabled: true, providers: [] });
+	expect(body.enabled).toBe(true);
+	expect(body.providers).toEqual([{ id: "openai", transport: "webrtc", model: "gpt-realtime-2.1" }]);
+});
+
+test("MEDIUM-4: hasAnyVoiceKey is false with no key configured, true once one is", () => {
+	delete process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY;
+	expect(hasAnyVoiceKey()).toBe(false);
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	expect(hasAnyVoiceKey()).toBe(true);
 });
 
 test("POST /api/voice/token refuses with 403 in DB mode regardless of tier (single shared key, no per-org attribution in v1)", async () => {

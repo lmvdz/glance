@@ -103,7 +103,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { mintVoiceToken, voiceProviderPublicInfo } from "./voice-token.ts";
+import { hasAnyVoiceKey, mintVoiceToken, voiceProviderPublicInfo } from "./voice-token.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -1179,6 +1179,13 @@ export class SquadServer {
 		// pinned by a regression test) — no new authz branch.
 		if (url.pathname === "/api/voice/config" && req.method === "GET") {
 			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
+			// MEDIUM-4: POST /api/voice/token 403s in DB mode (no per-org attribution/budget in v1)
+			// and 501s when no provider key is configured — a flag-on daemon in either shape would
+			// otherwise advertise {enabled:true} and show a voice button that dies at the very first
+			// mint attempt (the "old mic scar" this capability probe exists to prevent). Fold both
+			// into the SAME honest signal the flag represents, for every role tier, before any
+			// provider-posture detail is even considered.
+			if (this.dbMode || !hasAnyVoiceKey()) return Response.json({ enabled: false });
 			// Viewer tier gets the bare capability probe only — provider posture (which keys are
 			// configured) is never leaked below operator (DESIGN.md red-team: "leaks provider posture").
 			if (role === "viewer") return Response.json({ enabled: true });

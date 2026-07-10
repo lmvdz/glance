@@ -86,9 +86,33 @@ export interface UseVoiceDispatcherOptions {
   onAgentBound?: (agentId: string) => void;
   /** Fired with a lightweight text summary of what was spoken/said each turn, for the caller to
    *  persist as a durable message if it wants (concern 08's job — this hook never touches
-   *  storage). Covers both the operator's prompt and the narrated completion. */
-  onSpokenSummary?: (text: string) => void;
+   *  storage). Covers both the operator's prompt (role:'user', stamped with the dispatch's own
+   *  `clientTurnId` so the caller can persist it in a way the existing user-side render dedupe
+   *  already covers once the transcript echoes it back — see `SpokenSummaryEvent`'s doc comment)
+   *  and the narrated completion (role:'model', no clientTurnId of its own). */
+  onSpokenSummary?: (event: SpokenSummaryEvent) => void;
 }
+
+/**
+ * MAJOR-2 fix: `onSpokenSummary` used to fire a bare `text` string for BOTH the operator's spoken
+ * prompt (at dispatch) and the assistant's narrated completion (at completion) — the caller had no
+ * way to tell them apart, so both persisted as `role:'model'` with no `clientTurnId`. That broke two
+ * things downstream: the operator's OWN spoken prompt rendered as a model bubble (wrong speaker),
+ * and the completion summary had nothing to dedupe it against the transcript's own `message_end`
+ * entry once that landed, so it rendered twice.
+ *
+ * This discriminated union lets the caller (`VoiceCallContext.tsx`) persist each half correctly:
+ * `role:'user'` with the SAME `clientTurnId` `dispatchPromptAgent` already sent in the dispatched
+ * command — `partitionSessionMessages` (AssistantChat.tsx) already dedupes `role:'user'` durable
+ * Messages by `clientTurnId` match against the real transcript, so this rides the EXISTING
+ * dedupe/speaker-correctness machinery for free instead of needing a parallel one. `role:'model'`
+ * carries no `clientTurnId` (a voice completion summary isn't itself a dispatched turn) — its
+ * double-render is instead fixed by extending `partitionSessionMessages` with a text-match dedupe
+ * against finished assistant transcript entries (see that function's own doc comment).
+ */
+export type SpokenSummaryEvent =
+  | { role: 'user'; text: string; clientTurnId: string }
+  | { role: 'model'; text: string };
 
 export interface UseVoiceDispatcherResult {
   /** Pass directly as `VoiceSessionOptions.onFunctionCall` when constructing the session. Stable
@@ -146,7 +170,7 @@ export interface DispatchPromptAgentDeps {
   sendConsoleCommand: (command: ClientCommand) => void;
   subscribeConsole: (agentId: string) => void;
   onAgentBound?: (agentId: string) => void;
-  onSpokenSummary?: (text: string) => void;
+  onSpokenSummary?: (event: SpokenSummaryEvent) => void;
   /** Injectable for tests — default to the real implementations imported above. */
   ensureConsoleAgentFn?: typeof ensureConsoleAgent;
   buildPromptCommandFn?: typeof buildPromptCommand;
@@ -227,7 +251,11 @@ export async function dispatchPromptAgent(
     { clientTurnId, source: 'voice', displayText: spokenText || message },
   );
   deps.sendConsoleCommand(command);
-  deps.onSpokenSummary?.(spokenText || message);
+  // MAJOR-2(a): role:'user', stamped with the SAME clientTurnId just sent in `command` — the caller
+  // persists this as a durable user Message that `partitionSessionMessages`' existing clientTurnId
+  // dedupe covers once the transcript echoes it back, so it renders as the operator's own turn (not
+  // a model bubble) and never double-renders.
+  deps.onSpokenSummary?.({ role: 'user', text: spokenText || message, clientTurnId });
 
   if (refs.pendingFreshAgentNoticeRef.current) {
     refs.pendingFreshAgentNoticeRef.current = false;
@@ -242,7 +270,7 @@ export async function dispatchPromptAgent(
 export interface SweepWatchersDeps {
   transcripts: Map<string, TranscriptEntry[]>;
   agents: AgentDTO[];
-  onSpokenSummary?: (text: string) => void;
+  onSpokenSummary?: (event: SpokenSummaryEvent) => void;
   clearTimerFn?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
@@ -292,7 +320,11 @@ export function sweepPromptWatchers(session: Pick<VoiceSession, 'queueInjection'
     refs.watchersRef.current.delete(agentId);
     const label = labelForAgent(deps.agents, agentId, current.label);
     session.queueInjection(buildCompletionInjectionItems(label, completion.text));
-    deps.onSpokenSummary?.(completion.text);
+    // MAJOR-2(a): role:'model', no clientTurnId — this isn't a dispatched turn of its own. Its
+    // double-render risk is fixed on the OTHER side, by extending partitionSessionMessages
+    // (AssistantChat.tsx) to dedupe a role:'model' durable Message against a matching finished
+    // assistant transcript entry by exact text, consumed once.
+    deps.onSpokenSummary?.({ role: 'model', text: completion.text });
   }
 }
 

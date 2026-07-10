@@ -475,6 +475,16 @@ export class VoiceSession {
     return this.state;
   }
 
+  /** GAP-1: `opts.agentId` is normally fixed at construction, but a call can start before any
+   *  console agent is bound (concern 07/08's bootstrap path) — without a way to update it, a
+   *  rotation/reconnect's carry-over text (`buildCarryOverText`) would permanently render a blank
+   *  "Bound console agent:" line even after the bind happens mid-call. The provider calls this the
+   *  moment `useVoiceDispatcher`'s `onAgentBound` fires, so the NEXT rotation (proactive re-mint or
+   *  an unexpected-disconnect reconnect) carries the real id forward. */
+  setAgentId(agentId: string | undefined): void {
+    this.opts.agentId = agentId;
+  }
+
   // ---------------------------------------------------------------------------
   // Connect / disconnect
   // ---------------------------------------------------------------------------

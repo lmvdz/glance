@@ -776,6 +776,57 @@ test("clearEchoedPendingSends does NOT clear a pending send when a gate answer e
   expect(next[0]?.clientTurnId).toBe("turn-a");
 });
 
+// ── MAJOR-2: voice-authored spoken summaries must not double-render or render as the wrong speaker ──
+
+test("partitionSessionMessages: a voice prompt persisted as role:'user' with the dispatch's clientTurnId is covered by the matching transcript echo — renders once, as the USER, not a model bubble (MAJOR-2a)", () => {
+  const messages: Message[] = [{ role: "user", text: "check the fleet status", timestamp: 5, clientTurnId: "voice:1" }];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "user", text: "check the fleet status", ts: 6, status: "ok", clientTurnId: "voice:1" },
+  ];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries).toHaveLength(1);
+  expect(entries[0]!.kind).toBe("user"); // not "assistant" — the wrong-speaker bug this fixes
+  expect(trailingEntries).toEqual([]);
+});
+
+test("partitionSessionMessages: a persisted voice completion summary (role:'model') that exactly matches a FINISHED assistant transcript entry is suppressed — no double-render (MAJOR-2b)", () => {
+  const messages: Message[] = [{ role: "model", text: "Fixed the flaky test and pushed.", timestamp: 10 }];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "assistant", text: "Fixed the flaky test and pushed.", ts: 5, status: "ok" },
+  ];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries.map((e) => e.text)).toEqual(["Fixed the flaky test and pushed."]);
+  expect(trailingEntries).toEqual([]); // NOT rendered a second time as a trailing durable Message
+});
+
+test("partitionSessionMessages: a role:'model' message is NOT covered by a still-running assistant entry, even with identical text (MAJOR-2b: only a FINISHED entry counts as an echo)", () => {
+  const messages: Message[] = [{ role: "model", text: "still thinking", timestamp: 10 }];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "assistant", text: "still thinking", ts: 5, status: "running" },
+  ];
+
+  const { trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  // Uncovered (the running entry doesn't count) and newer than the transcript's only entry ->
+  // trailing, same as any other uncovered model message.
+  expect(trailingEntries.map((e) => e.text)).toEqual(["still thinking"]);
+});
+
+test("partitionSessionMessages: two role:'model' messages with the same text each consume their OWN finished assistant entry (consumed-once, not double-matched against a single entry)", () => {
+  const messages: Message[] = [
+    { role: "model", text: "done", timestamp: 10 },
+    { role: "model", text: "done", timestamp: 20 },
+  ];
+  const transcriptEntries: TranscriptEntry[] = [{ id: "t1", kind: "assistant", text: "done", ts: 5, status: "ok" }];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  // Only ONE "done" transcript entry exists — it covers the first message; the second is
+  // genuinely uncovered and renders trailing (not silently dropped).
+  expect(entries.map((e) => e.text)).toEqual(["done"]);
+  expect(trailingEntries.map((e) => e.text)).toEqual(["done"]);
+});
+
 test("clearEchoedPendingSends ignores non-user-kind entries even if they somehow share a clientTurnId", () => {
   const pendingSends: TranscriptEntry[] = [
     { id: "pending:s1:turn-a", kind: "user", text: "sent", ts: 1, status: "running", clientTurnId: "turn-a" },

@@ -15,7 +15,7 @@
  * so these tests exercise the EXACT same code the hook calls, without a React render.
  */
 import { describe, expect, test } from 'bun:test';
-import { clearAllPendingTimers, dispatchPromptAgent, sweepPromptWatchers, type DispatcherRefs, type DispatchPromptAgentDeps, type SweepWatchersDeps, type TimerCleanupRefs } from './useVoiceDispatcher';
+import { clearAllPendingTimers, dispatchPromptAgent, sweepPromptWatchers, type DispatcherRefs, type DispatchPromptAgentDeps, type SpokenSummaryEvent, type SweepWatchersDeps, type TimerCleanupRefs } from './useVoiceDispatcher';
 import { ALREADY_DISPATCHED_DETAIL, decideToolCall, type DispatcherDecisionState } from '../lib/voice/tools';
 import type { VoiceSession, PendingFunctionCall } from '../lib/voice/voiceSession';
 import type { TranscriptEntry } from '../lib/dto';
@@ -215,6 +215,52 @@ describe('MAJOR-2: promptInFlight releases at the echo, before completion', () =
     sweepPromptWatchers(session, refs, { transcripts, agents: [] });
     expect(refs.promptInFlightRef.current).toBe(false);
     expect(injections).toHaveLength(1);
+  });
+});
+
+// =============================================================================
+// MAJOR-2(a): onSpokenSummary carries a role discriminator — the operator's own spoken prompt
+// persists as role:'user' (with the dispatch's clientTurnId), the narrated completion as
+// role:'model'. Fixes both a wrong-speaker bug (the prompt used to render as a model bubble) and a
+// double-render (the completion had nothing to dedupe it against the real transcript entry).
+// =============================================================================
+
+describe('MAJOR-2(a): onSpokenSummary role discriminator', () => {
+  test('dispatchPromptAgent reports the operator prompt as role:"user", stamped with the SAME clientTurnId sent in the dispatched command', async () => {
+    const refs = makeRefs({ boundAgentIdRef: { current: 'agent-1' }, hasEverBoundRef: { current: true } });
+    const { session } = makeFakeSession();
+    const spokenSummaries: SpokenSummaryEvent[] = [];
+    let capturedClientTurnId: string | undefined;
+    const deps = baseDeps({
+      onSpokenSummary: (event) => spokenSummaries.push(event),
+      buildPromptCommandFn: ((_ctx: unknown, _message: string, opts: { clientTurnId: string }) => {
+        capturedClientTurnId = opts.clientTurnId;
+        return { type: 'prompt', id: 'x', message: 'x', displayText: 'x' };
+      }) as unknown as DispatchPromptAgentDeps['buildPromptCommandFn'],
+    });
+
+    await dispatchPromptAgent(session, 'call-1', 'ship the fix', refs, deps);
+
+    expect(capturedClientTurnId).toBeTruthy();
+    expect(spokenSummaries).toEqual([{ role: 'user', text: 'ship the fix', clientTurnId: capturedClientTurnId }]);
+  });
+
+  test('sweepPromptWatchers reports a completion narration as role:"model" (no clientTurnId)', () => {
+    const refs = makeRefs({
+      boundAgentIdRef: { current: 'agent-1' },
+      promptInFlightRef: { current: true },
+      watchersRef: { current: new Map([['agent-1', { kind: 'prompt', clientTurnId: 'turn-1', echoed: true, cursor: 0, label: 'the agent' }]]) },
+    });
+    const { session } = makeFakeSession();
+    const spokenSummaries: SpokenSummaryEvent[] = [];
+    const transcripts = new Map<string, TranscriptEntry[]>([[
+      'agent-1',
+      [{ id: 'e2', kind: 'assistant', text: 'fixed it', ts: 2, status: 'ok' }],
+    ]]);
+
+    sweepPromptWatchers(session, refs, { transcripts, agents: [], onSpokenSummary: (event) => spokenSummaries.push(event) });
+
+    expect(spokenSummaries).toEqual([{ role: 'model', text: 'fixed it' }]);
   });
 });
 

@@ -34,6 +34,8 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
 import { PendingApproval } from './components/PendingApproval';
 import { PageContextDebugPanel } from './components/PageContextDebugPanel';
+import { VoiceCallProvider } from './context/VoiceCallContext';
+import { VoiceCallPill } from './components/chat/VoiceCallPill';
 import { Loader2 } from 'lucide-react';
 
 const readStoredBoolean = (key: string, fallback: boolean) => {
@@ -201,7 +203,16 @@ export default function App() {
                 context/PageContext.tsx for why this can't just be threaded as a prop. */}
             <PageContextProvider>
               <GlobalShortcuts />
-              <AppContent />
+              {/* VoiceCallProvider owns the live VoiceSession (webapp-voice-lane concern 08,
+                  DESIGN.md "Session ownership" row) — it must sit ABOVE AssistantChat (rendered
+                  deep inside AppContent, conditional on `isChatOpen`) so a closed/deleted chat
+                  panel never takes the call down with it. VoiceCallPill is mounted beside
+                  AppContent, same pattern as CommandPalette/ToastContainer below, so no
+                  view-level conditional can unmount the in-call HUD either. */}
+              <VoiceCallProvider>
+                <AppContent />
+                <VoiceCallPill />
+              </VoiceCallProvider>
               {/* ⌘K opens the palette from EVERY view — mounted beside (not inside) AppContent so
                   no view-level conditional can unmount it. */}
               <CommandPalette />

@@ -20,77 +20,34 @@ import { apiJson, jsonInit } from '../lib/api';
 import { answerCommand, interruptCommand, interruptibleAgents } from '../lib/agent-control';
 import { buildPromptCommand, ensureConsoleAgent } from '../lib/chat/sendCore';
 import { spawnProposalFor, type SpawnedUnitRecord, type SpawnProposal } from '../lib/spawnProposal';
+import {
+  loadPersistedSessions,
+  mergeSessions,
+  normalizeAssistantSessions,
+  persistSessions,
+  subscribeSessionStore,
+  type Message,
+  type Session,
+} from '../lib/chat/sessionStore';
+import { useVoiceCall } from '../context/VoiceCallContext';
 import type { AgentDTO, TranscriptEntry } from '../lib/dto';
 import type { Task } from '../types';
 
-export interface Message {
-  role: 'user' | 'model';
-  text: string;
-  timestamp: number;
-  /** Stamped on a user turn at send time (fix, review finding 1) so render-time coverage
-   *  dedupe (`partitionSessionMessages`) can match this durable copy against the transcript
-   *  entry the server echoes back with the same id, or against the ephemeral `pendingSend`
-   *  still showing it live — additive field, tolerated by `normalizeAssistantSessions`. */
-  clientTurnId?: string;
-  /** Set by the send-timeout/catch path when a turn never reached (or never echoed from) the
-   *  server. Survives reload (unlike `pendingSends`, which is render state only) so a failed
-   *  send still renders with error styling after a refresh. */
-  undelivered?: boolean;
-}
-
-export interface Session {
-  id: string;
-  title: string;
-  messages: Message[];
-  updatedAt: number;
-  metadata?: {
-    status?: 'waiting' | 'active' | 'autonomous' | 'completed';
-    tasksDiscussed?: string[];
-    stage?: string;
-    agentId?: string;
-  };
-  /** Feature 2 D3 LINK-BACK: every unit confirmed-and-spawned from this thread, in spawn order.
-   *  Persists with the rest of `Session` (same `localStorage` write below) so the thread stays the
-   *  durable "I asked → here's the PR" record across a reload — only the tiny record (id/agentId/
-   *  createdAt/prompt) is stored here; live status is always re-read from `agents` (see
-   *  `spawnCardStatus`'s doc for why nothing about the unit's current state is cached). */
-  spawnedUnits?: SpawnedUnitRecord[];
-}
+// `Message`/`Session` + their (de)serialization now live in `lib/chat/sessionStore.ts` — concern
+// 08's voice call is owned at PROVIDER level (App.tsx, above this component) specifically so it
+// survives THIS component unmounting (Back/close/session-delete), and provider-level code needs a
+// module it can read/write the same `localStorage['assistant-chat-sessions']` blob through
+// without reaching into this component's local `useState`. Re-exported here so every existing
+// import of `./AssistantChat` (this file's own `.test.tsx`, in particular) keeps working
+// unchanged.
+export type { Message, Session };
+export { normalizeAssistantSessions };
 
 const CHAT_WIDTH_KEY = 'omp.assistantChat.width';
 const CHAT_MIN_WIDTH = 320;
 const CHAT_DEFAULT_WIDTH = 440;
 const CHAT_MAX_WIDTH = 680;
 const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-const CHAT_SESSIONS_KEY = 'assistant-chat-sessions';
-const CHAT_WELCOME_MESSAGE = "Ask me anything about the current fleet, or tell me what to do. I’ll keep this as a chat unless you explicitly ask me to start work.";
-
-const createInitialSession = (now = Date.now()): Session => ({
-  id: 'default',
-  title: 'Initial conversation',
-  metadata: {
-    status: 'active',
-    tasksDiscussed: [],
-    stage: 'Planning'
-  },
-  messages: [
-    { role: 'model', text: CHAT_WELCOME_MESSAGE, timestamp: now }
-  ],
-  updatedAt: now
-});
-
-const isSession = (value: unknown): value is Session => {
-  const rec = value && typeof value === 'object' ? value as Partial<Session> : {};
-  return typeof rec.id === 'string' && typeof rec.title === 'string' && Array.isArray(rec.messages) && typeof rec.updatedAt === 'number';
-};
-
-/** Old localStorage blobs may carry a `reaction` field on messages from the (now removed)
- *  thumbs up/down UI. Strip it so it doesn't ride forward into freshly re-persisted state. */
-const stripLegacyReaction = (message: Message): Message => {
-  if (!message || typeof message !== 'object' || !('reaction' in message)) return message;
-  const { reaction: _reaction, ...rest } = message as Message & { reaction?: unknown };
-  return rest as Message;
-};
 
 // A prior revision of this file destructively dropped every role:'user' message from
 // agent-backed sessions here (on the theory the replayed server transcript was always a
@@ -102,30 +59,8 @@ const stripLegacyReaction = (message: Message): Message => {
 // (`partitionSessionMessages`, used by `buildTranscriptRenderEntries`) suppresses whichever
 // copy is redundant instead of one of them being deleted outright.
 
-export function normalizeAssistantSessions(value: unknown, now = Date.now()): Session[] {
-  if (!Array.isArray(value)) return [createInitialSession(now)];
-  const sessions = value
-    .filter(isSession)
-    .map((session) => ({ ...session, messages: session.messages.map(stripLegacyReaction) }))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-  return sessions.length ? sessions : [createInitialSession(now)];
-}
-
 function readInitialChatState(): { sessions: Session[]; activeSessionId: string | null } {
-  if (typeof window === 'undefined') {
-    const sessions = normalizeAssistantSessions(null);
-    return { sessions, activeSessionId: sessions[0]?.id ?? null };
-  }
-  const saved = window.localStorage.getItem(CHAT_SESSIONS_KEY);
-  let parsed: unknown = null;
-  if (saved) {
-    try {
-      parsed = JSON.parse(saved);
-    } catch {
-      parsed = null;
-    }
-  }
-  const sessions = normalizeAssistantSessions(parsed);
+  const sessions = loadPersistedSessions();
   return { sessions, activeSessionId: sessions[0]?.id ?? null };
 }
 
@@ -246,6 +181,14 @@ export const messageToTranscriptEntry = (message: Message): TranscriptEntry => (
  *    from `transcriptEntries` itself.
  *  - Covered by a live `pendingSend` (same `clientTurnId`, still `status:'running'`) →
  *    suppressed; the pendingSend already shows it with a live status.
+ *  - A `role:'model'` message covered by a FINISHED (`status !== 'running'`) assistant transcript
+ *    entry with the exact same `text`, each transcript entry consumed at most once (MAJOR-2b) →
+ *    suppressed. This is how the voice dispatcher's completion-narration summary
+ *    (`useVoiceDispatcher`'s `onSpokenSummary` `role:'model'` event, persisted via
+ *    `appendSpokenSummary`) avoids double-rendering once the same text also shows up as the
+ *    agent's own replayed `message_end` transcript entry — a `status:'running'` entry never
+ *    counts as covering one (the durable copy might be the ONLY thing to render if the live
+ *    entry never actually finishes, e.g. an agent that dies mid-turn).
  *  - Otherwise uncovered → positioned by `timestamp` against `windowHeadTs` (the transcript's
  *    first entry, or the current agent's `startedAt` when the transcript hasn't produced
  *    anything yet, or +Infinity when neither exists): older → `prologue` (renders at the top,
@@ -261,6 +204,9 @@ export function partitionSessionMessages(
   windowHeadTs: number,
 ): { prologue: TranscriptEntry[]; trailing: TranscriptEntry[] } {
   const transcriptUserEntries = transcriptEntries.filter((entry) => entry.kind === 'user');
+  // MAJOR-2b: a finished assistant entry only — a still-`running` one is not yet a real echo of
+  // anything (see the function doc comment above), so it must never suppress the durable copy.
+  const finishedAssistantEntries = transcriptEntries.filter((entry) => entry.kind === 'assistant' && entry.status !== 'running');
   const consumedTranscriptEntries = new Set<TranscriptEntry>();
   const liveTurnIds = new Set(
     pendingSends.filter((entry) => entry.status !== 'error' && entry.clientTurnId).map((entry) => entry.clientTurnId as string),
@@ -290,6 +236,17 @@ export function partitionSessionMessages(
           consumedTranscriptEntries.add(matched);
           continue;
         }
+      }
+    } else if (message.role === 'model') {
+      // MAJOR-2b: a voice completion summary that exactly matches an already-finished assistant
+      // transcript entry is covered by it — suppressed so it doesn't double-render (once from the
+      // live/replayed transcript, once from this durable copy).
+      const echoed = finishedAssistantEntries.find(
+        (entry) => !consumedTranscriptEntries.has(entry) && entry.text === message.text,
+      );
+      if (echoed) {
+        consumedTranscriptEntries.add(echoed);
+        continue;
       }
     }
     const entry = messageToTranscriptEntry(message);
@@ -468,6 +425,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   // that view's <PageContextScope> (see App.tsx/WorkspaceCockpit.tsx/OmpGraphPanel.tsx). Replaces
   // the old selectedTask-only assembly below with the live page, not just a maybe-selected task.
   const pageContext = usePageContext();
+  // webapp-voice-lane concern 08: the live call is owned above THIS component (App.tsx's
+  // VoiceCallProvider) so it survives this panel closing — this is just a reader + the one place
+  // that pins a fresh call to the currently active session at start time.
+  const voiceCall = useVoiceCall();
   const [initialChatState] = useState(readInitialChatState);
   const [sessions, setSessions] = useState<Session[]>(initialChatState.sessions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialChatState.activeSessionId);
@@ -633,8 +594,20 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   };
 
   useEffect(() => {
-    localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(sessions));
+    persistSessions(sessions);
   }, [sessions]);
+
+  // Pick up externally-written sessions live — today that's exclusively the voice call provider's
+  // spoken-summary/agent-bind writes (`VoiceCallContext.tsx`, via `sessionStore.ts`'s
+  // `appendSpokenSummary`/`bindSessionAgent`), landing while THIS component happens to be mounted
+  // and showing the bound thread. `mergeSessions` returns the same array reference when nothing
+  // actually changed (including this component's OWN writes echoing back through the same
+  // `persistSessions` → notify path), so this never loops.
+  useEffect(() => {
+    return subscribeSessionStore(() => {
+      setSessions((prev) => mergeSessions(prev, loadPersistedSessions()));
+    });
+  }, []);
 
   useEffect(() => {
     const repo = currentProject?.id;
@@ -1014,6 +987,13 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
         modelOptions={currentModelOptions}
         onModelChange={handleModelChange}
         agent={selectedAgent}
+        voiceCallEnabled={voiceCall.voiceEnabled}
+        voiceCallActive={voiceCall.isCallActive}
+        onStartVoiceCall={
+          activeSessionId
+            ? () => voiceCall.startCall({ sessionId: activeSessionId, sessionTitle: activeSession?.title ?? 'Untitled', agentId })
+            : undefined
+        }
       />
     </div>
   );

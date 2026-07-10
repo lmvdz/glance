@@ -12,6 +12,7 @@ import {
   uploadChatAttachment,
 } from '../../lib/imageAttachment';
 import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession } from '../../lib/voice/speech';
+import { VoiceCallButton } from './VoiceCallButton';
 import type { AgentDTO } from '../../lib/dto';
 import type { Task } from '../../types';
 
@@ -319,6 +320,9 @@ export const Composer = ({
   agent,
   placeholder,
   focusKey,
+  voiceCallEnabled = false,
+  voiceCallActive = false,
+  onStartVoiceCall,
 }: {
   tasks: Task[];
   suggestionChips: SuggestionChip[];
@@ -339,6 +343,15 @@ export const Composer = ({
   /** Changing this value refocuses the composer — used to snap focus onto the box the instant a
    *  new pending request appears, without stomping whatever the operator is mid-typing. */
   focusKey?: string | number;
+  /** webapp-voice-lane concern 08: `GET /api/voice/config`'s `{enabled}`, read by `AssistantChat`
+   *  via `useVoiceCall()` — `VoiceCallButton` itself renders nothing when this is false. */
+  voiceCallEnabled?: boolean;
+  /** A voice call (for any session) is already live — disables (doesn't hide) the button. */
+  voiceCallActive?: boolean;
+  /** Pins a new call to THIS composer's active session at click time. Absent when there's no
+   *  active session to pin to (`AssistantChat`'s session-list screen never renders a `Composer`
+   *  at all, so this is only ever absent defensively). */
+  onStartVoiceCall?: () => void;
 }) => {
   const [input, setInput] = useState('');
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -765,6 +778,7 @@ export const Composer = ({
             >
               <Mic className="h-4 w-4" aria-hidden />
             </button>
+            <VoiceCallButton enabled={voiceCallEnabled} active={voiceCallActive} onStart={() => onStartVoiceCall?.()} />
           </div>
           <ComposerSendButton
             isStopShown={isStopShown}

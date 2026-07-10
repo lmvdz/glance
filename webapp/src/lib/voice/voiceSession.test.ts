@@ -936,6 +936,47 @@ test('VoiceSession: proactive re-mint fires immediately from idle and injects th
   expect(h.timers).toHaveLength(1);
 });
 
+test('GAP-1: setAgentId lets a bootstrap call (no agentId at construction) carry the real binding into rotation, instead of a permanently blank line', async () => {
+  const h = makeHarness({ getRecap: () => 'spun up a fresh console agent', agentId: undefined });
+  await h.session.connect();
+
+  // The bind happens mid-call, well after connect() — exactly the bootstrap-call shape GAP-1
+  // describes: no agent was bound at construction time.
+  h.session.setAgentId('agent-42');
+
+  const dueFn = h.timers[0]!.fn;
+  dueFn(); // proactive re-mint fires from idle
+  await flush();
+
+  const sent = lastSent(h);
+  expect(sent).toEqual([
+    {
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'system',
+        content: [{ type: 'input_text', text: '[Voice session carried over from a prior connection. Bound console agent: agent-42.]\nspun up a fresh console agent' }],
+      },
+    },
+  ]);
+});
+
+test('GAP-1: setAgentId(undefined) is also honored — a dead-agent recovery clearing the binding does not leave a stale agentId in the next carry-over', async () => {
+  const h = makeHarness({ getRecap: () => 'recap', agentId: 'agent-old' });
+  await h.session.connect();
+
+  h.session.setAgentId(undefined);
+
+  const dueFn = h.timers[0]!.fn;
+  dueFn();
+  await flush();
+
+  const sent = lastSent(h);
+  const text = (sent[0]!.item as { content: [{ text: string }] }).content[0].text;
+  expect(text).not.toContain('agent-old');
+  expect(text).toBe('[Voice session carried over from a prior connection.]\nrecap');
+});
+
 test('VoiceSession: proactive re-mint due mid-recording waits for quiescence instead of rotating immediately', async () => {
   const h = makeHarness({ getRecap: () => 'recap text' });
   await h.session.connect();
