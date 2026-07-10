@@ -5,8 +5,9 @@
  * `SquadManager.projects()` grouped LIVE AGENTS by `dto.repo`, so a repo existed in the UI only while
  * it happened to have a running agent. Observed on the operator's own daemon: `/api/projects` returned
  * only `omp-squad` moments after lunarpup's last agent was reaped — lunarpup vanished from the sidebar
- * despite being the daemon's own working directory and holding two persisted features. It reappeared
- * when an agent respawned there. Projects blinked in and out with the roster, there was no POST to add
+ * despite being the daemon's own working directory. Its two features were DERIVED from those very
+ * agents (persisted features on disk: 47, all omp-squad, zero lunarpup), so agents and features vanished
+ * together and nothing was left to anchor the repo. It reappeared only when an agent respawned there. Projects blinked in and out with the roster, there was no POST to add
  * one, and nothing in the web UI could switch between them.
  *
  * This registry is the missing durable half: a repo you register stays a project whether or not any
