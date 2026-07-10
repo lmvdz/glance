@@ -188,8 +188,21 @@ async function throttledFetch(repo: string, defaultBranch: string): Promise<void
 }
 
 /** Commits on `branch` not reachable from the resolved base (PR mode: fetched `origin/<default>`;
- *  local mode: `HEAD`). 0 ⇒ fully landed/empty; -1 ⇒ couldn't determine. The ONE replacement for every
- *  `rev-list <base>..<branch>`-style computation in the codebase. */
+ *  local mode: `HEAD`). 0 ⇒ fully landed/empty; **-1 ⇒ couldn't determine** (the underlying `git
+ *  rev-list` failed — a transient fault, not a measurement). The ONE replacement for every
+ *  `rev-list <base>..<branch>`-style computation in the codebase.
+ *
+ *  -1 is an in-band error sentinel on a numeric channel: a caller that does a bare `> 0` (or
+ *  compares against a specific positive count) silently reads "couldn't determine" as "definitely
+ *  0 or negative", which for every "does this branch have unlanded work?" consumer means "no work" —
+ *  a git fault then reads as "nothing to land" and the caller moves on as if it were clean. That is
+ *  exactly the interlock shape this codebase has been bitten by before (see aheadOfMain's callers in
+ *  squad-manager.ts and the orchestrator's `agentHasWork` skip). EVERY consumer MUST branch on the
+ *  unknown case explicitly — never write a bare `> 0`/`=== 0` against this return value. Use the
+ *  `aheadUnknown` guard below, which also documents what each direction of "unknown" should mean:
+ *  assume-work-exists for anything gating a land/resume decision, not-merged for anything gating a
+ *  destructive/cleanup decision (the worktree reaper).
+ */
 export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: string }): Promise<number> {
 	const cwd = opts.cwd ?? opts.repo;
 	const mode = await resolveLandMode(opts.repo);
@@ -205,4 +218,12 @@ export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: st
 	// costs nothing and restores the pre-refactor `-C <main checkout>` semantics.
 	const r = await hardenedGit(["rev-list", "--count", `HEAD..${opts.branch}`], { cwd: opts.repo });
 	return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+}
+
+/** Named guard for `aheadOfBase`'s -1 sentinel — the one and only correct way to test for "couldn't
+ *  determine". Never compare the raw number against `-1`/`< 0` inline; route through this so the
+ *  intent ("this is the unknown case, not a real count") is legible at every call site and grep-able
+ *  in one place. */
+export function aheadUnknown(n: number): boolean {
+	return n < 0;
 }

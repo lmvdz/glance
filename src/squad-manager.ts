@@ -68,7 +68,7 @@ import { canTransition, dedupeTransitions, deriveStatus, followLineage, type Der
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
-import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
+import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof, type DoneProof } from "./done-proof.ts";
 import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
@@ -1697,7 +1697,12 @@ export class SquadManager extends EventEmitter {
 		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
 		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
 		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
-		return (await computeAheadOfBase({ repo: p.repo, branch: p.branch, cwd: p.repo })) > 0;
+		const ahead = await this.computeAheadOfBaseFor({ repo: p.repo, branch: p.branch, cwd: p.repo });
+		// -1 ⇒ the git read failed and we genuinely don't know whether this persisted agent still has
+		// work — assume it DOES. The cost of a false positive is one wasted resume/acceptance run; the
+		// cost of a false negative (treating a fault as "clean") is permanently dropping the agent's
+		// work on the floor, unresumed. See aheadOfBase's doc comment in land-mode.ts.
+		return aheadUnknown(ahead) || ahead > 0;
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
@@ -3334,6 +3339,20 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Thin, overridable wrapper around land-mode.ts's `aheadOfBase` — mirrors `resolveLandModeFor`
+	 * immediately above, same reason: `bun test`'s PROCESS-WIDE `mock.module` permanently rebinds
+	 * every consumer's import of `land-mode.ts` the moment ANY test file module-mocks it, regardless
+	 * of which file's tests run when — so a test needing `aheadOfBase`'s REAL git behavior (e.g. a
+	 * PATH-shimmed git-fault repro) can silently get another file's canned mock instead. Every
+	 * "unlanded work?" consumer below routes through this method (never the bare `computeAheadOfBase`
+	 * import directly) so tests inject a fake ahead-count by overriding the method, never by mocking
+	 * the module.
+	 */
+	protected computeAheadOfBaseFor(opts: { repo: string; branch: string; cwd?: string }): Promise<number> {
+		return computeAheadOfBase(opts);
+	}
+
+	/**
 	 * Injection seam (mirrors `resolveLandModeFor` above) so tests can supply a fake independent
 	 * judge without a real `omp` binary on PATH. `undefined` ⇒ `validatorGate`'s own default judge
 	 * (an independent one-shot `omp -p --model opus` call).
@@ -3509,16 +3528,25 @@ export class SquadManager extends EventEmitter {
 		if (st.dirtyFiles.length > 0) return true;
 		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
 		if (proof && (await proofCoversTip(proof, rec.dto.branch, rec.dto.repo))) return false;
-		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
+		const ahead = await this.computeAheadOfBaseFor({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree });
+		// -1 ⇒ the git read failed and we genuinely don't know — assume there IS unlanded work rather
+		// than silently reading a transient git fault as "nothing to land". A false positive costs one
+		// wasted acceptance-suite run; a false negative here is orchestrator.ts:220's `agentHasWork`
+		// gate silently skipping the land for this unit, forever, with no escalation. See aheadOfBase's
+		// doc comment in land-mode.ts.
+		return aheadUnknown(ahead) || ahead > 0;
 	}
 
 	// ── Observer edges (OMPSQ-52) — read-only git probes + the main gate, injected into Observer. ──
 
 	/** Commits on an agent's branch not in main (origin-aware in PR mode via `aheadOfBase`):
-	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
+	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown git read — test with `aheadUnknown`, never
+	 *  a bare `< 0`/`=== -1`/`> 0` (see aheadOfBase's doc comment in land-mode.ts). Feeds
+	 *  ObserverDeps.gitAheadOfMain — auditLandedSurvivors/auditStaleDone in observer.ts are the callers
+	 *  and both branch on `aheadUnknown` explicitly. */
 	protected async aheadOfMain(a: AgentDTO): Promise<number> {
 		if (!a.branch) return -1;
-		return computeAheadOfBase({ repo: a.repo, branch: a.branch, cwd: a.worktree });
+		return this.computeAheadOfBaseFor({ repo: a.repo, branch: a.branch, cwd: a.worktree });
 	}
 
 	/** Count of uncommitted TRACKED files in a checkout — the land-blocking set (matches the land path's
@@ -7641,11 +7669,16 @@ export class SquadManager extends EventEmitter {
 						// were landed too.
 						const doneProof = !w.isPrimary && w.branch ? getDoneProofByBranch(this.stateDir, w.branch) : undefined;
 						const proven = !!doneProof && w.branch !== undefined && (await proofCoversTip(doneProof, w.branch, root));
+						// The -1 "unknown" sentinel flows straight into WorktreeInfo.aheadOfBase unmapped, by
+						// design: selectReapable's `merged` test is `w.aheadOfBase === 0`, an EXACT-equality
+						// check, so -1 (or any other nonzero) already falls into "not merged" without any
+						// special-casing here — the fail-safe direction this consumer needs (never reap a
+						// worktree we couldn't verify is landed). Do not change this to `> 0`/`< 0`.
 						return {
 							worktree: w.worktree,
 							branch: w.branch ?? "",
 							isPrimary: w.isPrimary,
-							aheadOfBase: w.isPrimary || !w.branch ? 0 : await computeAheadOfBase({ repo: root, branch: w.branch, cwd: root }),
+							aheadOfBase: w.isPrimary || !w.branch ? 0 : await this.computeAheadOfBaseFor({ repo: root, branch: w.branch, cwd: root }),
 							proven,
 							dirty: !w.isPrimary && (await worktreeStatus(w.worktree)).dirtyFiles.length > 0,
 							mtimeMs: stat ? stat.mtimeMs : 0, // dir gone ⇒ ancient ⇒ eligible (removeWorktree prunes the stale entry)

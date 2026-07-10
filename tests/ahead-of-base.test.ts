@@ -3,11 +3,20 @@
  * covers the arithmetic itself (local-mode regression guard + PR-mode origin-aware counting); this
  * file's job is narrower per the concern's own Verify wording: prove every consumer — SquadManager's
  * `aheadOfMain`, `agentHasUnlandedWork`, and the worktree reaper — routes through the SAME shared
- * function rather than re-implementing the arithmetic, via a module-mock spy (not re-testing counts
- * four times over).
+ * function rather than re-implementing the arithmetic.
+ *
+ * Injected via `SquadManager.computeAheadOfBaseFor` (the TestManager subclass below overrides it),
+ * NOT `mock.module("../src/land-mode.ts", ...)`: bun's `mock.module` overwrites that module's exports
+ * PROCESS-WIDE the moment it's called (per bun-types' own doc comment: "If the module is already
+ * loaded, exports are overwritten...") and stays swapped for as long as it's registered, regardless
+ * of which OTHER test file's tests happen to run meanwhile in the same `bun test` invocation — a
+ * silent false pass/fail with no error for any file that needs `aheadOfBase`'s REAL git behavior
+ * (e.g. `ahead-of-base-unknown.test.ts`'s PATH-shimmed git-fault repro). This is the SAME hazard
+ * `resolveLandModeFor`'s own doc comment already flags for `resolveLandMode` — `computeAheadOfBaseFor`
+ * is its sibling seam.
  */
 
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,19 +29,16 @@ interface AheadCall {
 }
 let calls: AheadCall[] = [];
 let canned = 0;
-mock.module("../src/land-mode.ts", () => ({
-	aheadOfBase: async (opts: AheadCall): Promise<number> => {
-		calls.push(opts);
-		return canned;
-	},
-	resolveLandMode: async () => ({ mode: "local", reason: "mocked — not under test here" }),
-}));
 
 const { SquadManager } = await import("../src/squad-manager.ts");
 const { SubagentTracker } = await import("../src/subagents.ts");
 import type { AgentDTO, PersistedAgent } from "../src/types.ts";
 
 class TestManager extends SquadManager {
+	protected computeAheadOfBaseFor(opts: AheadCall): Promise<number> {
+		calls.push(opts);
+		return Promise.resolve(canned);
+	}
 	callAheadOfMain(a: AgentDTO): Promise<number> {
 		return this.aheadOfMain(a);
 	}
