@@ -382,7 +382,10 @@ async function cmdUp(args: string[]): Promise<void> {
 	// registry: the server routes the operator's own org (OMP_SQUAD_ROOT_ORG) + the on-box loopback admin to
 	// the root factory, and every tenant org to its per-org registry manager (server.ts managerFor).
 	const rootOrgId = process.env.OMP_SQUAD_ROOT_ORG?.trim() || undefined;
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId });
+	// Resolved BEFORE the server so `/api/doctor` can report the supervisor that actually runs, not the one
+	// the flag implies: it is also gated on `--no-supervise` and on file mode.
+	const superviseExternal = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId, superviseExternal });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
@@ -392,8 +395,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	// auto-supervision is the per-org, in-process maybeAutoSupervise inside each manager (lifecycle 05).
 	const stopTracker = startExternalSessionTracker();
 	// risk #7: the external supervisor authenticates with the file-mode bearer token; DB mode has none, so file-mode only.
-	const supervise = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
-	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
+	const stopSupervisor = superviseExternal ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
 
 	// Cross-host file leasing: the file-mode daemon now gossips its own leases IN-PROCESS over the
 	// manager's LocalFederationBus (SquadManager, SEAM 1) and mirrors peers' leases the same way — no
@@ -422,13 +424,13 @@ async function cmdUp(args: string[]): Promise<void> {
 	// (the operator watches the factory in the webapp, mapped to OMP_SQUAD_ROOT_ORG / the loopback admin).
 	if (manager && !registry && useTui) {
 		process.stdout.write(`glance dashboard: ${url}\n  access token: ${token}\n`);
-		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${superviseExternal ? "on" : "off"}\n`);
 		const tui = new SquadTui(manager);
 		await tui.run();
 		await shutdown();
 	} else {
 		process.stdout.write(`glance daemon running\n  dashboard: ${url}\n  access token: ${token}\n  open from any device on this network (tap to sign in):\n${access}\n  add an agent: glance add <repo> --task "…"\n`);
-		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${superviseExternal ? "on" : "off"}\n`);
 		await new Promise<void>(() => {}); // run until signal
 	}
 }
