@@ -590,6 +590,48 @@ export class SquadServer {
 	 *  every live org manager exactly like GET /api/agents does, instead of silently reading empty just
 	 *  because no root factory is configured. Returns undefined for any other pathname/method so the
 	 *  caller falls through to the single-manager route table below. */
+	/**
+	 * The facts only the running daemon knows, for `glance doctor`. Deliberately NOT derived from the
+	 * caller's environment: `envBool` here reads the process the agents actually run in.
+	 *
+	 * `webapp` and `authMode` are the two that have burned the most hours — a legacy-UI daemon and a
+	 * DB-mode daemon each look completely healthy from outside while doing something other than what the
+	 * operator asked for.
+	 */
+	private doctorFacts(managers: SquadManager[]): unknown {
+		const agents = managers.flatMap((m) => m.list());
+		return {
+			daemon: {
+				running: true,
+				pid: process.pid,
+				execPath: process.execPath,
+				cwd: process.cwd(),
+				installedRev: process.env.GLANCE_REV || undefined,
+				authMode: this.dbMode ? "db" : "file",
+				// The SAME predicate the request path uses (flag AND a built dist) — a doctor that reports the
+				// flag rather than the behaviour is how "why does 7878 show the old UI" became a live question.
+				webapp: webappEnabled(),
+				// Distinct from `webapp`: the flag can be off while the build exists, and the build can be
+				// missing while the flag is on. Conflating them made "the UI is missing" fire whenever the
+				// operator simply hadn't opted in.
+				webappDist: existsSync(WEBAPP_INDEX),
+				uptimeMs: Math.round(process.uptime() * 1000),
+			},
+			autonomy: {
+				autodispatch: envBool("OMP_SQUAD_AUTODISPATCH", false),
+				autodrive: envBool("OMP_SQUAD_AUTODRIVE", false),
+				autoland: envBool("OMP_SQUAD_AUTOLAND", false),
+				// BOTH spellings. They are not aliases of each other anywhere in the code, and the one you
+				// forget is the one that auto-approves a human gate.
+				autosupervise: envBool("OMP_SQUAD_AUTOSUPERVISE", false) || envBool("OMP_SQUAD_AUTO_SUPERVISE", false),
+				landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
+				regressionGate: envBool("OMP_SQUAD_REGRESSION_GATE", false),
+			},
+			projects: [...new Set(managers.flatMap((m) => m.projects().map((p) => p.repo)))],
+			zombieAgents: agents.filter((a) => a.status === "error").length,
+		};
+	}
+
 	private async handleObservability(url: URL, req: Request, managers: SquadManager[], role: Role, actor: Actor): Promise<Response | undefined> {
 		if (req.method !== "GET" || managers.length === 0) return undefined;
 		if (url.pathname === "/api/health") {
@@ -614,6 +656,10 @@ export class SquadServer {
 		// — so there is nothing for that allowlist to scope. Fleet-wide, like /api/usage and /api/heat.
 		if (url.pathname === "/api/graph/task-class") return Response.json(await taskClassPayload(managers, url));
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(managers, url));
+		// `glance doctor` asks the DAEMON what it believes, never the calling shell. The two disagree by
+		// construction: `/proc/<pid>/environ` shows only a process's INITIAL environment, and the operator's
+		// terminal has its own. Only the daemon can answer "is autodispatch on" for the daemon. (R6)
+		if (url.pathname === "/api/doctor") return Response.json(this.doctorFacts(managers));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(managers, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/leases") {
 			const repo = url.searchParams.get("repo");

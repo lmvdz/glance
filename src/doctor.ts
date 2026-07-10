@@ -1,0 +1,314 @@
+/**
+ * `glance doctor` — the one command that answers "is the factory on, armed, and pointed at the right
+ * world?"
+ *
+ * R6 of the founding brief: *operational fragility makes "is the factory even on?" a research question.*
+ * That was not hyperbole. Every one of the checks below is a bug that actually cost a session, and each
+ * time the answer took a shell archaeology dig — reading `/proc/<pid>/environ`, comparing `git rev-parse`
+ * against a global install, curling `/api/auth/mode` — rather than a question anyone could ask the tool:
+ *
+ *   - The daemon runs the GLOBAL install, not this checkout. Editing `src/` changes nothing until a
+ *     restart, and nothing says so. (`omp-squad-stale-work-guards`)
+ *   - `bun` autoloads `.env` from the daemon's cwd, so a daemon launched in a repo with a `DATABASE_URL`
+ *     silently boots in DB mode — which architecturally DISABLES the file-mode factory. The daemon looks
+ *     healthy and dispatches nothing. (`omp-squad-tenancy-vs-factory`)
+ *   - Autonomy is a matrix of six env flags with two spellings for the supervisor. "Is autodispatch on?"
+ *     had no answer short of grepping the process environment — which shows only the INITIAL environment.
+ *   - Plane secrets load from `~/.claude/secrets/plane.env` at boot; a daemon started before that file
+ *     existed has an armed-looking config and no fuel line. ("motor but no fuel line")
+ *   - The regression gate runs in a container. `oven/bun:1` has no git, so the gate passed by never
+ *     running. The image is derived once and cached; if it's missing, the gate silently degrades.
+ *   - Land refuses on a dirty default branch, and reports it as RETRYABLE — so the fleet retries forever
+ *     and the learning ledger starves. 113 uncommitted deletions on `main` cost a full session.
+ *
+ * Design: every probe is injected, so the whole report is drivable from tests with zero IO and zero
+ * daemon. `runDoctor` NEVER throws — a diagnostic that dies on the machine it is diagnosing is worthless.
+ * A failing probe becomes a check of status `"unknown"` carrying its own error text.
+ *
+ * Statuses are a triage order, not a mood: `error` = the factory cannot do its job; `warn` = it can, but
+ * a known trap is armed; `ok` = verified, not assumed; `unknown` = the probe itself failed, which is
+ * itself information (you are not allowed to read this as "fine").
+ */
+
+import { errText } from "./err-text.ts";
+
+export type DoctorStatus = "ok" | "warn" | "error" | "unknown";
+
+export interface DoctorCheck {
+	/** Stable machine id — `--json` consumers and tests key on this, never on the title. */
+	id: string;
+	/** Which question this answers, in the operator's words. */
+	title: string;
+	status: DoctorStatus;
+	/** What is true right now. One line. */
+	detail: string;
+	/** What to do about it. Present iff status is not "ok". A remedy is a command, not advice. */
+	remedy?: string;
+}
+
+export interface DoctorReport {
+	checks: DoctorCheck[];
+	/** The worst status present — what the exit code is derived from. */
+	worst: DoctorStatus;
+	/** True when nothing is `error`. `warn` is survivable; `unknown` is not a pass. */
+	healthy: boolean;
+}
+
+/** A repo the operator has told glance to care about, as `doctor` needs to see it. */
+export interface RepoFacts {
+	repo: string;
+	exists: boolean;
+	isGitRepo: boolean;
+	/** Uncommitted changes on the CURRENT checkout of the default branch. */
+	dirtyFiles: number;
+	hasOrigin: boolean;
+	defaultBranch?: string;
+	/** `squad/*` branches with no open PR — the fleet's litter. */
+	staleBranches: number;
+}
+
+export interface DaemonFacts {
+	running: boolean;
+	/** The daemon answered `/api/health` but could not answer `/api/doctor`: it is alive and running code
+	 *  older than this CLI, or it refused us. Reporting that as "not running" is the exact class of lie
+	 *  `doctor` exists to kill — it would tell the operator to `glance up` a daemon that is already up. */
+	reachableButOpaque?: boolean;
+	/** Why the facts are missing, when they are. */
+	opaqueReason?: string;
+	pid?: number;
+	/** Absolute path of the binary/entrypoint the RUNNING daemon executes. */
+	execPath?: string;
+	/** The daemon's working directory — this is what decides which `.env` bun autoloads. */
+	cwd?: string;
+	/** Commit the running daemon's code is at, if resolvable. */
+	installedRev?: string;
+	/** Repo root the daemon's code lives in. Only when this matches the operator's checkout is a rev
+	 *  comparison meaningful — otherwise `doctor` run from repo B would call the daemon "stale" for the
+	 *  crime of being repo A. */
+	installRepo?: string;
+	/** "file" = the autonomous factory is possible; "db" = multi-tenant, factory disabled. */
+	authMode?: "file" | "db";
+	webapp?: boolean;
+	/** `webapp/dist/index.html` exists next to the DAEMON's code — orthogonal to the flag above. */
+	webappDist?: boolean;
+	uptimeMs?: number;
+}
+
+export interface AutonomyFacts {
+	autodispatch: boolean;
+	autodrive: boolean;
+	autoland: boolean;
+	/** Either spelling. Two exist; one silently auto-approves human gates. */
+	autosupervise: boolean;
+	landConfirm: boolean;
+	regressionGate: boolean;
+}
+
+export interface DoctorProbe {
+	daemon(): Promise<DaemonFacts>;
+	/** Autonomy as the RUNNING daemon sees it — not as this shell's environment sees it. `undefined` when
+	 *  the daemon cannot be asked: "nothing is armed" and "I could not find out" are different answers,
+	 *  and only one of them is safe to act on. */
+	autonomy(): Promise<AutonomyFacts | undefined>;
+	/** Commit and repo root of the checkout the operator is standing in. */
+	repoRev(): Promise<{ rev?: string; repoRoot?: string }>;
+	stateDir(): Promise<{ path: string; writable: boolean }>;
+	planeArmed(): Promise<{ configured: boolean; reachable: boolean; detail?: string }>;
+	/** The derived gate image (`glance-gate:bun1-v2`) — present, and is docker usable at all? */
+	gateImage(): Promise<{ dockerUsable: boolean; imagePresent: boolean }>;
+	projects(): Promise<RepoFacts[]>;
+	webappBuilt(): Promise<boolean>;
+	/** Agents parked in a terminal-but-listed state: the zombies `glance rm` is for. */
+	zombieAgents(): Promise<number>;
+}
+
+const WORST_ORDER: DoctorStatus[] = ["ok", "unknown", "warn", "error"];
+
+function worstOf(checks: DoctorCheck[]): DoctorStatus {
+	let worst: DoctorStatus = "ok";
+	for (const c of checks) if (WORST_ORDER.indexOf(c.status) > WORST_ORDER.indexOf(worst)) worst = c.status;
+	return worst;
+}
+
+/** A probe that throws becomes an honest `unknown`, never a silent `ok`. */
+async function attempt(id: string, title: string, fn: () => Promise<DoctorCheck[]>): Promise<DoctorCheck[]> {
+	try {
+		return await fn();
+	} catch (err) {
+		return [{ id, title, status: "unknown", detail: `probe failed: ${errText(err)}`, remedy: "this check could not run — do not read it as healthy" }];
+	}
+}
+
+const short = (rev?: string): string => (rev ? rev.slice(0, 7) : "?");
+
+async function daemonChecks(probe: DoctorProbe): Promise<DoctorCheck[]> {
+	const d = await probe.daemon();
+	if (!d.running) {
+		return [{ id: "daemon.running", title: "Is the daemon up?", status: "error", detail: "no daemon is listening", remedy: "glance up" }];
+	}
+	if (d.reachableButOpaque) {
+		return [{
+			id: "daemon.running",
+			title: "Is the daemon up?",
+			status: "warn",
+			detail: `alive, but it cannot answer ${d.opaqueReason ?? "the doctor"} — it is running older code than this CLI, or refused the call`,
+			remedy: "restart the daemon (scripts/squadctl.sh restart); until then its autonomy flags are unknowable from here",
+		}];
+	}
+
+	const checks: DoctorCheck[] = [{ id: "daemon.running", title: "Is the daemon up?", status: "ok", detail: `pid ${d.pid ?? "?"}${d.uptimeMs ? `, up ${Math.round(d.uptimeMs / 60_000)}m` : ""}` }];
+
+	// The deploy gap. The daemon runs whatever code it started with; a global install and a checkout can
+	// be a hundred commits apart, and the only symptom is that your fix "didn't work".
+	//
+	// Only comparable when both revs name the SAME repo. `glance doctor` is routinely run from a repo the
+	// daemon merely manages, not the one it runs from — comparing those two HEADs would report every such
+	// run as a stale daemon.
+	const { rev: repoRev, repoRoot } = await probe.repoRev();
+	const comparable = Boolean(repoRoot && d.installRepo && repoRoot === d.installRepo);
+	if (!comparable) {
+		// Silence, not a guess.
+	} else if (repoRev && d.installedRev && repoRev !== d.installedRev) {
+		checks.push({
+			id: "daemon.stale",
+			title: "Is the running daemon this code?",
+			status: "warn",
+			detail: `daemon is at ${short(d.installedRev)}, checkout is at ${short(repoRev)}`,
+			remedy: "restart the daemon to pick up your changes (scripts/squadctl.sh restart)",
+		});
+	} else if (repoRev) {
+		checks.push({ id: "daemon.stale", title: "Is the running daemon this code?", status: "ok", detail: `both at ${short(repoRev)}` });
+	}
+
+	// Tenancy vs factory. This is architectural, not a setting: in DB mode the file-mode factory does not
+	// exist, and `add` returns 403 while everything else looks fine.
+	if (d.authMode === "db") {
+		checks.push({
+			id: "daemon.mode",
+			title: "File mode or DB mode?",
+			status: "warn",
+			detail: `DB (multi-tenant) — the autonomous factory is DISABLED in this mode${d.cwd ? `; launched from ${d.cwd}, whose .env bun autoloads` : ""}`,
+			remedy: "launch the daemon from a directory with no DATABASE_URL in .env, or accept a manual fleet",
+		});
+	} else if (d.authMode === "file") {
+		checks.push({ id: "daemon.mode", title: "File mode or DB mode?", status: "ok", detail: "file mode — the factory can run" });
+	}
+
+	if (d.webapp === false) {
+		checks.push({ id: "daemon.webapp", title: "Which UI is being served?", status: "warn", detail: "the legacy fallback UI (src/web/index.html)", remedy: "GLANCE_WEBAPP=1, and build it: cd webapp && bun run build" });
+	} else if (d.webapp) {
+		checks.push({ id: "daemon.webapp", title: "Which UI is being served?", status: "ok", detail: "the React webapp" });
+	}
+
+	return checks;
+}
+
+function autonomyCheck(a: AutonomyFacts): DoctorCheck {
+	const on = (["autodispatch", "autodrive", "autoland"] as const).filter((k) => a[k]);
+	// The supervisor answers approval gates with a small model. On, it is how trust dies invisibly: a
+	// human gate gets auto-approved and nothing in the transcript says a human never saw it.
+	if (a.autosupervise) {
+		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "warn", detail: `auto-supervisor is ON — approval gates are being answered by a model, not by you`, remedy: "OMP_SQUAD_AUTOSUPERVISE=0 (and OMP_SQUAD_AUTO_SUPERVISE=0 — both spellings exist)" };
+	}
+	if (a.autoland && !a.regressionGate) {
+		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "error", detail: "autoland is ON with the regression gate OFF — units can land unverified work", remedy: "OMP_SQUAD_REGRESSION_GATE=1, or OMP_SQUAD_AUTOLAND=0" };
+	}
+	if (on.length === 0) {
+		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "warn", detail: "nothing is armed — the daemon is a viewer; no work will be picked up", remedy: "OMP_SQUAD_AUTODISPATCH=1 OMP_SQUAD_AUTODRIVE=1" };
+	}
+	return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "ok", detail: `${on.join(", ")} armed; gate ${a.regressionGate ? "on" : "off"}; land ${a.landConfirm ? "confirms" : "auto"}` };
+}
+
+function repoChecks(repos: RepoFacts[]): DoctorCheck[] {
+	if (repos.length === 0) {
+		return [{ id: "projects", title: "Which repos is glance working on?", status: "warn", detail: "no projects registered", remedy: "add one in the web UI (+ Add project…), or POST /api/projects" }];
+	}
+	const checks: DoctorCheck[] = [];
+	for (const r of repos) {
+		const name = r.repo.split("/").pop() || r.repo;
+		if (!r.exists) {
+			checks.push({ id: `repo.${name}`, title: `Repo ${name}`, status: "error", detail: `${r.repo} does not exist`, remedy: `DELETE /api/projects — it is registered but gone` });
+			continue;
+		}
+		if (!r.isGitRepo) {
+			checks.push({ id: `repo.${name}`, title: `Repo ${name}`, status: "error", detail: `${r.repo} is not a git repository`, remedy: "unregister it; glance cuts worktrees, which requires git" });
+			continue;
+		}
+		// A dirty default branch makes every land refuse — and the refusal is classed RETRYABLE, so the
+		// fleet retries forever, never records an outcome, and the learning ledger starves silently.
+		if (r.dirtyFiles > 0) {
+			checks.push({ id: `repo.${name}.dirty`, title: `Repo ${name}`, status: "error", detail: `${r.dirtyFiles} uncommitted file(s) — every land will refuse, and retry forever`, remedy: `commit or stash them in ${r.repo}` });
+		}
+		if (!r.hasOrigin) {
+			checks.push({ id: `repo.${name}.origin`, title: `Repo ${name}`, status: "warn", detail: "no origin remote — units will land by local merge, never by PR", remedy: "git remote add origin <url>" });
+		}
+		if (r.staleBranches > 0) {
+			checks.push({ id: `repo.${name}.branches`, title: `Repo ${name}`, status: "warn", detail: `${r.staleBranches} abandoned squad/* branch(es)`, remedy: "git branch -D the merged ones" });
+		}
+		if (r.dirtyFiles === 0 && r.hasOrigin && r.staleBranches === 0) {
+			checks.push({ id: `repo.${name}`, title: `Repo ${name}`, status: "ok", detail: `clean, origin present, default ${r.defaultBranch ?? "?"}` });
+		}
+	}
+	return checks;
+}
+
+/**
+ * Assemble the report. Every check is independent and every probe is guarded, so one broken subsystem
+ * cannot hide the diagnosis of the others — the failure mode of every health check ever written.
+ */
+export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
+	const groups = await Promise.all([
+		attempt("daemon", "Is the daemon up?", () => daemonChecks(probe)),
+		attempt("autonomy", "Is autonomy armed, and safely?", async () => {
+			const a = await probe.autonomy();
+			// Silence is not "off". A daemon we cannot interrogate may well be autolanding right now.
+			if (!a) return [{ id: "autonomy", title: "Is autonomy armed, and safely?", status: "unknown" as const, detail: "the daemon did not answer — its flags cannot be read from here", remedy: "restart it so it can report, or read its launch environment" }];
+			return [autonomyCheck(a)];
+		}),
+		attempt("state", "Can glance write its state?", async () => {
+			const s = await probe.stateDir();
+			return [s.writable ? { id: "state", title: "Can glance write its state?", status: "ok" as const, detail: s.path } : { id: "state", title: "Can glance write its state?", status: "error" as const, detail: `${s.path} is not writable`, remedy: `chown -R $(id -u) ${s.path}` }];
+		}),
+		attempt("plane", "Is the work queue connected?", async () => {
+			const p = await probe.planeArmed();
+			if (!p.configured) return [{ id: "plane", title: "Is the work queue connected?", status: "warn" as const, detail: "Plane is not configured — dispatch has no backlog to pull from", remedy: "provide plane.env before the daemon boots; it is read once, at boot" }];
+			if (!p.reachable) return [{ id: "plane", title: "Is the work queue connected?", status: "error" as const, detail: `Plane configured but unreachable${p.detail ? `: ${p.detail}` : ""}`, remedy: "check the API key and base URL, then restart the daemon" }];
+			return [{ id: "plane", title: "Is the work queue connected?", status: "ok" as const, detail: "configured and reachable" }];
+		}),
+		attempt("gate", "Can the verification gate run?", async () => {
+			const g = await probe.gateImage();
+			if (!g.dockerUsable) return [{ id: "gate", title: "Can the verification gate run?", status: "warn" as const, detail: "docker is unavailable — the gate falls back to running on the host", remedy: "start docker, or accept an unsandboxed gate" }];
+			if (!g.imagePresent) return [{ id: "gate", title: "Can the verification gate run?", status: "warn" as const, detail: "the derived gate image is missing; it will be rebuilt on first use", remedy: "none — the first gate run pays for it" }];
+			return [{ id: "gate", title: "Can the verification gate run?", status: "ok" as const, detail: "docker + derived gate image present" }];
+		}),
+		attempt("projects", "Which repos is glance working on?", async () => repoChecks(await probe.projects())),
+		attempt("webapp.dist", "Is the UI built?", async () => [(await probe.webappBuilt()) ? { id: "webapp.dist", title: "Is the UI built?", status: "ok" as const, detail: "webapp/dist is present" } : { id: "webapp.dist", title: "Is the UI built?", status: "error" as const, detail: "webapp/dist is missing — the UI will 404", remedy: "cd webapp && bun run build" }]),
+		attempt("zombies", "Any stuck units?", async () => {
+			const n = await probe.zombieAgents();
+			return [n === 0 ? { id: "zombies", title: "Any stuck units?", status: "ok" as const, detail: "none" } : { id: "zombies", title: "Any stuck units?", status: "warn" as const, detail: `${n} unit(s) parked in a terminal state`, remedy: "glance rm <name>" }];
+		}),
+	]);
+
+	const checks = groups.flat();
+	const worst = worstOf(checks);
+	return { checks, worst, healthy: !checks.some((c) => c.status === "error") };
+}
+
+const GLYPH: Record<DoctorStatus, string> = { ok: "✔", warn: "!", error: "✗", unknown: "?" };
+
+/** Human rendering. Grouped by status so the thing that is broken is the thing you read first. */
+export function renderDoctor(report: DoctorReport): string {
+	const order: DoctorStatus[] = ["error", "warn", "unknown", "ok"];
+	const lines: string[] = [];
+	for (const status of order) {
+		for (const c of report.checks.filter((x) => x.status === status)) {
+			lines.push(`${GLYPH[status]} ${c.title.padEnd(34)} ${c.detail}`);
+			if (c.remedy) lines.push(`  ↳ ${c.remedy}`);
+		}
+	}
+	const errors = report.checks.filter((c) => c.status === "error").length;
+	const warns = report.checks.filter((c) => c.status === "warn").length;
+	lines.push("");
+	lines.push(report.healthy && warns === 0 ? "the factory is on, armed, and pointed at the right world." : `${errors} blocking, ${warns} to watch.`);
+	return `${lines.join("\n")}\n`;
+}

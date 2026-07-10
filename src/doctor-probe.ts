@@ -1,0 +1,198 @@
+/**
+ * The real-world probe behind `glance doctor` — every fact gathered from the machine, none inferred.
+ *
+ * Split from `doctor.ts` on purpose: the report logic there is pure and exhaustively tested against
+ * fabricated facts, while everything here touches the filesystem, docker, git, and a possibly-dead
+ * daemon. The seam is the only reason the diagnosis is testable at all.
+ *
+ * Two rules, both learned the hard way:
+ *
+ *  1. **Ask the daemon what the daemon believes.** `/proc/<pid>/environ` shows a process's INITIAL
+ *     environment, so reading it to answer "is autodispatch on?" gives a confident wrong answer — I made
+ *     that mistake twice in one session. When the daemon is up, `GET /api/doctor` is the source of truth.
+ *  2. **Diagnose a dead daemon too.** The single most valuable moment for `doctor` is when nothing is
+ *     running. Repo, state-dir, docker, and webapp checks never need the daemon, so they run regardless.
+ */
+
+import { existsSync } from "node:fs";
+import { access, constants } from "node:fs/promises";
+import * as path from "node:path";
+import { errText } from "./err-text.ts";
+import { hardenedGit } from "./git-harden.ts";
+import { planeConfig } from "./plane.ts";
+import { resolveStateDir } from "./state-dir.ts";
+import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
+import type { AutonomyFacts, DaemonFacts, DoctorProbe, RepoFacts } from "./doctor.ts";
+
+interface DoctorFactsResponse {
+	daemon: DaemonFacts;
+	autonomy: AutonomyFacts;
+	projects: string[];
+	zombieAgents: number;
+}
+
+const DEAD: DaemonFacts = { running: false };
+/** Nothing is armed when nothing is running. Reporting the CALLING shell's flags here would describe a
+ *  daemon that does not exist. */
+const NO_AUTONOMY: AutonomyFacts = { autodispatch: false, autodrive: false, autoland: false, autosupervise: false, landConfirm: false, regressionGate: false };
+
+async function run(argv: string[], cwd: string): Promise<{ code: number; stdout: string }> {
+	const proc = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+	const stdout = await new Response(proc.stdout).text();
+	return { code: await proc.exited, stdout: stdout.trim() };
+}
+
+async function gitOut(args: string[], cwd: string): Promise<string | undefined> {
+	const r = await hardenedGit(args, { cwd }).catch(() => ({ code: 1, stdout: "" }));
+	return r.code === 0 ? r.stdout.trim() : undefined;
+}
+
+/** `git branch --list 'squad/*'` — `--list` patterns are relative to `refs/heads/`, a distinction that
+ *  already produced one false-positive gate in this repo. */
+async function staleSquadBranches(repo: string): Promise<number> {
+	const out = await gitOut(["branch", "--list", "squad/*", "--format=%(refname:short)"], repo);
+	return out ? out.split("\n").filter((l) => l.trim()).length : 0;
+}
+
+async function repoFacts(repo: string): Promise<RepoFacts> {
+	if (!existsSync(repo)) return { repo, exists: false, isGitRepo: false, dirtyFiles: 0, hasOrigin: false, staleBranches: 0 };
+	const inside = await gitOut(["rev-parse", "--is-inside-work-tree"], repo);
+	if (inside !== "true") return { repo, exists: true, isGitRepo: false, dirtyFiles: 0, hasOrigin: false, staleBranches: 0 };
+
+	const [status, remotes, head, stale] = await Promise.all([
+		gitOut(["status", "--porcelain"], repo),
+		gitOut(["remote"], repo),
+		gitOut(["symbolic-ref", "--quiet", "--short", "HEAD"], repo),
+		staleSquadBranches(repo),
+	]);
+	return {
+		repo,
+		exists: true,
+		isGitRepo: true,
+		dirtyFiles: status ? status.split("\n").filter((l) => l.trim()).length : 0,
+		hasOrigin: (remotes ?? "").split("\n").includes("origin"),
+		defaultBranch: head,
+		staleBranches: stale,
+	};
+}
+
+export interface ProbeOptions {
+	/** Daemon base URL, e.g. `http://127.0.0.1:7878`. */
+	base: string;
+	headers: Record<string, string>;
+	/** The checkout the operator is standing in. */
+	cwd: string;
+	/** Milliseconds to wait on the daemon before declaring it dead. */
+	timeoutMs?: number;
+}
+
+export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
+	// Fetched once and shared: eight checks want pieces of it, and a doctor that issues eight round-trips
+	// can report eight mutually inconsistent snapshots of a daemon that changed underneath it.
+	//
+	// "Cannot ask the daemon" is NOT "the daemon is down". `/api/doctor` is new; a daemon started from an
+	// older install answers 404 while happily driving agents. Caught on the first live run of this command,
+	// which told me to `glance up` a daemon that was already up. `/api/health` has existed forever, so it
+	// is the liveness probe, and `/api/doctor` only decides whether the facts are legible.
+	let factsPromise: Promise<{ facts?: DoctorFactsResponse; alive: boolean; opaqueReason?: string }> | undefined;
+	const probeDaemon = () => {
+		factsPromise ??= (async () => {
+			try {
+				// ANY HTTP response means something is listening — a 401 (wrong token) and a 404 (older
+				// daemon) both prove liveness. Only a thrown fetch (connection refused, timeout) means dead.
+				await fetch(`${opts.base}/api/health`, { headers: opts.headers, signal: AbortSignal.timeout(opts.timeoutMs ?? 3_000) });
+			} catch {
+				return { alive: false };
+			}
+			const alive = true;
+			try {
+				const res = await fetch(`${opts.base}/api/doctor`, { headers: opts.headers, signal: AbortSignal.timeout(opts.timeoutMs ?? 3_000) });
+				if (res.status === 404) return { alive, opaqueReason: "/api/doctor (404 — older daemon)" };
+				if (res.status === 401 || res.status === 403) return { alive, opaqueReason: `/api/doctor (${res.status} — this token is not an operator)` };
+				if (!res.ok) return { alive, opaqueReason: `/api/doctor (HTTP ${res.status})` };
+				return { alive, facts: (await res.json()) as DoctorFactsResponse };
+			} catch (err) {
+				return { alive, opaqueReason: `/api/doctor (${errText(err)})` };
+			}
+		})();
+		return factsPromise;
+	};
+	const facts = async (): Promise<DoctorFactsResponse | undefined> => (await probeDaemon()).facts;
+
+	return {
+		async daemon() {
+			const probed = await probeDaemon();
+			if (!probed.alive) return DEAD;
+			const f = probed.facts;
+			if (!f) return { running: true, reachableButOpaque: true, opaqueReason: probed.opaqueReason };
+			// The daemon reports the rev it was BUILT from only if it was launched with GLANCE_REV. When it
+			// wasn't, resolve it from the checkout its cwd sits in — that is where a `bun src/index.ts`
+			// daemon's code actually lives. A global install lands in neither, and `installedRev` stays
+			// undefined rather than borrowing the operator's rev and claiming they match.
+			const [installedRev, installRepo] = f.daemon.cwd
+				? await Promise.all([f.daemon.installedRev ? Promise.resolve(f.daemon.installedRev) : gitOut(["rev-parse", "HEAD"], f.daemon.cwd), gitOut(["rev-parse", "--show-toplevel"], f.daemon.cwd)])
+				: [f.daemon.installedRev, undefined];
+			return { ...f.daemon, installedRev, installRepo };
+		},
+		async autonomy() {
+			const probed = await probeDaemon();
+			// A dead daemon is genuinely running nothing. A LIVE but opaque one may be autolanding as we
+			// speak — reporting "nothing is armed" there would be a fabricated all-clear.
+			if (!probed.alive) return NO_AUTONOMY;
+			return probed.facts?.autonomy;
+		},
+		async repoRev() {
+			const [rev, repoRoot] = await Promise.all([gitOut(["rev-parse", "HEAD"], opts.cwd), gitOut(["rev-parse", "--show-toplevel"], opts.cwd)]);
+			return { rev, repoRoot };
+		},
+		async stateDir() {
+			const p = resolveStateDir();
+			try {
+				await access(p, constants.W_OK);
+				return { path: p, writable: true };
+			} catch {
+				return { path: p, writable: false };
+			}
+		},
+		async planeArmed() {
+			// The daemon's own resolution, not a re-derivation from env names: Plane accepts two spellings
+			// for its key and strips a pasted `/api/v1` suffix from the base URL.
+			const cfg = planeConfig();
+			if (!cfg) return { configured: false, reachable: false };
+			try {
+				const res = await fetch(`${cfg.baseUrl}/api/v1/users/me/`, {
+					headers: { "x-api-key": cfg.apiKey },
+					signal: AbortSignal.timeout(opts.timeoutMs ?? 3_000),
+				});
+				return { configured: true, reachable: res.ok, detail: res.ok ? undefined : `HTTP ${res.status}` };
+			} catch (err) {
+				return { configured: true, reachable: false, detail: errText(err) };
+			}
+		},
+		async gateImage() {
+			const version = await run(["docker", "version", "--format", "{{.Server.Version}}"], opts.cwd).catch(() => ({ code: 1, stdout: "" }));
+			if (version.code !== 0) return { dockerUsable: false, imagePresent: false };
+			const inspect = await run(["docker", "image", "inspect", DERIVED_SANDBOX_IMAGE], opts.cwd).catch(() => ({ code: 1, stdout: "" }));
+			return { dockerUsable: true, imagePresent: inspect.code === 0 };
+		},
+		async projects() {
+			const f = await facts();
+			// With no daemon, the repo you are standing in is the one you care about. That is also the only
+			// one we can name without reading the registry the daemon owns.
+			const repos = f?.projects?.length ? f.projects : [opts.cwd];
+			return Promise.all(repos.map(repoFacts));
+		},
+		async webappBuilt() {
+			// The DAEMON serves `webapp/dist` from wherever ITS code lives, which is routinely not the repo
+			// the operator is standing in. Asking the local cwd would report "the UI is missing" every time
+			// `glance doctor` runs from a managed repo. Believe the daemon; fall back to the cwd only when
+			// there is no daemon to ask.
+			const f = await facts();
+			if (f) return f.daemon.webappDist !== false;
+			return existsSync(path.join(opts.cwd, "webapp", "dist", "index.html"));
+		},
+		async zombieAgents() {
+			return (await facts())?.zombieAgents ?? 0;
+		},
+	};
+}

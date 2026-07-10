@@ -8,6 +8,7 @@
  *   glance prompt <id> <message…>
  *   glance rm <id> [--delete-worktree]
  *   glance open
+ *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
  *
  * `up` is the long-lived process that owns the agents. The other verbs are thin
  * HTTP clients that talk to a running daemon's REST surface.
@@ -20,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
+import { renderDoctor, runDoctor } from "./doctor.ts";
+import { makeDoctorProbe } from "./doctor-probe.ts";
 import { envBool } from "./config.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
@@ -82,6 +85,7 @@ USAGE
   glance logs <id> [--limit N]                  Print an agent's recent transcript
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   glance open                                   Print the dashboard URL
+  glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
   glance plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
   glance plan-decompose <dir> [--json]          One-shot: decompose <dir>/OBJECTIVE.md into a concern-DAG (needs \`omp\`)
@@ -798,6 +802,19 @@ async function cmdAutomation(args: string[]): Promise<void> {
 	}
 }
 
+/**
+ * `glance doctor` — R6's answer. Exit code IS the verdict, so CI and the operator's `&&` both work:
+ * 0 = nothing blocking, 1 = the factory cannot do its job. A warning never fails the command; a warning
+ * that failed the command would be turned off within a week.
+ */
+async function cmdDoctor(args: string[]): Promise<void> {
+	const { flags } = parseArgs(args);
+	const report = await runDoctor(makeDoctorProbe({ base: base(flags), headers: tokenHeader(), cwd: process.cwd() }));
+	process.stdout.write(flags.json ? `${JSON.stringify(report, null, 2)}
+` : renderDoctor(report));
+	if (!report.healthy) process.exit(1);
+}
+
 async function main(): Promise<void> {
 	const [cmd, ...rest] = process.argv.slice(2);
 	switch (cmd) {
@@ -851,6 +868,9 @@ async function main(): Promise<void> {
 			break;
 		case "plan-decompose":
 			await cmdPlanDecompose(rest);
+			break;
+		case "doctor":
+			await cmdDoctor(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);
