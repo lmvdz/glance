@@ -56,13 +56,18 @@ export const FileSignIn = (): React.ReactElement => {
         </div>
 
         <div className="space-y-2 rounded-md border border-current/15 p-4">
-          <p className="text-sm font-medium">The quickest way in</p>
+          <p className="text-sm font-medium">Where to find the token</p>
           <p className="text-sm opacity-80">
-            The daemon printed a sign-in link when it started. Or run this in a terminal and open the URL it prints:
+            The daemon printed a sign-in link when it started. Otherwise, read the token and paste it below:
           </p>
+          {/* Deliberately NOT `glance open` or any other CLI verb. The package declares both a `glance` and
+              an `omp-squad` bin, and an install predating the rename has only the latter — the first draft
+              of this screen told the operator to run a command that did not exist on their machine. A
+              recovery screen that prescribes a broken command is worse than no screen. `cat` always works. */}
           <pre className="overflow-x-auto rounded bg-current/5 p-3 text-xs">
-            <code>echo &quot;$(glance open)/?token=$(cat ~/.glance/access-token)&quot;</code>
+            <code>cat ~/.glance/access-token</code>
           </pre>
+          <p className="text-xs opacity-60">Older installs keep it at ~/.omp/squad/access-token.</p>
         </div>
 
         <form onSubmit={submit} className="space-y-2">
