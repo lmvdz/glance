@@ -455,7 +455,7 @@ const LandRail: React.FC<{
  * land rail.
  */
 export const WorkspaceCockpit: React.FC = () => {
-  const { agents, features, audit, tasks, transcripts, sendConsoleCommand, subscribeConsole, showToast, selectTask, setView, reload, openIntervene } = useTaskContext();
+  const { agents, features, audit, tasks, allTasks, transcripts, sendConsoleCommand, subscribeConsole, showToast, selectTask, setView, reload, openIntervene } = useTaskContext();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: 'omp default', value: '' }]);
   const [stopPending, setStopPending] = useState(false);
@@ -618,9 +618,12 @@ export const WorkspaceCockpit: React.FC = () => {
 
   const openUnstaffed = useCallback((item: ActiveWorkItem) => {
     if (!item.featureId) return;
-    const task = tasks.find((t) => t.sourceId === item.featureId) ?? tasks.find((t) => t.id === item.featureId);
+    // The FLEET is deliberately unscoped — a blocked agent in another repo must never be hidden — so its
+    // unstaffed-plan rows can name a task the current project scope excludes. Look it up in `allTasks`;
+    // searching the scoped list silently found nothing and the click did nothing. (gpt-5.6-sol)
+    const task = allTasks.find((t) => t.sourceId === item.featureId) ?? allTasks.find((t) => t.id === item.featureId);
     if (task) { selectTask(task.id); setView('tasks'); }
-  }, [tasks, selectTask, setView]);
+  }, [allTasks, selectTask, setView]);
 
   const staffPlan = useCallback(async (item: ActiveWorkItem) => {
     if (!item.featureId) return;
