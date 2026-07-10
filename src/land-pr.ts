@@ -522,24 +522,50 @@ async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, sta
  *
  * Guard: any commit this PR would publish that is also reachable from a local branch OUTSIDE
  * `refs/heads/squad/` is a transplant. Stacked `squad/*` branches are deliberately allowed (a unit
- * forked from another unit is still fleet work). Refusal is NOT retryable — retrying cannot fix
- * lineage, and a silent retry loop is exactly how the dirty-main interlock stayed invisible for
+ * forked from another unit is still fleet work). A GENUINE finding is NOT retryable — retrying cannot
+ * fix lineage, and a silent retry loop is exactly how the dirty-main interlock stayed invisible for
  * 1,381 attempts. Found by cross-lineage review (gpt-5.6-sol + grok-4.5) of the probe-4 removal.
+ *
+ * A second cross-lineage pass (grok-4.5, eap-borrows) on THIS fix found the polarity re-introduced one
+ * probe over: a probe FAILURE (offline daemon, pruned `origin/<default>`) is not a lineage finding —
+ * see `TransplantFinding`/`transplantedCommitsReason` below for the retryable split.
  */
 /** git's own wording when a REF doesn't exist at all — distinct from a genuine probe failure (a
  *  nonexistent branch has nothing to publish, full stop; that's not the same claim as "couldn't tell
  *  whether it's safe to publish"). Matched narrowly so an actual tool/repo failure still blocks. */
 const UNKNOWN_REVISION_RE = /unknown revision|bad revision|bad object|not a valid object name/i;
 
-export async function transplantedCommitsReason(repo: string, branch: string, defaultBranch: string): Promise<string | undefined> {
+/**
+ * Why `branch` is blocked from publishing to `origin/<default>`, and whether that's a genuine lineage
+ * FINDING or a PROBE that couldn't run — mirrors `StaleBranchFinding` (land.ts) exactly, and for the
+ * same reason (cross-lineage review, eap-borrows): a real transplanted-commit finding means retrying
+ * cannot help (the lineage doesn't change on its own), so `retryable: false` there is correct and was
+ * always correct. But a git PROBE FAILURE (offline daemon, `origin/<default>` pruned by a transient
+ * fetch, a corrupted `.git/objects`) proves NOTHING about lineage either way — hardcoding
+ * `retryable: false` for THAT case turned a transient hiccup into a PERMANENT park (`SquadManager.land`
+ * never re-tries a non-retryable refusal and never bumps the auto-land fail streak back down), exactly
+ * the interlock pathology this repo is named after, just re-introduced one probe over. Both cases still
+ * BLOCK — only the retry polarity differs.
+ */
+export interface TransplantFinding {
+	reason: string;
+	retryable: boolean;
+}
+
+export async function transplantedCommitsReason(repo: string, branch: string, defaultBranch: string): Promise<TransplantFinding | undefined> {
+	const probeFailed = (step: string, r: GitRun): TransplantFinding => {
+		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `${step} failed: ${r.stderr || r.stdout || "no output"}` });
+		return { reason: `transplant gate ${reason} — could not prove ${branch}'s lineage; refusing to publish it`, retryable: true };
+	};
 	// Finding #4 (eap-borrows wave 2): the ORIGINAL checks collapsed "probe failed (nonzero git exit)"
 	// and "probe succeeded, legitimately nothing to compare" into the SAME `undefined` — a transient git
 	// error during either rev-list silently ALLOWED a land that could publish an operator's private
 	// commits, exactly the hazard this gate exists to catch. A probe failure can prove neither lineage
-	// claim, so it now blocks (never allows) with a distinct, non-retryable reason — retrying cannot fix
-	// lineage, mirroring every other reason this function returns. A branch that doesn't exist AT ALL is
-	// a separate, legitimate case (nothing to publish), not a probe failure — a false-block here is as
-	// bad as the false-allow this finding fixes (see this file's negative-case tests).
+	// claim, so it now blocks (never allows) with a distinct reason — retrying cannot fix a GENUINE
+	// lineage claim, but a probe failure is its own, retryable, category (see `probeFailed` above). A
+	// branch that doesn't exist AT ALL is a separate, legitimate case (nothing to publish), not a probe
+	// failure — a false-block here is as bad as the false-allow this finding fixes (see this file's
+	// negative-case tests).
 	const publishing = await git(["rev-list", `origin/${defaultBranch}..${branch}`], repo);
 	if (publishing.code !== 0) {
 		// Finding #1 (code-review fixlist): `git rev-list a..b` emits BYTE-IDENTICAL "unknown revision"
@@ -553,8 +579,7 @@ export async function transplantedCommitsReason(repo: string, branch: string, de
 			const branchRef = await git(["rev-parse", "--verify", "--quiet", branch], repo);
 			if (branchRef.code !== 0) return undefined; // confirmed: the branch itself doesn't exist — nothing to publish
 		}
-		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `git rev-list origin/${defaultBranch}..${branch} failed: ${publishing.stderr || publishing.stdout || "no output"}` });
-		return `transplant gate ${reason} — could not prove ${branch}'s lineage; refusing to publish it`;
+		return probeFailed(`git rev-list origin/${defaultBranch}..${branch}`, publishing);
 	}
 	if (!publishing.stdout) return undefined; // nothing ahead of origin/<default> ⇒ nothing to publish
 	// `--exclude` patterns are interpreted the way the FOLLOWING ref option interprets its own pattern:
@@ -562,10 +587,7 @@ export async function transplantedCommitsReason(repo: string, branch: string, de
 	// silently matches nothing and every branch — including this one — counts as foreign. (Caught by a
 	// negative test: the gate flagged the agent's own commit.)
 	const foreign = await git(["rev-list", "--exclude=squad/*", `--exclude=${branch}`, "--branches", "--not", `origin/${defaultBranch}`], repo);
-	if (foreign.code !== 0) {
-		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `git rev-list --branches --not origin/${defaultBranch} failed: ${foreign.stderr || foreign.stdout || "no output"}` });
-		return `transplant gate ${reason} — could not prove ${branch}'s lineage; refusing to publish it`;
-	}
+	if (foreign.code !== 0) return probeFailed(`git rev-list --branches --not origin/${defaultBranch}`, foreign);
 	if (!foreign.stdout) return undefined; // no local non-fleet branches to compare against
 	const foreignShas = new Set(foreign.stdout.split("\n").filter(Boolean));
 	const stolen = publishing.stdout.split("\n").filter((s) => s && foreignShas.has(s));
@@ -577,11 +599,13 @@ export async function transplantedCommitsReason(repo: string, branch: string, de
 		}),
 	);
 	const more = stolen.length > 3 ? ` (+${stolen.length - 3} more)` : "";
-	return (
-		`transplant gate blocked ${branch}: it would publish ${stolen.length} commit(s) to origin/${defaultBranch} that belong to a ` +
-		`local non-fleet branch, not to this unit — ${shown.join("; ")}${more}. This branch was forked from an operator branch ` +
-		`(pre-PR-mode units forked from the local checkout's HEAD). Rebase it onto origin/${defaultBranch} and re-verify, or delete it.`
-	);
+	return {
+		reason:
+			`transplant gate blocked ${branch}: it would publish ${stolen.length} commit(s) to origin/${defaultBranch} that belong to a ` +
+			`local non-fleet branch, not to this unit — ${shown.join("; ")}${more}. This branch was forked from an operator branch ` +
+			`(pre-PR-mode units forked from the local checkout's HEAD). Rebase it onto origin/${defaultBranch} and re-verify, or delete it.`,
+		retryable: false,
+	};
 }
 
 async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, onOrphan?: AutomationRecorder): Promise<LandResult> {
@@ -628,8 +652,11 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	}
 
 	// Lineage gate — BEFORE the first push. Everything below this line is remote-visible.
+	// Cross-lineage review (grok-4.5, eap-borrows): `transplant.retryable` threads a genuine finding
+	// (retrying can't fix lineage) apart from a probe failure (offline fetch / pruned origin ref — an
+	// environmental hiccup, not a branch defect) so the latter never permanently parks a healthy branch.
 	const transplant = await transplantedCommitsReason(repo, branch, opts.defaultBranch);
-	if (transplant) return { ok: false, retryable: false, committed, merged: false, message, mode: "pr", detail: transplant };
+	if (transplant) return { ok: false, retryable: transplant.retryable, committed, merged: false, message, mode: "pr", detail: transplant.reason };
 
 	const ensure = await ensurePr({
 		repo,

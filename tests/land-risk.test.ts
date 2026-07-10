@@ -99,6 +99,57 @@ test("an unreadable repo never throws — but is now BLOCKED (fail-closed), not 
 	expect(r).toContain("could not compute a blast radius");
 });
 
+// Cross-lineage review (grok-4.5, eap-borrows) finding #4: `merge-base` exit 1 + empty stdout means
+// "no common ancestor" — the carve-out this repo added so an orphan/grafted branch isn't misread as a
+// probe failure. But for THIS gate (blast radius), "not a probe failure" must not mean "safe": with no
+// merge base the diff is uncomputable, so the honest reading is maximum uncertainty, not a clean bill
+// of health. Reproduced with a REAL orphan branch (git checkout --orphan), not a mock.
+test("an orphan branch (no common ancestor) is BLOCKED as unknowable blast radius, not silently safe", async () => {
+	sh(["checkout", "-q", "--orphan", "orphan-feat"]);
+	commitFiles({ "orphan.txt": "unrelated history\n" }, "orphan root");
+	sh(["checkout", "-q", "main"]);
+	const r = await landRiskReason(repo, "orphan-feat");
+	expect(r).toBeDefined();
+	expect(r).toContain("land-risk gate:");
+	expect(r).toContain("no common ancestor");
+	expect(r).toContain("UNKNOWABLE");
+	// Distinct from a probe failure — the gate/hatches are still named, but never the "could not compute" wording.
+	expect(r).not.toContain("could not compute a blast radius");
+});
+
+// Finding #4 continued (shallow-clone twin): `git merge-base` emits the SAME exit-1/empty-stdout
+// signal for a shallow clone's truncated history as for a genuinely orphan branch — the carve-out
+// above can't tell the difference, so a shallow repo must fail closed as an ordinary probe failure
+// instead of guessing "unknowable, maximum blast radius". Reproduced with a REAL shallow clone
+// (`git clone --depth 1`), not a mock of `--is-shallow-repository`.
+test("a shallow clone gets the merge-base twin signal but fails closed as a probe failure, not the orphan wording", async () => {
+	sh(["checkout", "-q", "-b", "feat"]);
+	commitFiles({ "src/a.ts": "export const a = 1;\n" }, "feat work");
+	sh(["checkout", "-q", "main"]);
+
+	const shallow = mkdtempSync(path.join(tmpdir(), "landrisk-shallow-"));
+	try {
+		// `--no-single-branch --depth 1` shallow-clones EVERY branch to depth 1 independently — `main`
+		// and `feat` each get grafted at their own tip, so locally they share no known common ancestor
+		// even though the real (unfetched) history is linear. That reproduces the exact exit-1/empty-
+		// stdout signal the orphan-branch test above exercises, but for a reason that must fail closed
+		// instead of reading as "genuinely orphan, maximum blast radius".
+		const clone = Bun.spawnSync(["git", "clone", "-q", "--depth", "1", "--no-single-branch", `file://${repo}`, shallow], { stdout: "ignore", stderr: "ignore" });
+		if (clone.exitCode !== 0) throw new Error("git clone --depth 1 failed");
+
+		const isShallow = Bun.spawnSync(["git", "rev-parse", "--is-shallow-repository"], { cwd: shallow, stdout: "pipe", stderr: "ignore" });
+		expect(new TextDecoder().decode(isShallow.stdout).trim()).toBe("true"); // sanity: the fixture really is shallow
+
+		const r = await landRiskReason(shallow, "origin/feat", "main");
+		expect(r).toBeDefined();
+		expect(r).toContain("land-risk gate:");
+		expect(r).toContain("could not compute a blast radius");
+		expect(r).toContain("SHALLOW clone");
+	} finally {
+		rmSync(shallow, { recursive: true, force: true });
+	}
+});
+
 test("the gate is OFF by default", () => {
 	expect(landRiskGateEnabled()).toBe(false);
 	process.env.OMP_SQUAD_LAND_RISK_GATE = "1";

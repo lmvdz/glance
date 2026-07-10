@@ -692,6 +692,16 @@ export interface StaleBranchFinding {
 	retryable: boolean;
 }
 
+/** Cross-lineage review (grok-4.5, eap-borrows) on the carve-out below: `git merge-base` signals the
+ *  SAME exit-1 + empty-stdout/stderr for a shallow clone's truncated history as it does for genuinely
+ *  unrelated histories — a shallow repo can never trust "no common ancestor" from that signal alone,
+ *  since the shared ancestor may simply not be fetched. Ambiguous ⇒ can't discriminate ⇒ fail closed
+ *  (probe failure), rather than reading it as the legitimately-fresh case. */
+async function isShallowRepo(repo: string): Promise<boolean> {
+	const r = await git(["rev-parse", "--is-shallow-repository"], repo);
+	return r.code === 0 && r.stdout === "true";
+}
+
 export async function staleBranchReason(repo: string, branch: string, baseRef = "HEAD"): Promise<StaleBranchFinding | undefined> {
 	const probeFailed = (step: string, r: GitRun): StaleBranchFinding => {
 		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `${step} failed: ${r.stderr || r.stdout || "no output"}` });
@@ -708,7 +718,14 @@ export async function staleBranchReason(repo: string, branch: string, baseRef = 
 	// and was PERMANENTLY refused, retried forever — the exact interlock pathology this repo's own
 	// history is named after. Only a bare exit 1 with both streams empty is git's "unrelated
 	// histories" signal; any other nonzero exit (corrupt object, spawn death, etc.) still fails closed.
-	if (mb.code === 1 && !mb.stdout && !mb.stderr) return undefined; // no common ancestor — the merge path itself surfaces this
+	//
+	// Shallow-clone twin (grok-4.5 cross-lineage review): the exact same exit-1/empty-streams signal
+	// fires when the ancestor merely wasn't fetched, not just for a genuine orphan — a shallow repo
+	// can't tell those apart, so it takes the probeFailed path instead of the "fresh" carve-out.
+	if (mb.code === 1 && !mb.stdout && !mb.stderr) {
+		if (await isShallowRepo(repo)) return probeFailed(`git merge-base ${baseRef} ${branch}`, { ...mb, stderr: "no common ancestor reported in a SHALLOW clone — cannot distinguish unrelated history from an unfetched ancestor" });
+		return undefined; // no common ancestor — the merge path itself surfaces this
+	}
 	if (mb.code !== 0) return probeFailed(`git merge-base ${baseRef} ${branch}`, mb);
 	if (!mb.stdout) return undefined; // defensive: should not occur (exit 0 always yields a sha on success)
 	const base = await git(["rev-parse", baseRef], repo);

@@ -259,6 +259,78 @@ test("a clean land records `landed` (not blocked), clears the banner path, and l
 	expect(mgr.factoryStatus().landBlocked.blocked).toBe(false);
 });
 
+// Cross-lineage review (grok-4.5, eap-borrows) finding #2: `autoLandFailCap` deliberately never sees a
+// retryable refusal, so nothing else in this path ever escalates one — a persisting dirty-main window
+// (or any other retryable refusal) retried forever at the ~30s tick cadence with ONLY a cooldown-
+// throttled log line nobody watches. `landBlockedEscalateCap` bounds how many consecutive attempts on
+// the SAME episode run before a "Needs you" attention item fires — this drives the REAL SquadManager
+// path (not the ledger helper) with a small test cap so the budget doesn't require 20 real land() calls.
+test("REGRESSION: a retryable refusal past the escalate cap fires ONE 'Needs you' attention item — never forever-soft", async () => {
+	process.env.OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP = "3";
+	try {
+		const stateDir = await tmpDir("blocked-escalate-state-");
+		const repo = await baseRepo("blocked-escalate-repo-");
+		const wt = await branchWorktree(repo, "squad/a1", "x.txt");
+		const mgr = new TestManager({ stateDir });
+		seedAgent(mgr, "a1", repo, wt, "squad/a1");
+		await fs.writeFile(path.join(repo, "base.txt"), "base\nLOCAL UNCOMMITTED WORK\n");
+
+		// Same episode (same repo, branch, head, reason) driven exactly to the cap.
+		for (let i = 0; i < 2; i++) {
+			const r = await mgr.land("a1", undefined, { force: true, reason: `escalate test ${i}` });
+			expect(r.retryable).toBe(true);
+		}
+		// Below the cap: no attention item yet.
+		expect(mgr.agents.get("a1")?.dto.attentionEvents ?? []).toEqual([]);
+
+		const atCap = await mgr.land("a1", undefined, { force: true, reason: "escalate test at cap" });
+		expect(atCap.retryable).toBe(true);
+
+		// Crossing the cap fires exactly one attention item, naming the branch and the attempt count.
+		const events = mgr.agents.get("a1")?.dto.attentionEvents ?? [];
+		expect(events.length).toBe(1);
+		expect(events[0]?.summary).toContain("squad/a1");
+		expect(events[0]?.summary).toContain("3 consecutive attempts");
+		expect(events[0]?.summary).toContain("needs a human");
+		expect(events[0]?.source).toBe("notify");
+
+		// Idempotent: retrying the SAME still-stuck episode past the cap does not file a second item.
+		const pastCap = await mgr.land("a1", undefined, { force: true, reason: "escalate test past cap" });
+		expect(pastCap.retryable).toBe(true);
+		expect((mgr.agents.get("a1")?.dto.attentionEvents ?? []).length).toBe(1);
+
+		// A NEW episode (branch advances) resets the attempt budget and can escalate again.
+		await fs.writeFile(path.join(wt, "y.txt"), "more work\n");
+		await git(wt, "add", "-A");
+		await git(wt, "commit", "-qm", "more work");
+		for (let i = 0; i < 3; i++) {
+			await mgr.land("a1", undefined, { force: true, reason: `escalate test new-episode ${i}` });
+		}
+		expect((mgr.agents.get("a1")?.dto.attentionEvents ?? []).length).toBe(2);
+	} finally {
+		delete process.env.OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP;
+	}
+});
+
+test("landBlockedEscalateCap:0 disables the bounded escalation (pure opt-out, never fires)", async () => {
+	process.env.OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP = "0";
+	try {
+		const stateDir = await tmpDir("blocked-escalate-off-state-");
+		const repo = await baseRepo("blocked-escalate-off-repo-");
+		const wt = await branchWorktree(repo, "squad/a1", "x.txt");
+		const mgr = new TestManager({ stateDir });
+		seedAgent(mgr, "a1", repo, wt, "squad/a1");
+		await fs.writeFile(path.join(repo, "base.txt"), "base\nLOCAL UNCOMMITTED WORK\n");
+
+		for (let i = 0; i < 5; i++) {
+			await mgr.land("a1", undefined, { force: true, reason: `escalate-off test ${i}` });
+		}
+		expect(mgr.agents.get("a1")?.dto.attentionEvents ?? []).toEqual([]);
+	} finally {
+		delete process.env.OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP;
+	}
+});
+
 test("a non-retryable land FAILURE still records `rejected` exactly as before (decoupling changed nothing here)", async () => {
 	// Autoresolve is ON by default and would spawn a real resolver on the conflict below — this test
 	// is about the RECORDING of a plain non-retryable failure, so turn it off for the duration.

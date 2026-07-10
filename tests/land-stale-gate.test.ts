@@ -181,6 +181,44 @@ test("staleBranchReason names the overlap and how to proceed", async () => {
 	expect(await staleBranchReason(repo, "fresh")).toBeUndefined();
 });
 
+// Cross-lineage review (grok-4.5, eap-borrows) finding #4, control case: a genuinely orphan branch in
+// a NON-shallow repo must keep reading as `undefined` (safe) — staleBranchReason's own doc explains
+// why this axis differs from land-risk.ts's blast-radius gate: no common ancestor means no overlap, so
+// no silent-clobber risk; the merge itself will surface whatever the orphan history actually contains.
+// This proves the new shallow-repo guard (below) doesn't regress the ordinary case.
+test("a genuine orphan branch (non-shallow repo) stays undefined — the merge path surfaces it, not this gate", async () => {
+	const repo = await baseRepo("stale-orphan-");
+	await git(repo, "checkout", "-q", "--orphan", "orphan-branch");
+	await fs.writeFile(path.join(repo, "orphan.txt"), "unrelated history\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "orphan root");
+	await git(repo, "checkout", "-q", "main");
+
+	expect(await staleBranchReason(repo, "orphan-branch")).toBeUndefined();
+});
+
+// Finding #4 continued (shallow-clone twin): `git merge-base` emits the SAME exit-1/empty-streams
+// signal for a shallow clone's independently-grafted branches as it does for a genuinely orphan
+// branch — the carve-out above can't tell those apart, so a shallow repo must fail closed (probe
+// failure, retryable:true) instead of reading it as "legitimately fresh". Reproduced with a REAL
+// shallow clone (`git clone --depth 1 --no-single-branch`), not a mock of `--is-shallow-repository`.
+test("shallow clone: the merge-base twin signal fails closed as a probe failure, not 'fresh'", async () => {
+	const src = await baseRepo("stale-shallow-src-");
+	await branchWorktree(src, "other", editSharedLine(1, "other branch edit"));
+
+	const shallow = await fs.mkdtemp(path.join(os.tmpdir(), "stale-shallow-clone-"));
+	tmps.push(shallow);
+	const clone = Bun.spawnSync(["git", "clone", "-q", "--depth", "1", "--no-single-branch", `file://${src}`, shallow]);
+	if (clone.exitCode !== 0) throw new Error("git clone --depth 1 failed");
+	expect(new TextDecoder().decode(Bun.spawnSync(["git", "-C", shallow, "rev-parse", "--is-shallow-repository"]).stdout).trim()).toBe("true");
+
+	const finding = await staleBranchReason(shallow, "origin/other");
+	expect(finding).toBeDefined();
+	expect(finding?.reason).toContain("stale-branch");
+	expect(finding?.reason).toContain("SHALLOW clone");
+	expect(finding?.retryable).toBe(true);
+});
+
 // finding #6 (eap-borrows wave 2): the ORIGINAL probe collapsed "genuinely fresh (fork point IS the
 // tip)" and "the merge-base/rev-parse/diff probe itself FAILED" into the same `undefined` — a git
 // hiccup silently let a genuinely stale, potentially clobbering merge through unchecked. Passing a

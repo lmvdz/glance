@@ -72,13 +72,16 @@ test("BLOCKS a squad branch forked from an operator branch that carries unpushed
 	await git(repo, "checkout", "-qb", "squad/unit-1");
 	await commit(repo, "agent.txt", "agent work\n", "agent: the actual unit");
 
-	const reason = await transplantedCommitsReason(repo, "squad/unit-1", "main");
-	expect(reason).toBeDefined();
-	expect(reason).toContain("transplant gate blocked squad/unit-1");
-	expect(reason).toContain("operator: unpushed WIP");
-	expect(reason).toContain("1 commit(s)");
+	const finding = await transplantedCommitsReason(repo, "squad/unit-1", "main");
+	expect(finding).toBeDefined();
+	expect(finding?.reason).toContain("transplant gate blocked squad/unit-1");
+	expect(finding?.reason).toContain("operator: unpushed WIP");
+	expect(finding?.reason).toContain("1 commit(s)");
 	// The agent's own commit must NOT be named as stolen.
-	expect(reason).not.toContain("agent: the actual unit");
+	expect(finding?.reason).not.toContain("agent: the actual unit");
+	// eap-borrows cross-lineage review: a GENUINE lineage finding is never retryable — retrying can't
+	// change which branch a commit was authored on.
+	expect(finding?.retryable).toBe(false);
 });
 
 test("BLOCKS while naming only the operator commits, and caps the list", async () => {
@@ -88,9 +91,10 @@ test("BLOCKS while naming only the operator commits, and caps the list", async (
 	await git(repo, "checkout", "-qb", "squad/unit-2");
 	await commit(repo, "agent.txt", "a\n", "agent work");
 
-	const reason = await transplantedCommitsReason(repo, "squad/unit-2", "main");
-	expect(reason).toContain("4 commit(s)");
-	expect(reason).toContain("(+1 more)"); // 4 stolen, 3 shown
+	const finding = await transplantedCommitsReason(repo, "squad/unit-2", "main");
+	expect(finding?.reason).toContain("4 commit(s)");
+	expect(finding?.reason).toContain("(+1 more)"); // 4 stolen, 3 shown
+	expect(finding?.retryable).toBe(false);
 });
 
 // ── the negative cases: a false positive here re-breaks landing entirely ────────────────────────
@@ -151,12 +155,16 @@ test("finding #4: a rev-list PROBE FAILURE (unreadable .git/objects) BLOCKS — 
 	const objectsDir = path.join(repo, ".git", "objects");
 	await fs.chmod(objectsDir, 0o000);
 	try {
-		const reason = await transplantedCommitsReason(repo, "squad/unit-probe", "main");
+		const finding = await transplantedCommitsReason(repo, "squad/unit-probe", "main");
 		// OLD behavior (fail-open): this returned undefined (allow). NEW behavior: blocks with a distinct
 		// probe-failure reason, never silently allowing a land whose lineage it couldn't actually check.
-		expect(reason).toBeDefined();
-		expect(reason).toContain("transplant gate");
-		expect(reason).toContain("could not prove");
+		expect(finding).toBeDefined();
+		expect(finding?.reason).toContain("transplant gate");
+		expect(finding?.reason).toContain("could not prove");
+		// eap-borrows cross-lineage review (2nd pass, grok-4.5): a PROBE failure (unreadable objects,
+		// offline fetch, pruned ref) is an environmental precondition, not a lineage fact — it must be
+		// retryable so a transient hiccup never permanently parks a healthy branch.
+		expect(finding?.retryable).toBe(true);
 	} finally {
 		await fs.chmod(objectsDir, 0o755);
 	}
@@ -178,12 +186,16 @@ test("finding #1: an ABSENT origin/<default> (pruned/offline) BLOCKS — never m
 	// is untouched and fully real.
 	await git(repo, "update-ref", "-d", "refs/remotes/origin/main");
 
-	const reason = await transplantedCommitsReason(repo, "squad/unit-noorigin", "main");
+	const finding = await transplantedCommitsReason(repo, "squad/unit-noorigin", "main");
 	// OLD behavior (fail-open bug): this returned undefined (allow) because the "unknown revision"
 	// text is identical whether origin/main or the branch is missing. NEW behavior: the branch is
 	// verified to actually exist before that carve-out is trusted, so an absent origin/<default>
 	// correctly blocks as a probe failure instead.
-	expect(reason).toBeDefined();
-	expect(reason).toContain("transplant gate");
-	expect(reason).toContain("could not prove");
+	expect(finding).toBeDefined();
+	expect(finding?.reason).toContain("transplant gate");
+	expect(finding?.reason).toContain("could not prove");
+	// eap-borrows cross-lineage review (2nd pass, grok-4.5) — the exact scenario named in the finding:
+	// a pruned/offline origin/<default> is a transient probe failure (a fetch will fix it), not proof
+	// the branch carries transplanted commits. Must be retryable, not a permanent park.
+	expect(finding?.retryable).toBe(true);
 });

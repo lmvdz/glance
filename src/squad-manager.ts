@@ -334,6 +334,24 @@ function autoLandFailCap(): number {
 }
 
 /**
+ * Cross-lineage review (grok-4.5, eap-borrows) finding #2: `autoLandFailCap` above deliberately EXCLUDES
+ * retryable refusals from the fail streak (a transient dirty-main window must never park a healthy
+ * branch — see the `land()` comment at its `!result.retryable` gate), so a RETRYABLE refusal
+ * (stale-branch probe failure, transplant probe failure, dirty-main) has NO bounded escalation path of
+ * its own: `fileLandBlockedFinding` re-warns forever on a cooldown, but nothing ever stops retrying or
+ * tells a human "this one specific episode has been stuck for a while, go look" — the taxonomy in
+ * `classify-probe-failure.ts` calls this `escalate`, but land.ts/land-pr.ts's callers hardcode
+ * `retryable: true` on the LandResult without ever consulting a budget. Bounds how many consecutive
+ * attempts on the SAME episode (repo+branch+headSha+reasonClass — see `landBlockedEpisode`) run before
+ * `land()` files a "Needs you" attention item on top of the routine automation warn. 0 disables (pure
+ * opt-out, never the default — an unbounded factory that silently thrashes forever is the exact failure
+ * mode this closes). At the ~30s auto-land retry cadence, the default is roughly 10 minutes.
+ */
+function landBlockedEscalateCap(): number {
+	return envInt("OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP", 20);
+}
+
+/**
  * Epic 5 (HITL safeguards, DESIGN.md D1): below this run-end confidence score, `syncAuthority`
  * caps the agent's effective mode to `assist` (propose-only) regardless of requested/approval/
  * autoLand policy. Read fresh (not cached) so tests can flip it per-case. Default 0.4.
@@ -775,6 +793,14 @@ export class SquadManager extends EventEmitter {
 	 *  re-emit per LAND_BLOCKED_WARN_COOLDOWN_MS per repo condition (a dirty main is ONE repo-level
 	 *  fact, not a per-agent fact), keeping the factory-status banner alive without the per-tick flood. */
 	private readonly landBlockedWarnAt = new Map<string, number>();
+	/** Bounded-escalation budget (finding #2, cross-lineage review): consecutive `land()` attempts on
+	 *  the SAME `landBlockedEpisode` value, keyed identically (`${repo}::${branch}`). Reset to 0 the
+	 *  moment the episode changes (a new commit or a different refusal reason is a genuinely new
+	 *  problem, not a continuation) and cleared entirely once a non-retryable outcome lands/rejects. */
+	private readonly landBlockedAttempts = new Map<string, number>();
+	/** Idempotency for `fileLandBlockedEscalation` — fires the "Needs you" attention item at most once
+	 *  per live episode (mirrors `unverifiedProofEscalated`'s pattern), not once per tick past the cap. */
+	private readonly landBlockedEscalated = new Set<string>();
 	/** Deterministic branch agent ids `reconcileParallelResume` just stopped, so the next `spawnFleetBranch`
 	 *  call under the same id knows to append the "resuming after a restart" addendum to the branch's
 	 *  re-prompt. Consumed (deleted) the moment spawnFleetBranch checks it — short-lived, not persisted. */
@@ -2809,6 +2835,10 @@ export class SquadManager extends EventEmitter {
 			// Any non-retryable outcome (landed OR rejected) closes the branch's blocked EPISODE: the next
 			// retryable refusal is a genuinely new "attempted, couldn't land cleanly" fact, not a repeat.
 			this.landBlockedEpisode.delete(`${dto.repo}::${dto.branch ?? ""}`);
+			// Bounded-escalation state closes with the same episode (finding #2): a branch that lands or
+			// gets a genuine rejection starts the NEXT retryable episode's attempt count from zero.
+			this.landBlockedAttempts.delete(`${dto.repo}::${dto.branch ?? ""}`);
+			this.landBlockedEscalated.delete(`${dto.repo}::${dto.branch ?? ""}`);
 			recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 			// Model-outcome ledger (Epic 6 concern 06): a cheap, always-on statistic — like land-ledger
 			// itself — so concern 07's default-shift has data on day one even before it's turned on.
@@ -2871,8 +2901,13 @@ export class SquadManager extends EventEmitter {
 			const episodeScope = `${dto.repo}::${dto.branch ?? ""}`;
 			const headSha = await headCommit(dto.worktree).catch(() => "");
 			const episode = `${headSha}::${reasonClass}`;
-			if (this.landBlockedEpisode.get(episodeScope) !== episode) {
+			const isNewEpisode = this.landBlockedEpisode.get(episodeScope) !== episode;
+			if (isNewEpisode) {
 				this.landBlockedEpisode.set(episodeScope, episode);
+				// A new episode is a genuinely NEW problem (different commit or different refusal reason) —
+				// restart the escalation budget below from zero, same rationale as the model-outcome counter.
+				this.landBlockedAttempts.set(episodeScope, 0);
+				this.landBlockedEscalated.delete(episodeScope);
 				try {
 					recordModelOutcomeBlocked(this.stateDir, dto.model, tierOf(rec.options.thinking));
 					this.learningMetrics.record("model-outcome-blocked", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
@@ -2888,6 +2923,20 @@ export class SquadManager extends EventEmitter {
 			// inside fileLandBlockedFinding (NOT edge-triggered like the counter above: the factory-status
 			// banner needs periodic fresh rows to stay up while the condition persists).
 			this.fileLandBlockedFinding(dto.repo, dto.branch, blockDetail, reasonClass);
+			// Bounded escalation (finding #2, cross-lineage review): `autoLandFailCap` deliberately never
+			// sees a retryable refusal (see the `!result.retryable` gate above), so absent this, a
+			// persisting retryable episode retries forever at the ~30s tick cadence with nothing but a
+			// cooldown-throttled log line — the exact "forever-soft interlock" pathology named by the
+			// review. Count every ATTEMPT (not edge-triggered like the model-outcome stat above — the
+			// budget must actually track how long the SAME episode has been stuck) and fire a "Needs you"
+			// attention item, once per episode, the moment it crosses the cap.
+			const attempts = (this.landBlockedAttempts.get(episodeScope) ?? 0) + 1;
+			this.landBlockedAttempts.set(episodeScope, attempts);
+			const cap = landBlockedEscalateCap();
+			if (cap > 0 && attempts >= cap && !this.landBlockedEscalated.has(episodeScope)) {
+				this.landBlockedEscalated.add(episodeScope);
+				this.fileLandBlockedEscalation(rec, dto.repo, blockDetail, reasonClass, attempts);
+			}
 		}
 		// Joined task-outcome row (Epic 6 concern 03): idempotent, agentId-keyed row joining the routing
 		// decision (`rec.options.routing`) with the terminal land outcome. Deliberately a WIDER gate than
@@ -3442,6 +3491,38 @@ export class SquadManager extends EventEmitter {
 				skipReason: reasonClass === "dirty-main" ? "dirty-main" : undefined,
 				detail: branch ? `${branch}: ${detail}` : detail,
 			});
+		} catch {
+			/* observability must never break the land path */
+		}
+	}
+
+	/**
+	 * Bounded escalation for a retryable land refusal (finding #2, cross-lineage review): once the SAME
+	 * episode (`landBlockedEpisode`'s key — repo+branch+headSha+reasonClass) has retried past
+	 * `landBlockedEscalateCap()` attempts, this fires the "Needs you" attention item on top of the
+	 * routine `fileLandBlockedFinding` warn — dual-write, mirroring `fileUnverifiedProofFinding`'s
+	 * pattern exactly:
+	 *   1. The attention lane on the live `AgentRecord` (`rec` is always live here — this runs inside
+	 *      `land()`, called with a roster-resolved `rec`), so it's live-pushed to any connected client.
+	 *   2. The "land" automation channel, unconditionally, so it surfaces in /api/automation + the panel
+	 *      even if `rec` is reaped before a client observes the attention event.
+	 * Never blocks or retries anything itself — `land()`'s own retry loop is untouched; this only makes
+	 * "this specific episode has been stuck a while" legible instead of an indefinitely-repeating log
+	 * line nobody is watching. Idempotent per episode via the caller's `landBlockedEscalated` set (this
+	 * method itself doesn't dedupe). Best-effort; never throws.
+	 */
+	private fileLandBlockedEscalation(rec: AgentRecord, repo: string, detail: string, reasonClass: string, attempts: number): void {
+		const summary = `auto-land has been blocked on ${rec.dto.branch ?? rec.dto.name} for ${attempts} consecutive attempts (${reasonClass}) — needs a human to look`;
+		try {
+			const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
+			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.emitAgent(rec);
+		} catch (err) {
+			this.log("warn", `land-blocked attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
+		try {
+			this.log("warn", `${summary} — ${detail}`);
+			this.automation.for("land", repo)({ durationMs: 0, level: "warn", skipReason: reasonClass === "dirty-main" ? "dirty-main" : undefined, detail: `${summary} — ${detail}` });
 		} catch {
 			/* observability must never break the land path */
 		}
