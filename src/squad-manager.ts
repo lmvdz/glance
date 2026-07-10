@@ -3156,7 +3156,17 @@ export class SquadManager extends EventEmitter {
 		// spec (applyState) on the common omp/pi path; `harness` is the fallback for vendor-pinned ACP
 		// runtimes. Threaded so the ValidationRecord can flag a same-lineage (self-graded) review.
 		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
-		const { record, veto } = await validatorGate({ criteria, repo: opts.repo, worktree: opts.worktree, branch: opts.branch, proof, judge: this.validatorJudgeOverride(), authorModel: rec?.dto.model, authorHarness: rec?.dto.harness });
+		const { record, veto } = await validatorGate({
+			criteria,
+			repo: opts.repo,
+			worktree: opts.worktree,
+			branch: opts.branch,
+			proof,
+			judge: this.validatorJudgeOverride(),
+			authorModel: rec?.dto.model,
+			authorHarness: rec?.dto.harness,
+			agentId: opts.agentId,
+		});
 		if (rec) {
 			rec.dto.validation = record;
 			this.emitAgent(rec);
