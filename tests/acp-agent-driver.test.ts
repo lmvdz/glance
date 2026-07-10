@@ -83,12 +83,12 @@ afterAll(async () => {
 	for (const f of tmps) await fs.rm(f, { recursive: true, force: true }).catch(() => {});
 });
 
-async function fakeDriver(): Promise<{ driver: AcpAgentDriver; events: Frame[] }> {
+async function fakeDriver(opts: { approvalMode?: string } = {}): Promise<{ driver: AcpAgentDriver; events: Frame[] }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-"));
 	tmps.push(dir);
 	const script = path.join(dir, "fake-acp.ts");
 	await fs.writeFile(script, FAKE_ACP);
-	const driver = new AcpAgentDriver({ id: "t", cwd: dir, command: ["bun", script] });
+	const driver = new AcpAgentDriver({ id: "t", cwd: dir, command: ["bun", script], approvalMode: opts.approvalMode });
 	drivers.push(driver);
 	const events: Frame[] = [];
 	driver.on("event", (f: Frame) => events.push(f));
@@ -160,3 +160,42 @@ test("AcpAgentDriver: getState() returns a structurally valid RpcSessionState", 
 	expect(typeof s.queuedMessageCount).toBe("number");
 	expect(Array.isArray(s.todoPhases)).toBe(true);
 }, 30_000);
+
+/**
+ * R7. `session/request_permission` IS an approval gate — the harness stopped because it may not grant
+ * itself this action. It reached the manager unmarked, and `gateClass` was decided by omp's own naming
+ * conventions (`gate_` id / `GATE:` title), which an ACP id (`acpui_<n>`) never matches. So the
+ * auto-supervisor — default ON, prompted with "when in doubt inside the worktree, approve" — was
+ * eligible to answer every permission prompt of every foreign harness.
+ */
+test("an ACP permission request is marked gate-class: a human answers it, never a model", async () => {
+	const { driver } = await fakeDriver(); // no approvalMode: the operator wants to be asked
+	const uiP = once(driver, "ui");
+	await driver.start(30_000);
+	const turn = driver.prompt("hi");
+
+	const [ui] = (await uiP) as [{ id: string; gateClass?: boolean; method?: string }];
+	expect(ui.method).toBe("confirm");
+	expect(ui.gateClass).toBe(true); // never auto-answered by any supervisor
+
+	driver.respondUi(ui.id, { confirmed: true });
+	await turn;
+});
+
+/**
+ * The fake advertises no session modes, so `applyApprovalMode` cannot set an auto-approve one — exactly
+ * the `unstable_ setSessionMode` fallback the spec warns about. The harness then asks per call. That
+ * request used to become a pending, and the supervisor's model decided it. The operator already decided:
+ * they said yolo. Answer it from their instruction, deterministically, and surface nothing.
+ */
+test("under yolo the driver answers the permission itself — no pending, no model", async () => {
+	const { driver } = await fakeDriver({ approvalMode: "yolo" });
+	let uiSeen = 0;
+	driver.on("ui", () => uiSeen++);
+
+	await driver.start(30_000);
+	await driver.prompt("hi"); // resolves only if the permission was answered — nothing else can answer it
+
+	expect(uiSeen).toBe(0); // no human was ever asked
+	expect(driver.isReady).toBe(true);
+});
