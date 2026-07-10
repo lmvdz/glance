@@ -9,9 +9,9 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc --noEmit -p webapp/tsconfig.json",
     "prepare": "effect-language-service patch",
-    "test": "bun test"
+    "test": "bun test && cd webapp && bun test"
   },
   "dependencies": {
     "@oh-my-pi/pi-tui": "16.1.7",

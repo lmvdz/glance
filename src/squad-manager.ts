@@ -138,7 +138,7 @@ import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPath
 import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, provisionWorktreeDeps, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
-import { changedFiles } from "./explore.ts";
+import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
@@ -1166,6 +1166,14 @@ export class SquadManager extends EventEmitter {
 			spawn: (opts) => this.create(opts),
 			verify: async (id) => (await this.verifyFeature(id))?.ok ?? false,
 			land: async (id) => (await this.landFeature(id)).ok,
+			// Sweep the finished agent's uncommitted work into a commit before the orchestrator reads its
+			// HEAD. `runProof` refuses a dirty worktree and nothing else in a unit's lifecycle commits, so
+			// without this every unit's verify fails and it dies at the escalate cap. It runs ahead of
+			// `stateKey` (not inside `verifyAgent`) so the durable records aren't keyed to a HEAD the sweep
+			// is about to replace. See `commitAgentWip`.
+			settleWork: async (id) => {
+				await this.commitAgentWip(id);
+			},
 			verifyAgent: (id) => this.verifyAgentWork(id),
 			landAgentWork: async (id) => {
 				const r = await this.land(id);
@@ -2863,10 +2871,13 @@ export class SquadManager extends EventEmitter {
 				// agent's LAST finalized RunReceipt (`lastReceipt`, hoisted above alongside `effectiveModel`
 				// so both this row-write and the model-outcome ledger write above key on the SAME receipt
 				// read). `readReceipts` returns rows in append order, so the last entry is the most recent
-				// run; its `filesTouched` (git-status-derived at that run's finish()) already reflects every
-				// prior turn's uncommitted changes too, since nothing is committed until land()'s own
-				// commitWip. Undefined when no run ever finalized for this agent (e.g. a re-adopted/direct
-				// land with no receipt on disk) — never fabricated.
+				// run; its `filesTouched` is now BASE-RELATIVE (`runFilesTouched` → `filesTouchedSinceBase`),
+				// spanning committed and uncommitted work alike. It used to be a bare `git status` probe,
+				// resting on "nothing is committed until land()'s own commitWip" — false for any agent that
+				// commits its own work, and false for every unit now that `commitAgentWip` sweeps before
+				// verify. That assumption zeroed 16 of 18 rows in this host's live ledger.
+				// Undefined when no run ever finalized for this agent (e.g. a re-adopted/direct land with no
+				// receipt on disk) — never fabricated.
 				// fixupCount: the SAME workflow-engine visit counter (`WorkflowRunState.visits.fixup`)
 				// concern 01's fixups-to-green metric (recordWorkflowOutcomeMetrics above) and
 				// digestReward's firstTryGreen already read. IN-RUN churn, not post-merge regression — see
@@ -3237,9 +3248,24 @@ export class SquadManager extends EventEmitter {
 		const stages = pf.acceptance ? undefined : await detectVerifyStages(pf.repo);
 		const command = pf.acceptance ?? (stages?.length ? stages.map((s) => s.command).join(" && ") : undefined);
 		if (!command) return { ok: false, results: [{ ok: false, detail: "no acceptance command — set the feature's acceptance or add a test script to the repo", artifacts: 0 }] };
+		// Sweep every live member's uncommitted work BEFORE snapshotting tips and running the gate — the
+		// feature path hits the same `runProof` dirty refusal as the single-agent path (see
+		// `commitAgentWip`), and the orchestrator routes multi-agent features through here
+		// (`buildOrchestrator`'s `verify` hook), not through `verifyAgent`. Missing this left the
+		// interlock fully intact for every feature-mode unit. Found by cross-lineage review (grok-4.5).
+		// Members that exist only as `pf.branches` rows (their agent was removed) have no status to
+		// judge "busy" by and no live record — `commitAgentWip` no-ops on them, deliberately.
+		for (const r of [...this.agents.values()]) if (r.dto.featureId === id) await this.commitAgentWip(r.dto.id);
 		this.snapshotBranches(id);
 		const members: LandMember[] = [...this.agents.values()].filter((r) => r.dto.featureId === id).map((r) => ({ agentId: r.dto.id, agentName: r.dto.name, branch: r.dto.branch, worktree: r.dto.worktree, repo: pf.repo }));
 		for (const b of pf.branches ?? []) if (!members.some((m) => m.agentId === b.agentId)) members.push({ agentId: b.agentId, branch: b.branch, worktree: b.worktree, repo: pf.repo });
+		// FAIL CLOSED on an empty member set: `[].every(...)` is `true`, so a feature whose agents were all
+		// removed used to verify GREEN without a single gate ever running — then land nothing. A gate that
+		// reports "verified" for work it never looked at is the exact failure class the regression-gate
+		// fix (#123) closed on the other side. Found by cross-lineage review (gpt-5.6-sol).
+		if (members.length === 0) {
+			return { ok: false, command, results: [{ ok: false, detail: "no member worktrees to verify — the feature has no live agents or recorded branches", artifacts: 0 }] };
+		}
 		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string; artifacts: number }[] = [];
 		for (const m of members) {
 			const proof = await runProof({ repo: pf.repo, worktree: m.worktree, command, stages });
@@ -3374,6 +3400,82 @@ export class SquadManager extends EventEmitter {
 			/* observability must never break the land path */
 		}
 	}
+	/**
+	 * Sweep a FINISHED agent's uncommitted work into a commit on its own branch.
+	 *
+	 * THE MISSING STEP (found by driving the factory to completion, 2026-07-09). No stage of the unit
+	 * lifecycle ever commits: the bundled verify-loop workflow is `Implement → Verify → exit`, and
+	 * agents reliably end a turn with uncommitted edits, reporting "Done". `runProof` (proof.ts) then
+	 * refuses a dirty worktree outright, so `verifyAgentWork` returns false, the orchestrator escalates,
+	 * and the unit dies at the escalate visit cap. That is the SINGLE terminal state of every
+	 * autonomously-dispatched unit this daemon has ever run: 65 of 65 recorded `catastrophe` events are
+	 * `node "escalate" exceeded its visit cap (2)`. No unit has ever landed.
+	 *
+	 * The system's model was never "agents commit" — it is "agents work, the daemon sweeps": `land()`
+	 * already does exactly this sweep (`commitWip: !busy`) BEFORE its proof gate. Only the autonomous
+	 * path lacked it, which is why a human clicking Land could land what the fleet structurally could
+	 * not. This restores the symmetry at the one seam the orchestrator drives.
+	 *
+	 * Deliberately conservative — a no-op unless ALL hold: the agent exists, it is NOT busy (a live
+	 * agent's half-written tree is not a unit of work), it has its own branch and worktree (an in-place
+	 * agent has nothing to isolate), and the tree is actually dirty. `.omp/` is excluded on both the
+	 * status probe and the add, exactly as `land()` does — it is the daemon's own evidence dir, and
+	 * sweeping it commits screenshots the proof fingerprint deliberately ignores.
+	 *
+	 * Returns true only when a commit was created.
+	 */
+	async commitAgentWip(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
+		const rec = this.agents.get(id);
+		if (!rec) return false;
+		const { repo, worktree, branch, status, name } = rec.dto;
+		if (!branch) return false; // no branch of its own ⇒ nothing to commit onto
+		if (status === "working" || status === "starting" || status === "input") return false; // mirrors land()'s `busy`
+		// In-place guard, resolved through symlinks: `path.resolve` alone is textual, so a worktree path
+		// that symlinks to the operator's checkout would slip past it and we would commit on the tree the
+		// human is standing in. `realpath` both sides; fall back to the textual compare if either path is
+		// unreadable (a missing worktree can't be swept anyway). Cross-lineage review (grok-4.5) raised it.
+		const canon = async (p: string): Promise<string> => await fs.realpath(p).catch(() => path.resolve(p));
+		if ((await canon(worktree)) === (await canon(repo))) return false; // in-place: nothing to isolate
+
+		// "idle" is an observation, not quiescence: `agent_end` clears streaming but never kills the agent
+		// host, so a background process it spawned can still be writing. Require a short dwell since the
+		// last activity before we freeze the tree into a commit; the orchestrator re-ticks in 30s, so a
+		// skipped sweep costs one tick, while a premature one commits a half-written file. This narrows
+		// the window; it cannot close it (no lock stops the agent's own child processes) — the same
+		// exposure `land()`'s WIP sweep has always carried. Raised by cross-lineage review (both lineages).
+		const dwellMs = envInt("OMP_SQUAD_WIP_SWEEP_DWELL_MS", 3_000);
+		if (rec.dto.lastActivity && Date.now() - rec.dto.lastActivity < dwellMs) return false;
+
+		const pathspec = [".", ":(exclude).omp"];
+		const st = await hardenedGit(["status", "--porcelain", "--", ...pathspec], { cwd: worktree });
+		if (st.code !== 0 || st.stdout.trim().length === 0) return false; // clean (or unreadable) ⇒ nothing to sweep
+
+		// Re-read status through the lifecycle one last time: an operator prompt or a resumed turn between
+		// the checks above and the write below must abort the sweep, not race it.
+		if (this.agents.get(id)?.dto.status !== status) return false;
+
+		const add = await hardenedGit(["add", "-A", "--", ...pathspec], { cwd: worktree });
+		if (add.code !== 0) {
+			this.log("warn", `wip-sweep: git add failed for ${name}: ${add.stderr.trim()}`);
+			return false;
+		}
+		// This subject is PERMANENT: it is the commit the fleet pushes and a reviewer reads on the PR.
+		// Title it after the work, not after the plumbing — the daemon's internal reason belongs in the
+		// body. (The first fleet-opened PR, #149, was titled "wip(…): sweep uncommitted work before
+		// verify"; nobody wants a history of that.) Falls back to `land()`'s existing `squad(<name>)` shape.
+		const issue = rec.dto.issue;
+		const subject = issue?.name ? `${issue.identifier ? `${issue.identifier}: ` : ""}${issue.name}` : `squad(${name}): agent changes`;
+		const message = `${subject}\n\nCommitted by the glance daemon (uncommitted work swept before the verify gate).`;
+		const commit = await hardenedGit(["commit", "-m", message], { cwd: worktree });
+		if (commit.code !== 0) {
+			this.log("warn", `wip-sweep: git commit failed for ${name}: ${commit.stderr.trim() || commit.stdout.trim()}`);
+			return false;
+		}
+		this.log("info", `wip-sweep: committed ${name}'s uncommitted work on ${branch} before verify`);
+		void this.recordAudit(actor, "commit-wip", id, "ok", subject);
+		return true;
+	}
+
 	async verifyAgentWork(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec) return false;
@@ -4496,6 +4598,12 @@ export class SquadManager extends EventEmitter {
 					break;
 				}
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
+				// A new instruction makes every decision the auto-loop already took about this unit stale.
+				// Its in-memory `staged`/`landed`/`halted` sets are keyed by ids that a steered agent's edits
+				// never change, so without this the work a steer produces is skipped forever — verified never,
+				// landed never. (The durable, HEAD-keyed records go stale on their own.) See
+				// `Orchestrator.invalidate`. Found by cross-lineage review (gpt-5.6-sol).
+				this.orchestrator?.invalidate(rec.dto.id, rec.dto.featureId);
 				// `text` is the durable audit/debug record — the full context-augmented message the
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
@@ -5716,17 +5824,25 @@ export class SquadManager extends EventEmitter {
 	/**
 	 * Best-effort fast-forward heal for a repo resolved to PR mode: when the local checkout is
 	 * STRICTLY behind `origin/<default>` (an ancestor of it, not equal) and currently checked out on
-	 * that default branch (never a deliberate feature-branch checkout — same condition `resolveLandMode`'s
-	 * probe 4 already requires), fast-forward it. `--ff-only` can never overwrite or lose local work by
+	 * that default branch, fast-forward it. `--ff-only` can never overwrite or lose local work by
 	 * construction — a strictly-behind fast-forward has nothing to lose. Runs inside the SAME
 	 * `withRepoLandLock` a live land uses, so it never races an in-flight merge/scratch-gate.
+	 *
+	 * The `current !== defaultBranch` guard below is LOAD-BEARING, and is the only thing enforcing it.
+	 * It used to be belt-and-braces: `resolveLandMode`'s probe 4 refused pr mode outright on a
+	 * non-default checkout, so this function could never see one. That interlock was removed (it made
+	 * the fleet unable to land whenever an operator was working in the repo — see land-mode.ts probe 4),
+	 * so pr mode is now perfectly valid while HEAD sits on a feature branch. Deleting this check as
+	 * "redundant" would let `merge --ff-only origin/<default>` run against whatever branch the operator
+	 * is standing on and silently advance it. This is the only write PR mode ever makes to the shared
+	 * checkout; keep it pinned to the default branch.
 	 */
 	private async ffHealOne(repo: string): Promise<void> {
 		const mode = await this.resolveLandModeFor(repo);
 		if (mode.mode !== "pr" || !mode.defaultBranch) return;
 		const defaultBranch = mode.defaultBranch;
 		const current = (await hardenedGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo })).stdout.trim();
-		if (current !== defaultBranch) return; // deliberate non-default checkout wins — never touch
+		if (current !== defaultBranch) return; // LOAD-BEARING (see doc comment): never ff a feature checkout
 		await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
 		const localSha = (await hardenedGit(["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
 		const remoteSha = (await hardenedGit(["rev-parse", `origin/${defaultBranch}`], { cwd: repo })).stdout.trim();
@@ -5734,6 +5850,16 @@ export class SquadManager extends EventEmitter {
 		const behind = await isAncestor(localSha, `origin/${defaultBranch}`, repo); // ancestor + not-equal ⇒ strictly behind, never ahead/diverged
 		if (!behind) return;
 		await withRepoLandLock(repo, async () => {
+			// TOCTOU: the branch check above ran before the fetch and before this lock. `withRepoLandLock`
+			// serializes the DAEMON's lands, not the operator's `git checkout` — so between the check and
+			// here the human can have switched onto a feature branch whose tip happens to be an ancestor of
+			// origin/<default>, and `merge --ff-only` would silently advance THEIR branch. Re-read HEAD
+			// inside the lock and bail if anything moved. The window is not closable (git has no such lock),
+			// but this narrows it from "one fetch round-trip" to a couple of milliseconds.
+			const stillOnDefault = (await hardenedGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo })).stdout.trim();
+			if (stillOnDefault !== defaultBranch) return; // operator switched branches mid-heal — never touch it
+			const stillAt = (await hardenedGit(["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+			if (stillAt !== localSha) return; // checkout moved under us — re-probe next tick rather than guess
 			const merge = await hardenedGit(["merge", "--ff-only", `origin/${defaultBranch}`], { cwd: repo });
 			if (merge.code === 0) this.log("info", `pr-reconcile: ff-healed ${repo} to ${remoteSha}`);
 			else this.log("warn", `pr-reconcile: ff-heal merge --ff-only failed for ${repo}: ${merge.stderr.trim()}`);
@@ -5762,6 +5888,40 @@ export class SquadManager extends EventEmitter {
 	 * the accumulator so the next turn starts fresh. Idempotent per run via the
 	 * accumulator's `finalized` flag (agent_end + exit can both fire).
 	 */
+	/**
+	 * The unit's real blast radius: every file it has touched since forking from its base, committed or
+	 * not. Feeds the receipt, and through it `scoreConfidence`'s `filesTouched` term and the
+	 * task-outcomes ledger.
+	 *
+	 * A bare `git status` probe (what this used to be) counts only UNCOMMITTED paths, so a unit that
+	 * committed its own work reported ZERO files touched — and `confidence.ts` reads `<= 3` as a
+	 * small-change BONUS, `> 12` as a penalty, with confidence gating auto-land. Live ledger on this
+	 * host: 16 of 18 rows carried `filesTouched: 0`, one of them for a change that really touched 16
+	 * files. `commitAgentWip` (the daemon's own pre-verify sweep) makes committed work the normal case,
+	 * so this had to become base-relative or the signal would have gone permanently to zero.
+	 *
+	 * Base: `origin/<default>` in PR mode (where the unit forked from), else the shared checkout's HEAD —
+	 * the same base `land()` merges into. An in-place agent (no branch of its own) has no fork point;
+	 * its working tree IS the change.
+	 */
+	private async runFilesTouched(rec: AgentRecord): Promise<string[]> {
+		const { repo, worktree, branch } = rec.dto;
+		if (!branch || path.resolve(worktree) === path.resolve(repo)) return changedFiles(worktree);
+		try {
+			const mode = await this.resolveLandModeFor(repo);
+			let baseRef: string | undefined;
+			if (mode.mode === "pr" && mode.defaultBranch) baseRef = `origin/${mode.defaultBranch}`;
+			else {
+				const head = await hardenedGit(["rev-parse", "HEAD"], { cwd: repo });
+				baseRef = head.code === 0 ? head.stdout.trim() : undefined;
+			}
+			if (!baseRef) return changedFiles(worktree);
+			return await filesTouchedSinceBase(worktree, baseRef);
+		} catch {
+			return changedFiles(worktree); // never let a receipt fail over a metric
+		}
+	}
+
 	private async finalizeRun(rec: AgentRecord): Promise<void> {
 		const run = rec.run;
 		if (!run || run.finalized) return;
@@ -5775,7 +5935,7 @@ export class SquadManager extends EventEmitter {
 		// is itself first-model-wins (never overwrites an explicit start()-time model), so this is a
 		// pure gap-fill, not a behavior change for a run that already resolved its model earlier.
 		if (rec.dto.model) run.noteModel(rec.dto.model);
-		run.finish(rec.dto.status, await changedFiles(rec.dto.worktree));
+		run.finish(rec.dto.status, await this.runFilesTouched(rec));
 		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
 		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it
 		// survives the run — the input Epic 5's confidence scorer reads via buildDigest.
