@@ -57,7 +57,7 @@ function seed(mgr: InstanceType<typeof TestManager>, id: string, over: Partial<P
 	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
 }
 
-const ENV_KEYS = ["OMP_SQUAD_LAND_MODE", "OMP_SQUAD_LAND_MODE_TTL_MS"] as const;
+const ENV_KEYS = ["OMP_SQUAD_LAND_MODE", "OMP_SQUAD_LAND_MODE_TTL_MS", "OMP_SQUAD_PR_BASE"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -170,6 +170,43 @@ test("agentHasUnlandedWork: a genuinely landed branch (real ahead=0, real git) s
 	const mgr = new TestManager({ stateDir: await tmpDir("aob-genuine0-mgr-") });
 	seed(mgr, "a2", { repo, worktree, branch: "squad/landed" });
 	expect(await mgr.callAgentHasUnlandedWork("a2")).toBe(false);
+});
+
+// ── PR-mode fault coverage (finding #3c, cross-lineage review of af3d534) ──────────────────────
+//
+// The two tests above (and `shimRevListFailure`) only ever exercise LOCAL mode's `HEAD..branch` git
+// call. `aheadOfBase`'s PR-mode arm runs a DIFFERENT git invocation — `rev-list --count
+// origin/<default>..branch`, gated behind `resolveLandMode` resolving `mode: "pr"` — so a PATH shim
+// keyed on `HEAD..` never fires for it: the PR-mode fault path was untested. No PATH shim is needed
+// here to produce a genuine fault, either — a repo with no `origin` remote configured at all has no
+// `origin/<default>` ref for `rev-list` to resolve, so the git call fails for real ("unknown revision
+// or path"), the same way a real repo with a broken/unreachable origin would.
+
+test("agentHasUnlandedWork: a PR-mode git rev-list FAULT (no origin/<default> ref) reads as unlanded work (true), never as clean (false)", async () => {
+	process.env.OMP_SQUAD_LAND_MODE = "pr"; // force PR mode — skips the 5-probe convergence entirely
+	process.env.OMP_SQUAD_PR_BASE = "main"; // resolveDefaultBranchBestEffort's first check — no gh/network needed
+
+	const repo = await tmpDir("aob-pr-fault-repo-");
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await commit(repo, "a.txt", "a\n", "base");
+	await git(repo, "branch", "squad/prfault");
+	// Deliberately NO `origin` remote — throttledFetch's `git fetch origin main` fails and is caught
+	// silently (matching a repo whose remote is unreachable); `origin/main` never comes to exist, so
+	// the follow-up `rev-list --count origin/main..squad/prfault` fails for real.
+
+	const wtParent = await tmpDir("aob-pr-fault-wt-");
+	const worktree = path.join(wtParent, "squad-prfault");
+	await git(repo, "worktree", "add", "-q", worktree, "squad/prfault");
+	await commit(worktree, "b.txt", "b\n", "one unlanded commit the PR-mode fault must not hide");
+
+	const mgr = new TestManager({ stateDir: await tmpDir("aob-pr-fault-mgr-") });
+	seed(mgr, "a4", { repo, worktree, branch: "squad/prfault" });
+	// Before this path was covered: nothing proved the PR-mode git call even routes through the same
+	// -1-on-failure contract as local mode. After: unknown ⇒ assume work exists ⇒ true, same as local mode.
+	expect(await mgr.callAgentHasUnlandedWork("a4")).toBe(true);
 });
 
 test("agentHasUnlandedWork: a genuinely unlanded branch (real ahead>0, real git) still reads has unlanded work", async () => {
