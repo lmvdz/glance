@@ -162,7 +162,7 @@ function median(xs: number[]): number | undefined {
  *  the champion for a taskClass is chosen FROM the sample-sufficient cells, so this check can't itself
  *  depend on a champion that doesn't exist yet (breaks the circularity `reproducible` alone would have:
  *  you need a champion to compute variance, and you need "sufficient" cells to pick a champion). */
-function isSampleSufficient(cell: CellMetrics, minSamples: number, tokenGateApplies: boolean): boolean {
+export function isSampleSufficient(cell: CellMetrics, minSamples: number, tokenGateApplies: boolean): boolean {
 	return (
 		cell.n >= minSamples &&
 		cell.costCoveragePct >= MIN_COVERAGE_PCT &&
@@ -174,7 +174,7 @@ function isSampleSufficient(cell: CellMetrics, minSamples: number, tokenGateAppl
  *  collapsed outcomes are landed" case DESIGN.md calls out, where a mergeRate-only comparison is
  *  structurally inert (there is no way for either side to move). Any other tie (e.g. both at 0.5) still
  *  carries real information about where the distribution sits, so it counts as having variance. */
-function hasVarianceBetween(a: CellMetrics, b: CellMetrics): boolean {
+export function hasVarianceBetween(a: CellMetrics, b: CellMetrics): boolean {
 	return !(a.mergeRate === b.mergeRate && (a.mergeRate === 0 || a.mergeRate === 1));
 }
 

@@ -30,7 +30,8 @@ import {
 import type { CellMetrics } from "../src/omp-graph/task-class-matrix.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { AgentDTO, PersistedAgent, RpcSessionState } from "../src/types.ts";
+import type { AgentDTO, AttentionEvent, PersistedAgent, RpcSessionState } from "../src/types.ts";
+import type { AutomationLog } from "../src/automation-log.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
@@ -276,10 +277,42 @@ test("checkMembraneBreaker: below MEMBRANE_BREAKER_MIN_UNITS never trips even wi
 	expect(checkMembraneBreaker(flagged, baseline).tripped).toBe(false);
 });
 
-test("checkMembraneBreaker: a non-reproducible cell never trips (comparing against noise)", () => {
-	const baseline = cell({ mergeRate: 0.9, reproducible: false });
+test("checkMembraneBreaker: a sample-insufficient baseline never trips (comparing against noise)", () => {
+	// Round-2 review fix: the gate no longer reads either cell's own self-doc `.reproducible` bit (that
+	// bit is meaningless for the flagged cohort's single-cell doc — see the mergeRate-0 test below). It
+	// gates on `isSampleSufficient` directly: a baseline with thin cost coverage is still noise, even
+	// with `n` past the floor.
+	const baseline = cell({ mergeRate: 0.9, costCoveragePct: 0.1 });
 	const flagged = cell({ mergeRate: 0.1 });
 	expect(checkMembraneBreaker(flagged, baseline).tripped).toBe(false);
+});
+
+test("checkMembraneBreaker: a saturated mergeRate-0 flagged cohort trips against a healthy baseline (structural-inertness fix)", () => {
+	// This is the exact case that was structurally inert before the round-2 fix: `membraneBreakerCadence`
+	// collapses the flagged cohort into a single-cell matrix doc where that cell is its own "champion",
+	// so `flagged.reproducible` (self-compared) was ALWAYS false whenever the cohort's own mergeRate
+	// saturated at 0 or 1 — a catastrophic mergeRate-0 cohort could never trip the breaker. Gating on
+	// `hasVarianceBetween(flagged, baseline)` (the CROSS-cell comparison) instead fixes it: 0 vs 0.9 is
+	// real variance regardless of either cell's own self-doc reproducible bit.
+	const baseline = cell({ mergeRate: 0.9 });
+	const flagged = cell({ mergeRate: 0, landed: 0 });
+	const result = checkMembraneBreaker(flagged, baseline);
+	expect(result.tripped).toBe(true);
+	expect(result.reason).toMatch(/mergeRate dropped/);
+});
+
+test("checkMembraneBreaker: a saturated mergeRate-1.0 tie does not block the vetoRate arm (structural-inertness fix)", () => {
+	// The other half of the same bug: the live fleet's documented saturated regime is `mergeRate` pinned
+	// at 1.0 (all collapsed outcomes are `landed`) — the OLD gate required BOTH cells' self-doc
+	// `.reproducible`, which is false for a cell self-compared against its own champion at a saturated
+	// mergeRate, silently defeating the vetoRate/inRunReworkRate arms. `hasVarianceBetween` now gates
+	// ONLY the mergeRate arm (mirroring `flagEfficiencyRegression`'s precedent) — a degraded vetoRate must
+	// still trip even though both cells sit at the saturated mergeRate-1.0 tie point.
+	const baseline = cell({ mergeRate: 1, vetoRate: 0.05 });
+	const flagged = cell({ mergeRate: 1, vetoRate: 0.4 });
+	const result = checkMembraneBreaker(flagged, baseline);
+	expect(result.tripped).toBe(true);
+	expect(result.reason).toMatch(/vetoRate rose/);
 });
 
 test("checkMembraneBreaker: a higher vetoRate trips even with an unchanged mergeRate", () => {
@@ -324,4 +357,44 @@ test("runMembraneBreaker: a healthy cohort leaves the setting untouched and retu
 	expect(event).toBeUndefined();
 	const states = await store.states();
 	expect(states.find((f) => f.key === "OMP_SQUAD_MEMBRANE_PROFILES")?.enabled).toBe(true);
+});
+
+// ── Round-2 review fix: a breaker trip is human-visible via the attention lane, not a log line ────────
+
+test("SquadManager#fileMembraneBreakerFinding: a breaker trip attaches to the triggering unit's attention lane AND the land automation channel", async () => {
+	// Round-2 review fix: the trip escalation used to be `this.log("warn", ...)` — a log line nobody in
+	// the cockpit is watching for a hard fleet-wide auto-disable. It must land on BOTH the "Needs you"
+	// attention lane (AgentDTO.attentionEvents — the SAME channel squad_attention/glance notify use) AND
+	// the "land" automation channel (fileLandBlockedFinding's precedent; concern 04's #12 fix uses the
+	// equivalent "observer" channel for a gate-unrunnable finding) so it survives even if the triggering
+	// unit is reaped before a human looks.
+	const { mgr, repo } = await makeMgr("membrane-breaker-finding");
+	const dto = await mgr.create({ name: "u", repo, approvalMode: "yolo", autoRoute: false });
+	const rec = (mgr as unknown as InternalHost).agents.get(dto.id)! as unknown as { dto: AgentDTO };
+	expect(rec.dto.attentionEvents ?? []).toEqual([]);
+
+	const event: AttentionEvent = {
+		id: "membrane-breaker:tdd:heavy:1",
+		summary: 'Membrane profile disciplines auto-disabled — measured success degradation on taskClass "tdd:heavy"',
+		detail: "mergeRate dropped 20.0pt vs baseline (n=5)",
+		source: "notify",
+		createdAt: Date.now(),
+	};
+	(mgr as unknown as { fileMembraneBreakerFinding: (rec: unknown, repo: string, event: AttentionEvent) => void }).fileMembraneBreakerFinding(
+		(mgr as unknown as InternalHost).agents.get(dto.id)!,
+		repo,
+		event,
+	);
+
+	// 1. Attention lane: the event is attached to the triggering unit's DTO, human-visible in the cockpit's
+	//    "Needs you" surface exactly like a squad_attention call.
+	expect(rec.dto.attentionEvents).toHaveLength(1);
+	expect(rec.dto.attentionEvents?.[0]).toEqual(event);
+
+	// 2. Automation channel: also surfaces in /api/automation + the automation panel, independent of
+	//    whether the triggering unit is still live by the time a human looks.
+	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
+	expect(recent.some((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn")).toBe(true);
+
+	await mgr.stop();
 });

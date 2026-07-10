@@ -31,16 +31,29 @@ export async function ompOneShot(args: string[], opts: { bin?: string; timeoutMs
 	}
 }
 
-/** Extract the outermost balanced-ish JSON object from noisy model output (handles ```json fences and stray prose). */
+/**
+ * Extract the outermost balanced-ish JSON object from noisy model output (handles ```json fences
+ * and stray prose). Mirrors planner.ts's `extractJsonArray` fix (aff5270): VERDICT_FIRST_BLOCK now
+ * ships on validator/lens SYSTEM prompts, which instructs a prose verdict sentence BEFORE the JSON
+ * — a stray '{' in that prose (e.g. "the object literal is {}. {"verdict":...}") would defeat a
+ * naive first-'{'/last-'}' slice. Anchor on the LAST '}' (the real object's close is reliably the
+ * final one) and try each '{' from the front in turn until one parses — a false-start brace just
+ * fails to parse against that same end and the loop advances to the next candidate.
+ */
 export function extractJsonObject(raw: string): Record<string, unknown> | undefined {
-	const start = raw.indexOf("{");
 	const end = raw.lastIndexOf("}");
-	if (start < 0 || end <= start) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
-		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
-	} catch {
-		return undefined;
+	if (end < 0) return undefined;
+	let searchFrom = 0;
+	while (true) {
+		const start = raw.indexOf("{", searchFrom);
+		if (start < 0 || start >= end) return undefined;
+		try {
+			const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
+			if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>;
+		} catch {
+			// a false-start brace (e.g. inside verdict-first prose) — try the next "{" against the same end
+		}
+		searchFrom = start + 1;
 	}
 }
 

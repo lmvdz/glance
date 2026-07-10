@@ -103,6 +103,97 @@ test("membraneBreakerCadence: a real degraded flagged cohort trips the breaker a
 	expect(states.find((f) => f.key === "OMP_SQUAD_MEMBRANE_PROFILES")?.enabled).toBe(false);
 });
 
+test("membraneBreakerCadence: a 5-unit flagged cohort with 0 lands trips against a healthy unflagged baseline (round-2 review fix)", async () => {
+	// The catastrophic case the round-2 review found structurally inert: the flagged cohort collapses
+	// into a single-cell matrix doc whose "champion" is itself, so a mergeRate-0 cohort's OWN
+	// `reproducible` bit was always false (self-compared variance at a saturated 0 is false) — the
+	// breaker could never trip on a total-failure cohort. Fixed by comparing the flagged cell directly
+	// against the UNFLAGGED baseline champion instead of gating on either cell's self-doc bit.
+	const stateDir = await tmpDir("membrane-cadence-zero-lands-");
+	const store = new RuntimeSettingsStore(stateDir);
+	await store.setFeatureFlag("OMP_SQUAD_MEMBRANE_PROFILES", true);
+
+	await seedBaseline(stateDir); // sonnet: 4/5 landed = 0.8 mergeRate, healthy
+	const flaggedIds = ["f1", "f2", "f3", "f4", "f5"];
+	for (let i = 1; i <= 5; i++) {
+		// opus (flagged): 0/5 landed — every single unit rejected
+		await recordTaskOutcome(stateDir, outcomeRow(`f${i}`, "opus", "rejected"));
+	}
+	await seedFlaggedReceipts(stateDir, flaggedIds);
+
+	const pop = [...population(["b1", "b2", "b3", "b4", "b5"], "sonnet"), ...population(flaggedIds, "opus")];
+	const event = await membraneBreakerCadence(stateDir, pop, { mode: "tdd", tier: "heavy" }, { store });
+
+	expect(event).toBeDefined();
+	expect(event?.summary).toContain("tdd:heavy");
+	expect(event?.detail).toMatch(/mergeRate dropped/);
+
+	const states = await store.states();
+	expect(states.find((f) => f.key === "OMP_SQUAD_MEMBRANE_PROFILES")?.enabled).toBe(false);
+});
+
+test("membraneBreakerCadence: no comparable baseline when the unflagged population alone is sample-insufficient (baseline excludes flagged agentIds)", async () => {
+	// Round-2 review fix: the baseline must be the UNFLAGGED auto-champion — computed with flagged
+	// agentIds excluded, not a champion computed over the unfiltered fleet. Seed only 2 unflagged
+	// "sonnet" units (below task-class-matrix.ts's MIN_SAMPLES=3) and a large, badly-degraded flagged
+	// "opus" cohort. If the baseline were computed over the UNFILTERED population, "opus" (n=8,
+	// sample-sufficient) would become the default champion by elimination — and the flagged cell (built
+	// from the SAME underlying agentIds under the sentinel model) would then be compared against itself,
+	// a degenerate "healthy" read no matter how badly the cohort is actually doing. Excluding flagged
+	// agentIds correctly leaves no sample-sufficient unflagged champion, so the check must report
+	// "no signal yet" (undefined, no state change) instead of a false-healthy self-comparison.
+	const stateDir = await tmpDir("membrane-cadence-baseline-excl-");
+	const store = new RuntimeSettingsStore(stateDir);
+	await store.setFeatureFlag("OMP_SQUAD_MEMBRANE_PROFILES", true);
+
+	// Only 2 unflagged "sonnet" units — below MIN_SAMPLES (3), never sample-sufficient on its own.
+	await recordTaskOutcome(stateDir, outcomeRow("b1", "sonnet", "landed"));
+	await recordTaskOutcome(stateDir, outcomeRow("b2", "sonnet", "landed"));
+
+	const flaggedIds = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"];
+	for (const id of flaggedIds) {
+		await recordTaskOutcome(stateDir, outcomeRow(id, "opus", "rejected")); // opus: 0/8 landed, badly degraded
+	}
+	await seedFlaggedReceipts(stateDir, flaggedIds);
+
+	const pop = [...population(["b1", "b2"], "sonnet"), ...population(flaggedIds, "opus")];
+	const event = await membraneBreakerCadence(stateDir, pop, { mode: "tdd", tier: "heavy" }, { store });
+
+	expect(event).toBeUndefined();
+	const states = await store.states();
+	expect(states.find((f) => f.key === "OMP_SQUAD_MEMBRANE_PROFILES")?.enabled).toBe(true);
+});
+
+test("membraneBreakerCadence: a landed-and-reaped flagged unit still counts toward the cohort (history, not live-roster-only)", async () => {
+	// Round-2 review fix: the cohort used to be the LIVE roster intersected with flagged agentIds, so a
+	// flagged unit that already landed and was reaped off the roster dropped out entirely. With
+	// MEMBRANE_BREAKER_MIN_UNITS=5, a slow trickle of flagged units landing one at a time could never
+	// accumulate 5 concurrently-live units even with plenty of degraded history. Here only 3 of the 5
+	// flagged units are still in the live roster/population passed in; the other 2 exist ONLY as
+	// task-outcomes history rows (as a reaped unit would) — the cohort must still reach 5 and trip.
+	const stateDir = await tmpDir("membrane-cadence-history-cohort-");
+	const store = new RuntimeSettingsStore(stateDir);
+	await store.setFeatureFlag("OMP_SQUAD_MEMBRANE_PROFILES", true);
+
+	await seedBaseline(stateDir); // sonnet: 4/5 landed = 0.8 mergeRate
+	const flaggedIds = ["f1", "f2", "f3", "f4", "f5"];
+	for (let i = 1; i <= 5; i++) {
+		await recordTaskOutcome(stateDir, outcomeRow(`f${i}`, "opus", "rejected")); // opus: 0/5 landed
+	}
+	await seedFlaggedReceipts(stateDir, flaggedIds);
+
+	// Only f1-f3 are still "live" (present in the population passed to membraneBreakerCadence); f4/f5
+	// are reaped — history-only, exactly like a landed-and-cleaned-up unit.
+	const liveFlagged = ["f1", "f2", "f3"];
+	const pop = [...population(["b1", "b2", "b3", "b4", "b5"], "sonnet"), ...population(liveFlagged, "opus")];
+	const event = await membraneBreakerCadence(stateDir, pop, { mode: "tdd", tier: "heavy" }, { store });
+
+	expect(event).toBeDefined();
+	expect(event?.detail).toMatch(/mergeRate dropped/);
+	const states = await store.states();
+	expect(states.find((f) => f.key === "OMP_SQUAD_MEMBRANE_PROFILES")?.enabled).toBe(false);
+});
+
 test("membraneBreakerCadence: a healthy flagged cohort leaves the setting untouched", async () => {
 	const stateDir = await tmpDir("membrane-cadence-healthy-");
 	const store = new RuntimeSettingsStore(stateDir);

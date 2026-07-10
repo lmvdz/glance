@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { writeFileDurable } from "./dal/store.ts";
 import { getStorageBackend } from "./dal/storage.ts";
-import type { CellMetrics } from "./omp-graph/task-class-matrix.ts";
+import { hasVarianceBetween, isSampleSufficient, MIN_SAMPLES, type CellMetrics } from "./omp-graph/task-class-matrix.ts";
 import type { AttentionEvent } from "./types.ts";
 
 export type FeatureFlagKey =
@@ -194,22 +194,44 @@ export interface MembraneBreakerCheck {
 
 /**
  * Pure check: does the flagged cohort's cell show a measured composite-success degradation against its
- * baseline? Requires BOTH cells `reproducible` (comparing against a saturated or thin-sample cell is
- * comparing against noise — the same variance floor DESIGN.md's publish gate uses) and the flagged
- * cohort past `MEMBRANE_BREAKER_MIN_UNITS`. Trips on ANY of: a mergeRate drop >= minEdge, a vetoRate
- * rise >= minEdge, or an inRunReworkRate rise >= minEdge — the discipline's entire promise is a
- * cost/token win, so ANY composite-success degradation past the noise floor burns the bet, not just
- * the dimension a caller happened to check first. `minEdge` applies uniformly across all three
- * dimensions (not mergeRate alone) — a single extra veto in a small cohort is jitter, not a signal.
+ * baseline? Batch-2 round-2 review fix: the ORIGINAL gate read `flagged.reproducible`/`baseline.reproducible`
+ * — each cell's OWN bit, computed inside whatever doc it was built in. That's structurally inert for this
+ * caller's shape: `membraneBreakerCadence` collapses the flagged cohort into a single-cell matrix doc, so
+ * that cell's "champion" (the doc's only sample-sufficient cell) IS itself, and self-compared variance is
+ * always false whenever the cohort's own mergeRate is saturated (0 or 1) — a catastrophic all-rejected
+ * flagged cohort could never trip. Same failure the other direction: the live fleet's documented
+ * saturated regime is `mergeRate` pinned at 1.0 (all collapsed outcomes are `landed`), which made the
+ * baseline non-`reproducible` against itself too, silently defeating the vetoRate/inRunReworkRate arms in
+ * production (red-team B C1).
+ *
+ * The fix drops the self-doc `reproducible` bits entirely and gates on the PAIR being compared: both
+ * cells must be `isSampleSufficient` (the n/cost-coverage half of `reproducible`, minus the circular
+ * champion dependency neither cell here has a champion to lean on). Neither cell is built with token
+ * receipts in this caller's shape, so the token-coverage arm never applies here.
+ *
+ * `hasVarianceBetween(flagged, baseline)` — the CROSS-cell comparison — gates ONLY the mergeRate arm,
+ * mirroring `flagEfficiencyRegression`'s exact precedent (task-class-matrix.ts): a "mergeRate dropped"
+ * read off two cells both stuck at 0 or both stuck at 1 is a saturated tie, not a signal, but the
+ * vetoRate/inRunReworkRate arms carry real information independent of where mergeRate sits (including
+ * at a saturated 1.0-vs-1.0 tie) and must NOT be gated by it — that was exactly the "vetoRate/
+ * inRunReworkRate arms can never fire in production" defect this fix closes. `minEdge` applies uniformly
+ * across all three dimensions — a single extra veto in a small cohort is jitter, not a signal, but the
+ * discipline's entire promise is a cost/token win, so ANY composite-success degradation past the noise
+ * floor burns the bet, not just the dimension a caller happened to check first.
  */
-export function checkMembraneBreaker(flagged: CellMetrics, baseline: CellMetrics, opts: { minEdge?: number; minUnits?: number } = {}): MembraneBreakerCheck {
+export function checkMembraneBreaker(
+	flagged: CellMetrics,
+	baseline: CellMetrics,
+	opts: { minEdge?: number; minUnits?: number; minSamples?: number } = {},
+): MembraneBreakerCheck {
 	const minEdge = opts.minEdge ?? MEMBRANE_BREAKER_MIN_EDGE;
 	const minUnits = opts.minUnits ?? MEMBRANE_BREAKER_MIN_UNITS;
-	if (!flagged.reproducible || !baseline.reproducible) return { tripped: false };
+	const minSamples = opts.minSamples ?? MIN_SAMPLES;
 	if (flagged.n < minUnits) return { tripped: false };
+	if (!isSampleSufficient(flagged, minSamples, false) || !isSampleSufficient(baseline, minSamples, false)) return { tripped: false };
 
 	const mergeDrop = baseline.mergeRate - flagged.mergeRate;
-	if (mergeDrop >= minEdge) {
+	if (hasVarianceBetween(flagged, baseline) && mergeDrop >= minEdge) {
 		return { tripped: true, reason: `mergeRate dropped ${(mergeDrop * 100).toFixed(1)}pt vs baseline (n=${flagged.n})` };
 	}
 	if (flagged.vetoRate !== undefined && baseline.vetoRate !== undefined && flagged.vetoRate - baseline.vetoRate >= minEdge) {
@@ -232,7 +254,7 @@ export async function runMembraneBreaker(
 	taskClass: string,
 	flagged: CellMetrics,
 	baseline: CellMetrics,
-	opts: { minEdge?: number; minUnits?: number; now?: number } = {},
+	opts: { minEdge?: number; minUnits?: number; minSamples?: number; now?: number } = {},
 ): Promise<AttentionEvent | undefined> {
 	const result = checkMembraneBreaker(flagged, baseline, opts);
 	if (!result.tripped) return undefined;

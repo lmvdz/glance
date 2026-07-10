@@ -2829,7 +2829,7 @@ export class SquadManager extends EventEmitter {
 				const flaggedTaskClass = { mode: rec.options.routing?.mode ?? "unknown", tier: rec.options.routing?.tier ?? "unknown" };
 				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass)
 					.then((event) => {
-						if (event) this.log("warn", `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`);
+						if (event) this.fileMembraneBreakerFinding(rec, dto.repo, event);
 					})
 					.catch((err) => this.log("warn", `membrane-breaker cadence check failed for ${dto.name} (non-fatal): ${errText(err)}`));
 			}
@@ -3433,6 +3433,38 @@ export class SquadManager extends EventEmitter {
 			/* observability must never break the land path */
 		}
 	}
+
+	/**
+	 * Route a membrane-breaker trip — a hard fleet-wide auto-disable of `OMP_SQUAD_MEMBRANE_PROFILES`
+	 * (eap-borrows concern 05) — to where a human actually looks. Dual-write, mirroring how every other
+	 * daemon-scoped escalation in this file records:
+	 *   1. The "Needs you" attention lane: attach `event` to `rec.dto.attentionEvents` (the SAME
+	 *      non-blocking channel `squad_attention`/`glance notify` use — squad-manager.ts's `notify`
+	 *      command and `handleAttentionTool`) and `emitAgent(rec)` so it's live-pushed to any connected
+	 *      client. `rec` is the just-landed flagged unit whose land triggered this cadence check.
+	 *   2. The "land" automation channel (`fileLandBlockedFinding`'s pattern; concern 04's #12 fix uses
+	 *      the equivalent "observer" channel for a gate-unrunnable finding) — surfaces in /api/automation
+	 *      + the automation panel regardless of whether `rec` is still live in `this.agents` by the time
+	 *      this fire-and-forget cadence check resolves (a reap racing the async I/O must not silently
+	 *      swallow a hard auto-disable).
+	 * Never a log line alone — a fleet-wide safety-net trip that only a daemon operator tailing logs
+	 * would ever see defeats the point of having a breaker. Best-effort; never throws.
+	 */
+	private fileMembraneBreakerFinding(rec: AgentRecord, repo: string, event: AttentionEvent): void {
+		try {
+			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.emitAgent(rec);
+		} catch (err) {
+			this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
+		try {
+			this.log("warn", `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`);
+			this.automation.for("land", repo)({ durationMs: 0, level: "warn", detail: `${event.summary}${event.detail ? ` — ${event.detail}` : ""}` });
+		} catch {
+			/* observability must never break the land path */
+		}
+	}
+
 	/**
 	 * Sweep a FINISHED agent's uncommitted work into a commit on its own branch.
 	 *

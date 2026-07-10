@@ -2,8 +2,8 @@
  * Membrane breaker cadence caller (eap-borrows concern 05, batch-2 review fix) — the missing wiring
  * `runtime-settings.ts#runMembraneBreaker` was built for but never got. That module ships the PURE
  * check plus the one-shot disable action; this module is the caller that actually builds the
- * flagged-cohort `CellMetrics` it needs from real fleet state and hands the result to it, on the SAME
- * event-driven cadence `threshold-tuner.ts`'s `recordConfidenceOutcome` uses (called once per
+ * flagged-cohort and baseline `CellMetrics` it needs from real fleet state and hands both to it, on
+ * the SAME event-driven cadence `threshold-tuner.ts`'s `recordConfidenceOutcome` uses (called once per
  * non-retryable land outcome — see `SquadManager.land()`) — "threshold-tuner-cadence check" per
  * concern 05's Approach. Without this module, DESIGN.md's "Membrane measurement" ruling ("hard
  * auto-disable breaker", resolving red-team B M3's "ceremonial posture" rejection) was not live: an
@@ -18,11 +18,22 @@
  * measured at (taskClass, membrane-flag) instead. The flagged cohort is collapsed into ONE cell per
  * taskClass by overriding `DenominatorUnit.model` to a local sentinel before calling
  * `buildTaskClassMatrix` — this stays entirely inside this scratch computation and never touches the
- * real per-model attribution any other reader (the routing panel, cost gate, etc.) depends on. The
- * baseline is the taskClass's real auto-champion cell (`selectBaseline`, unfiltered population) — the
- * SAME comparison `runtime-settings.ts`'s module doc describes ("a membrane-flagged cohort's
- * `CellMetrics` against its taskClass's auto-champion baseline"), not a synthetic flagged-vs-unflagged
- * split concern 05's Approach never asked for.
+ * real per-model attribution any other reader (the routing panel, cost gate, etc.) depends on.
+ *
+ * Baseline (round-2 review fix): DESIGN.md/05-membrane-disciplines.md's ruling is "flagged cohort vs
+ * auto-champion baseline" — but the auto-champion must be chosen from the UNFLAGGED population, not
+ * the unfiltered one. A champion selected over the unfiltered population can itself BE (or be diluted
+ * by) the very units this check is trying to catch, which quietly defeats the comparison in exactly
+ * the regime the breaker exists for (a membrane-flagged cohort large enough to dominate a taskClass).
+ * `flagged`/`unflagged`, not `flagged`/`everyone`.
+ *
+ * Cohort population (round-2 review fix): built from the UNION of the live roster
+ * (`denominatorPopulation`, for units still in flight with no outcome row yet) and historical
+ * task-outcomes rows (for flagged units that already landed and were reaped off the live roster) —
+ * the same "denominator union" shape `buildTaskClassMatrix` itself uses internally. Reading only the
+ * live-roster intersection meant a slow trickle of flagged units that land-then-reap one at a time
+ * could NEVER accumulate `MEMBRANE_BREAKER_MIN_UNITS` concurrently live evidence, even with a large
+ * total flagged population sitting in history.
  */
 
 import { unitEfficiencyFlags, readAllReceipts, EFFICIENCY_FLAG_PREFIX } from "./receipts.ts";
@@ -64,20 +75,20 @@ async function flaggedAgentIds(stateDir: string): Promise<Set<string>> {
 
 /**
  * Builds the flagged-cohort `CellMetrics` for `taskClass` from real fleet state and, when it shows a
- * measured composite-success degradation against the taskClass's auto-champion baseline, hard-disables
- * `OMP_SQUAD_MEMBRANE_PROFILES` and returns the `AttentionEvent` explaining what tripped (the actual
- * check + disable is delegated to `runtime-settings.ts#runMembraneBreaker` — this module's only job is
- * building real `flagged`/`baseline` cells for it). `undefined` when there is no flagged cohort yet, no
- * comparable baseline, or the cohort is healthy — mirrors `runMembraneBreaker`'s own "no signal, no
- * state change" contract. Never throws — every I/O step here mirrors the non-fatal try/catch every
- * sibling cadence write (`recordModelOutcome`, `recordConfidenceOutcome`) already uses at its call
- * site; this function itself stays pure of that concern so it's testable without one.
+ * measured composite-success degradation against the taskClass's UNFLAGGED auto-champion baseline,
+ * hard-disables `OMP_SQUAD_MEMBRANE_PROFILES` and returns the `AttentionEvent` explaining what tripped
+ * (the actual check + disable is delegated to `runtime-settings.ts#runMembraneBreaker` — this module's
+ * only job is building real `flagged`/`baseline` cells for it). `undefined` when there is no flagged
+ * cohort yet, no comparable baseline, or the cohort is healthy — mirrors `runMembraneBreaker`'s own
+ * "no signal, no state change" contract. Never throws — every I/O step here mirrors the non-fatal
+ * try/catch every sibling cadence write (`recordModelOutcome`, `recordConfidenceOutcome`) already uses
+ * at its call site; this function itself stays pure of that concern so it's testable without one.
  */
 export async function membraneBreakerCadence(
 	stateDir: string,
 	denominatorPopulation: DenominatorUnit[],
 	taskClass: { mode: string; tier: string },
-	opts: { minEdge?: number; minUnits?: number; now?: number; store?: RuntimeSettingsStore } = {},
+	opts: { minEdge?: number; minUnits?: number; minSamples?: number; now?: number; store?: RuntimeSettingsStore } = {},
 ): Promise<AttentionEvent | undefined> {
 	const now = opts.now ?? Date.now();
 	const range = { start: now - 30 * DAY_MS, end: now };
@@ -85,15 +96,34 @@ export async function membraneBreakerCadence(
 	if (flagged.size === 0) return undefined;
 
 	const tcKey = taskClassKey(taskClass);
-	// Baseline: the taskClass's real auto-champion, computed off the UNFILTERED population — the exact
-	// comparison DESIGN.md/runtime-settings.ts describe.
-	const baselineDoc = buildTaskClassMatrix(rows, denominatorPopulation, range);
-	const baseline = selectBaseline(baselineDoc, tcKey);
-	if (!baseline) return undefined; // no reproducible champion for this taskClass yet — nothing to compare against
 
-	const flaggedPopulation: DenominatorUnit[] = denominatorPopulation
-		.filter((u) => flagged.has(u.agentId) && taskClassKey(u.taskClass) === tcKey)
-		.map((u) => ({ ...u, model: FLAGGED_MODEL_SENTINEL }));
+	// Baseline: the taskClass's auto-champion computed off the UNFLAGGED population/rows only (round-2
+	// review fix) — excluding every flagged agentId so the champion the flagged cohort is measured
+	// against can never itself be diluted by the units under test.
+	const unflaggedPopulation = denominatorPopulation.filter((u) => !flagged.has(u.agentId));
+	const unflaggedRows = rows.filter((r) => !flagged.has(r.agentId));
+	const baselineDoc = buildTaskClassMatrix(unflaggedRows, unflaggedPopulation, range);
+	const baseline = selectBaseline(baselineDoc, tcKey);
+	if (!baseline) return undefined; // no auto-champion for this taskClass yet — nothing to compare against
+
+	// Flagged population: the UNION of the live roster (flagged agentIds still in flight, possibly with
+	// no outcome row yet) and historical task-outcomes rows (flagged agentIds that already landed and
+	// were reaped off the live roster) — round-2 review fix. A roster-only filter drops a unit the
+	// instant it's reaped, so a slow trickle of flagged units landing one at a time could never
+	// accumulate MEMBRANE_BREAKER_MIN_UNITS of concurrently-live evidence even with plenty of history.
+	const fromRoster = new Map<string, DenominatorUnit>();
+	for (const u of denominatorPopulation) {
+		if (flagged.has(u.agentId) && taskClassKey(u.taskClass) === tcKey) {
+			fromRoster.set(u.agentId, { ...u, model: FLAGGED_MODEL_SENTINEL });
+		}
+	}
+	for (const r of rows) {
+		if (fromRoster.has(r.agentId)) continue; // roster entry already covers this agentId
+		if (flagged.has(r.agentId) && taskClassKey(r.routing) === tcKey) {
+			fromRoster.set(r.agentId, { agentId: r.agentId, taskClass: r.routing, model: FLAGGED_MODEL_SENTINEL });
+		}
+	}
+	const flaggedPopulation: DenominatorUnit[] = [...fromRoster.values()];
 	if (flaggedPopulation.length === 0) return undefined;
 
 	// `buildTaskClassMatrix` has an agentId ROW win over the roster/population entry for the SAME
