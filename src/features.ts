@@ -11,6 +11,7 @@
  * worktree but NOT in main — Land to test" and "branch diverged, can't cleanly land".
  */
 
+import { normalizeRepoPath } from "./project-registry.ts";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { hardenedGitSync } from "./git-harden.ts";
@@ -848,8 +849,12 @@ export async function buildFeatures(repo: string, agents: AgentDTO[], persisted:
 	const planDirs = await listPlanDirs(repo);
 	const planDirByPath = new Map(planDirs.map((pd) => [pd.dir, pd]));
 
+	// Compare NORMALIZED: features persisted before `createFeature` normalized (and any written by an
+	// older daemon) still carry the caller's raw spelling, while callers now address them by the
+	// normalized project id. A literal `!==` silently excluded them. (gpt-5.6-sol)
+	const repoKey = normalizeRepoPath(repo);
 	for (const pf of persisted) {
-		if (pf.repo !== repo) continue;
+		if (normalizeRepoPath(pf.repo) !== repoKey) continue;
 		if (pf.origin?.planDir) adoptedDirs.add(pf.origin.planDir);
 		if (pf.archived) continue;
 		const members = agents.filter((a) => a.featureId === pf.id);

@@ -63,6 +63,7 @@ import {
 	PlanVoteCastBodySchema,
 	PushSubscriptionBodySchema,
 	SpawnBodySchema,
+	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
 } from "./schema/http-body.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
@@ -1164,7 +1165,27 @@ export class SquadServer {
 		const feedbackResponse = await handleFeedbackRoutes(url, req, manager, actor);
 		if (feedbackResponse) return feedbackResponse;
 		if (url.pathname === "/api/agents") return Response.json(manager.list());
-		if (url.pathname === "/api/projects") return Response.json(manager.projects());
+		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
+		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later
+		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
+		// real git repo — a relative path is refused, never resolved against the daemon's cwd (which is an
+		// accident of how the operator launched it).
+		if (url.pathname === "/api/projects" && req.method === "POST") {
+			const decoded = decodeBody(ProjectRegisterBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
+			const registered = await manager.registerProject(decoded.success.repo);
+			if (!registered.ok) return new Response(registered.reason, { status: 400 });
+			return Response.json({ ok: true, repo: registered.repo, added: registered.added, projects: manager.projects() });
+		}
+		// Un-register. Deletes NOTHING on disk; a repo that still has live agents or persisted features
+		// keeps listing, because hiding work that exists would be the same lie in a new place.
+		if (url.pathname === "/api/projects" && req.method === "DELETE") {
+			const repoParam = url.searchParams.get("repo");
+			if (!repoParam) return new Response("repo query param required", { status: 400 });
+			const dropped = manager.unregisterProject(repoParam);
+			if (!dropped.ok) return new Response(dropped.reason, { status: 500 }); // registry write failed; nothing changed
+			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
+		}
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(manager.list(), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });

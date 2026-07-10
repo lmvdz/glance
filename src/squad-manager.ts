@@ -41,6 +41,7 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { errText } from "./err-text.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
+import { normalizeRepoPath, openProjectRegistry, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
@@ -754,6 +755,8 @@ export class SquadManager extends EventEmitter {
 	 *  remove(); CLEARED by createWithId when an authorized creator deliberately reuses the id
 	 *  (deterministic workflow-branch ids must stay resurrectable by their parent's resume). */
 	private readonly removedLedger: RemovedLedger;
+	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
+	private readonly projectRegistry: ProjectRegistry;
 	/** In-flight spawn-time dependency provisioning, keyed by agent id (cross-lineage review HIGH 1).
 	 *  createWithId KICKS provisioning here without awaiting it — the invariant is "the verify gate
 	 *  must not run before provisioning settles", NOT "the dispatch tick must wait", so the await
@@ -842,6 +845,7 @@ export class SquadManager extends EventEmitter {
 		setGateLogRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
+		this.projectRegistry = openProjectRegistry(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
@@ -2046,7 +2050,7 @@ export class SquadManager extends EventEmitter {
 		const campaign: FeedbackCampaign = {
 			id,
 			name: opts.name.trim() || "Feedback campaign",
-			repo: opts.repo.trim() || process.cwd(),
+			repo: normalizeRepoPath(opts.repo) || process.cwd(),
 			tokenHash: hashCampaignToken(opts.token),
 			allowedOrigins: opts.allowedOrigins?.length ? opts.allowedOrigins : ["*"],
 			rewardCents: opts.rewardCents,
@@ -2267,21 +2271,107 @@ export class SquadManager extends EventEmitter {
 		return this.reattached.has(id);
 	}
 
-	/** Group agents into projects (by repo root) with status rollups — the command-center top level. */
+	/**
+	 * The command-center's top level: every repo this operator works in, with live rollups.
+	 *
+	 * The union of three sources, because any one alone lies:
+	 *   - the durable REGISTRY (`project-registry.ts`) — repos the operator explicitly added;
+	 *   - repos with LIVE AGENTS — a `glance add <repo>` that was never registered still shows up;
+	 *   - repos with PERSISTED FEATURES — work that outlives the agent that was doing it.
+	 *
+	 * This used to be live agents ONLY, which meant a project existed exactly as long as it had a
+	 * running agent. Observed on the operator's daemon: `/api/projects` returned only `omp-squad`
+	 * seconds after lunarpup's last agent was reaped, so lunarpup — the daemon's own cwd, holding two
+	 * persisted features — disappeared from the sidebar entirely, then reappeared when an agent
+	 * respawned. A project blinking in and out with the roster is the "system lies about state" class,
+	 * at the top level of the UI.
+	 *
+	 * `registered` distinguishes "I asked for this repo" from "this repo happens to have work in it",
+	 * so the UI can offer to un-register the former without pretending it can hide the latter.
+	 */
 	projects(): ProjectDTO[] {
 		const byRepo = new Map<string, ProjectDTO>();
-		for (const { dto } of this.agents.values()) {
-			let p = byRepo.get(dto.repo);
+		const ensure = (repo: string): ProjectDTO => {
+			const key = normalizeRepoPath(repo);
+			let p = byRepo.get(key);
 			if (!p) {
-				p = { id: dto.repo, name: path.basename(dto.repo) || dto.repo, repo: dto.repo, agentCount: 0, statusCounts: {}, pendingCount: 0, lastActivity: 0 };
-				byRepo.set(dto.repo, p);
+				p = { id: key, name: path.basename(key) || key, repo: key, agentCount: 0, statusCounts: {}, pendingCount: 0, lastActivity: 0, featureCount: 0, registered: false };
+				byRepo.set(key, p);
 			}
+			return p;
+		};
+
+		for (const repo of this.projectRegistry.list()) ensure(repo).registered = true;
+		for (const pf of this.featureStore.values()) if (pf.repo) ensure(pf.repo).featureCount++;
+		for (const { dto } of this.agents.values()) {
+			const p = ensure(dto.repo);
 			p.agentCount++;
 			p.statusCounts[dto.status] = (p.statusCounts[dto.status] ?? 0) + 1;
 			p.pendingCount += dto.pending.length;
 			p.lastActivity = Math.max(p.lastActivity, dto.lastActivity);
 		}
-		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity);
+		// Busiest first, then a stable alphabetical tail so idle registered projects don't shuffle.
+		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity || a.name.localeCompare(b.name));
+	}
+
+	/**
+	 * Register a repo as a project. Validated, not trusted: an absolute path to a real git worktree.
+	 *
+	 * This path is where the daemon will later create worktrees and spawn agents, so a relative path is
+	 * REFUSED rather than resolved against the daemon's cwd — that cwd is an accident of how the
+	 * operator launched it (this daemon runs from `~/lunarpup` while its code lives elsewhere), and
+	 * silently resolving against it is how you register the wrong tree.
+	 */
+	async registerProject(repo: string): Promise<{ ok: true; repo: string; added: boolean } | { ok: false; reason: string }> {
+		const raw = normalizeRepoPath(repo ?? "");
+		if (!raw) return { ok: false, reason: "repo is required" };
+		if (!path.isAbsolute(raw)) return { ok: false, reason: `repo must be an absolute path (got "${raw}")` };
+		if (!existsSync(raw)) return { ok: false, reason: `no such directory: ${raw}` };
+
+		// Canonicalize to the repo ROOT, through symlinks. `isGitRepo` is true for any directory INSIDE a
+		// repo (it shells `rev-parse --show-toplevel` and only falls back to a `.git` probe), so registering
+		// `/repo/src` — or a symlink to `/repo` — used to mint a project whose id matched no agent's
+		// `dto.repo` and no feature's `repo`: the workspace showed two rows for one repository and the
+		// task↔project join missed. Found by cross-lineage review (grok-4.5).
+		let root: string;
+		try {
+			root = normalizeRepoPath(await repoRoot(await fs.realpath(raw)));
+		} catch {
+			return { ok: false, reason: `not a git repository: ${raw}` };
+		}
+
+		// Never register anything inside glance's OWN data directory.
+		//
+		// A glance worktree is a git repo too, and its lifetime belongs to an agent, not the operator. But
+		// the sharper reason is tenancy: per-org managers put their worktrees under
+		// `<stateRoot>/orgs/<orgId>/worktrees` (manager-registry.ts), while `worktreeBase()` only names the
+		// ROOT manager's `<stateRoot>/worktrees`. Guarding the latter alone let one org's admin register
+		// ANOTHER org's managed worktree — and registration widens the viewer-readable `/api/graph*`
+		// allowlist (`resolveGraphRepo`), whose `/api/graph/commit` returns source diffs. That is a
+		// cross-tenant read, not a role bypass. Refusing the whole state root closes every variant at once:
+		// orgs/*/worktrees, the root worktrees dir, proof/, receipts/, and anything added later.
+		// Found by cross-lineage review (gpt-5.6-sol).
+		const forbidden = [resolveStateDir(), worktreeBase(), this.stateDir].map(normalizeRepoPath);
+		const inside = forbidden.find((base) => base.length > 0 && (root === base || root.startsWith(`${base}${path.sep}`)));
+		if (inside) {
+			return { ok: false, reason: `${root} is inside glance's own state directory (${inside}) — register the source repository instead` };
+		}
+
+		const outcome = this.projectRegistry.add(root);
+		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${root} was NOT added` };
+		if (outcome === "added") this.log("info", `project registered: ${root}`);
+		this.emitFeaturesChanged();
+		return { ok: true, repo: root, added: outcome === "added" };
+	}
+
+	/** Un-register a repo. Deletes NOTHING on disk; a repo with live agents or features keeps listing. */
+	unregisterProject(repo: string): { ok: true; repo: string; removed: boolean } | { ok: false; reason: string } {
+		const key = normalizeRepoPath(repo ?? "");
+		const outcome = this.projectRegistry.delete(key);
+		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${key} was NOT removed` };
+		if (outcome === "removed") this.log("info", `project un-registered: ${key}`);
+		this.emitFeaturesChanged();
+		return { ok: true, repo: key, removed: outcome === "removed" };
 	}
 
 	/** Feature view: persisted features + derived plan-dir/agent features with live land status, per repo. */
@@ -2308,7 +2398,10 @@ export class SquadManager extends EventEmitter {
 		const now = Date.now();
 		// Seed the human assignee list so the vote substrate is never A=0: the creating author (a
 		// real `db:<userId>` in DB mode) when known, else this manager's operator identity.
-		const pf: PersistedFeature = { id, title: opts.title.trim() || "feature", repo: opts.repo, stageOverride: opts.stageOverride, origin: opts.planDir ? { planDir: opts.planDir } : undefined, assignees: [opts.author ?? this.operator.id], createdAt: now, updatedAt: now };
+		// Store the SAME normalized key `projects()` groups by. A feature persisted as "/srv/app/" used to
+		// live under project "/srv/app" in the UI while every server-side `pf.repo !== repo` comparison
+		// missed it — TaskDetail's pipeline 404s, and project scoping drops the task. (gpt-5.6-sol)
+		const pf: PersistedFeature = { id, title: opts.title.trim() || "feature", repo: normalizeRepoPath(opts.repo), stageOverride: opts.stageOverride, origin: opts.planDir ? { planDir: opts.planDir } : undefined, assignees: [opts.author ?? this.operator.id], createdAt: now, updatedAt: now };
 		this.featureStore.set(id, pf);
 		this.emitFeaturesChanged();
 		return pf;
@@ -7810,7 +7903,23 @@ export class SquadManager extends EventEmitter {
 			if (parent.kind !== "workflow") continue;
 			for (const id of await this.unresolvedBranchIds(parent)) skipRestore.add(id);
 		}
+		// Count what we ACTUALLY restore. This used to `return list.length`, so the boot banner said
+		// "restored 2 agent(s)" whether it restored two, skipped two as tombstoned, or (before the guard
+		// above) minted two duplicates. A count that never disagrees with itself is not a count.
+		let restoredCount = 0;
 		for (const p of list) {
+			// ALREADY RESIDENT ⇒ never re-create. `start()` runs first and `reconnectLive`/`adoptOrphanedAgents`
+			// reattach persisted records VERBATIM, keyed by their original id (reconnectLive has this exact
+			// guard). `--restore` then walked the same list and `create()`d each one under a FRESH id — so
+			// every reattached record got a twin, and the twin was itself persisted, so the next
+			// `up --restore` doubled again. Observed live on the operator's daemon: one `ompsq-445` became
+			// two after one bounce and four after the next, each pair a terminal-marked workflow reattached
+			// verbatim alongside a freshly-minted duplicate. The dispatcher was innocent — its ledger
+			// correctly skips the issue; the roster was breeding at boot.
+			if (this.agents.has(p.id)) {
+				this.log("info", `skipped restoring ${p.name} (${p.id}) — already reattached by start()`);
+				continue;
+			}
 			// rm-doesn't-stick fix (cross-lineage review MEDIUM 3): `--restore` was the one boot path that
 			// bypassed the tombstone entirely, re-creating every persisted record — including explicitly
 			// rm'd ones — under fresh ids. Same gate as reconnectLive/adoptOrphanedAgents.
@@ -7819,7 +7928,12 @@ export class SquadManager extends EventEmitter {
 				continue;
 			}
 			if (p.kind === "flue-service" && p.flue) {
-				await this.restoreFlueMember(p).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
+				// Counted on SUCCESS only — a restore that threw is not a restore (grok-4.5).
+				await this.restoreFlueMember(p)
+					.then(() => {
+						restoredCount++;
+					})
+					.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 				continue;
 			}
 			if (skipRestore.has(p.id)) {
@@ -7866,6 +7980,12 @@ export class SquadManager extends EventEmitter {
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap
 			})
 				.then(async (dto) => {
+					// SUCCESS only. `createWithId` catches a driver/handshake failure, marks the record `error`,
+					// and RESOLVES with that DTO rather than rejecting (see its catch → settleSpawnFailure →
+					// `return rec.dto`), so a bare `.then()` counted a unit that never came up. The boot banner
+					// would print "restored 1 agent(s)" over a corpse. (grok-4.5 raised the attempts-vs-successes
+					// gap; gpt-5.6-sol found the fulfilled-error path that makes `.catch` insufficient.)
+					if (dto.status !== "error") restoredCount++;
 					// Same fresh-id-fresh-correlation leak as adoptOrphanedAgents (this path also mints a new
 					// agent id from a PersistedAgent) — close, never restore, any pending it carried (concern 04).
 					// Unconditional, like adoptOrphanedAgents' call site — closeOrphanedPending unconditionally
@@ -7876,7 +7996,7 @@ export class SquadManager extends EventEmitter {
 				})
 				.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
-		return list.length;
+		return restoredCount;
 	}
 }
 
