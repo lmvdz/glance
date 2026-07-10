@@ -4370,7 +4370,13 @@ export class SquadManager extends EventEmitter {
 			// "squad-leaky" worktrees). settleSpawnFailure then stops the (possibly half-spawned) driver so no
 			// detached host / ACP child / sandbox container leaks (OMPSQ-163, OMPSQ-146) and marks error — the
 			// SAME shared stop-before-fail path the prompt/set-model/restart sites use.
-			if (!started && createdWorktree) await removeWorktree(repo, cwd).catch(() => {});
+			if (!started && createdWorktree) {
+				// Reaping the worktree here prevents a leak (a failed-start test once orphaned 500+ of them),
+				// but it also destroys the evidence: the operator later finds an errored unit whose worktree
+				// "never existed". Record whether it was there when the spawn failed, before removing it.
+				this.log("warn", `${name}: spawn failed with the worktree ${existsSync(cwd) ? "PRESENT" : "ALREADY GONE"} at ${cwd} — removing it`);
+				await removeWorktree(repo, cwd).catch(() => {});
+			}
 			await this.settleSpawnFailure(rec, err);
 		}
 
