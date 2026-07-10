@@ -43,7 +43,13 @@ export interface AcpAgentDriverOptions {
 	command?: string[];
 	/** Approval intent from the manager. Mapped best-effort to an ACP session mode after session/new
 	 *  (`yolo` → an auto-approve mode); ACP's setSessionMode is `unstable_`, so a missing/failing call
-	 *  falls back silently to the per-call session/request_permission round-trip. */
+	 *  falls back silently to the per-call session/request_permission round-trip.
+	 *
+	 *  OPERATOR NOTE: every ACP `session/request_permission` is gate-class — a human answers it, and no
+	 *  supervisor ever will. So a NON-yolo ACP unit needs a human present at each tool permission. That
+	 *  is what "ask me" means, and it is the point (R7). For hands-off, spawn `yolo`: the driver then
+	 *  answers from the operator's own instruction, deterministically, which is what dispatch does.
+	 *  (grok-4.5) */
 	approvalMode?: string;
 	/** omp-squad context (fabric primer + tool-grant scoping + profile memory) the manager composed.
 	 *  ACP has no system-prompt slot, so this is only used when `contextInjection` opts in — see below. */
@@ -387,12 +393,22 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 			// land in the auto-supervisor's lap.
 			if (this.opts.approvalMode === "yolo") {
 				const optionId = pickOption(options, true);
-				// Fails CLOSED: a non-compliant agent emitted kind-less options, so we cannot tell allow from
-				// reject. Ask a human rather than guess a polarity.
 				if (optionId) {
 					this.write({ jsonrpc: "2.0", id, result: { outcome: { outcome: "selected", optionId } } });
 					return;
 				}
+				// Fails CLOSED: a non-compliant agent emitted kind-less options, so allow cannot be told from
+				// reject, and a guessed polarity could approve what the operator would have denied. A human
+				// decides — but LOUDLY. The operator asked for hands-off, and an unattended unit that waits
+				// forever WITHOUT SAYING WHY is the "can't finish" failure this project exists to kill. A
+				// `notify` frame becomes a real attention row, so the stall surfaces as "needs you". (grok-4.5)
+				this.emit("ui", {
+					type: "extension_ui_request",
+					id: `acpnotify_${++this.seq}`,
+					method: "notify",
+					notifyType: "warning",
+					message: `--approval yolo cannot be honored for this permission: the agent offered no ACP option "kind" (allow_once|allow_always|reject_once|reject_always), so allow cannot be distinguished from reject. Waiting for a human.`,
+				});
 			}
 
 			const uiId = `acpui_${++this.seq}`;

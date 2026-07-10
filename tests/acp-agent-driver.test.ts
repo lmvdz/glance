@@ -199,3 +199,32 @@ test("under yolo the driver answers the permission itself — no pending, no mod
 	expect(uiSeen).toBe(0); // no human was ever asked
 	expect(driver.isReady).toBe(true);
 });
+
+/**
+ * `pickOption` fails closed when an agent omits option `kind`s — allow cannot be told from reject. Under
+ * `yolo` that means a human is asked despite the operator having asked for hands-off. Fine. But an
+ * unattended unit that waits forever WITHOUT SAYING WHY is the "can't finish" failure this project exists
+ * to kill, so the stall announces itself as an attention row. (grok-4.5)
+ */
+test("yolo + a non-compliant agent: fails closed to a human, and says so", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-"));
+	tmps.push(dir);
+	const script = path.join(dir, "fake-acp.ts");
+	// The same fake, minus the ACP option `kind`s — a non-compliant adapter.
+	await fs.writeFile(script, FAKE_ACP.replaceAll(', kind: "allow_once"', "").replaceAll(', kind: "reject_once"', ""));
+	const driver = new AcpAgentDriver({ id: "t", cwd: dir, command: ["bun", script], approvalMode: "yolo" });
+	drivers.push(driver);
+
+	const frames: Array<{ method?: string; notifyType?: string; message?: string; gateClass?: boolean }> = [];
+	driver.on("ui", (f) => frames.push(f));
+	await driver.start(30_000);
+	void driver.prompt("hi"); // never resolves: the gate waits for a human, by design
+
+	await Bun.sleep(400);
+	const notify = frames.find((f) => f.method === "notify");
+	expect(notify?.notifyType).toBe("warning");
+	expect(notify?.message).toContain("cannot be honored");
+
+	const gate = frames.find((f) => f.method === "confirm");
+	expect(gate?.gateClass).toBe(true); // a human is asked — never the supervisor's model
+});
