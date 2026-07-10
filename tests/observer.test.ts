@@ -164,6 +164,31 @@ test("(b) a red gate files exactly one regression finding", async () => {
 	expect(filed[0]).toContain("regression: auth.test.ts > login");
 });
 
+// Reproduce-first (eap-borrows finding #12): the OLD `confirmedGate` mapped a THROWN gate to
+// `{ ok: true }` (fail-open) — a Docker outage or transient spawn failure silently hid main-red for
+// as long as the throw kept happening, and no finding was ever filed. It must now file a distinct
+// `gate-unrunnable:` finding (never a `regression:`, which would dispatch a unit to "fix" the
+// environment), NEVER confirm-retry it like a flake, and record it on the daemon-scoped automation
+// channel (`record`) so it's visible without a live-log tail.
+test("(#12) a THROWN gate is no longer fail-open — files a distinct gate-unrunnable finding, not green, not a regression", async () => {
+	process.env.OMP_SQUAD_OBSERVE = "1";
+	let calls = 0;
+	const events: AutomationReport[] = [];
+	const { deps, filed } = makeDeps(tmpDir(), {
+		runGate: async () => {
+			calls++;
+			throw new Error("docker: Cannot connect to the Docker daemon");
+		},
+		record: (r) => events.push(r),
+	});
+	await new Observer(deps).tick();
+	expect(calls).toBe(1); // never confirm-retried (a throw isn't a flake to reproduce)
+	expect(filed.length).toBe(1);
+	expect(filed[0]).toContain("gate-unrunnable:");
+	expect(filed[0]).not.toContain("regression:");
+	expect(events.some((e) => e.level === "warn" && e.detail?.includes("docker"))).toBe(true);
+});
+
 test("(b) a flaky gate (red then green on the confirm re-run) files NOTHING — no false regression (OMPSQ-184)", async () => {
 	process.env.OMP_SQUAD_OBSERVE = "1";
 	let calls = 0;

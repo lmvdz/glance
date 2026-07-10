@@ -1,8 +1,9 @@
 /**
  * Observer regression gate (runMainGate) honors detectVerify(repo) instead of a hardcoded
  * "bun run check && bun test" (OMPSQ-136). Three behaviors pinned:
- *   - no detectable verify command ⇒ ok:true (don't file a false `regression:` against a non-bun repo)
- *   - the detected command passing ⇒ ok:true
+ *   - no detectable verify command ⇒ ok:true, skipped:true (don't file a false `regression:` against a
+ *     non-bun repo, but say so distinctly from a confirmed pass — eap-borrows finding #13)
+ *   - the detected command passing ⇒ ok:true, no `skipped`
  *   - the detected command failing ⇒ ok:false (it actually ran the repo's own gate)
  */
 
@@ -65,16 +66,18 @@ async function manager(): Promise<GateManager> {
 	return new GateManager({ stateDir });
 }
 
-test("no detectable verify command ⇒ ok:true (no false regression on a non-bun repo)", async () => {
+test("no detectable verify command ⇒ ok:true, skipped:true (no false regression on a non-bun repo)", async () => {
 	const mgr = await manager();
 	const r = await repo({ "README.md": "hi" });
-	expect(await mgr.gate(r)).toEqual({ ok: true });
+	expect(await mgr.gate(r)).toEqual({ ok: true, skipped: true });
 });
 
-test("detected command passing ⇒ ok:true", async () => {
+test("detected command passing ⇒ ok:true, and is distinguishable from a no-command skip (finding #13)", async () => {
 	const mgr = await manager();
 	const r = await repo({ "bun.lock": "", "package.json": JSON.stringify({ scripts: { check: "true", test: "true" } }) });
-	expect(await mgr.gate(r)).toEqual({ ok: true });
+	const g = await mgr.gate(r);
+	expect(g).toEqual({ ok: true });
+	expect(g.skipped).toBeUndefined(); // OLD fail-open behavior: this was indistinguishable from "no command ran at all"
 });
 
 test("detected command failing ⇒ ok:false (it ran the repo's own gate)", async () => {

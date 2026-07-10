@@ -1,5 +1,5 @@
 # Fail-closed wave 2 — the land-path findings + land-path offload (post-G3)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -41,6 +41,59 @@ Adjudicated sweep: plans/eap-borrows/failopen-sweep.md.
   pre-G3 numbering) — full output always persisted, pointer on the land record/DoneProof detail.
 - All refusals route through classifyProbeFailure (concern 04): structural → escalate visibly,
   bounded retries only. No unbounded-retryable — that pathology already jammed the factory once.
+
+## Adjudication: finding 5
+
+Re-verified against current `src/validator.ts` (post-G3; G3 never touched this file — last real
+change was membrane-disciplines/gate-log-offload, both unrelated to the abstain path). The finding
+has two genuinely separate parts; they get different verdicts.
+
+**Part A — judge unreachable/throws/unparseable ⇒ `abstain` (`scoreAgainstCriteria`, the
+`!raw || raw.perCriterion.length === 0` branch): WORKING AS DESIGNED, no code change.**
+
+This is explicitly the epic-3 DESIGN §3 contract (`Judge`'s own doc comment: "Never throws by
+contract — a throw is treated the same as `undefined` — abstain, fail-open"), and it is a *different
+kind* of checker than everything else in this wave. Every other finding in waves 1+2 guards a
+checker that is the ONLY signal standing between a bad change and a merge (the acceptance gate, the
+regression gate, the transplant/stale probes). The validator is additive on TOP of those — by the
+time `validatorGate` runs, `landAgent`/`landAgentPr` still have to clear the acceptance gate,
+regression gate, dirty-main guard, and (after this wave) the red-on-red set-diff, transplant probe,
+and stale-branch probe, ALL fail-closed. An unreachable judge does not remove any of that; it only
+means the ADDITIONAL criteria-adherence check didn't run. Fail-open here is a deliberate trust-
+layering choice (semantic review is advisory-strength by construction — the lens panel one layer up
+is explicitly advisory too, per DESIGN.md's "Membrane placement" and the validator's own veto being
+"bypassable ONLY by an explicit `validator-override` at the caller"), not an oversight. Making an
+`omp`/`codex` outage fail-CLOSE every land in the fleet would trade a contained, honest gap (one
+extra check skipped, logged in the record's `rationale`) for a total autonomy stall — worse than the
+gap it would close, and out of proportion to what the validator actually guards.
+
+**Part B — empty diff ⇒ `abstain`, when the emptiness came from a `computeLandDiff` FAILURE rather
+than a genuine no-op land: REAL, narrow residual gap. Deferred — no code change in this PR.**
+
+`computeLandDiff` (validator.ts:458-484) wraps its git calls in a blanket `try { … } catch { return
+""; }` and a `rev-parse HEAD` failure returns `""` immediately. `scoreAgainstCriteria` cannot tell
+"this land genuinely changed nothing" (in-place, no-op — the documented, common case `!diff.trim()`
+exists for) from "the diff computation itself errored on a REAL change" — both read as the same
+`abstain` with the same reassuring rationale ("empty diff — nothing to validate"). A unit with
+declared criteria and a real diff that hits a git hiccup at exactly this moment lands with its
+criteria silently unchecked, mis-labeled as a legitimate no-op rather than a failed probe.
+
+Why this is real but narrow, and why it does not get fixed in this PR:
+- `validatorGate` runs in `SquadManager.landBranch` BEFORE dispatching to `landAgent`/`landAgentPr`
+  (its own doc comment says so), so it executes before this wave's freshly-hardened dirty-main/status
+  checks get a chance to catch the same underlying git unhealthiness — there IS a live window where
+  this residual is the only thing standing between a real change and an unchecked land.
+- But the fix belongs in `computeLandDiff`/`scoreAgainstCriteria` (distinguish "genuinely nothing to
+  diff" from "the probe errored" — e.g. via `classify-probe-failure.ts`'s taxonomy, same shared
+  classifier this wave used everywhere else), and `src/validator.ts` is **not** in concern 07's
+  TOUCHES (`src/land.ts`, `src/land-pr.ts`, `src/done-proof.ts`, `src/intake.ts`,
+  `src/squad-manager.ts`, `tests/`). Per this concern's own scope discipline (DESIGN.md's own "Fail-
+  closed wave split... by behavioral blast radius" reasoning, and the explicit rule here: "forced
+  out-of-TOUCHES edits go in notes"), it is recorded here rather than smuggled into land.ts.
+- Follow-up: a small concern touching `src/validator.ts` to make `computeLandDiff` return a
+  distinguishable "probe failed" signal (not just `""`), and have `scoreAgainstCriteria` route that
+  through `classifyProbeFailure` to a `"probe-failed"` verdict distinct from `"abstain"` — visible in
+  the record, not silently indistinguishable from a real no-op.
 
 ## Cross-Repo Side Effects
 None.

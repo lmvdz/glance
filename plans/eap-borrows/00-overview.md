@@ -50,3 +50,41 @@
 - Adjudicated grok sweep report preserved at plans/eap-borrows/failopen-sweep.md.
 - Borrow #6 (per-hop SSRF) closed pre-plan: gap already documented in ssrf.ts header; fix blocked
   on the omp/browser producer.
+
+## Completion (2026-07-10)
+
+7/8 concerns done (08 deferred by design — scope-only, gated on post-G3 volume).
+Suite 2382 → **2519 pass / 0 fail**; tsc clean. Commits: e114228, 278e3f8, a2cbcc7, 5bffd28,
+f107d58, 2615c33, e2039d3, aff5270, 07a10e6, 6840cb7, 50145f4, 4aaabe5, 703c61c.
+
+**The audit gauntlet was load-bearing.** Per-batch reviews passed, the suite was green — and a
+high-effort adversarial code review (31 candidates, 24 verifiers, 0 refuted) still found 10 real
+defects, five of them the wave-2 fail-closed fixes *not actually failing closed*:
+- the transplant gate fail-opened when `origin/<default>` was pruned (git emits byte-identical
+  "unknown revision" text for a missing left ref and a missing branch);
+- the observer's gate-unrunnable path was unreachable (production `runGate` never throws);
+- the unproven-green classifier was defeated by check ordering, and absent entirely on the local path;
+- two `merge-base` probes read exit-1 ("no common ancestor") as a spawn error → permanent refusal;
+- the new `reproducible` gate silently disabled the live model router (champion compared to itself
+  at a saturated mergeRate; cost-coverage floor gating merge-rate routing).
+
+**Cross-lineage review then caught what the native re-verify missed.** grok-4.5, asked what the
+fixes *opened* rather than whether the holes closed, found: `land-risk` returning "genuinely safe"
+for an unknowable blast radius (fail-open, caused by this plan's own fixlist over-generalizing the
+stale-gate discrimination); the transplant probe parking a branch permanently on a transient pruned
+ref; and — verified in code — that `landFailureCount` is gated on `!result.retryable`, so retryable
+refusals had **no bounded escalation whatsoever**, the exact 1,381-refusal interlock shape. All
+fixed (`703c61c`), with `OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP` (default 20) now escalating a stuck
+episode to the "Needs you" lane.
+
+## Follow-ups (named, not silently dropped)
+- `detectBaselineStaleness` + `pinnedModel` have no producer — decision 4 is 1/3 live (needs a
+  persisted previous-baseline to be meaningful).
+- `flagEfficiencyRegression` / `isCostReproducible` are substrate without a production caller —
+  sanctioned by DESIGN's "schema-before-router (G4)" posture; wire when G4's ledger fills.
+- `ValidationRecordDTO` lacks `gateLogPaths` (webapp mirror); extend when a renderer exists.
+- `extractGateFailures` whole-output identity is nondeterminism-sensitive (interior timestamps);
+  normalize per-line timing tokens if a real repo hits it.
+- Stale-probe/merge TOCTOU (pre-existing): re-probe after a clean merge, or capture+compare base SHA
+  under the repo land lock.
+- Concern 05's live scratch-daemon smoke was waived in favor of FakeDriver assertions.

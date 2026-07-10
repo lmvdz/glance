@@ -31,8 +31,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { envBool, envInt } from "./config.ts";
 import * as path from "node:path";
 import type { AutomationRecorder } from "./automation-log.ts";
+import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import type { ComplianceFinding } from "./compliance.ts";
 import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
+import { errText } from "./err-text.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
@@ -70,8 +72,11 @@ export interface ObserverDeps {
 	 *  only filing an issue. Absent ⇒ regressions are only filed (today's behavior). Only ever called
 	 *  for a `regression:`-fingerprinted finding, and only under OMP_SQUAD_OBSERVE_REPRODUCE=1. */
 	spawnObserver?: (finding: Finding) => Promise<boolean>;
-	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
-	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }>;
+	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red.
+	 *  `unrunnable:true` (eap-borrows finding #2) ⇒ the gate itself couldn't run (Docker down, spawn
+	 *  failure) — structurally distinct from a reproduced test failure; `confirmedGate` never
+	 *  confirm-retries it and `auditTestsGreen` files it as `gate-unrunnable`, not `regression:`. */
+	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }>;
 	/** Commits on the agent's branch not in main (origin-aware in PR mode — see `aheadOfBase`):
 	 *  0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown. Async: PR mode fetches the origin default branch. */
 	gitAheadOfMain: (agent: AgentDTO) => Promise<number>;
@@ -181,9 +186,26 @@ export function stableFailure(firstFailure?: string): string {
 	return (firstFailure ?? "gate").replace(/\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/, "").trim() || "gate";
 }
 
-/** Check 1 — the acceptance gate is red on main ⇒ a regression finding (high). */
-export function auditTestsGreen(gate: { ok: boolean; firstFailure?: string }): Finding[] {
+/**
+ * Check 1 — the acceptance gate is red on main ⇒ a regression finding (high). A gate that THREW
+ * (`unrunnable: true` — eap-borrows finding #12) is NOT a regression: dispatching a unit to "fix" a
+ * gate that never ran (Docker down, a transient spawn failure) would chase an environment problem as
+ * if it were a code defect. Filed instead as a distinct `structural` finding — ALWAYS needs-triage
+ * (never auto-dispatched), and never confused with `regression:`'s reproduce-and-spawn path.
+ */
+export function auditTestsGreen(gate: { ok: boolean; firstFailure?: string; unrunnable?: boolean }): Finding[] {
 	if (gate.ok) return [];
+	if (gate.unrunnable) {
+		const fail = stableFailure(gate.firstFailure);
+		return [
+			{
+				fingerprint: `gate-unrunnable:${fail}`,
+				title: `gate-unrunnable: ${fail}`,
+				detail: "the acceptance gate (the repo's verify command) threw instead of reporting a pass/fail — main's actual test status is UNKNOWN, not confirmed red",
+				severity: "structural",
+			},
+		];
+	}
 	const fail = stableFailure(gate.firstFailure);
 	return [
 		{
@@ -558,13 +580,30 @@ export class Observer {
 	 * firstFailure). A green confirm ⇒ flaky ⇒ reported green, nothing filed.
 	 * ponytail: one extra gate run, and only on the rare red path; the green (common) path is unchanged.
 	 */
-	private async confirmedGate(): Promise<{ ok: boolean; firstFailure?: string }> {
-		const safe = () => this.deps.runGate().catch(() => ({ ok: true }) as { ok: boolean; firstFailure?: string; skipped?: boolean });
+	private async confirmedGate(): Promise<{ ok: boolean; firstFailure?: string; unrunnable?: boolean }> {
+		type GateRun = { ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean };
+		// Fail-closed (eap-borrows finding #12): the OLD `.catch(() => ({ ok: true }))` mapped ANY thrown
+		// gate to "green" — a Docker outage or a transient spawn failure silently hid main-red for as
+		// long as the gate kept throwing. A thrown gate is NOT "ok:true" (fail-open) and NOT a confirmed
+		// `regression:` (would dispatch a unit to "fix" the environment) — it's a distinct unrunnable
+		// state `auditTestsGreen` files separately. Also daemon-scoped visible: routed through the SAME
+		// `record` automation channel every other observer finding uses (surfaces in /api/automation +
+		// the automation panel — "the cockpit lane" — not just a log line nobody's watching).
+		const safe = async (): Promise<GateRun> => {
+			try {
+				return await this.deps.runGate();
+			} catch (err) {
+				const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: errText(err) });
+				this.deps.record?.({ durationMs: 0, level: "warn", detail: `main acceptance gate ${reason}` });
+				return { ok: false, unrunnable: true, firstFailure: reason };
+			}
+		};
 		const first = await safe();
 		if (first.skipped) this.deps.record?.({ detail: "gate inputs unchanged" });
 		if (first.ok) return first;
+		if (first.unrunnable) return first; // never confirm-retry an unrunnable gate as if it were a flake
 		const confirm = await safe();
-		if (!confirm.ok) return confirm; // reproduced — a real regression, named by the confirming run
+		if (!confirm.ok) return confirm; // reproduced (or turned unrunnable) — named by the confirming run
 		(this.deps.log ?? (() => {}))(`gate red then green on re-run — flaky, not filing (first failure was: ${first.firstFailure ?? "gate"})`);
 		return { ok: true };
 	}

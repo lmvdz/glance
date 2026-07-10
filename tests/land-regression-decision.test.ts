@@ -34,6 +34,33 @@ test("extractGateFailures parses bun fail lines", () => {
 });
 
 test("extractGateFailures returns a conservative fallback identity for unparseable failure output", () => {
-	expect(extractGateFailures("\nTypeError: boom\nstack", "bun test")).toEqual(["TypeError: boom"]);
+	// finding #8 (eap-borrows wave 2): the identity is now the WHOLE trimmed output, not just its first
+	// line — see the two tests below for why (a first-line-only identity collided two different reds).
+	expect(extractGateFailures("\nTypeError: boom\nstack", "bun test")).toEqual(["TypeError: boom\nstack"]);
 	expect(extractGateFailures("\n", "bun test")).toEqual(["bun test"]);
+});
+
+test("finding #8: an UNCHANGED check/tsc-only red baseline still compares equal (never wedges a brownfield repo)", () => {
+	// The exact same failing gate output on base and merged (a genuinely reproducible, unchanged
+	// brownfield failure) — decideRegressionGate must still ALLOW the red-baseline re-merge.
+	const output = "$ tsc --noEmit\nsrc/foo.ts(3,1): error TS2304: Cannot find name 'Bar'.\n";
+	const base = extractGateFailures(output);
+	const merged = extractGateFailures(output);
+	expect(decideRegressionGate(base, merged)).toEqual({ allow: true, newRegressions: [] });
+});
+
+test('finding #8: two DIFFERENT check/tsc-only failures whose FIRST LINE coincides no longer collide as "the same" red', () => {
+	// OLD behavior (fail-open, the residual "equal-red" hole): extractGateFailures used only the first
+	// line as identity — both outputs below share the exact same first line ("$ tsc --noEmit") while
+	// reporting genuinely DIFFERENT errors underneath, so the old fallback extracted the SAME single
+	// token for both and decideRegressionGate read it as "same pre-existing red baseline" — silently
+	// allowing a branch that introduced a real new tsc error. NEW behavior: the full-output identity
+	// differs, so the merged run's failure reads as a genuinely new regression and blocks.
+	const baseOutput = "$ tsc --noEmit\nsrc/foo.ts(3,1): error TS2304: Cannot find name 'Bar'.\n";
+	const mergedOutput = "$ tsc --noEmit\nsrc/other.ts(9,4): error TS2322: Type 'string' is not assignable to type 'number'.\n";
+	const base = extractGateFailures(baseOutput);
+	const merged = extractGateFailures(mergedOutput);
+	const decision = decideRegressionGate(base, merged);
+	expect(decision.allow).toBe(false);
+	expect(decision.newRegressions).toEqual(merged);
 });

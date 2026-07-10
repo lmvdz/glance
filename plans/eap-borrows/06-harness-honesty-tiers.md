@@ -1,9 +1,9 @@
 # Harness honesty tiers — additive matrix, gates untouched
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
-TOUCHES: src/harness-registry.ts, src/server.ts, src/tui.ts, tests/
+TOUCHES: src/harness-registry.ts, src/server.ts, src/index.ts, tests/
 
 ## Goal
 One authoritative, honest harness capability matrix: end-to-end verified / registered-unverified /

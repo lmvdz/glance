@@ -10,7 +10,9 @@
  * and a per-(commit,tree) cache; it is the seam `SquadManager.landBranch` calls (DESIGN §1).
  */
 
+import { VERDICT_FIRST_BLOCK } from "./agent-profiles.ts";
 import { envBool, envInt } from "./config.ts";
+import { budgetedExcerpt } from "./gate-logs.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { harnessLineage, type ModelLineage, modelLineage } from "./model-lineage.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
@@ -23,11 +25,17 @@ export interface RawVerdict {
 	perCriterion: { id: string; satisfied: boolean; note?: string }[];
 	confidence?: number;
 	rationale?: string;
+	/** Gate-log offload (concern 03): pointer path(s) to the full untruncated diff/proof text when
+	 *  either exceeded its excerpt budget. NOT part of the judge's own JSON output — attached by the
+	 *  production judge (`ompJudge`/`codexJudge`) after `decideTyped` resolves, so `scoreAgainstCriteria`
+	 *  can copy it onto the `ValidationRecord` without widening the `Judge` return contract. Absent on
+	 *  fakes/tests and on any run where nothing was oversized. */
+	gateLogPaths?: string[];
 }
 
 /** Injected judge seam — the default is a one-shot `omp -p` call; tests pass a fake. Never throws
  *  by contract (a throw is treated the same as `undefined` — abstain, fail-open). */
-export type Judge = (input: { criteria: FeatureCriterion[]; diff: string; proof?: Proof }) => Promise<RawVerdict | undefined>;
+export type Judge = (input: { criteria: FeatureCriterion[]; diff: string; proof?: Proof; agentId?: string }) => Promise<RawVerdict | undefined>;
 
 const RATIONALE_MAX = 600;
 
@@ -74,12 +82,16 @@ function lineageFields(reviewerLineage: ModelLineage, authorModel?: string, auth
 	return { authorLineage, reviewerLineage, sameLineage };
 }
 
-const SYSTEM_PROMPT =
+// v1 membrane placement (eap-borrows concern 05, DESIGN.md): verdict-first ships unconditionally on
+// this output-shaped surface — the judge already emits nothing but a JSON verdict, so the block only
+// reinforces "no reasoning preamble before it", never changes the required schema below.
+export const SYSTEM_PROMPT =
 	"You are an INDEPENDENT validator judging whether a code change satisfies a list of DECLARED acceptance criteria. " +
 	"You did not write this code and must not trust the author's own claims — inspect the diff (and proof output, if given) " +
 	'directly. For EACH criterion, decide satisfied:true only if the diff visibly implements it. Respond with EXACTLY one JSON ' +
 	'object and nothing else: {"perCriterion":[{"id":"<criterion id>","satisfied":true|false,"note":"<short reason>"}],' +
-	'"confidence":0..1,"rationale":"<short overall rationale>"}.';
+	'"confidence":0..1,"rationale":"<short overall rationale>"}.\n\n' +
+	VERDICT_FIRST_BLOCK;
 
 /** Coerce a parsed object into a RawVerdict, or undefined if it has no usable `perCriterion`. */
 function coerceVerdict(obj: Record<string, unknown> | undefined): RawVerdict | undefined {
@@ -146,23 +158,32 @@ function pickCodexText(obj: Record<string, unknown>): string | undefined {
 	return undefined;
 }
 
-/** The criteria+diff+proof prompt body shared by every judge harness. */
-function judgeUserPrompt(criteria: FeatureCriterion[], diff: string, proof?: Proof): string {
+/** The criteria+diff+proof prompt body shared by every judge harness. Oversized diff/proof text is
+ *  budgeted (diff-aware for the diff, head+tail for the proof tail) rather than head-truncated
+ *  (concern 03) — the full text is persisted durably, and `gateLogPaths` collects the pointer(s) so
+ *  the caller can stamp them onto the `ValidationRecord` for post-hoc forensics. */
+async function judgeUserPrompt(criteria: FeatureCriterion[], diff: string, proof?: Proof, agentId?: string): Promise<{ text: string; gateLogPaths: string[] }> {
 	const criteriaText = criteria.map((c) => `- [${c.id}] ${c.text}`).join("\n");
-	const proofTail = proof?.detail ? `\n\nProof output (tail):\n${truncate(proof.detail, 2000)}` : "";
-	return `Declared acceptance criteria:\n${criteriaText}\n\nDiff:\n${truncate(diff, 12000)}${proofTail}`;
+	const diffX = await budgetedExcerpt(diff, 12000, { kind: "diff", agentId });
+	const proofX = proof?.detail ? await budgetedExcerpt(proof.detail, 2000, { kind: "log", agentId }) : undefined;
+	const proofTail = proofX ? `\n\nProof output (tail):\n${proofX.text}` : "";
+	const gateLogPaths = [diffX.path, proofX?.path].filter((p): p is string => !!p);
+	return { text: `Declared acceptance criteria:\n${criteriaText}\n\nDiff:\n${diffX.text}${proofTail}`, gateLogPaths };
 }
 
 /** omp judge: an independent one-shot `omp -p --model <lineage>` call. `Bun.which("omp")` missing,
  *  a timeout, or unparseable output all degrade to `undefined` via `decideTyped`'s fallback — never throws. */
 function ompJudge(): Judge {
-	return ({ criteria, diff, proof }) =>
-		decideTyped<RawVerdict | undefined>({
-			args: ["-p", "--model", validatorModel(), "--system-prompt", SYSTEM_PROMPT, judgeUserPrompt(criteria, diff, proof)],
+	return async ({ criteria, diff, proof, agentId }) => {
+		const { text, gateLogPaths } = await judgeUserPrompt(criteria, diff, proof, agentId);
+		const raw = await decideTyped<RawVerdict | undefined>({
+			args: ["-p", "--model", validatorModel(), "--system-prompt", SYSTEM_PROMPT, text],
 			parse: parseRawVerdict,
 			fallback: undefined,
 			timeoutMs: envInt("OMP_SQUAD_VALIDATOR_TIMEOUT_MS", 120_000),
 		});
+		return raw && gateLogPaths.length ? { ...raw, gateLogPaths } : raw;
+	};
 }
 
 /**
@@ -173,14 +194,17 @@ function ompJudge(): Judge {
  * OFF until its live-verify test proves codex emits parseable verdicts on real diffs.
  */
 function codexJudge(): Judge {
-	return ({ criteria, diff, proof }) =>
-		decideTyped<RawVerdict | undefined>({
+	return async ({ criteria, diff, proof, agentId }) => {
+		const { text, gateLogPaths } = await judgeUserPrompt(criteria, diff, proof, agentId);
+		const raw = await decideTyped<RawVerdict | undefined>({
 			bin: "codex",
-			args: ["exec", "-s", "read-only", `${SYSTEM_PROMPT}\n\n${judgeUserPrompt(criteria, diff, proof)}`],
+			args: ["exec", "-s", "read-only", `${SYSTEM_PROMPT}\n\n${text}`],
 			parse: parseCodexVerdict,
 			fallback: undefined,
 			timeoutMs: envInt("OMP_SQUAD_VALIDATOR_CODEX_TIMEOUT_MS", 90_000),
 		});
+		return raw && gateLogPaths.length ? { ...raw, gateLogPaths } : raw;
+	};
 }
 
 /** Selects the judge harness, kept in lockstep with `activeReviewer()` so the running reviewer and the
@@ -196,30 +220,36 @@ function defaultJudge(): Judge {
 // Advisory only, default-off (concern 06 gates it), fail-open by construction: any throw/timeout/garbage
 // degrades to `undefined` (no signal), never a fabricated verdict and never a throw that could reach a land.
 
-/** Per-lens system prompt — single-concern framing, explicitly NOT re-checking the declared criteria. */
-const LENS_SYSTEM_PROMPTS: Record<LensId, string> = {
+/** Per-lens system prompt — single-concern framing, explicitly NOT re-checking the declared criteria.
+ *  Carries `VERDICT_FIRST_BLOCK` too (concern 05: "judges/planner get verdict-first blocks"). */
+export const LENS_SYSTEM_PROMPTS: Record<LensId, string> = {
 	regression:
 		"You are an INDEPENDENT reviewer. You are NOT checking whether declared acceptance criteria are met — " +
 		"assume another reviewer already did that, and do not repeat it. Your ONLY job: does this diff introduce a " +
 		"problem the acceptance criteria would NOT have named — a security regression, a scope violation, data loss, " +
 		"a broken or silently-swallowed failure path, or a resource/performance cliff? Inspect the diff directly and " +
 		"distrust any author description. Respond with EXACTLY one JSON object and nothing else: " +
-		'{"disposition":"accept"|"object","severity":"low"|"high","claim":"<one-line reason; empty string if accept>"}.',
+		'{"disposition":"accept"|"object","severity":"low"|"high","claim":"<one-line reason; empty string if accept>"}.\n\n' +
+		VERDICT_FIRST_BLOCK,
 };
 
 /** Injected lens-judge seam (tests pass a fake). Never throws by contract — a throw/timeout/unparseable
  *  run is treated identically to `undefined` (no advisory signal). */
-export type LensJudge = (input: { lens: LensId; diff: string; proof?: Proof }) => Promise<LensVerdict | undefined>;
+export type LensJudge = (input: { lens: LensId; diff: string; proof?: Proof; agentId?: string }) => Promise<LensVerdict | undefined>;
 
 function lensTimeoutMs(): number {
 	return envInt("OMP_SQUAD_LENS_TIMEOUT_MS", 60_000);
 }
 
-/** The diff (+proof tail) a lens inspects — same truncation budget as the criteria judge. No criteria:
- *  a lens deliberately does not see the declared criteria, so it cannot just re-grade them. */
-function lensUserPrompt(diff: string, proof?: Proof): string {
-	const proofTail = proof?.detail ? `\n\nProof output (tail):\n${truncate(proof.detail, 2000)}` : "";
-	return `Diff:\n${truncate(diff, 12000)}${proofTail}`;
+/** The diff (+proof tail) a lens inspects — same excerpt budget as the criteria judge (concern 03: a
+ *  lens re-excerpting the same oversized diff writes its OWN gate-log file — see gate-logs.ts's module
+ *  doc on why paths are per-write, not deduped). No criteria: a lens deliberately does not see the
+ *  declared criteria, so it cannot just re-grade them. */
+async function lensUserPrompt(diff: string, proof?: Proof, agentId?: string): Promise<string> {
+	const diffX = await budgetedExcerpt(diff, 12000, { kind: "diff", agentId });
+	const proofX = proof?.detail ? await budgetedExcerpt(proof.detail, 2000, { kind: "log", agentId }) : undefined;
+	const proofTail = proofX ? `\n\nProof output (tail):\n${proofX.text}` : "";
+	return `Diff:\n${diffX.text}${proofTail}`;
 }
 
 /** Coerce a parsed object into a LensVerdict, or undefined if it lacks a usable `disposition`. */
@@ -277,11 +307,11 @@ export function parseLensVerdict(lens: LensId): (raw: string) => LensVerdict | u
  * multiplying the two independence axes at lens granularity.
  */
 export function ompLensJudge(lens: LensId): LensJudge {
-	return async ({ diff, proof }) => {
+	return async ({ diff, proof, agentId }) => {
 		try {
 			const reviewer = activeReviewer();
 			const system = LENS_SYSTEM_PROMPTS[lens];
-			const user = lensUserPrompt(diff, proof);
+			const user = await lensUserPrompt(diff, proof, agentId);
 			const codex = reviewer.harness === "codex";
 			return await decideTyped<LensVerdict | undefined>({
 				bin: codex ? "codex" : undefined,
@@ -310,6 +340,7 @@ export async function scoreAgainstCriteria(
 	judge: Judge = defaultJudge(),
 	authorModel?: string,
 	authorHarness?: string,
+	agentId?: string,
 ): Promise<ValidationRecord> {
 	const ranAt = Date.now();
 	const reviewer = activeReviewer();
@@ -325,12 +356,22 @@ export async function scoreAgainstCriteria(
 	}
 	let raw: RawVerdict | undefined;
 	try {
-		raw = await judge({ criteria, diff, proof });
+		raw = await judge({ criteria, diff, proof, agentId });
 	} catch {
 		raw = undefined;
 	}
 	if (!raw || raw.perCriterion.length === 0) {
-		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "judge unavailable or returned no verdict", model: reviewer.model, ...lineage, ranAt };
+		return {
+			verdict: "abstain",
+			agreement: 0,
+			confidence: 0,
+			perCriterion: [],
+			rationale: "judge unavailable or returned no verdict",
+			model: reviewer.model,
+			...lineage,
+			...(raw?.gateLogPaths?.length ? { gateLogPaths: raw.gateLogPaths } : {}),
+			ranAt,
+		};
 	}
 	const byId = new Map(raw.perCriterion.map((p) => [p.id, p] as const));
 	const perCriterion = criteria.map((c) => {
@@ -345,6 +386,7 @@ export async function scoreAgainstCriteria(
 		agreement,
 		confidence: raw.confidence ?? 0,
 		perCriterion,
+		...(raw.gateLogPaths?.length ? { gateLogPaths: raw.gateLogPaths } : {}),
 		rationale: truncate(raw.rationale ?? "", RATIONALE_MAX),
 		model: reviewer.model,
 		...lineage,
@@ -366,6 +408,10 @@ export interface ValidatorGateOpts {
 	 *  cross-lineage stamp. Absent ⇒ author lineage resolves `unknown` (an honest non-assertion). */
 	authorModel?: string;
 	authorHarness?: string;
+	/** The unit's agentId — threaded through to `budgetedExcerpt` (concern 03) so an oversized
+	 *  diff/proof gate-log lands under that agent's own `gate-logs/<agentId>/` directory. Absent ⇒
+	 *  offloaded files fall under a shared "unknown" bucket rather than being dropped. */
+	agentId?: string;
 	/** Injected lens-judge factory (concern 03) — tests pass a fake; production uses `ompLensJudge`.
 	 *  Only consulted when the master flag is on and the criteria judge returned a clean `pass`. */
 	lensJudge?: (lens: LensId) => LensJudge;
@@ -475,9 +521,9 @@ export function lensConfig(): { review: boolean; max: number; allow?: LensId[]; 
 
 /** Run a single lens, guarded — an injected fake or a real judge that throws resolves to `undefined`
  *  (no signal), never propagating out of the panel. */
-async function runOneLens(lens: LensId, make: (l: LensId) => LensJudge, diff: string, proof?: Proof): Promise<LensVerdict | undefined> {
+async function runOneLens(lens: LensId, make: (l: LensId) => LensJudge, diff: string, proof?: Proof, agentId?: string): Promise<LensVerdict | undefined> {
 	try {
-		return await make(lens)({ lens, diff, proof });
+		return await make(lens)({ lens, diff, proof, agentId });
 	} catch {
 		return undefined;
 	}
@@ -488,10 +534,10 @@ async function runOneLens(lens: LensId, make: (l: LensId) => LensJudge, diff: st
  * `Promise.allSettled` + per-lens guard means no single lens failure can reject the batch or reach the
  * land. Returns `[]` when nothing fired (docs-only, capped to 0, or all lenses gave no signal).
  */
-export async function runLensPanel(diff: string, proof: Proof | undefined, criteriaText: string, make: (l: LensId) => LensJudge): Promise<LensVerdict[]> {
+export async function runLensPanel(diff: string, proof: Proof | undefined, criteriaText: string, make: (l: LensId) => LensJudge, agentId?: string): Promise<LensVerdict[]> {
 	const lenses = selectLenses(diff, { criteriaText, max: lensMax(), allow: lensAllow() });
 	if (lenses.length === 0) return [];
-	const settled = await Promise.allSettled(lenses.map((lens) => runOneLens(lens, make, diff, proof)));
+	const settled = await Promise.allSettled(lenses.map((lens) => runOneLens(lens, make, diff, proof, agentId)));
 	const verdicts: LensVerdict[] = [];
 	for (const r of settled) if (r.status === "fulfilled" && r.value) verdicts.push(r.value);
 	return verdicts;
@@ -506,16 +552,17 @@ export async function runLensPanel(diff: string, proof: Proof | undefined, crite
 
 /** Injected re-check seam. `true` = confirmed, `false` = refuted, `undefined` = couldn't determine
  *  (treated as NOT confirmed — an unreachable re-check must never escalate). */
-export type LensVerifyJudge = (input: { lens: LensId; claim: string; diff: string; proof?: Proof }) => Promise<boolean | undefined>;
+export type LensVerifyJudge = (input: { lens: LensId; claim: string; diff: string; proof?: Proof; agentId?: string }) => Promise<boolean | undefined>;
 
 /** Its own sub-flag; only meaningful WITHIN an already-enabled panel (checked after a panel objection). */
 function lensVerifyEnabled(): boolean {
 	return envBool("OMP_SQUAD_LENS_VERIFY", false);
 }
 
-const LENS_VERIFY_SYSTEM =
+export const LENS_VERIFY_SYSTEM =
 	"You are re-checking ONE specific concern another reviewer raised about a code diff. Decide only whether that " +
-	'concern is substantiated by the diff itself. Respond with EXACTLY one JSON object: {"verdict":"confirmed"|"refuted"|"inconclusive"}.';
+	'concern is substantiated by the diff itself. Respond with EXACTLY one JSON object: {"verdict":"confirmed"|"refuted"|"inconclusive"}.\n\n' +
+	VERDICT_FIRST_BLOCK;
 
 /** Guarded parser — confirmed ⇒ true, refuted/inconclusive ⇒ false (do not escalate on doubt), else undefined. */
 function parseVerifyConfirmed(raw: string): boolean | undefined {
@@ -531,10 +578,10 @@ function parseVerifyConfirmed(raw: string): boolean | undefined {
 
 /** The re-check judge, on the same one-shot machinery (omp/codex) as the lens judge. Never throws. */
 export function ompLensVerifyJudge(): LensVerifyJudge {
-	return async ({ claim, diff, proof }) => {
+	return async ({ claim, diff, proof, agentId }) => {
 		try {
 			const reviewer = activeReviewer();
-			const user = `A reviewer flagged this specific concern about the diff:\n${truncate(claim, RATIONALE_MAX)}\n\n${lensUserPrompt(diff, proof)}`;
+			const user = `A reviewer flagged this specific concern about the diff:\n${truncate(claim, RATIONALE_MAX)}\n\n${await lensUserPrompt(diff, proof, agentId)}`;
 			const codex = reviewer.harness === "codex";
 			return await decideTyped<boolean | undefined>({
 				bin: codex ? "codex" : undefined,
@@ -554,12 +601,12 @@ export function ompLensVerifyJudge(): LensVerifyJudge {
  * caller only invokes this after the sub-flag check, so a `low` objection or an all-accept panel never
  * spends the extra call. A failed/undetermined re-check ⇒ `confirmed:false` (fail-open).
  */
-export async function runLensVerify(verdicts: LensVerdict[], diff: string, proof: Proof | undefined, make: () => LensVerifyJudge): Promise<{ lens: LensId; claim: string; confirmed: boolean } | undefined> {
+export async function runLensVerify(verdicts: LensVerdict[], diff: string, proof: Proof | undefined, make: () => LensVerifyJudge, agentId?: string): Promise<{ lens: LensId; claim: string; confirmed: boolean } | undefined> {
 	const target = verdicts.find((v) => v.disposition === "object" && v.severity === "high");
 	if (!target) return undefined;
 	let confirmed = false;
 	try {
-		confirmed = (await make()({ lens: target.lens, claim: target.claim, diff, proof })) === true;
+		confirmed = (await make()({ lens: target.lens, claim: target.claim, diff, proof, agentId })) === true;
 	} catch {
 		confirmed = false;
 	}
@@ -584,7 +631,7 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 		record = cached;
 	} else {
 		const diff = await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit);
-		record = await scoreAgainstCriteria(opts.criteria, diff, opts.proof, opts.judge, opts.authorModel, opts.authorHarness);
+		record = await scoreAgainstCriteria(opts.criteria, diff, opts.proof, opts.judge, opts.authorModel, opts.authorHarness, opts.agentId);
 		// Advisory lenses: only on a clean pass, only when enabled, strictly after the criteria judge.
 		// Build a NEW record (never mutate the one about to be cached-by-reference).
 		if (record.verdict === "pass" && lensReviewEnabled()) {
@@ -592,12 +639,12 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 			// but this is the trust-critical land path — an outer catch guarantees that even a future throw
 			// in selectLenses/runLensPanel (OUTSIDE runOneLens's per-lens guard) can never fail-CLOSE a land.
 			try {
-				const lensAdvisory = await runLensPanel(diff, opts.proof, criteriaSig, opts.lensJudge ?? ompLensJudge);
+				const lensAdvisory = await runLensPanel(diff, opts.proof, criteriaSig, opts.lensJudge ?? ompLensJudge, opts.agentId);
 				if (lensAdvisory.length > 0) {
 					record = { ...record, lensAdvisory };
 					// VERIFY re-check: structurally nested here (master flag already gated above) + its own sub-flag.
 					if (lensVerifyEnabled()) {
-						const lensVerify = await runLensVerify(lensAdvisory, diff, opts.proof, opts.lensVerifyJudge ?? ompLensVerifyJudge);
+						const lensVerify = await runLensVerify(lensAdvisory, diff, opts.proof, opts.lensVerifyJudge ?? ompLensVerifyJudge, opts.agentId);
 						if (lensVerify) record = { ...record, lensVerify };
 					}
 				}

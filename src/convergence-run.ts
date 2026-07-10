@@ -27,8 +27,10 @@ import * as path from "node:path";
 import { arm, clearFailures, disarm, handoffDoc, readFailures, readOracle, writeFailures, writeOracle as persistOracle } from "./convergence-oracle.ts";
 import { ratchet } from "./convergence-ratchet.ts";
 import { runIteration, runToConvergence, type ConvergenceDeps, type DispatchOutcome, type PlanFrontier } from "./convergence.ts";
+import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import { detectVerify } from "./intake.ts";
-import { execGatedCommand } from "./gate-runner.ts";
+import { errText } from "./err-text.ts";
+import { execGatedCommand, gateRunUnrunnable } from "./gate-runner.ts";
 import { extractGateFailures } from "./land.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import type { FeatureCriterion, VerifiedState } from "./types.ts";
@@ -282,7 +284,17 @@ export async function gitDiffSinceBase(worktree: string): Promise<string> {
  * but unfed until a real single-iteration `validate` supplies it. Reporting no known regressions is
  * the conservative, safe default until then.
  */
-function realValidate(repo: string): ConvergenceDeps["validate"] {
+/**
+ * Thrown by `suiteFailures` when the suite demonstrably never ran (eap-borrows finding #15) — spawn
+ * death, or a nonzero exit whose output carries no parseable test-failure signal (an env failure, not
+ * a real red). Caught by `realValidate` (never left to reject `deps.validate`'s documented
+ * never-throws contract) and by `runOnceIteration`, which skips the failures-sidecar write entirely
+ * for the turn: a synthetic "no failures" entry would poison the NEXT turn's set-diff into a false
+ * "new regression" once the environment recovers and the suite is red for a REAL reason.
+ */
+export class SuiteUnrunnableError extends Error {}
+
+function realValidate(repo: string, prevFailures: string[] | null, onUnrunnable: (reason: string) => void): ConvergenceDeps["validate"] {
 	return async (goalId: string) => {
 		const validator = await importValidatorModule();
 		const { parsePlanConcerns } = await import("./features.ts");
@@ -297,7 +309,19 @@ function realValidate(repo: string): ConvergenceDeps["validate"] {
 		const diff = await gitDiffAgainstHead(repo);
 		const record = await validator.scoreAgainstCriteria(criteria, diff);
 		const unmet = record.perCriterion.filter((p) => !p.satisfied).map((p) => p.id);
-		return { gap: unmet.length, confidence: record.confidence, failures: await suiteFailures(repo) };
+		try {
+			return { gap: unmet.length, confidence: record.confidence, failures: await suiteFailures(repo) };
+		} catch (err) {
+			if (!(err instanceof SuiteUnrunnableError)) throw err;
+			// Escalate WITHOUT rejecting (ConvergenceDeps.validate's documented contract: a dep that can
+			// fail resolves to a safe value, e.g. low confidence, rather than reject) — confidence -1 is
+			// always below the floor, so `runIteration`'s existing low-confidence branch escalates. The
+			// carried-forward PRIOR failure set (never a synthetic new one) is returned so a caller that
+			// insists on writing it back writes something real, not a placeholder; `runOnceIteration`
+			// skips the write outright via `onUnrunnable` below.
+			onUnrunnable(err.message);
+			return { gap: unmet.length, confidence: -1, failures: prevFailures ?? [] };
+		}
 	};
 }
 
@@ -306,22 +330,32 @@ function realValidate(repo: string): ConvergenceDeps["validate"] {
  * verify command + failure extractor the post-merge regression gate uses (`detectVerify` + gateExec +
  * `extractGateFailures`), so "never undo a verified gain" is the exact monotonicity landing enforces —
  * NOT the unmet-acceptance-criteria list (which would misfire the ratchet on iteration 1). Empty when
- * the repo declares no verify command or the suite is green. Best-effort/fail-open: a spawn error
- * yields [] so a flaky runner never wedges the loop into a false "regression → escalate".
+ * the repo declares no verify command or the suite is green.
+ *
+ * FAIL-CLOSED (eap-borrows finding #15): spawn death, or a nonzero exit with no demonstrable test
+ * execution (`gateRunUnrunnable` — the SAME classifier the post-merge regression gate uses), THROWS
+ * `SuiteUnrunnableError` instead of the OLD best-effort `[]`. `[]` reads as "no known regressions" —
+ * exactly wrong for "the suite never ran"; the loop must not treat "couldn't check" as "checked, clean".
  */
 async function suiteFailures(repo: string): Promise<string[]> {
+	const command = await detectVerify(repo);
+	if (!command) return [];
+	let run: { code: number; stdout: string; stderr: string };
 	try {
-		const command = await detectVerify(repo);
-		if (!command) return [];
-		const { stdout, stderr } = await execGatedCommand(command, repo, { mounts: [repo] });
-		return extractGateFailures(`${stdout}\n${stderr}`);
-	} catch {
-		return [];
+		run = await execGatedCommand(command, repo, { mounts: [repo] });
+	} catch (err) {
+		throw new SuiteUnrunnableError(classifyProbeFailure({ kind: "spawn-error", detail: errText(err) }).reason);
 	}
+	const output = `${run.stdout}\n${run.stderr}`;
+	if (run.code !== 0) {
+		const unrunnable = gateRunUnrunnable({ code: run.code, output }, command);
+		if (unrunnable) throw new SuiteUnrunnableError(classifyProbeFailure({ kind: "unparseable", detail: unrunnable }).reason);
+	}
+	return extractGateFailures(output);
 }
 
-async function buildDeps(args: RunArgs, repo: string): Promise<ConvergenceDeps> {
-	const { plan, dispatch, validate } = args.fixture ? fixtureDeps() : { plan: realPlan(repo), dispatch: noopDispatch, validate: realValidate(repo) };
+async function buildDeps(args: RunArgs, repo: string, prevFailures: string[] | null = null, onUnrunnable: (reason: string) => void = () => {}): Promise<ConvergenceDeps> {
+	const { plan, dispatch, validate } = args.fixture ? fixtureDeps() : { plan: realPlan(repo), dispatch: noopDispatch, validate: realValidate(repo, prevFailures, onUnrunnable) };
 	return {
 		plan,
 		dispatch,
@@ -384,9 +418,29 @@ export async function runConvergence(args: RunArgs, repo: string = process.cwd()
  * keeps pinned (§1). The first turn reads `null` (no sidecar) → baseline, no ratchet; every later turn
  * ratchets this turn's suite failures against the previous turn's, making the no-regression guarantee
  * live in the real loop (S3 — formerly dormant).
+ *
+ * Two fail-closed escalation paths (eap-borrows findings #15/#16), both short-circuiting BEFORE any
+ * of this turn's real work: a CORRUPT sidecar (#16, distinct from "no sidecar yet") escalates without
+ * ever calling `runIteration` — the corrupt file is left on disk untouched for a human to inspect, the
+ * oracle is NOT reseeded, and nothing is silently treated as a fresh baseline. A suite that
+ * demonstrably never ran this turn (#15, surfaced via `onUnrunnable`) still runs the state machine
+ * (so `plan`/`decide` still happen and confidence-floor escalation fires), but the sidecar write is
+ * skipped entirely — never a synthetic "no failures" entry.
  */
 export async function runOnceIteration(args: RunArgs, repo: string = process.cwd()): Promise<VerifiedState> {
-	const deps = await buildDeps(args, repo);
+	let prevFailures: string[] | null;
+	let sidecarCorrupt: string | undefined;
+	try {
+		prevFailures = await readFailures();
+	} catch (err) {
+		prevFailures = null;
+		sidecarCorrupt = errText(err);
+	}
+
+	let suiteUnrunnable = false;
+	const deps = await buildDeps(args, repo, prevFailures, () => {
+		suiteUnrunnable = true;
+	});
 	const current = (await readOracle()) ?? seedState(args, deps);
 
 	// Idempotent: an already-terminal oracle is left untouched (the hook would not have re-injected),
@@ -397,12 +451,28 @@ export async function runOnceIteration(args: RunArgs, repo: string = process.cwd
 		return current;
 	}
 
+	if (sidecarCorrupt) {
+		const next: VerifiedState = { ...current, decision: "escalate", pendingEscalation: true, updatedAt: Date.now() };
+		await persistOracle(next);
+		await disarm();
+		console.error(`convergence: failures sidecar corrupt — escalating without ratcheting; sidecar left on disk for inspection: ${sidecarCorrupt}`);
+		return next;
+	}
+
 	// (Re)arm with this session's identity so the next turn's Stop hook stays gated to us.
 	await arm(undefined, loopSessionId());
-	const prevFailures = await readFailures(); // null on the baseline turn — no ratchet, just record
 	const { next, failures } = await runIteration(current, deps, prevFailures);
-	await writeFailures(failures); // hand this turn's set to the next `--once` process for its ratchet
+	// A suite-unrunnable turn (finding #15) skips the write outright — `failures` here is only the
+	// carried-forward prior set (see `realValidate`), and even a same-value rewrite is the wrong
+	// guarantee: the NEXT turn must compare against the last REAL suite run, not a stand-in.
+	if (!suiteUnrunnable) await writeFailures(failures); // hand this turn's set to the next `--once` process
 	// A terminal outcome ends the loop — disarm + drop the sidecar so no stale state survives the run.
+	// Finding #6 (code-review fixlist): unlike the WRITE above (rightly skipped when suiteUnrunnable —
+	// there is no real turn's failure set to hand forward), the CLEAR here must never be skipped. A
+	// terminal decision means there is no next turn of THIS goal to serve; a sidecar left behind on an
+	// unrunnable-terminal turn survives into the NEXT goal's first (baseline) turn, which then
+	// set-diffs its real failures against a stale, unrelated set and escalates a healthy goal on its
+	// very first turn.
 	if (next.decision !== "continue") {
 		await disarm();
 		await clearFailures();

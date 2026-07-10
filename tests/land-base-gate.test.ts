@@ -13,7 +13,9 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setGateLogRoot } from "../src/gate-logs.ts";
 import { landAgent } from "../src/land.ts";
+import { proofFor, setProofRoot } from "../src/proof.ts";
 
 const GATE = "test ! -f RED"; // exit 0 (green) when RED absent, exit 1 (red) when present
 const tmps: string[] = [];
@@ -95,4 +97,119 @@ test("base already red + clean branch → lands onto the red baseline with a log
 	expect(res.detail).toContain("landed onto a red baseline");
 	expect(await out(repo, "rev-parse", "HEAD")).not.toBe(head0); // main advanced past the red base
 	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).toContain("feature.txt");
+});
+
+// ── finding #1 (eap-borrows wave 2): a branch that ADDS a new failure on top of an already-red base
+// must be refused, not silently landed as "red baseline, nothing to see here" — the OLD acceptance
+// path had NO failure-set comparison at all on this branch (unlike the full-suite regression gate),
+// so ANY red-on-red merge landed regardless of whether the branch made things worse. A gate whose
+// output distinguishes failures (Bun's own `(fail) <name>` lines) is needed to prove this — `GATE`
+// above (`test ! -f RED`) produces no diagnostic text at all, so its failures are indistinguishable
+// by design; this scenario needs a gate that actually NAMES what broke.
+
+const NAMED_GATE = "sh gate.sh"; // "(fail) base.test.ts > known" iff BASE_RED, "(fail) new.test.ts > introduced" iff NEW_RED
+
+/** A base repo whose gate.sh emits distinctly-named failures depending on tracked marker files. */
+async function namedGateRepo(prefix: string, opts: { baseRed?: boolean } = {}): Promise<string> {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(
+		path.join(repo, "gate.sh"),
+		[
+			"#!/bin/sh",
+			"out=''; code=0",
+			"[ -f BASE_RED ] && { out=\"${out}(fail) base.test.ts > known\\n\"; code=1; }",
+			"[ -f NEW_RED ]  && { out=\"${out}(fail) new.test.ts > introduced\\n\"; code=1; }",
+			"printf \"$out\"",
+			"exit \"$code\"",
+		].join("\n"),
+	);
+	if (opts.baseRed) await fs.writeFile(path.join(repo, "BASE_RED"), "broken\n");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	return repo;
+}
+
+test("finding #1: base already red + branch introduces a NEW distinct failure → REFUSED, not landed as a red baseline", async () => {
+	const repo = await namedGateRepo("land-base-red-worse-", { baseRed: true });
+	const head0 = await out(repo, "rev-parse", "HEAD");
+	// Branch does NOT fix BASE_RED and ADDS NEW_RED — a genuinely worse merged state than the base.
+	await git(repo, "branch", "feat");
+	const wt = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "land-wt-")), "feat");
+	tmps.push(path.dirname(wt));
+	await git(repo, "worktree", "add", "-q", wt, "feat");
+	await fs.writeFile(path.join(wt, "NEW_RED"), "broken\n");
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-qm", "add NEW_RED");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: NAMED_GATE });
+
+	// OLD behavior (fail-open): this merged and returned ok:true "landed onto a red baseline" —
+	// the branch's NEW failure was invisible to a binary red/green gate. NEW behavior: refused.
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("new.test.ts > introduced");
+	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // main stays at its prior (red) baseline
+});
+
+test("finding #1 guard-rail: base already red + branch does NOT add a new failure → still lands (the allowance survives)", async () => {
+	const repo = await namedGateRepo("land-base-red-same-", { baseRed: true });
+	await git(repo, "branch", "feat");
+	const wt = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "land-wt-")), "feat");
+	tmps.push(path.dirname(wt));
+	await git(repo, "worktree", "add", "-q", wt, "feat");
+	await fs.writeFile(path.join(wt, "feature.txt"), "unrelated\n"); // doesn't touch BASE_RED or add NEW_RED
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-qm", "unrelated feature");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: NAMED_GATE });
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect(res.detail).toContain("landed onto a red baseline");
+});
+
+// offload half (eap-borrows concern 07 / 03's budgetedExcerpt+writeGateLog): the red-baseline detail
+// used to plain-`truncate()` the gate output at 800 chars, losing everything past the cap. Now the
+// FULL output is durably persisted and a pointer rides along in the LandResult/proof detail text.
+test("offload half: a red-baseline land's oversized gate output is durably persisted, with a pointer in the detail", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "land-base-offload-"));
+	tmps.push(repo);
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "land-base-offload-state-"));
+	tmps.push(stateDir);
+	setGateLogRoot(stateDir);
+	setProofRoot(stateDir);
+	try {
+		await git(repo, "init", "-q", "-b", "main");
+		await git(repo, "config", "user.email", "t@t");
+		await git(repo, "config", "user.name", "t");
+		await git(repo, "config", "commit.gpgsign", "false");
+		// A gate whose FAILED output is oversized (> 800 chars, the budget for this detail site).
+		await fs.writeFile(path.join(repo, "gate.sh"), ["#!/bin/sh", `printf '(fail) base.test.ts > known\\n'`, `printf '%.0sY' $(seq 1 900)`, "printf '\\n'", "exit 1"].join("\n"));
+		await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "base (red)");
+		const wt = await branchWorktree(repo, "feat", "feature.txt");
+
+		const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "sh gate.sh" });
+
+		expect(res.ok).toBe(true);
+		expect(res.merged).toBe(true);
+		// The pointer lives on the durable post-merge PROOF record (recordMainProof), not the returned
+		// LandResult.detail itself — that's the "inspectable proof" this offload is meant to feed.
+		const proof = await proofFor(repo, repo);
+		expect(proof?.ok).toBe(false); // red baseline — main was not green, recorded honestly
+		const pointerMatch = proof?.detail.match(/full: ([^\]]+)\]/);
+		expect(pointerMatch).toBeTruthy();
+		const fullContent = await fs.readFile(pointerMatch?.[1] ?? "", "utf8");
+		expect(fullContent.length).toBeGreaterThan(900);
+		expect(fullContent).toContain("base.test.ts > known");
+	} finally {
+		setGateLogRoot(path.join(os.tmpdir(), "gate-logs-unset"));
+	}
 });

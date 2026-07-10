@@ -1,5 +1,5 @@
 # Membrane disciplines — verdict-first + minimal-code, measured, auto-reverting
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -39,3 +39,10 @@ None.
 Tests: toolGrants isolation; ACP no-stamp; breaker trips on a synthetic degraded cohort and the
 setting reads disabled afterward. Live: scratch-daemon unit under omp with the token shows the
 block in its system prompt; a judge verdict stays byte-exact on code/paths.
+
+STATUS NOTE (batch-2 review fix): the live scratch-daemon smoke was substituted with the
+FakeDriver-backed `rec.options.appendSystemPrompt` assertion in
+`tests/membrane-disciplines.test.ts`, per concern 04's accepted precedent for this same
+substitution — the assertion proves the block reaches the composed system prompt, which is as far
+as an in-process test can verify without a live `omp` binary. The scratch-daemon smoke itself
+has not been run; it remains open before this plan closes.

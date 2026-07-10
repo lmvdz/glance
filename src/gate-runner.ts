@@ -365,3 +365,26 @@ export function gateRunUnrunnable(run: GateRunLike, command?: string): string | 
 	if (command && /\btest\b/.test(command) && ZERO_TESTS_RE.test(run.output)) return "test gate executed zero tests — the suite never ran";
 	return undefined;
 }
+
+/**
+ * Did this GREEN (exit 0) gate run demonstrably NOT exercise the code under test? The counterpart of
+ * {@link gateRunUnrunnable} for the pass side: `gateRunUnrunnable` only classifies FAILED runs by
+ * design ("code === 0 ⇒ green is green" is deliberately never second-guessed there). But a green
+ * run can be just as unproven as a red one — a degraded bare-sandbox fallback or a test glob that
+ * matched zero files both exit 0 while proving nothing.
+ *
+ * Finding #3 (code-review fixlist): the degraded check MUST run before the tests-ran short-circuit.
+ * A degraded bare-image run where only a handful of the real suite resolves (missing deps, a
+ * container that can't see most of the repo) can still print "N pass" for the tests that did
+ * resolve and exit 0 — checking TESTS_RAN_RE first would trust that as a real pass. Degraded means
+ * "this environment cannot be trusted," full stop, regardless of what its truncated output claims.
+ *
+ * Was previously private to land-pr.ts (PR-mode only) — moved here and exported so the LOCAL land
+ * path (land.ts) can apply the same classifier instead of trusting any bare exit 0.
+ */
+export function greenGateUnproven(run: GateRunLike, command: string): string | undefined {
+	if (run.degraded) return "gate ran inside the DEGRADED bare sandbox image and reported success — cannot trust an unverified environment as a pass";
+	if (TESTS_RAN_RE.test(run.output)) return undefined; // tests demonstrably ran — trust the pass
+	if (/\btest\b/.test(command) && ZERO_TESTS_RE.test(run.output)) return "test gate exited 0 but executed zero tests — the suite never ran";
+	return undefined;
+}

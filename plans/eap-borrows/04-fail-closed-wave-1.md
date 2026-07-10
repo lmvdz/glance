@@ -1,5 +1,5 @@
 # Fail-closed wave 1 — classifyProbeFailure + the five no-land-refusal findings
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

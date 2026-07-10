@@ -20,7 +20,7 @@ import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "
 import { envBool, envInt } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
 import { errText } from "./err-text.ts";
-import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
+import { globalDefaultHarness, listHarnesses, listHarnessTiers } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
 	AgentLandBodySchema,
@@ -727,9 +727,15 @@ export class SquadServer {
 		// isn't offered by default). `?all=1` includes them regardless so an operator can inspect the roster.
 		if (url.pathname === "/api/harnesses") {
 			const all = url.searchParams.get("all") === "1";
+			// Tiers are additive to the existing shape — `verified` (the gate's own bit) is untouched;
+			// `tier`/`binDetected`/`usageVerified`/`alert` are honest labels alongside it, not a replacement.
+			const tiers = new Map(listHarnessTiers().map((t) => [t.name, t]));
 			return Response.json({
 				default: globalDefaultHarness(),
-				harnesses: listHarnesses(all || undefined).map((h) => ({ name: h.name, protocol: h.protocol, verified: h.verified, capabilities: h.capabilities, note: h.note })),
+				harnesses: listHarnesses(all || undefined).map((h) => {
+					const t = tiers.get(h.name);
+					return { name: h.name, protocol: h.protocol, verified: h.verified, capabilities: h.capabilities, note: t?.note ?? h.note, tier: t?.tier, binDetected: t?.binDetected, usageVerified: t?.usageVerified ?? false, alert: t?.alert };
+				}),
 			});
 		}
 		return Response.json([]);

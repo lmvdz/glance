@@ -1,5 +1,5 @@
 # Success-coupled efficiency accounting (matrix core)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,5 +1,5 @@
 # Delivery-confirmed efficiencyFlags on receipts
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

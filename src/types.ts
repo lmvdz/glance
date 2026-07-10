@@ -417,6 +417,11 @@ export interface ValidationRecord {
 	/** The one-shot re-check of a high-severity lens objection (concern 05): did a second, claim-scoped
 	 *  look confirm it? `confirmed:true` maxes the confidence penalty; it still never vetoes. */
 	lensVerify?: { lens: LensId; claim: string; confirmed: boolean };
+	/** Lossless gate-log offload (plans/eap-borrows/ concern 03): pointer path(s) under
+	 *  `<stateDir>/gate-logs/<agentId>/` to the FULL diff/proof text when either exceeded the judge's
+	 *  excerpt budget — the judge prompt itself only saw a diff-aware/head+tail excerpt with the same
+	 *  pointer appended. Absent ⇒ nothing was oversized (the common case). */
+	gateLogPaths?: string[];
 	ranAt: number;
 }
 
@@ -940,6 +945,14 @@ export interface RunReceipt {
 	validation?: ValidationRecord;
 	/** Run-end self-confidence 0..1 (src/confidence.ts); absent until computed. */
 	confidence?: number;
+	/** Efficiency-discipline tokens (a profile's `membrane:*` capability tokens, `receipts.ts`'s
+	 *  `splitCapabilityTokens`) CONFIRMED delivered to this run — stamped by `confirmDeliveredFlags`
+	 *  only when the resolved harness's `contextInjection` was `"native"`, i.e. `appendSystemPrompt`
+	 *  actually reached the child process. Requesting a flag on a harness whose contextInjection is
+	 *  `"none"` (ACP default) yields NO flag here, even though the profile asked for one — stamping at
+	 *  request time instead of confirmed-delivery time would measure a placebo, not a real behavior
+	 *  change. Absent ⇒ nothing requested, or nothing delivered. */
+	efficiencyFlags?: string[];
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
