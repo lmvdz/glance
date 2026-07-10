@@ -4,9 +4,9 @@
  * A "project" used to be an artifact of the live roster: `projects()` grouped LIVE AGENTS by repo, so a
  * repo existed in the UI only while it had a running agent. Observed on the operator's own daemon —
  * `/api/projects` returned only `omp-squad` seconds after lunarpup's last agent was reaped, so lunarpup
- * (the daemon's own cwd, holding two persisted features) vanished from the sidebar and reappeared when
- * an agent respawned. There was no POST to add a project and nothing in the web UI could switch between
- * them.
+ * (the daemon's own cwd) vanished from the sidebar and reappeared only when an agent respawned. Its two
+ * features were DERIVED from those agents, not persisted — nothing was left to anchor the repo at all.
+ * There was no POST to add a project, and nothing in the web UI could switch between them.
  *
  * Now: a durable registry, unioned with live-agent repos and persisted-feature repos, so a project can
  * never silently disappear.
