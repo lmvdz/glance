@@ -169,7 +169,8 @@ const RosterAgentRow: React.FC<{
   onSelect: () => void;
   onRowAction: (row: FleetAgentRow) => void;
   onInlineAnswer: (agentId: string, requestId: string, value: string) => void;
-}> = ({ row, selected, diffCounts, mostUrgent = false, onSelect, onRowAction, onInlineAnswer }) => {
+  onIntervene: (agentId: string) => void;
+}> = ({ row, selected, diffCounts, mostUrgent = false, onSelect, onRowAction, onInlineAnswer, onIntervene }) => {
   const { agent, attn, planItem } = row;
   const pending = agent.pending[0];
   const showInlineOptions = attn?.kind === 'blocked' && !!pending?.options?.length;
@@ -191,6 +192,15 @@ const RosterAgentRow: React.FC<{
           status={agent.status}
           variant={!selected && (agent.status === 'working' || agent.status === 'starting') ? 'dim' : undefined}
         />
+        {(agent.status === 'input' || agent.status === 'error') && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onIntervene(agent.id); }}
+            className="flex-shrink-0 rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+            style={{ minHeight: '44px', minWidth: '44px' }}
+          >
+            Step in
+          </button>
+        )}
       </div>
       <div className="flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
         {agent.branch && (
@@ -445,7 +455,7 @@ const LandRail: React.FC<{
  * land rail.
  */
 export const WorkspaceCockpit: React.FC = () => {
-  const { agents, features, audit, tasks, transcripts, sendConsoleCommand, subscribeConsole, showToast, selectTask, setView, reload } = useTaskContext();
+  const { agents, features, audit, tasks, transcripts, sendConsoleCommand, subscribeConsole, showToast, selectTask, setView, reload, openIntervene } = useTaskContext();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: 'omp default', value: '' }]);
   const [stopPending, setStopPending] = useState(false);
@@ -730,6 +740,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
             </div>
@@ -754,6 +765,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
             </>
@@ -771,6 +783,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
               {!workingExpanded && filteredWorking.length > WORKING_VISIBLE_CAP && (
@@ -796,6 +809,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
             </>
