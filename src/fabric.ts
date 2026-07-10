@@ -4,6 +4,7 @@ import { getStorageBackend } from "./dal/storage.ts";
 import { readDigest } from "./digest.ts";
 import { readFailureAnnotations } from "./failure-memory.ts";
 import { leasesFor, type LeaseEntry } from "./leases.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
 import { readReceipts } from "./receipts.ts";
 import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "./types.ts";
 
@@ -209,18 +210,40 @@ export async function loadScoutFacts(stateDir: string, issues: IssueRef[], scope
  */
 export function loadFailureFacts(stateDir: string, repos?: string[]): FabricFailureFact[] {
 	const store = readFailureAnnotations(stateDir);
+	// Normalized both sides, like every other fact type: a raw `includes()` made `/srv/app/` a different
+	// repo from `/srv/app` and silently dropped its recurring-failure memory.
+	const admit = repoAdmitter(repos);
 	const facts: FabricFailureFact[] = [];
 	for (const a of Object.values(store)) {
-		if (repos?.length && !repos.includes(a.repo)) continue;
+		if (repos?.length && !admit(a.repo)) continue;
 		facts.push({ type: "failure", source: { repo: a.repo }, fingerprint: a.fingerprint, branch: a.branch, rootCause: a.rootCause, at: a.at });
 	}
 	return facts;
 }
 
+/**
+ * When a caller names its repos, EVERY fact type must honour that — not just the four that used to.
+ *
+ * `decisions`, `failures`, `leases` and `scout` were repo-filtered; `agents`, `digests` and the
+ * receipts behind `hotAreas` were not. So `?repo=A` on the Knowledge view listed repo B's agents, and
+ * the cold-start primer — which asks for exactly one repo — could BM25-rank repo B's digest to the top
+ * and paste it into a unit working in repo A. Cross-repo (and, in DB-root mode, cross-tenant-adjacent)
+ * bleed of another codebase's summarized source into a system prompt. (gpt-5.6-sol)
+ *
+ * Fails closed: a fact whose repo can't be resolved is dropped rather than admitted. Both sides are
+ * normalized so a trailing slash doesn't silently empty the snapshot.
+ */
+function repoAdmitter(repos: string[] | undefined): (repo: string | undefined) => boolean {
+	if (!repos?.length) return () => true; // unrestricted — the caller named no repos
+	const keys = new Set(repos.map(normalizeRepoPath));
+	return (repo) => repo !== undefined && keys.has(normalizeRepoPath(repo));
+}
+
 export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnapshot> {
 	const generatedAt = deps.now?.() ?? Date.now();
 	const scope = scopeFor(deps.actor, deps.agents);
-	const scopedAgents = deps.agents.filter((a) => scope.has(a.id));
+	const inRepo = repoAdmitter(deps.repos);
+	const scopedAgents = deps.agents.filter((a) => scope.has(a.id) && inRepo(a.repo));
 
 	// The empty-Knowledge-view incident: for a human actor, `scopeFor` returns the CURRENT live
 	// roster's ids as its "no restriction" proxy — correct for picking which AgentDTOs appear in
@@ -236,7 +259,7 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 	// of every id found on disk" — the `receiptAgentIds`/`digestAgentIds` directory listings.
 	const readScope = deps.actor.origin === "agent" ? scope : undefined;
 
-	const receipts = await scopedReceipts(deps.stateDir, readScope);
+	const receipts = (await scopedReceipts(deps.stateDir, readScope)).filter((r) => inRepo(r.repo));
 	const latestRun = new Map<string, RunReceipt>();
 	for (const r of receipts) if (!latestRun.get(r.agentId) || (latestRun.get(r.agentId)?.startedAt ?? 0) < r.startedAt) latestRun.set(r.agentId, r);
 
@@ -271,7 +294,11 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		const digest = await readDigest(deps.stateDir, id).catch(() => "");
 		if (digest) {
 			const run = latestRun.get(id);
-			digests.push({ type: "digest", source: { agentId: id, runId: run?.runId, repo: digestRepoById.get(id) ?? run?.repo }, digest, ts: run?.endedAt ?? run?.startedAt });
+			// A digest is a summary OF a repo's source. When the caller named repos, an unattributable
+			// digest (no live agent, no surviving receipt) is dropped: we cannot prove it belongs here.
+			const repo = digestRepoById.get(id) ?? run?.repo;
+			if (!inRepo(repo)) continue;
+			digests.push({ type: "digest", source: { agentId: id, runId: run?.runId, repo }, digest, ts: run?.endedAt ?? run?.startedAt });
 		}
 	}
 
@@ -284,7 +311,9 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 			deps.repos?.length ? deps.repos : scopedAgents.length ? scopedAgents.map((a) => a.repo) : (deps.features ?? []).map((f) => f.repo),
 		),
 	];
-	const repoSet = new Set(repos);
+	// Normalized, like `repoAdmitter` — a raw Set made `/srv/app/` a different repo from `/srv/app` and
+	// silently dropped that feature's decisions from the primer.
+	const repoSet = new Set(repos.map(normalizeRepoPath));
 	const issueLists = await Promise.all(repos.map((repo) => (deps.listIssues ? deps.listIssues(repo).catch(() => null) : Promise.resolve(null))));
 	const scout = await loadScoutFacts(deps.stateDir, issueLists.flatMap((x) => x ?? []), readScope);
 
@@ -308,7 +337,7 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		// leases, issues) — NOT the raw `deps.repos`. When the caller omits `repos` (the default
 		// /api/fabric path with no ?repo), filtering on `deps.repos?.length` short-circuits false and
 		// leaks decisions from every repo/tenant into an actor's scoped fabric + cold-start primer.
-		if (!repoSet.has(f.repo)) continue;
+		if (!repoSet.has(normalizeRepoPath(f.repo))) continue;
 		for (const d of f.decisions ?? []) {
 			if (!d.text?.trim()) continue;
 			decisions.push({

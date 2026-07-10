@@ -148,6 +148,34 @@ export function resolveHarness(p: { harness?: string; runtime?: string }): Harne
 	return d;
 }
 
+/**
+ * Will `appendSystemPrompt` (fabric primer, tool-grant scoping, profile memory, authored spec) actually
+ * REACH the agent this record will spawn?
+ *
+ * The registry has always DECLARED this per harness (`capabilities.contextInjection`), but nothing
+ * consulted it: the harness scorecard credited a unit with "instructions" whenever a primer was BUILT,
+ * regardless of whether the driver had any channel to deliver it. An `auggie`/ACP unit scored
+ * `hasInstructions: true` while running with an empty system prompt — the scorecard was measuring our
+ * intent, not the agent's reality. Same class of defect as the `primer-empty` metric that lived inside
+ * the branch it was meant to measure. (gpt-5.6-sol)
+ *
+ * A workflow unit's context reaches its inner omp `RpcAgent`, and a sandboxed unit's reaches the omp
+ * child inside the container — both native. ACP has no system-prompt slot at all; it delivers only when
+ * the operator opts into the lossy first-turn injection (`OMP_SQUAD_ACP_CONTEXT=prompt`).
+ */
+export function contextReachesAgent(p: { harness?: string; runtime?: string; sandbox?: unknown; workflow?: unknown }, env: NodeJS.ProcessEnv = process.env): boolean {
+	if (p.workflow || p.sandbox) return true; // inner agent is omp over rpc — a native channel
+	let d: HarnessDescriptor;
+	try {
+		d = resolveHarness(p);
+	} catch {
+		return false; // unknown harness ⇒ never CLAIM delivery (create() will throw anyway)
+	}
+	if (d.capabilities.contextInjection === "native") return true;
+	if (d.protocol === "acp") return env.OMP_SQUAD_ACP_CONTEXT === "prompt";
+	return false;
+}
+
 /** Resolve the binary (argv[0]) for a descriptor: per-agent override > GLANCE_BIN for the default
  *  harness > the descriptor's own bin. GLANCE_BIN only overrides the DEFAULT harness (a custom omp
  *  fork at a nonstandard path), never every harness. */

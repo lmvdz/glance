@@ -34,12 +34,17 @@ export interface SandboxAgentOptions {
 	model?: string;
 	approvalMode?: ApprovalMode;
 	thinking?: ThinkingLevel;
+	/** omp-squad context (fabric primer, tool-grant scoping, profile memory, authored spec) for the omp
+	 *  child INSIDE the container. It was silently dropped: `create()` never passed it here, so every
+	 *  sandboxed unit ran with an empty system prompt while the scorecard reported otherwise. The child
+	 *  is plain `omp --mode rpc`, which has taken `--append-system-prompt` all along. */
+	appendSystemPrompt?: string;
 	/** docker binary override. */
 	docker?: string;
 	/** Extra `docker run` args — e.g. `["--network=none"]` for network isolation. */
 	runArgs?: string[];
 	/** Build the in-container agent argv. Default: `omp --mode rpc`. Tests inject a fake-omp server. */
-	agentCommand?: (o: { workdir: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel }) => string[];
+	agentCommand?: (o: { workdir: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; appendSystemPrompt?: string }) => string[];
 }
 
 interface ModelInfo {
@@ -89,7 +94,7 @@ export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
 
 		try {
 			const build = this.opts.agentCommand ?? defaultAgentCommand;
-			const cmd = build({ workdir: this.workdir, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking });
+			const cmd = build({ workdir: this.workdir, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking, appendSystemPrompt: this.opts.appendSystemPrompt });
 			const noSign = Object.entries(gitNoSignEnv({})).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
 			const proc = Bun.spawn([this.docker, "exec", "-i", "-e", "PI_RPC_EMIT_TITLE=0", ...noSign, this.container, ...cmd], {
 				stdin: "pipe",
@@ -326,10 +331,14 @@ export class SandboxAgentDriver extends EventEmitter implements AgentDriver {
 	}
 }
 
-function defaultAgentCommand(o: { workdir: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel }): string[] {
+/** Exported for the delivery test: the primer must be ONE argv element on the in-container omp child. */
+export function defaultAgentCommand(o: { workdir: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; appendSystemPrompt?: string }): string[] {
 	const argv = ["omp", "--mode", "rpc", "--cwd", o.workdir];
 	if (o.model) argv.push("--model", o.model);
 	if (o.approvalMode) argv.push("--approval-mode", o.approvalMode);
 	if (o.thinking) argv.push("--thinking", o.thinking);
+	// One argv element, never a shell string: the primer is untrusted third-party text and this argv is
+	// handed to `docker run` unquoted-by-us. Newlines are safe; interpolation is not, so never join it in.
+	if (o.appendSystemPrompt) argv.push("--append-system-prompt", o.appendSystemPrompt);
 	return argv;
 }

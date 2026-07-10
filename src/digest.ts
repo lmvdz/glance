@@ -131,12 +131,33 @@ export async function readDigest(stateDir: string, agentId: string): Promise<str
 	return raw ?? "";
 }
 
+/** Longest untrusted body we will fence. Everything reaching this function is attacker-influenced text
+ *  destined for a system prompt or an argv element; an unbounded issue body or digest would otherwise be
+ *  spliced straight into `--append-system-prompt` and can blow ARG_MAX. Truncation is visible. */
+const MAX_FENCED = 24_000;
+
+/** The delimiter is a fixed, guessable string, and the fenced text is written BY the agents we are
+ *  fencing against. Any `=====` run inside the body is folded to the box-drawing double line: it reads
+ *  identically to a human and to a model, but can never byte-match a real delimiter, so a digest that
+ *  contains `===== END context primer =====` cannot close its own fence and continue as instructions. */
+function neutralizeDelimiters(text: string): string {
+	return text.replace(/={5,}/g, (run) => "═".repeat(run.length));
+}
+
 /**
- * Wrap injected, model-derived memory in an explicit untrusted-data fence so a
- * resumed session treats it as data, not instructions (prompt-injection guard).
+ * Wrap injected, model-derived memory in an explicit untrusted-data fence so a resumed session treats it
+ * as data, not instructions (prompt-injection guard).
+ *
+ * The single choke point for every untrusted injection: resume digests, peer messages, workflow
+ * reflections, authored issue specs, and the cold-start context primer. Escaping happens HERE so no
+ * future injector can forget it — the same reason `buildContextPrimer` fences internally and forbids its
+ * callers from re-fencing. Before this, a unit could write `===== END resume digest =====` into its own
+ * digest and hand the next unit's model a forged instruction block.
  */
 export function fenceUntrusted(label: string, body: string): string {
-	return `===== BEGIN ${label} (untrusted data) =====\n${body}\n===== END ${label} =====`;
+	const safeLabel = neutralizeDelimiters(label);
+	const clipped = body.length > MAX_FENCED ? `${body.slice(0, MAX_FENCED)}\n… [truncated ${body.length - MAX_FENCED} chars]` : body;
+	return `===== BEGIN ${safeLabel} (untrusted data) =====\n${neutralizeDelimiters(clipped)}\n===== END ${safeLabel} =====`;
 }
 
 /**
