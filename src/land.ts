@@ -231,8 +231,49 @@ async function excerptForDetail(s: string, n: number, agentId?: string): Promise
 
 const FAILURE_DURATION_SUFFIX = /\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/;
 
+/**
+ * eap-borrows follow-up 4: `extractGateFailures`'s whole-output fallback (below — a gate with no
+ * `(fail)` lines) uses the ENTIRE trimmed output as the failure identity, so two runs of the exact same
+ * logical failure only compare equal if the output is byte-identical. Interior timestamps, elapsed
+ * durations, temp paths, PIDs, and hex object ids differ run-to-run even when the underlying failure is
+ * unchanged, which silently degraded the red-baseline allowance (`decideRegressionGate`) to
+ * always-refuse on any repo whose gate output carries one of these — indistinguishable from a genuine
+ * new regression, with force-land as the only escape.
+ *
+ * Conservative by construction: each pattern only fires on a substring that is PROVABLY volatile (a
+ * number directly glued to a duration unit, an ISO/clock timestamp, a `/tmp` path, a `pid N` token, or a
+ * long-enough token that is genuinely hex — contains at least one a-f letter, so a plain meaningful
+ * decimal number like a line number or byte count is never touched). Anything else, including the
+ * failure's actual message text, passes through untouched — two genuinely DIFFERENT failures still
+ * normalize to different strings and must never collide.
+ */
+const VOLATILE_DURATION = /\b\d+(?:\.\d+)?\s?(?:ns|[µu]s|ms|s)\b/g;
+const VOLATILE_ISO_TIMESTAMP = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g;
+const VOLATILE_CLOCK_TIMESTAMP = /\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/g;
+const VOLATILE_TMP_PATH = /\/(?:private\/)?(?:tmp|var\/tmp)\/[^\s"'):,]+/g;
+const VOLATILE_PID = /\bpid[:\s]+\d+\b/gi;
+const VOLATILE_HEXLIKE = /\b[0-9a-f]{7,40}\b/gi;
+
+/** Strip run-to-run volatile tokens from a SINGLE line — see `VOLATILE_*` doc above. Applied per-line
+ *  (never across a whole multi-line blob at once) so the trailing-`$`-anchored `FAILURE_DURATION_SUFFIX`
+ *  below still means "end of THIS line", not "end of the whole output". */
+function normalizeVolatileLine(line: string): string {
+	return line
+		.replace(FAILURE_DURATION_SUFFIX, "") // a trailing bracketed duration, brackets and all (pre-existing behavior)
+		.replace(VOLATILE_ISO_TIMESTAMP, "<TS>")
+		.replace(VOLATILE_CLOCK_TIMESTAMP, "<TS>")
+		.replace(VOLATILE_DURATION, "<DUR>")
+		.replace(VOLATILE_TMP_PATH, "<TMPPATH>")
+		.replace(VOLATILE_PID, "pid <PID>")
+		.replace(VOLATILE_HEXLIKE, (m) => (/[a-f]/i.test(m) ? "<HEXID>" : m));
+}
+
 function normalizeFailureIdentity(failure: string): string {
-	return failure.replace(FAILURE_DURATION_SUFFIX, "").trim();
+	return failure
+		.split("\n")
+		.map(normalizeVolatileLine)
+		.join("\n")
+		.trim();
 }
 
 function uniqueSortedFailures(failures: Iterable<string>): string[] {
@@ -254,8 +295,10 @@ export function extractGateFailures(output: string, fallback = "gate"): string[]
 	// compared set-equal, and silently allowed a red-baseline re-merge that had actually introduced a new
 	// failure. Use the WHOLE trimmed output as the identity instead — a genuinely reproducible, UNCHANGED
 	// brownfield failure (the same check/tsc-only gate failing exactly the same way on base and merged)
-	// still compares byte-identical and allows the red-baseline landing (never wedging that repo), but a
-	// materially different failure no longer collides just because its first line happens to match.
+	// still compares equal (after `normalizeFailureIdentity` collapses run-to-run volatile tokens — follow-
+	// up 4, see the doc above `VOLATILE_DURATION` et al.) and allows the red-baseline landing (never
+	// wedging that repo), but a materially different failure no longer collides just because its first
+	// line happens to match.
 	const trimmed = output.trim();
 	return uniqueSortedFailures([trimmed.length > 0 ? trimmed : fallback]);
 }

@@ -86,7 +86,7 @@ export interface FeatureCriterionDTO {
 /** Mirrors backend `ValidationRecord` (src/types.ts) — Epic 3's independent-validator verdict for an
  *  agent's most recent land attempt. */
 export interface ValidationRecordDTO {
-  verdict: "pass" | "veto" | "abstain" | "skipped";
+  verdict: "pass" | "veto" | "abstain" | "skipped" | "inconclusive";
   agreement: number;
   confidence: number;
   perCriterion: { id: string; satisfied: boolean; note?: string }[];

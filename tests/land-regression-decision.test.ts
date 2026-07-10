@@ -49,6 +49,44 @@ test("finding #8: an UNCHANGED check/tsc-only red baseline still compares equal 
 	expect(decideRegressionGate(base, merged)).toEqual({ allow: true, newRegressions: [] });
 });
 
+// eap-borrows follow-up 4: the whole-output fallback identity is nondeterminism-sensitive — interior
+// timestamps/durations/temp paths/PIDs/hex ids differ run-to-run even when the underlying failure is
+// unchanged, so base-vs-merged never compared equal on such a repo (degrading the red-baseline
+// allowance to always-refuse; force-land was the only escape). These three tests reproduce that on
+// CURRENT (pre-fix) code — they FAIL before `normalizeFailureIdentity` normalizes volatile tokens.
+test("follow-up 4(a): the SAME logical failure with different timestamps/durations/temp-paths/pids/hex-ids compares EQUAL", () => {
+	const baseOutput =
+		"$ some-check\n" +
+		"2026-07-09T12:00:01.123Z [worker pid 4821] wrote /tmp/omp-squad-a1b2c3d/scratch.log\n" +
+		"error: assertion failed at src/foo.ts:42\n" +
+		"Ran 12 tests across 3 files. [196.72s]\n";
+	const mergedOutput =
+		"$ some-check\n" +
+		"2026-07-10T03:14:59.987Z [worker pid 9310] wrote /tmp/omp-squad-z9y8x7w/scratch.log\n" +
+		"error: assertion failed at src/foo.ts:42\n" +
+		"Ran 12 tests across 3 files. [204.05s]\n";
+	const base = extractGateFailures(baseOutput);
+	const merged = extractGateFailures(mergedOutput);
+	expect(base).toEqual(merged);
+	expect(decideRegressionGate(base, merged)).toEqual({ allow: true, newRegressions: [] });
+});
+
+test("follow-up 4(b): two GENUINELY different failures (different assertion) still compare UNEQUAL even once volatile tokens are stripped", () => {
+	const baseOutput = "$ some-check\n2026-07-09T12:00:01.123Z [worker pid 4821] wrote /tmp/omp-squad-a1b2c3d/scratch.log\nerror: assertion failed at src/foo.ts:42\nRan 12 tests across 3 files. [196.72s]\n";
+	const mergedOutput = "$ some-check\n2026-07-10T03:14:59.987Z [worker pid 9310] wrote /tmp/omp-squad-z9y8x7w/scratch.log\nerror: assertion failed at src/bar.ts:17\nRan 12 tests across 3 files. [204.05s]\n";
+	const base = extractGateFailures(baseOutput);
+	const merged = extractGateFailures(mergedOutput);
+	expect(base).not.toEqual(merged);
+	const decision = decideRegressionGate(base, merged);
+	expect(decision.allow).toBe(false);
+	expect(decision.newRegressions).toEqual(merged);
+});
+
+test("follow-up 4(c): existing (fail)-line behavior is unchanged — bun-style fail lines still parse and de-duplicate the same way", () => {
+	const output = "ok\n(fail) tests/auth.test.ts > login [1.23ms]\n(fail) tests/api.test.ts > returns 500 [2s]\n";
+	expect(extractGateFailures(output)).toEqual(["tests/api.test.ts > returns 500", "tests/auth.test.ts > login"]);
+});
+
 test('finding #8: two DIFFERENT check/tsc-only failures whose FIRST LINE coincides no longer collide as "the same" red', () => {
 	// OLD behavior (fail-open, the residual "equal-red" hole): extractGateFailures used only the first
 	// line as identity — both outputs below share the exact same first line ("$ tsc --noEmit") while

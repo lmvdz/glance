@@ -424,6 +424,11 @@ export interface ValidatorGateResult {
 	record: ValidationRecord;
 	/** Human-readable veto reason — set ONLY when `record.verdict === "veto"`. */
 	veto?: string;
+	/** Human-readable "diff could not be computed" reason (eap-borrows follow-up 7) — set ONLY when
+	 *  `record.verdict === "inconclusive"`. Distinct from `veto`: this is an ENVIRONMENTAL fault, never a
+	 *  branch defect, so the caller must treat it as a RETRYABLE hold (never a silent pass, never a
+	 *  permanent park) — never fold it into the same non-retryable refusal path as `veto`. */
+	inconclusive?: string;
 }
 
 /** On by default; OMP_SQUAD_VALIDATOR=0 disables the gate entirely (verdict "skipped"), mirroring
@@ -445,41 +450,77 @@ const gateCache = new Map<string, ValidationRecord>();
  *  diff.mnemonicPrefix. `-c` overrides must precede the `diff` subcommand. */
 const DIFF_PREFIX_ARGS = ["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"];
 
-async function gitOut(args: string[], cwd: string): Promise<string> {
-	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "ignore" });
-	const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-	return out.trim();
+/** Runs a git command and surfaces whether it actually SUCCEEDED (exit 0), instead of collapsing a
+ *  real git failure and a legitimate empty result to the same `""` (eap-borrows follow-up 7: that
+ *  collapse is exactly how `computeLandDiff` used to make a git fault indistinguishable from a genuine
+ *  no-op land). A spawn-level throw (e.g. no `git` on PATH) is caught and reported as `ok:false` too —
+ *  never lets a real fault escape as an exception the caller has to separately guard. */
+async function gitOutChecked(args: string[], cwd: string): Promise<{ ok: boolean; out: string }> {
+	try {
+		const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], { cwd, env: { ...process.env, ...GIT_HARDEN_ENV }, stdout: "pipe", stderr: "ignore" });
+		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		return { ok: code === 0, out: out.trim() };
+	} catch {
+		return { ok: false, out: "" };
+	}
 }
 
-/** The diff a land would merge: `<base>...HEAD` inside the worktree. `base` prefers the proof's
- *  recorded target-repo HEAD (the exact base the proof ran against); absent a proof, falls back to
- *  the repo's current HEAD. Never throws — an unreadable worktree yields an empty diff, which
- *  `scoreAgainstCriteria` treats as an abstain (never a veto), not a crash. */
-async function computeLandDiff(repo: string, worktree: string, baseCommit?: string): Promise<string> {
+/**
+ * The diff a land would merge: `<base>...HEAD` inside the worktree. `base` prefers the proof's
+ * recorded target-repo HEAD (the exact base the proof ran against); absent a proof, falls back to the
+ * repo's current HEAD.
+ *
+ * Returns `null` on a genuine FAILURE to compute the diff (a git command exited non-zero, or the spawn
+ * itself threw) — distinct from `""`, which means the diff was computed successfully and is genuinely
+ * empty (eap-borrows follow-up 7: `computeLandDiff` used to return `""` for BOTH a git fault and a real
+ * no-op land, so `scoreAgainstCriteria` silently abstained — and an abstain LANDS — on an environmental
+ * hiccup with no semantic check at all). `validatorGate` reads `null` as "inconclusive": when criteria
+ * are declared it blocks the land as a RETRYABLE hold (never a silent pass, never a permanent park).
+ *
+ * The best-effort in-place recovery path below (worktree === repo) is deliberately exempt: an
+ * unresolvable upstream or a failed `merge-base`/recovery `diff` there is a normal, already-adjudicated
+ * outcome (see the comment at that branch) — it still falls through to an honest empty-diff abstain,
+ * exactly as before this fix. Only a failure on the PRIMARY path (resolving `base`, or the first `diff`
+ * call) is promoted to `null`.
+ */
+async function computeLandDiff(repo: string, worktree: string, baseCommit?: string): Promise<string | null> {
 	try {
-		const base = baseCommit || (await gitOut(["rev-parse", "HEAD"], repo));
-		if (!base) return "";
+		let base = baseCommit;
+		if (!base) {
+			const headRes = await gitOutChecked(["rev-parse", "HEAD"], repo);
+			if (!headRes.ok) return null; // couldn't even resolve HEAD — an environmental fault, not "nothing to diff"
+			base = headRes.out;
+			if (!base) return ""; // clean exit, empty output (e.g. a genuinely unborn HEAD) — honest abstain, unchanged
+		}
 		// `--no-ext-diff` is load-bearing: GIT_HARDEN_ARGS sets `-c diff.external=` (empty), which makes
 		// git try to exec "" as an external differ and die with EMPTY output for every diff. `--no-ext-diff`
 		// forces the builtin diff (and still ignores any malicious repo-level diff.external — the harden intent).
 		// `DIFF_PREFIX_ARGS` pins the standard `a/`…`b/` header prefixes so the lens selector's file parser
 		// (changedFilesFromDiff) is reliable even under an operator's diff.noprefix/mnemonicPrefix git config.
-		let diff = await gitOut([...DIFF_PREFIX_ARGS, "diff", "--no-ext-diff", `${base}...HEAD`], worktree);
+		const first = await gitOutChecked([...DIFF_PREFIX_ARGS, "diff", "--no-ext-diff", `${base}...HEAD`], worktree);
+		if (!first.ok) return null; // the diff command itself failed — a real fault, not a no-op land
+		let diff = first.out;
 		// In-place (worktree === repo) the base collapses to HEAD, so `base...HEAD` is empty even though
 		// the unit made real commits. Recover the true change set via the merge-base with the tracked
 		// upstream / default branch when one is resolvable; otherwise leave it empty (→ honest abstain).
+		// Best-effort: a failure anywhere in this recovery attempt falls through to the same honest abstain,
+		// never promoted to `null` — the PRIMARY diff above already succeeded (cleanly empty), so this is a
+		// normal, already-adjudicated outcome, not a fault.
 		if (!diff && worktree === repo) {
 			const upstream =
-				(await gitOut(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)) ||
-				(await gitOut(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo));
+				(await gitOutChecked(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)).out ||
+				(await gitOutChecked(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo)).out;
 			if (upstream) {
-				const mergeBase = await gitOut(["merge-base", upstream, "HEAD"], repo);
-				if (mergeBase && mergeBase !== base) diff = await gitOut([...DIFF_PREFIX_ARGS, "diff", "--no-ext-diff", `${mergeBase}...HEAD`], worktree);
+				const mergeBase = await gitOutChecked(["merge-base", upstream, "HEAD"], repo);
+				if (mergeBase.ok && mergeBase.out && mergeBase.out !== base) {
+					const second = await gitOutChecked([...DIFF_PREFIX_ARGS, "diff", "--no-ext-diff", `${mergeBase.out}...HEAD`], worktree);
+					if (second.ok) diff = second.out;
+				}
 			}
 		}
 		return diff;
 	} catch {
-		return "";
+		return null; // an actual thrown fault escaping the checked helpers above — not "nothing changed"
 	}
 }
 
@@ -630,29 +671,58 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 	if (cached) {
 		record = cached;
 	} else {
-		const diff = await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit);
-		record = await scoreAgainstCriteria(opts.criteria, diff, opts.proof, opts.judge, opts.authorModel, opts.authorHarness, opts.agentId);
-		// Advisory lenses: only on a clean pass, only when enabled, strictly after the criteria judge.
-		// Build a NEW record (never mutate the one about to be cached-by-reference).
-		if (record.verdict === "pass" && lensReviewEnabled()) {
-			// Defensive outer catch: the panel is fail-open by construction (every judge call is guarded),
-			// but this is the trust-critical land path — an outer catch guarantees that even a future throw
-			// in selectLenses/runLensPanel (OUTSIDE runOneLens's per-lens guard) can never fail-CLOSE a land.
-			try {
-				const lensAdvisory = await runLensPanel(diff, opts.proof, criteriaSig, opts.lensJudge ?? ompLensJudge, opts.agentId);
-				if (lensAdvisory.length > 0) {
-					record = { ...record, lensAdvisory };
-					// VERIFY re-check: structurally nested here (master flag already gated above) + its own sub-flag.
-					if (lensVerifyEnabled()) {
-						const lensVerify = await runLensVerify(lensAdvisory, diff, opts.proof, opts.lensVerifyJudge ?? ompLensVerifyJudge, opts.agentId);
-						if (lensVerify) record = { ...record, lensVerify };
+		const diffOrNull = await computeLandDiff(opts.repo, opts.worktree, opts.proof?.baseCommit);
+		// eap-borrows follow-up 7: `null` means the diff itself could not be COMPUTED (a git fault) —
+		// distinct from `""`, a diff that computed cleanly and is genuinely empty. With no declared
+		// criteria there is nothing to validate either way, so the fault is moot: fall through to
+		// `scoreAgainstCriteria`'s own `criteria.length === 0` ⇒ "skipped" path (an empty-string diff is
+		// fine there since it's never inspected). Only WITH declared criteria does the distinction matter:
+		// silently treating a fault as an empty diff would abstain — and an abstain LANDS — grading a real
+		// unit's real criteria against an environmental hiccup instead of its actual diff.
+		if (diffOrNull === null && opts.criteria.length > 0) {
+			record = {
+				verdict: "inconclusive",
+				agreement: 0,
+				confidence: 0,
+				perCriterion: [],
+				rationale: "the land diff could not be computed (git fault) — declared criteria were not evaluated",
+				ranAt: Date.now(),
+			};
+		} else {
+			const diff = diffOrNull ?? "";
+			record = await scoreAgainstCriteria(opts.criteria, diff, opts.proof, opts.judge, opts.authorModel, opts.authorHarness, opts.agentId);
+			// Advisory lenses: only on a clean pass, only when enabled, strictly after the criteria judge.
+			// Build a NEW record (never mutate the one about to be cached-by-reference).
+			if (record.verdict === "pass" && lensReviewEnabled()) {
+				// Defensive outer catch: the panel is fail-open by construction (every judge call is guarded),
+				// but this is the trust-critical land path — an outer catch guarantees that even a future throw
+				// in selectLenses/runLensPanel (OUTSIDE runOneLens's per-lens guard) can never fail-CLOSE a land.
+				try {
+					const lensAdvisory = await runLensPanel(diff, opts.proof, criteriaSig, opts.lensJudge ?? ompLensJudge, opts.agentId);
+					if (lensAdvisory.length > 0) {
+						record = { ...record, lensAdvisory };
+						// VERIFY re-check: structurally nested here (master flag already gated above) + its own sub-flag.
+						if (lensVerifyEnabled()) {
+							const lensVerify = await runLensVerify(lensAdvisory, diff, opts.proof, opts.lensVerifyJudge ?? ompLensVerifyJudge, opts.agentId);
+							if (lensVerify) record = { ...record, lensVerify };
+						}
 					}
+				} catch {
+					// advisory only — a lens failure never touches the record's verdict or the land decision
 				}
-			} catch {
-				// advisory only — a lens failure never touches the record's verdict or the land decision
 			}
 		}
-		if (cacheKey) gateCache.set(cacheKey, record);
+		// Never cache "inconclusive": it is an ENVIRONMENTAL fault, not a fact about this (commit,tree) —
+		// caching it would poison every future retry against the SAME proof forever, even after the git
+		// fault clears, turning a transient hiccup into a permanent wedge (the exact 1,381-refusal
+		// interlock shape this codebase has already been bitten by once). Leaving it uncached means the
+		// next retryable attempt re-runs `computeLandDiff` from scratch, so the moment the environment
+		// recovers the diff computes cleanly, the verdict resolves to pass/veto/abstain, and THAT gets
+		// cached and lands normally.
+		if (cacheKey && record.verdict !== "inconclusive") gateCache.set(cacheKey, record);
+	}
+	if (record.verdict === "inconclusive") {
+		return { record, inconclusive: `validator inconclusive: diff could not be computed (environmental git fault, not a branch defect) — retry` };
 	}
 	if (record.verdict !== "veto") return { record };
 	const unmet = record.perCriterion.filter((p) => !p.satisfied).map((p) => p.id);

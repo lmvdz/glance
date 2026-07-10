@@ -83,6 +83,11 @@ export function validationBadge(agent: Pick<AgentDTO, 'validation'>): { label: s
       return { label: 'validated', cls: 'bg-emerald-100 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400', title };
     case 'abstain':
       return { label: 'unjudged', cls: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400', title };
+    case 'inconclusive':
+      // eap-borrows follow-up 7: the land diff couldn't be COMPUTED (a git fault), so the declared
+      // criteria were never evaluated — a retryable hold, NOT a pass and NOT a veto. Amber like a
+      // held state so it never reads as "ready to land".
+      return { label: 'inconclusive', cls: 'bg-amber-100 font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-400', title };
   }
 }
 
