@@ -64,6 +64,9 @@ export function restActionTier(method: string, pathname: string): Role {
 	// agents against. Reading the list is viewer; adding/removing one is admin — same tier as installing
 	// a capability, and for the same reason: it widens what the daemon may touch.
 	if (pathname === "/api/projects") return method === "GET" ? "viewer" : "admin";
+	// Reading an answer is a read. ASKING spends model tokens and spawns a unit against a repo, which is
+	// everyday driving, not administration — the same tier as creating an agent. (R5)
+	if (pathname === "/api/answers" || pathname.startsWith("/api/answers/")) return method === "GET" ? "viewer" : "operator";
 	if (pathname === "/api/upgrade") return "admin";
 	if (pathname === "/api/settings/feature-flags") return "admin";
 	if (pathname === "/api/policy/rules") return method === "GET" ? "viewer" : "admin";

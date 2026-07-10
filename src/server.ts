@@ -63,6 +63,7 @@ import {
 	PlanVoteCastBodySchema,
 	PushSubscriptionBodySchema,
 	SpawnBodySchema,
+	AskBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
 } from "./schema/http-body.ts";
@@ -1159,6 +1160,24 @@ export class SquadServer {
 		const feedbackResponse = await handleFeedbackRoutes(url, req, manager, actor);
 		if (feedbackResponse) return feedbackResponse;
 		if (url.pathname === "/api/agents") return Response.json(manager.list());
+		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
+		// which is the single most common way a glance result used to evaporate — the agent reaped before
+		// anyone read what it found.
+		if (url.pathname === "/api/answers" && req.method === "GET") return Response.json(await manager.answers(url.searchParams.get("repo") ?? undefined));
+		if (url.pathname.startsWith("/api/answers/") && req.method === "GET") {
+			const answer = await manager.answer(decodeURIComponent(url.pathname.slice("/api/answers/".length)));
+			return answer ? Response.json(answer) : new Response("no such answer", { status: 404 });
+		}
+		if (url.pathname === "/api/answers" && req.method === "POST") {
+			const decoded = decodeBody(AskBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("expected { repo, question }", { status: 400 });
+			try {
+				const { repo, question, model, harness } = decoded.success;
+				return Response.json(await manager.ask({ repo, question, model, harness }, actor));
+			} catch (err) {
+				return new Response(errText(err), { status: 400 });
+			}
+		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a

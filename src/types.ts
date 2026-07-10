@@ -1045,6 +1045,9 @@ export interface PersistedAgent {
 	 *  squad-manager's `unitProviderKey`: routing overrides are out of the gate key by invariant, and
 	 *  the record key must match the gate key). Additive/optional like the rest. */
 	routing?: { mode: string; tier: string; thinking?: ThinkingLevel; routedAt: number; routedModel?: string };
+	/** The question this unit was asked, when it is an answer unit (R5). Persisted so a daemon restart
+	 *  still knows the unit owes an answer. */
+	ask?: string;
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
@@ -1167,6 +1170,10 @@ export interface CreateAgentOptions {
 	/** Carries a persisted run's trace link through the adopt/restore boot paths (topology review finding
 	 *  7) — absent on a genuinely fresh create(), which only ever assigns this once a run actually starts. */
 	traceId?: string;
+	/** This unit's deliverable is an ANSWER, not a branch (R5). Carries the operator's question; the unit's
+	 *  final message is captured verbatim as a durable `Answer`. Implies `executionRole: "observer"`, which
+	 *  already means "never commits, never lands". */
+	ask?: string;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */
