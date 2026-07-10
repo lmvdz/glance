@@ -23,6 +23,10 @@ import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
 import { type OrgContext, withOrg } from "./context.ts";
 import { getStorageBackend } from "./storage.ts";
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Atomically + durably write `data` to `file` through the active StorageBackend (default: local disk,
  * temp → fsync(file) → rename → fsync(dir)). After this resolves the bytes survive a host crash. The
@@ -48,6 +52,9 @@ export interface AuditEntry {
 	action: string;
 	target?: string;
 	detail?: unknown;
+	/** Observability-only provenance tag carried from `ClientCommand.source` (e.g. "voice" |
+	 *  "composer") when the originating command set one. Never consulted for authz — see authz.ts. */
+	source?: string;
 }
 
 export interface Store {
@@ -347,6 +354,13 @@ export class DbStore implements Store {
 
 	async appendAudit(entry: AuditEntry): Promise<void> {
 		await withOrg(this.ctx, this.orgId, async (trx) => {
+			// No dedicated `source` column (no migration for this concern) — fold it into the JSON
+			// `detail` blob instead of dropping it, so DB-mode never silently loses the provenance tag
+			// the file-mode audit trail carries natively.
+			const detail =
+				entry.source === undefined
+					? entry.detail
+					: { ...(isPlainObject(entry.detail) ? entry.detail : entry.detail !== undefined ? { detail: entry.detail } : {}), source: entry.source };
 			await trx
 				.insertInto("audit")
 				.values({
@@ -355,7 +369,7 @@ export class DbStore implements Store {
 					actor: entry.actor,
 					action: entry.action,
 					target: entry.target ?? null,
-					detail: entry.detail === undefined ? null : JSON.stringify(entry.detail),
+					detail: detail === undefined ? null : JSON.stringify(detail),
 					at: Date.now(),
 				})
 				.execute();

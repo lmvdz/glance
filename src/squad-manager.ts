@@ -330,6 +330,12 @@ function commandTarget(cmd: ClientCommand): string | undefined {
 	return cmd.type === "message" ? cmd.to : "id" in cmd ? cmd.id : undefined;
 }
 
+/** Observability-only provenance tag carried on the mutating variants ("voice" | "composer", kept
+ *  open) — never consulted for authz/tier decisions (see authz.ts#commandTier). */
+function commandSource(cmd: ClientCommand): string | undefined {
+	return "source" in cmd ? cmd.source : undefined;
+}
+
 function autoLandFailCap(): number {
 	return envInt("OMP_SQUAD_AUTOLAND_FAIL_CAP", 3);
 }
@@ -4835,9 +4841,12 @@ export class SquadManager extends EventEmitter {
 		}
 		// Security trail: record every accepted mutation (reads — snapshot/subscribe — are need=viewer
 		// and not audited). DB mode persists to the per-org `audit` table; FileStore is a no-op.
+		// `source` (voice/composer provenance) rides along when the command carried one — observability
+		// only, never consulted above at the RBAC gate.
 		if (need !== "viewer") {
+			const source = commandSource(cmd);
 			await this.store
-				.appendAudit({ actor: actor.id, action: cmd.type, target: commandTarget(cmd) })
+				.appendAudit({ actor: actor.id, action: cmd.type, target: commandTarget(cmd), ...(source !== undefined ? { source } : {}) })
 				.catch((err) => this.log("warn", `audit write failed for \"${cmd.type}\": ${err instanceof Error ? err.message : String(err)}`));
 		}
 		if (cmd.type === "create") {
