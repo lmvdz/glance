@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, ImagePlus, Loader2, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
+import { Camera, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
 import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
 import { ImageAnnotator, type Annotation } from './ImageAnnotator';
@@ -11,6 +11,7 @@ import {
   nextImageAttachmentId,
   uploadChatAttachment,
 } from '../../lib/imageAttachment';
+import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession } from '../../lib/voice/speech';
 import type { AgentDTO } from '../../lib/dto';
 import type { Task } from '../../types';
 
@@ -147,6 +148,15 @@ export function assembleSendText(typedText: string, chips: PasteChip[]): string 
   if (chips.length === 0) return typedText;
   const fenced = chips.map((chip) => `\`\`\`\n${chip.content}\n\`\`\``).join('\n\n');
   return typedText ? `${typedText}\n\n${fenced}` : fenced;
+}
+
+/** Fold one finalized speech segment into the draft — space-joined onto whatever's already there.
+ *  Voice input always appends at the end and never auto-sends; the operator reviews the assembled
+ *  draft (typed + dictated, in whatever order they arrived) before it goes anywhere. */
+export function appendVoiceTranscript(current: string, segment: string): string {
+  if (!segment) return current;
+  if (!current) return segment;
+  return /\s$/.test(current) ? `${current}${segment}` : `${current} ${segment}`;
 }
 
 /** A single paste-as-chip attachment: label + preview (hover `title`, click-to-expand) + remove,
@@ -360,6 +370,33 @@ export const Composer = ({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Voice input (chained STT): browser Web Speech API transcribes into `input` — reviewed then
+  // sent like any typed draft, never auto-sent. `speechSupported` gates the button itself rather
+  // than being re-checked on click, so an unsupported browser sees a disabled button with an
+  // honest tooltip instead of a click that silently does nothing (the exact defect that got the
+  // previous mic button removed as a "misleading no-op").
+  const speechSupported = isSpeechRecognitionSupported();
+  const [isListening, setIsListening] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const voiceSessionRef = useRef<VoiceInputSession | null>(null);
+
+  useEffect(() => () => { voiceSessionRef.current?.abort(); }, []); // stop listening on unmount
+
+  const toggleVoiceInput = () => {
+    if (isListening) {
+      voiceSessionRef.current?.abort();
+      return;
+    }
+    setVoiceError(null);
+    const session = startVoiceInput({
+      continuous: true, // chained: keep listening across multiple sentences until toggled off
+      onListeningChange: setIsListening,
+      onTranscript: (text) => setInput((prev) => appendVoiceTranscript(prev, text)),
+      onError: (info) => setVoiceError(info.message),
+    });
+    voiceSessionRef.current = session ?? null;
+  };
 
   const addImageFromSource = async (source: Blob | string) => {
     try {
@@ -644,6 +681,12 @@ export const Composer = ({
           </div>
         )}
 
+        {voiceError && (
+          <div className="px-2.5 pt-2 text-[11px] text-red-600 dark:text-red-400" role="alert">
+            {voiceError}
+          </div>
+        )}
+
         <textarea
           ref={composerTextareaRef}
           value={input}
@@ -688,6 +731,24 @@ export const Composer = ({
               className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800"
             >
               {isCapturing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Camera className="h-4 w-4" aria-hidden />}
+            </button>
+            <button
+              type="button"
+              aria-label="Voice input"
+              title={
+                speechSupported
+                  ? "Voice input — your browser may send audio to its speech-recognition service to transcribe it (Chrome does)"
+                  : "Voice input isn't supported in this browser"
+              }
+              disabled={!speechSupported}
+              onClick={toggleVoiceInput}
+              className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
+                isListening
+                  ? 'bg-red-100 text-red-500 dark:bg-red-900/30'
+                  : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+              }`}
+            >
+              <Mic className="h-4 w-4" aria-hidden />
             </button>
           </div>
           <ComposerSendButton

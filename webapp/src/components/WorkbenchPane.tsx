@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Archive,
@@ -28,6 +28,7 @@ import { getCategoryBadge } from '../utils';
 import { useTaskContext, type AppView, type TaskFilter, type ArchivedFeature } from '../context/TaskContext';
 import { summarizeTask, taskListRank, type TaskStatus } from '../lib/taskStatus';
 import { taskRef } from '../lib/task-model';
+import { startVoiceInput, type VoiceInputSession } from '../lib/voice/speech';
 import { AccountMenu } from './AccountMenu';
 import { Kbd } from './kit/Kbd';
 import { MonoLabel } from './kit/MonoLabel';
@@ -277,7 +278,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const [categoryFilter, setCategoryFilter] = useState<'all' | Task['category']>('all');
   const [sortBy, setSortBy] = useState<'attention' | 'creation'>('attention');
   const [isListening, setIsListening] = useState(false);
+  const voiceSessionRef = useRef<VoiceInputSession | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+
+  useEffect(() => () => { voiceSessionRef.current?.abort(); }, []); // stop listening on unmount
 
   const totalTasks = tasks.length;
   const completedTasks = tasks.filter((task) => task.status === 'done').length;
@@ -353,21 +357,23 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   };
 
   const handleVoiceToTask = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
+    if (isListening) {
+      voiceSessionRef.current?.abort();
+      return;
+    }
+    // One utterance → one task, same as this button's original behavior (`continuous` defaults to
+    // false) — unlike the composer's chained multi-sentence dictation, this isn't a review-then-
+    // send draft, so it stays a deliberately short, single-shot capture.
+    const session = startVoiceInput({
+      onListeningChange: setIsListening,
+      onTranscript: (transcript) => addTask({ title: transcript, category: 'frontend', duration: '1d', status: 'todo' }),
+      onError: (info) => showToast(info.message, 'error'),
+    });
+    if (!session) {
       showToast('Speech recognition is not supported in this browser.', 'error');
       return;
     }
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-US';
-    recognition.interimResults = false;
-    recognition.onstart = () => setIsListening(true);
-    recognition.onend = () => setIsListening(false);
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      addTask({ title: transcript, category: 'frontend', duration: '1d', status: 'todo' });
-    };
-    recognition.start();
+    voiceSessionRef.current = session;
   };
 
   const toggleTagFilter = (tag: string) => {
