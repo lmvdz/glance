@@ -63,20 +63,34 @@ export const PATTERNS: DefectPattern[] = [
 	{
 		id: "hand-written-retryable",
 		description:
-			"A bare `retryable: true` with no attempt budget is the interlock pathology: 1,381 of 1,708 " +
-			"historical land attempts died retryable-forever and never escalated (the LEDGER's own dirty " +
-			"file jammed the factory). Construct refusals through `classifyProbeFailure` " +
-			"(src/classify-probe-failure.ts) and let OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP bound them — " +
-			"don't hand-write the field.",
+			"A NEW hand-written `retryable: true` must be a reviewed event — not because the literal is " +
+			"wrong (the 14 below are deliberate and load-bearing) but because getting its polarity " +
+			"backwards has twice wedged this factory. Read BOTH failure modes before you add one:\n" +
+			"  - retryable-forever: 1,381 of 1,708 historical land attempts died retryable and never " +
+			"escalated. FIXED at the manager, not the call site — `landBlockedEscalateCap` (default 20) " +
+			"now bounds every retryable refusal and fires a 'Needs you' escalation per episode.\n" +
+			"  - permanent park: hardcoding `retryable: false` on a PROBE FAILURE (offline daemon, pruned " +
+			"`origin/<default>`, corrupt .git) turns a transient hiccup into a branch that never retries " +
+			"and never un-parks — 'the interlock pathology re-introduced one probe over' (land-pr.ts).\n" +
+			"So do NOT mechanically route a land-loop refusal through `classifyProbeFailure`'s verdict: " +
+			"absent a `maxAttempts` budget it returns `retryable: false, escalate: true`, which PARKS the " +
+			"branch. Those call sites correctly take only its `.reason` and set `retryable: true` " +
+			"themselves, because the land loop's budget is the ~30s retry tick + the escalate cap. Use " +
+			"the classification's own `retryable` ONLY where the caller has no retry loop (observer, " +
+			"convergence, land-risk). An environmental precondition is retryable; a branch defect is not.",
 		regex: /retryable:\s*true\b/,
 		// The taxonomy module's own home — `classifyProbeFailure` computes `retryable` from a budget
 		// comparison, never writes the literal `true` today, but a future structural-failure branch
 		// legitimately could; this is the one place that literal is the taxonomy itself, not a bypass.
 		allowlist: ["src/classify-probe-failure.ts"],
-		// Measured 14 (2026-07-10): all in src/land.ts and src/land-pr.ts's own refusal paths — the
-		// exact interlock shape classifyProbeFailure exists to replace. 3 more textual hits are history
-		// comments (src/land-mode.ts:142, src/land.ts:686, src/squad-manager.ts:345, all documenting
-		// this pathology in prose) and don't count — see the module doc's comment-skip rationale.
+		// Measured 14 (2026-07-10): all in src/land.ts and src/land-pr.ts's refusal paths, and every one
+		// is a DELIBERATE anti-park flag — see land.ts:450-455 ("treat 'couldn't confirm clean' the SAME
+		// as 'confirmed dirty': retryable — an environmental precondition, not a branch defect") and
+		// land-pr.ts:543-548 (`retryable: false` there "turned a transient hiccup into a PERMANENT park").
+		// This is a CEILING, not a debt to burn down: do not "migrate" these to 0. An adversarial design
+		// review (2026-07-10) caught this ratchet's first description telling authors to do exactly that.
+		// 3 further textual hits are history comments (land-mode.ts:142, land.ts:686, squad-manager.ts:345)
+		// and don't count — see the module doc's comment-skip rationale.
 		baseline: 14,
 	},
 	{
