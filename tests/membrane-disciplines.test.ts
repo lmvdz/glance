@@ -219,7 +219,7 @@ test("gate #2 OFF (default): a native-harness unit's system prompt carries NEITH
 	await mgr.stop();
 });
 
-test("ACP-none harness: gate #2 on, but contextInjection=none still drops both the block and the stamp", async () => {
+test("ACP-none harness: gate #2 on, contextInjection=none never stamps a confirmed flag (the block still rides options.appendSystemPrompt but never reaches the child)", async () => {
 	stashEnv("OMP_SQUAD_PROFILES", "OMP_SQUAD_MEMBRANE_PROFILES");
 	process.env.OMP_SQUAD_MEMBRANE_PROFILES = "1";
 	process.env.OMP_SQUAD_PROFILES = JSON.stringify([{ id: "acp-membrane-05", name: "ACP membrane", harness: "opencode", capabilities: ["read", "membrane:verdict-first"] }]);
@@ -227,8 +227,15 @@ test("ACP-none harness: gate #2 on, but contextInjection=none still drops both t
 	const dto = await mgr.create({ name: "u", repo, profileId: "acp-membrane-05", approvalMode: "yolo", autoRoute: false });
 	expect(dto.harnessCaps?.contextInjection).toBe("none");
 	const rec = (mgr as unknown as InternalHost).agents.get(dto.id)!;
+	// The invariant that matters: contextInjection=none never CONFIRMS the flag (concern 02 semantics —
+	// stamping here would measure a placebo, since the appended prompt is silently dropped before the
+	// child ever sees it — see receipts.ts#confirmDeliveredFlags and acp-agent-driver.ts).
 	expect(rec.efficiencyFlags).toBeUndefined();
 	expect(rec.toolGrants).toEqual(["read"]);
+	// NOT proof the child never sees the block: gate #2 alone still composes it into
+	// rec.options.appendSystemPrompt (the driver-level drop happens downstream, inside
+	// acp-agent-driver.ts, which this FakeDriver-backed test never exercises).
+	expect(rec.options.appendSystemPrompt).toContain(VERDICT_FIRST_BLOCK);
 	await mgr.stop();
 });
 

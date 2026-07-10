@@ -51,6 +51,15 @@ test("parseConcernDrafts: malformed JSON returns undefined", () => {
 	expect(parseConcernDrafts("")).toBeUndefined();
 });
 
+test("parseConcernDrafts: a verdict-first prose sentence with a bracket before the real array still parses (batch-2 review fix)", () => {
+	// VERDICT_FIRST_BLOCK instructs the model to lead with its verdict before any JSON — a verdict
+	// sentence that itself names a bracketed reference must not defeat the array extraction.
+	const raw = `Verdict: plan needs 1 more concern [gap: writer wiring not yet covered].\n[{"num": 1, "slug": "core", "title": "Core module", "priority": "p1", "complexity": "architectural", "touches": ["src/core.ts"], "blockedBy": [], "goal": "Build the core.", "approach": "Write it.", "acceptance": ["core.ts exists"]}]`;
+	const drafts = parseConcernDrafts(raw);
+	expect(drafts).toBeDefined();
+	expect(drafts!.map((d) => d.slug)).toEqual(["core"]);
+});
+
 test("parseConcernDrafts: a missing required field returns undefined", () => {
 	const raw = JSON.stringify([{ num: 1, slug: "x", title: "X", priority: "p1", complexity: "mechanical", touches: [], blockedBy: [], acceptance: ["y"] /* no goal */ }]);
 	expect(parseConcernDrafts(raw)).toBeUndefined();

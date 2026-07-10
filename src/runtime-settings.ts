@@ -196,9 +196,11 @@ export interface MembraneBreakerCheck {
  * Pure check: does the flagged cohort's cell show a measured composite-success degradation against its
  * baseline? Requires BOTH cells `reproducible` (comparing against a saturated or thin-sample cell is
  * comparing against noise — the same variance floor DESIGN.md's publish gate uses) and the flagged
- * cohort past `MEMBRANE_BREAKER_MIN_UNITS`. Trips on ANY of: a mergeRate drop >= minEdge, a higher
- * vetoRate, or a higher inRunReworkRate — the discipline's entire promise is a cost/token win, so ANY
- * composite-success degradation burns the bet, not just the dimension a caller happened to check first.
+ * cohort past `MEMBRANE_BREAKER_MIN_UNITS`. Trips on ANY of: a mergeRate drop >= minEdge, a vetoRate
+ * rise >= minEdge, or an inRunReworkRate rise >= minEdge — the discipline's entire promise is a
+ * cost/token win, so ANY composite-success degradation past the noise floor burns the bet, not just
+ * the dimension a caller happened to check first. `minEdge` applies uniformly across all three
+ * dimensions (not mergeRate alone) — a single extra veto in a small cohort is jitter, not a signal.
  */
 export function checkMembraneBreaker(flagged: CellMetrics, baseline: CellMetrics, opts: { minEdge?: number; minUnits?: number } = {}): MembraneBreakerCheck {
 	const minEdge = opts.minEdge ?? MEMBRANE_BREAKER_MIN_EDGE;
@@ -210,10 +212,10 @@ export function checkMembraneBreaker(flagged: CellMetrics, baseline: CellMetrics
 	if (mergeDrop >= minEdge) {
 		return { tripped: true, reason: `mergeRate dropped ${(mergeDrop * 100).toFixed(1)}pt vs baseline (n=${flagged.n})` };
 	}
-	if (flagged.vetoRate !== undefined && baseline.vetoRate !== undefined && flagged.vetoRate > baseline.vetoRate) {
+	if (flagged.vetoRate !== undefined && baseline.vetoRate !== undefined && flagged.vetoRate - baseline.vetoRate >= minEdge) {
 		return { tripped: true, reason: `vetoRate rose from ${(baseline.vetoRate * 100).toFixed(1)}% to ${(flagged.vetoRate * 100).toFixed(1)}% (n=${flagged.n})` };
 	}
-	if (flagged.inRunReworkRate !== undefined && baseline.inRunReworkRate !== undefined && flagged.inRunReworkRate > baseline.inRunReworkRate) {
+	if (flagged.inRunReworkRate !== undefined && baseline.inRunReworkRate !== undefined && flagged.inRunReworkRate - baseline.inRunReworkRate >= minEdge) {
 		return { tripped: true, reason: `inRunReworkRate rose from ${(baseline.inRunReworkRate * 100).toFixed(1)}% to ${(flagged.inRunReworkRate * 100).toFixed(1)}% (n=${flagged.n})` };
 	}
 	return { tripped: false };

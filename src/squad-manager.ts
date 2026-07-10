@@ -58,7 +58,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -139,7 +139,8 @@ import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, provisionW
 import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
-import { appendReceipt, confirmDeliveredFlags, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
+import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
+import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
@@ -2814,6 +2815,23 @@ export class SquadManager extends EventEmitter {
 				recordConfidenceOutcome(this.stateDir, envNumber("OMP_SQUAD_CONFIDENCE_FLOOR", 0.4), dto.confidence, result.ok);
 			} catch (err) {
 				this.log("warn", `threshold-tuner record failed for ${dto.name} (non-fatal): ${errText(err)}`);
+			}
+			// Membrane breaker cadence (eap-borrows concern 05 / DESIGN.md "Membrane measurement" — the
+			// real, not ceremonial, auto-disable red-team B M3 required): the SAME threshold-tuner cadence
+			// above — once per non-retryable land outcome — but only when THIS land actually contributes new
+			// flagged-cohort evidence (rec.efficiencyFlags carries a CONFIRMED-delivered membrane:* token;
+			// see receipts.ts#confirmDeliveredFlags) and the discipline is armed at all. A healthy fleet with
+			// the flag off pays nothing. Fire-and-forget: membraneBreakerCadence walks the whole fleet's
+			// receipts + task-outcomes (not O(1)), so it must never delay `land()`'s own completion, and a
+			// failure here must never fail the land it's grading — mirrors every other non-fatal ledger write
+			// in this block.
+			if (membraneProfilesEnabled() && rec.efficiencyFlags?.some((f) => f.startsWith(EFFICIENCY_FLAG_PREFIX))) {
+				const flaggedTaskClass = { mode: rec.options.routing?.mode ?? "unknown", tier: rec.options.routing?.tier ?? "unknown" };
+				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass)
+					.then((event) => {
+						if (event) this.log("warn", `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`);
+					})
+					.catch((err) => this.log("warn", `membrane-breaker cadence check failed for ${dto.name} (non-fatal): ${errText(err)}`));
 			}
 		} else if (result.retryable) {
 			// research-sirvir/01-recording-unlock (part 2, durable fix): a retryable/environmental refusal

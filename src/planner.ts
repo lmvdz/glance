@@ -129,16 +129,32 @@ Respond with a JSON array only.
 ${VERDICT_FIRST_BLOCK}`;
 }
 
-/** Extract the outermost `[...]` JSON array from noisy model output (fences/prose tolerant). */
+/**
+ * Extract the outermost `[...]` JSON array from noisy model output (fences/prose tolerant).
+ *
+ * Anchoring on the FIRST `[` alone is unsafe on this prompt: `buildDecomposePrompt` appends
+ * `VERDICT_FIRST_BLOCK` (DESIGN-directed placement — resident-planner.md's judge/planner surfaces get
+ * it unconditionally), which instructs the model to state its verdict in the first sentence BEFORE the
+ * JSON array. A verdict sentence that itself names a bracketed reference (e.g. "gap coverage: [2 items
+ * remain]") would then win `indexOf("[")`, producing a slice from that false start to the real closing
+ * `]` that fails to parse — silently dropping a well-formed plan. Try every `[` in order (not just the
+ * first) against the SAME `lastIndexOf("]")` end, returning the first span that actually parses as an
+ * array — a false-start bracket in leading prose just fails its own JSON.parse and the loop moves on.
+ */
 function extractJsonArray(raw: string): unknown[] | undefined {
-	const start = raw.indexOf("[");
 	const end = raw.lastIndexOf("]");
-	if (start < 0 || end <= start) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
-		return Array.isArray(parsed) ? parsed : undefined;
-	} catch {
-		return undefined;
+	if (end < 0) return undefined;
+	let searchFrom = 0;
+	while (true) {
+		const start = raw.indexOf("[", searchFrom);
+		if (start < 0 || start >= end) return undefined;
+		try {
+			const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
+			if (Array.isArray(parsed)) return parsed;
+		} catch {
+			// a false-start bracket (e.g. inside verdict-first prose) — try the next "[" against the same end
+		}
+		searchFrom = start + 1;
 	}
 }
 
