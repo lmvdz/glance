@@ -28,8 +28,16 @@ interface DoctorFactsResponse {
 	daemon: DaemonFacts;
 	autonomy: AutonomyFacts;
 	plane?: { configured: boolean; reachable: boolean; detail?: string };
+	gate?: { image: string; strict: boolean };
 	projects: string[];
 	zombieAgents: number;
+}
+
+/** Structural check, not a full decode: the fields `doctor` actually reads. */
+function isDoctorFacts(v: unknown): v is DoctorFactsResponse {
+	if (typeof v !== "object" || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o.daemon === "object" && o.daemon !== null && typeof o.autonomy === "object" && o.autonomy !== null;
 }
 
 const DEAD: DaemonFacts = { running: false };
@@ -133,7 +141,12 @@ export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
 				if (res.status === 404) return { alive, opaqueReason: "/api/doctor (404 — older daemon)" };
 				if (res.status === 401 || res.status === 403) return { alive, opaqueReason: `/api/doctor (${res.status} — this token is not an operator)` };
 				if (!res.ok) return { alive, opaqueReason: `/api/doctor (HTTP ${res.status})` };
-				return { alive, facts: (await res.json()) as DoctorFactsResponse };
+				const body: unknown = await res.json();
+				// A 200 does not prove we are talking to glance. `noFleet` answers `[]`, and an unrelated
+				// service on this port answers anything at all. Check the shape before believing it, or the
+				// first property access throws and the whole diagnosis reads as a probe crash. (gpt-5.6-sol)
+				if (!isDoctorFacts(body)) return { alive, opaqueReason: "/api/doctor (unrecognized response — is something else on this port?)" };
+				return { alive, facts: body };
 			} catch (err) {
 				return { alive, opaqueReason: `/api/doctor (${errText(err)})` };
 			}
@@ -172,9 +185,17 @@ export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
 			const p = resolveStateDir();
 			try {
 				await access(p, constants.W_OK);
-				return { path: p, writable: true };
+				return { path: p, exists: true, writable: true };
 			} catch {
-				return { path: p, writable: false };
+				// A fresh install has no state dir yet — the daemon creates it at boot. "Not writable" there
+				// is a lie, and the old `chown -R` remedy would have failed on a path that does not exist.
+				if (existsSync(p)) return { path: p, exists: true, writable: false };
+				try {
+					await access(path.dirname(p), constants.W_OK);
+					return { path: p, exists: false, writable: true };
+				} catch {
+					return { path: p, exists: false, writable: false };
+				}
 			}
 		},
 		async planeArmed() {
@@ -197,10 +218,18 @@ export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
 			}
 		},
 		async gateImage() {
+			// The image the gate will ACTUALLY use, resolved the way the gate resolves it: an explicit
+			// `OMP_SQUAD_GATE_SANDBOX=<image>` wins, then the operator's default, then the derived one.
+			// Inspecting the derived image while the operator pinned another told them about an image the
+			// gate would never run. (gpt-5.6-sol)
+			const f = await facts();
+			const gate = f?.gate;
+			const image = gate?.image ?? DERIVED_SANDBOX_IMAGE;
+			const strict = gate?.strict ?? false;
 			const version = await run(["docker", "version", "--format", "{{.Server.Version}}"], opts.cwd).catch(() => ({ code: 1, stdout: "" }));
-			if (version.code !== 0) return { dockerUsable: false, imagePresent: false };
-			const inspect = await run(["docker", "image", "inspect", DERIVED_SANDBOX_IMAGE], opts.cwd).catch(() => ({ code: 1, stdout: "" }));
-			return { dockerUsable: true, imagePresent: inspect.code === 0 };
+			if (version.code !== 0) return { dockerUsable: false, imagePresent: false, image, strict };
+			const inspect = await run(["docker", "image", "inspect", image], opts.cwd).catch(() => ({ code: 1, stdout: "" }));
+			return { dockerUsable: true, imagePresent: inspect.code === 0, image, strict };
 		},
 		async projects() {
 			const f = await facts();

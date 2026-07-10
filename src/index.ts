@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { renderDoctor, runDoctor } from "./doctor.ts";
 import { makeDoctorProbe } from "./doctor-probe.ts";
-import { envBool } from "./config.ts";
+import { envBool, rootFactoryEnabledWith } from "./config.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
@@ -68,7 +68,7 @@ const glanceBin = (): string | undefined => process.env.GLANCE_BIN?.trim() || un
  * silently spins a global factory. Exported for the boot-gate test.
  */
 export function rootFactoryEnabled(repoCount: number = planeRepos().length): boolean {
-	return envBool("OMP_SQUAD_ROOT_FACTORY", false) && repoCount > 0;
+	return rootFactoryEnabledWith(repoCount);
 }
 
 const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees

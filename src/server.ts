@@ -17,9 +17,10 @@ import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
-import { envBool, envInt } from "./config.ts";
+import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
 import { doctorHostVisible } from "./doctor.ts";
+import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
 import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
@@ -614,6 +615,7 @@ export class SquadServer {
 				cwd: host ? process.cwd() : undefined,
 				installedRev: process.env.GLANCE_REV || undefined,
 				authMode: this.dbMode ? "db" : "file",
+				rootFactory: rootFactoryEnabledWith(planeRepos().length),
 				// The SAME predicate the request path uses (flag AND a built dist) — a doctor that reports the
 				// flag rather than the behaviour is how "why does 7878 show the old UI" became a live question.
 				webapp: webappEnabled(),
@@ -636,6 +638,9 @@ export class SquadServer {
 			// Plane loads its secrets ONCE, at boot, in THIS process. The CLI's shell does not have them, so
 			// only the daemon can answer whether the work queue is connected. (grok-4.5)
 			plane: await this.planeHealth(),
+			// Which image the gate will actually use, and whether it fails closed without docker. The CLI
+			// cannot know: both are read from the DAEMON's environment. (gpt-5.6-sol)
+			gate: { image: process.env.OMP_SQUAD_GATE_SANDBOX?.trim() || process.env.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim() || DERIVED_SANDBOX_IMAGE, strict: envBool("OMP_SQUAD_GATE_SANDBOX_STRICT", false) },
 			projects: [...new Set(managers.flatMap((m) => m.projects().map((p) => p.repo)))],
 			zombieAgents: agents.filter((a) => a.status === "error").length,
 		};

@@ -21,9 +21,9 @@ function probe(over: Partial<DoctorProbe> = {}): DoctorProbe {
 		daemon: async () => ({ running: true, pid: 1, cwd: "/srv/app", installedRev: "abc1234", installRepo: "/srv/app", authMode: "file", webapp: true, webappDist: true, uptimeMs: 60_000 }),
 		autonomy: async () => ARMED,
 		repoRev: async () => ({ rev: "abc1234", repoRoot: "/srv/app" }),
-		stateDir: async () => ({ path: "/home/u/.glance", writable: true }),
+		stateDir: async () => ({ path: "/home/u/.glance", exists: true, writable: true }),
 		planeArmed: async () => ({ configured: true, reachable: true }),
-		gateImage: async () => ({ dockerUsable: true, imagePresent: true }),
+		gateImage: async () => ({ dockerUsable: true, imagePresent: true, image: "glance-gate:bun1-v2", strict: false }),
 		projects: async () => [CLEAN_REPO],
 		webappBuilt: async () => true,
 		zombieAgents: async () => 0,
@@ -103,15 +103,11 @@ test("serving the legacy UI is not the same as having no build", async () => {
 	expect(report.healthy).toBe(true);
 });
 
-/** Enabling tenancy architecturally DISABLES the file-mode factory. The daemon looks perfectly healthy
- *  and dispatches nothing; `add` returns 403. `bun` autoloads `.env` from the launch cwd, so this is
- *  usually an accident of *where the daemon was started*, which is why the cwd is in the message. */
-test("DB mode is surfaced as the factory-killer it is, with the cwd that caused it", async () => {
-	const report = await runDoctor(probe({ daemon: async () => ({ running: true, authMode: "db", cwd: "/srv/tenant-app" }) }));
-	const check = find(report, "daemon.mode");
-	expect(check?.status).toBe("warn");
-	expect(check?.detail).toContain("DISABLED");
-	expect(check?.detail).toContain("/srv/tenant-app");
+/** `bun` autoloads `.env` from the launch cwd, so a DB-mode daemon is usually an accident of *where it
+ *  was started*. That cwd is the single most useful thing to print, because it is the thing to change. */
+test("DB mode names the cwd that caused it", async () => {
+	const report = await runDoctor(probe({ daemon: async () => ({ running: true, authMode: "db", rootFactory: false, cwd: "/srv/tenant-app" }) }));
+	expect(find(report, "daemon.mode")?.detail).toContain("/srv/tenant-app");
 });
 
 test("the legacy UI is named, not silently served", async () => {
@@ -199,8 +195,24 @@ test("Plane configured but unreachable is an error; absent is a warning", async 
 });
 
 test("an unwritable state dir is an error", async () => {
-	const report = await runDoctor(probe({ stateDir: async () => ({ path: "/home/u/.glance", writable: false }) }));
+	const report = await runDoctor(probe({ stateDir: async () => ({ path: "/home/u/.glance", exists: true, writable: false }) }));
 	expect(find(report, "state")?.status).toBe("error");
+	// `chown -R` on a path the operator may have mis-set is a foot-gun they cannot undo — and on a MISSING
+	// path it simply fails. Say what is wrong; let them pick the tool. (gpt-5.6-sol)
+	expect(find(report, "state")?.remedy).not.toContain("chown -R");
+});
+
+/** A fresh install has no state dir. The daemon creates it at boot; calling that "not writable" turns a
+ *  first run into a false alarm. (gpt-5.6-sol) */
+test("a state dir that does not exist yet, with a writable parent, is fine", async () => {
+	const report = await runDoctor(probe({ stateDir: async () => ({ path: "/home/u/.glance", exists: false, writable: true }) }));
+	expect(find(report, "state")?.status).toBe("ok");
+	expect(find(report, "state")?.detail).toContain("will be created");
+});
+
+test("a state dir that cannot be created is an error that says so", async () => {
+	const report = await runDoctor(probe({ stateDir: async () => ({ path: "/ro/.glance", exists: false, writable: false }) }));
+	expect(find(report, "state")?.detail).toContain("cannot be created");
 });
 
 test("a missing webapp build is an error — the UI would 404", async () => {
@@ -311,4 +323,44 @@ test("host process identity is redacted from DB-mode members, not from admins", 
 	expect(doctorHostVisible(false, false)).toBe(true); // file mode: one operator, the human here
 	expect(doctorHostVisible(true, false)).toBe(false); // db mode, org member: no host paths
 	expect(doctorHostVisible(true, true)).toBe(true); // db mode, admin: it is their host
+});
+
+// ── the diagnosis must track the code, not a memory of it ───────────────────────────────────────
+
+/**
+ * "DB mode disables the factory" was true when it was written, and `doctor` said so unconditionally with
+ * the remedy "launch without DATABASE_URL" — advice that dismantles working multi-tenancy. The opt-in
+ * ROOT factory (`OMP_SQUAD_ROOT_FACTORY=1` + Plane repos) now runs the global loops alongside the tenant
+ * registry. Report what the factory is DOING; never infer it from the storage mode. (gpt-5.6-sol)
+ */
+test("DB mode WITH a root factory is healthy, not a warning", async () => {
+	const report = await runDoctor(probe({ daemon: async () => ({ running: true, authMode: "db", rootFactory: true }) }));
+	expect(find(report, "daemon.mode")?.status).toBe("ok");
+	expect(find(report, "daemon.mode")?.detail).toContain("root factory");
+});
+
+test("DB mode WITHOUT one names the real cause, and never says to tear down tenancy", async () => {
+	const report = await runDoctor(probe({ daemon: async () => ({ running: true, authMode: "db", rootFactory: false }) }));
+	const check = find(report, "daemon.mode");
+	expect(check?.status).toBe("warn");
+	expect(check?.detail).toContain("nothing owns the Plane loops");
+	expect(check?.remedy).toContain("OMP_SQUAD_ROOT_FACTORY=1"); // the fix that keeps tenancy
+});
+
+/** `OMP_SQUAD_GATE_SANDBOX_STRICT=1` exists so the gate never silently runs unsandboxed. Without docker
+ *  it does not degrade — it refuses, and nothing can verify or land. That is blocking. (gpt-5.6-sol) */
+test("no docker under STRICT is an error, not a graceful fallback", async () => {
+	const strict = await runDoctor(probe({ gateImage: async () => ({ dockerUsable: false, imagePresent: false, image: "glance-gate:bun1-v2", strict: true }) }));
+	expect(find(strict, "gate")?.status).toBe("error");
+	expect(find(strict, "gate")?.detail).toContain("nothing can verify or land");
+
+	const lax = await runDoctor(probe({ gateImage: async () => ({ dockerUsable: false, imagePresent: false, image: "glance-gate:bun1-v2", strict: false }) }));
+	expect(find(lax, "gate")?.status).toBe("warn"); // falls back to the host
+});
+
+/** An operator who pinned `OMP_SQUAD_GATE_SANDBOX=my-image` was told about an image the gate would never
+ *  run. The daemon names the image; the probe inspects that one. */
+test("the gate check names the image the gate will actually use", async () => {
+	const report = await runDoctor(probe({ gateImage: async () => ({ dockerUsable: true, imagePresent: false, image: "acme/custom-gate:3", strict: false }) }));
+	expect(find(report, "gate")?.detail).toContain("acme/custom-gate:3");
 });

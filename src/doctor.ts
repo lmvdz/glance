@@ -87,8 +87,12 @@ export interface DaemonFacts {
 	 *  comparison meaningful — otherwise `doctor` run from repo B would call the daemon "stale" for the
 	 *  crime of being repo A. */
 	installRepo?: string;
-	/** "file" = the autonomous factory is possible; "db" = multi-tenant, factory disabled. */
+	/** "file" = the autonomous factory is possible; "db" = multi-tenant. */
 	authMode?: "file" | "db";
+	/** DB mode used to mean "no factory"; the opt-in ROOT factory (`OMP_SQUAD_ROOT_FACTORY=1` + Plane
+	 *  repos) now runs one alongside the tenant registry. Report the factory's ACTUAL state, never infer
+	 *  it from the storage mode. (gpt-5.6-sol) */
+	rootFactory?: boolean;
 	webapp?: boolean;
 	/** `webapp/dist/index.html` exists next to the DAEMON's code — orthogonal to the flag above. */
 	webappDist?: boolean;
@@ -113,10 +117,14 @@ export interface DoctorProbe {
 	autonomy(): Promise<AutonomyFacts | undefined>;
 	/** Commit and repo root of the checkout the operator is standing in. */
 	repoRev(): Promise<{ rev?: string; repoRoot?: string }>;
-	stateDir(): Promise<{ path: string; writable: boolean }>;
+	/** `exists: false` with a writable parent is NORMAL on a fresh install — the daemon creates it at
+	 *  boot. Only an existing, unwritable dir is a fault. (gpt-5.6-sol) */
+	stateDir(): Promise<{ path: string; exists: boolean; writable: boolean }>;
 	planeArmed(): Promise<{ configured: boolean; reachable: boolean; detail?: string }>;
-	/** The derived gate image (`glance-gate:bun1-v2`) — present, and is docker usable at all? */
-	gateImage(): Promise<{ dockerUsable: boolean; imagePresent: boolean }>;
+	/** Is docker usable, is the image the gate will ACTUALLY use present, and does the gate fail closed
+	 *  without docker (`OMP_SQUAD_GATE_SANDBOX_STRICT`)? Under strict, no docker means no gate at all —
+	 *  an error, not a fallback. (gpt-5.6-sol) */
+	gateImage(): Promise<{ dockerUsable: boolean; imagePresent: boolean; image: string; strict: boolean }>;
 	projects(): Promise<RepoFacts[]>;
 	webappBuilt(): Promise<boolean>;
 	/** Agents parked in a terminal-but-listed state: the zombies `glance rm` is for. */
@@ -192,15 +200,20 @@ async function daemonChecks(probe: DoctorProbe): Promise<DoctorCheck[]> {
 		checks.push({ id: "daemon.stale", title: "Is the running daemon this code?", status: "ok", detail: `both at ${short(repoRev)}` });
 	}
 
-	// Tenancy vs factory. This is architectural, not a setting: in DB mode the file-mode factory does not
-	// exist, and `add` returns 403 while everything else looks fine.
-	if (d.authMode === "db") {
+	// Tenancy vs factory. Enabling multi-tenancy once silently turned the factory off — the tenant
+	// managers are lazy and org-scoped, so nothing owned the global Plane loops. It is no longer
+	// unconditional: an opt-in ROOT factory runs alongside the registry. So report what the factory is
+	// actually DOING, and never tell an operator to tear down working tenancy to get it back.
+	// (gpt-5.6-sol)
+	if (d.authMode === "db" && d.rootFactory) {
+		checks.push({ id: "daemon.mode", title: "File mode or DB mode?", status: "ok", detail: "DB (multi-tenant) with the root factory on — tenants served, autonomy running" });
+	} else if (d.authMode === "db") {
 		checks.push({
 			id: "daemon.mode",
 			title: "File mode or DB mode?",
 			status: "warn",
-			detail: `DB (multi-tenant) — the autonomous factory is DISABLED in this mode${d.cwd ? `; launched from ${d.cwd}, whose .env bun autoloads` : ""}`,
-			remedy: "launch the daemon from a directory with no DATABASE_URL in .env, or accept a manual fleet",
+			detail: `DB (multi-tenant) with no root factory — tenant managers are lazy and org-scoped, so nothing owns the Plane loops and no work is dispatched${d.cwd ? `; launched from ${d.cwd}, whose .env bun autoloads` : ""}`,
+			remedy: "OMP_SQUAD_ROOT_FACTORY=1 with PLANE_PROJECT_MAP set, then restart — or run file mode (no DATABASE_URL in the launch dir's .env)",
 		});
 	} else if (d.authMode === "file") {
 		checks.push({ id: "daemon.mode", title: "File mode or DB mode?", status: "ok", detail: "file mode — the factory can run" });
@@ -281,7 +294,16 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 		}),
 		attempt("state", "Can glance write its state?", async () => {
 			const s = await probe.stateDir();
-			return [s.writable ? { id: "state", title: "Can glance write its state?", status: "ok" as const, detail: s.path } : { id: "state", title: "Can glance write its state?", status: "error" as const, detail: `${s.path} is not writable`, remedy: `chown -R $(id -u) ${s.path}` }];
+			if (s.writable) return [{ id: "state", title: "Can glance write its state?", status: "ok" as const, detail: s.exists ? s.path : `${s.path} (will be created at boot)` }];
+			// `chown -R` on a path that may be mis-set is a foot-gun the operator cannot undo, and on a
+			// MISSING path it just fails. Say what is wrong; let them choose the tool. (gpt-5.6-sol)
+			return [{
+				id: "state",
+				title: "Can glance write its state?",
+				status: "error" as const,
+				detail: s.exists ? `"${s.path}" exists but is not writable` : `"${s.path}" cannot be created (its parent is not writable)`,
+				remedy: s.exists ? `make "${s.path}" writable by this user, or point GLANCE_STATE_DIR elsewhere` : `create "${s.path}" yourself, or point GLANCE_STATE_DIR at a writable path`,
+			}];
 		}),
 		attempt("plane", "Is the work queue connected?", async () => {
 			const p = await probe.planeArmed();
@@ -291,9 +313,12 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 		}),
 		attempt("gate", "Can the verification gate run?", async () => {
 			const g = await probe.gateImage();
+			// STRICT exists precisely so the gate never silently runs unsandboxed. Without docker it does
+			// not degrade — it refuses, and every verify fails. That is a blocking fault, not a warning.
+			if (!g.dockerUsable && g.strict) return [{ id: "gate", title: "Can the verification gate run?", status: "error" as const, detail: "docker is unavailable and OMP_SQUAD_GATE_SANDBOX_STRICT=1 — the gate fails closed, so nothing can verify or land", remedy: "start docker, or unset OMP_SQUAD_GATE_SANDBOX_STRICT to allow the host fallback" }];
 			if (!g.dockerUsable) return [{ id: "gate", title: "Can the verification gate run?", status: "warn" as const, detail: "docker is unavailable — the gate falls back to running on the host", remedy: "start docker, or accept an unsandboxed gate" }];
-			if (!g.imagePresent) return [{ id: "gate", title: "Can the verification gate run?", status: "warn" as const, detail: "the derived gate image is missing; it will be rebuilt on first use", remedy: "none — the first gate run pays for it" }];
-			return [{ id: "gate", title: "Can the verification gate run?", status: "ok" as const, detail: "docker + derived gate image present" }];
+			if (!g.imagePresent) return [{ id: "gate", title: "Can the verification gate run?", status: "warn" as const, detail: `gate image "${g.image}" is not present locally; it will be built or pulled on first use`, remedy: "none — the first gate run pays for it" }];
+			return [{ id: "gate", title: "Can the verification gate run?", status: "ok" as const, detail: `docker + gate image "${g.image}" present` }];
 		}),
 		attempt("projects", "Which repos is glance working on?", async () => repoChecks(await probe.projects())),
 		attempt("webapp.dist", "Is the UI built?", async () => [(await probe.webappBuilt()) ? { id: "webapp.dist", title: "Is the UI built?", status: "ok" as const, detail: "webapp/dist is present" } : { id: "webapp.dist", title: "Is the UI built?", status: "error" as const, detail: "webapp/dist is missing — the UI will 404", remedy: "cd webapp && bun run build" }]),
