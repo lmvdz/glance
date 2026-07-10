@@ -24,14 +24,16 @@ const unit = (over: Partial<DenominatorUnit>): DenominatorUnit => ({
 });
 
 /** Build a cell with `n` denominator members, `landedCount` of which land, all tagged with `model`
- *  (a raw model string that `modelFamily` folds to the matrix's family key). */
+ *  (a raw model string that `modelFamily` folds to the matrix's family key). Every row carries a
+ *  `costUsd` so `costCoveragePct` clears `MIN_COVERAGE_PCT` — the `reproducible` gate (eap-borrows
+ *  concern 01) `routeModelForTaskClass` now honors alongside `insufficientData`. */
 function seedCell(model: string, n: number, landedCount: number): { denom: DenominatorUnit[]; rows: TaskOutcomeRow[] } {
 	const denom: DenominatorUnit[] = [];
 	const rows: TaskOutcomeRow[] = [];
 	for (let i = 0; i < n; i++) {
 		const agentId = `${model}-${i}`;
 		denom.push(unit({ agentId }));
-		rows.push(row({ agentId, model, outcome: i < landedCount ? "landed" : "rejected" }));
+		rows.push(row({ agentId, model, costUsd: 1, outcome: i < landedCount ? "landed" : "rejected" }));
 	}
 	return { denom, rows };
 }
