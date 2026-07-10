@@ -758,6 +758,59 @@ test('MAJOR-3: a function call during the ack-continuation response is tagged tr
   expect(h.functionCalls[1]).toEqual({ callId: 'call-2', name: 'tool_two', arguments: '{}', trigger: 'injection' });
 });
 
+// -------------------------------------------------------------------------------------------------
+// MINOR-4: per-response trigger correlation. Two function calls belonging to the SAME
+// user-triggered wrapping response must both stay tagged 'user', even if the dispatcher acks the
+// first one (which flips the single mutable `currentTrigger` field to 'injection' for the ack's OWN,
+// unrelated response.create) before the second one arrives. Without correlating by response_id, the
+// second call would be wrongly stamped 'injection' and fail-closed-blocked by the human-turn gate.
+// -------------------------------------------------------------------------------------------------
+
+test("MINOR-4: two function calls from the same user-triggered response are both stamped 'user', even after the first is acked", async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease(); // response.create #1 — trigger 'user'
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'call-a', name: 'tool_a', arguments: '{}' });
+  expect(h.functionCalls[0]).toEqual({ callId: 'call-a', name: 'tool_a', arguments: '{}', trigger: 'user' });
+
+  // The dispatcher acks the first call — flips currentTrigger to 'injection' and sends a SECOND,
+  // unrelated response.create (the ack's own continuation, a different response than resp-1).
+  h.session.sendFunctionOutput('call-a', { ok: true });
+
+  // The ORIGINAL wrapping response (resp-1) emits a second function call before its own
+  // response.done — still the same user turn, must still be tagged 'user', not 'injection'.
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'call-b', name: 'tool_b', arguments: '{}' });
+
+  expect(h.functionCalls[1]).toEqual({ callId: 'call-b', name: 'tool_b', arguments: '{}', trigger: 'user' });
+});
+
+test('MINOR-4: response_id correlation survives interleaving with a queued-injection response', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease(); // response.create #1 (resp-user) — trigger 'user'
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-user' } });
+
+  h.session.queueInjection([{ text: 'agent finished a background task' }]); // waits — not idle
+  expect(h.session.getState()).toBe('speaking');
+
+  // resp-user's own function call still correlates to 'user' even with an injection queued behind it.
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-user', call_id: 'call-x', name: 'tool_x', arguments: '{}' });
+  expect(h.functionCalls[0]).toEqual({ callId: 'call-x', name: 'tool_x', arguments: '{}', trigger: 'user' });
+});
+
+test('MINOR-4: falls back to currentTrigger when response_id is absent from the wire event (residual, documented)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.queueInjection([{ text: 'agent finished a background task' }]); // flushes immediately (idle)
+  serverEvent(h, { type: 'response.created' }); // no response.id on the wire
+  serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-i', name: 'fleet_status', arguments: '{}' }); // no response_id either
+  expect(h.functionCalls[0]!.trigger).toBe('injection');
+});
+
 test('VoiceSession: guard (b) — if the user starts recording before the tool ack lands, sendFunctionOutput still records the output but withholds response.create', async () => {
   const h = makeHarness();
   await h.session.connect();

@@ -222,6 +222,17 @@ export interface RealtimeServerEvent {
   [key: string]: unknown;
 }
 
+/** Pulls `response.id` out of a `response.created`/`response.done` event's nested `response` object
+ *  (MINOR-4 correlation) — both events carry it at `evt.response.id` per the realtime API's wire
+ *  shape. Loose/defensive on purpose: an unexpected shape yields `undefined` (falls back to
+ *  `currentTrigger`) rather than throwing. */
+function extractResponseId(evt: RealtimeServerEvent): string | undefined {
+  const response = evt.response;
+  if (!response || typeof response !== 'object') return undefined;
+  const id = (response as { id?: unknown }).id;
+  return typeof id === 'string' ? id : undefined;
+}
+
 /** Provider error codes this module treats as benign, routine gestures rather than connection
  *  failures — both are the server's response to a no-op we send unconditionally by design:
  *  `response_cancel_not_active` (barge-in's `response.cancel` when nothing was actually in
@@ -406,12 +417,36 @@ export class VoiceSession {
 
   /** What triggered the response currently (or about to be) in flight — set at the three places a
    *  `response.create` is actually requested: `pttRelease` ('user'), `flushInjectionQueue`
-   *  ('injection'), and `sendFunctionOutput`'s ack ('injection'). Read when a function call arrives
-   *  mid-response so `onFunctionCall`'s payload carries provenance (MAJOR-3) — concern 07's
-   *  human-turn injection gate needs to tell a user-initiated tool call apart from one the agent
-   *  chained on its own. Defaults to 'user': the only way a function call can arrive at all is
-   *  after SOME response.create, which will always have already set this first. */
+   *  ('injection'), and `sendFunctionOutput`'s ack ('injection'). Defaults to 'user': the only way a
+   *  function call can arrive at all is after SOME response.create, which will always have already
+   *  set this first.
+   *
+   *  MINOR-4: this single mutable field is only a PROVISIONAL trigger at send time — it is NOT
+   *  itself read when a function call arrives (see `pendingTriggerQueue`/`responseTriggerById`
+   *  below). Without per-response correlation, two function calls belonging to the SAME
+   *  user-triggered wrapping response — one arriving after the dispatcher has already acked the
+   *  first (which flips this field to 'injection' for the ack's own, unrelated response.create) —
+   *  would have the second wrongly stamped 'injection' and fail-closed-blocked by the human-turn
+   *  gate, even though the operator's own speech is what produced BOTH calls. */
   private currentTrigger: 'user' | 'injection' = 'user';
+
+  /** FIFO of triggers for `response.create` sends not yet claimed by a `response.created`'s
+   *  `response.id` (MINOR-4). A single reliable, ordered WebRTC data channel means response.create
+   *  sends and the server's `response.created` acks arrive in the same relative order, so shifting
+   *  this queue on every `response.created` correctly pairs each new response with the trigger that
+   *  was active at the moment its creation was requested — independent of any LATER currentTrigger
+   *  flip from an ack sent while that response is still open. */
+  private pendingTriggerQueue: Array<'user' | 'injection'> = [];
+
+  /** Settled `response.id -> trigger` mapping, populated once a `response.created` event claims an
+   *  entry off `pendingTriggerQueue` and consulted by every `function_call_arguments.done` event
+   *  carrying that same `response_id` — so ALL function calls belonging to one response are
+   *  attributed to whatever triggered that response, however many there are and however long the
+   *  response stays open. Cleared once that response's own `response.done` arrives. Residual: if a
+   *  future provider build ever omits `response_id` from `function_call_arguments.done` (the
+   *  documented OpenAI Realtime API shape includes it as of writing), this module falls back to the
+   *  provisional `currentTrigger` field above rather than losing the event entirely. */
+  private responseTriggerById = new Map<string, 'user' | 'injection'>();
 
   /** Best-effort target for the barge-in `conversation.item.truncate` (MINOR-9) — the most
    *  recently-seen assistant audio item's id/content-index, and the wall-clock time its first delta
@@ -508,6 +543,8 @@ export class VoiceSession {
     for (const track of this.micStream?.getTracks() ?? []) track.stop();
     this.micStream = undefined;
     this.outstandingResponses = 0;
+    this.pendingTriggerQueue = []; // MINOR-4: stale queue entries from the torn-down session
+    this.responseTriggerById.clear();
     this.activeAudioItemId = undefined;
     this.activeAudioContentIndex = undefined;
     this.activeAudioStartedAt = undefined;
@@ -565,9 +602,15 @@ export class VoiceSession {
     if (!raw || typeof raw !== 'object' || typeof (raw as { type?: unknown }).type !== 'string') return;
     const evt = raw as RealtimeServerEvent;
     switch (evt.type) {
-      case 'response.created':
+      case 'response.created': {
+        // MINOR-4: claim this response's slot in the trigger queue — the trigger that was active
+        // when its response.create was SENT, not whatever currentTrigger happens to hold now.
+        const responseId = extractResponseId(evt);
+        const trigger = this.pendingTriggerQueue.shift() ?? this.currentTrigger;
+        if (responseId) this.responseTriggerById.set(responseId, trigger);
         this.dispatch({ type: 'response-started' });
         return;
+      }
       case 'response.output_audio_transcript.delta':
         if (typeof evt.delta === 'string') this.opts.onCaption?.(evt.delta, 'assistant');
         if (typeof evt.item_id === 'string') this.activeAudioItemId = evt.item_id;
@@ -581,21 +624,28 @@ export class VoiceSession {
         if (typeof evt.delta === 'string') this.opts.onCaption?.(evt.delta, 'user');
         return;
       case 'response.function_call_arguments.done': {
+        // MINOR-4: correlate by this event's own response_id against the settled map — falls back
+        // to the provisional currentTrigger only when response_id is absent (residual, see the
+        // responseTriggerById doc comment above).
+        const responseId = typeof evt.response_id === 'string' ? evt.response_id : undefined;
+        const trigger = (responseId !== undefined ? this.responseTriggerById.get(responseId) : undefined) ?? this.currentTrigger;
         const call: PendingFunctionCall = {
           callId: typeof evt.call_id === 'string' ? evt.call_id : '',
           name: typeof evt.name === 'string' ? evt.name : '',
           arguments: typeof evt.arguments === 'string' ? evt.arguments : '',
-          trigger: this.currentTrigger,
+          trigger,
         };
         this.dispatch({ type: 'function-call-ready', call });
         this.opts.onFunctionCall?.(call);
         return;
       }
-      case 'response.done':
+      case 'response.done': {
         // Correlate against outstanding response.create sends (see the module doc comment and
         // CRITICAL-1) — only forward to the reducer once every response this module asked for has
         // actually finished, so an unrelated wrapping response's completion can't be mistaken for a
         // synchronous ack's response completing.
+        const responseId = extractResponseId(evt);
+        if (responseId) this.responseTriggerById.delete(responseId); // MINOR-4: this response is done
         if (this.outstandingResponses > 0) this.outstandingResponses--;
         if (this.outstandingResponses === 0) {
           this.activeAudioItemId = undefined;
@@ -604,6 +654,7 @@ export class VoiceSession {
           this.dispatch({ type: 'response-done' });
         }
         return;
+      }
       case 'error': {
         const error = evt.error;
         const code =
@@ -681,7 +732,13 @@ export class VoiceSession {
 
   private sendRaw(payload: Record<string, unknown>): void {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') return; // dropped, not queued/retried
-    if (payload.type === 'response.create') this.outstandingResponses++;
+    if (payload.type === 'response.create') {
+      this.outstandingResponses++;
+      // MINOR-4: record the trigger active AT SEND TIME — claimed off this FIFO by the matching
+      // `response.created`'s response.id, so a later currentTrigger flip (an ack sent while this
+      // response is still open) can never retroactively relabel it.
+      this.pendingTriggerQueue.push(this.currentTrigger);
+    }
     this.dataChannel.send(JSON.stringify(payload));
   }
 
@@ -786,6 +843,8 @@ export class VoiceSession {
       this.pc = pc;
       this.dataChannel = dc;
       this.outstandingResponses = 0;
+      this.pendingTriggerQueue = []; // MINOR-4: a fresh connection has no in-flight responses to correlate
+      this.responseTriggerById.clear();
       this.activeAudioItemId = undefined;
       this.activeAudioContentIndex = undefined;
       this.activeAudioStartedAt = undefined;

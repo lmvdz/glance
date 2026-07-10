@@ -21,7 +21,7 @@ import { restActionTier } from "../src/authz.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer, type AuthInstance } from "../src/server.ts";
-import { isKnownVoiceProvider, mintVoiceToken } from "../src/voice-token.ts";
+import { isKnownVoiceProvider, mintVoiceToken, VOICE_SESSION_TOOLS } from "../src/voice-token.ts";
 
 const OPENAI_MINT_URL = "https://api.openai.com/v1/realtime/client_secrets";
 const realFetch = globalThis.fetch;
@@ -119,13 +119,31 @@ test("mintVoiceToken maps a successful OpenAI mint to the uniform shape and pins
 		transport: "webrtc",
 		pinnedAtMint: true,
 	});
-	// The browser never chooses model/voice/instructions — asserted against what was actually sent.
+	// The browser never chooses model/voice/instructions/tools — asserted against what was actually sent.
 	expect(capturedBody.session.model).toBe("gpt-realtime-test");
 	expect(capturedBody.session.voice).toBe("aria");
 	expect(capturedBody.session.turn_detection).toBeNull(); // push-to-talk v1
 	expect(typeof capturedBody.session.instructions).toBe("string");
 	expect(capturedBody.session.instructions.length).toBeGreaterThan(0);
+	// Without tools the model could never emit a function_call — the whole lane would be inert
+	// (concern 07's gap report). The four schemas are part of the pinned surface.
+	expect(capturedBody.session.tools.map((t: { name: string }) => t.name)).toEqual([
+		"prompt_agent",
+		"spawn_agent",
+		"fleet_status",
+		"interrupt",
+	]);
 	expect(capturedBody.expires_after).toEqual({ anchor: "created_at", seconds: 3600 });
+});
+
+test("VOICE_SESSION_TOOLS stays deep-equal with the webapp dispatcher's VOICE_TOOL_DEFS (cross-build sync pin)", async () => {
+	// The daemon pins the tool schemas at mint; the webapp dispatcher validates and executes the
+	// resulting calls. Two builds, one contract — this pin is what keeps them from drifting apart
+	// silently. Bun resolves the webapp's TS directly at test time; no build artifact involved.
+	const webappTools = await import("../webapp/src/lib/voice/tools");
+	expect(JSON.parse(JSON.stringify(VOICE_SESSION_TOOLS))).toEqual(
+		JSON.parse(JSON.stringify(webappTools.VOICE_TOOL_DEFS)),
+	);
 });
 
 test("mintVoiceToken defaults model/voice when the env vars are unset", async () => {
