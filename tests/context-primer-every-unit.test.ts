@@ -273,3 +273,18 @@ test("a fast failure does not trip the breaker", async () => {
 	mgr.fabricThrows = false;
 	expect((await mgr.prime(DISPATCHED)).hasPrimer).toBe(true);
 });
+
+/** Global backoff would let one repo with a stalled Plane fetch silently mute priming for every other
+ *  repo the daemon serves — a fleet-wide regression triggered by one slow project. (gpt-5.6-sol) */
+test("the breaker is per-repo: a slow repo does not mute a healthy one", async () => {
+	process.env.OMP_SQUAD_PRIMER_TIMEOUT_MS = "30";
+	const mgr = await manager();
+	(mgr as unknown as { fabric: (a: unknown, o: { repos: string[] }) => Promise<unknown> }).fabric = (_a, o) =>
+		o.repos[0] === "/srv/slow" ? new Promise<never>(() => {}) : Promise.resolve(mgr.snapshot);
+
+	expect((await mgr.prime({ repo: "/srv/slow", task: "retry budget" } as CreateAgentOptions)).hasPrimer).toBe(false); // trips /srv/slow
+	expect((await mgr.prime({ repo: "/srv/app", task: "retry budget" } as CreateAgentOptions)).hasPrimer).toBe(true); // unaffected
+	expect((await mgr.prime({ repo: "/srv/slow", task: "retry budget" } as CreateAgentOptions)).hasPrimer).toBe(false); // still open
+
+	delete process.env.OMP_SQUAD_PRIMER_TIMEOUT_MS;
+});

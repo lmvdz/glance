@@ -163,7 +163,10 @@ export function resolveHarness(p: { harness?: string; runtime?: string }): Harne
  * child inside the container — both native. ACP has no system-prompt slot at all; it delivers only when
  * the operator opts into the lossy first-turn injection (`OMP_SQUAD_ACP_CONTEXT=prompt`).
  */
-export function contextReachesAgent(p: { harness?: string; runtime?: string; sandbox?: unknown; workflow?: unknown }, env: NodeJS.ProcessEnv = process.env): boolean {
+export function contextReachesAgent(p: { harness?: string; runtime?: string; sandbox?: unknown; workflow?: unknown; flue?: unknown }, env: NodeJS.ProcessEnv = process.env): boolean {
+	// A flue-service unit runs `flue run`. It is not an agent harness at all and has no system-prompt
+	// channel of any kind — checked FIRST, because a flue unit may also carry a workflow. (gpt-5.6-sol)
+	if (p.flue) return false;
 	if (p.workflow || p.sandbox) return true; // inner agent is omp over rpc — a native channel
 	let d: HarnessDescriptor;
 	try {

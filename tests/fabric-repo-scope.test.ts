@@ -116,3 +116,26 @@ test("a completed agent's digest still passes the filter, attributed by its rece
 	expect(s.digests.map((d) => d.source.agentId)).toEqual(["ghost"]);
 	expect(s.hotAreas.map((h) => h.file)).toEqual(["src/ghost.ts"]);
 });
+
+/**
+ * Attribution and inclusion are different questions. `latestRun` decides which repo a digest BELONGS to;
+ * `inRepo` decides whether it may be shown. Answering both from the same repo-filtered receipt list leaks:
+ * nothing binds `digests/<agentId>.md` to one repo forever, and only the LATEST receipt names its current
+ * one. Filter first, and an agent id reused in repo B resolves to its stale repo-A receipt — so repo B's
+ * digest is attributed to A and admitted. (gpt-5.6-sol; their own weakest finding, and it holds.)
+ */
+test("a reused agent id cannot smuggle repo B's digest into a repo-A snapshot", async () => {
+	const dir = await tmpDir();
+	// `x` ran in repo A long ago; it was reused in repo B, whose run overwrote the single digest file.
+	await writeDigest(dir, "x", "## PRIVATE — repo B's key rotation schedule");
+	await appendReceipt(dir, { agentId: "x", name: "x", repo: "/srv/alpha", runId: "old", startedAt: 100, endedAt: 150, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: ["src/a.ts"] });
+	await appendReceipt(dir, { agentId: "x", name: "x", repo: "/srv/beta", runId: "new", startedAt: 900, endedAt: 950, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: ["src/secret.ts"] });
+
+	const a = await snap(dir, [], ["/srv/alpha"]);
+	expect(a.digests).toEqual([]); // the digest is repo B's — its latest run says so
+	expect(JSON.stringify(a)).not.toContain("key rotation schedule");
+	expect(a.hotAreas.map((h) => h.file)).toEqual(["src/a.ts"]); // repo-A file evidence still shows
+
+	const b = await snap(dir, [], ["/srv/beta"]);
+	expect(b.digests.map((d) => d.source.agentId)).toEqual(["x"]); // and it IS visible from repo B
+});

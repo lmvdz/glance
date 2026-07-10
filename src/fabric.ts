@@ -259,9 +259,17 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 	// of every id found on disk" — the `receiptAgentIds`/`digestAgentIds` directory listings.
 	const readScope = deps.actor.origin === "agent" ? scope : undefined;
 
-	const receipts = (await scopedReceipts(deps.stateDir, readScope)).filter((r) => inRepo(r.repo));
+	// ATTRIBUTION vs INCLUSION are different questions, and answering them with the same filtered list
+	// leaks. `latestRun` decides which repo a digest BELONGS to; it must be computed from every receipt
+	// this actor may read. Filter first and an agent id reused across repos resolves to its stale
+	// repo-A receipt — so repo B's digest, which overwrote `digests/<id>.md`, gets attributed to repo A
+	// and admitted into a repo-A primer. Nothing binds a digest file to one repo forever; only the
+	// LATEST receipt names its current one. (gpt-5.6-sol)
+	const allReceipts = await scopedReceipts(deps.stateDir, readScope);
 	const latestRun = new Map<string, RunReceipt>();
-	for (const r of receipts) if (!latestRun.get(r.agentId) || (latestRun.get(r.agentId)?.startedAt ?? 0) < r.startedAt) latestRun.set(r.agentId, r);
+	for (const r of allReceipts) if (!latestRun.get(r.agentId) || (latestRun.get(r.agentId)?.startedAt ?? 0) < r.startedAt) latestRun.set(r.agentId, r);
+	// Hot areas are per-FILE evidence, so they take the filtered list.
+	const receipts = allReceipts.filter((r) => inRepo(r.repo));
 
 	const agents: FabricAgentFact[] = scopedAgents.map((a) => ({
 		type: "agent",

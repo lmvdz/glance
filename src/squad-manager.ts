@@ -746,9 +746,11 @@ export class SquadManager extends EventEmitter {
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
 	private readonly learningMetrics: LearningMetrics;
-	/** Epoch ms until which the cold-start primer is skipped, after a fabric read blew its budget.
-	 *  Overridable in tests via the protected `now()` seam. */
-	protected primerBreakerUntil = 0;
+	/** Per-repo epoch ms until which the cold-start primer is skipped, after a fabric read of THAT repo
+	 *  blew its budget. Per-repo, not global: one repo with thousands of receipts (or a Plane project
+	 *  behind a stalled fetch) must not silently mute priming for every other repo the daemon serves.
+	 *  (gpt-5.6-sol.) Overridable in tests via the protected `now()` seam. */
+	protected primerBreakerUntil = new Map<string, number>();
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -4087,7 +4089,8 @@ export class SquadManager extends EventEmitter {
 		// unit, whose inner omp child does have a native channel. Asking before the route gave the wrong
 		// answer for exactly the units dispatch produces — an auto-routed ACP unit would be logged as
 		// undelivered while its primer sailed through to the inner agent. (grok-4.5)
-		const primerDelivered = primerBuilt && contextReachesAgent(opts);
+		const contextDelivers = contextReachesAgent(opts);
+		const primerDelivered = primerBuilt && contextDelivers;
 		if (primerBuilt && !primerDelivered) {
 			// Measured from OUTSIDE the branch it measures — the mistake `primer-empty` made.
 			this.learningMetrics.record("primer-undelivered", 1, { flag: "context-primer", variant: resolveHarnessName(opts) });
@@ -4095,9 +4098,12 @@ export class SquadManager extends EventEmitter {
 		}
 		if (harnessScorecardEnabled()) {
 			dto.harnessScorecard = scoreHarness({
-				// A delivered primer IS instructions for an ad-hoc unit too: `glance add <name>` carries no
-				// task string, and the primer is then the only orientation the unit gets. (grok-4.5)
-				hasInstructions: opts.issue ? Boolean(specBlock) || primerDelivered : Boolean(opts.task?.trim()) || primerDelivered,
+				// The authored spec rides the SAME `appendSystemPrompt` channel as the primer, so an ACP unit
+				// receives neither — scoring it as instructed because a spec was composed is the same lie
+				// the primer told. And a delivered primer IS instructions for an ad-hoc unit: `glance add
+				// <name>` carries no task string, so the primer is its only orientation. (grok-4.5,
+				// gpt-5.6-sol)
+				hasInstructions: opts.issue ? (Boolean(specBlock) && contextDelivers) || primerDelivered : Boolean(opts.task?.trim()) || primerDelivered,
 				toolsScoped: Boolean(toolGrants?.length || opts.requires?.length || produces?.length),
 				isolatedEnvironment: Boolean(resolvedBranch),
 				continuityAnchor: Boolean(opts.featureId || opts.issue || opts.workflowState),
@@ -6059,7 +6065,7 @@ export class SquadManager extends EventEmitter {
 		// on Plane. The dispatcher spawns serially, so a slow fabric makes every unit in the tick start its
 		// own full scan while the last one is still running, and the daemon amplifies its way into the
 		// stall it was supposed to bound. After a timeout, stop asking for a while. (grok-4.5)
-		if (this.now() < this.primerBreakerUntil) return { opts, hasPrimer: false };
+		if (this.now() < (this.primerBreakerUntil.get(opts.repo) ?? 0)) return { opts, hasPrimer: false };
 		try {
 			// BOUNDED. `fabric()` enumerates every receipt file, reads every digest, and calls Plane's issue
 			// list — whose fetch carries no timeout. The dispatcher awaits each spawn serially, so one
@@ -6087,8 +6093,9 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			const timedOut = errText(err).includes("timed out");
 			if (timedOut) {
-				this.primerBreakerUntil = this.now() + envInt("OMP_SQUAD_PRIMER_BACKOFF_MS", 60_000);
-				this.log("warn", `context primer timed out — priming paused for ${envInt("OMP_SQUAD_PRIMER_BACKOFF_MS", 60_000)}ms (the fabric read is still running behind us)`);
+				const backoff = envInt("OMP_SQUAD_PRIMER_BACKOFF_MS", 60_000);
+				this.primerBreakerUntil.set(opts.repo, this.now() + backoff);
+				this.log("warn", `context primer timed out for ${opts.repo} — priming paused there for ${backoff}ms (the fabric read is still running behind us)`);
 			} else this.log("warn", `context primer failed: ${errText(err)}`);
 			return { opts, hasPrimer: false };
 		}

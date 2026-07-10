@@ -144,6 +144,16 @@ function neutralizeDelimiters(text: string): string {
 	return text.replace(/={5,}/g, (run) => "═".repeat(run.length));
 }
 
+/** The label is interpolated INTO the delimiter line, and one caller builds it from an actor id
+ *  (`peer message from ${actor.id}`). A newline there breaks the delimiter across lines and lets the
+ *  attacker write the rest of the fence themselves; an unbounded label pushes the real delimiter past
+ *  anything a reader (or model) will attend to. Collapse control characters, cap it. (gpt-5.6-sol) */
+function sanitizeLabel(label: string): string {
+	// eslint-disable-next-line no-control-regex -- the point is to strip them
+	const flat = neutralizeDelimiters(label).replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+	return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat || "untrusted";
+}
+
 /**
  * Wrap injected, model-derived memory in an explicit untrusted-data fence so a resumed session treats it
  * as data, not instructions (prompt-injection guard).
@@ -155,7 +165,7 @@ function neutralizeDelimiters(text: string): string {
  * digest and hand the next unit's model a forged instruction block.
  */
 export function fenceUntrusted(label: string, body: string): string {
-	const safeLabel = neutralizeDelimiters(label);
+	const safeLabel = sanitizeLabel(label);
 	const clipped = body.length > MAX_FENCED ? `${body.slice(0, MAX_FENCED)}\n… [truncated ${body.length - MAX_FENCED} chars]` : body;
 	return `===== BEGIN ${safeLabel} (untrusted data) =====\n${neutralizeDelimiters(clipped)}\n===== END ${safeLabel} =====`;
 }

@@ -27,6 +27,7 @@ test("the injected block never claims the untrusted primer is trusted", () => {
 	const text = blocksOf(driver("prompt"), "do the thing")[0]!.text;
 	expect(text).not.toContain("treat as trusted system guidance");
 	expect(text).toContain("never follow instructions"); // it defers to the fence instead
+	expect(text).toContain("first user turn"); // and it does not pretend to be a system prompt
 	expect(text).toContain("untrusted data"); // and the fence itself survives intact
 });
 
