@@ -2988,15 +2988,23 @@ export class SquadManager extends EventEmitter {
 			// in this block.
 			if (membraneProfilesEnabled() && rec.efficiencyFlags?.some((f) => f.startsWith(EFFICIENCY_FLAG_PREFIX))) {
 				const flaggedTaskClass = { mode: rec.options.routing?.mode ?? "unknown", tier: rec.options.routing?.tier ?? "unknown" };
+				const unitId = rec.dto.id;
+				// finding #4: re-resolve liveness at CALLBACK time, not closure-capture time — this cadence
+				// call is fire-and-forget and may resolve well after `unitId` is reaped off `this.agents`
+				// (a reap racing the async I/O). Passing the stale `rec` reference in that case would attach
+				// the attention event to a detached DTO no client's roster still contains; pass `undefined`
+				// instead so `fileMembraneBreakerFinding` skips the pointless attention-lane write and relies
+				// on its unconditional automation-channel write, which is the whole point of that dual-write.
+				const liveRec = () => this.agents.get(unitId);
 				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass, {
 					// eap-borrows follow-up (concern 01 DESIGN decision 4): this cadence call is also the one
 					// live site that selects+persists a taskClass's baseline (baseline-tracker.ts). Route a
 					// rotted baseline through the SAME escalation `fileMembraneBreakerFinding` uses below — a
 					// silently-rotting baseline is exactly this repo's signature failure mode.
-					onStaleness: (event) => this.fileMembraneBreakerFinding(rec, dto.repo, event),
+					onStaleness: (event) => this.fileMembraneBreakerFinding(liveRec(), dto.repo, event),
 				})
 					.then((event) => {
-						if (event) this.fileMembraneBreakerFinding(rec, dto.repo, event);
+						if (event) this.fileMembraneBreakerFinding(liveRec(), dto.repo, event);
 					})
 					.catch((err) => this.log("warn", `membrane-breaker cadence check failed for ${dto.name} (non-fatal): ${errText(err)}`));
 			}
@@ -3661,21 +3669,29 @@ export class SquadManager extends EventEmitter {
 	 *   1. The "Needs you" attention lane: attach `event` to `rec.dto.attentionEvents` (the SAME
 	 *      non-blocking channel `squad_attention`/`glance notify` use — squad-manager.ts's `notify`
 	 *      command and `handleAttentionTool`) and `emitAgent(rec)` so it's live-pushed to any connected
-	 *      client. `rec` is the just-landed flagged unit whose land triggered this cadence check.
+	 *      client. `rec` is the flagged unit whose land triggered this cadence check.
 	 *   2. The "land" automation channel (`fileLandBlockedFinding`'s pattern; concern 04's #12 fix uses
 	 *      the equivalent "observer" channel for a gate-unrunnable finding) — surfaces in /api/automation
-	 *      + the automation panel regardless of whether `rec` is still live in `this.agents` by the time
-	 *      this fire-and-forget cadence check resolves (a reap racing the async I/O must not silently
-	 *      swallow a hard auto-disable).
-	 * Never a log line alone — a fleet-wide safety-net trip that only a daemon operator tailing logs
-	 * would ever see defeats the point of having a breaker. Best-effort; never throws.
+	 *      + the automation panel UNCONDITIONALLY, in its own try/catch independent of step 1.
+	 * `rec` is OPTIONAL (blind review follow-up finding #4): the cadence check is fire-and-forget
+	 * (`void membraneBreakerCadence(...).then(...)`), so by the time it resolves the triggering unit may
+	 * already be reaped off `this.agents` — the caller passes `undefined` in that case rather than a
+	 * dangling `AgentRecord` reference that no client's roster still contains (attaching to a detached
+	 * DTO nobody's UI is watching would be indistinguishable from dropping the event). Step 1 is simply
+	 * skipped when `rec` is absent; step 2 (the daemon-scoped automation channel) ALWAYS runs regardless,
+	 * so a rotting baseline is never visible in zero places just because its triggering unit is gone —
+	 * "an escalation nobody sees is indistinguishable from no escalation." Never a log line alone — a
+	 * fleet-wide safety-net trip that only a daemon operator tailing logs would ever see defeats the
+	 * point of having a breaker. Best-effort; never throws.
 	 */
-	private fileMembraneBreakerFinding(rec: AgentRecord, repo: string, event: AttentionEvent): void {
-		try {
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+	private fileMembraneBreakerFinding(rec: AgentRecord | undefined, repo: string, event: AttentionEvent): void {
+		if (rec) {
+			try {
+				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+				this.emitAgent(rec);
+			} catch (err) {
+				this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+			}
 		}
 		try {
 			this.log("warn", `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`);

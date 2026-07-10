@@ -67,13 +67,27 @@ describe("readPersistedBaseline / recordSelectedBaseline", () => {
 		expect(readPersistedBaseline(stateDir, "tdd:heavy")).toEqual({ model: "opus", at: 2000 });
 	});
 
-	test("a corrupt state file is treated as no prior selection, not a crash", async () => {
+	test("a corrupt state file THROWS (corrupt-state) instead of being read as no prior selection (blind review finding #1)", async () => {
+		// Mirrors convergence-oracle.ts#readFailures' fail-open finding #16 discipline: a corrupt sidecar
+		// must escalate, never silently collapse into "nothing persisted yet" — that would silently
+		// re-baseline against nothing on the very next round.
 		const stateDir = await tmpDir();
-		await fs.writeFile(path.join(stateDir, "baseline-tracker.json"), "{not json");
-		expect(readPersistedBaseline(stateDir, "tdd:heavy")).toBeUndefined();
-		// and recording still works afterward (write path is independently best-effort)
-		recordSelectedBaseline(stateDir, "tdd:heavy", "sonnet", 1000);
-		expect(readPersistedBaseline(stateDir, "tdd:heavy")).toEqual({ model: "sonnet", at: 1000 });
+		const file = path.join(stateDir, "baseline-tracker.json");
+		await fs.writeFile(file, "{not json");
+		expect(() => readPersistedBaseline(stateDir, "tdd:heavy")).toThrow(/corrupt-state/);
+		// recordSelectedBaseline does a read-modify-write — it must ALSO throw rather than blindly
+		// overwrite the corrupt file with a fresh single-entry state (which would destroy every OTHER
+		// taskClass's persisted baseline sharing this file).
+		expect(() => recordSelectedBaseline(stateDir, "tdd:heavy", "sonnet", 1000)).toThrow(/corrupt-state/);
+		// The file on disk is left exactly as it was — never silently overwritten.
+		expect(await fs.readFile(file, "utf8")).toBe("{not json");
+	});
+
+	test("a tracker entry with an invalid shape (a torn write) also THROWS corrupt-state", async () => {
+		const stateDir = await tmpDir();
+		const file = path.join(stateDir, "baseline-tracker.json");
+		await fs.writeFile(file, JSON.stringify({ "tdd:heavy": { model: "sonnet" /* missing "at" — a plausible torn-write shape */ } }));
+		expect(() => readPersistedBaseline(stateDir, "tdd:heavy")).toThrow(/corrupt-state/);
 	});
 });
 
@@ -102,9 +116,21 @@ describe("resolvePinnedModel", () => {
 		expect(resolvePinnedModel(stateDir, "tdd:heavy", env)).toBe("opus");
 	});
 
-	test("a corrupt pin file resolves to no pin, not a crash", async () => {
+	test("a corrupt pin file THROWS (corrupt-state) instead of silently resolving to no pin (blind review finding #2)", async () => {
 		const stateDir = await tmpDir();
 		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), "{not json");
+		expect(() => resolvePinnedModel(stateDir, "tdd:heavy", {})).toThrow(/corrupt-state/);
+	});
+
+	test("an env pin that is SET but blank/whitespace-only THROWS (unparseable) rather than falling through silently", async () => {
+		const stateDir = await tmpDir();
+		const env = { OMP_SQUAD_BASELINE_PIN_TDD_HEAVY: "   " } as unknown as NodeJS.ProcessEnv;
+		expect(() => resolvePinnedModel(stateDir, "tdd:heavy", env)).toThrow(/unparseable/);
+	});
+
+	test("a taskClass with no entry in an otherwise-valid pins file legitimately resolves to no pin (not corruption)", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:light": "opus" }));
 		expect(resolvePinnedModel(stateDir, "tdd:heavy", {})).toBeUndefined();
 	});
 });
@@ -157,7 +183,7 @@ describe("selectAndTrackBaseline", () => {
 		expect(result.staleness).toEqual([]);
 	});
 
-	test("a pin pointing at an insufficientData cell fires a staleness event but still resolves the pinned baseline", async () => {
+	test("a pin pointing at an insufficientData cell fires a staleness event AND falls back to the auto-champion, never comparing against the ghost (blind review finding #2)", async () => {
 		const stateDir = await tmpDir();
 		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": "opus" }));
 		// "opus" only has 1 unit in this doc — thin, insufficientData.
@@ -168,9 +194,24 @@ describe("selectAndTrackBaseline", () => {
 		expect(result.staleness).toHaveLength(1);
 		expect(result.staleness[0].summary).toContain("opus");
 		expect(result.staleness[0].detail).toMatch(/insufficient data/);
-		// the pin still wins — selectBaseline doesn't silently fall back to the auto-champion
-		expect(result.baseline?.model).toBe("opus");
-		expect(result.baseline?.pinned).toBe(true);
+		// A thin pin must not silently disable the compare (undefined baseline) nor keep comparing
+		// against the ghost cell — it escalates (above) and falls back to the sample-sufficient
+		// auto-champion explicitly.
+		expect(result.baseline?.model).toBe("sonnet");
+		expect(result.baseline?.pinned).toBe(false);
+	});
+
+	test("a pin naming a NONEXISTENT cell fires a staleness event AND falls back to the auto-champion, never silently disabling the compare (blind review finding #2)", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": "grok" })); // never dispatched under this taskClass
+		const doc = healthyDoc("b", "sonnet");
+		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 9500 });
+		expect(result.staleness).toHaveLength(1);
+		expect(result.staleness[0].summary).toContain("grok");
+		expect(result.staleness[0].detail).toMatch(/dropped out of the fleet|never dispatched/);
+		expect(result.baseline?.model).toBe("sonnet");
+		expect(result.baseline?.pinned).toBe(false);
+		expect(readPersistedBaseline(stateDir, "tdd:heavy")).toEqual({ model: "sonnet", at: 9500 });
 	});
 
 	test("a healthy pin fires no staleness and is recorded as the persisted baseline", async () => {
@@ -193,5 +234,50 @@ describe("selectAndTrackBaseline", () => {
 		expect(result.baseline).toBeUndefined();
 		expect(result.staleness).toEqual([]);
 		expect(readPersistedBaseline(stateDir, "tdd:heavy")).toBeUndefined();
+	});
+
+	// ── Blind review finding #1: corrupt tracker escalates, holds the measurement, never re-baselines ──
+
+	test("a corrupt tracker file: escalation fired, baseline STILL resolves this round (never blocks the land), and the file is NEVER overwritten", async () => {
+		const stateDir = await tmpDir();
+		const file = path.join(stateDir, "baseline-tracker.json");
+		await fs.writeFile(file, "{not json");
+		const doc = healthyDoc("b", "sonnet");
+		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 12000 });
+
+		// 1. Escalation fired.
+		expect(result.staleness.length).toBeGreaterThan(0);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("corrupt"))).toBe(true);
+		expect(result.staleness.some((e) => e.summary.includes("tdd:heavy"))).toBe(true);
+
+		// 2. The measurement is held, not blocked: a usable baseline still resolves off THIS round's doc
+		//    (the pure `selectBaseline` computation never touched the corrupt file at all).
+		expect(result.baseline?.model).toBe("sonnet");
+
+		// 3. No silent re-baseline: the corrupt file on disk is untouched, left for a human to inspect —
+		//    NOT overwritten with a fresh single-entry state.
+		expect(await fs.readFile(file, "utf8")).toBe("{not json");
+	});
+
+	// ── Blind review finding #2: corrupt/bad pin escalates and falls back to the auto-champion ─────────
+
+	test("a corrupt pin file: escalation fired and the auto-champion is used, never a crash or a silently-disabled compare", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), "{not json");
+		const doc = healthyDoc("b", "sonnet");
+		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13000 });
+		expect(result.staleness.length).toBeGreaterThan(0);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("corrupt"))).toBe(true);
+		expect(result.baseline?.model).toBe("sonnet");
+		expect(result.baseline?.pinned).toBe(false);
+	});
+
+	test("an env pin set but blank: escalation fired and the auto-champion is used", async () => {
+		const stateDir = await tmpDir();
+		const doc = healthyDoc("b", "sonnet");
+		const env = { OMP_SQUAD_BASELINE_PIN_TDD_HEAVY: "" } as unknown as NodeJS.ProcessEnv;
+		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13500, env });
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("unparseable"))).toBe(true);
+		expect(result.baseline?.model).toBe("sonnet");
 	});
 });

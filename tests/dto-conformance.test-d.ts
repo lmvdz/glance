@@ -8,13 +8,18 @@
  * `bunx tsc --noEmit -p .` (part of `bun run check`), not just a runtime read nobody happened to
  * exercise.
  *
- * Deliberately a SUBSET check, not full structural equality: a DTO may legitimately omit fields the
- * webapp has no reader for yet (see plans/eap-borrows/00-overview.md's follow-ups list). The guarantee
- * this makes: every key a DTO DOES declare exists on its backend source type with the IDENTICAL type —
- * a backend field renamed out from under a DTO, or retyped, breaks the build; a NEW backend field the
- * DTO is meant to carry can't silently vanish from the mirror once the DTO claims to carry it (that
- * "claims to carry it" moment is exactly a rename: the old key becomes an EXTRA key on the DTO with no
- * backend counterpart, which this check also catches).
+ * Blind review follow-up (this file's original SUBSET design didn't catch the bug it was built for): a
+ * "DTO keys ⊆ Source keys" check passes trivially the moment someone adds a NEW backend field and simply
+ * forgets to mirror it — the DTO stays a valid subset either way, so the exact defect this file exists to
+ * catch (`gateLogPaths` sitting on `ValidationRecord` for months with no compiler edge to `dto.ts`) would
+ * have sailed straight through the old check too. Redesigned to EQUALITY-minus-an-explicit-omit-list: a
+ * DTO's keys must equal its backend source's keys, MINUS a `OmittedFromDto` union the mirror author has
+ * to name on purpose. `UnmirroredSourceKeys` is the new arm — every backend field that is neither on the
+ * DTO nor in the omit list fails the build. Adding a backend field now forces a conscious choice (mirror
+ * it, or name it in `OmittedFromDto`); neither can happen by accident, and both are compile errors
+ * otherwise. Verified live: added a throwaway field to `ValidationRecord` with no DTO/omit-list
+ * counterpart, confirmed `bunx tsc --noEmit -p .` failed on `_ValidationRecordDtoMirrorsEveryBackendField`
+ * naming the new field, then reverted it.
  *
  * `.test-d.ts` naming (mirrors the `tsd`/`expect-type` convention): type-only, no `bun:test` import, no
  * runtime assertions — every import here is `import type`, so the whole file fully erases at
@@ -49,9 +54,24 @@ export type MismatchedSharedKeys<Dto, Source> = {
 	[K in keyof Dto & keyof Source]: Equals<Dto[K], Source[K]> extends true ? never : K;
 }[keyof Dto & keyof Source];
 
-// ── ValidationRecordDTO ⊆ ValidationRecord, and every shared key is byte-identical ─────────────────────
+/** Keys `Source` declares that NEITHER `Dto` NOR the explicit `Omitted` union covers — must be `never`.
+ *  A non-`never` result here IS the offending key name(s): a backend field nobody made a conscious
+ *  decision about yet. This is the arm the old subset-only check was missing — `ExtraDtoKeys` alone
+ *  can never fail on a field that simply never got added to the DTO, which is exactly how
+ *  `gateLogPaths` went unmirrored for months with a "passing" conformance file sitting right next to
+ *  it. Combined with `ExtraDtoKeys` + `MismatchedSharedKeys`, the three checks together assert
+ *  `keyof Dto === keyof Source \ Omitted` — equality minus a deliberate, named exclusion list, not a
+ *  one-directional subset. */
+export type UnmirroredSourceKeys<Dto, Source, Omitted extends keyof Source = never> = Exclude<keyof Source, keyof Dto | Omitted>;
+
+// ── ValidationRecordDTO == ValidationRecord \ OmittedFromValidationRecordDto ────────────────────────────
 // The concrete drift this follow-up closes: `gateLogPaths` (and, pre-existing, `lensAdvisory`/
 // `lensVerify`) were on `ValidationRecord` but missing from `ValidationRecordDTO` — added to the DTO
-// alongside this check so the NEXT such field can't repeat it silently.
+// alongside this check so the NEXT such field can't repeat it silently. Every field on `ValidationRecord`
+// is mirrored today, so this omit list is empty — the NEXT backend field added here must either be
+// mirrored onto `ValidationRecordDTO` or named below on purpose; leaving it out of both fails the build
+// via `_ValidationRecordDtoMirrorsEveryBackendField`, not silently.
+export type OmittedFromValidationRecordDto = never;
 export type _ValidationRecordDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<ValidationRecordDTO, ValidationRecord>] extends [never] ? true : false>;
 export type _ValidationRecordDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<ValidationRecordDTO, ValidationRecord>] extends [never] ? true : false>;
+export type _ValidationRecordDtoMirrorsEveryBackendField = Expect<[UnmirroredSourceKeys<ValidationRecordDTO, ValidationRecord, OmittedFromValidationRecordDto>] extends [never] ? true : false>;
