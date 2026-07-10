@@ -312,6 +312,10 @@ export interface ProjectDTO {
 	statusCounts: Partial<Record<AgentStatus, number>>;
 	pendingCount: number;
 	lastActivity: number;
+	/** Persisted features in this repo — work that outlives the agent that was doing it. */
+	featureCount: number;
+	/** The operator explicitly registered this repo (vs it merely having agents/features today). */
+	registered: boolean;
 }
 
 /** Lifecycle stage of a feature — derived from observable evidence (plan dir, agents, land status). */

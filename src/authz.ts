@@ -60,6 +60,10 @@ export function commandTier(cmd: ClientCommand): Role {
  *  per-command tier (incl. admin for kill/restart/remove) is enforced downstream by `commandTier`
  *  inside `applyCommand`, the SAME single chokepoint the WS surface uses. No second authz site. */
 export function restActionTier(method: string, pathname: string): Role {
+	// Registering a project names a filesystem path the daemon will later create worktrees in and spawn
+	// agents against. Reading the list is viewer; adding/removing one is admin — same tier as installing
+	// a capability, and for the same reason: it widens what the daemon may touch.
+	if (pathname === "/api/projects") return method === "GET" ? "viewer" : "admin";
 	if (pathname === "/api/upgrade") return "admin";
 	if (pathname === "/api/settings/feature-flags") return "admin";
 	if (pathname === "/api/policy/rules") return method === "GET" ? "viewer" : "admin";
