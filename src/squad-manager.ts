@@ -3393,7 +3393,12 @@ export class SquadManager extends EventEmitter {
 		// fileLandBlockedEscalation in the `land()` outcome-recording block below): it retries at the
 		// orchestrator's ~30s cadence, never bumps the branch's fail streak, and escalates to a "Needs you"
 		// attention item if the SAME episode (headSha+reasonClass) is still stuck after the cap — the same
-		// safety valve that already prevents the dirty-main refusal from wedging forever.
+		// safety valve that already prevents the dirty-main refusal from wedging forever. Note the
+		// deliberate asymmetry with `veto` just above: a veto has `opts.validatorOverride` as a logged
+		// human bypass, but `inconclusive` has none — this check runs unconditionally, so `opts.force`
+		// (requireProof:false) does NOT skip it either. There is nothing for a human to override: the
+		// diff itself couldn't be computed, so there's no verdict to force through. The only way out is
+		// the retry lane above (or a human fixing the underlying git fault directly).
 		if (inconclusive) {
 			return { ok: false, committed: false, merged: false, message: opts.message, detail: inconclusive, retryable: true };
 		}

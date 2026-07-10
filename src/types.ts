@@ -378,7 +378,9 @@ export interface FeatureCriterion {
  * (eap-borrows follow-up 7) ⇐ criteria WERE declared but the diff itself could not be COMPUTED (a git
  * fault, distinct from a computed-and-empty diff) — never silently treated as an abstain-and-land; the
  * land path (`SquadManager.runValidatorGate`) turns this into a RETRYABLE hold, never a permanent park
- * and never a silent pass. "veto"/"pass" ⇐ the judge ran and found at least one unsatisfied / all
+ * and never a silent pass. Unlike "veto", a force-land does NOT bypass "inconclusive" — there is no
+ * diff to grade, so the only way through is the bounded-escalation retry lane (or a human fixing the
+ * underlying git fault). "veto"/"pass" ⇐ the judge ran and found at least one unsatisfied / all
  * satisfied criterion respectively (fail-closed on veto).
  * Epic 5's confidence scorer reads `agreement` as one input to the aggregate `confidence` it computes
  * separately — this record never computes that aggregate itself (DESIGN §5).

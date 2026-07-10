@@ -12,7 +12,7 @@
  */
 
 import type { AgentDTO, PendingRequest } from './dto';
-import { isVetoed } from './agent-badges';
+import { isValidatorHeld, isVetoed } from './agent-badges';
 
 export type TaskPosture = 'needs-you' | 'working' | 'idle' | 'unstaffed';
 
@@ -38,6 +38,12 @@ export interface TaskStatus {
   /** land-ready agents the independent validator VETOED — a green proof but a semantic rejection,
    *  so they surface as "review", never "ready to land". Subset of `landReady`. */
   vetoed: AgentDTO[];
+  /** land-ready agents whose last land attempt came back "inconclusive" (eap-borrows follow-up 7: the
+   *  diff itself couldn't be COMPUTED — an environmental git fault, not a semantic rejection). Auto-
+   *  retries on the bounded escalation lane; a force-land does NOT bypass it. Surfaces as a hold, never
+   *  a calm "ready to land" — a bare non-veto check would silently read this as a pass. Subset of
+   *  `landReady`, disjoint from `vetoed`. */
+  inconclusive: AgentDTO[];
   total: number;
   /** the single action that resolves the current posture. */
   primaryAction: 'answer' | 'restart' | 'land' | 'implement' | 'none';
@@ -87,6 +93,8 @@ export function summarizeTask(
   const idle = list.filter((a) => a.status === 'idle' && !blockedIds.has(a.id));
   const landReady = list.filter((a) => a.landReady);
   const vetoed = landReady.filter(isVetoed);
+  const inconclusive = landReady.filter((a) => a.validation?.verdict === 'inconclusive');
+  const readyToLand = landReady.filter((a) => !isValidatorHeld(a));
 
   let posture: TaskPosture;
   let verdict: TaskStatus['verdict'];
@@ -111,11 +119,19 @@ export function summarizeTask(
     verdict = 'critical';
     primaryAction = 'land'; // routes to the console, where the veto rationale + a deliberate force live
     headline = `${plural(vetoed.length, 'agent')} vetoed by the validator — review before landing`;
-  } else if (landReady.length) {
+  } else if (inconclusive.length) {
+    // eap-borrows follow-up 7: the land diff couldn't be COMPUTED (an environmental git fault), not a
+    // semantic rejection — but it must still read as a HOLD, never a calm "ready to land". It auto-
+    // retries on the bounded escalation lane; a force-land does NOT bypass it (there's no diff to grade).
+    posture = 'needs-you';
+    verdict = 'warn';
+    primaryAction = 'land'; // routes to the console, where the retry/escalation state is visible
+    headline = `${plural(inconclusive.length, 'agent')} validator diff inconclusive — retrying automatically`;
+  } else if (readyToLand.length) {
     posture = 'needs-you';
     verdict = 'warn';
     primaryAction = 'land';
-    headline = `${plural(landReady.length, 'agent')} ready to land — review the proof`;
+    headline = `${plural(readyToLand.length, 'agent')} ready to land — review the proof`;
   } else if (working.length) {
     posture = 'working';
     verdict = 'healthy';
@@ -149,6 +165,7 @@ export function summarizeTask(
     idle,
     landReady,
     vetoed,
+    inconclusive,
     total: list.length,
     primaryAction,
     criteria: opts.criteria,

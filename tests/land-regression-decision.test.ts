@@ -87,6 +87,56 @@ test("follow-up 4(c): existing (fail)-line behavior is unchanged — bun-style f
 	expect(extractGateFailures(output)).toEqual(["tests/api.test.ts > returns 500", "tests/auth.test.ts > login"]);
 });
 
+// Fail-open fix (blind cross-lineage review of the follow-up-4 patch, db4ed56): the original patch
+// stripped its volatile-token patterns ANYWHERE in a line, not just at the boilerplate positions
+// (leading timestamp / trailing duration). When a gate emits no `(fail)` lines the whole trimmed output
+// is a single identity token, so over-stripping could normalize two genuinely DIFFERENT failures down
+// to the same string — decideRegressionGate then reads base==merged and ALLOWS a land that actually
+// introduced a real regression. These reproduce the collision on the PRE-fix (db4ed56) code — verified
+// by stashing this fix and re-running: both fail before the fix, pass after.
+test("fail-open fix: an interior duration difference (no brackets) stays a genuinely different failure", () => {
+	const base = extractGateFailures("timeout after 30s\n");
+	const merged = extractGateFailures("timeout after 5s\n");
+	expect(base).not.toEqual(merged);
+	const decision = decideRegressionGate(base, merged);
+	expect(decision.allow).toBe(false);
+	expect(decision.newRegressions).toEqual(merged);
+});
+
+test("fail-open fix: an interior hex object id difference stays a genuinely different failure", () => {
+	const base = extractGateFailures("object a1b2c3d missing\n");
+	const merged = extractGateFailures("object e4f5a6b missing\n");
+	expect(base).not.toEqual(merged);
+	const decision = decideRegressionGate(base, merged);
+	expect(decision.allow).toBe(false);
+	expect(decision.newRegressions).toEqual(merged);
+});
+
+test("fail-open fix: leading timestamp still normalizes away (follow-up 4's original wedge stays fixed)", () => {
+	const base = extractGateFailures("2026-07-09T12:00:01.123Z error: assertion failed at src/foo.ts:42\n");
+	const merged = extractGateFailures("2026-07-10T03:14:59.987Z error: assertion failed at src/foo.ts:42\n");
+	expect(base).toEqual(merged);
+	expect(decideRegressionGate(base, merged)).toEqual({ allow: true, newRegressions: [] });
+});
+
+test("fail-open fix: trailing bracketed duration still normalizes away (follow-up 4's original wedge stays fixed)", () => {
+	const base = extractGateFailures("error: assertion failed at src/foo.ts:42 [196.72s]\n");
+	const merged = extractGateFailures("error: assertion failed at src/foo.ts:42 [204.05s]\n");
+	expect(base).toEqual(merged);
+	expect(decideRegressionGate(base, merged)).toEqual({ allow: true, newRegressions: [] });
+});
+
+test("fail-open fix, gate level: base failure A and merged failure B differing only in an interior hex id is REFUSED, not silently allowed", () => {
+	// This is the test that proves the fail-open is closed AT THE GATE, not just in the helper: base
+	// has one failure, merged has a DIFFERENT failure whose only textual difference is the hex id — the
+	// exact shape a false-equality collision would silently wave through.
+	const baseFailures = extractGateFailures("object a1b2c3d missing\n");
+	const mergedFailures = extractGateFailures("object e4f5a6b missing\n");
+	const decision = decideRegressionGate(baseFailures, mergedFailures);
+	expect(decision.allow).toBe(false); // must REFUSE — a real regression, not a red-baseline re-merge
+	expect(decision.newRegressions).toEqual(mergedFailures);
+});
+
 test('finding #8: two DIFFERENT check/tsc-only failures whose FIRST LINE coincides no longer collide as "the same" red', () => {
 	// OLD behavior (fail-open, the residual "equal-red" hole): extractGateFailures used only the first
 	// line as identity — both outputs below share the exact same first line ("$ tsc --noEmit") while

@@ -62,6 +62,20 @@ export function isVetoed(agent: Pick<AgentDTO, 'validation'>): boolean {
   return agent.validation?.verdict === 'veto';
 }
 
+/**
+ * True on a validator verdict that must read as a HOLD, never "safe to land" — a `veto` (semantic
+ * rejection) or an `inconclusive` (eap-borrows follow-up 7: the land diff couldn't be COMPUTED, an
+ * environmental git fault, distinct from a genuinely empty diff). Both can coexist with
+ * `landReady:true`: the land attempt that produced the verdict doesn't clear the staged flag on a
+ * blocked/retryable outcome — only a successful land does. Every surface that gates a "ready to land" /
+ * "Land" affordance on `landReady` must exclude both, not just `veto` — a bare `verdict !== 'veto'`
+ * check silently reads an `inconclusive` hold as a pass (the fail-open this helper closes).
+ */
+export function isValidatorHeld(agent: Pick<AgentDTO, 'validation'>): boolean {
+  const v = agent.validation?.verdict;
+  return v === 'veto' || v === 'inconclusive';
+}
+
 /** A rendered pill for the independent-validator verdict, or `null` when there's no verdict worth
  *  showing (`skipped` = no declared criteria to judge against). Title carries the judge's rationale. */
 export function validationBadge(agent: Pick<AgentDTO, 'validation'>): { label: string; cls: string; title: string } | null {

@@ -234,38 +234,44 @@ const FAILURE_DURATION_SUFFIX = /\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/;
 /**
  * eap-borrows follow-up 4: `extractGateFailures`'s whole-output fallback (below — a gate with no
  * `(fail)` lines) uses the ENTIRE trimmed output as the failure identity, so two runs of the exact same
- * logical failure only compare equal if the output is byte-identical. Interior timestamps, elapsed
- * durations, temp paths, PIDs, and hex object ids differ run-to-run even when the underlying failure is
- * unchanged, which silently degraded the red-baseline allowance (`decideRegressionGate`) to
- * always-refuse on any repo whose gate output carries one of these — indistinguishable from a genuine
- * new regression, with force-land as the only escape.
+ * logical failure only compare equal if the output is byte-identical. A leading log-line timestamp and a
+ * trailing elapsed-duration suffix differ run-to-run even when the underlying failure is unchanged,
+ * which silently degraded the red-baseline allowance (`decideRegressionGate`) to always-refuse on any
+ * repo whose gate output carries one of these — indistinguishable from a genuine new regression, with
+ * force-land as the only escape.
  *
- * Conservative by construction: each pattern only fires on a substring that is PROVABLY volatile (a
- * number directly glued to a duration unit, an ISO/clock timestamp, a `/tmp` path, a `pid N` token, or a
- * long-enough token that is genuinely hex — contains at least one a-f letter, so a plain meaningful
- * decimal number like a line number or byte count is never touched). Anything else, including the
- * failure's actual message text, passes through untouched — two genuinely DIFFERENT failures still
- * normalize to different strings and must never collide.
+ * FAIL-OPEN FIX (found by a blind cross-lineage review of the original follow-up-4 patch): that patch
+ * stripped its volatile-token patterns ANYWHERE in the line, including a bare interior duration
+ * (`timeout after 30s`) and an interior hex-looking token (`object a1b2c3d missing`). When a gate emits
+ * no `(fail)` lines the WHOLE trimmed output is a single identity token, so over-stripping could
+ * normalize two genuinely DIFFERENT failures (different timeout thresholds, different object ids) down
+ * to the same string — `decideRegressionGate` then reads base==merged and ALLOWS a land that actually
+ * introduced a real regression. Normalization is now scoped to boilerplate POSITIONS, never to a token
+ * shape wherever it appears: a LEADING timestamp prefix (the wrapper/runner's log-line banner), a
+ * TRAILING bracketed duration suffix (`FAILURE_DURATION_SUFFIX`, pre-existing, unchanged), and two
+ * tokens (`/tmp/...` paths, `pid N`) that are boilerplate wherever they occur because neither is ever the
+ * distinguishing content of a failure message. A bare interior duration or a bare interior hex token is
+ * deliberately left UNTOUCHED, even though that means some repos whose gate output embeds a volatile hex
+ * id or an unbracketed elapsed time won't auto-collapse to the same identity across runs and may need a
+ * force-land — an asymmetric trade made on purpose: a false INEQUALITY here is a visible, force-landable
+ * wedge; a false EQUALITY silently merges a regression. When in doubt, do not strip.
  */
-const VOLATILE_DURATION = /\b\d+(?:\.\d+)?\s?(?:ns|[µu]s|ms|s)\b/g;
-const VOLATILE_ISO_TIMESTAMP = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g;
-const VOLATILE_CLOCK_TIMESTAMP = /\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/g;
+const VOLATILE_LEADING_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\s*/;
+const VOLATILE_LEADING_CLOCK_TIMESTAMP = /^\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s*/;
 const VOLATILE_TMP_PATH = /\/(?:private\/)?(?:tmp|var\/tmp)\/[^\s"'):,]+/g;
 const VOLATILE_PID = /\bpid[:\s]+\d+\b/gi;
-const VOLATILE_HEXLIKE = /\b[0-9a-f]{7,40}\b/gi;
 
-/** Strip run-to-run volatile tokens from a SINGLE line — see `VOLATILE_*` doc above. Applied per-line
+/** Strip run-to-run volatile BOILERPLATE from a SINGLE line — see the doc above. Applied per-line
  *  (never across a whole multi-line blob at once) so the trailing-`$`-anchored `FAILURE_DURATION_SUFFIX`
- *  below still means "end of THIS line", not "end of the whole output". */
+ *  below still means "end of THIS line", not "end of the whole output", and the leading-`^`-anchored
+ *  timestamp patterns mean "start of THIS line", never an interior match. */
 function normalizeVolatileLine(line: string): string {
 	return line
 		.replace(FAILURE_DURATION_SUFFIX, "") // a trailing bracketed duration, brackets and all (pre-existing behavior)
-		.replace(VOLATILE_ISO_TIMESTAMP, "<TS>")
-		.replace(VOLATILE_CLOCK_TIMESTAMP, "<TS>")
-		.replace(VOLATILE_DURATION, "<DUR>")
+		.replace(VOLATILE_LEADING_ISO_TIMESTAMP, "") // a leading ISO-8601 log-line timestamp, position-anchored
+		.replace(VOLATILE_LEADING_CLOCK_TIMESTAMP, "") // a leading bare clock timestamp, position-anchored
 		.replace(VOLATILE_TMP_PATH, "<TMPPATH>")
-		.replace(VOLATILE_PID, "pid <PID>")
-		.replace(VOLATILE_HEXLIKE, (m) => (/[a-f]/i.test(m) ? "<HEXID>" : m));
+		.replace(VOLATILE_PID, "pid <PID>");
 }
 
 function normalizeFailureIdentity(failure: string): string {
@@ -295,8 +301,8 @@ export function extractGateFailures(output: string, fallback = "gate"): string[]
 	// compared set-equal, and silently allowed a red-baseline re-merge that had actually introduced a new
 	// failure. Use the WHOLE trimmed output as the identity instead — a genuinely reproducible, UNCHANGED
 	// brownfield failure (the same check/tsc-only gate failing exactly the same way on base and merged)
-	// still compares equal (after `normalizeFailureIdentity` collapses run-to-run volatile tokens — follow-
-	// up 4, see the doc above `VOLATILE_DURATION` et al.) and allows the red-baseline landing (never
+	// still compares equal (after `normalizeFailureIdentity` collapses run-to-run volatile BOILERPLATE —
+	// follow-up 4, see the doc above `VOLATILE_LEADING_ISO_TIMESTAMP` et al.) and allows the red-baseline landing (never
 	// wedging that repo), but a materially different failure no longer collides just because its first
 	// line happens to match.
 	const trimmed = output.trim();

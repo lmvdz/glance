@@ -427,7 +427,10 @@ export interface ValidatorGateResult {
 	/** Human-readable "diff could not be computed" reason (eap-borrows follow-up 7) — set ONLY when
 	 *  `record.verdict === "inconclusive"`. Distinct from `veto`: this is an ENVIRONMENTAL fault, never a
 	 *  branch defect, so the caller must treat it as a RETRYABLE hold (never a silent pass, never a
-	 *  permanent park) — never fold it into the same non-retryable refusal path as `veto`. */
+	 *  permanent park) — never fold it into the same non-retryable refusal path as `veto`. Unlike a
+	 *  `veto`, there is no `validatorOverride`-style escape hatch: a force-land does NOT bypass this
+	 *  (there is nothing to grade when the diff itself couldn't be computed). The real escape hatch is
+	 *  the bounded-escalation retry lane — this is legible in the returned string. */
 	inconclusive?: string;
 }
 
@@ -722,7 +725,10 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 		if (cacheKey && record.verdict !== "inconclusive") gateCache.set(cacheKey, record);
 	}
 	if (record.verdict === "inconclusive") {
-		return { record, inconclusive: `validator inconclusive: diff could not be computed (environmental git fault, not a branch defect) — retry` };
+		return {
+			record,
+			inconclusive: `validator inconclusive: diff could not be computed (environmental git fault, not a branch defect) — auto-retries on the bounded escalation lane; a force-land does NOT bypass this (unlike a veto's validatorOverride) since there is no diff to grade — if it persists past the escalation cap it surfaces as a "needs you" attention item; check the repo/worktree's git health (disk space, permissions, stale lock files)`,
+		};
 	}
 	if (record.verdict !== "veto") return { record };
 	const unmet = record.perCriterion.filter((p) => !p.satisfied).map((p) => p.id);

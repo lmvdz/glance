@@ -371,6 +371,20 @@ describe('attentionItems', () => {
     expect(items.some((i) => i.kind === 'land-ready')).toBe(false); // the calm row is suppressed
   });
 
+  // Fail-open fix (blind review): the old `a.landReady && a.validation?.verdict !== 'veto'` check below
+  // treated "inconclusive" (eap-borrows follow-up 7 — the land diff couldn't be COMPUTED, an
+  // environmental git fault) the same as a clean pass, silently emitting a calm land-ready row for an
+  // agent whose last land attempt was actually BLOCKED and retryable.
+  test('inconclusive land-ready agent → a warn "inconclusive" row, and NOT a calm land row', () => {
+    const validation = { verdict: 'inconclusive' as const, agreement: 0, confidence: 0, perCriterion: [], rationale: 'diff fault' };
+    const items = attentionItems({ agents: [agent('a', 'idle', { landReady: true, validation })] });
+    const held = items.find((i) => i.kind === 'inconclusive');
+    expect(held).toBeDefined();
+    expect(held?.severity).toBe('warn');
+    expect(held?.detail).toContain('diff fault');
+    expect(items.some((i) => i.kind === 'land-ready')).toBe(false); // the calm row is suppressed
+  });
+
   test('collisions become warn view items', () => {
     const items = attentionItems({ collisions: [{ file: 'src/x.ts', agents: [{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }] }] });
     expect(items[0].kind).toBe('collision');
