@@ -358,6 +358,13 @@ export const ChatAttachmentCreateBodySchema = Schema.Struct({
 	dataUrl: Schema.String,
 });
 
+/** POST /api/voice/token — no required field (`provider` defaults to `"openai"` downstream in
+ *  `voice-token.ts`; an unknown provider id 400s post-decode, not here — the SSRF-doctrine closed
+ *  switch lives in `mintVoiceToken`, not in schema validation). */
+export const VoiceTokenBodySchema = Schema.Struct({
+	provider: Schema.optional(Schema.Unknown),
+});
+
 /** POST /api/tasks/:id/start — no required field (`repo` falls back to `process.cwd()`). */
 export const TaskStartBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),

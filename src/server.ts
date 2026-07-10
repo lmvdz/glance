@@ -65,6 +65,7 @@ import {
 	SpawnBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
+	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
@@ -102,6 +103,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { mintVoiceToken, voiceProviderPublicInfo } from "./voice-token.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -440,6 +442,10 @@ export class SquadServer {
 	private readonly trustedOrigins: Set<string>;
 	/** ponytail: in-process public intake limiter; restart resets it, campaign token + origin + byte caps are the real controls. */
 	private readonly feedbackRate = new Map<string, { minute: number; count: number }>();
+	/** Per-actor voice mint rate cap (webapp-voice-lane/05): audio never transits the daemon, so the
+	 *  mint count is the daemon's ONLY spend signal — this cap is load-bearing, not hygiene. Restart
+	 *  resets it, same ponytail as `feedbackRate` above. */
+	private readonly voiceMintRate = new Map<string, { minute: number; count: number }>();
 
 	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
 		this.singleManager = manager;
@@ -508,6 +514,23 @@ export class SquadServer {
 		const rec = this.feedbackRate.get(key);
 		if (!rec || rec.minute !== minute) {
 			this.feedbackRate.set(key, { minute, count: 1 });
+			return true;
+		}
+		rec.count++;
+		return rec.count <= limit;
+	}
+
+	/** Per-actor mint rate cap (webapp-voice-lane/05), mirroring `feedbackRateAllowed`'s shape exactly
+	 *  but keyed by `actor.id` (not IP) — voice mint is authenticated, so the actor identity is the
+	 *  natural per-caller bucket, same as everywhere else RBAC-scoped state is keyed. */
+	private voiceMintRateAllowed(actor: Actor): boolean {
+		const limit = envInt("OMP_SQUAD_VOICE_MINT_RATE_PER_MIN", 6);
+		if (limit <= 0) return true;
+		const minute = Math.floor(Date.now() / 60_000);
+		const key = actor.id || "unknown";
+		const rec = this.voiceMintRate.get(key);
+		if (!rec || rec.minute !== minute) {
+			this.voiceMintRate.set(key, { minute, count: 1 });
 			return true;
 		}
 		rec.count++;
@@ -1148,6 +1171,35 @@ export class SquadServer {
 					? { ...actorForRole(role), orgId }
 					: actorForRole(role);
 		const manager = await this.managerFor(actor);
+		// Voice token mint + capability probe (webapp-voice-lane/05, DESIGN.md "Token mint" row).
+		// Deliberately placed BEFORE the `!manager` gate below: minting is independent of any specific
+		// fleet manager, and the DB-mode refusal must fire even for a DB-mode session with no active
+		// org (which would otherwise hit `noFleet` first and never see the real reason). Both routes
+		// are gated by `restActionTier`'s existing default (GET=viewer/POST=operator for `/api/voice/*`,
+		// pinned by a regression test) — no new authz branch.
+		if (url.pathname === "/api/voice/config" && req.method === "GET") {
+			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
+			// Viewer tier gets the bare capability probe only — provider posture (which keys are
+			// configured) is never leaked below operator (DESIGN.md red-team: "leaks provider posture").
+			if (role === "viewer") return Response.json({ enabled: true });
+			return Response.json({ enabled: true, providers: voiceProviderPublicInfo() });
+		}
+		if (url.pathname === "/api/voice/token" && req.method === "POST") {
+			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
+			// A single shared provider key with no per-org attribution or budget is the uncapped-shared-
+			// dollar shape (DESIGN.md "Token mint" row) — refuse outright in DB/org mode rather than
+			// silently pooling spend across tenants. `dbMode` is `!!this.auth`, true regardless of
+			// whether this particular session resolved an org/manager.
+			if (this.dbMode) return new Response("voice token mint is unavailable in multi-tenant (DB) mode in v1 — file mode only", { status: 403 });
+			// Per-actor mint rate cap: audio never transits the daemon, so the mint count is the ONLY
+			// spend signal the daemon has — this cap is load-bearing, not hygiene (DESIGN.md).
+			if (!this.voiceMintRateAllowed(actor)) return new Response("rate limited", { status: 429 });
+			const decoded = decodeBodyOrEmpty(VoiceTokenBodySchema, await req.json().catch(() => null));
+			const providerId = typeof decoded.provider === "string" && decoded.provider ? decoded.provider : "openai";
+			const result = await mintVoiceToken(providerId, process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY);
+			if (!result.ok) return new Response(result.message, { status: result.status });
+			return Response.json(result.token);
+		}
 		// Seed identity for features created this request: a real signed-in user's `db:<userId>` when
 		// there's a session, else undefined ⇒ the manager falls back to its own operator identity
 		// (file mode, or an on-box bootstrap admin with no session). Never seeds a role-derived id.
