@@ -3112,6 +3112,9 @@ export class SquadManager extends EventEmitter {
 	private markLandReady(id: string): void {
 		const rec = this.agents.get(id);
 		if (!rec) return;
+		// "Ready to land" is meaningless for a unit that must never land, and it is the flag the UI's Land
+		// button and `floatPrOnLandReady` both key off. (grok-4.5)
+		if (rec.options.executionRole === "observer" || rec.options.ask) return;
 		rec.dto.landReady = true;
 		this.emitAgent(rec);
 		this.log("info", `land-confirm: ${id} verified — ready to land`);
@@ -3131,6 +3134,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	private floatPrOnLandReady(rec: AgentRecord): void {
 		const dto = rec.dto;
+		if (rec.options.executionRole === "observer" || rec.options.ask) return; // an answer opens no PR
 		if (!dto.branch || dto.worktree === dto.repo) return; // nothing to land in PR mode
 		void (async () => {
 			try {
@@ -3396,6 +3400,9 @@ export class SquadManager extends EventEmitter {
 	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
+		// Not "unlanded work" — an answer. Saying yes here is what invites the orchestrator to verify it,
+		// sweep it, and try to land it. (grok-4.5)
+		if (rec.options.executionRole === "observer" || rec.options.ask) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
@@ -3529,6 +3536,12 @@ export class SquadManager extends EventEmitter {
 	 * Returns true only when a commit was created.
 	 */
 	async commitAgentWip(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
+		// An observer/answer unit produces a REPORT. Sweeping its worktree into a commit is the first step
+		// of a chain that ends in a merge, and this sweep is exactly what made the fleet able to land at
+		// all. `is-landing-unit.ts` looks like it guards this; it does not — it is a metrics denominator
+		// and no land path reads it. The refusal has to live at each door. (grok-4.5)
+		const guard = this.agents.get(id);
+		if (guard && (guard.options.executionRole === "observer" || guard.options.ask)) return false;
 		const rec = this.agents.get(id);
 		if (!rec) return false;
 		const { repo, worktree, branch, status, name } = rec.dto;

@@ -9,11 +9,24 @@
  *
  * An answer is not a branch that happens to contain a markdown file. It is a first-class artifact:
  *
- *   - It has no branch, no worktree to land, no merge. `executionRole: "observer"` already means
- *     "never commits" (`is-landing-unit.ts`), so the machinery exists; nothing here relaxes it.
  *   - It is durable. The question outlives the roster row that answered it — the single most common way
  *     a glance result used to evaporate was the agent being reaped before anyone read its transcript.
  *   - It is addressable. `glance ask` prints it; `GET /api/answers/:id` serves it; the id is stable.
+ *   - Nothing the daemon does can turn it into a merge. `land()`, `commitAgentWip`, `markLandReady`,
+ *     `floatPrOnLandReady` and `agentHasUnlandedWork` each refuse an observer/answer unit.
+ *
+ * What is NOT true, and was claimed here first: the unit HAS a branch (`squad/<id>`) and a real worktree,
+ * because an answer that had to read the repo through a keyhole would be worse than no answer. And
+ * `is-landing-unit.ts` — which reads exactly like "an observer never commits" — is a metrics DENOMINATOR
+ * that no land path consults. Every refusal above had to be written; none of it was inherited.
+ *
+ * REMAINING GAP, stated rather than papered over. The unit runs `--approval yolo`, and the brief below
+ * telling it not to edit is a PROMPT, not an enforcement. `agent-guard.ts` (`screenToolCall`) is the
+ * layer that could enforce it — a hook block stops a tool before it runs and yolo cannot bypass it — but
+ * its policy is process-global today, so making it per-unit means threading a per-agent env through
+ * `RpcAgent` → `agent-host`. Until then the daemon refuses to publish an answer unit's work; it does not
+ * stop the model from writing into a worktree that is subsequently discarded. A `git push` by the model
+ * would still reach the operator's origin. (grok-4.5)
  *
  * Stored as one JSON record per answer, next to the state dir's other tiny sets (`removed-ledger.ts`,
  * `project-registry.ts`), and decoded with a real Schema rather than a cast: persisted state survives

@@ -280,3 +280,35 @@ test("an empty question is refused", async () => {
 	const mgr = new AnswerManager({ stateDir: await tmpDir() } as never);
 	await expect(mgr.ask({ repo: "/srv/app", question: "   " })).rejects.toThrow("a question is required");
 });
+
+/**
+ * Closing the door I found is not closing the doors. `land()` is one of five places the daemon can turn a
+ * unit's worktree into a commit or a PR — the others are the pre-verify WIP sweep, the land-ready flag the
+ * UI's Land button keys off, the draft-PR float, and the "has unlanded work" predicate that invites the
+ * orchestrator to verify-and-land in the first place. (grok-4.5: "the author fixed the discovery path they
+ * hit, not the adjacent doors.")
+ */
+test("every daemon-side door to a commit refuses an answer unit", async () => {
+	const dir = await tmpDir();
+
+	class DoorManager extends SquadManager {
+		seed(rec: unknown): void {
+			(this as unknown as { agents: Map<string, unknown> }).agents.set("u1", rec);
+		}
+		landReady(): unknown {
+			(this as unknown as { markLandReady(id: string): void }).markLandReady("u1");
+			return (this as unknown as { agents: Map<string, { dto: { landReady?: boolean } }> }).agents.get("u1")?.dto.landReady;
+		}
+		hasWork(): Promise<boolean> {
+			return this.agentHasUnlandedWork("u1");
+		}
+	}
+
+	const mgr = new DoorManager({ stateDir: dir } as never);
+	mgr.seed({ dto: { id: "u1", name: "ask-1", repo: "/srv/app", worktree: "/wt/ask-1", branch: "squad/ask-1" }, options: { executionRole: "observer", ask: "why?" } });
+
+	expect(await mgr.commitAgentWip("u1")).toBe(false); // the pre-verify sweep does not commit it
+	expect(mgr.landReady()).toBeUndefined(); // never flagged ready — the Land button has nothing to press
+	expect(await mgr.hasWork()).toBe(false); // the orchestrator is never invited to verify-and-land it
+	expect((await mgr.land("u1")).ok).toBe(false); // and the door itself stays shut
+});
