@@ -43,21 +43,25 @@ export const ClientCommandSchema = Schema.Union([
 		message: Schema.String,
 		clientTurnId: Schema.optional(Schema.String),
 		displayText: Schema.optional(Schema.String),
+		// Observability-only provenance tag (e.g. "voice" | "composer"), kept as an open string —
+		// threaded to the audit trail, never consulted for authz. `Schema.Struct` strips unknown keys,
+		// so without this the tag would be silently dropped at decode and the audit would stay blind.
+		source: Schema.optional(Schema.String),
 	}),
 	Schema.Struct({ type: Schema.Literal("set-model"), id: Schema.String, model: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("answer"), id: Schema.String, requestId: Schema.String, value: Schema.String }),
-	Schema.Struct({ type: Schema.Literal("interrupt"), id: Schema.String }),
+	Schema.Struct({ type: Schema.Literal("interrupt"), id: Schema.String, source: Schema.optional(Schema.String) }),
 	Schema.Struct({ type: Schema.Literal("kill"), id: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("restart"), id: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("fork"), id: Schema.String, seq: Schema.optional(Schema.Number) }),
 	Schema.Struct({ type: Schema.Literal("remove"), id: Schema.String, deleteWorktree: Schema.optional(Schema.Boolean) }),
 	// Phase-2: `options` (CreateAgentOptions) is deep-modeled in ./create-agent-options.ts.
-	Schema.Struct({ type: Schema.Literal("create"), options: CreateAgentOptionsSchema }),
+	Schema.Struct({ type: Schema.Literal("create"), options: CreateAgentOptionsSchema, source: Schema.optional(Schema.String) }),
 	Schema.Struct({ type: Schema.Literal("message"), to: Schema.String, text: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("snapshot") }),
 	Schema.Struct({ type: Schema.Literal("subscribe"), id: Schema.String }),
 	// Phase-2: `spec` (CommissionSpec) is deep-modeled in ./create-agent-options.ts.
-	Schema.Struct({ type: Schema.Literal("commission"), spec: CommissionSpecSchema }),
+	Schema.Struct({ type: Schema.Literal("commission"), spec: CommissionSpecSchema, source: Schema.optional(Schema.String) }),
 	Schema.Struct({ type: Schema.Literal("set-mode"), id: Schema.String, mode: AutonomyModeSchema, reason: Schema.optional(Schema.String) }),
 	// cmux-research concern 03 (harness-agnostic `glance notify`): non-blocking attention flag.
 	Schema.Struct({ type: Schema.Literal("notify"), id: Schema.String, summary: Schema.String, detail: Schema.optional(Schema.String) }),

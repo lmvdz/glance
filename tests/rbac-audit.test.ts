@@ -24,7 +24,7 @@ afterEach(async () => {
 test("applyCommand audits RBAC denials and accepted mutations", async () => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rbac-audit-"));
 	// Store stub that records audit entries; everything else is an inert no-op.
-	const audits: { actor: string; action: string }[] = [];
+	const audits: { actor: string; action: string; source?: string }[] = [];
 	const store: Store = {
 		async hasState() {
 			return false;
@@ -38,7 +38,7 @@ test("applyCommand audits RBAC denials and accepted mutations", async () => {
 		},
 		async saveFeedback() {},
 		async appendAudit(e) {
-			audits.push({ actor: e.actor, action: e.action });
+			audits.push({ actor: e.actor, action: e.action, source: e.source });
 		},
 		async appendUsage() {},
 	};
@@ -63,4 +63,49 @@ test("applyCommand audits RBAC denials and accepted mutations", async () => {
 	// Reads (viewer-tier) are not audited.
 	await mgr.applyCommand({ type: "snapshot" }, viewer);
 	expect(audits.some((a) => a.action === "snapshot")).toBe(false);
+});
+
+test("applyCommand: a voice-originated command's source rides along to the audit entry (concern 03)", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rbac-audit-source-"));
+	const audits: { actor: string; action: string; source?: string }[] = [];
+	const store: Store = {
+		async hasState() {
+			return false;
+		},
+		async load(): Promise<StateSnapshot> {
+			return { agents: [], transcripts: {}, features: [] };
+		},
+		async save() {},
+		async loadFeedback() {
+			return { campaigns: [], items: [], validations: [], rewards: [] };
+		},
+		async saveFeedback() {},
+		async appendAudit(e) {
+			// Mirror the real entry's contain-or-omit contract exactly: `source` is either present with a
+			// value, or absent — never present-but-undefined (that would be null pollution by another name).
+			audits.push(e.source !== undefined ? { actor: e.actor, action: e.action, source: e.source } : { actor: e.actor, action: e.action });
+		},
+		async appendUsage() {},
+	};
+	const mgr = new SquadManager({ stateDir: dir, store });
+	await mgr.start();
+	cleanups.push(async () => {
+		await mgr.stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	const operator: Actor = { id: "o", origin: "remote", role: "operator" };
+
+	// A voice-originated prompt is distinguishable from a typed one in the audit trail.
+	await mgr.applyCommand({ type: "prompt", id: "ghost", message: "x", source: "voice" }, operator);
+	const voiceEntry = audits.find((a) => a.actor === "o" && a.action === "prompt");
+	expect(voiceEntry?.source).toBe("voice");
+
+	// A frame without `source` behaves exactly as today — no null/undefined pollution in the entry.
+	audits.length = 0;
+	await mgr.applyCommand({ type: "interrupt", id: "ghost" }, operator);
+	const typedEntry = audits.find((a) => a.actor === "o" && a.action === "interrupt");
+	expect(typedEntry).toBeDefined();
+	expect("source" in (typedEntry as object)).toBe(false);
+	expect(typedEntry?.source).toBeUndefined();
 });
