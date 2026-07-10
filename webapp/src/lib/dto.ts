@@ -615,7 +615,10 @@ export type SquadEvent =
 export type ClientCommand =
   | { type: "snapshot" }
   | { type: "subscribe"; id: string }
-  | { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string }
+  // `source` (intended values "composer" | "voice", kept as an open string) is observability-only
+  // provenance for the audit trail (root ClientCommand/schema, concern 03) — never consulted here
+  // for authz/tier decisions, which stay server-side regardless of this tag.
+  | { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string; source?: string }
   | { type: "set-model"; id: string; model: string }
   | { type: "interrupt"; id: string }
   | { type: "kill"; id: string }

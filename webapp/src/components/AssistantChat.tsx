@@ -18,8 +18,7 @@ import { usePageContext } from '../context/PageContext';
 import { serializePageContextForPrompt } from '../lib/pageContextDerive';
 import { apiJson, jsonInit } from '../lib/api';
 import { answerCommand, interruptCommand, interruptibleAgents } from '../lib/agent-control';
-import { activeWork, activeWorkDigest } from '../lib/insights';
-import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../lib/fleetActivity';
+import { buildPromptCommand, ensureConsoleAgent } from '../lib/chat/sendCore';
 import { spawnProposalFor, type SpawnedUnitRecord, type SpawnProposal } from '../lib/spawnProposal';
 import type { AgentDTO, TranscriptEntry } from '../lib/dto';
 import type { Task } from '../types';
@@ -37,10 +36,6 @@ export interface Message {
    *  server. Survives reload (unlike `pendingSends`, which is render state only) so a failed
    *  send still renders with error styling after a refresh. */
   undelivered?: boolean;
-}
-
-interface ConsoleStart {
-  agentId: string;
 }
 
 export interface Session {
@@ -693,8 +688,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
 
   // Declared state-relocation (concern 09 — monolith split): the composer's typed-input state
   // and the `@`-mention trigger-menu now live in `chat/Composer.tsx`, which validates and clears
-  // its own input before calling this with a non-empty `textToSend`. Context-assembly (fleet
-  // snapshot, task context, agent creation) stays here, unchanged.
+  // its own input before calling this with a non-empty `textToSend`. Agent creation + prompt-shape
+  // assembly now live in `lib/chat/sendCore.ts` (concern 04 — shared with the voice dispatcher);
+  // this component keeps only the optimistic pendingSends/clientTurnId machinery and session
+  // bookkeeping around those two calls.
   //
   // Single message model (concern 10 — replay-as-truth) + client durability (review finding 1):
   // the server echoes every prompt into the agent's persisted transcript (replayed on every
@@ -732,32 +729,25 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     setIsLoading(true);
 
     try {
-      let nextAgentId = activeSession?.metadata?.agentId;
-      if (nextAgentId && !agents.some((agent) => agent.id === nextAgentId)) nextAgentId = undefined;
-      if (!nextAgentId) {
-        const started = await apiJson<ConsoleStart>('/api/console', jsonInit('POST', { repo: currentProject?.id, model: selectedModel || undefined }));
-        nextAgentId = started.agentId;
-        subscribeConsole(nextAgentId);
+      const priorAgentId = activeSession?.metadata?.agentId;
+      const nextAgentId = await ensureConsoleAgent(
+        { apiJson, subscribeConsole, roster: agents, currentProject, selectedModel },
+        sessionId,
+        priorAgentId,
+      );
+      if (nextAgentId !== priorAgentId) {
         setSessions(prev => prev.map(session => session.id === sessionId ? {
           ...session,
           title: session.title === 'New Chat' ? (textToSend.length > 30 ? `${textToSend.slice(0, 30)}...` : textToSend) : session.title,
           metadata: { ...session.metadata, agentId: nextAgentId, status: 'active', stage: 'Chat' },
         } : session));
       }
-      // Always hand the assistant the same live join the Active Work pane renders, so it can
-      // answer "what's being worked on?" (present) AND "what happened while I was away?" (recent
-      // past, from the audit log) from one source of truth — plus the selected feature's detail
-      // when one is open. Reference context, not an instruction to act.
-      const fleetSnapshot = activeWorkDigest(activeWork(agents, features));
-      const activitySnapshot = fleetActivityDigest(fleetActivityRollup(audit), fleetActivityLines(audit, agents));
-      const taskContext = selectedTask ? `\n\nCurrent feature context:\n${selectedTask.id} — ${selectedTask.title}\n${selectedTask.description}` : '';
-      // Feature 2 D1/D2: whichever screen is actually open (Fleet/Tasks/Graph/Capabilities/
-      // Intervene/Review/Org) — fenced the same way the fleet/activity snapshots already are, so
-      // the model treats it as reference data, never an instruction. This is what makes the chat
-      // page-aware immediately, ahead of the screenshot/annotation work (P2).
-      const pageContextBlock = serializePageContextForPrompt(pageContext);
-      const message = `${textToSend}\n\n[Live context for reference — only act on it if asked]\n${fleetSnapshot}\n\n${activitySnapshot}${taskContext}${pageContextBlock ? `\n\n${pageContextBlock}` : ''}`;
-      sendConsoleCommand({ type: 'prompt', id: nextAgentId, message, displayText: textToSend, clientTurnId });
+      const command = buildPromptCommand(
+        { agentId: nextAgentId, agents, features, audit, selectedTask, pageContext },
+        textToSend,
+        { clientTurnId, source: 'composer' },
+      );
+      sendConsoleCommand(command);
     } catch (error: any) {
       const timeout = pendingSendTimeouts.current.get(clientTurnId);
       if (timeout) {
