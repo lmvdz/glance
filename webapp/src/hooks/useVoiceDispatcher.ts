@@ -147,14 +147,21 @@ function labelForAgent(agents: AgentDTO[], agentId: string, fallback: string): s
 // just mutable `{current: T}` cells.
 // =============================================================================
 
-/** Mutable-cell shape for every ref these functions touch. */
+/** Mutable-cell shape for every ref these functions touch.
+ *
+ *  LOW batch: `watchersRef` maps an agent id to a LIST of watchers, not a single one — the
+ *  single-flight lock (`promptInFlightRef`) releases at the ECHO (MAJOR-2), not at completion, so a
+ *  second `prompt_agent` dispatch to the SAME agent is reachable (and legitimate — the operator
+ *  steering mid-turn) before the first dispatch's own completion has narrated. A single-watcher Map
+ *  keyed by agentId would have the second dispatch's watcher silently overwrite the first's,
+ *  dropping its completion narration on the floor. */
 export interface DispatcherRefs {
   boundAgentIdRef: { current: string | undefined };
   hasEverBoundRef: { current: boolean };
   justMintedAtRef: { current: number | undefined };
   pendingFreshAgentNoticeRef: { current: boolean };
   promptInFlightRef: { current: boolean };
-  watchersRef: { current: Map<string, CompletionWatcher> };
+  watchersRef: { current: Map<string, CompletionWatcher[]> };
   echoTimersRef: { current: Map<string, ReturnType<typeof setTimeout>> };
   userCaptionBufferRef: { current: string };
 }
@@ -234,12 +241,23 @@ export async function dispatchPromptAgent(
   const clientTurnId = `voice:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   const cursor = deps.transcripts.get(agentId)?.length ?? 0;
 
-  refs.watchersRef.current.set(agentId, { kind: 'prompt', clientTurnId, echoed: false, cursor, label: labelForAgent(deps.agents, agentId, 'the agent') });
+  // LOW batch: PUSH onto this agent's watcher list, never overwrite — a second prompt_agent
+  // dispatch to the same agent (reachable once the first's promptInFlight lock releases at its
+  // echo, well before its completion) must not silently drop the first dispatch's own
+  // still-pending completion watcher.
+  {
+    const list = refs.watchersRef.current.get(agentId) ?? [];
+    list.push({ kind: 'prompt', clientTurnId, echoed: false, cursor, label: labelForAgent(deps.agents, agentId, 'the agent') });
+    refs.watchersRef.current.set(agentId, list);
+  }
   const echoTimer = setTimerFn(() => {
     refs.echoTimersRef.current.delete(clientTurnId);
-    const watcher = refs.watchersRef.current.get(agentId);
-    if (!watcher || watcher.kind !== 'prompt' || watcher.echoed || watcher.clientTurnId !== clientTurnId) return; // already echoed/superseded
-    refs.watchersRef.current.delete(agentId);
+    const list = refs.watchersRef.current.get(agentId);
+    const idx = list?.findIndex((w) => w.kind === 'prompt' && !w.echoed && w.clientTurnId === clientTurnId) ?? -1;
+    if (!list || idx === -1) return; // already echoed/superseded
+    list.splice(idx, 1);
+    if (list.length === 0) refs.watchersRef.current.delete(agentId);
+    else refs.watchersRef.current.set(agentId, list);
     refs.promptInFlightRef.current = false;
     session.queueInjection(buildDeliveryFailureInjectionItems(labelForAgent(deps.agents, agentId, 'the agent')));
   }, ECHO_TIMEOUT_MS);
@@ -267,6 +285,61 @@ export async function dispatchPromptAgent(
   session.sendFunctionOutput(callId, dispatchedOutput(isBootstrap ? 'started a new console agent and sent it your message' : 'dispatched — telling the agent now'));
 }
 
+export interface DispatchSpawnAgentRefs {
+  spawnInFlightRef: { current: boolean };
+  watchersRef: { current: Map<string, CompletionWatcher[]> };
+}
+
+export interface DispatchSpawnAgentDeps {
+  transcripts: Map<string, TranscriptEntry[]>;
+  /** Injectable for tests — defaults to the real `apiJson` imported above. */
+  apiJsonFn?: typeof apiJson;
+}
+
+/**
+ * `spawn_agent`'s full dispatch — factored out the same way `dispatchPromptAgent` is (framework-
+ * free, directly testable without a React render).
+ *
+ * LOW batch: a 2xx `/api/spawn` response with a missing/malformed `agent` field must not `.id`
+ * deref past the `catch` with no `sendFunctionOutput` ever sent — that would wedge the session in
+ * `toolPending` forever (nothing else acks this call, and the reducer never leaves `toolPending`
+ * without an ack — see `nextVoiceState`'s `toolPending` cell). Guarded the same way
+ * `ensureConsoleAgent` guards a missing `agentId` (sendCore.ts): throw inside the `try`, let the
+ * existing `catch` produce the honest `failedOutput` instead of adding a second ack path to keep in
+ * sync with the first.
+ */
+export async function dispatchSpawnAgent(
+  session: Pick<VoiceSession, 'sendFunctionOutput'>,
+  callId: string,
+  prompt: string,
+  refs: DispatchSpawnAgentRefs,
+  deps: DispatchSpawnAgentDeps,
+): Promise<void> {
+  const apiJsonFn = deps.apiJsonFn ?? apiJson;
+  refs.spawnInFlightRef.current = true;
+  let agent: AgentDTO;
+  try {
+    // MEDIUM-5: audit source tagging — tell the daemon this spawn came from the voice lane.
+    const result = await apiJsonFn<{ agent: AgentDTO }>('/api/spawn', jsonInit('POST', { prompt, source: 'voice' }));
+    if (!result?.agent?.id) throw new Error('/api/spawn returned no agent');
+    agent = result.agent;
+  } catch {
+    session.sendFunctionOutput(callId, failedOutput('could not spawn a new agent'));
+    return;
+  } finally {
+    refs.spawnInFlightRef.current = false;
+  }
+  const cursor = deps.transcripts.get(agent.id)?.length ?? 0;
+  // LOW batch: push, don't overwrite — a spawned agent's own id is fresh per spawn, so this can
+  // only collide with a prior watcher if a PRIOR spawn's watcher (same id — never happens, ids are
+  // unique per spawn) is still pending, but keeping this consistent with the list-based
+  // dispatchPromptAgent path costs nothing and rules out any future regression here.
+  const list = refs.watchersRef.current.get(agent.id) ?? [];
+  list.push({ kind: 'spawn', echoed: true, cursor, label: agent.name });
+  refs.watchersRef.current.set(agent.id, list);
+  session.sendFunctionOutput(callId, dispatchedOutput(`spawned ${agent.name} — tracking it, I'll let you know when it finishes`));
+}
+
 export interface SweepWatchersDeps {
   transcripts: Map<string, TranscriptEntry[]>;
   agents: AgentDTO[];
@@ -287,44 +360,75 @@ export interface SweepWatchersDeps {
  * operator from steering mid-turn for no reason. Completion narration is unaffected: it still only
  * fires once `findCompletionEntry` finds a finished turn, same as before this fix.
  */
+/**
+ * LOW batch: iterates each agent's WATCHER LIST (not a single watcher) — the single-flight lock
+ * releases at the echo (MAJOR-2), so a second `prompt_agent` dispatch to the same agent can be in
+ * flight, with its own independent watcher, before the first's completion has narrated.
+ *
+ * FIFO ordering (a completion entry can only ever belong to ONE watcher): `TranscriptEntry` has no
+ * per-turn id on the ASSISTANT side (only user-kind entries carry `clientTurnId`), so two sibling
+ * watchers for the same agent can't tell "which finished-assistant entry is mine" apart by content
+ * alone — only by ORDER (earlier-dispatched turn's completion comes first in the transcript).
+ * `floor` tracks the highest transcript index already claimed by an earlier watcher in this SAME
+ * pass; it's re-derived fresh each sweep call, but its effect is baked into `cursor` for any watcher
+ * that keeps waiting (`remaining.push`) so a later sweep — after the watcher that established the
+ * floor has already completed and been removed — doesn't let a still-pending sibling re-claim an
+ * entry that's already been narrated.
+ */
 export function sweepPromptWatchers(session: Pick<VoiceSession, 'queueInjection'>, refs: DispatcherRefs, deps: SweepWatchersDeps): void {
   const clearTimerFn = deps.clearTimerFn ?? ((handle: ReturnType<typeof setTimeout>) => clearTimeout(handle));
 
-  for (const [agentId, watcher] of [...refs.watchersRef.current.entries()]) {
+  for (const [agentId, watchers] of [...refs.watchersRef.current.entries()]) {
     const entries = deps.transcripts.get(agentId) ?? [];
-    let current = watcher;
+    const remaining: CompletionWatcher[] = [];
+    let floor = -1; // highest transcript index already claimed by an earlier sibling watcher this pass
 
-    if (current.kind === 'prompt' && !current.echoed) {
-      const echo = findEchoEntry(entries, current.clientTurnId);
-      if (!echo) continue; // still waiting on delivery confirmation (or the echo timeout will fire)
-      const echoIndex = entries.indexOf(echo);
-      const timer = refs.echoTimersRef.current.get(current.clientTurnId);
-      if (timer) {
-        clearTimerFn(timer);
-        refs.echoTimersRef.current.delete(current.clientTurnId);
+    for (const watcher of watchers) {
+      let current = watcher;
+
+      if (current.kind === 'prompt' && !current.echoed) {
+        const echo = findEchoEntry(entries, current.clientTurnId);
+        if (!echo) {
+          remaining.push(current); // still waiting on delivery confirmation (or the echo timeout will fire)
+          continue;
+        }
+        const echoIndex = entries.indexOf(echo);
+        const timer = refs.echoTimersRef.current.get(current.clientTurnId);
+        if (timer) {
+          clearTimerFn(timer);
+          refs.echoTimersRef.current.delete(current.clientTurnId);
+        }
+        // MAJOR-2: release the single-flight lock right here — see the function doc comment.
+        refs.promptInFlightRef.current = false;
+        // Fall through to the completion check below in this SAME pass (not `continue`) — a short
+        // response can complete in the very same transcript broadcast as its echo, and `transcripts`
+        // might not change again for a while if we deferred that check to the next sweep, silently
+        // missing the narration.
+        current = { kind: 'prompt', clientTurnId: current.clientTurnId, echoed: true, cursor: echoIndex + 1, label: current.label };
       }
-      // MAJOR-2: release the single-flight lock right here — see the function doc comment.
-      refs.promptInFlightRef.current = false;
-      // Fall through to the completion check below in this SAME pass (not `continue`) — a short
-      // response can complete in the very same transcript broadcast as its echo, and `transcripts`
-      // might not change again for a while if we deferred that check to the next sweep, silently
-      // missing the narration.
-      current = { kind: 'prompt', clientTurnId: current.clientTurnId, echoed: true, cursor: echoIndex + 1, label: current.label };
-      refs.watchersRef.current.set(agentId, current);
+
+      // Echoed prompt, or a spawn (which needs no echo — the /api/spawn 200 already confirmed it):
+      // watch for the next finished assistant turn, never earlier than a sibling watcher's own
+      // already-claimed completion (see the function doc comment).
+      const searchFrom = Math.max(current.cursor, floor + 1);
+      const completion = findCompletionEntry(entries, searchFrom);
+      if (!completion) {
+        remaining.push({ ...current, cursor: searchFrom }); // bump persists the floor across sweeps
+        continue;
+      }
+      floor = entries.indexOf(completion);
+      const label = labelForAgent(deps.agents, agentId, current.label);
+      session.queueInjection(buildCompletionInjectionItems(label, completion.text));
+      // MAJOR-2(a): role:'model', no clientTurnId — this isn't a dispatched turn of its own. Its
+      // double-render risk is fixed on the OTHER side, by extending partitionSessionMessages
+      // (AssistantChat.tsx) to dedupe a role:'model' durable Message against a matching finished
+      // assistant transcript entry by exact text, consumed once.
+      deps.onSpokenSummary?.({ role: 'model', text: completion.text });
+      // This watcher is done — dropped, not pushed to `remaining`.
     }
 
-    // Echoed prompt, or a spawn (which needs no echo — the /api/spawn 200 already confirmed it):
-    // watch for the next finished assistant turn.
-    const completion = findCompletionEntry(entries, current.cursor);
-    if (!completion) continue;
-    refs.watchersRef.current.delete(agentId);
-    const label = labelForAgent(deps.agents, agentId, current.label);
-    session.queueInjection(buildCompletionInjectionItems(label, completion.text));
-    // MAJOR-2(a): role:'model', no clientTurnId — this isn't a dispatched turn of its own. Its
-    // double-render risk is fixed on the OTHER side, by extending partitionSessionMessages
-    // (AssistantChat.tsx) to dedupe a role:'model' durable Message against a matching finished
-    // assistant transcript entry by exact text, consumed once.
-    deps.onSpokenSummary?.({ role: 'model', text: completion.text });
+    if (remaining.length === 0) refs.watchersRef.current.delete(agentId);
+    else refs.watchersRef.current.set(agentId, remaining);
   }
 }
 
@@ -386,7 +490,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   /** Per-target completion watchers — the bound console agent AND any spawned agent each get an
    *  independent entry, so a spawn's completion narrates on its own timeline from the console
    *  agent's (concern text: "if multiple prompts are in flight, narrate per-completion"). */
-  const watchersRef = useRef<Map<string, CompletionWatcher>>(new Map());
+  const watchersRef = useRef<Map<string, CompletionWatcher[]>>(new Map());
   /** Accumulates the live `'user'`-speaker caption text since the last prompt_agent dispatch
    *  consumed it — see the module doc comment on why this is currently always empty in practice
    *  (input_audio_transcription dormant per 06) and why it's still wired. */
@@ -467,23 +571,11 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   }
 
   // ---------------------------------------------------------------------------
-  // spawn_agent
+  // spawn_agent — delegates to `dispatchSpawnAgent` (LOW batch: validates the /api/spawn response
+  // before dereferencing `agent.id`, so a malformed 2xx can't wedge the session in toolPending).
   // ---------------------------------------------------------------------------
   async function executeSpawnAgent(session: VoiceSession, callId: string, prompt: string): Promise<void> {
-    spawnInFlightRef.current = true;
-    let agent: AgentDTO;
-    try {
-      const result = await apiJson<{ agent: AgentDTO }>('/api/spawn', jsonInit('POST', { prompt }));
-      agent = result.agent;
-    } catch {
-      session.sendFunctionOutput(callId, failedOutput('could not spawn a new agent'));
-      return;
-    } finally {
-      spawnInFlightRef.current = false;
-    }
-    const cursor = transcripts.get(agent.id)?.length ?? 0;
-    watchersRef.current.set(agent.id, { kind: 'spawn', echoed: true, cursor, label: agent.name });
-    session.sendFunctionOutput(callId, dispatchedOutput(`spawned ${agent.name} — tracking it, I'll let you know when it finishes`));
+    await dispatchSpawnAgent(session, callId, prompt, { spawnInFlightRef, watchersRef }, { transcripts });
   }
 
   // ---------------------------------------------------------------------------
@@ -497,7 +589,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
       session.sendFunctionOutput(callId, failedOutput('no agent to interrupt'));
       return;
     }
-    sendConsoleCommand(interruptCommand(agentId));
+    sendConsoleCommand(interruptCommand(agentId, 'voice')); // MEDIUM-5: audit source tagging
     interruptPendingRef.current = true;
     if (interruptTimerRef.current) clearTimeout(interruptTimerRef.current);
     interruptTimerRef.current = setTimeout(() => {

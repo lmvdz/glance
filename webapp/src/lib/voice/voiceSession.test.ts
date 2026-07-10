@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   VoiceSession,
   nextVoiceState,
@@ -34,6 +34,9 @@ function makeFakeDataChannel(): DataChannelLike & { sent: Record<string, unknown
     onerror: null,
   };
 }
+
+/** Signature mirrors `VoiceSessionDeps['postSdpOffer']` (LOW batch: the SDP POST timeout/abort). */
+type PostSdpOfferImpl = (ephemeralKey: string, offerSdp: string, signal?: AbortSignal) => Promise<string>;
 
 function makeFakePeerConnection(dc: DataChannelLike): PeerConnectionLike {
   return {
@@ -71,6 +74,7 @@ interface Harness {
   timers: { fn: () => void; ms: number; handle: number }[];
   nowValue: number;
   stopPlaybackCalls: number;
+  resumePlaybackCalls: number;
   states: VoiceState[];
   errors: { code: string; message: string; fallbackToText?: boolean }[];
   reconnected: { recap: string }[];
@@ -86,7 +90,7 @@ function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
   const dataChannels: (DataChannelLike & { sent: Record<string, unknown>[] })[] = [];
   let mintCalls = 0;
   let mintImpl: () => Promise<VoiceMintTokenLike> = async () => ({ value: `ek_fake_${++mintCalls}`, expiresAt: Date.now() + 3600_000 });
-  let postSdpOfferImpl: () => Promise<string> = async () => 'fake-answer-sdp';
+  let postSdpOfferImpl: PostSdpOfferImpl = async () => 'fake-answer-sdp';
   const micStreams: (MediaStream & { track: MediaStreamTrack & { enabled: boolean; stopped?: boolean } })[] = [];
   let getUserMediaCalls = 0;
   let getUserMediaImpl: () => Promise<MediaStream> = async () => {
@@ -101,6 +105,7 @@ function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
   let timerHandleSeq = 0;
   let nowValue = 0;
   let stopPlaybackCalls = 0;
+  let resumePlaybackCalls = 0;
 
   const states: VoiceState[] = [];
   const errors: { code: string; message: string; fallbackToText?: boolean }[] = [];
@@ -119,10 +124,13 @@ function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
       getUserMediaCalls++;
       return getUserMediaImpl();
     },
-    postSdpOffer: () => postSdpOfferImpl(),
+    postSdpOffer: (key, sdp, signal) => postSdpOfferImpl(key, sdp, signal),
     attachRemoteStream: () => undefined,
     stopPlayback: () => {
       stopPlaybackCalls++;
+    },
+    resumePlayback: () => {
+      resumePlaybackCalls++;
     },
     now: () => nowValue,
     setTimer: (fn, ms) => {
@@ -160,7 +168,7 @@ function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
     get mintImpl() {
       return mintImpl;
     },
-    set postSdpOfferImpl(fn: () => Promise<string>) {
+    set postSdpOfferImpl(fn: PostSdpOfferImpl) {
       postSdpOfferImpl = fn;
     },
     get postSdpOfferImpl() {
@@ -184,6 +192,9 @@ function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
     },
     get stopPlaybackCalls() {
       return stopPlaybackCalls;
+    },
+    get resumePlaybackCalls() {
+      return resumePlaybackCalls;
     },
     states,
     errors,
@@ -602,25 +613,31 @@ test('VoiceSession: a full spoken turn returns to idle on response.done', async 
 // Tool dispatcher surface: function-call-ready -> toolPending -> sendFunctionOutput
 // =================================================================================================
 
-test('VoiceSession: a function call moves to toolPending and emits onFunctionCall; sendFunctionOutput acks and resumes', async () => {
+test('VoiceSession: a function call moves to toolPending and emits onFunctionCall; sendFunctionOutput acks and resumes (once the wrapping response.done arrives — CRITICAL-1)', async () => {
   const h = makeHarness();
   await h.session.connect();
   h.session.pttPress();
   h.session.pttRelease();
-  serverEvent(h, { type: 'response.created' });
-  serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-42', name: 'fleet_status', arguments: '{}' });
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'call-42', name: 'fleet_status', arguments: '{}' });
 
   expect(h.session.getState()).toBe('toolPending');
   expect(h.functionCalls).toEqual([{ callId: 'call-42', name: 'fleet_status', arguments: '{}', trigger: 'user' }]);
 
+  const sentBeforeAck = lastSent(h).length;
   h.session.sendFunctionOutput('call-42', { agents: 3 });
 
   expect(h.session.getState()).toBe('awaitingResponse');
+  const sentAfterAck = lastSent(h).slice(sentBeforeAck);
+  expect(sentAfterAck).toEqual([
+    { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: 'call-42', output: JSON.stringify({ agents: 3 }) } },
+  ]);
+  // CRITICAL-1: the continuation response.create is DEFERRED until the wrapping response's own
+  // response.done arrives — not sent eagerly at ack time.
+  expect(sentAfterAck.some((s) => s.type === 'response.create')).toBe(false);
+
+  serverEvent(h, { type: 'response.done' }); // resp-1's own completion releases the deferred send
   const sent = lastSent(h);
-  expect(sent[sent.length - 2]).toEqual({
-    type: 'conversation.item.create',
-    item: { type: 'function_call_output', call_id: 'call-42', output: JSON.stringify({ agents: 3 }) },
-  });
   expect(sent[sent.length - 1]).toEqual({ type: 'response.create' });
 });
 
@@ -629,9 +646,9 @@ test('MINOR-12: a second function call before the first is acked still fires onF
   await h.session.connect();
   h.session.pttPress();
   h.session.pttRelease();
-  serverEvent(h, { type: 'response.created' });
-  serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-a', name: 'tool_a', arguments: '{}' });
-  serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-b', name: 'tool_b', arguments: '{}' });
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'call-a', name: 'tool_a', arguments: '{}' });
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'call-b', name: 'tool_b', arguments: '{}' });
 
   expect(h.session.getState()).toBe('toolPending'); // stays toolPending — the reducer's designated noop
   expect(h.functionCalls).toEqual([
@@ -701,6 +718,256 @@ test('CRITICAL-1: after the desync-prone sequence, a PTT press while "still" awa
 });
 
 // -------------------------------------------------------------------------------------------------
+// CRITICAL-1 (gauntlet fix): sendFunctionOutput's ack must not send response.create WHILE the
+// wrapping response is still active — the provider rejects `response.create` sent during an active
+// response (`conversation_already_has_active_response`). The fix defers the actual send until the
+// wrapping response's own response.done arrives, rather than sending it eagerly at ack time.
+// -------------------------------------------------------------------------------------------------
+
+describe('CRITICAL-1 (gauntlet): ack response.create is deferred until the wrapping response.done arrives', () => {
+  test('an ack requested during an active response does NOT emit response.create until response.done, then does', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    h.session.pttPress();
+    h.session.pttRelease();
+    serverEvent(h, { type: 'response.created' }); // wrapping response now active (outstandingResponses: 1)
+    serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'fleet_status', arguments: '{}' });
+    expect(h.session.getState()).toBe('toolPending');
+
+    const sentBeforeAck = lastSent(h).length;
+    h.session.sendFunctionOutput('call-1', { agents: 3 }); // the ack
+
+    // The function_call_output item itself is sent immediately (valid mid-response) — but NOT a
+    // second response.create, since the wrapping response's own response.done hasn't arrived yet.
+    const sentAfterAck = lastSent(h).slice(sentBeforeAck);
+    expect(sentAfterAck).toEqual([
+      { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: 'call-1', output: '{"agents":3}' } },
+    ]);
+    expect(sentAfterAck.some((s) => s.type === 'response.create')).toBe(false);
+    expect(h.session.getState()).toBe('awaitingResponse'); // the reducer's own state still advances
+
+    // The wrapping response's response.done arrives — THIS is what releases the deferred send.
+    serverEvent(h, { type: 'response.done' });
+
+    const sentAfterDone = lastSent(h);
+    expect(sentAfterDone[sentAfterDone.length - 1]).toEqual({ type: 'response.create' });
+    expect(h.session.getState()).toBe('awaitingResponse'); // still awaiting the ack's own continuation
+
+    // And the machine returns to idle only once the ACK's own response.done lands.
+    serverEvent(h, { type: 'response.done' });
+    expect(h.session.getState()).toBe('idle');
+  });
+
+  test('a barge-in before the wrapping response.done arrives cancels the deferred continuation — it never fires into the new recording', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    h.session.pttPress();
+    h.session.pttRelease();
+    serverEvent(h, { type: 'response.created' });
+    serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'fleet_status', arguments: '{}' });
+    h.session.sendFunctionOutput('call-1', { agents: 3 }); // deferred response.create pending
+
+    h.session.pttPress(); // barge-in — supersedes the deferred continuation
+    expect(h.session.getState()).toBe('userRecording');
+    const sentAtBargeIn = lastSent(h).length;
+
+    // The wrapping response's response.done finally arrives — must NOT emit a stray response.create
+    // into the new recording (that would violate rule (b)).
+    serverEvent(h, { type: 'response.done' });
+    expect(h.session.getState()).toBe('userRecording');
+    expect(lastSent(h).slice(sentAtBargeIn).some((s) => s.type === 'response.create')).toBe(false);
+  });
+
+  test('a conversation_already_has_active_response error does not wedge the machine or tear down the call', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    h.session.pttPress();
+    h.session.pttRelease();
+    serverEvent(h, { type: 'response.created' }); // outstandingResponses: 1
+
+    // Simulate the provider rejecting a response.create sent while a response was already active
+    // (belt-and-braces — the deferral above is meant to make this unreachable in normal operation).
+    serverEvent(h, { type: 'error', error: { code: 'conversation_already_has_active_response', message: 'active' } });
+
+    expect(h.errors).toEqual([]); // absorbed as benign, not surfaced as connect-failed
+    expect(h.session.getState()).toBe('speaking'); // unaffected
+
+    // The bookkeeping correction (outstandingResponses decremented) means the wrapping response's
+    // own response.done still correctly returns the machine to idle — no permanent miscount.
+    serverEvent(h, { type: 'response.done' });
+    expect(h.session.getState()).toBe('idle');
+    expect(h.errors).toEqual([]);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// CRITICAL-2 (gauntlet fix): the first barge-in pauses local playback (`stopPlayback`) but nothing
+// ever resumed it — every response after the first barge-in played into a permanently-paused
+// element. Fix: `resumePlayback` fires whenever a fresh response starts (`response.created`).
+// -------------------------------------------------------------------------------------------------
+
+describe('CRITICAL-2 (gauntlet): playback resumes after a barge-in', () => {
+  test('after a barge-in pauses playback, the next response triggers resumePlayback', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    h.session.pttPress();
+    h.session.pttRelease();
+    serverEvent(h, { type: 'response.created' }); // first response — resumePlayback called here too
+    expect(h.resumePlaybackCalls).toBe(1);
+    expect(h.session.getState()).toBe('speaking');
+
+    h.session.pttPress(); // barge-in: pauses playback
+    expect(h.stopPlaybackCalls).toBe(1);
+
+    h.session.pttRelease();
+    serverEvent(h, { type: 'response.created' }); // the NEXT response starting
+
+    expect(h.resumePlaybackCalls).toBe(2); // resumed — not permanently silent after the barge-in
+  });
+
+  test('resumePlayback fires on every response.created, not just after a barge-in (cheap/idempotent)', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    h.session.pttPress();
+    h.session.pttRelease();
+    serverEvent(h, { type: 'response.created' });
+    expect(h.resumePlaybackCalls).toBe(1);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// HIGH-3 (gauntlet fix): hot-mic vectors — rotate/reconnect reusing a MediaStream whose tracks are
+// still enabled from a held PTT, and a failed initial connect leaving the mic stream open.
+// -------------------------------------------------------------------------------------------------
+
+describe('HIGH-3 (gauntlet): hot-mic privacy across rotation/reconnect and connect failure', () => {
+  test('an unexpected-drop reconnect re-mutes a mic track left enabled (e.g. a PTT held when the drop happened)', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    h.session.pttPress(); // track.enabled -> true — simulates a PTT still held when the drop hits
+    expect(lastMicTrack(h).enabled).toBe(true);
+
+    const dc = h.dataChannels[0]!;
+    dc.onclose?.(); // unexpected drop while the track is still enabled=true from the held PTT
+    await flush();
+
+    // establishConnection (called by the reconnect attempt) re-asserts the mute at its own start,
+    // regardless of whatever the track's enabled state was left at — nothing else would have.
+    expect(lastMicTrack(h).enabled).toBe(false);
+  });
+
+  test('rotateSession (proactive re-mint) re-mutes the reused MediaStream even if left enabled', async () => {
+    const h = makeHarness({ getRecap: () => 'recap' });
+    await h.session.connect();
+    // Directly simulate a track left hot (e.g. a PTT release that, in some future refactor, missed
+    // its own re-mute) — establishConnection must not trust the track's incoming state.
+    lastMicTrack(h).enabled = true;
+
+    const dueFn = h.timers[0]!.fn; // idle — rotates immediately
+    dueFn();
+    await flush();
+
+    expect(lastMicTrack(h).enabled).toBe(false);
+  });
+
+  test('a mint failure on the initial connect() stops the mic tracks (not just a bounded-reconnect give-up)', async () => {
+    const h = makeHarness();
+    h.mintImpl = async () => {
+      throw new Error('rate limited');
+    };
+    await h.session.connect();
+    expect(h.errors).toEqual([{ code: 'mint-failed', message: 'rate limited' }]);
+    expect(lastMicTrack(h).stopped).toBe(true);
+  });
+
+  test('a connect-failed (post-mint SDP failure) on the initial connect() also stops the mic tracks', async () => {
+    const h = makeHarness();
+    h.postSdpOfferImpl = async () => {
+      throw new Error('voice: SDP exchange failed (500)');
+    };
+    await h.session.connect();
+    expect(h.errors).toEqual([{ code: 'connect-failed', message: 'voice: SDP exchange failed (500)' }]);
+    expect(lastMicTrack(h).stopped).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// LOW batch: the SDP POST now carries a 15s timeout and is abortable by disconnect()/a superseding
+// attempt — previously unbounded, so a hung provider request could strand "Connecting…" forever.
+// -------------------------------------------------------------------------------------------------
+
+describe('LOW batch: SDP POST timeout + abort', () => {
+  test('the 15s timeout aborts the in-flight SDP POST; the resulting rejection surfaces as connect-failed', async () => {
+    const h = makeHarness();
+    let sawAbort = false;
+    h.postSdpOfferImpl = (_key, _sdp, signal) =>
+      new Promise<string>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          sawAbort = true;
+          reject(new Error('aborted'));
+        });
+      });
+
+    const connecting = h.session.connect();
+    await flush();
+    fireTimer(h, 15_000);
+    await connecting;
+    await flush();
+
+    expect(sawAbort).toBe(true);
+    expect(h.errors).toEqual([{ code: 'connect-failed', message: 'aborted' }]);
+  });
+
+  test('disconnect() mid-SDP-POST aborts the in-flight request', async () => {
+    const h = makeHarness();
+    let sawAbort = false;
+    h.postSdpOfferImpl = (_key, _sdp, signal) =>
+      new Promise<string>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          sawAbort = true;
+          reject(new Error('aborted'));
+        });
+      });
+
+    const connecting = h.session.connect();
+    await flush();
+    h.session.disconnect();
+    await connecting;
+    await flush();
+
+    expect(sawAbort).toBe(true);
+  });
+
+  test('a normal, timely SDP POST clears its timeout — the 15s timer never fires stray', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    expect(h.session.getState()).toBe('idle');
+    // Only the re-mint timer (55min) should remain scheduled — the SDP-POST timeout was cleared.
+    expect(h.timers.map((t) => t.ms)).toEqual([55 * 60_000]);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// LOW batch: fail-closed trigger fallback — an uncorrelated function_call_arguments.done (no
+// response_id on the wire) now ALWAYS defaults to 'injection', never to whatever `currentTrigger`
+// happens to hold (previously this could fail OPEN as 'user' if a user-triggered response happened
+// to still be the provisionally-tracked trigger when the uncorrelated event arrived).
+// -------------------------------------------------------------------------------------------------
+
+test("LOW batch: an uncorrelated function call defaults to trigger 'injection' even when currentTrigger is 'user' (fail-closed, not fail-open)", async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease(); // currentTrigger is 'user' at this point
+  serverEvent(h, { type: 'response.created' }); // no response.id on the wire — nothing claims the trigger queue... shifts 'user' off the queue instead
+  // Simulate the residual case: no response_id on the function-call event either, so this can't
+  // correlate against responseTriggerById at all.
+  serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'fleet_status', arguments: '{}' });
+
+  expect(h.functionCalls[0]!.trigger).toBe('injection');
+});
+
+// -------------------------------------------------------------------------------------------------
 // MAJOR-2: benign provider error codes are dropped rather than surfaced as connect-failed.
 // -------------------------------------------------------------------------------------------------
 
@@ -747,8 +1014,8 @@ test('MAJOR-3: a function call during the ack-continuation response is tagged tr
   await h.session.connect();
   h.session.pttPress();
   h.session.pttRelease(); // user-triggered turn
-  serverEvent(h, { type: 'response.created' });
-  serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'call-1', name: 'tool_one', arguments: '{}' });
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'call-1', name: 'tool_one', arguments: '{}' });
   expect(h.functionCalls[0]!.trigger).toBe('user');
 
   h.session.sendFunctionOutput('call-1', { ok: true }); // ack's own response.create is agent-triggered

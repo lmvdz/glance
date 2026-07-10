@@ -103,7 +103,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { hasAnyVoiceKey, mintVoiceToken, voiceProviderPublicInfo } from "./voice-token.ts";
+import { hasAnyVoiceKey, isKnownVoiceProvider, mintVoiceToken, voiceProviderApiKey, voiceProviderPublicInfo } from "./voice-token.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -399,6 +399,28 @@ function isLoopbackAddr(ip: string): boolean {
 	return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 
+const VOICE_MINT_RATE_DEFAULT_PER_MIN = 6;
+let voiceMintRateLimitWarned = false;
+
+/** OMP_SQUAD_VOICE_MINT_RATE_PER_MIN is the ONLY spend brake on voice mint (audio never transits
+ *  the daemon, so the mint count is the daemon's only signal). `envInt` faithfully returns a
+ *  configured `0` or negative value rather than silently substituting the default — correct for
+ *  every OTHER env reader, but here a non-positive value must never be read as "unlimited": that's
+ *  the same absence-as-success shape as an empty array meaning "nothing to report" (the audit
+ *  gauntlet's naming). Clamp to the default and warn once (not on every request) so a misconfigured
+ *  `0` can't silently remove the only cap on cost abuse. */
+function resolveVoiceMintRatePerMin(): number {
+	const configured = envInt("OMP_SQUAD_VOICE_MINT_RATE_PER_MIN", VOICE_MINT_RATE_DEFAULT_PER_MIN);
+	if (configured > 0) return configured;
+	if (!voiceMintRateLimitWarned) {
+		voiceMintRateLimitWarned = true;
+		console.warn(
+			`[server] OMP_SQUAD_VOICE_MINT_RATE_PER_MIN="${configured}" is not a positive rate — the voice mint cap cannot be disabled this way; falling back to the default (${VOICE_MINT_RATE_DEFAULT_PER_MIN}/min)`,
+		);
+	}
+	return VOICE_MINT_RATE_DEFAULT_PER_MIN;
+}
+
 export class SquadServer {
 	private readonly singleManager?: SquadManager;
 	/** DB-registry mode fleet (per-org managers); undefined ⇒ single-manager (file mode / db-single). */
@@ -524,8 +546,7 @@ export class SquadServer {
 	 *  but keyed by `actor.id` (not IP) — voice mint is authenticated, so the actor identity is the
 	 *  natural per-caller bucket, same as everywhere else RBAC-scoped state is keyed. */
 	private voiceMintRateAllowed(actor: Actor): boolean {
-		const limit = envInt("OMP_SQUAD_VOICE_MINT_RATE_PER_MIN", 6);
-		if (limit <= 0) return true;
+		const limit = resolveVoiceMintRatePerMin();
 		const minute = Math.floor(Date.now() / 60_000);
 		const key = actor.id || "unknown";
 		const rec = this.voiceMintRate.get(key);
@@ -1201,9 +1222,35 @@ export class SquadServer {
 			// Per-actor mint rate cap: audio never transits the daemon, so the mint count is the ONLY
 			// spend signal the daemon has — this cap is load-bearing, not hygiene (DESIGN.md).
 			if (!this.voiceMintRateAllowed(actor)) return new Response("rate limited", { status: 429 });
-			const decoded = decodeBodyOrEmpty(VoiceTokenBodySchema, await req.json().catch(() => null));
-			const providerId = typeof decoded.provider === "string" && decoded.provider ? decoded.provider : "openai";
-			const result = await mintVoiceToken(providerId, process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY);
+			// A genuinely-empty body (nothing sent) is a lenient default-to-openai case, same as every
+			// other `decodeBodyOrEmpty` endpoint. But `req.json().catch(() => null)` used to collapse a
+			// body that WAS sent but is malformed/unparseable into that exact same `null` — silently
+			// minting a cost-bearing default-provider token off a request that was actually broken. Read
+			// the raw text first so "nothing sent" and "sent but broken" are distinguishable: only the
+			// former may fall through to the empty-body default.
+			const rawBody = await req.text();
+			let bodyJson: unknown = null;
+			if (rawBody.trim().length > 0) {
+				try {
+					bodyJson = JSON.parse(rawBody);
+				} catch {
+					return new Response("malformed request body", { status: 400 });
+				}
+			}
+			const decoded = decodeBody(VoiceTokenBodySchema, bodyJson);
+			if (rawBody.trim().length > 0 && Result.isFailure(decoded)) {
+				// Valid JSON but not struct-shaped (e.g. a bare string/array/number) — still a body that
+				// was sent and is invalid, not a legitimately-absent one.
+				return new Response("invalid voice token request body", { status: 400 });
+			}
+			const body = Result.isSuccess(decoded) ? decoded.success : ({} as { provider?: unknown });
+			const providerId = typeof body.provider === "string" && body.provider ? body.provider : "openai";
+			// Mint via the SAME trimmed key `hasAnyVoiceKey`/`voiceProviderApiKey`/`GET /api/voice/config`
+			// already read — a newline/space-padded env value used to make the config probe advertise
+			// `enabled:true` while every mint 502s against the untrimmed, invalid key (config-honesty and
+			// mint disagreeing on the same env var).
+			const apiKey = isKnownVoiceProvider(providerId) ? voiceProviderApiKey(providerId) : undefined;
+			const result = await mintVoiceToken(providerId, apiKey);
 			if (!result.ok) return new Response(result.message, { status: result.status });
 			return Response.json(result.token);
 		}
@@ -1766,6 +1813,9 @@ export class SquadServer {
 			const prompt = Result.isSuccess(decoded) ? decoded.success.prompt.trim() : "";
 			if (prompt.length === 0) return new Response("empty prompt", { status: 400 });
 			const profileId = Result.isSuccess(decoded) && typeof decoded.success.profileId === "string" ? decoded.success.profileId : undefined;
+			// Observability-only provenance (e.g. "voice") threaded to recordAudit/audit.jsonl —
+			// contain-or-omit, same as every other `source` in audit.ts: never consulted for authz.
+			const source = Result.isSuccess(decoded) && typeof decoded.success.source === "string" ? decoded.success.source : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -1775,7 +1825,7 @@ export class SquadServer {
 			const scoreboard = envBool("OMP_SQUAD_MODEL_OUTCOMES", false) ? await manager.spawnScoreboard() : undefined;
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked), scoreboard });
 			try {
-				const dto = await manager.create({ ...plan, profileId, track: true }, actor);
+				const dto = await manager.create({ ...plan, profileId, track: true }, actor, source);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });

@@ -15,10 +15,22 @@
  * so these tests exercise the EXACT same code the hook calls, without a React render.
  */
 import { describe, expect, test } from 'bun:test';
-import { clearAllPendingTimers, dispatchPromptAgent, sweepPromptWatchers, type DispatcherRefs, type DispatchPromptAgentDeps, type SpokenSummaryEvent, type SweepWatchersDeps, type TimerCleanupRefs } from './useVoiceDispatcher';
+import {
+  clearAllPendingTimers,
+  dispatchPromptAgent,
+  dispatchSpawnAgent,
+  sweepPromptWatchers,
+  type DispatcherRefs,
+  type DispatchPromptAgentDeps,
+  type DispatchSpawnAgentDeps,
+  type DispatchSpawnAgentRefs,
+  type SpokenSummaryEvent,
+  type SweepWatchersDeps,
+  type TimerCleanupRefs,
+} from './useVoiceDispatcher';
 import { ALREADY_DISPATCHED_DETAIL, decideToolCall, type DispatcherDecisionState } from '../lib/voice/tools';
 import type { VoiceSession, PendingFunctionCall } from '../lib/voice/voiceSession';
-import type { TranscriptEntry } from '../lib/dto';
+import type { AgentDTO, TranscriptEntry } from '../lib/dto';
 
 // =============================================================================
 // Fakes
@@ -158,7 +170,7 @@ describe('MAJOR-2: promptInFlight releases at the echo, before completion', () =
       boundAgentIdRef: { current: 'agent-1' },
       hasEverBoundRef: { current: true },
       promptInFlightRef: { current: true },
-      watchersRef: { current: new Map([['agent-1', { kind: 'prompt', clientTurnId: 'turn-1', echoed: false, cursor: 0, label: 'the agent' }]]) },
+      watchersRef: { current: new Map([['agent-1', [{ kind: 'prompt', clientTurnId: 'turn-1', echoed: false, cursor: 0, label: 'the agent' }]]]) },
     });
     const { session, injections } = makeFakeSession();
     const sweepDeps: SweepWatchersDeps = { transcripts: new Map(), agents: [] };
@@ -202,7 +214,7 @@ describe('MAJOR-2: promptInFlight releases at the echo, before completion', () =
     const refs = makeRefs({
       boundAgentIdRef: { current: 'agent-1' },
       promptInFlightRef: { current: true },
-      watchersRef: { current: new Map([['agent-1', { kind: 'prompt', clientTurnId: 'turn-1', echoed: false, cursor: 0, label: 'the agent' }]]) },
+      watchersRef: { current: new Map([['agent-1', [{ kind: 'prompt', clientTurnId: 'turn-1', echoed: false, cursor: 0, label: 'the agent' }]]]) },
     });
     const { session, injections } = makeFakeSession();
     const transcripts = new Map<string, TranscriptEntry[]>([[
@@ -249,7 +261,7 @@ describe('MAJOR-2(a): onSpokenSummary role discriminator', () => {
     const refs = makeRefs({
       boundAgentIdRef: { current: 'agent-1' },
       promptInFlightRef: { current: true },
-      watchersRef: { current: new Map([['agent-1', { kind: 'prompt', clientTurnId: 'turn-1', echoed: true, cursor: 0, label: 'the agent' }]]) },
+      watchersRef: { current: new Map([['agent-1', [{ kind: 'prompt', clientTurnId: 'turn-1', echoed: true, cursor: 0, label: 'the agent' }]]]) },
     });
     const { session } = makeFakeSession();
     const spokenSummaries: SpokenSummaryEvent[] = [];
@@ -261,6 +273,171 @@ describe('MAJOR-2(a): onSpokenSummary role discriminator', () => {
     sweepPromptWatchers(session, refs, { transcripts, agents: [], onSpokenSummary: (event) => spokenSummaries.push(event) });
 
     expect(spokenSummaries).toEqual([{ role: 'model', text: 'fixed it' }]);
+  });
+});
+
+// =============================================================================
+// LOW batch: dispatchSpawnAgent must validate the /api/spawn response before dereferencing
+// `agent.id` — a 2xx with a missing/malformed `agent` field previously derefed `agent.id` AFTER
+// the `catch` block, so no `sendFunctionOutput` was ever sent and the session wedged in
+// `toolPending` forever (the reducer's `toolPending` cell has no timeout of its own — it waits
+// specifically for an ack that would now never come).
+// =============================================================================
+
+function spawnRefs(overrides: Partial<DispatchSpawnAgentRefs> = {}): DispatchSpawnAgentRefs {
+  return {
+    spawnInFlightRef: { current: false },
+    watchersRef: { current: new Map() },
+    ...overrides,
+  };
+}
+
+describe('LOW batch: dispatchSpawnAgent validates the /api/spawn response', () => {
+  test('a well-formed 2xx response dispatches normally and arms a completion watcher', async () => {
+    const refs = spawnRefs();
+    const { session, outputs } = makeFakeSession();
+    const agent: AgentDTO = { id: 'agent-9', name: 'fresh-agent' } as AgentDTO;
+    const deps: DispatchSpawnAgentDeps = {
+      transcripts: new Map(),
+      apiJsonFn: (async () => ({ agent })) as unknown as DispatchSpawnAgentDeps['apiJsonFn'],
+    };
+
+    await dispatchSpawnAgent(session, 'call-1', 'build a widget', refs, deps);
+
+    expect(outputs).toEqual([{ callId: 'call-1', output: { status: 'dispatched', detail: "spawned fresh-agent — tracking it, I'll let you know when it finishes" } }]);
+    expect(refs.watchersRef.current.get('agent-9')).toEqual([{ kind: 'spawn', echoed: true, cursor: 0, label: 'fresh-agent' }]);
+    expect(refs.spawnInFlightRef.current).toBe(false); // released, not wedged
+  });
+
+  test('a 2xx response with a MISSING agent field fails honestly instead of wedging toolPending forever', async () => {
+    const refs = spawnRefs();
+    const { session, outputs } = makeFakeSession();
+    const deps: DispatchSpawnAgentDeps = {
+      transcripts: new Map(),
+      apiJsonFn: (async () => ({})) as unknown as DispatchSpawnAgentDeps['apiJsonFn'], // no `agent` at all
+    };
+
+    await dispatchSpawnAgent(session, 'call-1', 'build a widget', refs, deps);
+
+    // The critical assertion: sendFunctionOutput WAS called (the session is never left waiting
+    // forever for an ack that would never come).
+    expect(outputs).toEqual([{ callId: 'call-1', output: { status: 'failed', detail: 'could not spawn a new agent' } }]);
+    expect(refs.watchersRef.current.size).toBe(0); // no bogus watcher armed for a nonexistent agent
+    expect(refs.spawnInFlightRef.current).toBe(false);
+  });
+
+  test('a 2xx response with an agent object missing `id` also fails honestly', async () => {
+    const refs = spawnRefs();
+    const { session, outputs } = makeFakeSession();
+    const deps: DispatchSpawnAgentDeps = {
+      transcripts: new Map(),
+      apiJsonFn: (async () => ({ agent: { name: 'no-id-agent' } })) as unknown as DispatchSpawnAgentDeps['apiJsonFn'],
+    };
+
+    await dispatchSpawnAgent(session, 'call-1', 'build a widget', refs, deps);
+
+    expect(outputs).toEqual([{ callId: 'call-1', output: { status: 'failed', detail: 'could not spawn a new agent' } }]);
+    expect(refs.watchersRef.current.size).toBe(0);
+  });
+
+  test('a network/thrown failure still releases spawnInFlightRef (not wedged for future spawn_agent calls)', async () => {
+    const refs = spawnRefs({ spawnInFlightRef: { current: false } });
+    const { session, outputs } = makeFakeSession();
+    const deps: DispatchSpawnAgentDeps = {
+      transcripts: new Map(),
+      apiJsonFn: (async () => {
+        throw new Error('network error');
+      }) as unknown as DispatchSpawnAgentDeps['apiJsonFn'],
+    };
+
+    await dispatchSpawnAgent(session, 'call-1', 'build a widget', refs, deps);
+
+    expect(outputs).toEqual([{ callId: 'call-1', output: { status: 'failed', detail: 'could not spawn a new agent' } }]);
+    expect(refs.spawnInFlightRef.current).toBe(false);
+  });
+
+  test('a second spawn to a DIFFERENT agent id pushes its own watcher without disturbing a pending one', async () => {
+    const refs = spawnRefs({ watchersRef: { current: new Map([['agent-1', [{ kind: 'spawn', echoed: true, cursor: 0, label: 'agent-one' }]]]) } });
+    const { session } = makeFakeSession();
+    const agent: AgentDTO = { id: 'agent-2', name: 'agent-two' } as AgentDTO;
+    const deps: DispatchSpawnAgentDeps = {
+      transcripts: new Map(),
+      apiJsonFn: (async () => ({ agent })) as unknown as DispatchSpawnAgentDeps['apiJsonFn'],
+    };
+
+    await dispatchSpawnAgent(session, 'call-2', 'another task', refs, deps);
+
+    expect(refs.watchersRef.current.get('agent-1')).toEqual([{ kind: 'spawn', echoed: true, cursor: 0, label: 'agent-one' }]); // untouched
+    expect(refs.watchersRef.current.get('agent-2')).toEqual([{ kind: 'spawn', echoed: true, cursor: 0, label: 'agent-two' }]);
+  });
+});
+
+// =============================================================================
+// LOW batch: a second prompt_agent dispatch to the SAME agent (reachable once the first's
+// promptInFlight lock releases at its own echo — MAJOR-2 — well before its completion narrates)
+// must get its own independent completion watcher, not silently overwrite the first's. Pre-fix,
+// `watchersRef` was a single-value Map keyed by agentId, so the second dispatch's `.set(agentId,
+// ...)` call would clobber the first watcher — the operator's first turn would never narrate.
+// =============================================================================
+
+describe('LOW batch: two prompt_agent dispatches in flight to the same agent both narrate', () => {
+  test('a second dispatch (reachable after the first echoes) does not drop the first turn\'s completion watcher', async () => {
+    const refs = makeRefs({ boundAgentIdRef: { current: 'agent-1' }, hasEverBoundRef: { current: true } });
+    const { session, injections } = makeFakeSession();
+    const clientTurnIds: string[] = [];
+    const deps = baseDeps({
+      transcripts: new Map(),
+      buildPromptCommandFn: ((_ctx: unknown, message: string, opts: { clientTurnId: string }) => {
+        clientTurnIds.push(opts.clientTurnId);
+        return { type: 'prompt', id: 'agent-1', message, displayText: message };
+      }) as unknown as DispatchPromptAgentDeps['buildPromptCommandFn'],
+    });
+
+    // First dispatch: "fix the bug" — pushes a watcher for turn-1 onto agent-1's list.
+    await dispatchPromptAgent(session, 'call-1', 'fix the bug', refs, deps);
+    expect(refs.watchersRef.current.get('agent-1')).toHaveLength(1);
+    const turn1 = clientTurnIds[0]!;
+
+    // The first dispatch's echo lands — MAJOR-2 releases promptInFlightRef right here, well before
+    // any completion — making a second dispatch to the SAME agent reachable.
+    const afterEcho1 = new Map<string, TranscriptEntry[]>([['agent-1', [{ id: 'e1', kind: 'user', text: 'fix the bug', ts: 1, clientTurnId: turn1 }]]]);
+    sweepPromptWatchers(session, refs, { transcripts: afterEcho1, agents: [] });
+    expect(refs.promptInFlightRef.current).toBe(false);
+    expect(injections).toEqual([]); // turn-1 hasn't completed yet
+
+    // Second dispatch: "also run the tests" — reachable now the lock released.
+    await dispatchPromptAgent(session, 'call-2', 'also run the tests', refs, { ...deps, transcripts: afterEcho1 });
+    expect(refs.watchersRef.current.get('agent-1')).toHaveLength(2); // BOTH watchers present — turn-1's was not clobbered
+    const turn2 = clientTurnIds[1]!;
+
+    // turn-2 echoes too, then BOTH turns complete (turn-1 first, turn-2 after).
+    const bothEchoedThenTurn1Done = new Map<string, TranscriptEntry[]>([[
+      'agent-1',
+      [
+        { id: 'e1', kind: 'user', text: 'fix the bug', ts: 1, clientTurnId: turn1 },
+        { id: 'e2', kind: 'user', text: 'also run the tests', ts: 2, clientTurnId: turn2 },
+        { id: 'e3', kind: 'assistant', text: 'fixed the bug', ts: 3, status: 'ok' },
+      ],
+    ]]);
+    sweepPromptWatchers(session, refs, { transcripts: bothEchoedThenTurn1Done, agents: [] });
+
+    // turn-1's completion narrated; turn-2's watcher is still pending its own completion, not lost.
+    expect(injections).toHaveLength(1);
+    expect((injections[0]![0] as { content: [{ text: string }] }).content[0].text).toContain('fixed the bug');
+    expect(refs.watchersRef.current.get('agent-1')).toHaveLength(1); // turn-2's watcher survives
+
+    const turn2Done = new Map<string, TranscriptEntry[]>([[
+      'agent-1',
+      [
+        ...bothEchoedThenTurn1Done.get('agent-1')!,
+        { id: 'e4', kind: 'assistant', text: 'tests pass', ts: 4, status: 'ok' },
+      ],
+    ]]);
+    sweepPromptWatchers(session, refs, { transcripts: turn2Done, agents: [] });
+
+    expect(injections).toHaveLength(2);
+    expect((injections[1]![0] as { content: [{ text: string }] }).content[0].text).toContain('tests pass');
+    expect(refs.watchersRef.current.has('agent-1')).toBe(false); // both watchers consumed
   });
 });
 

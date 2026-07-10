@@ -314,12 +314,21 @@ export function isBoundAgentLive(roster: ReadonlyArray<Pick<AgentDTO, 'id'>>, ag
 /** `fleet_status`'s `function_call_output`: a trusted structural count in `detail`, the per-agent
  *  breakdown (names/activity — technically fleet-controlled, not the dispatcher's own words) fenced
  *  into `data` per the injection-defense contract above. */
+/** Roster `data` bound — `truncateForVoice`'s own default (400) is sized for a spoken sentence, not
+ *  a JSON roster dump; this is generous enough for a realistic fleet size while still keeping the
+ *  LOW-batch promise ("bounded despite truncateForVoice's doc claim") honest for a large one — an
+ *  unbounded roster listing would otherwise ride the wire un-truncated regardless of fleet size. */
+const FLEET_STATUS_DATA_MAX_CHARS = 2_000;
+
 export function formatFleetStatus(agents: ReadonlyArray<Pick<AgentDTO, 'id' | 'name' | 'status' | 'activity'>>): ToolCallOutput {
   const total = agents.length;
   if (total === 0) return okOutput('No agents in the fleet right now.');
   const working = agents.filter((a) => a.status === 'working' || a.status === 'starting').length;
   const detail = `${total} agent${total === 1 ? '' : 's'}: ${working} working, ${total - working} idle/other.`;
-  const data = JSON.stringify(agents.map((a) => ({ id: a.id, name: a.name, status: a.status, activity: a.activity })));
+  const data = truncateForVoice(
+    JSON.stringify(agents.map((a) => ({ id: a.id, name: a.name, status: a.status, activity: a.activity }))),
+    FLEET_STATUS_DATA_MAX_CHARS,
+  );
   return okOutput(detail, data);
 }
 

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Mic, PhoneOff } from 'lucide-react';
 import {
   bindingBannerText,
@@ -6,6 +6,7 @@ import {
   formatCallCost,
   formatElapsed,
   nextPttUiState,
+  shouldForceReleaseForWatchdog,
   voiceStateLabel,
   type CaptionState,
   type CallHudPhase,
@@ -42,6 +43,10 @@ export interface VoiceCallPillViewProps {
   onPttDown: () => void;
   onPttUp: () => void;
   onPttLeave: () => void;
+  /** HIGH-3: `pointercancel` (the browser itself aborting the gesture — a system dialog stealing
+   *  focus, a touch gesture reinterpreted as a scroll, etc.) is a FORCED release, not a `'leave'` —
+   *  it must end a `'locked'` engagement too, not just a `'holding'` one. */
+  onPttCancel: () => void;
   onEndCall: () => void;
 }
 
@@ -58,6 +63,7 @@ export const VoiceCallPillView = ({
   onPttDown,
   onPttUp,
   onPttLeave,
+  onPttCancel,
   onEndCall,
 }: VoiceCallPillViewProps) => (
   <div
@@ -100,6 +106,7 @@ export const VoiceCallPillView = ({
         onPointerDown={onPttDown}
         onPointerUp={onPttUp}
         onPointerLeave={onPttLeave}
+        onPointerCancel={onPttCancel}
         className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 active:scale-[0.99] ${
           pttEngaged
             ? 'bg-amber-500 text-white'
@@ -118,13 +125,16 @@ export const VoiceCallPillView = ({
   </div>
 );
 
+/** HIGH-3: how often the PTT watchdog checks how long the current engagement has run. Cheap and
+ *  coarse on purpose — this only needs to catch a stuck-open mic within a few seconds of the
+ *  60s cap, not react instantly. */
+const PTT_WATCHDOG_POLL_MS = 5_000;
+
 export const VoiceCallPill = () => {
   const call = useVoiceCall();
   const { isChatOpen } = useTaskContext();
   const [pttMode, setPttMode] = useState<PttUiMode>('idle');
   const pressedAtRef = useRef(0);
-
-  if (!call.isCallActive || !call.binding) return null;
 
   const applyGesture = (event: PttGestureEvent, holdMs: number) => {
     const result = nextPttUiState(pttMode, event, holdMs);
@@ -142,6 +152,40 @@ export const VoiceCallPill = () => {
   };
   const handleUp = () => applyGesture('up', Date.now() - pressedAtRef.current);
   const handleLeave = () => applyGesture('leave', Date.now() - pressedAtRef.current);
+  // HIGH-3: pointercancel, window blur, and document visibilitychange all mean "the operator has
+  // stopped interacting with this — force a release, don't leave a lock engaged with nobody
+  // watching the HUD".
+  const handleForceRelease = () => applyGesture('forceRelease', Date.now() - pressedAtRef.current);
+
+  // HIGH-3: window blur / tab hidden — a hot mic must not survive the operator tabbing away.
+  // Re-registered whenever `pttMode` changes so the listener's closure never reads a stale mode
+  // (the churn rate here is "once per press/release", not a hot loop).
+  useEffect(() => {
+    const onBlur = () => handleForceRelease();
+    const onVisibilityChange = () => {
+      if (document.hidden) handleForceRelease();
+    };
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-armed only on pttMode change
+  }, [pttMode]);
+
+  // HIGH-3: the watchdog backstop — if engagement (holding or locked) somehow outlives every other
+  // release signal, force it closed rather than hold the mic open indefinitely.
+  useEffect(() => {
+    if (pttMode === 'idle') return;
+    const id = setInterval(() => {
+      if (shouldForceReleaseForWatchdog(pttMode, Date.now() - pressedAtRef.current)) handleForceRelease();
+    }, PTT_WATCHDOG_POLL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-armed only on pttMode change
+  }, [pttMode]);
+
+  if (!call.isCallActive || !call.binding) return null;
 
   const phase: CallHudPhase = call.phase;
   const caption: CaptionState | null = call.caption;
@@ -160,6 +204,7 @@ export const VoiceCallPill = () => {
       onPttDown={handleDown}
       onPttUp={handleUp}
       onPttLeave={handleLeave}
+      onPttCancel={handleForceRelease}
       onEndCall={call.endCall}
     />
   );

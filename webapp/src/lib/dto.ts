@@ -620,7 +620,9 @@ export type ClientCommand =
   // for authz/tier decisions, which stay server-side regardless of this tag.
   | { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string; source?: string }
   | { type: "set-model"; id: string; model: string }
-  | { type: "interrupt"; id: string }
+  // `source` mirrors "prompt"'s own field (MEDIUM-5: audit source tagging) — observability-only
+  // provenance, never consulted here for authz/tier decisions.
+  | { type: "interrupt"; id: string; source?: string }
   | { type: "kill"; id: string }
   | { type: "restart"; id: string }
   | { type: "remove"; id: string; deleteWorktree?: boolean }

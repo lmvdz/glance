@@ -123,6 +123,9 @@ test("mintVoiceToken maps a successful OpenAI mint to the uniform shape and pins
 	expect(capturedBody.session.model).toBe("gpt-realtime-test");
 	expect(capturedBody.session.voice).toBe("aria");
 	expect(capturedBody.session.turn_detection).toBeNull(); // push-to-talk v1
+	// Concern-audit finding 3: without this the browser's user-caption branch is permanently dormant
+	// and the model's own paraphrase would render as the operator's words.
+	expect(capturedBody.session.input_audio_transcription).toEqual({ model: "whisper-1" });
 	expect(typeof capturedBody.session.instructions).toBe("string");
 	expect(capturedBody.session.instructions.length).toBeGreaterThan(0);
 	// Without tools the model could never emit a function_call — the whole lane would be inert
@@ -298,6 +301,65 @@ test("unknown provider 400s at the HTTP layer with zero fetch calls to any provi
 	expect(tracker.calls()).toBe(0);
 });
 
+test("concern-audit finding 2: malformed JSON body 400s BEFORE any mint, instead of silently minting a default-provider token", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	const tracker = countOpenAiMintCalls();
+	const { url } = await startServer({ token: "admin-tok" });
+	const res = await fetch(`${url}/api/voice/token`, {
+		method: "POST",
+		headers: { authorization: "Bearer admin-tok", "content-type": "application/json" },
+		body: "{ this is not valid json",
+	});
+	expect(res.status).toBe(400);
+	expect(tracker.calls()).toBe(0);
+});
+
+test("concern-audit finding 2: a valid-JSON-but-non-object body (e.g. a bare array) also 400s rather than defaulting", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	const tracker = countOpenAiMintCalls();
+	const { url } = await startServer({ token: "admin-tok" });
+	const res = await fetch(`${url}/api/voice/token`, {
+		method: "POST",
+		headers: { authorization: "Bearer admin-tok", "content-type": "application/json" },
+		body: JSON.stringify(["not", "an", "object"]),
+	});
+	expect(res.status).toBe(400);
+	expect(tracker.calls()).toBe(0);
+});
+
+test("concern-audit finding 2: a truly empty body (nothing sent) still mints — defaulting to openai is the intentionally-lenient case", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	mockOpenAiMint(() => ({ status: 200, json: { value: "ek_empty_body_ok", expires_at: 1, session: {} } }));
+	const { url } = await startServer({ token: "admin-tok" });
+	const res = await fetch(`${url}/api/voice/token`, { method: "POST", headers: { authorization: "Bearer admin-tok" } }); // no body at all
+	expect(res.status).toBe(200);
+	expect((await res.json()).provider).toBe("openai");
+});
+
+test("concern-audit finding 4: a newline/space-padded provider key is trimmed at mint — config and mint agree instead of config advertising enabled while every mint 502s", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "  sk-padded-key\n"; // padded exactly like the untrimmed-env footgun
+	let capturedAuth: string | undefined;
+	mockOpenAiMint((_body) => ({ status: 200, json: { value: "ek_trimmed", expires_at: 1, session: {} } }));
+	const realFetchForAuthCapture = globalThis.fetch;
+	globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : (input as { url?: string } | undefined)?.url;
+		if (url === OPENAI_MINT_URL) capturedAuth = (init?.headers as Record<string, string> | undefined)?.authorization;
+		return realFetchForAuthCapture(input as never, init);
+	}) as typeof fetch;
+	const { url } = await startServer({ token: "admin-tok", roleTokens: { operator: "op-tok" } });
+	// GET /api/voice/config must honestly advertise enabled:true for this (trimmed) key.
+	const cfgRes = await fetch(`${url}/api/voice/config`, { headers: { authorization: "Bearer op-tok" } });
+	expect((await cfgRes.json()).enabled).toBe(true);
+	// And the mint itself must actually succeed with the SAME trimmed key, not 502 on the padded raw value.
+	const mintRes = await fetch(`${url}/api/voice/token`, { method: "POST", headers: { authorization: "Bearer admin-tok" } });
+	expect(mintRes.status).toBe(200);
+	expect(capturedAuth).toBe("Bearer sk-padded-key");
+});
+
 test("per-actor mint rate cap 429s after the configured burst (feedbackRateAllowed shape)", async () => {
 	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
 	process.env.OMP_SQUAD_VOICE_MINT_RATE_PER_MIN = "2";
@@ -307,6 +369,28 @@ test("per-actor mint rate cap 429s after the configured burst (feedbackRateAllow
 	const hit = () => fetch(`${url}/api/voice/token`, { method: "POST", headers: { authorization: "Bearer admin-tok" } });
 	expect((await hit()).status).toBe(200);
 	expect((await hit()).status).toBe(200);
+	expect((await hit()).status).toBe(429);
+});
+
+test("concern-audit finding 1: OMP_SQUAD_VOICE_MINT_RATE_PER_MIN=0 does NOT disable the cap — it falls back to the default (6) and still 429s on burst", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_MINT_RATE_PER_MIN = "0"; // the footgun value: absence-as-success would read this as "unlimited"
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	mockOpenAiMint(() => ({ status: 200, json: { value: "ek_zero_cap", expires_at: 1, session: {} } }));
+	const { url } = await startServer({ token: "admin-tok" });
+	const hit = () => fetch(`${url}/api/voice/token`, { method: "POST", headers: { authorization: "Bearer admin-tok" } });
+	for (let i = 0; i < 6; i++) expect((await hit()).status).toBe(200); // default cap of 6, not unlimited
+	expect((await hit()).status).toBe(429); // the 7th must be refused — a true "unlimited" reading would keep returning 200
+});
+
+test("concern-audit finding 1: a negative OMP_SQUAD_VOICE_MINT_RATE_PER_MIN also falls back to the default rather than disabling the cap", async () => {
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_MINT_RATE_PER_MIN = "-3";
+	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+	mockOpenAiMint(() => ({ status: 200, json: { value: "ek_neg_cap", expires_at: 1, session: {} } }));
+	const { url } = await startServer({ token: "admin-tok" });
+	const hit = () => fetch(`${url}/api/voice/token`, { method: "POST", headers: { authorization: "Bearer admin-tok" } });
+	for (let i = 0; i < 6; i++) expect((await hit()).status).toBe(200);
 	expect((await hit()).status).toBe(429);
 });
 

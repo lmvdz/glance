@@ -1,7 +1,15 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { getVoiceConfig, mintVoiceToken } from '../lib/api';
 import createVoiceSession, { type VoiceSession, type VoiceSessionErrorInfo, type VoiceState } from '../lib/voice/voiceSession';
-import { appendCaption, errorToastMessage, reconnectNoticeText, type CaptionState } from '../lib/voice/callHud';
+import {
+  appendCaption,
+  errorToastMessage,
+  reconnectNoticeText,
+  shouldEndCall,
+  shouldEndCallForIdle,
+  shouldEndCallForMaxDuration,
+  type CaptionState,
+} from '../lib/voice/callHud';
 import { useVoiceDispatcher } from '../hooks/useVoiceDispatcher';
 import { appendSpokenSummary, appendSpokenUserMessage, bindSessionAgent, loadPersistedSessionsOrNull, subscribeSessionStore } from '../lib/chat/sessionStore';
 import { useTaskContext } from './TaskContext';
@@ -75,6 +83,10 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
 
   const sessionRef = useRef<VoiceSession | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** MEDIUM-6: wall-clock time of the last PTT press/release — the idle-timeout cap's clock. Reset
+   *  at call start (so an unattended call that never touches PTT still starts the idle clock from
+   *  connection time, not from `undefined`). */
+  const lastPttActivityAtRef = useRef<number | null>(null);
 
   // Capability probe (DESIGN.md "Flagging" row) — the only honest discovery channel; a flag-off
   // 404 is mapped to `{enabled:false}` by `getVoiceConfig` itself, never surfaced as an error here.
@@ -124,6 +136,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     setCaption(null);
     setReconnectNotice(null);
     setCallStartedAt(null);
+    lastPttActivityAtRef.current = null;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -140,6 +153,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       setBinding(nextBinding);
       setCallToken(`call:${Date.now()}:${Math.random().toString(36).slice(2)}`);
       setCallStartedAt(Date.now());
+      lastPttActivityAtRef.current = Date.now(); // MEDIUM-6: idle clock starts at connection time
       setConnecting(true);
     },
     [callToken],
@@ -166,12 +180,27 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   }, [binding, showToast, endCall]);
 
   // Elapsed-time tick — re-renders once a second while a call is up so `elapsedMs` (read below)
-  // stays live without a separate ref/interval per consumer.
+  // stays live without a separate ref/interval per consumer. MEDIUM-6: the same tick also drives
+  // the idle/max-duration spend cap — piggybacking here instead of a second interval, since nothing
+  // about the checks needs a tighter cadence than the meter already has.
   useEffect(() => {
     if (!callStartedAt) return;
-    const id = setInterval(() => forceTick((tick) => tick + 1), 1_000);
+    const id = setInterval(() => {
+      forceTick((tick) => tick + 1);
+      const now = Date.now();
+      if (shouldEndCallForMaxDuration(now - callStartedAt)) {
+        showToast('Voice call ended automatically after reaching the maximum call duration.', 'info');
+        endCall();
+        return;
+      }
+      const lastActivity = lastPttActivityAtRef.current;
+      if (lastActivity !== null && shouldEndCallForIdle(now - lastActivity)) {
+        showToast('Voice call ended automatically after 10 minutes of inactivity.', 'info');
+        endCall();
+      }
+    }, 1_000);
     return () => clearInterval(id);
-  }, [callStartedAt]);
+  }, [callStartedAt, showToast, endCall]);
 
   // Construct/tear down the VoiceSession exactly once per `callToken` — NOT per `binding`, since
   // `binding` also changes in place as the dispatcher (re)binds an agent (`onAgentBound` above),
@@ -199,7 +228,16 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       },
       onError: (error: VoiceSessionErrorInfo) => {
         showToast(errorToastMessage(error.code), 'error');
-        teardown(); // no retry loop — BUILD item 5
+        // MEDIUM-4: previously ANY onError tore the call down, discarding
+        // `VoiceSessionErrorInfo.fallbackToText` entirely — an informational/benign provider error
+        // mid-call (voiceSession.ts's generic `error` handler surfaces these as 'connect-failed'
+        // too, alongside genuine SDP/connect failures) would drop a perfectly healthy call. Two
+        // conditions actually warrant tearing down: the session never got past its very first
+        // connect attempt at all (nothing yet to keep alive — `session.isConnected()` is false), or
+        // `shouldEndCall` says this specific error is terminal (an explicit `fallbackToText`, or a
+        // code that's always terminal regardless of the flag, e.g. mic-denied). Anything else keeps
+        // the call up — the toast already told the operator, no retry loop either way (BUILD item 5).
+        if (!session.isConnected() || shouldEndCall(error)) teardown();
       },
     });
     sessionRef.current = session;
@@ -216,8 +254,17 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on callToken only, see comment above
   }, [callToken]);
 
-  const pttPress = useCallback(() => sessionRef.current?.pttPress(), []);
-  const pttRelease = useCallback(() => sessionRef.current?.pttRelease(), []);
+  // MEDIUM-6: every PTT press/release resets the idle-timeout clock — this is the ONLY activity
+  // signal the idle cap watches (fleet narration/completions don't count; an operator who's stepped
+  // away isn't listening either way).
+  const pttPress = useCallback(() => {
+    lastPttActivityAtRef.current = Date.now();
+    sessionRef.current?.pttPress();
+  }, []);
+  const pttRelease = useCallback(() => {
+    lastPttActivityAtRef.current = Date.now();
+    sessionRef.current?.pttRelease();
+  }, []);
 
   const value: VoiceCallContextValue = {
     voiceEnabled,

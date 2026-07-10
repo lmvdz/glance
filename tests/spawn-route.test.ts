@@ -168,6 +168,59 @@ test("POST /api/spawn: same seeded ledger, flag OFF ⇒ no shift (control — pr
 	expect(body.plan.model).toBeUndefined();
 });
 
+// ── source provenance (audit gauntlet finding 5, seam 03↔07: a voice-originated spawn must reach
+// audit.jsonl tagged, not anonymously) ───────────────────────────────────────────────────────────
+
+test("POST /api/spawn with source:\"voice\" writes an audit.jsonl entry containing source:\"voice\"", async () => {
+	const { url } = await startFixture();
+	const res = await fetch(`${url}/api/spawn`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ prompt: "fix the thing", source: "voice" }),
+	});
+	expect(res.status).toBe(200);
+	const body = (await res.json()) as { agent: { id: string } };
+	const auditRes = await fetch(`${url}/api/audit`);
+	expect(auditRes.status).toBe(200);
+	const entries = (await auditRes.json()) as Array<{ action: string; target: string | null; source?: string }>;
+	const createEntry = entries.find((e) => e.action === "create" && e.target === body.agent.id);
+	expect(createEntry).toBeDefined();
+	expect(createEntry?.source).toBe("voice");
+});
+
+test("POST /api/spawn WITHOUT source writes an audit.jsonl entry with no source key (contain-or-omit)", async () => {
+	const { url } = await startFixture();
+	const res = await fetch(`${url}/api/spawn`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ prompt: "fix the thing, no source this time" }),
+	});
+	expect(res.status).toBe(200);
+	const body = (await res.json()) as { agent: { id: string } };
+	const auditRes = await fetch(`${url}/api/audit`);
+	expect(auditRes.status).toBe(200);
+	const entries = (await auditRes.json()) as Array<{ action: string; target: string | null; source?: string }>;
+	const createEntry = entries.find((e) => e.action === "create" && e.target === body.agent.id);
+	expect(createEntry).toBeDefined();
+	expect("source" in (createEntry as object)).toBe(false);
+});
+
+test("POST /api/spawn with a non-string source drops it (typeof-narrowed, matches every other optional body field's treatment)", async () => {
+	const { url } = await startFixture();
+	const res = await fetch(`${url}/api/spawn`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ prompt: "fix the thing", source: 12345 }),
+	});
+	expect(res.status).toBe(200);
+	const body = (await res.json()) as { agent: { id: string } };
+	const auditRes = await fetch(`${url}/api/audit`);
+	const entries = (await auditRes.json()) as Array<{ action: string; target: string | null; source?: string }>;
+	const createEntry = entries.find((e) => e.action === "create" && e.target === body.agent.id);
+	expect(createEntry).toBeDefined();
+	expect("source" in (createEntry as object)).toBe(false);
+});
+
 // ── spawnScoreboard TTL + single-flight cache (PR #114 cross-lineage review) ────────────────────
 // `readAllReceipts` is an O(lifetime-receipts) walk+parse; with OMP_SQUAD_MODEL_OUTCOMES=1 every
 // POST /api/spawn hits `spawnScoreboard()`. These prove one scan is SHARED, not raced or repeated.

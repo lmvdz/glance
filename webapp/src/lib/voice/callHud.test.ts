@@ -8,7 +8,14 @@ import {
   formatElapsed,
   nextPttUiState,
   reconnectNoticeText,
+  shouldEndCall,
+  shouldEndCallForIdle,
+  shouldEndCallForMaxDuration,
+  shouldForceReleaseForWatchdog,
   voiceStateLabel,
+  CALL_IDLE_TIMEOUT_MS,
+  MAX_CALL_DURATION_MS,
+  MAX_PTT_HOLD_MS,
   VOICE_COST_PER_MINUTE_USD_ESTIMATE,
   PTT_TAP_THRESHOLD_MS,
 } from './callHud';
@@ -163,5 +170,89 @@ describe('nextPttUiState', () => {
     test('"leave" while idle is a no-op', () => {
       expect(nextPttUiState('idle', 'leave', 1_000)).toEqual({ mode: 'idle', action: 'none' });
     });
+  });
+
+  // HIGH-3: 'forceRelease' (pointercancel / window blur / document visibilitychange / the watchdog)
+  // must release from BOTH 'holding' and 'locked' — unlike 'leave', which deliberately leaves a
+  // locked recording alone. A locked recording surviving the pointer sliding off the button is the
+  // point of "lock"; surviving the operator tabbing away entirely (or the OS cancelling the
+  // gesture) is a hot mic with nobody watching the HUD.
+  describe('"forceRelease" event (HIGH-3: forces a release out of locked too)', () => {
+    test('forces a release from "holding"', () => {
+      expect(nextPttUiState('holding', 'forceRelease', 10)).toEqual({ mode: 'idle', action: 'release' });
+    });
+
+    test('forces a release from "locked" — unlike "leave", which is a no-op here', () => {
+      expect(nextPttUiState('locked', 'forceRelease', 10_000)).toEqual({ mode: 'idle', action: 'release' });
+    });
+
+    test('a no-op from "idle" (nothing engaged to release)', () => {
+      expect(nextPttUiState('idle', 'forceRelease', 10)).toEqual({ mode: 'idle', action: 'none' });
+    });
+  });
+});
+
+describe('shouldForceReleaseForWatchdog (HIGH-3: max-hold backstop)', () => {
+  test('never fires from idle, regardless of elapsed time', () => {
+    expect(shouldForceReleaseForWatchdog('idle', 10 * MAX_PTT_HOLD_MS)).toBe(false);
+  });
+
+  test('does not fire before the max hold duration, from either engaged mode', () => {
+    expect(shouldForceReleaseForWatchdog('holding', MAX_PTT_HOLD_MS - 1)).toBe(false);
+    expect(shouldForceReleaseForWatchdog('locked', MAX_PTT_HOLD_MS - 1)).toBe(false);
+  });
+
+  test('fires at/after the max hold duration, from either engaged mode', () => {
+    expect(shouldForceReleaseForWatchdog('holding', MAX_PTT_HOLD_MS)).toBe(true);
+    expect(shouldForceReleaseForWatchdog('locked', MAX_PTT_HOLD_MS + 5_000)).toBe(true);
+  });
+
+  test('honors a custom threshold', () => {
+    expect(shouldForceReleaseForWatchdog('holding', 5_000, 10_000)).toBe(false);
+    expect(shouldForceReleaseForWatchdog('holding', 10_000, 10_000)).toBe(true);
+  });
+});
+
+describe('shouldEndCall (MEDIUM-4: honor fallbackToText, plus always-terminal codes)', () => {
+  test('mic-denied always ends the call, even without an explicit fallbackToText flag', () => {
+    expect(shouldEndCall({ code: 'mic-denied' })).toBe(true);
+    expect(shouldEndCall({ code: 'mic-denied', fallbackToText: false })).toBe(true);
+  });
+
+  test('reconnect-failed always ends the call (belt-and-braces — every call site also sets fallbackToText)', () => {
+    expect(shouldEndCall({ code: 'reconnect-failed' })).toBe(true);
+  });
+
+  test('mint-failed / connect-failed do NOT end the call unless fallbackToText is explicitly set', () => {
+    expect(shouldEndCall({ code: 'mint-failed' })).toBe(false);
+    expect(shouldEndCall({ code: 'connect-failed' })).toBe(false);
+  });
+
+  test('an explicit fallbackToText ends the call regardless of code', () => {
+    expect(shouldEndCall({ code: 'connect-failed', fallbackToText: true })).toBe(true);
+    expect(shouldEndCall({ code: 'mint-failed', fallbackToText: true })).toBe(true);
+  });
+});
+
+describe('shouldEndCallForMaxDuration / shouldEndCallForIdle (MEDIUM-6: idle/max-duration spend cap)', () => {
+  test('max duration: does not fire before the cap, fires at/after it', () => {
+    expect(shouldEndCallForMaxDuration(MAX_CALL_DURATION_MS - 1)).toBe(false);
+    expect(shouldEndCallForMaxDuration(MAX_CALL_DURATION_MS)).toBe(true);
+    expect(shouldEndCallForMaxDuration(MAX_CALL_DURATION_MS + 60_000)).toBe(true);
+  });
+
+  test('max duration honors a custom cap', () => {
+    expect(shouldEndCallForMaxDuration(59 * 60_000, 60 * 60_000)).toBe(false);
+    expect(shouldEndCallForMaxDuration(60 * 60_000, 60 * 60_000)).toBe(true);
+  });
+
+  test('idle: does not fire before the timeout, fires at/after it', () => {
+    expect(shouldEndCallForIdle(CALL_IDLE_TIMEOUT_MS - 1)).toBe(false);
+    expect(shouldEndCallForIdle(CALL_IDLE_TIMEOUT_MS)).toBe(true);
+  });
+
+  test('idle honors a custom timeout', () => {
+    expect(shouldEndCallForIdle(4 * 60_000, 5 * 60_000)).toBe(false);
+    expect(shouldEndCallForIdle(5 * 60_000, 5 * 60_000)).toBe(true);
   });
 });

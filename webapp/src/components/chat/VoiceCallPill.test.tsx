@@ -15,6 +15,7 @@ const baseProps = {
   onPttDown: () => {},
   onPttUp: () => {},
   onPttLeave: () => {},
+  onPttCancel: () => {},
   onEndCall: () => {},
 };
 

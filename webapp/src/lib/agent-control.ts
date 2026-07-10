@@ -33,9 +33,12 @@ export function stopCommand(agentId: string): ClientCommand {
   return { type: 'kill', id: agentId };
 }
 
-/** Interrupt the current turn without halting the agent host. */
-export function interruptCommand(agentId: string): ClientCommand {
-  return { type: 'interrupt', id: agentId };
+/** Interrupt the current turn without halting the agent host. `source` (MEDIUM-5: audit source
+ *  tagging) is optional observability-only provenance — the voice dispatcher passes 'voice', every
+ *  other caller leaves it unset (undefined, not the literal string, so it's omitted from the wire
+ *  payload rather than serialized as `"source":null`/`"source":undefined`). */
+export function interruptCommand(agentId: string, source?: string): ClientCommand {
+  return source ? { type: 'interrupt', id: agentId, source } : { type: 'interrupt', id: agentId };
 }
 
 /** Restart a stopped/error agent. */

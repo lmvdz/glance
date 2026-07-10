@@ -128,6 +128,54 @@ export function errorToastMessage(code: VoiceSessionErrorInfo['code']): string {
 }
 
 // =============================================================================
+// MEDIUM-4: honor VoiceSessionErrorInfo.fallbackToText. Previously VoiceCallContext.tsx ended the
+// call on ANY onError, discarding the flag entirely — an informational/benign provider error mid-
+// call (surfaced as 'connect-failed' by voiceSession.ts's generic 'error' handler, but NOT a
+// connection teardown on its own) would drop a perfectly healthy call. `shouldEndCall` is the pure
+// decision: end only for an explicit `fallbackToText`, or a code that is ALWAYS terminal regardless
+// of whether the flag happened to be set at the call site.
+//
+// 'mic-denied' is always terminal even though `voiceSession.ts` doesn't set `fallbackToText` on it
+// (no mic access means there is no voice channel to keep alive, full stop). 'reconnect-failed' is
+// listed too for the same "always terminal" reason, even though every call site that emits it
+// already sets `fallbackToText: true` — belt-and-braces, so a future call site can't silently regress
+// this by forgetting the flag. 'mint-failed'/'connect-failed' are NOT unconditionally terminal: the
+// caller (VoiceCallContext.tsx) additionally treats "never successfully connected yet" as terminal
+// regardless of this function's answer (there's nothing yet to keep alive), which this pure helper
+// deliberately doesn't know about — see VoiceSession.isConnected().
+// =============================================================================
+
+const ALWAYS_TERMINAL_ERROR_CODES: ReadonlySet<VoiceSessionErrorInfo['code']> = new Set(['mic-denied', 'reconnect-failed']);
+
+export function shouldEndCall(errorInfo: Pick<VoiceSessionErrorInfo, 'code' | 'fallbackToText'>): boolean {
+  return !!errorInfo.fallbackToText || ALWAYS_TERMINAL_ERROR_CODES.has(errorInfo.code);
+}
+
+// =============================================================================
+// MEDIUM-6: idle / max-duration spend cap. Nothing previously ended an unattended call — a proactive
+// re-mint happens every ~55 minutes forever, and completion narrations get spoken into an empty
+// room. Two independent client-side caps, both pure so `VoiceCallContext.tsx`'s ticking check (it
+// already re-renders once a second for the elapsed-time meter) can drive them without any of this
+// logic itself owning a timer.
+// =============================================================================
+
+/** Hard cap on total call length regardless of activity — generous (2h, well past the ~55min
+ *  re-mint cadence) but bounded, so a call nobody ever explicitly ends doesn't run forever. */
+export const MAX_CALL_DURATION_MS = 2 * 60 * 60 * 1000;
+
+/** No PTT activity (press OR release) for this long ends the call — an unattended session
+ *  shouldn't keep re-minting and narrating completions into an empty room. */
+export const CALL_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+export function shouldEndCallForMaxDuration(elapsedMs: number, maxDurationMs = MAX_CALL_DURATION_MS): boolean {
+  return elapsedMs >= maxDurationMs;
+}
+
+export function shouldEndCallForIdle(msSinceLastPttActivity: number, idleTimeoutMs = CALL_IDLE_TIMEOUT_MS): boolean {
+  return msSinceLastPttActivity >= idleTimeoutMs;
+}
+
+// =============================================================================
 // Push-to-talk gesture (BUILD item 3: "PTT button (press-hold AND tap-toggle both work)"). A
 // three-state gesture machine, structurally identical in spirit to `voiceSession.ts`'s own
 // `nextVoiceState` — pure `(mode, event, holdMs) -> {mode, action}` so the pointer-event wiring in
@@ -141,8 +189,17 @@ export function errorToastMessage(code: VoiceSessionErrorInfo['code']): string {
 export type PttUiMode = 'idle' | 'holding' | 'locked';
 /** `'leave'` (MINOR-6) is distinct from `'up'`: a `pointerleave` fires when the pointer slides off
  *  the button, which is NOT the same signal as a genuine release while still over the target — only
- *  the latter may legitimately turn into a tap-to-lock. */
-export type PttGestureEvent = 'down' | 'up' | 'leave';
+ *  the latter may legitimately turn into a tap-to-lock.
+ *
+ *  HIGH-3: `'forceRelease'` is distinct from BOTH — `pointercancel`, a window `blur`, or the
+ *  document going hidden (`visibilitychange`) mean the operator has stopped interacting with this
+ *  tab/window entirely (switched apps, the OS yanked the pointer, the browser cancelled the
+ *  gesture). Unlike `'leave'`, this must force a release even out of `'locked'` — a locked
+ *  (tap-to-toggle) recording surviving the pointer sliding off the button is the whole POINT of
+ *  "lock", but surviving the user tabbing away entirely is a hot mic with nobody watching the HUD
+ *  to notice. The PTT watchdog (`shouldForceReleaseForWatchdog` below) fires the same event as a
+ *  last-resort backstop if none of those signals ever arrive. */
+export type PttGestureEvent = 'down' | 'up' | 'leave' | 'forceRelease';
 export interface PttGestureResult {
   mode: PttUiMode;
   action: 'press' | 'release' | 'none';
@@ -157,6 +214,12 @@ export function nextPttUiState(
   holdMs: number,
   tapThresholdMs = PTT_TAP_THRESHOLD_MS,
 ): PttGestureResult {
+  if (event === 'forceRelease') {
+    // HIGH-3: unconditional — releases from 'holding' AND 'locked' alike; a true no-op only from
+    // 'idle' (nothing was engaged to release).
+    if (mode === 'idle') return { mode: 'idle', action: 'none' };
+    return { mode: 'idle', action: 'release' };
+  }
   if (event === 'down') {
     if (mode === 'idle') return { mode: 'holding', action: 'press' };
     if (mode === 'locked') return { mode: 'idle', action: 'release' }; // second tap: stop
@@ -177,4 +240,21 @@ export function nextPttUiState(
     return { mode: 'idle', action: 'release' }; // a real hold: release on lift
   }
   return { mode, action: 'none' }; // 'up' while idle/locked (a stray duplicate up) — no-op
+}
+
+// =============================================================================
+// HIGH-3: PTT watchdog — a last-resort backstop for a hot mic that outlives every other release
+// signal (up/leave/forceRelease). `VoiceCallPill.tsx` polls this on an interval against how long
+// the current engagement (holding OR locked) has lasted; once true, it fires the SAME
+// 'forceRelease' gesture a blur/visibilitychange would. Pure so the threshold logic is directly
+// testable without a real timer/interval.
+// =============================================================================
+
+/** Default max continuous PTT engagement before the watchdog forces a release — generous enough to
+ *  never interrupt a genuine long dictation, but bounded so a stuck/forgotten lock can't hold the
+ *  mic open indefinitely. */
+export const MAX_PTT_HOLD_MS = 60_000;
+
+export function shouldForceReleaseForWatchdog(mode: PttUiMode, heldMs: number, maxHoldMs = MAX_PTT_HOLD_MS): boolean {
+  return mode !== 'idle' && heldMs >= maxHoldMs;
 }

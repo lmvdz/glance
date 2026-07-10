@@ -319,10 +319,14 @@ export const FederationCommandBodySchema = Schema.Struct({
 	cmd: Schema.optional(Schema.Unknown),
 });
 
-/** POST /api/spawn — `prompt` required (empty-after-trim stays a post-decode check). */
+/** POST /api/spawn — `prompt` required (empty-after-trim stays a post-decode check). `source` is
+ *  optional observability-only provenance (e.g. "voice") threaded to `recordAudit`/audit.jsonl —
+ *  `Schema.Struct` strips unknown keys, so without naming it here a caller-supplied `source` would
+ *  be silently dropped before it ever reached the manager. */
 export const SpawnBodySchema = Schema.Struct({
 	prompt: Schema.String,
 	profileId: Schema.optional(Schema.Unknown),
+	source: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/console — no required field. */

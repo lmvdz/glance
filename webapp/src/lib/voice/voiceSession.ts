@@ -237,8 +237,16 @@ function extractResponseId(evt: RealtimeServerEvent): string | undefined {
  *  failures — both are the server's response to a no-op we send unconditionally by design:
  *  `response_cancel_not_active` (barge-in's `response.cancel` when nothing was actually in
  *  flight) and `input_audio_buffer_commit_empty` (an empty PTT tap's `input_audio_buffer.commit`
- *  with no audio behind it). Any other error code still surfaces via `onError`. */
-const BENIGN_ERROR_CODES: ReadonlySet<string> = new Set(['response_cancel_not_active', 'input_audio_buffer_commit_empty']);
+ *  with no audio behind it). `conversation_already_has_active_response` (CRITICAL-1
+ *  belt-and-braces) is the provider's rejection of a `response.create` sent while a response was
+ *  still open — the deferred-send machinery below (`sendRaw`/`deferredResponseCreate`) is meant to
+ *  make this unreachable in practice, but if it ever does fire, it must be absorbed rather than
+ *  torn down as a connection failure. Any other error code still surfaces via `onError`. */
+const BENIGN_ERROR_CODES: ReadonlySet<string> = new Set([
+  'response_cancel_not_active',
+  'input_audio_buffer_commit_empty',
+  'conversation_already_has_active_response',
+]);
 
 // =============================================================================
 // Injected dependencies
@@ -291,10 +299,19 @@ export interface VoiceSessionDeps {
   getUserMedia: () => Promise<MediaStream>;
   /** POST the local SDP offer text to the provider and resolve the answer SDP text. Encapsulated
    *  as one function (rather than a raw `fetch` dependency) so tests never need to fake `fetch`
-   *  or a `Response` object — just resolve/reject a string. */
-  postSdpOffer: (ephemeralKey: string, offerSdp: string) => Promise<string>;
+   *  or a `Response` object — just resolve/reject a string. LOW batch: `signal` is an optional
+   *  `AbortSignal` this module ties to a 15s send timeout AND to `disconnect()`/a superseding
+   *  connect attempt — implementations that ignore it still work (fine for tests), but the real
+   *  browser wiring passes it straight to `fetch`. */
+  postSdpOffer: (ephemeralKey: string, offerSdp: string, signal?: AbortSignal) => Promise<string>;
   attachRemoteStream: (stream: MediaStream) => void;
   stopPlayback: () => void;
+  /** CRITICAL-2: resume local playback of the shared `<audio>` element. Called every time a fresh
+   *  response actually starts (`response.created`) — cheap/idempotent when playback was never
+   *  paused, and the ONLY thing that un-pauses it after `stopPlayback()` paused it for a barge-in
+   *  (see that field's doc comment: nothing else ever calls `.play()` again, so without this every
+   *  response after the FIRST barge-in would play into a permanently-paused element). */
+  resumePlayback: () => void;
   now: () => number;
   setTimer: (fn: () => void, ms: number) => VoiceTimerHandle;
   clearTimer: (handle: VoiceTimerHandle) => void;
@@ -465,6 +482,20 @@ export class VoiceSession {
   private static readonly INCIDENT_WINDOW_MS = 60_000;
   private static readonly MAX_CONSECUTIVE_INCIDENTS = 3;
   private static readonly RECONNECT_ATTEMPT_DELAY_MS = 500;
+  private static readonly SDP_POST_TIMEOUT_MS = 15_000;
+
+  /** CRITICAL-1: a `response.create` that `sendRaw` deferred because a wrapping response was still
+   *  active (`outstandingResponses > 0`) at send time — holds the trigger that was live when the
+   *  send was REQUESTED (an ack, always 'injection' in practice, but kept general). Sent for real
+   *  the moment `handleServerEvent`'s `response.done` case brings `outstandingResponses` back to
+   *  zero. Cleared (without ever sending) by a barge-in (`pttPress`) or a reset/disconnect — a
+   *  superseded turn must never have its deferred continuation fire into whatever comes next. */
+  private deferredResponseCreate: { trigger: 'user' | 'injection' } | undefined;
+
+  /** LOW batch: the AbortController backing the current SDP POST's 15s timeout — aborted by
+   *  `disconnect()` (hanging up mid-connect shouldn't leave a POST in flight) and superseded by the
+   *  next `establishConnection` attempt's own controller. */
+  private sdpAbortController: AbortController | undefined;
 
   constructor(
     private readonly deps: VoiceSessionDeps,
@@ -473,6 +504,15 @@ export class VoiceSession {
 
   getState(): VoiceState {
     return this.state;
+  }
+
+  /** MEDIUM-4: whether this session has ever completed a connection (as opposed to still being on
+   *  its very first, never-yet-successful `connect()` attempt). `VoiceCallContext.tsx`'s
+   *  `shouldEndCall` decision uses this to distinguish "nothing to keep alive yet" (always end the
+   *  call on any error before this is ever true) from "already live, only end for a genuinely
+   *  terminal error" (once it is). */
+  isConnected(): boolean {
+    return this.connected;
   }
 
   /** GAP-1: `opts.agentId` is normally fixed at construction, but a call can start before any
@@ -518,6 +558,11 @@ export class VoiceSession {
         await this.establishConnection(mic, myEpoch);
       } catch (err) {
         if (myEpoch !== this.epoch || err instanceof EpochStaleError) return; // bail silently
+        // HIGH-3: a genuine mint/connect failure never becomes a live session — stop the mic here
+        // too (previously only the bounded-reconnect give-up path did this), so a failed initial
+        // connect doesn't leave the device held open with nothing to show for it.
+        for (const track of this.micStream?.getTracks() ?? []) track.stop();
+        this.micStream = undefined;
         this.opts.onError?.({
           code: err instanceof VoiceMintError ? 'mint-failed' : 'connect-failed',
           message: err instanceof Error ? err.message : 'Failed to start the voice session.',
@@ -538,6 +583,9 @@ export class VoiceSession {
   disconnect(): void {
     this.epoch++; // invalidate any in-flight connect/rotate/reconnect
     this.connected = false;
+    this.sdpAbortController?.abort(); // LOW batch: cancel a hanging SDP POST rather than let it run
+    this.sdpAbortController = undefined;
+    this.deferredResponseCreate = undefined; // CRITICAL-1: nothing left to continue into
     // Clear the injection queue and the re-mint flag BEFORE dispatching 'reset': if a batch were
     // still queued, `dispatch`'s `onQuiescent()` (fired because reset lands on `idle`) would flush
     // it straight through the about-to-be-torn-down data channel and leave `getState()` reporting
@@ -569,6 +617,11 @@ export class VoiceSession {
   pttPress(): void {
     const responseActive = this.state === 'awaitingResponse' || this.state === 'speaking' || this.state === 'toolPending';
     if (responseActive) this.sendBargeInTruncate();
+    // CRITICAL-1: a barge-in supersedes any ack continuation still waiting on the wrapping
+    // response's response.done — that continuation must never fire into whatever the user is
+    // about to say next (it would violate rule (b): response.create must never be emitted while
+    // userRecording). Safe to clear unconditionally even when nothing was pending.
+    this.deferredResponseCreate = undefined;
     // Hot-mic privacy (MINOR-8): unmute for the duration of the hold.
     for (const track of this.micStream?.getAudioTracks() ?? []) track.enabled = true;
     this.dispatch({ type: 'ptt-press' });
@@ -619,6 +672,10 @@ export class VoiceSession {
         const trigger = this.pendingTriggerQueue.shift() ?? this.currentTrigger;
         if (responseId) this.responseTriggerById.set(responseId, trigger);
         this.dispatch({ type: 'response-started' });
+        // CRITICAL-2: a fresh response is starting — resume local playback in case the PREVIOUS
+        // turn ended in a barge-in (`stopPlayback()` paused the shared <audio> element and nothing
+        // else ever un-pauses it). Idempotent/cheap when playback was never paused to begin with.
+        this.deps.resumePlayback();
         return;
       }
       case 'response.output_audio_transcript.delta':
@@ -637,8 +694,12 @@ export class VoiceSession {
         // MINOR-4: correlate by this event's own response_id against the settled map — falls back
         // to the provisional currentTrigger only when response_id is absent (residual, see the
         // responseTriggerById doc comment above).
+        // LOW batch: fail CLOSED on the residual no-response_id case (consistent with MINOR-3's
+        // doctrine at the decision layer) — default to 'injection', never to whatever
+        // `currentTrigger` happens to hold, so an uncorrelated call is blocked pending explicit
+        // user confirmation rather than silently sailing through as if the user just asked for it.
         const responseId = typeof evt.response_id === 'string' ? evt.response_id : undefined;
-        const trigger = (responseId !== undefined ? this.responseTriggerById.get(responseId) : undefined) ?? this.currentTrigger;
+        const trigger = (responseId !== undefined ? this.responseTriggerById.get(responseId) : undefined) ?? 'injection';
         const call: PendingFunctionCall = {
           callId: typeof evt.call_id === 'string' ? evt.call_id : '',
           name: typeof evt.name === 'string' ? evt.name : '',
@@ -658,6 +719,18 @@ export class VoiceSession {
         if (responseId) this.responseTriggerById.delete(responseId); // MINOR-4: this response is done
         if (this.outstandingResponses > 0) this.outstandingResponses--;
         if (this.outstandingResponses === 0) {
+          // CRITICAL-1: the wrapping response (or whichever response was last outstanding) has now
+          // actually finished — if an ack's continuation was deferred waiting for exactly this
+          // moment, send it for real now instead of dispatching `response-done` (the turn isn't
+          // over; it's continuing). `sendRaw` sees outstandingResponses back at 0 and sends
+          // immediately rather than deferring again.
+          if (this.deferredResponseCreate) {
+            const { trigger } = this.deferredResponseCreate;
+            this.deferredResponseCreate = undefined;
+            this.currentTrigger = trigger;
+            this.sendRaw({ type: 'response.create' });
+            return;
+          }
           this.activeAudioItemId = undefined;
           this.activeAudioContentIndex = undefined;
           this.activeAudioStartedAt = undefined;
@@ -671,6 +744,16 @@ export class VoiceSession {
           error && typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
             ? (error as { code: string }).code
             : undefined;
+        if (code === 'conversation_already_has_active_response') {
+          // CRITICAL-1 belt-and-braces: a response.create this module sent WAS rejected because a
+          // response was already active (should be unreachable now that sendRaw defers instead of
+          // sending in that situation, but a race or a future provider quirk could still trigger
+          // it). Undo its optimistic bookkeeping — it will never receive a matching response.done —
+          // so outstandingResponses/pendingTriggerQueue can't permanently overcount and wedge the
+          // machine open forever.
+          if (this.outstandingResponses > 0) this.outstandingResponses--;
+          this.pendingTriggerQueue.pop();
+        }
         if (code !== undefined && BENIGN_ERROR_CODES.has(code)) return; // routine gesture, not a failure
         const message =
           error && typeof error === 'object' && 'message' in error && typeof (error as { message?: unknown }).message === 'string'
@@ -743,6 +826,16 @@ export class VoiceSession {
   private sendRaw(payload: Record<string, unknown>): void {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') return; // dropped, not queued/retried
     if (payload.type === 'response.create') {
+      if (this.outstandingResponses > 0) {
+        // CRITICAL-1: a response is still active (its response.done hasn't arrived) — sending
+        // response.create now would hit the provider's `conversation_already_has_active_response`
+        // rejection. Defer the actual send until `handleServerEvent`'s 'response.done' case brings
+        // outstandingResponses back to zero (at most the wrapping turn's own remaining duration —
+        // never the whole fleet, and never a re-issued prompt: nothing here re-asks the model
+        // anything, it just delays ONE already-decided send).
+        this.deferredResponseCreate = { trigger: this.currentTrigger };
+        return;
+      }
       this.outstandingResponses++;
       // MINOR-4: record the trigger active AT SEND TIME — claimed off this FIFO by the matching
       // `response.created`'s response.id, so a later currentTrigger flip (an ack sent while this
@@ -809,6 +902,13 @@ export class VoiceSession {
    *  This is a documented limitation, not a bug: there is no meaningful way to resume a half-spoken
    *  utterance across a torn-down and rebuilt peer connection. */
   private async establishConnection(mic: MediaStream, myEpoch: number): Promise<void> {
+    // HIGH-3: re-assert the hot-mic-privacy mute at the START of every (re)connect attempt, not
+    // just `connect()`'s own first call. `rotateSession`/`attemptReconnect` reuse this SAME
+    // MediaStream, whose tracks might still be `enabled: true` (a PTT held across the tear-down —
+    // see the "documented limitation" note below), and this module resets to `idle` regardless of
+    // what was happening before. Nothing else would otherwise re-mute a track already producing
+    // audio into a torn-down/soon-to-be-rebuilt connection.
+    for (const track of mic.getAudioTracks()) track.enabled = false;
     let token: VoiceMintTokenLike;
     try {
       token = await this.deps.mint(); // `token.value` (the ek_ secret) never leaves this scope
@@ -845,7 +945,22 @@ export class VoiceSession {
       await pc.setLocalDescription(offer);
       if (myEpoch !== this.epoch) throw new EpochStaleError();
       const offerSdp = pc.localDescription?.sdp ?? offer.sdp ?? '';
-      const answerSdp = await this.deps.postSdpOffer(token.value, offerSdp);
+      // LOW batch: bound the SDP POST with a 15s timeout, and make it abortable by `disconnect()`
+      // or a superseding (re)connect attempt — previously this had no timeout at all, so a hung
+      // provider request could leave `connect()` (and the caller's "Connecting…" UI) stuck forever.
+      // Uses the injected setTimer/clearTimer (not a raw AbortSignal.timeout) so this is directly
+      // testable with the same fake-timer harness every other lifecycle test in this file uses.
+      this.sdpAbortController?.abort(); // a stale attempt's controller, if any, is done either way
+      const abortController = new AbortController();
+      this.sdpAbortController = abortController;
+      const timeoutHandle = this.deps.setTimer(() => abortController.abort(), VoiceSession.SDP_POST_TIMEOUT_MS);
+      let answerSdp: string;
+      try {
+        answerSdp = await this.deps.postSdpOffer(token.value, offerSdp, abortController.signal);
+      } finally {
+        this.deps.clearTimer(timeoutHandle);
+        if (this.sdpAbortController === abortController) this.sdpAbortController = undefined;
+      }
       if (myEpoch !== this.epoch) throw new EpochStaleError();
       await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
       if (myEpoch !== this.epoch) throw new EpochStaleError();
@@ -853,6 +968,7 @@ export class VoiceSession {
       this.pc = pc;
       this.dataChannel = dc;
       this.outstandingResponses = 0;
+      this.deferredResponseCreate = undefined; // CRITICAL-1: a fresh connection has nothing to continue
       this.pendingTriggerQueue = []; // MINOR-4: a fresh connection has no in-flight responses to correlate
       this.responseTriggerById.clear();
       this.activeAudioItemId = undefined;
@@ -1050,11 +1166,12 @@ function getSharedAudioEl(): HTMLAudioElement {
   return sharedAudioEl;
 }
 
-async function defaultPostSdpOffer(ephemeralKey: string, offerSdp: string): Promise<string> {
+async function defaultPostSdpOffer(ephemeralKey: string, offerSdp: string, signal?: AbortSignal): Promise<string> {
   const res = await fetch('https://api.openai.com/v1/realtime/calls', {
     method: 'POST',
     headers: { Authorization: `Bearer ${ephemeralKey}`, 'Content-Type': 'application/sdp' },
     body: offerSdp,
+    signal,
   });
   if (!res.ok) throw new Error(`voice: SDP exchange failed (${res.status})`);
   return res.text();
@@ -1074,6 +1191,17 @@ export function createDefaultVoiceSessionDeps(mintFn: () => Promise<VoiceMintTok
     },
     stopPlayback: () => {
       sharedAudioEl?.pause();
+    },
+    resumePlayback: () => {
+      // CRITICAL-2: `.play()` on an already-playing element is a harmless no-op — this only
+      // matters the first time it runs after `stopPlayback()` paused the element for a barge-in.
+      const playResult = sharedAudioEl?.play();
+      if (playResult && typeof playResult.catch === 'function') {
+        playResult.catch(() => {
+          // Autoplay rejected (no user-gesture context, etc.) — not a connection failure. The
+          // element stays silent until the next response.created call retries this.
+        });
+      }
     },
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),

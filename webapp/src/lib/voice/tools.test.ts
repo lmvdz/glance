@@ -204,6 +204,23 @@ describe('formatFleetStatus', () => {
     const out = formatFleetStatus([{ id: 'a1', name: 'alpha', status: 'working' as const, activity: undefined }]);
     expect(out.detail).toBe('1 agent: 1 working, 0 idle/other.');
   });
+
+  // LOW batch: `data`'s JSON.stringify roster dump was unbounded despite truncateForVoice's own
+  // doc claim that agent-derived content riding the wire back to the model is always bounded — a
+  // large fleet's roster would ride the wire un-truncated. `detail` (the trusted count) is NEVER
+  // truncated; only `data` (the untrusted, agent-derived breakdown) is.
+  test('LOW batch: a large roster is bounded — data is truncated, detail (the trusted count) is not', () => {
+    const agents = Array.from({ length: 200 }, (_, i) => ({
+      id: `a${i}`,
+      name: `agent-with-a-fairly-long-name-${i}`,
+      status: 'working' as const,
+      activity: `doing a fairly long task description number ${i}`,
+    }));
+    const out = formatFleetStatus(agents);
+    expect(out.detail).toBe('200 agents: 200 working, 0 idle/other.'); // never truncated
+    expect(out.data!.length).toBeLessThanOrEqual(2_000 + 1); // bound + the trailing ellipsis char
+    expect(out.data!.endsWith('…')).toBe(true);
+  });
 });
 
 // =============================================================================

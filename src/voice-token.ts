@@ -205,6 +205,13 @@ async function mintOpenAiToken(cfg: VoiceProviderConfig, apiKey: string): Promis
 			model: voiceModel(),
 			voice: voiceVoice(),
 			turn_detection: null, // push-to-talk v1 (DESIGN.md "Turn detection" row); semantic_vad deferred
+			// Without this the browser's user-caption branch is permanently dormant — the model's own
+			// paraphrase of what it heard would render as the operator's own words in the transcript.
+			// `whisper-1` is the conservative pick here (not the newer `gpt-4o-transcribe`): it is the
+			// long-stable, narrowly-scoped transcription model, keeping this pinned surface's behavior
+			// as predictable as everything else pinned at mint (DESIGN.md "Token mint" row). Revisit if
+			// a future concern needs higher transcription fidelity.
+			input_audio_transcription: { model: "whisper-1" },
 			instructions: VOICE_INSTRUCTIONS,
 			tools: VOICE_SESSION_TOOLS,
 		},
