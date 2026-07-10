@@ -280,11 +280,27 @@ test("checkMembraneBreaker: below MEMBRANE_BREAKER_MIN_UNITS never trips even wi
 test("checkMembraneBreaker: a sample-insufficient baseline never trips (comparing against noise)", () => {
 	// Round-2 review fix: the gate no longer reads either cell's own self-doc `.reproducible` bit (that
 	// bit is meaningless for the flagged cohort's single-cell doc — see the mergeRate-0 test below). It
-	// gates on `isSampleSufficient` directly: a baseline with thin cost coverage is still noise, even
-	// with `n` past the floor.
-	const baseline = cell({ mergeRate: 0.9, costCoveragePct: 0.1 });
+	// gates on `isSampleSufficient` directly: a baseline whose `n` never cleared the floor is noise.
+	//
+	// Code-review finding #7 update: `isSampleSufficient` no longer folds in a cost-coverage floor —
+	// mergeRate/vetoRate/inRunReworkRate never read cost, so gating them on `costCoveragePct` starved
+	// this exact breaker on a fleet whose rows mostly lack `costUsd`. A thin-COST (but sample-sufficient
+	// `n`) baseline now legitimately trips; the "still noise" case this test guards is thin `n`, not
+	// thin cost coverage — see the next test for the corrected thin-cost-coverage behavior.
+	const baseline = cell({ mergeRate: 0.9, n: 1 }); // below the matrix's MIN_SAMPLES=3 floor
 	const flagged = cell({ mergeRate: 0.1 });
 	expect(checkMembraneBreaker(flagged, baseline).tripped).toBe(false);
+});
+
+test("checkMembraneBreaker: a baseline with thin COST coverage but sufficient n still trips (finding #7)", () => {
+	// The corrected behavior for the scenario the OLD test above mislabeled "noise": mergeRate/
+	// vetoRate/inRunReworkRate are computed off every outcome row, not just cost-bearing ones — thin
+	// cost coverage alone says nothing about whether there's enough mergeRate evidence to compare on.
+	const baseline = cell({ mergeRate: 0.9, costCoveragePct: 0.1 });
+	const flagged = cell({ mergeRate: 0.1, costCoveragePct: 0.1 });
+	const result = checkMembraneBreaker(flagged, baseline);
+	expect(result.tripped).toBe(true);
+	expect(result.reason).toMatch(/mergeRate dropped/);
 });
 
 test("checkMembraneBreaker: a saturated mergeRate-0 flagged cohort trips against a healthy baseline (structural-inertness fix)", () => {

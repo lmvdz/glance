@@ -157,14 +157,39 @@ function median(xs: number[]): number | undefined {
 	return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-/** Sample-sufficient: clears the `minSamples` floor plus the cost (and, when the builder was given
- *  receipts, token) coverage floor. Deliberately NOT the same thing as `CellMetrics.reproducible` —
- *  the champion for a taskClass is chosen FROM the sample-sufficient cells, so this check can't itself
- *  depend on a champion that doesn't exist yet (breaks the circularity `reproducible` alone would have:
- *  you need a champion to compute variance, and you need "sufficient" cells to pick a champion). */
-export function isSampleSufficient(cell: CellMetrics, minSamples: number, tokenGateApplies: boolean): boolean {
+/**
+ * Sample-sufficient for a MERGE-RATE-based comparison: the `minSamples` floor alone. Deliberately NOT
+ * the same thing as `CellMetrics.reproducible` — the champion for a taskClass is chosen FROM the
+ * sample-sufficient cells, so this check can't itself depend on a champion that doesn't exist yet
+ * (breaks the circularity `reproducible` alone would have: you need a champion to compute variance,
+ * and you need "sufficient" cells to pick a champion).
+ *
+ * Finding #7 (code-review fixlist): this used to ALSO require `costCoveragePct`/`tokensCoveragePct` to
+ * clear `MIN_COVERAGE_PCT` — a floor that has nothing to do with mergeRate. `mergeRate`, `vetoRate`, and
+ * `inRunReworkRate` are all computed off EVERY outcome row in the cell, not just the cost-bearing ones;
+ * gating champion selection (and therefore every downstream `reproducible` read, including
+ * `routeModelForTaskClass`'s live routing decision) on cost coverage meant a fleet whose rows mostly
+ * lack `costUsd` (true of this fleet historically) could never produce a champion at all — routing was
+ * silently dead fleet-wide, with a reason string that blamed "not reproducible" rather than missing
+ * cost data. Cost/token coverage is now its own gate, `isCostReproducible`, applied only where a
+ * comparison actually reads `medianCostUsd`/`medianTokensTotal`.
+ */
+export function isSampleSufficient(cell: CellMetrics, minSamples: number): boolean {
+	return cell.n >= minSamples;
+}
+
+/**
+ * Sample- AND coverage-sufficient for a COST/TOKEN-based comparison — everything `isSampleSufficient`
+ * requires, PLUS the cost (and, when the caller supplied receipts, token) median must be drawn from at
+ * least `MIN_COVERAGE_PCT` of the cell's rows (see `CellMetrics.costCoveragePct`'s doc). This is the
+ * honesty floor the plan calls for: never publish a COST/TOKEN comparison off a thin, unrepresentative
+ * slice — but unlike the old `isSampleSufficient`, it is opt-in for callers that are actually reading
+ * `medianCostUsd`/`medianTokensTotal` (e.g. a future `flagEfficiencyRegression` publish-gated view),
+ * not folded into mergeRate-only comparisons that never touch cost.
+ */
+export function isCostReproducible(cell: CellMetrics, minSamples: number, tokenGateApplies: boolean): boolean {
 	return (
-		cell.n >= minSamples &&
+		isSampleSufficient(cell, minSamples) &&
 		cell.costCoveragePct >= MIN_COVERAGE_PCT &&
 		(!tokenGateApplies || cell.tokensCoveragePct >= MIN_COVERAGE_PCT)
 	);
@@ -190,11 +215,12 @@ export function buildTaskClassMatrix(
 	// efficiency view's finer grain (module doc): pass it when the comparison needs `gpt-5.6-sol`
 	// distinguishable from `gpt-5.6-luna`, which `modelFamily` would otherwise collapse to one cell.
 	const keyModel = opts.groupBy === "variant" ? modelVariant : modelFamily;
-	// The token-coverage arm of the `reproducible` gate only applies when the caller actually supplied
-	// receipts — see `MIN_COVERAGE_PCT`'s doc. `receipts === []` (deliberately empty) still applies the
-	// gate; `receipts === undefined` (never wired up) does not, which is the ONLY difference; see
-	// `squad-manager.ts`'s existing call site (concern 01 didn't touch it — that's a later concern).
-	const tokenGateApplies = opts.receipts !== undefined;
+	// Finding #7 (code-review fixlist): `reproducible`/champion selection are mergeRate-based and no
+	// longer gated on cost/token coverage (see `isSampleSufficient`'s doc) — `tokenGateApplies` is no
+	// longer threaded through here. A caller that wants a COST/TOKEN-gated view of a cell (the honesty
+	// floor `MIN_COVERAGE_PCT` still exists for) calls `isCostReproducible(cell, minSamples,
+	// receipts !== undefined)` directly — `receipts === []` (deliberately empty) still applies the
+	// token arm; `receipts === undefined` (never wired up) does not.
 
 	// Outcome rows are range-filtered by `ts` (when the row was recorded) — the same convention
 	// buildAttribution uses for receipts. The roster/denominator population is NOT time-filtered: it
@@ -330,7 +356,7 @@ export function buildTaskClassMatrix(
 		let championModel: string | undefined;
 		let championCell: CellMetrics | undefined;
 		for (const [model, cell] of Object.entries(byModel)) {
-			if (!isSampleSufficient(cell, minSamples, tokenGateApplies)) continue;
+			if (!isSampleSufficient(cell, minSamples)) continue;
 			const better =
 				!championCell ||
 				cell.mergeRate > championCell.mergeRate ||
@@ -342,7 +368,16 @@ export function buildTaskClassMatrix(
 		}
 		champions[tcKey] = championModel;
 		for (const cell of Object.values(byModel)) {
-			cell.reproducible = !!championCell && isSampleSufficient(cell, minSamples, tokenGateApplies) && hasVarianceBetween(cell, championCell);
+			// Finding #7 (code-review fixlist): a champion cell must NEVER compare variance against
+			// ITSELF — `hasVarianceBetween(x, x)` is false whenever x's mergeRate is saturated (0 or 1),
+			// so the champion was never `reproducible` exactly when it had a perfect (or zero) record.
+			// On a fleet whose collapsed outcomes are all `landed` (mergeRate pinned at 1.0) that made
+			// EVERY champion permanently unreproducible, and `routeModelForTaskClass` refuses to shift on
+			// a non-reproducible cell on either side — the live router was silently dead. A champion is
+			// reproducible on sample sufficiency alone (it IS the reference point); every OTHER cell is
+			// still measured against it for genuine variance, unchanged.
+			const isChampion = cell === championCell;
+			cell.reproducible = !!championCell && isSampleSufficient(cell, minSamples) && (isChampion || hasVarianceBetween(cell, championCell));
 		}
 	}
 

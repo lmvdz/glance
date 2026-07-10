@@ -5,6 +5,7 @@
  */
 
 import { gitNoSignEnv } from "./git-harden.ts";
+import { extractOutermostJson } from "./json-extract.ts";
 
 const DEFAULT_TIMEOUT_MS = 1_000;
 
@@ -36,25 +37,14 @@ export async function ompOneShot(args: string[], opts: { bin?: string; timeoutMs
  * and stray prose). Mirrors planner.ts's `extractJsonArray` fix (aff5270): VERDICT_FIRST_BLOCK now
  * ships on validator/lens SYSTEM prompts, which instructs a prose verdict sentence BEFORE the JSON
  * — a stray '{' in that prose (e.g. "the object literal is {}. {"verdict":...}") would defeat a
- * naive first-'{'/last-'}' slice. Anchor on the LAST '}' (the real object's close is reliably the
- * final one) and try each '{' from the front in turn until one parses — a false-start brace just
- * fails to parse against that same end and the loop advances to the next candidate.
+ * naive first-'{'/last-'}' slice.
+ *
+ * Delegates to the shared depth-tracked scanner (`extractOutermostJson`, code-review fixlist finding
+ * #8) so a brace NESTED inside an earlier truncated structure can never be mistaken for the real,
+ * complete top-level object — only a `{` seen at depth 0 is ever a candidate.
  */
 export function extractJsonObject(raw: string): Record<string, unknown> | undefined {
-	const end = raw.lastIndexOf("}");
-	if (end < 0) return undefined;
-	let searchFrom = 0;
-	while (true) {
-		const start = raw.indexOf("{", searchFrom);
-		if (start < 0 || start >= end) return undefined;
-		try {
-			const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
-			if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>;
-		} catch {
-			// a false-start brace (e.g. inside verdict-first prose) — try the next "{" against the same end
-		}
-		searchFrom = start + 1;
-	}
+	return extractOutermostJson(raw, "{", (v): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v));
 }
 
 /**

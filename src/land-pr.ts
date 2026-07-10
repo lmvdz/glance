@@ -23,7 +23,7 @@ import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
-import { gateExec } from "./gate-runner.ts";
+import { gateExec, greenGateUnproven } from "./gate-runner.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
 import { proofGate } from "./proof.ts";
 import { gh, ghJson } from "./gh.ts";
@@ -92,19 +92,9 @@ async function excerptForDetail(s: string, n: number, agentId?: string): Promise
 // `gate-runner.ts`'s `gateRunUnrunnable` is reds-only by design ("code === 0 ⇒ green is green") — a
 // deliberate short-circuit so a real green run is never second-guessed. That leaves the PR acceptance
 // path unable to tell "the gate ran and passed" from "the gate exited 0 without exercising anything"
-// (a broken verify script, or a test glob that matched zero files) — mirroring the small-helper
-// duplication convention above (`git`/`runGate`) rather than exporting a red-only classifier's
-// internals for a green-only use.
-const ZERO_TESTS_RE = /\bRan 0 tests\b|did not match any test files/i;
-const TESTS_RAN_RE = /\b[1-9]\d* pass\b/;
-
-/** Why a GREEN (exit 0) gate run should NOT be trusted as a real pass, or undefined when it's fine. */
-function greenGateUnproven(run: { output: string; degraded?: boolean }, command: string): string | undefined {
-	if (TESTS_RAN_RE.test(run.output)) return undefined; // tests demonstrably ran — trust the pass
-	if (run.degraded) return "gate ran inside the DEGRADED bare sandbox image and reported success — cannot trust an unverified environment as a pass";
-	if (/\btest\b/.test(command) && ZERO_TESTS_RE.test(run.output)) return "test gate exited 0 but executed zero tests — the suite never ran";
-	return undefined;
-}
+// (a broken verify script, or a test glob that matched zero files). `greenGateUnproven` (code-review
+// finding #3) now lives in gate-runner.ts beside `gateRunUnrunnable` and its ZERO_TESTS_RE/TESTS_RAN_RE
+// twins — imported here rather than re-declared, and shared with the local land path (land.ts).
 
 /**
  * Provision `node_modules` in the disposable scratch worktree before any gate runs.
@@ -552,7 +542,17 @@ export async function transplantedCommitsReason(repo: string, branch: string, de
 	// bad as the false-allow this finding fixes (see this file's negative-case tests).
 	const publishing = await git(["rev-list", `origin/${defaultBranch}..${branch}`], repo);
 	if (publishing.code !== 0) {
-		if (UNKNOWN_REVISION_RE.test(publishing.stderr)) return undefined; // branch doesn't exist — nothing to publish
+		// Finding #1 (code-review fixlist): `git rev-list a..b` emits BYTE-IDENTICAL "unknown revision"
+		// text whether `a` (origin/<default>, pruned/absent) or `b` (the branch) is the missing ref —
+		// UNKNOWN_REVISION_RE alone can't tell which. The carve-out below is only sound for the branch
+		// case ("nothing to publish"); an absent origin/<default> must never take it (that's offline /
+		// stale-fetch, not "nothing to compare"). Anchor on the branch specifically before trusting the
+		// error text — this was fail-open: offline + pruned origin ref allowed publishing transplanted
+		// commits.
+		if (UNKNOWN_REVISION_RE.test(publishing.stderr)) {
+			const branchRef = await git(["rev-parse", "--verify", "--quiet", branch], repo);
+			if (branchRef.code !== 0) return undefined; // confirmed: the branch itself doesn't exist — nothing to publish
+		}
 		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `git rev-list origin/${defaultBranch}..${branch} failed: ${publishing.stderr || publishing.stdout || "no output"}` });
 		return `transplant gate ${reason} — could not prove ${branch}'s lineage; refusing to publish it`;
 	}

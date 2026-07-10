@@ -61,6 +61,14 @@ function probeFailureReason(detail: string): string {
 export async function landRiskReason(repo: string, branch: string, baseRef = "HEAD"): Promise<string | undefined> {
 	try {
 		const mb = await git(["merge-base", baseRef, branch], repo);
+		// Finding #5 (code-review fixlist, same shape as land.ts's staleBranchReason finding #4):
+		// `git merge-base` signals "no common ancestor" via EXIT 1 + empty stdout — it never exits 0
+		// with empty stdout. Folding that into `mb.code !== 0` treated a genuine orphan/grafted branch
+		// exactly like a real probe failure, hardcoding a "spawn-error" refusal that told the operator
+		// to disable the gate for a branch that was never unsafe to begin with. Only a bare exit 1 with
+		// nothing on stdout is that carve-out; any other nonzero exit (deleted ref, corrupt repo, etc.)
+		// still fails closed below.
+		if (mb.code === 1 && !mb.stdout) return undefined; // no common ancestor — not a probe failure
 		if (mb.code !== 0 || !mb.stdout) return probeFailureReason(`merge-base(${baseRef}, ${branch}) exited ${mb.code} with no output`);
 		const diff = await git(["diff", "--no-ext-diff", "--name-only", `${mb.stdout}..${branch}`], repo);
 		if (diff.code !== 0) return probeFailureReason(`diff ${mb.stdout}..${branch} exited ${diff.code}`);

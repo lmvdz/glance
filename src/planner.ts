@@ -15,6 +15,7 @@
 
 import { VERDICT_FIRST_BLOCK } from "./agent-profiles.ts";
 import type { PlanConcern } from "./features.ts";
+import { extractOutermostJson } from "./json-extract.ts";
 
 /** One concern the model wants planned. Field names map 1:1 onto the frontmatter
  *  `parsePlanConcerns` (features.ts:360) reads back — see plan-writer.ts. */
@@ -137,25 +138,15 @@ ${VERDICT_FIRST_BLOCK}`;
  * it unconditionally), which instructs the model to state its verdict in the first sentence BEFORE the
  * JSON array. A verdict sentence that itself names a bracketed reference (e.g. "gap coverage: [2 items
  * remain]") would then win `indexOf("[")`, producing a slice from that false start to the real closing
- * `]` that fails to parse — silently dropping a well-formed plan. Try every `[` in order (not just the
- * first) against the SAME `lastIndexOf("]")` end, returning the first span that actually parses as an
- * array — a false-start bracket in leading prose just fails its own JSON.parse and the loop moves on.
+ * `]` that fails to parse — silently dropping a well-formed plan.
+ *
+ * Delegates to the shared depth-tracked scanner (`extractOutermostJson`, code-review fixlist finding
+ * #8) so a bracket NESTED inside an earlier truncated structure (e.g. a `"blockedBy": []` inside a
+ * response cut off mid-array) can never be mistaken for the real, complete top-level array — only a
+ * `[` seen at depth 0 is ever a candidate.
  */
 function extractJsonArray(raw: string): unknown[] | undefined {
-	const end = raw.lastIndexOf("]");
-	if (end < 0) return undefined;
-	let searchFrom = 0;
-	while (true) {
-		const start = raw.indexOf("[", searchFrom);
-		if (start < 0 || start >= end) return undefined;
-		try {
-			const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
-			if (Array.isArray(parsed)) return parsed;
-		} catch {
-			// a false-start bracket (e.g. inside verdict-first prose) — try the next "[" against the same end
-		}
-		searchFrom = start + 1;
-	}
+	return extractOutermostJson(raw, "[", (v): v is unknown[] => Array.isArray(v));
 }
 
 function slugify(s: string): string {

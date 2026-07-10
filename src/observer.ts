@@ -72,8 +72,11 @@ export interface ObserverDeps {
 	 *  only filing an issue. Absent ⇒ regressions are only filed (today's behavior). Only ever called
 	 *  for a `regression:`-fingerprinted finding, and only under OMP_SQUAD_OBSERVE_REPRODUCE=1. */
 	spawnObserver?: (finding: Finding) => Promise<boolean>;
-	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red. */
-	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }>;
+	/** Run the acceptance gate (the repo's own verify command) on main; `ok:false` ⇒ red.
+	 *  `unrunnable:true` (eap-borrows finding #2) ⇒ the gate itself couldn't run (Docker down, spawn
+	 *  failure) — structurally distinct from a reproduced test failure; `confirmedGate` never
+	 *  confirm-retries it and `auditTestsGreen` files it as `gate-unrunnable`, not `regression:`. */
+	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }>;
 	/** Commits on the agent's branch not in main (origin-aware in PR mode — see `aheadOfBase`):
 	 *  0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown. Async: PR mode fetches the origin default branch. */
 	gitAheadOfMain: (agent: AgentDTO) => Promise<number>;

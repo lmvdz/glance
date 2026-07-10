@@ -27,6 +27,19 @@ describe("extractJsonObject", () => {
 	test("returns undefined for a JSON array (not an object)", () => {
 		expect(extractJsonObject("[1,2,3]")).toBeUndefined();
 	});
+
+	test("truncated output with a nested empty object returns undefined, NOT {} (finding #8)", () => {
+		// Same shape as planner.ts's extractJsonArray fix: the OLD loop anchored every candidate `{`
+		// against the same fixed `end = raw.lastIndexOf("}")` — for truncated output whose only `}`
+		// belongs to an already-closed inner object, the real (incomplete) outer object failed to parse
+		// but the search fell through to the inner one and returned it instead.
+		const truncated = 'garbage {"a":1, "b": {"nested": {}} ';
+		expect(extractJsonObject(truncated)).toBeUndefined();
+	});
+
+	test("a genuinely complete, well-formed nested empty object still parses (sanity check)", () => {
+		expect(extractJsonObject('{"a": {}}')).toEqual({ a: {} });
+	});
 });
 
 describe("ompOneShot", () => {

@@ -51,6 +51,25 @@ test("parseConcernDrafts: malformed JSON returns undefined", () => {
 	expect(parseConcernDrafts("")).toBeUndefined();
 });
 
+test("parseConcernDrafts: truncated output with a nested empty array returns undefined, NOT []", () => {
+	// Code-review fixlist finding #8: the old extraction loop anchored every candidate `[` against the
+	// SAME fixed `end = raw.lastIndexOf("]")` — for TRUNCATED output whose only `]` char belongs to a
+	// nested, already-closed inner array (e.g. a `"blockedBy": []` field), the outer (real, incomplete)
+	// array failed to parse but the search then advanced to that inner `[]` and parsed IT instead,
+	// returning `[]` — read by `decompose`/callers as "the model explicitly says nothing left to plan",
+	// not "the model's response was garbled". VERDICT_FIRST_BLOCK's "elaborate afterward" convention
+	// makes trailing prose — and therefore mid-structure truncation — likelier, not rarer.
+	const truncated = 'garbage [ {"a":1}, {"b": []} ';
+	expect(parseConcernDrafts(truncated)).toBeUndefined();
+});
+
+test("parseConcernDrafts: a genuinely complete, well-formed empty array still parses to []", () => {
+	// Sanity check the fix above didn't overcorrect: a model that legitimately closes an empty top-level
+	// array must still resolve to `[]` (a real "nothing left to plan" signal), not `undefined`.
+	expect(parseConcernDrafts("[]")).toEqual([]);
+	expect(parseConcernDrafts("Sure, here you go:\n```json\n[]\n```")).toEqual([]);
+});
+
 test("parseConcernDrafts: a verdict-first prose sentence with a bracket before the real array still parses (batch-2 review fix)", () => {
 	// VERDICT_FIRST_BLOCK instructs the model to lead with its verdict before any JSON — a verdict
 	// sentence that itself names a bracketed reference must not defeat the array extraction.

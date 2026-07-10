@@ -3,6 +3,8 @@ import {
 	buildTaskClassMatrix,
 	detectBaselineStaleness,
 	flagEfficiencyRegression,
+	isCostReproducible,
+	isSampleSufficient,
 	MIN_SAMPLES,
 	selectBaseline,
 	type CellMetrics,
@@ -282,14 +284,57 @@ describe("buildTaskClassMatrix — accounting core (eap-borrows concern 01)", ()
 		expect(c.medianTokensTotal).toBe(525); // median of [450 (u1 summed), 600 (u2)]
 	});
 
-	test("reproducible: an all-landed taskClass (saturated at 1.0) publishes NOTHING — the variance floor", () => {
+	test("reproducible: a lone saturated (1.0) cell IS its taskClass's champion, and IS reproducible (finding #7)", () => {
+		// Code-review finding #7: the OLD gate compared every cell's variance against the champion, even
+		// when the cell WAS the champion — `hasVarianceBetween(x, x)` is false at a saturated mergeRate,
+		// so the champion was never reproducible exactly when it had a perfect record. On a fleet whose
+		// collapsed outcomes are all `landed` (mergeRate pinned at 1.0, true of this fleet historically)
+		// that made EVERY taskClass's champion permanently unreproducible, silently killing
+		// `routeModelForTaskClass` fleet-wide. A champion needs no baseline comparison — it IS the
+		// baseline — so it's reproducible on sample sufficiency alone.
 		const denom = [unit({ agentId: "s1" }), unit({ agentId: "s2" }), unit({ agentId: "s3" })];
 		const rows = denom.map((u) => row({ agentId: u.agentId, model: "claude-sonnet-5", costUsd: 1 }));
 		const doc = buildTaskClassMatrix(rows, denom, range);
 		const c = doc.cells["tdd:heavy"].sonnet;
 		expect(c.mergeRate).toBe(1);
-		expect(c.insufficientData).toBe(false); // clears the sample floor...
-		expect(c.reproducible).toBe(false); // ...but saturated-tied against itself carries no signal
+		expect(c.insufficientData).toBe(false);
+		expect(doc.champions["tdd:heavy"]).toBe("sonnet");
+		expect(c.reproducible).toBe(true); // it's the champion — no self-comparison required
+	});
+
+	test("reproducible: a DIFFERENT cell saturated-tied with the champion still carries no signal", () => {
+		// The real "no signal" case the variance floor exists for: two DISTINCT cells both stuck at a
+		// saturated mergeRate. The champion (sonnet, cheaper) is reproducible on its own; the non-champion
+		// (opus) is genuinely tied with it at 1.0 and must stay unreproducible — unlike the champion, it
+		// really is being compared against something else, and that comparison carries no signal.
+		const cheap = [unit({ agentId: "c1" }), unit({ agentId: "c2" }), unit({ agentId: "c3" })];
+		const rich = [unit({ agentId: "r1" }), unit({ agentId: "r2" }), unit({ agentId: "r3" })];
+		const rows = [
+			...cheap.map((u) => row({ agentId: u.agentId, model: "claude-sonnet-5", costUsd: 1 })), // 1.0, cheaper
+			...rich.map((u) => row({ agentId: u.agentId, model: "claude-opus-4-8", costUsd: 5 })), // 1.0, pricier
+		];
+		const doc = buildTaskClassMatrix(rows, [...cheap, ...rich], range);
+		expect(doc.champions["tdd:heavy"]).toBe("sonnet"); // tied mergeRate — cost tie-break picks the cheaper cell
+		expect(doc.cells["tdd:heavy"].sonnet.reproducible).toBe(true); // the champion
+		expect(doc.cells["tdd:heavy"].opus.reproducible).toBe(false); // saturated tie against the champion — no signal
+	});
+
+	test("reproducible/champion selection no longer requires cost coverage (finding #7)", () => {
+		// A fleet whose rows never carry `costUsd` at all (historically true here) must still be able to
+		// produce a champion and reproducible cells off mergeRate evidence alone — the cost-coverage floor
+		// only applies to an actual cost/token comparison (`isCostReproducible`), never to mergeRate.
+		const cheap = [unit({ agentId: "c1" }), unit({ agentId: "c2" }), unit({ agentId: "c3" }), unit({ agentId: "c4" })];
+		const frontier = [unit({ agentId: "f1" }), unit({ agentId: "f2" }), unit({ agentId: "f3" }), unit({ agentId: "f4" })];
+		const rows = [
+			...cheap.map((u, i) => row({ agentId: u.agentId, model: "claude-sonnet-5", outcome: i < 1 ? "landed" : "rejected" })), // 0.25, no costUsd
+			...frontier.map((u) => row({ agentId: u.agentId, model: "claude-opus-4-8" })), // 1.0, no costUsd
+		];
+		const doc = buildTaskClassMatrix(rows, [...cheap, ...frontier], range);
+		expect(doc.cells["tdd:heavy"].sonnet.costCoveragePct).toBe(0);
+		expect(doc.cells["tdd:heavy"].opus.costCoveragePct).toBe(0);
+		expect(doc.champions["tdd:heavy"]).toBe("opus");
+		expect(doc.cells["tdd:heavy"].opus.reproducible).toBe(true);
+		expect(doc.cells["tdd:heavy"].sonnet.reproducible).toBe(true); // real (non-saturated) variance vs the champion
 	});
 
 	test("reproducible: genuine (non-saturated) variance against the auto-champion publishes both sides", () => {
@@ -362,6 +407,25 @@ describe("selectBaseline / detectBaselineStaleness (eap-borrows concern 01)", ()
 		const event = detectBaselineStaleness("tdd:heavy", "opus", doc);
 		expect(event).toBeDefined();
 		expect(event!.detail).toContain("no cell recorded");
+	});
+});
+
+describe("isSampleSufficient / isCostReproducible (code-review finding #7)", () => {
+	test("isSampleSufficient ignores cost/token coverage entirely — n alone", () => {
+		const thinCost = cell({ n: 10, costCoveragePct: 0, tokensCoveragePct: 0 });
+		expect(isSampleSufficient(thinCost, MIN_SAMPLES)).toBe(true);
+		const thinN = cell({ n: MIN_SAMPLES - 1, costCoveragePct: 1, tokensCoveragePct: 1 });
+		expect(isSampleSufficient(thinN, MIN_SAMPLES)).toBe(false);
+	});
+
+	test("isCostReproducible still enforces the coverage floor — the preserved honesty gate", () => {
+		const thinCost = cell({ n: 10, costCoveragePct: 0.1, tokensCoveragePct: 1 });
+		expect(isCostReproducible(thinCost, MIN_SAMPLES, false)).toBe(false);
+		const healthy = cell({ n: 10, costCoveragePct: 1, tokensCoveragePct: 1 });
+		expect(isCostReproducible(healthy, MIN_SAMPLES, false)).toBe(true);
+		const thinTokens = cell({ n: 10, costCoveragePct: 1, tokensCoveragePct: 0.1 });
+		expect(isCostReproducible(thinTokens, MIN_SAMPLES, true)).toBe(false); // token arm applies
+		expect(isCostReproducible(thinTokens, MIN_SAMPLES, false)).toBe(true); // token arm not requested
 	});
 });
 

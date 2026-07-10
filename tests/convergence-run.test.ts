@@ -218,7 +218,7 @@ describe("runConvergence — real Epic 1/3 adapters", () => {
 	// demonstrably never ran (here: bash's own "command not found", exit 127) to `[]` — indistinguishable
 	// from "the suite ran and found nothing wrong". The ratchet would then read "no known regressions"
 	// for a turn that verified NOTHING.
-	test("(#15) a suite that demonstrably never ran (exit 127) escalates and SKIPS the sidecar write — the prior REAL set survives untouched", async () => {
+	test("(#15) a suite that demonstrably never ran (exit 127) escalates and SKIPS the mid-run sidecar write", async () => {
 		await withStateDir(async (dir) => {
 			const repo = tmpRepo();
 			const planDir = path.join(repo, "plans", "demo");
@@ -231,11 +231,42 @@ describe("runConvergence — real Epic 1/3 adapters", () => {
 				const terminal = await runOnceIteration({ goal: "demo", fixture: false, once: true }, repo);
 				expect(terminal.decision).toBe("escalate");
 				expect(terminal.pendingEscalation).toBe(true);
-				// the write was SKIPPED entirely — the sidecar still holds the prior REAL set, never a
-				// synthetic `[]` that would poison the next turn's set-diff into a false regression.
-				expect(await readFailures(dir)).toEqual(["prior.test.ts > z"]);
+				// Code-review finding #6 superseded this test's original assertion (that the prior REAL
+				// set "survives untouched"): `escalate` is a TERMINAL decision — there is no next turn of
+				// THIS goal for the sidecar to serve, and leaving it behind is exactly what let it leak
+				// into a DIFFERENT goal's first turn (see the cross-goal test below). The mid-run WRITE is
+				// still correctly skipped (never a synthetic `[]`) — but the terminal CLEAR is unconditional.
+				expect(await readFailures(dir)).toBeNull();
 			} finally {
 				rmSync(repo, { recursive: true, force: true });
+			}
+		});
+	});
+
+	// Finding #6 (code-review fixlist): `if (!suiteUnrunnable) await clearFailures();` on the TERMINAL
+	// path meant an unrunnable-terminal turn left the sidecar behind — a DIFFERENT goal reusing the same
+	// state dir (failuresPath/oraclePath are keyed by stateDir, not goalId) then read a stale, unrelated
+	// failure set on what should have been its own baseline (no-ratchet) first turn.
+	test("(#6) an unrunnable-terminal turn clears the sidecar so a DIFFERENT goal's first turn starts clean", async () => {
+		await withStateDir(async (dir) => {
+			const repoA = tmpRepo();
+			const planDirA = path.join(repoA, "plans", "goal-a");
+			mkdirSync(planDirA, { recursive: true });
+			writeFileSync(path.join(planDirA, "01-example.md"), "STATUS: open\nPRIORITY: p1\n\n# Example\n\n## Acceptance Criteria\n- something works\n");
+			writeFileSync(path.join(repoA, "package.json"), JSON.stringify({ scripts: { test: "definitely-not-a-real-binary-xyz-127" } }));
+			writeFileSync(path.join(repoA, "bun.lock"), "");
+			await writeFailures(["goal-a-prior.test.ts > z"], dir); // goal A's own real prior failure set
+			try {
+				const terminalA = await runOnceIteration({ goal: "goal-a", fixture: false, once: true }, repoA);
+				expect(terminalA.decision).toBe("escalate"); // unrunnable ⇒ terminal
+				// Goal A is done — nothing left to compare against, so the sidecar must be gone.
+				expect(await readFailures(dir)).toBeNull();
+				// Goal B's very first turn (a fresh state dir read, same underlying stateDir): with the
+				// sidecar cleared, `readFailures` resolves null ⇒ realValidate treats it as a baseline turn
+				// (no ratchet), never a false regression set-diffed against goal A's leftovers.
+				expect(await readFailures(dir)).not.toEqual(["goal-a-prior.test.ts > z"]);
+			} finally {
+				rmSync(repoA, { recursive: true, force: true });
 			}
 		});
 	});

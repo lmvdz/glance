@@ -14,7 +14,7 @@ import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
 import { envBool } from "./config.ts";
-import { gateExec, gateRunUnrunnable } from "./gate-runner.ts";
+import { gateExec, gateRunUnrunnable, greenGateUnproven } from "./gate-runner.ts";
 import { proofGate, recordProof } from "./proof.ts";
 import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
@@ -519,6 +519,24 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		}
 		const v = await runGate(gate, repo);
 		if (v.code === 0) {
+			// Finding #3 (code-review fixlist): a bare exit 0 used to be trusted unconditionally on the
+			// LOCAL land path — unlike land-pr.ts (finding #9's PR-mode fix), nothing here classified a
+			// green run that exited 0 without proving anything (degraded sandbox, zero-matched test glob).
+			// Refuse (retryable — the environment/script is the problem, not necessarily the branch)
+			// rather than merge on an unproven "pass"; roll main back to head0 first, same as a real
+			// verification failure below.
+			const unproven = greenGateUnproven(v, gate);
+			if (unproven) {
+				await git(["reset", "--hard", head0], repo).catch(() => {});
+				return {
+					ok: false,
+					committed,
+					merged: false,
+					retryable: true,
+					message,
+					detail: `acceptance gate could not be trusted (${unproven}): ${gate} — refusing to land on an unproven pass; main rolled back\n${await excerptForDetail(v.output, 300, opts.agentId)}`,
+				};
+			}
 			// Acceptance gate green — additionally run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
 			if (rg) return rg;
@@ -683,8 +701,16 @@ export async function staleBranchReason(repo: string, branch: string, baseRef = 
 		};
 	};
 	const mb = await git(["merge-base", baseRef, branch], repo);
+	// Finding #4 (code-review fixlist): `git merge-base` signals "no common ancestor" via EXIT 1 +
+	// empty stdout + empty stderr — it NEVER exits 0 with empty stdout. The naive `mb.code !== 0` check
+	// below used to fire FIRST, making the very next line's carve-out dead code: an orphan/grafted
+	// branch (or a main that moved past a force-push, breaking the old merge-base) hit `probeFailed`
+	// and was PERMANENTLY refused, retried forever — the exact interlock pathology this repo's own
+	// history is named after. Only a bare exit 1 with both streams empty is git's "unrelated
+	// histories" signal; any other nonzero exit (corrupt object, spawn death, etc.) still fails closed.
+	if (mb.code === 1 && !mb.stdout && !mb.stderr) return undefined; // no common ancestor — the merge path itself surfaces this
 	if (mb.code !== 0) return probeFailed(`git merge-base ${baseRef} ${branch}`, mb);
-	if (!mb.stdout) return undefined; // unrelated histories / no common ancestor — the merge path itself surfaces this
+	if (!mb.stdout) return undefined; // defensive: should not occur (exit 0 always yields a sha on success)
 	const base = await git(["rev-parse", baseRef], repo);
 	if (base.code !== 0) return probeFailed(`git rev-parse ${baseRef}`, base);
 	if (mb.stdout === base.stdout) return undefined; // fork point IS the tip — fresh

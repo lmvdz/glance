@@ -467,9 +467,15 @@ export async function runOnceIteration(args: RunArgs, repo: string = process.cwd
 	// guarantee: the NEXT turn must compare against the last REAL suite run, not a stand-in.
 	if (!suiteUnrunnable) await writeFailures(failures); // hand this turn's set to the next `--once` process
 	// A terminal outcome ends the loop — disarm + drop the sidecar so no stale state survives the run.
+	// Finding #6 (code-review fixlist): unlike the WRITE above (rightly skipped when suiteUnrunnable —
+	// there is no real turn's failure set to hand forward), the CLEAR here must never be skipped. A
+	// terminal decision means there is no next turn of THIS goal to serve; a sidecar left behind on an
+	// unrunnable-terminal turn survives into the NEXT goal's first (baseline) turn, which then
+	// set-diffs its real failures against a stale, unrelated set and escalates a healthy goal on its
+	// very first turn.
 	if (next.decision !== "continue") {
 		await disarm();
-		if (!suiteUnrunnable) await clearFailures();
+		await clearFailures();
 	}
 	return next;
 }

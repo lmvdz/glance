@@ -205,9 +205,10 @@ export interface MembraneBreakerCheck {
  * production (red-team B C1).
  *
  * The fix drops the self-doc `reproducible` bits entirely and gates on the PAIR being compared: both
- * cells must be `isSampleSufficient` (the n/cost-coverage half of `reproducible`, minus the circular
- * champion dependency neither cell here has a champion to lean on). Neither cell is built with token
- * receipts in this caller's shape, so the token-coverage arm never applies here.
+ * cells must be `isSampleSufficient` (the `n`-only floor — code-review finding #7 dropped the
+ * cost-coverage requirement from this check entirely, since mergeRate/vetoRate/inRunReworkRate never
+ * read cost; that requirement now lives in the separate `isCostReproducible`, which this caller has no
+ * reason to call).
  *
  * `hasVarianceBetween(flagged, baseline)` — the CROSS-cell comparison — gates ONLY the mergeRate arm,
  * mirroring `flagEfficiencyRegression`'s exact precedent (task-class-matrix.ts): a "mergeRate dropped"
@@ -228,7 +229,7 @@ export function checkMembraneBreaker(
 	const minUnits = opts.minUnits ?? MEMBRANE_BREAKER_MIN_UNITS;
 	const minSamples = opts.minSamples ?? MIN_SAMPLES;
 	if (flagged.n < minUnits) return { tripped: false };
-	if (!isSampleSufficient(flagged, minSamples, false) || !isSampleSufficient(baseline, minSamples, false)) return { tripped: false };
+	if (!isSampleSufficient(flagged, minSamples) || !isSampleSufficient(baseline, minSamples)) return { tripped: false };
 
 	const mergeDrop = baseline.mergeRate - flagged.mergeRate;
 	if (hasVarianceBetween(flagged, baseline) && mergeDrop >= minEdge) {

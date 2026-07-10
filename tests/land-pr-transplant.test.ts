@@ -161,3 +161,29 @@ test("finding #4: a rev-list PROBE FAILURE (unreadable .git/objects) BLOCKS — 
 		await fs.chmod(objectsDir, 0o755);
 	}
 });
+
+// code-review fixlist finding #1: `git rev-list origin/<default>..<branch>` emits BYTE-IDENTICAL
+// "unknown revision" text whether origin/<default> (pruned/absent — offline, stale fetch) or the
+// branch itself is the missing ref. The OLD `UNKNOWN_REVISION_RE.test(stderr)` carve-out couldn't
+// tell which, so an absent/pruned origin/<default> was misread as "branch doesn't exist — nothing to
+// publish" and ALLOWED the land — exactly the fail-open hazard this gate exists to close (offline +
+// pruned origin ref would have let an operator's transplanted commits publish). Reproduced with a
+// REAL git repo: the branch genuinely exists (with an agent commit) but the origin/<default>
+// remote-tracking ref is deleted out from under it.
+test("finding #1: an ABSENT origin/<default> (pruned/offline) BLOCKS — never misread as 'branch missing'", async () => {
+	const repo = await converged("tp-noorigin-");
+	await git(repo, "checkout", "-qb", "squad/unit-noorigin", "origin/main");
+	await commit(repo, "agent.txt", "a\n", "agent work");
+	// Simulate a pruned/absent remote-tracking ref (offline daemon, stale fetch) — the branch itself
+	// is untouched and fully real.
+	await git(repo, "update-ref", "-d", "refs/remotes/origin/main");
+
+	const reason = await transplantedCommitsReason(repo, "squad/unit-noorigin", "main");
+	// OLD behavior (fail-open bug): this returned undefined (allow) because the "unknown revision"
+	// text is identical whether origin/main or the branch is missing. NEW behavior: the branch is
+	// verified to actually exist before that carve-out is trusted, so an absent origin/<default>
+	// correctly blocks as a probe failure instead.
+	expect(reason).toBeDefined();
+	expect(reason).toContain("transplant gate");
+	expect(reason).toContain("could not prove");
+});

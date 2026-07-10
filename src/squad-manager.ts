@@ -801,7 +801,7 @@ export class SquadManager extends EventEmitter {
 	private transcriptSeq = 0;
 	/** Last observed `plans/` signature for repos the feature board scans. */
 	private planFeatureSignature = "";
-	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string; skipped?: boolean }; tick: number }>();
+	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }; tick: number }>();
 
 	constructor(opts: SquadManagerOptions = {}) {
 		super();
@@ -3592,7 +3592,7 @@ export class SquadManager extends EventEmitter {
 	 * Change-driven: cache by live working-tree fingerprint (git status + bun.lock), force-run every
 	 * 10th tick, and fail open to running the real gate if the fingerprint cannot be sampled.
 	 */
-	protected runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }> {
+	protected runMainGate(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }> {
 		return withRepoLandLock(repo, async () => {
 			try {
 				const fp = await this.mainGateFingerprint(repo);
@@ -3607,7 +3607,11 @@ export class SquadManager extends EventEmitter {
 				if (fp) this.mainGateCache.set(repo, { fp, result, tick });
 				return result;
 			} catch (e) {
-				return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
+				// Finding #2 (eap-borrows code review): a THROWN gate (e.g. the lock itself, or the
+				// fingerprint sampler) is structurally unrunnable, not a confirmed regression — mirror
+				// runMainGateUncached's own catch below so observer.ts's confirmedGate can classify it as
+				// `gate-unrunnable` instead of filing a phantom `regression:` finding.
+				return { ok: false, unrunnable: true, firstFailure: e instanceof Error ? e.message : String(e) };
 			}
 		});
 	}
@@ -3624,7 +3628,7 @@ export class SquadManager extends EventEmitter {
 		return createHash("sha256").update(status.stdout).update("\0").update(lock).digest("hex");
 	}
 
-	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }> {
+	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }> {
 		try {
 			const command = await detectVerify(repo);
 			// Finding #13 (eap-borrows wave 2): `ok: true` here used to be indistinguishable from "the gate
@@ -3643,7 +3647,12 @@ export class SquadManager extends EventEmitter {
 			const firstFailure = failLine ? failLine.replace(/.*\(fail\)\s*/, "").trim() : text.split("\n").find((l) => l.trim().length > 0)?.trim();
 			return { ok: false, firstFailure: firstFailure?.slice(0, 200) };
 		} catch (e) {
-			return { ok: false, firstFailure: e instanceof Error ? e.message : String(e) };
+			// Finding #2: a thrown gate (Docker down, spawn failure) proves nothing about the repo's test
+			// status — it's unrunnable, not a reproduced regression. Production's `runGate` dep
+			// (`() => this.runMainGate(repo)`) never threw past this catch, so without this flag
+			// observer.ts's `confirmedGate` catch (which DOES classify unrunnable) was permanently dead
+			// for the real dependency and every outage filed a phantom `regression:` finding instead.
+			return { ok: false, unrunnable: true, firstFailure: e instanceof Error ? e.message : String(e) };
 		}
 	}
 
