@@ -55,7 +55,11 @@ export const PATTERNS: Pattern[] = [
 		// the workos.ts JWT payload (the follow-up debt called out here previously), federation.ts's
 		// `tailscale whois` output (another binary's stdout), and plane.ts's PLANE_PROJECT_MAP env JSON.
 		// The remaining 52 are mostly our-own-persisted-state parses; keep triaging before tightening.
-		baseline: 52,
+		// 52→54 (eap-borrows follow-up, concern 01 producer): src/baseline-tracker.ts's two
+		// `JSON.parse(...) as unknown` reads (baseline-tracker.json, baseline-pins.json) — the exact
+		// "parsing our own freshly-written data" carve-out this pattern's own description names,
+		// mirroring threshold-tuner.ts's identical already-baselined idiom byte-for-byte.
+		baseline: 54,
 	},
 	{
 		id: "bool-env-compare",

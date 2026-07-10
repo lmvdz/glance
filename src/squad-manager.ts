@@ -2988,7 +2988,13 @@ export class SquadManager extends EventEmitter {
 			// in this block.
 			if (membraneProfilesEnabled() && rec.efficiencyFlags?.some((f) => f.startsWith(EFFICIENCY_FLAG_PREFIX))) {
 				const flaggedTaskClass = { mode: rec.options.routing?.mode ?? "unknown", tier: rec.options.routing?.tier ?? "unknown" };
-				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass)
+				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass, {
+					// eap-borrows follow-up (concern 01 DESIGN decision 4): this cadence call is also the one
+					// live site that selects+persists a taskClass's baseline (baseline-tracker.ts). Route a
+					// rotted baseline through the SAME escalation `fileMembraneBreakerFinding` uses below — a
+					// silently-rotting baseline is exactly this repo's signature failure mode.
+					onStaleness: (event) => this.fileMembraneBreakerFinding(rec, dto.repo, event),
+				})
 					.then((event) => {
 						if (event) this.fileMembraneBreakerFinding(rec, dto.repo, event);
 					})
@@ -3648,8 +3654,10 @@ export class SquadManager extends EventEmitter {
 
 	/**
 	 * Route a membrane-breaker trip — a hard fleet-wide auto-disable of `OMP_SQUAD_MEMBRANE_PROFILES`
-	 * (eap-borrows concern 05) — to where a human actually looks. Dual-write, mirroring how every other
-	 * daemon-scoped escalation in this file records:
+	 * (eap-borrows concern 05) — to where a human actually looks. Also reused verbatim for the
+	 * baseline-tracker's staleness event (concern 01 DESIGN decision 4 follow-up — see the `onStaleness`
+	 * wire-up above): the channel doesn't care what tripped, only that a human sees it. Dual-write,
+	 * mirroring how every other daemon-scoped escalation in this file records:
 	 *   1. The "Needs you" attention lane: attach `event` to `rec.dto.attentionEvents` (the SAME
 	 *      non-blocking channel `squad_attention`/`glance notify` use — squad-manager.ts's `notify`
 	 *      command and `handleAttentionTool`) and `emitAgent(rec)` so it's live-pushed to any connected

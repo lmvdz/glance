@@ -83,8 +83,24 @@ export interface FeatureCriterionDTO {
   source?: "plan" | "ticket" | "workflow" | "manual";
 }
 
+/** Mirrors backend `LensVerdict` (src/types.ts) — one perspective-diversified advisory lens verdict.
+ *  `lens` mirrors backend `LensId` (src/lens-select.ts), currently the single literal "regression". */
+export interface LensVerdictDTO {
+  lens: "regression";
+  disposition: "accept" | "object";
+  severity: "low" | "high";
+  claim: string;
+}
+
 /** Mirrors backend `ValidationRecord` (src/types.ts) — Epic 3's independent-validator verdict for an
- *  agent's most recent land attempt. */
+ *  agent's most recent land attempt.
+ *
+ *  This is a HAND-MAINTAINED mirror with no compiler edge to the backend type — a field added to (or
+ *  renamed/retyped on) `ValidationRecord` does not fail `tsc` here on its own. `tests/dto-conformance.test-d.ts`
+ *  (wired into the root tsconfig's `include`) is that edge: it asserts every key declared here exists on
+ *  `ValidationRecord` with an IDENTICAL type, so this file drifting out of sync fails `bun run check`,
+ *  not just a runtime read nobody happened to exercise. It is deliberately a SUBSET, not full equality —
+ *  the DTO may omit backend fields the webapp has no reader for yet. */
 export interface ValidationRecordDTO {
   verdict: "pass" | "veto" | "abstain" | "skipped";
   agreement: number;
@@ -97,6 +113,17 @@ export interface ValidationRecordDTO {
   authorLineage?: "anthropic" | "openai" | "google" | "unknown";
   reviewerLineage?: "anthropic" | "openai" | "google" | "unknown";
   sameLineage?: boolean;
+  /** Perspective-diversified review (plans/perspective-diversified-review/): advisory out-of-criteria
+   *  lens verdicts that ran ALONGSIDE the authoritative criteria judge. Never changes `verdict`. */
+  lensAdvisory?: LensVerdictDTO[];
+  /** The one-shot re-check of a high-severity lens objection. `confirmed:true` maxes the confidence
+   *  penalty; it still never vetoes. */
+  lensVerify?: { lens: "regression"; claim: string; confirmed: boolean };
+  /** Lossless gate-log offload (plans/eap-borrows/ concern 03): pointer path(s) under
+   *  `<stateDir>/gate-logs/<agentId>/` to the FULL diff/proof text when either exceeded the judge's
+   *  excerpt budget. Absent ⇒ nothing was oversized (the common case). Type hygiene only — not rendered
+   *  anywhere in the webapp yet. */
+  gateLogPaths?: string[];
   ranAt: number;
 }
 

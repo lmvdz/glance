@@ -10,10 +10,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { membraneBreakerCadence } from "../src/membrane-breaker-cadence.ts";
+import { readPersistedBaseline, recordSelectedBaseline } from "../src/baseline-tracker.ts";
 import { appendReceipt } from "../src/receipts.ts";
 import { recordTaskOutcome } from "../src/task-outcomes.ts";
 import { RuntimeSettingsStore } from "../src/runtime-settings.ts";
-import type { RunReceipt } from "../src/types.ts";
+import type { AttentionEvent, RunReceipt } from "../src/types.ts";
 import type { TaskOutcomeRow } from "../src/task-outcomes.ts";
 
 const tmps: string[] = [];
@@ -228,6 +229,55 @@ test("membraneBreakerCadence: no flagged cohort yet (no membrane receipts on dis
 	expect(event).toBeUndefined();
 	const states = await store.states();
 	expect(states.find((f) => f.key === "OMP_SQUAD_MEMBRANE_PROFILES")?.enabled).toBe(true);
+});
+
+// ── Baseline-tracker producer wiring (eap-borrows follow-up, concern 01 DESIGN decision 4) ────────────
+// This module is the ONE live caller of `selectBaseline`, so it's also where `selectAndTrackBaseline`
+// (baseline-tracker.ts) gets its persist-then-compare wiring exercised end to end: a real prior selection
+// on disk, a real degraded doc on the next call, a real `onStaleness` invocation.
+
+test("membraneBreakerCadence: a rotted persisted baseline reaches onStaleness on the very next cadence call", async () => {
+	const stateDir = await tmpDir("membrane-cadence-baseline-stale-");
+	const store = new RuntimeSettingsStore(stateDir);
+	await store.setFeatureFlag("OMP_SQUAD_MEMBRANE_PROFILES", true);
+
+	// Simulate a PRIOR cadence call having already selected+persisted "sonnet" as this taskClass's
+	// baseline (exactly what `selectAndTrackBaseline` writes on a real first call — see
+	// tests/baseline-tracker.test.ts for that half in isolation). This run's history/receipts never
+	// mention "sonnet" at all — a real fleet where the model that used to win this taskClass simply
+	// hasn't been dispatched here recently, the exact "dropped out of the fleet" case
+	// `detectBaselineStaleness`'s doc calls out.
+	recordSelectedBaseline(stateDir, "tdd:heavy", "sonnet", Date.now() - 1000);
+
+	// Healthy unflagged baseline this round is a DIFFERENT model ("opus" as champion-of-the-unflagged is
+	// impossible here since "opus" is the flagged model — use "grok" as the unflagged control group so
+	// the membrane check itself still has something sample-sufficient to compare the flagged cohort
+	// against, independent of the now-rotted "sonnet" baseline).
+	for (let i = 1; i <= 5; i++) {
+		const outcome: TaskOutcomeRow["outcome"] = i <= 4 ? "landed" : "rejected";
+		await recordTaskOutcome(stateDir, outcomeRow(`g${i}`, "grok", outcome));
+	}
+	const flaggedIds = ["f1", "f2", "f3", "f4", "f5"];
+	for (let i = 1; i <= 5; i++) {
+		const outcome: TaskOutcomeRow["outcome"] = i <= 4 ? "landed" : "rejected"; // matches baseline: healthy, no trip
+		await recordTaskOutcome(stateDir, outcomeRow(`f${i}`, "opus", outcome));
+	}
+	await seedFlaggedReceipts(stateDir, flaggedIds);
+	const pop = [...population(["g1", "g2", "g3", "g4", "g5"], "grok"), ...population(flaggedIds, "opus")];
+
+	const staleness: AttentionEvent[] = [];
+	const event = await membraneBreakerCadence(stateDir, pop, { mode: "tdd", tier: "heavy" }, { store, onStaleness: (e) => staleness.push(e) });
+
+	expect(event).toBeUndefined(); // flagged cohort matches ITS baseline ("grok") — no trip
+	expect(staleness).toHaveLength(1);
+	expect(staleness[0].summary).toContain("sonnet");
+	expect(staleness[0].summary).toContain("tdd:heavy");
+	expect(staleness[0].detail).toMatch(/dropped out of the fleet|never dispatched/);
+	expect(staleness[0].source).toBe("notify");
+
+	// And the NEW champion (modelFamily("grok-4.5") === "xai") is now the persisted baseline, ready for
+	// the next round's comparison.
+	expect(readPersistedBaseline(stateDir, "tdd:heavy")?.model).toBe("xai");
 });
 
 test("membraneBreakerCadence: a mixed-identity flagged unit is excluded from the cohort (concern 01 rule)", async () => {

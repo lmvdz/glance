@@ -28,9 +28,14 @@ import {
 	RuntimeSettingsStore,
 } from "../src/runtime-settings.ts";
 import type { CellMetrics } from "../src/omp-graph/task-class-matrix.ts";
+import { membraneBreakerCadence } from "../src/membrane-breaker-cadence.ts";
+import { recordSelectedBaseline } from "../src/baseline-tracker.ts";
+import { appendReceipt } from "../src/receipts.ts";
+import { recordTaskOutcome } from "../src/task-outcomes.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { AgentDTO, AttentionEvent, PersistedAgent, RpcSessionState } from "../src/types.ts";
+import type { AgentDTO, AttentionEvent, PersistedAgent, RpcSessionState, RunReceipt } from "../src/types.ts";
+import type { TaskOutcomeRow } from "../src/task-outcomes.ts";
 import type { AutomationLog } from "../src/automation-log.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
@@ -411,6 +416,68 @@ test("SquadManager#fileMembraneBreakerFinding: a breaker trip attaches to the tr
 	//    whether the triggering unit is still live by the time a human looks.
 	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
 	expect(recent.some((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn")).toBe(true);
+
+	await mgr.stop();
+});
+
+// ── Baseline-tracker producer wiring (eap-borrows follow-up, concern 01 DESIGN decision 4) ────────────
+
+test("membraneBreakerCadence#onStaleness, wired the SAME way SquadManager.land() wires it, reaches the triggering unit's attention lane AND the land automation channel", async () => {
+	// Proves the FULL chain, not just the private escalation method in isolation: a rotted persisted
+	// baseline surfaces via membraneBreakerCadence's `onStaleness` callback, wired to
+	// `fileMembraneBreakerFinding` exactly as `SquadManager.land()` wires it — a silently-rotting
+	// baseline is this repo's signature failure mode, so this must land on a human-visible channel, not
+	// a function return value nobody reads.
+	const { mgr, repo } = await makeMgr("membrane-baseline-stale-wiring");
+	const dto = await mgr.create({ name: "u", repo, approvalMode: "yolo", autoRoute: false });
+	const rec = (mgr as unknown as InternalHost).agents.get(dto.id)! as unknown as { dto: AgentDTO };
+	expect(rec.dto.attentionEvents ?? []).toEqual([]);
+
+	const stateDir = (mgr as unknown as { stateDir: string }).stateDir;
+
+	// Pretend a PRIOR cadence call already selected+persisted "sonnet" as this taskClass's baseline.
+	recordSelectedBaseline(stateDir, "tdd:heavy", "sonnet", Date.now() - 1000);
+
+	// This round: seed a membrane-flagged "opus" cohort (so the cadence isn't a no-op) but NO unflagged
+	// "sonnet" evidence at all — the persisted baseline has vanished from the current doc entirely.
+	const flaggedIds = ["f1", "f2", "f3", "f4", "f5"];
+	for (const id of flaggedIds) {
+		await recordTaskOutcome(stateDir, { agentId: id, routing: { mode: "tdd", tier: "heavy" }, model: "opus", outcome: "landed", source: "land", ts: Date.now() } satisfies TaskOutcomeRow);
+		await appendReceipt(stateDir, {
+			agentId: id,
+			name: id,
+			repo,
+			runId: `${id}-run`,
+			startedAt: Date.now() - 1000,
+			endedAt: Date.now(),
+			status: "idle",
+			toolCalls: 0,
+			toolTally: {},
+			filesTouched: [],
+			efficiencyFlags: ["membrane:verdict-first"],
+		} satisfies RunReceipt);
+	}
+	const pop = flaggedIds.map((agentId) => ({ agentId, taskClass: { mode: "tdd", tier: "heavy" }, model: "opus" }));
+
+	// The EXACT wiring shape from SquadManager.land(): onStaleness routes to the same escalation the
+	// membrane trip itself uses.
+	await membraneBreakerCadence(stateDir, pop, { mode: "tdd", tier: "heavy" }, {
+		onStaleness: (event) =>
+			(mgr as unknown as { fileMembraneBreakerFinding: (rec: unknown, repo: string, event: AttentionEvent) => void }).fileMembraneBreakerFinding(
+				(mgr as unknown as InternalHost).agents.get(dto.id)!,
+				repo,
+				event,
+			),
+	});
+
+	// 1. Attention lane: the staleness event reached the triggering unit's DTO.
+	expect(rec.dto.attentionEvents).toHaveLength(1);
+	expect(rec.dto.attentionEvents?.[0]?.summary).toContain("sonnet");
+	expect(rec.dto.attentionEvents?.[0]?.summary).toContain("stale");
+
+	// 2. Automation channel: the SAME dual-write, independent of roster state.
+	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
+	expect(recent.some((e) => e.detail?.includes("sonnet") && e.detail?.includes("stale") && e.level === "warn")).toBe(true);
 
 	await mgr.stop();
 });
