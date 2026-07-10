@@ -379,22 +379,6 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 			const p = isObj(params) ? params : {};
 			const toolCall = isObj(p.toolCall) ? p.toolCall : {};
 			const options = parseOptions(p.options);
-
-			// The operator said `yolo`. Honor it HERE, deterministically, from their own instruction — do not
-			// route it to a model that decides whether to approve. `applyApprovalMode` normally prevents these
-			// requests from ever arriving, but ACP's setSessionMode is `unstable_`: when it is missing or the
-			// agent advertises no auto mode, the harness falls back to asking per call. That fallback used to
-			// land in the auto-supervisor's lap.
-			if (this.opts.approvalMode === "yolo") {
-				const optionId = pickOption(options, true);
-				// Fails CLOSED: a non-compliant agent emitted kind-less options, so we cannot tell allow from
-				// reject. Ask a human rather than guess a polarity.
-				if (optionId) {
-					this.write({ jsonrpc: "2.0", id, result: { outcome: { outcome: "selected", optionId } } });
-					return;
-				}
-			}
-
 			const uiId = `acpui_${++this.seq}`;
 			this.permits.set(uiId, { jsonrpcId: id, options });
 			this.emit("ui", {
@@ -403,19 +387,6 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 				method: "confirm",
 				title: asString(toolCall.title) ?? "Permission requested",
 				message: summarize(toolCall),
-				// An ACP `session/request_permission` IS an approval gate: the harness stopped because it may
-				// not grant itself this action. A HUMAN answers it.
-				//
-				// It was not marked as one. `gateClass` was decided by a string prefix — `gate_` on the id, or
-				// a `GATE:` title — both conventions of omp's own RPC. ACP ids are `acpui_<n>` and the title
-				// comes from the tool call, so EVERY permission request from every ACP harness (claude-code,
-				// codex, opencode, gemini, grok) failed the test and became eligible for the auto-supervisor,
-				// whose system prompt reads "When in doubt inside the worktree, approve." The classifier was
-				// written for one harness and never revisited when glance became harness-agnostic.
-				//
-				// This is R7 of the founding brief, exactly: "the safety story is inverted — autonomy is
-				// opt-out, safety is opt-in."
-				gateClass: true,
 			});
 			return;
 		}
