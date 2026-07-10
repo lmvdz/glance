@@ -63,7 +63,8 @@ export interface RepoFacts {
 	dirtyFiles: number;
 	hasOrigin: boolean;
 	defaultBranch?: string;
-	/** `squad/*` branches with no open PR — the fleet's litter. */
+	/** Local `squad/*` branches. NOT "with no open PR" — nothing here asks GitHub, and a remedy that
+	 *  assumes otherwise would delete unmerged work. */
 	staleBranches: number;
 }
 
@@ -120,6 +121,17 @@ export interface DoctorProbe {
 	webappBuilt(): Promise<boolean>;
 	/** Agents parked in a terminal-but-listed state: the zombies `glance rm` is for. */
 	zombieAgents(): Promise<number>;
+}
+
+/**
+ * May this caller see the HOST's process identity (pid, execPath, cwd)?
+ *
+ * In DB mode an org MEMBER is bridged to `operator` — the tier that governs their own agents. They did
+ * not set this host's environment or choose its working directory, and the cwd names a path on someone
+ * else's machine. File mode has exactly one operator: the person at the keyboard. (grok-4.5)
+ */
+export function doctorHostVisible(dbMode: boolean, isAdmin: boolean): boolean {
+	return !dbMode || isAdmin;
 }
 
 const WORST_ORDER: DoctorStatus[] = ["ok", "unknown", "warn", "error"];
@@ -208,13 +220,13 @@ function autonomyCheck(a: AutonomyFacts): DoctorCheck {
 	// The supervisor answers approval gates with a small model. On, it is how trust dies invisibly: a
 	// human gate gets auto-approved and nothing in the transcript says a human never saw it.
 	if (a.autosupervise) {
-		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "warn", detail: `auto-supervisor is ON — approval gates are being answered by a model, not by you`, remedy: "OMP_SQUAD_AUTOSUPERVISE=0 (and OMP_SQUAD_AUTO_SUPERVISE=0 — both spellings exist)" };
+		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "warn", detail: `auto-supervisor is ON — approval gates are being answered by a model, not by you`, remedy: "OMP_SQUAD_AUTOSUPERVISE=0 (and OMP_SQUAD_AUTO_SUPERVISE=0 — both spellings exist), then RESTART: these are read at boot" };
 	}
 	if (a.autoland && !a.regressionGate) {
-		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "error", detail: "autoland is ON with the regression gate OFF — units can land unverified work", remedy: "OMP_SQUAD_REGRESSION_GATE=1, or OMP_SQUAD_AUTOLAND=0" };
+		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "error", detail: "autoland is ON with the regression gate OFF — units can land unverified work", remedy: "OMP_SQUAD_REGRESSION_GATE=1, or OMP_SQUAD_AUTOLAND=0, then RESTART: these are read at boot" };
 	}
 	if (on.length === 0) {
-		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "warn", detail: "nothing is armed — the daemon is a viewer; no work will be picked up", remedy: "OMP_SQUAD_AUTODISPATCH=1 OMP_SQUAD_AUTODRIVE=1" };
+		return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "warn", detail: "nothing is armed — the daemon is a viewer; no work will be picked up", remedy: "OMP_SQUAD_AUTODISPATCH=1 OMP_SQUAD_AUTODRIVE=1, then RESTART: these are read at boot" };
 	}
 	return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "ok", detail: `${on.join(", ")} armed; gate ${a.regressionGate ? "on" : "off"}; land ${a.landConfirm ? "confirms" : "auto"}` };
 }
@@ -243,7 +255,9 @@ function repoChecks(repos: RepoFacts[]): DoctorCheck[] {
 			checks.push({ id: `repo.${name}.origin`, title: `Repo ${name}`, status: "warn", detail: "no origin remote — units will land by local merge, never by PR", remedy: "git remote add origin <url>" });
 		}
 		if (r.staleBranches > 0) {
-			checks.push({ id: `repo.${name}.branches`, title: `Repo ${name}`, status: "warn", detail: `${r.staleBranches} abandoned squad/* branch(es)`, remedy: "git branch -D the merged ones" });
+			// `-d` (safe delete), never `-D`: nothing here checked whether these are merged, and a doctor
+			// whose remedy destroys unmerged work is worse than the litter. (grok-4.5)
+			checks.push({ id: `repo.${name}.branches`, title: `Repo ${name}`, status: "warn", detail: `${r.staleBranches} leftover squad/* branch(es)`, remedy: "git branch -d <name> for each already merged (safe: refuses unmerged)" });
 		}
 		if (r.dirtyFiles === 0 && r.hasOrigin && r.staleBranches === 0) {
 			checks.push({ id: `repo.${name}`, title: `Repo ${name}`, status: "ok", detail: `clean, origin present, default ${r.defaultBranch ?? "?"}` });
@@ -306,9 +320,16 @@ export function renderDoctor(report: DoctorReport): string {
 			if (c.remedy) lines.push(`  ↳ ${c.remedy}`);
 		}
 	}
-	const errors = report.checks.filter((c) => c.status === "error").length;
-	const warns = report.checks.filter((c) => c.status === "warn").length;
+	const count = (s: DoctorStatus) => report.checks.filter((c) => c.status === s).length;
 	lines.push("");
-	lines.push(report.healthy && warns === 0 ? "the factory is on, armed, and pointed at the right world." : `${errors} blocking, ${warns} to watch.`);
+	// The all-clear is earned by `worst === "ok"`, NOT by the absence of errors. A report where every probe
+	// failed has no errors in it — and printing "pointed at the right world" over a page of `?` marks is
+	// exactly the fabricated all-clear this command was written to stop. (grok-4.5)
+	if (report.worst === "ok") lines.push("the factory is on, armed, and pointed at the right world.");
+	else {
+		const parts = [`${count("error")} blocking`, `${count("warn")} to watch`];
+		if (count("unknown")) parts.push(`${count("unknown")} unknown`);
+		lines.push(parts.join(", "));
+	}
 	return `${lines.join("\n")}\n`;
 }

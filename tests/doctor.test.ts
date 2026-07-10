@@ -251,3 +251,64 @@ test("the rendering leads with what is broken", async () => {
 	expect(out.indexOf("no daemon is listening")).toBeLessThan(out.indexOf("parked in a terminal state"));
 	expect(out).toContain("1 blocking");
 });
+
+// ── the all-clear must be earned ────────────────────────────────────────────────────────────────
+
+/**
+ * A report where every probe failed contains zero errors. Deriving the all-clear from
+ * `!checks.some(error)` therefore printed "the factory is on, armed, and pointed at the right world"
+ * over a page of `?` marks — a fabricated all-clear, the one thing this command must never produce.
+ * (grok-4.5)
+ */
+test("a report full of unknowns never prints the all-clear", async () => {
+	const boom = () => {
+		throw new Error("probe exploded");
+	};
+	const report = await runDoctor(probe({ daemon: boom, autonomy: boom, stateDir: boom, planeArmed: boom, gateImage: boom, projects: boom, webappBuilt: boom, zombieAgents: boom }));
+
+	expect(report.checks.every((c) => c.status === "unknown")).toBe(true);
+	expect(report.healthy).toBe(true); // nothing is BLOCKING — the exit code stays 0
+	const out = renderDoctor(report);
+	expect(out).not.toContain("pointed at the right world");
+	expect(out).toContain("unknown"); // and the count is stated
+});
+
+test("a single warning also withholds the all-clear", async () => {
+	const report = await runDoctor(probe({ zombieAgents: async () => 1 }));
+	expect(renderDoctor(report)).not.toContain("pointed at the right world");
+});
+
+/** A remedy that destroys unmerged work is worse than the litter it cleans up. Nothing in this probe
+ *  asks GitHub whether a branch was merged, so the remedy must not assume it. */
+test("the stale-branch remedy cannot delete unmerged work", async () => {
+	const report = await runDoctor(probe({ projects: async () => [{ ...CLEAN_REPO, staleBranches: 37 }] }));
+	const remedy = find(report, "repo.app.branches")?.remedy ?? "";
+	expect(remedy).toContain("git branch -d");
+	expect(remedy).not.toContain("-D");
+});
+
+/** Autonomy flags are read at boot. A remedy that only sets an env var leaves the running daemon exactly
+ *  as dangerous as it was, while the operator believes they fixed it. */
+test("every autonomy remedy says to restart", async () => {
+	for (const autonomy of [
+		async () => ({ ...ARMED, autosupervise: true }),
+		async () => ({ ...ARMED, autoland: true, regressionGate: false }),
+		async () => ({ ...ARMED, autodispatch: false, autodrive: false, autoland: false }),
+	]) {
+		const report = await runDoctor(probe({ autonomy }));
+		expect(find(report, "autonomy")?.remedy).toContain("RESTART");
+	}
+});
+
+/**
+ * `/api/doctor` returns the daemon's pid, executable path, and working directory. In file mode the only
+ * operator IS the person at the keyboard. In DB mode an org member is bridged to `operator` so they can
+ * govern their own agents — they never chose this host's cwd, and that path belongs to someone else.
+ * (grok-4.5)
+ */
+test("host process identity is redacted from DB-mode members, not from admins", async () => {
+	const { doctorHostVisible } = await import("../src/doctor.ts");
+	expect(doctorHostVisible(false, false)).toBe(true); // file mode: one operator, the human here
+	expect(doctorHostVisible(true, false)).toBe(false); // db mode, org member: no host paths
+	expect(doctorHostVisible(true, true)).toBe(true); // db mode, admin: it is their host
+});

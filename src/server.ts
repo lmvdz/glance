@@ -19,6 +19,7 @@ import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCate
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
 import { envBool, envInt } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
+import { doctorHostVisible } from "./doctor.ts";
 import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
@@ -85,7 +86,7 @@ import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { readModelOutcomes } from "./model-outcomes.ts";
 import { readTaskOutcomes } from "./task-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
-import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
+import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
 import { all, claim, release, who } from "./presence.ts";
@@ -598,14 +599,19 @@ export class SquadServer {
 	 * DB-mode daemon each look completely healthy from outside while doing something other than what the
 	 * operator asked for.
 	 */
-	private doctorFacts(managers: SquadManager[]): unknown {
+	private async doctorFacts(managers: SquadManager[], role: Role): Promise<unknown> {
 		const agents = managers.flatMap((m) => m.list());
+		// In DB mode an org MEMBER is bridged to `operator`, and members did not set this host's env or
+		// choose its cwd. Autonomy posture is theirs to see (it governs their agents); the host's process
+		// identity and filesystem layout are not. File mode has exactly one operator: the person at the
+		// keyboard. (grok-4.5)
+		const host = doctorHostVisible(this.dbMode, roleAtLeast(role, "admin"));
 		return {
 			daemon: {
 				running: true,
-				pid: process.pid,
-				execPath: process.execPath,
-				cwd: process.cwd(),
+				pid: host ? process.pid : undefined,
+				execPath: host ? process.execPath : undefined,
+				cwd: host ? process.cwd() : undefined,
 				installedRev: process.env.GLANCE_REV || undefined,
 				authMode: this.dbMode ? "db" : "file",
 				// The SAME predicate the request path uses (flag AND a built dist) — a doctor that reports the
@@ -627,13 +633,34 @@ export class SquadServer {
 				landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
 				regressionGate: envBool("OMP_SQUAD_REGRESSION_GATE", false),
 			},
+			// Plane loads its secrets ONCE, at boot, in THIS process. The CLI's shell does not have them, so
+			// only the daemon can answer whether the work queue is connected. (grok-4.5)
+			plane: await this.planeHealth(),
 			projects: [...new Set(managers.flatMap((m) => m.projects().map((p) => p.repo)))],
 			zombieAgents: agents.filter((a) => a.status === "error").length,
 		};
 	}
 
+	/** Bounded liveness ping against Plane. Never throws; an unreachable Plane is a finding, not an error. */
+	private async planeHealth(): Promise<{ configured: boolean; reachable: boolean; detail?: string }> {
+		const cfg = planeConfig();
+		if (!cfg) return { configured: false, reachable: false };
+		try {
+			const res = await fetch(`${cfg.baseUrl}/api/v1/users/me/`, { headers: { "x-api-key": cfg.apiKey }, signal: AbortSignal.timeout(3_000) });
+			return { configured: true, reachable: res.ok, detail: res.ok ? undefined : `HTTP ${res.status}` };
+		} catch (err) {
+			return { configured: true, reachable: false, detail: errText(err) };
+		}
+	}
+
 	private async handleObservability(url: URL, req: Request, managers: SquadManager[], role: Role, actor: Actor): Promise<Response | undefined> {
-		if (req.method !== "GET" || managers.length === 0) return undefined;
+		if (req.method !== "GET") return undefined;
+		// `glance doctor` asks the DAEMON what it believes, never the calling shell — `/proc/<pid>/environ`
+		// shows only a process's INITIAL environment, and the operator's terminal has its own. Answered
+		// ABOVE the empty-managers guard: a daemon with no fleet is precisely the daemon you are trying to
+		// diagnose, and 404-ing there made `doctor` report a healthy daemon as unreachable. (grok-4.5)
+		if (url.pathname === "/api/doctor") return Response.json(await this.doctorFacts(managers, role));
+		if (managers.length === 0) return undefined;
 		if (url.pathname === "/api/health") {
 			const h = await aggregateHealth(managers);
 			const projects = new Set(managers.flatMap((m) => m.projects().map((p) => p.repo))).size;
@@ -656,10 +683,6 @@ export class SquadServer {
 		// — so there is nothing for that allowlist to scope. Fleet-wide, like /api/usage and /api/heat.
 		if (url.pathname === "/api/graph/task-class") return Response.json(await taskClassPayload(managers, url));
 		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(managers, url));
-		// `glance doctor` asks the DAEMON what it believes, never the calling shell. The two disagree by
-		// construction: `/proc/<pid>/environ` shows only a process's INITIAL environment, and the operator's
-		// terminal has its own. Only the daemon can answer "is autodispatch on" for the daemon. (R6)
-		if (url.pathname === "/api/doctor") return Response.json(this.doctorFacts(managers));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(managers, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/leases") {
 			const repo = url.searchParams.get("repo");

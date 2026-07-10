@@ -27,6 +27,7 @@ import type { AutonomyFacts, DaemonFacts, DoctorProbe, RepoFacts } from "./docto
 interface DoctorFactsResponse {
 	daemon: DaemonFacts;
 	autonomy: AutonomyFacts;
+	plane?: { configured: boolean; reachable: boolean; detail?: string };
 	projects: string[];
 	zombieAgents: number;
 }
@@ -36,14 +37,32 @@ const DEAD: DaemonFacts = { running: false };
  *  daemon that does not exist. */
 const NO_AUTONOMY: AutonomyFacts = { autodispatch: false, autodrive: false, autoland: false, autosupervise: false, landConfirm: false, regressionGate: false };
 
+/** A wedged docker daemon or a git on a stalled network filesystem must not hang the diagnosis forever —
+ *  the machine `doctor` is asked about is, by hypothesis, the broken one. (grok-4.5) */
+async function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: T): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(onTimeout), ms);
+		timer.unref?.();
+	});
+	return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+const SPAWN_TIMEOUT_MS = 5_000;
+
 async function run(argv: string[], cwd: string): Promise<{ code: number; stdout: string }> {
 	const proc = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "ignore", stdin: "ignore" });
-	const stdout = await new Response(proc.stdout).text();
-	return { code: await proc.exited, stdout: stdout.trim() };
+	const done = (async () => {
+		const stdout = await new Response(proc.stdout).text();
+		return { code: await proc.exited, stdout: stdout.trim() };
+	})();
+	const result = await withTimeout(done, SPAWN_TIMEOUT_MS, { code: 124, stdout: "" });
+	if (result.code === 124) proc.kill();
+	return result;
 }
 
 async function gitOut(args: string[], cwd: string): Promise<string | undefined> {
-	const r = await hardenedGit(args, { cwd }).catch(() => ({ code: 1, stdout: "" }));
+	const r = await withTimeout(hardenedGit(args, { cwd }).catch(() => ({ code: 1, stdout: "" })), SPAWN_TIMEOUT_MS, { code: 124, stdout: "" });
 	return r.code === 0 ? r.stdout.trim() : undefined;
 }
 
@@ -54,13 +73,17 @@ async function staleSquadBranches(repo: string): Promise<number> {
 	return out ? out.split("\n").filter((l) => l.trim()).length : 0;
 }
 
-async function repoFacts(repo: string): Promise<RepoFacts> {
+/** Exported for the test that pins `dirtyFiles` to land's exact definition of dirty. */
+export async function repoFacts(repo: string): Promise<RepoFacts> {
 	if (!existsSync(repo)) return { repo, exists: false, isGitRepo: false, dirtyFiles: 0, hasOrigin: false, staleBranches: 0 };
 	const inside = await gitOut(["rev-parse", "--is-inside-work-tree"], repo);
 	if (inside !== "true") return { repo, exists: true, isGitRepo: false, dirtyFiles: 0, hasOrigin: false, staleBranches: 0 };
 
 	const [status, remotes, head, stale] = await Promise.all([
-		gitOut(["status", "--porcelain"], repo),
+		// EXACTLY the check that refuses a land (`land.ts`: `status --porcelain --untracked-files=no` on
+		// the repo). Counting untracked files here would report "every land will refuse" for a stray build
+		// artifact that land ignores — and a diagnostic that cries wolf gets turned off. (grok-4.5)
+		gitOut(["status", "--porcelain", "--untracked-files=no"], repo),
 		gitOut(["remote"], repo),
 		gitOut(["symbolic-ref", "--quiet", "--short", "HEAD"], repo),
 		staleSquadBranches(repo),
@@ -155,8 +178,12 @@ export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
 			}
 		},
 		async planeArmed() {
-			// The daemon's own resolution, not a re-derivation from env names: Plane accepts two spellings
-			// for its key and strips a pasted `/api/v1` suffix from the base URL.
+			// PLANE LIVES IN THE DAEMON. It loads `plane.env` once, at boot; the operator's shell almost
+			// never carries those variables. Reading them here answered "is the work queue connected?" for
+			// the CLI process — the exact substitution (calling shell for daemon) this whole command exists
+			// to stop making. Ask the daemon; only fall back to local env when there is no daemon. (grok-4.5)
+			const f = await facts();
+			if (f?.plane) return f.plane;
 			const cfg = planeConfig();
 			if (!cfg) return { configured: false, reachable: false };
 			try {
