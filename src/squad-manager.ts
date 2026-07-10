@@ -139,7 +139,7 @@ import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, provisionW
 import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
-import { appendReceipt, readAllReceipts, readReceipts, RunAccumulator } from "./receipts.ts";
+import { appendReceipt, confirmDeliveredFlags, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
@@ -579,6 +579,11 @@ interface AgentRecord {
 	 *  agent's declared allow-list is injected into its system prompt AND host tool calls outside the list
 	 *  are hard-denied at the onHostTool seam. Absent ⇒ full tool access (unscoped, the historical default). */
 	toolGrants?: string[];
+	/** CONFIRMED-delivered efficiency-flag tokens (`receipts.ts#confirmDeliveredFlags`), computed once at
+	 *  spawn from the same profile `capabilities` array `toolGrants` comes from. Threaded into the
+	 *  `RunSeed` at `agent_start` so every receipt this run produces carries the same confirmed set —
+	 *  never recomputed mid-run, and (like `toolGrants`) not persisted across a daemon restart. */
+	efficiencyFlags?: string[];
 	/** Consecutive `applyState` polls seen with `isStreaming === false` while pending is non-empty — the
 	 *  poll-based ghost-expiry fallback's counter (concern 04). Reset to 0 the instant a poll reports
 	 *  streaming, or pending drains to empty. */
@@ -3629,7 +3634,13 @@ export class SquadManager extends EventEmitter {
 		// FLAG: hard enforcement of omp's *core* tools (read/edit/bash) requires an upstream
 		// `omp --allowed-tools` flag the RpcAgent/agent-host cannot pass today; the prompt constraint + host
 		// tool gate are the strongest enforcement reachable without that upstream change.
-		const toolGrants = profile?.capabilities?.length ? [...new Set(profile.capabilities)] : undefined;
+		// `membrane:*` efficiency-flag tokens (concern 05) ride the SAME capabilities[] array a profile
+		// authors but must never enter toolGrants (DESIGN.md "Membrane delivery" — a membrane token would
+		// either wrongly narrow the tool allow-list or be denied as an unrecognized tool at onHostTool
+		// below). splitCapabilityTokens is the one place capabilities becomes toolGrants, so every
+		// downstream consumer only ever sees real tool names; requestedEfficiencyFlags is hoisted (same
+		// pattern as hasPrimer below) until the harness's contextInjection is known further down.
+		const { toolGrants, requested: requestedEfficiencyFlags } = splitCapabilityTokens(profile?.capabilities);
 		if (profile) {
 			opts = {
 				...opts,
@@ -3946,6 +3957,16 @@ export class SquadManager extends EventEmitter {
 			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now(), routedModel },
 		};
 
+		// Delivery confirmation (concern 02 / DESIGN.md "Membrane measurement"): a requested efficiency
+		// flag is only real when this unit's resolved harness actually carries `appendSystemPrompt` to the
+		// child (contextInjection "native"). An ACP unit (contextInjection "none") requested one but never
+		// got it — log it once for visibility (no consumer reads this yet; the flag itself is what a
+		// future breaker/comparison keys on) rather than silently stamping a placebo.
+		const confirmedEfficiencyFlags = confirmDeliveredFlags(requestedEfficiencyFlags, harnessDesc?.capabilities.contextInjection);
+		if (requestedEfficiencyFlags?.length && !confirmedEfficiencyFlags) {
+			this.log("info", `efficiency flags requested but not delivered on "${name}" (harness "${harnessDesc?.name ?? "unknown"}" contextInjection=${harnessDesc?.capabilities.contextInjection ?? "unknown"}): ${requestedEfficiencyFlags.join(", ")}`);
+		}
+
 		const dto: AgentDTO = {
 			id,
 			name,
@@ -4009,7 +4030,7 @@ export class SquadManager extends EventEmitter {
 		this.seedAuthority(dto, requestedMode);
 
 		const agent = this.makeDriver(persisted, opts.cold);
-		const rec: AgentRecord = { dto, agent, options: persisted, harness: harnessDesc, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants };
+		const rec: AgentRecord = { dto, agent, options: persisted, harness: harnessDesc, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map(), toolGrants, efficiencyFlags: confirmedEfficiencyFlags };
 		// create() is shared by fresh spawns (no prior subagents) and the adoptOrphanedAgents/loadPersisted
 		// restore paths (opts.subagents carries the persisted history) — reseed the tracker so a restored
 		// workflow/agent's subagent tree starts warm instead of empty, same rationale as attachExisting.
@@ -5302,6 +5323,9 @@ export class SquadManager extends EventEmitter {
 						// always omp-dialect RpcAgents, flue is its own runtime — never the `GLANCE_HARNESS` env
 						// default, which those kinds don't consult (cross-lineage review, PR #112 finding 2).
 						harness: rec.harness?.name ?? actualUnitHarness(rec.options),
+						// Confirmed-delivered efficiency flags (concern 02), fixed at spawn — see
+						// AgentRecord.efficiencyFlags / receipts.ts#confirmDeliveredFlags.
+						efficiencyFlags: rec.efficiencyFlags,
 					});
 				}
 				rec.run.start(rec.dto.model);

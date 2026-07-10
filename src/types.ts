@@ -941,6 +941,14 @@ export interface RunReceipt {
 	validation?: ValidationRecord;
 	/** Run-end self-confidence 0..1 (src/confidence.ts); absent until computed. */
 	confidence?: number;
+	/** Efficiency-discipline tokens (a profile's `membrane:*` capability tokens, `receipts.ts`'s
+	 *  `splitCapabilityTokens`) CONFIRMED delivered to this run — stamped by `confirmDeliveredFlags`
+	 *  only when the resolved harness's `contextInjection` was `"native"`, i.e. `appendSystemPrompt`
+	 *  actually reached the child process. Requesting a flag on a harness whose contextInjection is
+	 *  `"none"` (ACP default) yields NO flag here, even though the profile asked for one — stamping at
+	 *  request time instead of confirmed-delivery time would measure a placebo, not a real behavior
+	 *  change. Absent ⇒ nothing requested, or nothing delivered. */
+	efficiencyFlags?: string[];
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
