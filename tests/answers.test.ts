@@ -141,13 +141,58 @@ test("a disk failure is logged, never thrown into the frame loop", async () => {
 // ── it can never land ───────────────────────────────────────────────────────────────────────────
 
 /**
- * The whole safety story, and it predates this feature: `executionRole: "observer"` already meant "never
- * commits". `ask()` sets it, so an answer unit cannot open a PR or touch main no matter what it decides
- * to do inside its worktree. Nothing here relaxes that; this test is the load-bearing proof.
+ * I nearly shipped this feature on a safety claim that was FALSE.
+ *
+ * `is-landing-unit.ts` reads exactly like the rule I wanted — "an observer never commits" — and I cited it
+ * as the guarantee. It is a metrics DENOMINATOR: it exists so a unit that never lands by design is not
+ * counted as a failed land. **No land path ever consulted it.** Meanwhile an answer unit runs with
+ * `--approval yolo` in a worktree whose origin is the operator's real repository. Nothing but a sentence
+ * in a prompt stood between an answer and a merge.
+ *
+ * The refusal now lives in `land()`, the one door every land goes through — the operator UI, the
+ * orchestrator's auto-land, and `autoLandWorkflow` alike. `--force` does not open it: refusing to land a
+ * unit that was never supposed to produce a commit is not a valve an operator should talk their way past.
  */
-test("an answer unit is never a landing unit", () => {
+test("land() refuses an observer, and refuses an answer unit, even with --force", async () => {
+	const dir = await tmpDir();
+
+	class LandManager extends SquadManager {
+		seed(rec: unknown): void {
+			(this as unknown as { agents: Map<string, unknown> }).agents.set("u1", rec);
+		}
+	}
+	const mgr = new LandManager({ stateDir: dir } as never);
+
+	const observer = { dto: { id: "u1", name: "ask-1", repo: "/srv/app", branch: "squad/ask-1" }, options: { executionRole: "observer" } };
+	mgr.seed(observer);
+	const auto = await mgr.land("u1");
+	expect(auto.ok).toBe(false);
+	expect(auto.merged).toBe(false);
+	expect(auto.committed).toBe(false);
+	expect(auto.detail).toContain("report, not a branch");
+
+	const forced = await mgr.land("u1", "ship it", { force: true, reason: "I really mean it" });
+	expect(forced.ok).toBe(false); // force is not a key to this door
+});
+
+/** And a unit carrying a question is refused even if its role was somehow lost — belt and braces, because
+ *  the cost of being wrong here is a merge nobody asked for. */
+test("a unit with a question never lands, whatever its role says", async () => {
+	const dir = await tmpDir();
+	class LandManager extends SquadManager {
+		seed(rec: unknown): void {
+			(this as unknown as { agents: Map<string, unknown> }).agents.set("u1", rec);
+		}
+	}
+	const mgr = new LandManager({ stateDir: dir } as never);
+	mgr.seed({ dto: { id: "u1", name: "ask-1", repo: "/srv/app", branch: "squad/ask-1" }, options: { ask: "why?" } });
+	expect((await mgr.land("u1")).ok).toBe(false);
+});
+
+/** The metrics helper still says what it always said — it is just not, and never was, the gate. */
+test("isLandingUnit excludes an observer from the land-rate denominator", () => {
 	expect(isLandingUnit({ executionRole: "observer", branch: "squad/ask-1" } as never)).toBe(false);
-	expect(isLandingUnit({ branch: "squad/build-1" } as never)).toBe(true); // an ordinary unit still lands
+	expect(isLandingUnit({ branch: "squad/build-1" } as never)).toBe(true);
 });
 
 // ── the brief ───────────────────────────────────────────────────────────────────────────────────

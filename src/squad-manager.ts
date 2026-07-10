@@ -2782,6 +2782,16 @@ export class SquadManager extends EventEmitter {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
+		// An OBSERVER never lands. `is-landing-unit.ts` reads exactly like this rule, but it is only a
+		// metrics DENOMINATOR ("don't count a missing land against a unit that never lands by design") —
+		// no land path ever consulted it. I assumed it was a gate while building `glance ask`, and it was
+		// not: an answer unit runs with `--approval yolo` in a worktree whose origin is the operator's real
+		// repo, so nothing but a prompt ("do not edit") stood between an answer and a merge. `--force`
+		// does not open this door either; refusing to land a unit that was never supposed to produce a
+		// commit is not a safety valve an operator should be able to talk their way past.
+		if (rec.options.executionRole === "observer" || rec.options.ask) {
+			return { ok: false, committed: false, merged: false, message: "observer never lands", detail: `${dto.name} is an answer/observer unit — its deliverable is a report, not a branch` };
+		}
 		const auto = opts.auto ?? true;
 		await this.refreshProofState(rec);
 		if (opts.force && !opts.reason?.trim()) return { ok: false, committed: false, merged: false, message: "force land blocked", detail: "force land requires a reason" };
