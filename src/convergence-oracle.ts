@@ -18,6 +18,8 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import * as path from "node:path";
+import { classifyProbeFailure } from "./classify-probe-failure.ts";
+import { errText } from "./err-text.ts";
 import { resolveStateDir } from "./state-dir.ts";
 import type { VerifiedState } from "./types.ts";
 
@@ -123,14 +125,32 @@ export async function writeFailures(failures: string[], stateDir: string = resol
 	await fs.rename(tmp, dest);
 }
 
-/** `null` when no prior turn recorded a set (the baseline turn) or on any read/parse error. */
+/**
+ * `null` when no prior turn recorded a set (the baseline turn — the sidecar simply doesn't exist
+ * yet). THROWS when the sidecar EXISTS but is unreadable/corrupt (eap-borrows finding #16): the OLD
+ * behavior collapsed "no prior turn" and "prior turn's real data is gone" into the SAME `null`,
+ * silently re-baselining on corruption — the caller could never tell "first run" from "the sidecar
+ * that proved a real regression just vanished". A corrupt sidecar must escalate, never quietly become
+ * this turn's fresh floor.
+ */
 export async function readFailures(stateDir: string = resolveStateDir()): Promise<string[] | null> {
+	let raw: string;
 	try {
-		const parsed = JSON.parse(await fs.readFile(failuresPath(stateDir), "utf8"));
-		return Array.isArray(parsed) ? (parsed as string[]) : null;
-	} catch {
-		return null;
+		raw = await fs.readFile(failuresPath(stateDir), "utf8");
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null; // no prior turn — legitimate baseline
+		throw new Error(classifyProbeFailure({ kind: "corrupt-state", detail: `failures sidecar unreadable: ${errText(err)}` }).reason);
 	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (err) {
+		throw new Error(classifyProbeFailure({ kind: "corrupt-state", detail: `failures sidecar unparseable: ${errText(err)}` }).reason);
+	}
+	if (!Array.isArray(parsed)) {
+		throw new Error(classifyProbeFailure({ kind: "corrupt-state", detail: `failures sidecar at ${failuresPath(stateDir)} is not an array` }).reason);
+	}
+	return parsed as string[];
 }
 
 /** Drop the sidecar when a loop terminates so the NEXT goal starts at its own baseline. */

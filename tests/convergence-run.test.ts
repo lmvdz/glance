@@ -9,7 +9,7 @@ import * as fs from "node:fs/promises";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { armPath, isArmed, readOracle, writeOracle } from "../src/convergence-oracle.ts";
+import { armPath, failuresPath, isArmed, readFailures, readOracle, writeFailures, writeOracle } from "../src/convergence-oracle.ts";
 import { gitDiffAgainstHead, gitDiffSinceBase, runConvergence, runOnceIteration } from "../src/convergence-run.ts";
 import type { VerifiedState } from "../src/types.ts";
 
@@ -135,6 +135,24 @@ describe("runOnceIteration --once (S2 — the hook-driven single step)", () => {
 		});
 	});
 
+	// Reproduce-first (eap-borrows finding #16): the OLD `readFailures` collapsed "corrupt sidecar"
+	// into the SAME `null` as "no prior turn", so a corrupt sidecar silently became this turn's fresh
+	// baseline — `runIteration` ran normally and, worse, `writeFailures` below would have overwritten
+	// the (unreadable, but possibly still forensically useful) corrupt file with this turn's own set.
+	test("(#16) a corrupt failures sidecar escalates WITHOUT running an iteration — oracle untouched-but-escalated, sidecar left for inspection", async () => {
+		await withStateDir(async (dir) => {
+			await writeOracle(oracle({ iteration: 5, gap: 4 }), dir);
+			writeFileSync(failuresPath(dir), "{ not json at all");
+			const next = await runOnceIteration({ goal: "demo", fixture: true, once: true });
+			expect(next.decision).toBe("escalate");
+			expect(next.pendingEscalation).toBe(true);
+			expect(next.iteration).toBe(5); // untouched — runIteration never ran (plan/dispatch/validate skipped)
+			expect(isArmed(dir)).toBe(false);
+			// left on disk untouched — never silently repaired/overwritten/cleared.
+			expect(readFileSync(failuresPath(dir), "utf8")).toBe("{ not json at all");
+		});
+	});
+
 	test("disarms when an iteration reaches a terminal decision (budget cap)", async () => {
 		await withStateDir(async (dir) => {
 			const prevCap = process.env.OMP_SQUAD_CONVERGENCE_BUDGET_CAP;
@@ -190,6 +208,32 @@ describe("runConvergence — real Epic 1/3 adapters", () => {
 				expect(terminal.pendingEscalation).toBe(true);
 				expect(terminal.gap).toBe(1);
 				expect(terminal.iteration).toBe(1);
+			} finally {
+				rmSync(repo, { recursive: true, force: true });
+			}
+		});
+	});
+
+	// Reproduce-first (eap-borrows finding #15): the OLD `suiteFailures` mapped a suite that
+	// demonstrably never ran (here: bash's own "command not found", exit 127) to `[]` — indistinguishable
+	// from "the suite ran and found nothing wrong". The ratchet would then read "no known regressions"
+	// for a turn that verified NOTHING.
+	test("(#15) a suite that demonstrably never ran (exit 127) escalates and SKIPS the sidecar write — the prior REAL set survives untouched", async () => {
+		await withStateDir(async (dir) => {
+			const repo = tmpRepo();
+			const planDir = path.join(repo, "plans", "demo");
+			mkdirSync(planDir, { recursive: true });
+			writeFileSync(path.join(planDir, "01-example.md"), "STATUS: open\nPRIORITY: p1\n\n# Example\n\n## Acceptance Criteria\n- something works\n");
+			writeFileSync(path.join(repo, "package.json"), JSON.stringify({ scripts: { test: "definitely-not-a-real-binary-xyz-127" } }));
+			writeFileSync(path.join(repo, "bun.lock"), "");
+			await writeFailures(["prior.test.ts > z"], dir); // a REAL prior turn's failure set
+			try {
+				const terminal = await runOnceIteration({ goal: "demo", fixture: false, once: true }, repo);
+				expect(terminal.decision).toBe("escalate");
+				expect(terminal.pendingEscalation).toBe(true);
+				// the write was SKIPPED entirely — the sidecar still holds the prior REAL set, never a
+				// synthetic `[]` that would poison the next turn's set-diff into a false regression.
+				expect(await readFailures(dir)).toEqual(["prior.test.ts > z"]);
 			} finally {
 				rmSync(repo, { recursive: true, force: true });
 			}

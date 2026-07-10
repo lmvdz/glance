@@ -81,9 +81,22 @@ test("the cap is env-tunable", async () => {
 	}
 });
 
-test("an unreadable repo / bogus branch never throws — returns undefined (fail-open)", async () => {
-	expect(await landRiskReason(repo, "does-not-exist")).toBeUndefined();
-	expect(await landRiskReason("/no/such/repo", "feat")).toBeUndefined();
+// Reproduce-first (eap-borrows finding #7): the OLD behavior mapped ANY probe failure to
+// `undefined` (no block) — a corrupted git dir or a bogus branch name silently gave every branch a
+// clean bill of health. Never throws, but a probe failure must now be indistinguishable from a real
+// risk finding: a defined, blocking reason.
+test("a bogus branch never throws — but is now BLOCKED (fail-closed), not silently safe", async () => {
+	const r = await landRiskReason(repo, "does-not-exist");
+	expect(r).toBeDefined();
+	expect(r).toContain("land-risk gate:");
+	expect(r).toContain("could not compute a blast radius");
+});
+
+test("an unreadable repo never throws — but is now BLOCKED (fail-closed), not silently safe", async () => {
+	const r = await landRiskReason("/no/such/repo", "feat");
+	expect(r).toBeDefined();
+	expect(r).toContain("land-risk gate:");
+	expect(r).toContain("could not compute a blast radius");
 });
 
 test("the gate is OFF by default", () => {
