@@ -173,3 +173,20 @@ test("staleBranchReason names the overlap and how to proceed", async () => {
 	await git(repo, "branch", "fresh");
 	expect(await staleBranchReason(repo, "fresh")).toBeUndefined();
 });
+
+// finding #6 (eap-borrows wave 2): the ORIGINAL probe collapsed "genuinely fresh (fork point IS the
+// tip)" and "the merge-base/rev-parse/diff probe itself FAILED" into the same `undefined` — a git
+// hiccup silently let a genuinely stale, potentially clobbering merge through unchecked. Passing a
+// baseRef that cannot be resolved at all reproduces a real probe failure (distinct from "no common
+// ancestor", which staleBranchReason still treats as a legitimate non-stale outcome).
+test("finding #6: a stale-branch PROBE FAILURE (unresolvable baseRef) blocks — does not silently read as fresh", async () => {
+	const repo = await baseRepo("stale-probefail-");
+	await branchWorktree(repo, "unit", editSharedLine(1, "branch edit"));
+
+	const reason = await staleBranchReason(repo, "unit", "refs/heads/this-ref-does-not-exist-anywhere");
+
+	// OLD behavior (fail-open): merge-base failure returned undefined (allow, "safe"). NEW behavior:
+	// a distinct, non-`undefined` refusal — the caller (land.ts) blocks auto-land on it.
+	expect(reason).toBeDefined();
+	expect(reason).toContain("stale-branch");
+});

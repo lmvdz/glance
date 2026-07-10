@@ -10,7 +10,9 @@
  * tries automated resolution (#12): rebase → resolver → verify gate → reviewer, kept only if proven.
  */
 
-import { detectVerify } from "./intake.ts";
+import { classifyProbeFailure } from "./classify-probe-failure.ts";
+import { budgetedExcerpt } from "./gate-logs.ts";
+import { detectVerify, packageManifestError } from "./intake.ts";
 import { envBool } from "./config.ts";
 import { gateExec, gateRunUnrunnable } from "./gate-runner.ts";
 import { proofGate, recordProof } from "./proof.ts";
@@ -212,6 +214,21 @@ function truncate(s: string, n: number): string {
 	return s.length <= n ? s : `${s.slice(0, n)}…`;
 }
 
+/**
+ * Lossless offload half (eap-borrows concern 07, applying concern 03's `budgetedExcerpt`/
+ * `writeGateLog` to the land path): the ACCEPTANCE gate's failure/red-baseline details used to plain-
+ * `truncate()` an oversized gate dump — the tail past the cap was gone forever, exactly the evidence a
+ * human investigating a refused/red-baseline land needs most. `budgetedExcerpt` keeps the SAME `<= n`-
+ * char cap on the detail string (head+tail — the gate's conclusion lives in the tail), but durably
+ * persists the FULL output first and appends a `[N bytes omitted — full: <path>]` pointer when it had
+ * to cut anything, so the pointer lands right in the `LandResult.detail`/proof detail text itself —
+ * never silently discarded, and small dumps (the common case) pay nothing (no write at all).
+ */
+async function excerptForDetail(s: string, n: number, agentId?: string): Promise<string> {
+	const { text } = await budgetedExcerpt(s, n, { kind: "log", agentId });
+	return text;
+}
+
 const FAILURE_DURATION_SUFFIX = /\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/;
 
 function normalizeFailureIdentity(failure: string): string {
@@ -228,8 +245,19 @@ export function extractGateFailures(output: string, fallback = "gate"): string[]
 		return match ? [match[1] ?? ""] : [];
 	}));
 	if (parsed.length > 0) return parsed;
-	const firstLine = output.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
-	return uniqueSortedFailures([firstLine ?? fallback]);
+	// No `(fail)`-tagged lines — a check-first/tsc-only gate (or anything that doesn't use bun test's
+	// convention). Finding #8 (eap-borrows wave 2, "AMBIGUOUS / residual" in the sweep — `gateRunUnrunnable`
+	// already covers the worst env-failure cases upstream; this is what's left once BOTH runs are
+	// confirmed runnable): the OLD fallback used only the FIRST non-empty line as the failure's identity
+	// — two genuinely DIFFERENT failures whose first line happens to coincide (shared boilerplate: "error
+	// TS2304:", a wrapper script's generic "FAILED" banner, …) then extracted to the SAME single token,
+	// compared set-equal, and silently allowed a red-baseline re-merge that had actually introduced a new
+	// failure. Use the WHOLE trimmed output as the identity instead — a genuinely reproducible, UNCHANGED
+	// brownfield failure (the same check/tsc-only gate failing exactly the same way on base and merged)
+	// still compares byte-identical and allows the red-baseline landing (never wedging that repo), but a
+	// materially different failure no longer collides just because its first line happens to match.
+	const trimmed = output.trim();
+	return uniqueSortedFailures([trimmed.length > 0 ? trimmed : fallback]);
 }
 
 export function decideRegressionGate(baseFailures: Iterable<string>, mergedFailures: Iterable<string>): { allow: boolean; newRegressions: string[] } {
@@ -418,7 +446,17 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	// blast-radius contract. ponytail: in-place agents (worktree===repo) returned above; upgrade
 	// path: stash + restore around the land instead of refusing.
 	const mainStatus = await git(["status", "--porcelain", "--untracked-files=no"], repo);
-	if (mainStatus.code === 0 && mainStatus.stdout.length > 0) {
+	if (mainStatus.code !== 0) {
+		// Finding #2 (eap-borrows wave 2): the ORIGINAL guard only blocked on `code === 0 && stdout.length
+		// > 0`, so a nonzero/unreadable status (corrupted gitdir, sandbox, permissions) read as "clean" and
+		// let the land proceed — straight into the failed-gate rollback path's `reset --hard`, which
+		// destroys whatever the probe couldn't see. Treat "couldn't confirm clean" the SAME as "confirmed
+		// dirty": retryable (this is an environmental precondition, not a branch defect — see the
+		// `retryable` doc above), never a silent proceed.
+		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `git status --porcelain failed in ${repo}: ${mainStatus.stderr || mainStatus.stdout || "no output"}` });
+		return { ok: false, retryable: true, committed, merged: false, message, detail: `dirty-main ${reason} — cannot confirm ${repo} is clean; refusing to land ${branch} (a failed-gate rollback would risk destroying unseen state)` };
+	}
+	if (mainStatus.stdout.length > 0) {
 		return { ok: false, retryable: true, committed, merged: false, message, detail: `main checkout ${repo} has uncommitted tracked changes — refusing to land ${branch} (a failed-gate rollback would discard them); commit or stash them first` };
 	}
 
@@ -446,6 +484,27 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	// gate to run after merge (caller override wins; undefined ⇒ auto-detect; empty ⇒ skip).
 	const head0 = (await git(["rev-parse", "HEAD"], repo)).stdout;
 	const gate = opts.verify !== undefined ? opts.verify : await detectVerify(repo);
+
+	// Finding #10 (eap-borrows wave 2): detectVerify() collapses "genuinely no toolchain" and "package.json
+	// exists but is unreadable/malformed" into the SAME undefined — the right answer for a router/observer,
+	// but the land path used to then silently treat a broken node repo as "no acceptance gate, proceed"
+	// exactly like a legitimate non-node repo. Only applies when the CALLER didn't already make an explicit
+	// choice (opts.verify undefined ⇒ auto-detect was actually consulted; an explicit "" means "skip
+	// verification" on purpose and must stay untouched). Never blocks a repo for lacking package.json —
+	// only one that has it and is broken.
+	if (opts.verify === undefined && !gate) {
+		const manifestError = await packageManifestError(repo);
+		if (manifestError) {
+			return {
+				ok: false,
+				committed,
+				merged: false,
+				retryable: true,
+				message,
+				detail: `could not detect ${repo}'s verification command (${manifestError}) — refusing to land ${branch} without a gate rather than silently skipping acceptance; fix package.json or pass an explicit verify command`,
+			};
+		}
+	}
 
 	// Verify the merged main; if the gate fails, reset main to head0 so it stays green. The
 	// worktree branch keeps its commit (only main is reset), so it can be re-landed after a fix.
@@ -482,7 +541,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 				merged: false,
 				retryable: true,
 				message,
-				detail: `acceptance gate could not run (${mergedGateUnrunnable}): ${gate} — refusing to land unverified; main rolled back\n${truncate(v.output, 300)}`,
+				detail: `acceptance gate could not run (${mergedGateUnrunnable}): ${gate} — refusing to land unverified; main rolled back\n${await excerptForDetail(v.output, 300, opts.agentId)}`,
 			};
 		}
 		const base = await runGate(gate, repo); // main == head0 now
@@ -493,7 +552,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 				committed,
 				merged: false,
 				message,
-				detail: `merged ${branch} but verification failed (${gate}) — rolled main back to keep it green:\n${truncate(v.output, 800)}`,
+				detail: `merged ${branch} but verification failed (${gate}) — rolled main back to keep it green:\n${await excerptForDetail(v.output, 800, opts.agentId)}`,
 			};
 		}
 		// The base run must be runnable too before "base was already red" means anything.
@@ -505,20 +564,38 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 				merged: false,
 				retryable: true,
 				message,
-				detail: `acceptance gate could not run on BASE (${baseGateUnrunnable}): ${gate} — refusing the red-baseline allowance; main stays at head0\n${truncate(base.output, 300)}`,
+				detail: `acceptance gate could not run on BASE (${baseGateUnrunnable}): ${gate} — refusing the red-baseline allowance; main stays at head0\n${await excerptForDetail(base.output, 300, opts.agentId)}`,
 			};
 		}
-		// Base was already red ⇒ main was never green; refusing would wedge every land on a brownfield
-		// repo. Re-apply the merge and land, recording that we landed onto a red baseline.
-		// ponytail: binary gate can't tell "still red" from "redder" — a branch that worsens an already
-		// red base still lands. Upgrade path: per-framework failing-test diffing if that ever bites.
+		// Base was already red ⇒ main was never green; refusing outright would wedge every land on a
+		// brownfield repo. But a binary gate can't tell "still red" from "redder" on its own — finding #1
+		// (eap-borrows wave 2, the living cousin of the historical equal-reds bug, now on the ACCEPTANCE
+		// path): apply the SAME failure-set diff applyRegressionGate uses for the full-suite path, so a
+		// branch that adds a NEW failure on top of an already-red base is refused, not silently landed as
+		// "red baseline, nothing to see here." Only strictly-new failures block; the pre-existing red
+		// baseline itself always allows a re-merge (never wedges a brownfield repo that hasn't regressed).
+		const baseFailures = extractGateFailures(base.output);
+		const mergedFailures = extractGateFailures(v.output);
+		const { allow, newRegressions } = decideRegressionGate(baseFailures, mergedFailures);
+		if (!allow) {
+			// Main is already back at head0 (reset above) — nothing further to roll back.
+			return {
+				ok: false,
+				committed,
+				merged: false,
+				message,
+				detail: `merged ${branch} but verification failed (${gate}) on an already-red base, AND introduced ${newRegressions.length} new failure(s) beyond the existing red baseline — refusing (main stays at its prior red baseline):\n  ${newRegressions.join("\n  ")}\n${await excerptForDetail(v.output, 600, opts.agentId)}`,
+			};
+		}
+		// No NEW failures beyond the pre-existing red baseline — re-apply the merge and land, recording
+		// that we landed onto a red baseline.
 		const rm = await reMerge();
 		if (rm.code !== 0) {
 			return { ok: false, committed, merged: false, message, detail: `base already red (${gate}); re-merging ${branch} failed: ${rm.stderr || rm.stdout}` };
 		}
 		// Landed onto a red baseline — record it honestly: ok:false so the post-merge proof reflects that
 		// main was not green (the branch introduced no NEW failure, but main is still red).
-		await recordMainProof(repo, gate, false, `landed onto a red baseline — main was not green at head0 (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
+		await recordMainProof(repo, gate, false, `landed onto a red baseline — main was not green at head0 (${gate})\n${await excerptForDetail(v.output, 800, opts.agentId)}`.trim(), v.sandboxed);
 		return { ok: true, committed, merged: true, message, detail: `${detail}; landed onto a red baseline — main was not green at head0 (${gate})` };
 	};
 
@@ -542,7 +619,13 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 
 	// Opt-in via OMP_SQUAD_AUTORESOLVE, and only when the worktree is clean: a live agent's
 	// uncommitted edits are never clobbered by the rebase. Off/dirty ⇒ give up exactly as before.
-	const wtClean = (await git(["status", "--porcelain"], worktree)).stdout.length === 0;
+	// Finding #3 (eap-borrows wave 2): the ORIGINAL check only read `stdout.length === 0`, never `code`
+	// — a FAILED `git status` typically yields empty stdout too, so a broken probe read as "clean" and
+	// let the rebase proceed straight over whatever live WIP the probe couldn't see. Require a genuinely
+	// successful, empty status; any probe failure is treated as dirty (skip autoresolve, same as the
+	// existing off/dirty give-up path below).
+	const wtStatus = await git(["status", "--porcelain"], worktree);
+	const wtClean = wtStatus.code === 0 && wtStatus.stdout.length === 0;
 	if (autoresolve() && wtClean) {
 		return attemptAutoResolve({
 			repo, worktree, branch, head0, gate, message, committed,
@@ -572,17 +655,30 @@ const STALE_OVERLAP_LIST_CAP = 8;
  * PR mode passes a freshly-fetched `origin/<default>` instead), or undefined when it's safe.
  * Stale ⇐ base gained commits since the branch's fork point (merge-base) AND at least one file is
  * edited on BOTH sides. Non-overlapping parallel work merges as before; a branch forked from the
- * current tip can never be stale. Probe failures (unborn HEAD, unrelated histories) return
- * undefined — the merge path itself surfaces those, and this gate must never block on its own bugs.
+ * current tip can never be stale.
+ *
+ * Finding #6 (eap-borrows wave 2): a genuine "fork point IS the tip" result (mb.stdout === base.stdout)
+ * is legitimately fresh and stays undefined — but an actual PROBE FAILURE (merge-base/rev-parse/diff
+ * erroring) used to collapse to that SAME undefined, so a git hiccup silently let a genuinely stale,
+ * clobbering merge through. A probe that couldn't run can't prove freshness OR staleness — it now
+ * blocks auto-land with a distinct reason instead of allowing on a guess; force-land (staleGate:false
+ * at the call site) remains the escape hatch, same as a real staleness finding.
  */
 export async function staleBranchReason(repo: string, branch: string, baseRef = "HEAD"): Promise<string | undefined> {
+	const probeFailed = (step: string, r: GitRun): string => {
+		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `${step} failed: ${r.stderr || r.stdout || "no output"}` });
+		return `stale-branch ${reason} — could not prove ${branch} is fresh against ${baseRef}; refusing auto-land (force-land bypasses this gate)`;
+	};
 	const mb = await git(["merge-base", baseRef, branch], repo);
-	if (mb.code !== 0 || !mb.stdout) return undefined;
+	if (mb.code !== 0) return probeFailed(`git merge-base ${baseRef} ${branch}`, mb);
+	if (!mb.stdout) return undefined; // unrelated histories / no common ancestor — the merge path itself surfaces this
 	const base = await git(["rev-parse", baseRef], repo);
-	if (base.code !== 0 || mb.stdout === base.stdout) return undefined; // fork point IS the tip — fresh
+	if (base.code !== 0) return probeFailed(`git rev-parse ${baseRef}`, base);
+	if (mb.stdout === base.stdout) return undefined; // fork point IS the tip — fresh
 	const baseDiff = await git(["diff", "--name-only", `${mb.stdout}..${baseRef}`], repo);
 	const branchDiff = await git(["diff", "--name-only", `${mb.stdout}..${branch}`], repo);
-	if (baseDiff.code !== 0 || branchDiff.code !== 0) return undefined;
+	if (baseDiff.code !== 0) return probeFailed(`git diff --name-only ${mb.stdout}..${baseRef}`, baseDiff);
+	if (branchDiff.code !== 0) return probeFailed(`git diff --name-only ${mb.stdout}..${branch}`, branchDiff);
 	const baseFiles = new Set(baseDiff.stdout.split("\n").filter(Boolean));
 	const overlap = branchDiff.stdout.split("\n").filter((f) => f && baseFiles.has(f));
 	if (overlap.length === 0) return undefined;

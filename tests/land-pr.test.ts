@@ -73,6 +73,7 @@ mock.module("../src/gh.ts", () => ({
 const { ensurePr, landAgentPr, getPendingPr, listPendingPrs, recordPendingPr, assertMerged, assertNoOrphanedCommits, mergeMethod } = await import("../src/land-pr.ts");
 const { getDoneProofByBranch } = await import("../src/done-proof.ts");
 const { repoIdentity } = await import("../src/repo-identity.ts");
+const { setGateLogRoot } = await import("../src/gate-logs.ts");
 import type { AutomationReport } from "../src/automation-log.ts";
 
 const ENV_KEYS = ["OMP_SQUAD_PR_DRAFT", "OMP_SQUAD_PR_MERGE_METHOD", "OMP_SQUAD_REGRESSION_GATE"] as const;
@@ -557,6 +558,114 @@ test("landAgentPr: acceptance gate fails on scratch merge ⇒ refused, PR stays 
 	expect(mergeCalled).toBe(false); // never reached gh pr merge
 	expect(getDoneProofByBranch(stateDir, "squad/a1")).toBeUndefined();
 	expect(getPendingPr(stateDir, "squad/a1")?.state).toBe("open");
+});
+
+// finding #9 (eap-borrows wave 2): a GREEN exit code alone was never classified on the PR acceptance
+// path — a broken verify script that exits 0 without running anything, or a test glob that matched
+// zero files, landed exactly like a real pass (a real DoneProof, a real merge). NEW behavior: refused.
+test("landAgentPr: finding #9 — a GREEN acceptance gate that demonstrably ran zero tests is refused, never merged as a trusted pass", async () => {
+	const { repo } = await baseline("lp-zerotest-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-zerotest-state-");
+	prList = [];
+
+	const res = await landAgentPr(
+		{
+			repo,
+			worktree: wt,
+			branch: "squad/a1",
+			message: "m",
+			commitWip: false,
+			defaultBranch: "main",
+			verify: 'printf "did not match any test files\\n"; true',
+		},
+		stateDir,
+	);
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.retryable).toBe(true);
+	expect(res.detail).toContain("could not be trusted");
+	expect(mergeCalled).toBe(false); // never reached gh pr merge
+	expect(getDoneProofByBranch(stateDir, "squad/a1")).toBeUndefined();
+});
+
+test("landAgentPr: finding #9 guard-rail — a GREEN gate that demonstrably ran real tests still lands normally", async () => {
+	const { repo } = await baseline("lp-realtest-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-realtest-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const res = await landAgentPr(
+		{ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main", verify: 'printf "3 pass\\n"; true' },
+		stateDir,
+	);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	expect(getDoneProofByBranch(stateDir, "squad/a1")).toBeDefined();
+});
+
+// finding #10 (eap-borrows wave 2): detectVerify(repo) collapses "genuinely no toolchain" and
+// "package.json exists but is unreadable/malformed" into the SAME undefined. The primary checkout's
+// WORKING TREE (not committed, not pushed) is where detectVerify(repo) reads from — deliberately
+// isolated from the scratch-merge worktree (a FRESH checkout of origin/<default>, unaffected by this
+// local-only edit) so this test exercises the manifest check itself, not installScratchDeps' own
+// (also-correct, but differently-worded) install failure for a committed-and-pushed broken manifest.
+test("landAgentPr: finding #10 — a broken package.json in the primary checkout refuses the land instead of silently skipping acceptance", async () => {
+	const { repo } = await baseline("lp-badpkg-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	await fs.writeFile(path.join(repo, "package.json"), "{ this is not json");
+	const stateDir = await tmpDir("lp-badpkg-state-");
+	prList = [];
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(false);
+	expect(res.retryable).toBe(true);
+	expect(res.detail).toContain("could not detect");
+	expect(mergeCalled).toBe(false);
+	expect(getDoneProofByBranch(stateDir, "squad/a1")).toBeUndefined();
+});
+
+// ── offload half (eap-borrows concern 07 / 03's budgetedExcerpt+writeGateLog) ──────────────────────
+// Verify text: "a green land's full gate output file exists under gate-logs/." The scratch-merge
+// acceptance gate's output used to be DISCARDED ENTIRELY on success — a green PR-mode land recorded
+// zero gate evidence. Now the full output is always durably persisted (small ones cost nothing extra;
+// this test forces an oversized one so the pointer + file actually materialize).
+
+test("landAgentPr: offload half — a green land's oversized acceptance gate output is durably persisted, with a pointer in the DoneProof detail", async () => {
+	const { repo } = await baseline("lp-offload-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-offload-state-");
+	setGateLogRoot(stateDir);
+	try {
+		prList = [];
+		mergeSimulator = githubMerge("squad/a1");
+
+		// Oversized (> the 600-char excerpt budget), and demonstrably "ran real tests" (finding #9) so
+		// it's trusted as a genuine pass, not refused as unproven.
+		const bigOutput = `printf "3 pass\\n"; printf '%.0sX' $(seq 1 900); printf '\\n'; true`;
+
+		const res = await landAgentPr(
+			{ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main", verify: bigOutput },
+			stateDir,
+		);
+
+		expect(res.ok).toBe(true);
+		expect(res.merged).toBe(true);
+		const proof = getDoneProofByBranch(stateDir, "squad/a1");
+		expect(proof).toBeDefined();
+		const pointerMatch = proof?.detail.match(/full: ([^\]]+)\]/);
+		expect(pointerMatch).toBeTruthy();
+		const fullPath = pointerMatch?.[1] ?? "";
+		const fullContent = await fs.readFile(fullPath, "utf8");
+		expect(fullContent.length).toBeGreaterThan(900); // the FULL output, not just the excerpt
+		expect(fullContent).toContain("3 pass");
+	} finally {
+		setGateLogRoot(path.join(os.tmpdir(), "gate-logs-unset")); // avoid a stale root leaking into later tests in this file
+	}
 });
 
 // ── landAgentPr — scratch gate red (regression) ──────────────────────────────────────────────────

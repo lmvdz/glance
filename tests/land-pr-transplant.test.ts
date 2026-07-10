@@ -136,3 +136,28 @@ test("does not blow up on a nonexistent branch — returns undefined rather than
 	const repo = await converged("tp-missing-");
 	expect(await transplantedCommitsReason(repo, "squad/does-not-exist", "main")).toBeUndefined();
 });
+
+// finding #4 (eap-borrows wave 2): the ORIGINAL checks collapsed "rev-list failed for a REAL reason
+// (corrupted objects, permissions, transient git error)" into the SAME `undefined` as "nothing ahead"
+// — a probe failure silently ALLOWED publishing whatever the probe couldn't actually check. Making
+// `.git/objects` unreadable breaks `git rev-list` with a genuine "not a git repository" class error
+// (distinct from "unknown revision", which this fix deliberately still allows — see the negative
+// case above) — the exact probe-failure shape this finding hardens.
+test("finding #4: a rev-list PROBE FAILURE (unreadable .git/objects) BLOCKS — never silently allows publishing", async () => {
+	const repo = await converged("tp-probefail-");
+	await git(repo, "checkout", "-qb", "squad/unit-probe", "origin/main");
+	await commit(repo, "agent.txt", "a\n", "agent work");
+
+	const objectsDir = path.join(repo, ".git", "objects");
+	await fs.chmod(objectsDir, 0o000);
+	try {
+		const reason = await transplantedCommitsReason(repo, "squad/unit-probe", "main");
+		// OLD behavior (fail-open): this returned undefined (allow). NEW behavior: blocks with a distinct
+		// probe-failure reason, never silently allowing a land whose lineage it couldn't actually check.
+		expect(reason).toBeDefined();
+		expect(reason).toContain("transplant gate");
+		expect(reason).toContain("could not prove");
+	} finally {
+		await fs.chmod(objectsDir, 0o755);
+	}
+});

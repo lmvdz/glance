@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { errText } from "./err-text.ts";
 import type { ThinkingLevel } from "./types.ts";
 import { extractJsonObject, ompOneShot } from "./omp-call.ts";
 
@@ -181,5 +182,33 @@ async function exists(p: string): Promise<boolean> {
 		return true;
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * Whether `repo`'s `package.json` exists but could not be read as a JSON object — a genuinely broken
+ * node manifest, as distinct from a repo that legitimately has none (finding #10, eap-borrows wave 2).
+ * `detectVerify`/`detectVerifyStages` collapse BOTH cases to the same "no stages detected" result
+ * (via `readJsonObject`'s catch-all), which is the right, honest answer for routing/observing callers
+ * (routeIntake's heuristic, the Observer's main gate) — "no verify command" legitimately covers a
+ * non-node repo. Land paths (land.ts, land-pr.ts) consult THIS separately: undefined means either
+ * package.json is absent (ENOENT — an honest skip, never blocks a land) or present and parses fine;
+ * a returned reason means it exists and is unreadable/malformed, which a land path must not silently
+ * read as "nothing to verify" — never block a repo for lacking package.json, but never silently skip
+ * acceptance on one that exists and is broken either.
+ */
+export async function packageManifestError(repo: string): Promise<string | undefined> {
+	let raw: string;
+	try {
+		raw = await fs.readFile(path.join(repo, "package.json"), "utf8");
+	} catch (e) {
+		return (e as { code?: string }).code === "ENOENT" ? undefined : `package.json unreadable: ${errText(e)}`;
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "package.json does not contain a JSON object";
+		return undefined;
+	} catch (e) {
+		return `package.json is not valid JSON: ${errText(e)}`;
 	}
 }

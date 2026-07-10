@@ -753,6 +753,10 @@ export class SquadManager extends EventEmitter {
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
 	private readonly closedIssues = new Set<string>();
+	/** Idempotency for the "unverified DoneProof" escalation (finding #11, eap-borrows wave 2) — mirrors
+	 *  `closedIssues`'s own pattern: fire the attention-lane/automation dual-write exactly once per issue
+	 *  id, not once per reconciler tick (which would keep re-attempting the close forever). */
+	private readonly unverifiedProofEscalated = new Set<string>();
 	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
 	private readonly superviseBudget = new Map<string, number>();
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
@@ -796,7 +800,7 @@ export class SquadManager extends EventEmitter {
 	private transcriptSeq = 0;
 	/** Last observed `plans/` signature for repos the feature board scans. */
 	private planFeatureSignature = "";
-	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string }; tick: number }>();
+	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string; skipped?: boolean }; tick: number }>();
 
 	constructor(opts: SquadManagerOptions = {}) {
 		super();
@@ -1293,6 +1297,13 @@ export class SquadManager extends EventEmitter {
 			if (!proof) {
 				this.log("warn", `terminal-without-proof: ${issue.identifier ?? issue.id} is doc-closed but has no DoneProof — NOT closing in Plane (dispatch still skipped)`);
 				void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", issue.identifier ?? issue.id, "error", `doc says ${closedRef} but no DoneProof exists`);
+			} else if (proof.verified === "unverified") {
+				// Same tri-state authorization as closeLandedIssue (finding #11): a doc-closed concern whose
+				// only DoneProof is an out-of-band, never-re-verified merge is not auto-closed here either —
+				// this path has no branch/rec context to route a full attention-lane escalation, so it
+				// surfaces via the audit log only (still never silent).
+				this.log("warn", `terminal-with-unverified-proof: ${issue.identifier ?? issue.id} is doc-closed but its DoneProof was never re-verified by this daemon's own gate (out-of-band merge) — NOT auto-closing in Plane (dispatch still skipped)`);
+				void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unverified", issue.identifier ?? issue.id, "error", `doc says ${closedRef} but DoneProof.verified="unverified" (out-of-band merge, not re-checked)`);
 			} else if (await closePlaneIssue(issue)) {
 				this.closedIssues.add(issue.id);
 			} else {
@@ -3611,10 +3622,16 @@ export class SquadManager extends EventEmitter {
 		return createHash("sha256").update(status.stdout).update("\0").update(lock).digest("hex");
 	}
 
-	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string }> {
+	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean }> {
 		try {
 			const command = await detectVerify(repo);
-			if (!command) return { ok: true };
+			// Finding #13 (eap-borrows wave 2): `ok: true` here used to be indistinguishable from "the gate
+			// actually ran and passed" — a repo with no detectable verify command reads byte-identical to a
+			// confirmed green suite to any caller that only checks `.ok`. Keep `ok: true` (a repo with
+			// nothing to verify is not a regression — see the rationale above); ALSO stamp `skipped: true` so
+			// a reader (or a future consumer) can tell "nothing was checked" from "checked and green" without
+			// treating this as a claim about the repo's actual test status.
+			if (!command) return { ok: true, skipped: true };
 			// execGatedCommand: scrubbed env always; hermetic docker container by default when docker is usable (else a legible host fallback).
 			const { code, stdout: out, stderr: err } = await execGatedCommand(command, repo);
 			if (code === 0) return { ok: true };
@@ -5621,9 +5638,59 @@ export class SquadManager extends EventEmitter {
 			void this.recordAudit(LOCAL_ACTOR, "close.suppressed-unproven", identifier, "error", `land reported merged but no DoneProof exists for ${ctx?.branch ?? "(no branch)"}`);
 			return;
 		}
+		// Tri-state close authorization (finding #11, eap-borrows wave 2): a recorded DoneProof used to
+		// authorize a close regardless of ITS OWN `verified` grade — an out-of-band GitHub-UI merge
+		// (`reconcileOnePr`, never re-verified by the daemon's own gate) records `verified:"unverified"`,
+		// and that closed the tracking issue exactly like a real green land. `"green"` closes normally;
+		// `"red-baseline"` closes too (refusing here would zombify every brownfield issue forever — the
+		// land itself already accepted the red-baseline allowance) but the audit trail is annotated so
+		// it's distinguishable from a clean pass; `"unverified"` means THIS daemon never actually
+		// confirmed the merge — escalate instead of silently trusting the tracker to say "Done".
+		if (proof.verified === "unverified") {
+			if (!this.unverifiedProofEscalated.has(issue.id)) {
+				this.unverifiedProofEscalated.add(issue.id);
+				this.fileUnverifiedProofFinding(issue, identifier, ctx);
+			}
+			return;
+		}
+		if (proof.verified === "red-baseline") {
+			void this.recordAudit(LOCAL_ACTOR, "close.red-baseline", identifier, "ok", `branch landed onto a red baseline (no NEW failures introduced) — closing with annotation, not a clean pass: ${proof.detail}`);
+		}
 		this.log("info", `closing ${identifier} (branch landed, proof ${proof.verified})`);
 		if (await closePlaneIssue(issue)) this.closedIssues.add(issue.id);
 		else this.log("warn", `could not close ${identifier} (branch landed)`);
+	}
+
+	/**
+	 * Escalate an "unverified" DoneProof instead of silently closing its tracking issue (finding #11) —
+	 * dual-write, mirroring `fileMembraneBreakerFinding`'s pattern:
+	 *   1. The "Needs you" attention lane on the live `AgentRecord`, when one still exists on the roster
+	 *      (an out-of-band merge confirmed well after the fact often has none by now — a no-op then, not
+	 *      a bug: the automation channel below still surfaces it either way).
+	 *   2. The "land" automation channel, unconditionally, so it surfaces in /api/automation + the panel
+	 *      regardless of roster state.
+	 * Never blocks anything — the merge already happened; this only makes "nobody actually re-verified
+	 * this" legible instead of the tracker silently reading Done. Best-effort; never throws.
+	 */
+	private fileUnverifiedProofFinding(issue: IssueRef, identifier: string, ctx?: { branch?: string; repo?: string }): void {
+		const summary = `Plane issue ${identifier} landed via an UNVERIFIED merge (out-of-band GitHub-UI merge, never re-run through the daemon's own gate) — NOT auto-closed; needs a human to confirm and close manually`;
+		const detail = ctx?.branch ? `branch ${ctx.branch}` : undefined;
+		const rec = ctx?.branch ? this.agentByBranch(ctx.branch) : undefined;
+		if (rec) {
+			try {
+				const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
+				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+				this.emitAgent(rec);
+			} catch (err) {
+				this.log("warn", `unverified-proof attention-lane attach failed for ${identifier} (non-fatal): ${errText(err)}`);
+			}
+		}
+		try {
+			this.log("warn", `${summary}${detail ? ` — ${detail}` : ""}`);
+			this.automation.for("land", ctx?.repo ?? "unknown")({ durationMs: 0, level: "warn", detail: `${summary}${detail ? ` — ${detail}` : ""}` });
+		} catch {
+			/* observability must never break the close path */
+		}
 	}
 
 	// ── PR-reconciler backstop (concern 07) ─────────────────────────────────────────────────────────
@@ -5744,7 +5811,13 @@ export class SquadManager extends EventEmitter {
 		const rec = this.agentByBranch(entry.branch);
 		const issue: IssueRef = rec?.dto.issue ?? { id: entry.issueId, identifier: entry.issueIdentifier, name: entry.issueIdentifier ?? entry.issueId, projectId: entry.issueProjectId };
 		if (!this.closedIssues.has(issue.id)) await this.closeLandedIssue(issue, { branch: entry.branch, repo });
-		return this.closedIssues.has(issue.id);
+		// Escalated-unverified (finding #11, eap-borrows wave 2) is TERMINAL for the reconciler, same
+		// shape as the "autoclose off" arm above: closeLandedIssue will refuse an unverified DoneProof
+		// on every future tick too — the close is deliberately handed to a human via the attention-lane/
+		// automation escalation it just fired, so retrying is a no-op churn with no path to ever progress
+		// (the exact unbounded-retry pathology that jammed the factory once). "Resolved by escalation"
+		// counts as nothing-left-to-confirm; the Plane issue itself stays OPEN for the human.
+		return this.closedIssues.has(issue.id) || this.unverifiedProofEscalated.has(issue.id);
 	}
 
 	/**
