@@ -22,15 +22,23 @@ test("red base can improve while staying allowed", () => {
 });
 
 test("duplicates, unsorted failures, and duration suffixes normalize deterministically", () => {
-	expect(decideRegressionGate(["b [1.20ms]", "a", "b"], ["c [9.1ms]", "b [2.30ms]", "c", "a [1s]"])).toEqual({
+	// Duration values still collapse to the SAME placeholder (`<dur>`), so different literal
+	// durations for the same underlying failure still compare equal (never a new regression) — only
+	// "c", present in merged and absent from base, is genuinely new. Substitution (not deletion) is
+	// why the identity string itself now carries "<dur>" rather than nothing; that literal text is
+	// irrelevant to the comparison as long as it's the SAME placeholder on both sides, which it is.
+	expect(decideRegressionGate(["b [1.20ms]", "a [3ms]", "b [4ms]"], ["c [9.1ms]", "b [2.30ms]", "a [1s]"])).toEqual({
 		allow: false,
-		newRegressions: ["c"],
+		newRegressions: ["c <dur>"],
 	});
 });
 
 test("extractGateFailures parses bun fail lines", () => {
 	const output = "ok\n(fail) tests/auth.test.ts > login [1.23ms]\n(fail) tests/api.test.ts > returns 500 [2s]\n";
-	expect(extractGateFailures(output)).toEqual(["tests/api.test.ts > returns 500", "tests/auth.test.ts > login"]);
+	// The trailing duration is now SUBSTITUTED with a placeholder, not deleted (fail-open fix #2) —
+	// the identity string carries "<dur>" instead of nothing, but two different duration VALUES for
+	// the same failure still normalize to the same identity (see the follow-up-4 tests below).
+	expect(extractGateFailures(output)).toEqual(["tests/api.test.ts > returns 500 <dur>", "tests/auth.test.ts > login <dur>"]);
 });
 
 test("extractGateFailures returns a conservative fallback identity for unparseable failure output", () => {
@@ -84,7 +92,7 @@ test("follow-up 4(b): two GENUINELY different failures (different assertion) sti
 
 test("follow-up 4(c): existing (fail)-line behavior is unchanged — bun-style fail lines still parse and de-duplicate the same way", () => {
 	const output = "ok\n(fail) tests/auth.test.ts > login [1.23ms]\n(fail) tests/api.test.ts > returns 500 [2s]\n";
-	expect(extractGateFailures(output)).toEqual(["tests/api.test.ts > returns 500", "tests/auth.test.ts > login"]);
+	expect(extractGateFailures(output)).toEqual(["tests/api.test.ts > returns 500 <dur>", "tests/auth.test.ts > login <dur>"]);
 });
 
 // Fail-open fix (blind cross-lineage review of the follow-up-4 patch, db4ed56): the original patch
@@ -126,15 +134,87 @@ test("fail-open fix: trailing bracketed duration still normalizes away (follow-u
 	expect(decideRegressionGate(base, merged)).toEqual({ allow: true, newRegressions: [] });
 });
 
-test("fail-open fix, gate level: base failure A and merged failure B differing only in an interior hex id is REFUSED, not silently allowed", () => {
-	// This is the test that proves the fail-open is closed AT THE GATE, not just in the helper: base
-	// has one failure, merged has a DIFFERENT failure whose only textual difference is the hex id — the
-	// exact shape a false-equality collision would silently wave through.
+test("fail-open fix, helper level: base failure A and merged failure B differing only in an interior hex id is REFUSED, not silently allowed", () => {
+	// NOTE: this is the extractGateFailures/decideRegressionGate HELPER path, not a real
+	// applyRegressionGate/verifyMerged integration test — a blind review correctly pointed out a
+	// prior version of this test was mislabeled "gate level" despite never touching a real gate run.
+	// See tests/land-regression-gate.test.ts for the real integration-level equivalent (a genuine
+	// git repo + gate script driven through `landAgent`/`applyRegressionGate`/`verifyMerged`).
 	const baseFailures = extractGateFailures("object a1b2c3d missing\n");
 	const mergedFailures = extractGateFailures("object e4f5a6b missing\n");
 	const decision = decideRegressionGate(baseFailures, mergedFailures);
 	expect(decision.allow).toBe(false); // must REFUSE — a real regression, not a red-baseline re-merge
 	expect(decision.newRegressions).toEqual(mergedFailures);
+});
+
+// ─── Fail-open fix #2 (a second blind cross-lineage review): normalization must SUBSTITUTE a stable
+// placeholder for a volatile token, never DELETE it — deletion of a whole-line volatile token (a
+// failure message that IS, in its entirety, a timestamp or a duration) produced an EMPTY identity,
+// which `uniqueSortedFailures` used to filter out of the compared set entirely. A failure that
+// vanishes from the set is the sharpest possible fail-open: base=[] and merged=[] compare equal no
+// matter what actually happened. These tests pin the substitution scheme and the never-empty
+// invariant it guarantees.
+
+test("fail-open fix #2: a failure message that is ENTIRELY a leading timestamp normalizes to a non-empty placeholder, and still REFUSES against a green base", () => {
+	const identity = extractGateFailures("2026-07-09T12:00:01.123Z\n");
+	expect(identity).toEqual(["<ts>"]); // non-empty — never silently dropped from the set
+	const decision = decideRegressionGate([], identity); // green base vs. this genuinely-failing merge
+	expect(decision.allow).toBe(false);
+	expect(decision.newRegressions).toEqual(["<ts>"]);
+});
+
+test("fail-open fix #2: a failure message that is ENTIRELY a trailing bracketed duration normalizes to a non-empty placeholder, and still REFUSES against a green base", () => {
+	const identity = extractGateFailures("[196.72s]\n");
+	expect(identity).toEqual(["<dur>"]);
+	const decision = decideRegressionGate([], identity);
+	expect(decision.allow).toBe(false);
+	expect(decision.newRegressions).toEqual(["<dur>"]);
+});
+
+test("fail-open fix #2: a leading token that is CLOCK-shaped but is genuine message content (not a log prefix) still collapses to <ts>, but the REST of the line keeps two different messages apart", () => {
+	// The normalizer can't tell "a log-line timestamp prefix" from "a test name that happens to start
+	// with clock-shaped digits" — it strips both the same way. That's fine ONLY because it never
+	// deletes: the placeholder preserves enough structure that two genuinely different messages whose
+	// leading token both happen to look like a timestamp still compare unequal on the remainder.
+	const base = extractGateFailures("12:00:00 alpha check failed\n");
+	const merged = extractGateFailures("12:00:00 beta check failed\n");
+	expect(base).toEqual(["<ts> alpha check failed"]);
+	expect(merged).toEqual(["<ts> beta check failed"]);
+	expect(base).not.toEqual(merged);
+	const decision = decideRegressionGate(base, merged);
+	expect(decision.allow).toBe(false);
+	expect(decision.newRegressions).toEqual(merged);
+});
+
+test("fail-open fix #2: a message that is ONLY a /tmp path must never collide with an unrelated real message", () => {
+	const base = extractGateFailures("/tmp/build-a/scratch.log\n");
+	const merged = extractGateFailures("assertion failed\n");
+	expect(base).toEqual(["<tmp>"]);
+	expect(merged).toEqual(["assertion failed"]);
+	expect(base).not.toEqual(merged);
+	const decision = decideRegressionGate(base, merged);
+	expect(decision.allow).toBe(false); // a genuinely new, unrelated failure — must refuse
+	expect(decision.newRegressions).toEqual(merged);
+});
+
+test("design choice: two /tmp paths differing only in the sandbox directory name ARE treated as the same failure (same failure, different sandbox)", () => {
+	// Documented trade-off (rank 3 of the review): /tmp/build-a/x.ts vs /tmp/build-b/x.ts failing the
+	// SAME way is the same underlying failure surfacing in two different worktree sandboxes — that
+	// should collapse. A message that is ONLY a path (the test above) is the case that must NOT
+	// collapse into something else; collapsing two *equivalent* paths is intentional, not a regression.
+	const base = extractGateFailures("/tmp/build-a/x.ts: syntax error\n");
+	const merged = extractGateFailures("/tmp/build-b/x.ts: syntax error\n");
+	expect(base).toEqual(merged);
+	expect(decideRegressionGate(base, merged)).toEqual({ allow: true, newRegressions: [] });
+});
+
+test("design note: decideRegressionGate compares SETS, not multisets — multiplicity is deliberately ignored", () => {
+	// Three occurrences of the same identity in the base and one in the merged set compare equal; the
+	// gate answers "did a NEW kind of failure appear", not "did the count change". This is intentional
+	// (rank 7 of the review) — flagging a flaky test that fails 3/3 times on base and 1/1 on merged as
+	// a "regression" would be a worse false-positive than the count-blindness it trades for.
+	expect(decideRegressionGate(["a", "a", "a"], ["a"])).toEqual({ allow: true, newRegressions: [] });
+	expect(decideRegressionGate(["a"], ["a", "a", "a"])).toEqual({ allow: true, newRegressions: [] });
 });
 
 test('finding #8: two DIFFERENT check/tsc-only failures whose FIRST LINE coincides no longer collide as "the same" red', () => {
