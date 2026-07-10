@@ -417,6 +417,31 @@ export { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIs
 export { loadRepoProfiles, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 
 /** UI methods that block the agent on a human decision. */
+/**
+ * Is this UI request a decision a HUMAN must make?
+ *
+ * TIGHTEN-ONLY. The frame may ESCALATE a request to gate-class; it can never de-escalate one. Both
+ * inputs are honored, and the union wins:
+ *
+ *   - `gateClass: true` from a driver that knows it is relaying an approval gate (every ACP
+ *     `session/request_permission` — the harness stopped because it may not grant itself the action).
+ *   - omp's naming conventions (`gate_` id, `GATE:` title), which were the ENTIRE classifier and only
+ *     ever described omp. An ACP id is `acpui_<n>`, so every foreign harness's permission prompt failed
+ *     the test and became eligible for the auto-supervisor's "when in doubt … approve".
+ *
+ * The asymmetry is the point. `extension_ui_request` is deliberately NOT schema-validated
+ * (`schema/agent-host-frame.ts` validates only the two frames that mutate daemon state), and it arrives
+ * from the agent process — which runs model-authored tool calls and now carries a fabric primer of
+ * other agents' text. If a frame could assert `gateClass: false`, a prompt-injected agent would opt its
+ * own `gate_` request out of human review and hand it to a small model. Trust the claim only in the
+ * direction that asks for MORE human attention.
+ *
+ * A gate-class request is never auto-answered by any supervisor: no LLM call, no fallback, no spend. (R7)
+ */
+export function gateClassOf(req: { id: string; title?: string; gateClass?: boolean }): boolean {
+	return req.gateClass === true || req.id.startsWith("gate_") || (typeof req.title === "string" && req.title.startsWith("GATE:"));
+}
+
 const BLOCKING_UI_METHODS: Record<string, true> = {
 	confirm: true,
 	input: true,
@@ -7034,7 +7059,13 @@ export class SquadManager extends EventEmitter {
 				options: req.method === "select" ? req.options : undefined,
 				placeholder: req.method === "input" ? req.placeholder : req.method === "editor" ? req.prefill : undefined,
 				createdAt: Date.now(),
-				gateClass: req.id.startsWith("gate_") || ("title" in req && req.title.startsWith("GATE:")),
+				// The DRIVER's own claim wins. A prefix on an id (`gate_`) or a title (`GATE:`) is omp's
+				// naming convention, and it was the whole classifier — so an ACP harness's
+				// `session/request_permission` (id `acpui_<n>`, title from the tool call) matched neither and
+				// was handed to the auto-supervisor's model, whose prompt says "when in doubt … approve."
+				// A driver that knows it is relaying an approval gate says so; the conventions remain as the
+				// fallback for harnesses that don't. (R7)
+				gateClass: gateClassOf(req),
 				// Tag pendings rebuilt from the agent-host's ring replay during the post-reattach settle window
 				// (concern 04's ghost-expiry rules key off this — never gates answerability, only staleness).
 				replayed: this.settling.has(rec.dto.id) ? true : undefined,
