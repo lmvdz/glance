@@ -75,6 +75,7 @@ import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
+import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
 import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
@@ -812,6 +813,7 @@ export class SquadManager extends EventEmitter {
 		this.stateDir = opts.stateDir ?? resolveStateDir();
 		setProofRoot(this.stateDir);
 		setThresholdTunerRoot(this.stateDir);
+		setGateLogRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
@@ -7393,8 +7395,8 @@ export class SquadManager extends EventEmitter {
 	 *  this catches those the same way sweepLeases() catches plain heartbeat staleness. */
 	private async sweepRegistries(): Promise<void> {
 		try {
-			const [l, dead, p, pr] = await Promise.all([sweepLeases(), reapDeadSessions(), sweepPresence(), sweepProofs()]);
-			if (l + dead + p + pr > 0) this.log("info", `swept stale registry dirs — ${l} leases, ${dead} dead-pid leases, ${p} presence, ${pr} proofs`);
+			const [l, dead, p, pr, gl] = await Promise.all([sweepLeases(), reapDeadSessions(), sweepPresence(), sweepProofs(), sweepGateLogs()]);
+			if (l + dead + p + pr + gl > 0) this.log("info", `swept stale registry dirs — ${l} leases, ${dead} dead-pid leases, ${p} presence, ${pr} proofs, ${gl} gate-logs`);
 		} catch {
 			/* best-effort cleanup */
 		}

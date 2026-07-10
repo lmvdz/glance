@@ -690,7 +690,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		if (opts.staleGate !== false && staleGateEnabled()) {
 			const staleReason = await staleBranchReason(repo, branch, `origin/${opts.defaultBranch}`);
 			if (staleReason) {
-				return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: staleReason };
+				return { ok: false, committed, merged: false, retryable: staleReason.retryable, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: staleReason.reason };
 			}
 		}
 

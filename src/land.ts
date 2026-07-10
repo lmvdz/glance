@@ -609,7 +609,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		// merge (main was clean; this mirrors the failed-verify rollback) and refuse with the specifics.
 		if (staleReason) {
 			await git(["reset", "--hard", head0], repo).catch(() => {});
-			return { ok: false, committed, merged: false, message, detail: staleReason };
+			return { ok: false, committed, merged: false, retryable: staleReason.retryable, message, detail: staleReason.reason };
 		}
 		return verifyMerged(`merged ${branch}`, () => git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo));
 	}
@@ -664,10 +664,23 @@ const STALE_OVERLAP_LIST_CAP = 8;
  * blocks auto-land with a distinct reason instead of allowing on a guess; force-land (staleGate:false
  * at the call site) remains the escape hatch, same as a real staleness finding.
  */
-export async function staleBranchReason(repo: string, branch: string, baseRef = "HEAD"): Promise<string | undefined> {
-	const probeFailed = (step: string, r: GitRun): string => {
+/** Why `branch` is too stale to merge, and whether that's a genuine finding or a probe that
+ *  couldn't run. `retryable: true` ⇒ the probe itself failed (git hiccup) — this is an
+ *  environmental precondition, not a branch defect, and MUST NOT record as a rejected land
+ *  outcome (mirrors the dirty-main probe-failure polarity above). `retryable: false` ⇒ the
+ *  probes all ran and genuinely found staleness+overlap — a real refusal, unchanged from before. */
+export interface StaleBranchFinding {
+	reason: string;
+	retryable: boolean;
+}
+
+export async function staleBranchReason(repo: string, branch: string, baseRef = "HEAD"): Promise<StaleBranchFinding | undefined> {
+	const probeFailed = (step: string, r: GitRun): StaleBranchFinding => {
 		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `${step} failed: ${r.stderr || r.stdout || "no output"}` });
-		return `stale-branch ${reason} — could not prove ${branch} is fresh against ${baseRef}; refusing auto-land (force-land bypasses this gate)`;
+		return {
+			reason: `stale-branch ${reason} — could not prove ${branch} is fresh against ${baseRef}; refusing auto-land (force-land bypasses this gate)`,
+			retryable: true,
+		};
 	};
 	const mb = await git(["merge-base", baseRef, branch], repo);
 	if (mb.code !== 0) return probeFailed(`git merge-base ${baseRef} ${branch}`, mb);
@@ -685,12 +698,14 @@ export async function staleBranchReason(repo: string, branch: string, baseRef = 
 	const behind = await git(["rev-list", "--count", `${mb.stdout}..${baseRef}`], repo);
 	const shown = overlap.slice(0, STALE_OVERLAP_LIST_CAP).join(", ");
 	const more = overlap.length > STALE_OVERLAP_LIST_CAP ? ` (+${overlap.length - STALE_OVERLAP_LIST_CAP} more)` : "";
-	return (
-		`stale-branch gate blocked ${branch}: ${baseRef} advanced ${behind.stdout || "?"} commit(s) past this branch's fork point ` +
-		`and both sides edit ${overlap.length} of the same file(s): ${shown}${more}. ` +
-		`Merging a stale snapshot can silently revert newer ${baseRef} work — rebase the branch onto current ${baseRef} and re-verify, ` +
-		`or force-land with a reason. (OMP_SQUAD_STALE_GATE=0 disables this gate.)`
-	);
+	return {
+		reason:
+			`stale-branch gate blocked ${branch}: ${baseRef} advanced ${behind.stdout || "?"} commit(s) past this branch's fork point ` +
+			`and both sides edit ${overlap.length} of the same file(s): ${shown}${more}. ` +
+			`Merging a stale snapshot can silently revert newer ${baseRef} work — rebase the branch onto current ${baseRef} and re-verify, ` +
+			`or force-land with a reason. (OMP_SQUAD_STALE_GATE=0 disables this gate.)`,
+		retryable: false,
+	};
 }
 
 /** Bound the rebase resolve loop so a pathological branch can't spin forever. */
