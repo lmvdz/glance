@@ -8,13 +8,15 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentDriver } from "../src/agent-driver.ts";
 import { RbacDenied } from "../src/auth.ts";
 import type { StateSnapshot, Store } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { Actor } from "../src/types.ts";
+import type { AgentDTO, Actor, PersistedAgent, RpcSessionState } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -108,4 +110,86 @@ test("applyCommand: a voice-originated command's source rides along to the audit
 	expect(typedEntry).toBeDefined();
 	expect("source" in (typedEntry as object)).toBe(false);
 	expect(typedEntry?.source).toBeUndefined();
+});
+
+/** A healthy no-op driver (mirrors tests/console-prompt-spawn-failure.test.ts's HealthyDriver) — just
+ *  enough surface for `ensureConnected`/`prompt`/`abort` to resolve without a real spawn. */
+class HealthyDriver extends EventEmitter implements AgentDriver {
+	isReady = true;
+	isAlive = true;
+	start(): Promise<void> {
+		return Promise.resolve();
+	}
+	stop(): Promise<void> {
+		return Promise.resolve();
+	}
+	prompt(): Promise<void> {
+		return Promise.resolve();
+	}
+	abort(): Promise<unknown> {
+		return Promise.resolve();
+	}
+	getState(): Promise<RpcSessionState> {
+		return Promise.reject(new Error("getState is never called in this test"));
+	}
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
+interface ManagerTestHost {
+	agents: Map<string, { dto: AgentDTO; agent: AgentDriver; options: PersistedAgent; transcript: unknown[]; assistantBuf: string; thinkingBuf: string; streaming: boolean }>;
+}
+
+/** Seeds an in-roster agent record directly (bypassing create()'s real worktree/spawn), the same
+ *  shortcut tests/console-prompt-spawn-failure.test.ts uses to drive applyCommand's prompt/interrupt
+ *  paths without a real repo or harness. */
+function seed(mgr: SquadManager, id: string, agent: AgentDriver): void {
+	const dto: AgentDTO = { id, name: id, status: "idle", kind: "omp-operator", repo: "/r", worktree: "/r", branch: `squad/${id}`, approvalMode: "yolo", pending: [], lastActivity: 0, messageCount: 0 };
+	const options: PersistedAgent = { id, name: id, repo: "/r", worktree: "/r", approvalMode: "yolo" };
+	(mgr as unknown as ManagerTestHost).agents.set(id, { dto, agent, options, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false });
+}
+
+test("applyCommand: source reaches the REAL audit.jsonl trail, not just the DB store table (concern 03 gap)", async () => {
+	// The store.appendAudit path above feeds the sqlite `audit` table (DB mode) and is a no-op on
+	// FileStore. The actual trail GET /api/audit reads is recordAudit → makeAuditEntry →
+	// appendAudit(stateDir) → <stateDir>/audit.jsonl (src/audit.ts). Omitting `store` here defaults
+	// to FileStore (see SquadManager constructor), so this exercises that real, on-disk path. The
+	// prompt/interrupt cases only reach recordAudit once an in-roster agent is found (`if (!rec)
+	// return;`), so a real (seeded) agent record is required — an unknown id would silently no-op.
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rbac-audit-jsonl-"));
+	const mgr = new SquadManager({ stateDir: dir });
+	await mgr.start();
+	cleanups.push(async () => {
+		await mgr.stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	seed(mgr, "voice-1", new HealthyDriver());
+
+	const operator: Actor = { id: "o", origin: "remote", role: "operator" };
+
+	await mgr.applyCommand({ type: "prompt", id: "voice-1", message: "x", source: "voice" }, operator);
+	await mgr.applyCommand({ type: "interrupt", id: "voice-1" }, operator);
+
+	// recordAudit's disk write is deliberately fire-and-forget (`void this.recordAudit(...)`, never
+	// awaited by applyCommand — see its doc comment: "a disk failure must never break the action it
+	// records"). Poll for the fsync'd file rather than reading once immediately after applyCommand
+	// resolves, which would race the in-flight write.
+	let lines: Array<{ action: string; actor: string; source?: string }> = [];
+	for (let attempt = 0; attempt < 100; attempt++) {
+		const raw = await fs.readFile(path.join(dir, "audit.jsonl"), "utf8").catch(() => "");
+		lines = raw
+			.split("\n")
+			.filter((l) => l.trim())
+			.map((l) => JSON.parse(l));
+		if (lines.some((e) => e.action === "prompt") && lines.some((e) => e.action === "interrupt")) break;
+		await new Promise((r) => setTimeout(r, 10));
+	}
+
+	const promptLine = lines.find((e) => e.action === "prompt" && e.actor === "o");
+	expect(promptLine).toBeDefined();
+	expect(promptLine.source).toBe("voice");
+
+	const interruptLine = lines.find((e) => e.action === "interrupt" && e.actor === "o");
+	expect(interruptLine).toBeDefined();
+	expect("source" in interruptLine).toBe(false);
 });

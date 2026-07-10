@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { expect, test } from "bun:test";
 
-// ── env-catalog completeness gate (plans/agent-profiles/02-skills-mcp-binding.md concern 02) ──
+// ── env-catalog completeness gate (plans/webapp-voice-lane/02-env-example-test.md concern 02) ──
 //
 // .env.example claims (see its own header) to be kept complete by THIS test: every env var read
 // in src/ must appear in .env.example, and every var documented in .env.example must be read

@@ -1374,6 +1374,9 @@ export interface AuditEntry {
 	outcome: "ok" | "error";
 	/** Optional human-readable detail (truncated message, error text). */
 	detail?: string;
+	/** Optional provenance tag ("voice" | "composer", kept as an open string) carried from the
+	 *  originating ClientCommand — observability-only, never consulted for authz/tier decisions. */
+	source?: string;
 }
 
 // ── Surface → manager commands ──────────────────────────────────────────────

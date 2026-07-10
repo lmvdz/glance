@@ -443,6 +443,12 @@ test("ComposerSendButton swaps to a stop affordance while the agent is running, 
   expect(pending).toContain("disabled");
 });
 
+test("ComposerSendButton's own rendered subtree carries no attach/mic decoration (those live on Composer itself, not the send/stop control)", () => {
+  const html = renderToStaticMarkup(<ComposerSendButton isStopShown={false} stopPending={false} canSend={false} onSend={() => {}} onStop={() => {}} />);
+  expect(html).not.toContain('aria-label="Attach file"');
+  expect(html).not.toContain('aria-label="Voice input"');
+});
+
 test("ChatMessagesViewport's scroll container is an announced log region, aria-busy while a real transcript entry is running, while a send is loading, or while a pendingSend is in flight (review finding 2 — these are computed separately from the work-fold's own running)", () => {
   const runningEntries: TranscriptEntry[] = [{ id: "e1", kind: "assistant", text: "working…", ts: 1, status: "running" }];
   const settledEntries: TranscriptEntry[] = [{ id: "e2", kind: "assistant", text: "done", ts: 1, status: "ok" }];

@@ -3888,8 +3888,8 @@ export class SquadManager extends EventEmitter {
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
 
-	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
-		return this.createWithId(opts, undefined, actor);
+	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR, source?: string): Promise<AgentDTO> {
+		return this.createWithId(opts, undefined, actor, source);
 	}
 
 	/**
@@ -3907,7 +3907,7 @@ export class SquadManager extends EventEmitter {
 		return this.createWithId(opts, opts.explicitId, actor);
 	}
 
-	private async createWithId(opts: CreateAgentOptions, explicitId: string | undefined, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+	private async createWithId(opts: CreateAgentOptions, explicitId: string | undefined, actor: Actor = LOCAL_ACTOR, source?: string): Promise<AgentDTO> {
 		const profile = this.profileFor(opts.profileId, opts.repo);
 		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
 		// what tools the spawned agent may use. They were parsed but NEVER applied — every agent got full tool
@@ -4382,7 +4382,7 @@ export class SquadManager extends EventEmitter {
 
 		await this.persist();
 		const failed = rec.dto.status === "error";
-		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncate(opts.task ?? rec.dto.name, 80));
+		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncate(opts.task ?? rec.dto.name, 80), source);
 		return rec.dto;
 	}
 
@@ -4668,7 +4668,7 @@ export class SquadManager extends EventEmitter {
 	 * Author → validate → onboard a Flue worker (an agent that fills a job).
 	 * On a failed gate nothing is onboarded — the candidate is rejected.
 	 */
-	async commission(spec: CommissionSpec, opts: CommissionOptions = {}, actor: Actor = LOCAL_ACTOR): Promise<CommissionResult> {
+	async commission(spec: CommissionSpec, opts: CommissionOptions = {}, actor: Actor = LOCAL_ACTOR, source?: string): Promise<CommissionResult> {
 		const dir = opts.dir ?? path.join(this.stateDir, "workers", spec.name);
 		await fs.mkdir(dir, { recursive: true });
 		this.log("info", `${actor.id} commissioning "${spec.name}" → ${truncate(spec.purpose, 80)}`);
@@ -4685,10 +4685,10 @@ export class SquadManager extends EventEmitter {
 		const report = executor.report;
 		if (report) this.log(report.ok ? "info" : "warn", `gate "${spec.name}": ${report.checks.map((c) => `${c.name}=${c.status}`).join(" ")}`);
 		if (!executor.member || !report) {
-			void this.recordAudit(actor, "commission", spec.name, "error", report ? "gate failed" : "no candidate");
+			void this.recordAudit(actor, "commission", spec.name, "error", report ? "gate failed" : "no candidate", source);
 			return { ok: false, report: report ?? { ok: false, checks: [] }, dir };
 		}
-		void this.recordAudit(actor, "commission", spec.name, "ok", truncate(spec.purpose, 80));
+		void this.recordAudit(actor, "commission", spec.name, "ok", truncate(spec.purpose, 80), source);
 		return { ok: true, report, member: executor.member, dir };
 	}
 
@@ -4850,7 +4850,7 @@ export class SquadManager extends EventEmitter {
 				.catch((err) => this.log("warn", `audit write failed for \"${cmd.type}\": ${err instanceof Error ? err.message : String(err)}`));
 		}
 		if (cmd.type === "create") {
-			await this.create(cmd.options, actor);
+			await this.create(cmd.options, actor, commandSource(cmd));
 			return;
 		}
 		if (cmd.type === "snapshot") {
@@ -4864,7 +4864,7 @@ export class SquadManager extends EventEmitter {
 			return;
 		}
 		if (cmd.type === "commission") {
-			await this.commission(cmd.spec, {}, actor);
+			await this.commission(cmd.spec, {}, actor, commandSource(cmd));
 			return;
 		}
 		if (cmd.type === "message") {
@@ -4934,7 +4934,7 @@ export class SquadManager extends EventEmitter {
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
 				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
-				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncate(cmd.message, 80));
+				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncate(cmd.message, 80), commandSource(cmd));
 				break;
 			}
 			case "set-model": {
@@ -4976,7 +4976,7 @@ export class SquadManager extends EventEmitter {
 			}
 			case "interrupt":
 				await rec.agent.abort().catch(() => {});
-				void this.recordAudit(actor, "interrupt", cmd.id);
+				void this.recordAudit(actor, "interrupt", cmd.id, "ok", undefined, commandSource(cmd));
 				break;
 			case "kill":
 				// Review finding 8: mark BEFORE stop() — a branch agent's `onExit` listener (runAgentTask) fires
@@ -6611,8 +6611,8 @@ export class SquadManager extends EventEmitter {
 	 * actions it runs outside applyCommand (per-agent + feature land). Best-effort:
 	 * a disk failure must never break the action it records, so we log and move on.
 	 */
-	async recordAudit(actor: Actor | string, action: string, target: string | null, outcome: "ok" | "error" = "ok", detail?: string): Promise<void> {
-		const entry = makeAuditEntry({ actor, action, target, outcome, detail });
+	async recordAudit(actor: Actor | string, action: string, target: string | null, outcome: "ok" | "error" = "ok", detail?: string, source?: string): Promise<void> {
+		const entry = makeAuditEntry({ actor, action, target, outcome, detail, source });
 		this.emit("event", { type: "audit", entry } satisfies SquadEvent);
 		try {
 			await appendAudit(this.stateDir, entry);

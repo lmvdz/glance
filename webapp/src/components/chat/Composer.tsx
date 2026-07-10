@@ -379,6 +379,10 @@ export const Composer = ({
   const speechSupported = isSpeechRecognitionSupported();
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  // Latched once the browser reports 'not-allowed' — a denied mic permission doesn't clear itself
+  // mid-session, so re-clicking the button would just re-fail with the same error forever. Disabling
+  // it for the rest of this mount is the honest state instead of an infinite click-fail loop.
+  const [voiceDenied, setVoiceDenied] = useState(false);
   const voiceSessionRef = useRef<VoiceInputSession | null>(null);
 
   useEffect(() => () => { voiceSessionRef.current?.abort(); }, []); // stop listening on unmount
@@ -393,9 +397,18 @@ export const Composer = ({
       continuous: true, // chained: keep listening across multiple sentences until toggled off
       onListeningChange: setIsListening,
       onTranscript: (text) => setInput((prev) => appendVoiceTranscript(prev, text)),
-      onError: (info) => setVoiceError(info.message),
+      onError: (info) => {
+        setVoiceError(info.message);
+        if (info.code === 'not-allowed') setVoiceDenied(true);
+      },
     });
-    voiceSessionRef.current = session ?? null;
+    if (!session) {
+      // Support can vanish between render and click (isSpeechRecognitionSupported() gates the
+      // button, but a race — or a skipped check — must never look like a silent no-op).
+      setVoiceError("Voice input isn't available right now — try again or type instead.");
+      return;
+    }
+    voiceSessionRef.current = session;
   };
 
   const addImageFromSource = async (source: Blob | string) => {
@@ -736,11 +749,13 @@ export const Composer = ({
               type="button"
               aria-label="Voice input"
               title={
-                speechSupported
-                  ? "Voice input — your browser may send audio to its speech-recognition service to transcribe it (Chrome does)"
-                  : "Voice input isn't supported in this browser"
+                voiceDenied
+                  ? 'Microphone access was denied — allow it in your browser settings to use voice input'
+                  : speechSupported
+                    ? "Voice input — your browser may send audio to its speech-recognition service to transcribe it (Chrome does)"
+                    : "Voice input isn't supported in this browser"
               }
-              disabled={!speechSupported}
+              disabled={!speechSupported || voiceDenied}
               onClick={toggleVoiceInput}
               className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
                 isListening

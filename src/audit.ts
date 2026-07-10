@@ -35,6 +35,9 @@ export interface AuditInput {
 	target?: string | null;
 	outcome?: "ok" | "error";
 	detail?: string;
+	/** Optional provenance tag ("voice" | "composer", kept as an open string) — observability-only,
+	 *  never consulted for authz/tier decisions. Contain-or-omit: absent when the caller didn't have one. */
+	source?: string;
 }
 
 /** Stamp id + at, normalize the actor to its id, and default outcome to "ok". */
@@ -49,6 +52,7 @@ export function makeAuditEntry(input: AuditInput, now = Date.now()): AuditEntry 
 		outcome: input.outcome ?? "ok",
 	};
 	if (input.detail) entry.detail = input.detail;
+	if (input.source !== undefined) entry.source = input.source;
 	return entry;
 }
 
