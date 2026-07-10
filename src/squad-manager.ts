@@ -7649,7 +7649,23 @@ export class SquadManager extends EventEmitter {
 			if (parent.kind !== "workflow") continue;
 			for (const id of await this.unresolvedBranchIds(parent)) skipRestore.add(id);
 		}
+		// Count what we ACTUALLY restore. This used to `return list.length`, so the boot banner said
+		// "restored 2 agent(s)" whether it restored two, skipped two as tombstoned, or (before the guard
+		// above) minted two duplicates. A count that never disagrees with itself is not a count.
+		let restoredCount = 0;
 		for (const p of list) {
+			// ALREADY RESIDENT ⇒ never re-create. `start()` runs first and `reconnectLive`/`adoptOrphanedAgents`
+			// reattach persisted records VERBATIM, keyed by their original id (reconnectLive has this exact
+			// guard). `--restore` then walked the same list and `create()`d each one under a FRESH id — so
+			// every reattached record got a twin, and the twin was itself persisted, so the next
+			// `up --restore` doubled again. Observed live on the operator's daemon: one `ompsq-445` became
+			// two after one bounce and four after the next, each pair a terminal-marked workflow reattached
+			// verbatim alongside a freshly-minted duplicate. The dispatcher was innocent — its ledger
+			// correctly skips the issue; the roster was breeding at boot.
+			if (this.agents.has(p.id)) {
+				this.log("info", `skipped restoring ${p.name} (${p.id}) — already reattached by start()`);
+				continue;
+			}
 			// rm-doesn't-stick fix (cross-lineage review MEDIUM 3): `--restore` was the one boot path that
 			// bypassed the tombstone entirely, re-creating every persisted record — including explicitly
 			// rm'd ones — under fresh ids. Same gate as reconnectLive/adoptOrphanedAgents.
@@ -7658,7 +7674,12 @@ export class SquadManager extends EventEmitter {
 				continue;
 			}
 			if (p.kind === "flue-service" && p.flue) {
-				await this.restoreFlueMember(p).catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
+				// Counted on SUCCESS only — a restore that threw is not a restore (grok-4.5).
+				await this.restoreFlueMember(p)
+					.then(() => {
+						restoredCount++;
+					})
+					.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 				continue;
 			}
 			if (skipRestore.has(p.id)) {
@@ -7705,6 +7726,12 @@ export class SquadManager extends EventEmitter {
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap
 			})
 				.then(async (dto) => {
+					// SUCCESS only. `createWithId` catches a driver/handshake failure, marks the record `error`,
+					// and RESOLVES with that DTO rather than rejecting (see its catch → settleSpawnFailure →
+					// `return rec.dto`), so a bare `.then()` counted a unit that never came up. The boot banner
+					// would print "restored 1 agent(s)" over a corpse. (grok-4.5 raised the attempts-vs-successes
+					// gap; gpt-5.6-sol found the fulfilled-error path that makes `.catch` insufficient.)
+					if (dto.status !== "error") restoredCount++;
 					// Same fresh-id-fresh-correlation leak as adoptOrphanedAgents (this path also mints a new
 					// agent id from a PersistedAgent) — close, never restore, any pending it carried (concern 04).
 					// Unconditional, like adoptOrphanedAgents' call site — closeOrphanedPending unconditionally
@@ -7715,7 +7742,7 @@ export class SquadManager extends EventEmitter {
 				})
 				.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
-		return list.length;
+		return restoredCount;
 	}
 }
 
