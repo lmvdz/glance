@@ -641,6 +641,29 @@ test('VoiceSession: a function call moves to toolPending and emits onFunctionCal
   expect(sent[sent.length - 1]).toEqual({ type: 'response.create' });
 });
 
+test('re-review MEDIUM: the deferred-continuation path clears activeAudio so a barge-in during the continuation does not over-truncate the finished item', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease();
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  // the wrapping response speaks, so an audio item is now tracked
+  h.nowValue = 1_000;
+  serverEvent(h, { type: 'response.output_audio_transcript.delta', delta: 'Hi', item_id: 'item-1', content_index: 0 });
+  // a tool call resolves; its ack's continuation is deferred behind resp-1
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'c1', name: 'fleet_status', arguments: '{}' });
+  h.session.sendFunctionOutput('c1', { agents: 1 });
+  serverEvent(h, { type: 'response.done' }); // fires the deferred create AND must clear activeAudio*
+  const sentBefore = lastSent(h).length;
+
+  h.nowValue = 9_999; // lots of wall-clock elapsed on the tool round-trip
+  h.session.pttPress(); // barge in BEFORE the continuation's first audio delta
+
+  // item-1 finished with resp-1; there is no live audio item to truncate → no over-reported audio_end_ms
+  const afterBargeIn = lastSent(h).slice(sentBefore);
+  expect(afterBargeIn.some((s) => s.type === 'conversation.item.truncate')).toBe(false);
+});
+
 test('MINOR-12: a second function call before the first is acked still fires onFunctionCall with its own distinct callId (nothing is lost)', async () => {
   const h = makeHarness();
   await h.session.connect();
@@ -832,6 +855,18 @@ describe('CRITICAL-2 (gauntlet): playback resumes after a barge-in', () => {
     h.session.pttRelease();
     serverEvent(h, { type: 'response.created' });
     expect(h.resumePlaybackCalls).toBe(1);
+  });
+
+  test('re-review LOW: resumePlayback does NOT fire while userRecording (a barge-in inside the RTT window before response.created)', async () => {
+    const h = makeHarness();
+    await h.session.connect();
+    h.session.pttPress();
+    h.session.pttRelease(); // sends a response.create
+    h.session.pttPress(); // user barges in again BEFORE the server's response.created arrives → userRecording, playback paused
+    const before = h.resumePlaybackCalls;
+    serverEvent(h, { type: 'response.created' }); // the about-to-be-cancelled response starts
+    // must stay paused — un-pausing here would play its buffered frames over the user's new utterance
+    expect(h.resumePlaybackCalls).toBe(before);
   });
 });
 

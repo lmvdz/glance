@@ -675,7 +675,10 @@ export class VoiceSession {
         // CRITICAL-2: a fresh response is starting — resume local playback in case the PREVIOUS
         // turn ended in a barge-in (`stopPlayback()` paused the shared <audio> element and nothing
         // else ever un-pauses it). Idempotent/cheap when playback was never paused to begin with.
-        this.deps.resumePlayback();
+        // But NOT while the user is recording: if they barged in again inside the RTT window before
+        // this `response.created` landed, un-pausing would play the about-to-be-cancelled response's
+        // buffered frames over the user's new utterance.
+        if (this.state !== 'userRecording') this.deps.resumePlayback();
         return;
       }
       case 'response.output_audio_transcript.delta':
@@ -724,6 +727,13 @@ export class VoiceSession {
           // moment, send it for real now instead of dispatching `response-done` (the turn isn't
           // over; it's continuing). `sendRaw` sees outstandingResponses back at 0 and sends
           // immediately rather than deferring again.
+          // The wrapping response's audio item is finished either way — clear its tracking BEFORE
+          // firing a deferred continuation, or a barge-in during the continuation (before its own
+          // first delta) would truncate the now-completed item with a wall-clock `audio_end_ms`
+          // that exceeds the item's real duration (provider error, not benign → spurious teardown).
+          this.activeAudioItemId = undefined;
+          this.activeAudioContentIndex = undefined;
+          this.activeAudioStartedAt = undefined;
           if (this.deferredResponseCreate) {
             const { trigger } = this.deferredResponseCreate;
             this.deferredResponseCreate = undefined;
@@ -731,9 +741,6 @@ export class VoiceSession {
             this.sendRaw({ type: 'response.create' });
             return;
           }
-          this.activeAudioItemId = undefined;
-          this.activeAudioContentIndex = undefined;
-          this.activeAudioStartedAt = undefined;
           this.dispatch({ type: 'response-done' });
         }
         return;
