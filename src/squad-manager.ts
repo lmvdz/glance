@@ -322,6 +322,17 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
  */
 const LAND_BLOCKED_WARN_COOLDOWN_MS = FACTORY_FRESHNESS_FLOOR_MS - 60_000;
 
+/**
+ * Greppable marker for a membrane-breaker/staleness escalation filed with NO live triggering unit
+ * (`fileMembraneBreakerFinding`'s rec-less arm). Verified investigation (blind-review follow-up,
+ * see the doc comment on `fileMembraneBreakerFinding`): as of this fix there is NO rendered UI
+ * surface — cockpit or graph — that a repo/daemon-scoped automation event with no live `agentId`
+ * reaches. This marker exists so the escalation is still trivially findable by anyone grepping
+ * automation.jsonl, `/api/automation`, or `glance automation --loop land`, until a real
+ * repo-scoped attention surface exists to carry it.
+ */
+export const UNATTACHED_ESCALATION_MARKER = "UNATTACHED-ESCALATION (no live triggering unit — CLI/API only, see automation.jsonl)";
+
 function peerMessageBudget(): number {
 	return envInt("OMP_SQUAD_PEERMSG_BUDGET", 5);
 }
@@ -3678,10 +3689,30 @@ export class SquadManager extends EventEmitter {
 	 * already be reaped off `this.agents` — the caller passes `undefined` in that case rather than a
 	 * dangling `AgentRecord` reference that no client's roster still contains (attaching to a detached
 	 * DTO nobody's UI is watching would be indistinguishable from dropping the event). Step 1 is simply
-	 * skipped when `rec` is absent; step 2 (the daemon-scoped automation channel) ALWAYS runs regardless,
-	 * so a rotting baseline is never visible in zero places just because its triggering unit is gone —
-	 * "an escalation nobody sees is indistinguishable from no escalation." Never a log line alone — a
-	 * fleet-wide safety-net trip that only a daemon operator tailing logs would ever see defeats the
+	 * skipped when `rec` is absent; step 2 (the daemon-scoped automation channel) ALWAYS runs regardless.
+	 *
+	 * HONEST LABEL (2nd round follow-up, blind review): when `rec` is absent, step 2 is — as of today —
+	 * the ONLY place this escalation reaches. It was believed to also surface via the cockpit's
+	 * "Needs you" lane and/or the omp-graph "land" loop node; verified false on both counts:
+	 *   - The Needs-you lane (`attentionItems` in webapp/src/lib/insights.ts) has no daemon/repo-scoped
+	 *     source at all — its `actionItems` fold-in only ever pushes `source: "health"` rows, and the
+	 *     server's `/api/action-items` only ever builds `land`/`error`/`pending` rows FROM a live agent
+	 *     in the roster. An unattached finding has neither.
+	 *   - factory-status.ts's `landBlocked` banner (the one existing repo-scoped warning slot) is
+	 *     hard-coupled to the "land" channel's `skipReason` meaning "a land was refused" — tagging this
+	 *     event that way would misrender as "Fleet cannot land: …" for a condition that has nothing to do
+	 *     with landing. Rejected as dishonest.
+	 *   - The omp-graph "land" loop node is unreachable in the live UI: FleetPulseCanvas only turns a
+	 *     LOOP automation event into a clickable hanging note when it carries `filed`/`spawned` (see
+	 *     `pulse-model.ts`), which no "land"-channel write (this one included) ever sets. The tag `loop:
+	 *     "land"` exists only as event metadata, never as an inspectable/clickable UI element.
+	 * So a rotting baseline or a membrane-breaker trip with no live triggering unit is, right now, only
+	 * findable via `/api/automation`, `glance automation --loop land`, or grepping automation.jsonl — NOT
+	 * "an escalation nobody sees is indistinguishable from no escalation" in the full sense the rest of
+	 * this file achieves elsewhere. Rather than fake a UI render, the detail carries
+	 * `UNATTACHED_ESCALATION_MARKER` so it's trivially greppable until a real repo-scoped attention
+	 * surface exists (tracked as follow-up work, not invented here). Never a log line alone regardless —
+	 * a fleet-wide safety-net trip that only a daemon operator tailing logs would ever see defeats the
 	 * point of having a breaker. Best-effort; never throws.
 	 */
 	private fileMembraneBreakerFinding(rec: AgentRecord | undefined, repo: string, event: AttentionEvent): void {
@@ -3694,8 +3725,12 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		try {
-			this.log("warn", `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`);
-			this.automation.for("land", repo)({ durationMs: 0, level: "warn", detail: `${event.summary}${event.detail ? ` — ${event.detail}` : ""}` });
+			const text = `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`;
+			this.log("warn", text);
+			// See the doc comment above: with no live `rec`, this write is the ONLY place the escalation
+			// reaches today — mark it so it's still trivially findable without a UI.
+			const detail = rec ? text : `${UNATTACHED_ESCALATION_MARKER} — ${text}`;
+			this.automation.for("land", repo)({ durationMs: 0, level: "warn", detail });
 		} catch {
 			/* observability must never break the land path */
 		}

@@ -99,8 +99,11 @@ export interface LensVerdictDTO {
  *  renamed/retyped on) `ValidationRecord` does not fail `tsc` here on its own. `tests/dto-conformance.test-d.ts`
  *  (wired into the root tsconfig's `include`) is that edge: it asserts every key declared here exists on
  *  `ValidationRecord` with an IDENTICAL type, so this file drifting out of sync fails `bun run check`,
- *  not just a runtime read nobody happened to exercise. It is deliberately a SUBSET, not full equality —
- *  the DTO may omit backend fields the webapp has no reader for yet. */
+ *  not just a runtime read nobody happened to exercise. It is EQUALITY minus an explicit, named omit list
+ *  (`OmittedFromValidationRecordDto`, empty today), not a one-directional subset — a subset check passes
+ *  trivially the moment a new backend field is simply never mirrored, which is exactly how `gateLogPaths`
+ *  went unmirrored for months undetected. A new backend field must now either be mirrored here or named
+ *  in the omit list on purpose; leaving it out of both fails the build. */
 export interface ValidationRecordDTO {
   verdict: "pass" | "veto" | "abstain" | "skipped";
   agreement: number;

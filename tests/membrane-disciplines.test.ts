@@ -33,7 +33,7 @@ import { recordSelectedBaseline } from "../src/baseline-tracker.ts";
 import { appendReceipt } from "../src/receipts.ts";
 import { recordTaskOutcome } from "../src/task-outcomes.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
-import { SquadManager } from "../src/squad-manager.ts";
+import { SquadManager, UNATTACHED_ESCALATION_MARKER } from "../src/squad-manager.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { AgentDTO, AttentionEvent, PersistedAgent, RpcSessionState, RunReceipt } from "../src/types.ts";
 import type { TaskOutcomeRow } from "../src/task-outcomes.ts";
@@ -416,7 +416,12 @@ test("SquadManager#fileMembraneBreakerFinding: a breaker trip attaches to the tr
 	// 2. Automation channel: also surfaces in /api/automation + the automation panel, independent of
 	//    whether the triggering unit is still live by the time a human looks.
 	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
-	expect(recent.some((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn")).toBe(true);
+	const finding = recent.find((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn");
+	expect(finding).toBeDefined();
+	// With a LIVE rec, the attention lane above already made this human-visible in the cockpit — the
+	// unattached-only marker must NOT be present (it would misleadingly claim "no UI surface" for an
+	// event that DID reach one).
+	expect(finding?.detail).not.toContain(UNATTACHED_ESCALATION_MARKER);
 
 	await mgr.stop();
 });
@@ -445,7 +450,13 @@ test("SquadManager#fileMembraneBreakerFinding: with NO live record (unit already
 	).not.toThrow();
 
 	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
-	expect(recent.some((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn")).toBe(true);
+	const finding = recent.find((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn");
+	expect(finding).toBeDefined();
+	// Round-2 review follow-up: with no live `rec`, this write is (as of this fix) the ONLY place the
+	// escalation reaches — no cockpit/graph surface renders it (see the doc comment on
+	// `fileMembraneBreakerFinding`). Proves the write carries the unmistakable, greppable marker rather
+	// than pretending a UI render happened.
+	expect(finding?.detail).toContain(UNATTACHED_ESCALATION_MARKER);
 
 	await mgr.stop();
 });

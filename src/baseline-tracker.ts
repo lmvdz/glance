@@ -171,6 +171,14 @@ function envPinKey(taskClass: string): string {
  * A pin naming a taskClass the file simply doesn't mention is still legitimate "no pin" (not every
  * taskClass needs one). Callers on the land path (`selectAndTrackBaseline`) must catch this and escalate
  * rather than let it propagate unhandled — this function itself does not soften the failure, by design.
+ *
+ * A KEY PRESENT but an INVALID VALUE (blind review follow-up: `{"light": ""}` or `{"light": 42}` inside
+ * an otherwise-valid pins file) gets the same treatment, not the "no pin configured" silent fallthrough —
+ * the file parses fine, so the missing-vs-corrupt distinction above doesn't catch it, but a present,
+ * non-string/blank value is exactly as much an operator mistake as the blank-env-var case: a silently
+ * ignored pin is a silently-disabled safety net, the same failure class this whole function exists to
+ * reject. Only an ABSENT key (`value === undefined` — JSON has no `undefined`, so this is unambiguous)
+ * stays a legitimate, silent "no pin for this taskClass".
  */
 export function resolvePinnedModel(stateDir: string, taskClass: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
 	const envKey = envPinKey(taskClass);
@@ -198,7 +206,14 @@ export function resolvePinnedModel(stateDir: string, taskClass: string, env: Nod
 		throw new Error(classifyProbeFailure({ kind: "corrupt-state", detail: `baseline pins file at ${p} is not a JSON object` }).reason);
 	}
 	const value = (parsed as Record<string, unknown>)[taskClass];
-	return typeof value === "string" && value.trim() ? value.trim() : undefined; // no pin configured for THIS taskClass — not corruption
+	if (value === undefined) return undefined; // key absent — no pin configured for THIS taskClass, not corruption
+	if (typeof value === "string" && value.trim()) return value.trim();
+	// Key IS present but the value is not a usable pin (blank string, a number, `null`, …) — an operator
+	// mistake, not a legitimate no-pin state. Reject loudly, same as the blank-env-var case above.
+	throw new Error(
+		classifyProbeFailure({ kind: "unparseable", detail: `baseline pins file at ${p} has an invalid pin for taskClass "${taskClass}": ${JSON.stringify(value)} (expected a non-blank string)` })
+			.reason,
+	);
 }
 
 export interface BaselineTrackResult {
@@ -284,7 +299,24 @@ export function selectAndTrackBaseline(stateDir: string, doc: TaskClassMatrixDoc
 	// than let it silently overwrite the file with a fresh single-entry state (which would also destroy
 	// every OTHER taskClass's persisted baseline). The measurement itself is still returned above; only
 	// the PERSISTENCE of this round's pick is held back until the file is fixed.
-	if (baseline && !trackerCorrupt) recordSelectedBaseline(stateDir, taskClass, baseline.model, now);
+	//
+	// Round-2 review follow-up: `readPersistedBaseline` above already proved the file readable a moment
+	// ago (`trackerCorrupt` is false), but `recordSelectedBaseline` does its OWN read-modify-write — an
+	// external TOCTOU corruption of the file in between (a foreign process, a concurrent daemon) makes
+	// its internal `readState` throw too. Uncaught, that throw would escape this function entirely and
+	// take the `staleness` array — already built above, possibly carrying a real corruption/pin/staleness
+	// escalation — down with it, so the one thing this function promises ("never fail-blocked, always
+	// deliver what staleness it found") would itself fail silently on the exact class of bug it exists to
+	// catch. Caught, escalated via the SAME `corruptEvent` channel, and swallowed: `baseline` (already
+	// computed above from the pure `doc`) is still returned, so this remains fail-closed on the *write*,
+	// never fail-blocked on the *read*.
+	if (baseline && !trackerCorrupt) {
+		try {
+			recordSelectedBaseline(stateDir, taskClass, baseline.model, now);
+		} catch (err) {
+			staleness.push(corruptEvent("tracker", taskClass, err, now));
+		}
+	}
 
 	return { baseline, staleness };
 }

@@ -5,8 +5,9 @@
  * cell) — `tests/membrane-breaker-cadence.test.ts` covers the one live production call site end to end.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as nodeFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readPersistedBaseline, recordSelectedBaseline, resolvePinnedModel, selectAndTrackBaseline } from "../src/baseline-tracker.ts";
@@ -132,6 +133,34 @@ describe("resolvePinnedModel", () => {
 		const stateDir = await tmpDir();
 		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:light": "opus" }));
 		expect(resolvePinnedModel(stateDir, "tdd:heavy", {})).toBeUndefined();
+	});
+
+	// ── Round-2 review follow-up: a PRESENT but INVALID pin value must not silently read as "no pin" ────
+	// (the same failure class as the blank-env-pin fix above — a silently-ignored pin is a
+	// silently-disabled safety net). Only a genuinely ABSENT key (test above) stays silent.
+
+	test("a pin value that is an empty string THROWS (unparseable), not silently 'no pin'", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": "" }));
+		expect(() => resolvePinnedModel(stateDir, "tdd:heavy", {})).toThrow(/unparseable/);
+	});
+
+	test("a pin value that is whitespace-only THROWS (unparseable), not silently 'no pin'", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": "   " }));
+		expect(() => resolvePinnedModel(stateDir, "tdd:heavy", {})).toThrow(/unparseable/);
+	});
+
+	test("a pin value that is a NUMBER (not a string) THROWS (unparseable), not silently 'no pin'", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": 42 }));
+		expect(() => resolvePinnedModel(stateDir, "tdd:heavy", {})).toThrow(/unparseable/);
+	});
+
+	test("a pin value that is `null` THROWS (unparseable), not silently 'no pin'", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": null }));
+		expect(() => resolvePinnedModel(stateDir, "tdd:heavy", {})).toThrow(/unparseable/);
 	});
 });
 
@@ -279,5 +308,77 @@ describe("selectAndTrackBaseline", () => {
 		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13500, env });
 		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("unparseable"))).toBe(true);
 		expect(result.baseline?.model).toBe("sonnet");
+	});
+
+	// ── Round-2 review follow-up: a present-but-invalid pin VALUE inside a valid pins file ─────────────
+
+	test("a pin file with a present-but-blank value for this taskClass: escalation fired and the auto-champion is used, not a silently-disabled compare", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": "" }));
+		const doc = healthyDoc("b", "sonnet");
+		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13600 });
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("unparseable"))).toBe(true);
+		expect(result.baseline?.model).toBe("sonnet");
+		expect(result.baseline?.pinned).toBe(false);
+	});
+
+	test("a pin file with a present-but-non-string value (a number) for this taskClass: escalation fired and the auto-champion is used", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": 42 }));
+		const doc = healthyDoc("b", "sonnet");
+		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13700 });
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("unparseable"))).toBe(true);
+		expect(result.baseline?.model).toBe("sonnet");
+		expect(result.baseline?.pinned).toBe(false);
+	});
+
+	test("a pin file with NO entry at all for this taskClass stays legitimately silent: no staleness, auto-champion used", async () => {
+		const stateDir = await tmpDir();
+		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:light": "opus" }));
+		const doc = healthyDoc("b", "sonnet");
+		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13800 });
+		expect(result.staleness).toEqual([]);
+		expect(result.baseline?.model).toBe("sonnet");
+	});
+
+	// ── Round-2 review follow-up: a write-time TOCTOU corruption must not drop the staleness array ──────
+
+	test("recordSelectedBaseline throwing AFTER a healthy read (TOCTOU) is caught: staleness already built is still delivered, never lost to an uncaught throw", async () => {
+		const stateDir = await tmpDir();
+		// A prior baseline exists so this round has a real staleness event to lose if the throw escaped.
+		recordSelectedBaseline(stateDir, "tdd:heavy", "opus", 1000); // pretend "opus" was last time's champion
+		const doc = healthyDoc("b", "sonnet"); // this round's doc never saw "opus" — fires a staleness event
+
+		// Simulate an external TOCTOU corruption landing between selectAndTrackBaseline's OWN healthy read
+		// (readPersistedBaseline, the FIRST readFileSync call this invocation makes) and
+		// recordSelectedBaseline's internal read-modify-write (the SECOND call): let the first call through
+		// to the real implementation unchanged, then throw on the second — exactly what a foreign process
+		// tearing the file mid-flight, between those two reads, would produce. Scoped to this one call and
+		// restored immediately after (`finally`) — no other test observes the mock.
+		const realReadFileSync = nodeFs.readFileSync;
+		let calls = 0;
+		const spy = spyOn(nodeFs, "readFileSync").mockImplementation((...args: Parameters<typeof nodeFs.readFileSync>) => {
+			calls++;
+			if (calls === 2) throw new Error("simulated TOCTOU corruption");
+			return (realReadFileSync as (...a: unknown[]) => unknown)(...args);
+		});
+		let result!: ReturnType<typeof selectAndTrackBaseline>;
+		try {
+			expect(() => {
+				result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 14000 });
+			}).not.toThrow();
+		} finally {
+			spy.mockRestore();
+		}
+
+		// 1. The staleness event built BEFORE the write attempt (the vanished "opus" baseline) survived.
+		expect(result.staleness.some((e) => e.summary.includes("opus"))).toBe(true);
+		// 2. The write-time TOCTOU failure ALSO escalated via the same channel, not swallowed silently.
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("toctou"))).toBe(true);
+		// 3. The measurement itself is still returned — never fail-blocked on the write.
+		expect(result.baseline?.model).toBe("sonnet");
+
+		// Mock is fully torn down: a normal call afterward behaves exactly as before.
+		expect(readPersistedBaseline(stateDir, "tdd:heavy")).toEqual({ model: "opus", at: 1000 });
 	});
 });
