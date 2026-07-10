@@ -89,8 +89,12 @@ async function makeMgr(prefix: string): Promise<{ mgr: SquadManager; repo: strin
 }
 
 test("native harness (default omp): a membrane token confirms — AgentRecord.efficiencyFlags carries it, toolGrants stays isolated", async () => {
-	stashEnv("OMP_SQUAD_PROFILES");
+	// eap-borrows concern 05 added double gate #2 (OMP_SQUAD_MEMBRANE_PROFILES) between the raw
+	// capabilities-derived "requested" set and both the delivery confirmation and the prompt injection —
+	// gate #2 must be on for the same membrane token this test names to actually confirm.
+	stashEnv("OMP_SQUAD_PROFILES", "OMP_SQUAD_MEMBRANE_PROFILES");
 	process.env.OMP_SQUAD_PROFILES = JSON.stringify([{ id: "native-membrane", name: "Native membrane", capabilities: ["read", "membrane:verdict-first"] }]);
+	process.env.OMP_SQUAD_MEMBRANE_PROFILES = "1";
 	const { mgr, repo } = await makeMgr("eff-native");
 	const dto = await mgr.create({ name: "u", repo, profileId: "native-membrane", approvalMode: "yolo", autoRoute: false });
 	expect(dto.harnessCaps?.contextInjection).toBe("native");

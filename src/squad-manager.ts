@@ -58,7 +58,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { loadRepoProfiles, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -3640,7 +3640,12 @@ export class SquadManager extends EventEmitter {
 		// below). splitCapabilityTokens is the one place capabilities becomes toolGrants, so every
 		// downstream consumer only ever sees real tool names; requestedEfficiencyFlags is hoisted (same
 		// pattern as hasPrimer below) until the harness's contextInjection is known further down.
-		const { toolGrants, requested: requestedEfficiencyFlags } = splitCapabilityTokens(profile?.capabilities);
+		// gateMembraneTokens applies double gate #2 (OMP_SQUAD_MEMBRANE_PROFILES=1 — gate #1 is the token
+		// itself being present) BEFORE the flag reaches either the prompt join below or the delivery
+		// confirmation further down, so "stamped only on confirmed delivery" stays true when gate #2 is
+		// off: nothing is delivered, so nothing gets stamped as delivered either.
+		const { toolGrants, requested: requestedRaw } = splitCapabilityTokens(profile?.capabilities);
+		const requestedEfficiencyFlags = gateMembraneTokens(requestedRaw, profile?.id);
 		if (profile) {
 			opts = {
 				...opts,
@@ -3656,7 +3661,7 @@ export class SquadManager extends EventEmitter {
 				// env/operator server list. `opts.mcp` (direct, same trust tier as opts.bin) still wins.
 				mcp: opts.mcp ?? profile.mcp,
 				thinking: opts.thinking ?? profile.thinking,
-				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+				appendSystemPrompt: [profile.memory, toolGrantsPrompt(toolGrants), membraneDisciplinePrompt(requestedEfficiencyFlags), opts.appendSystemPrompt].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
 		}
 		// Cold-start KB primer (OMPSQ #8): a fresh agent on a feature inherits the most relevant prior

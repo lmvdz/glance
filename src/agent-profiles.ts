@@ -5,6 +5,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { envBool } from "./config.ts";
 import type { AgentProfile, McpServerSpec, ThinkingLevel } from "./types.ts";
 import { getHarness } from "./harness-registry.ts";
 
@@ -165,4 +166,77 @@ export function toolGrantsPrompt(grants: string[] | undefined): string | undefin
 		`You are scoped to ONLY these tools: ${grants.join(", ")}.`,
 		"Do not use, request, or attempt any tool outside this list. Tool calls outside the grant are denied by the host.",
 	].join("\n");
+}
+
+// ── Membrane disciplines (eap-borrows concern 05) ──────────────────────────────────────────────────
+// Prompt-only output disciplines: glance-native blocks (concepts from EAP, wording ours). Advisory
+// text only — never enforced by the host, unlike toolGrantsPrompt's hard constraint above. v1 ships
+// `VERDICT_FIRST_BLOCK` unconditionally on output-shaped judge/planner surfaces (validator.ts,
+// planner.ts); both blocks are additionally offered to implementer units as opt-in profile tokens
+// (below), double-gated so a single bad rollout can't silently degrade the whole fleet.
+
+/** Never applies to a safety refusal, a destructive-action warning, or raw error text — those three
+ *  carve-outs are byte-exact: the instruction below is deliberately worded to name them so a model
+ *  reading it doesn't reach for "conclusion first" phrasing on text that must read unmodified. */
+export const VERDICT_FIRST_BLOCK = [
+	"--- Output discipline: verdict-first ---",
+	"State your bottom-line verdict or conclusion in the FIRST sentence, before any supporting reasoning — " +
+		"elaborate afterward, never before. This does NOT apply to (byte-exact carve-outs, unmodified either way): " +
+		"a safety refusal, a destructive-action warning, or raw error text.",
+].join("\n");
+
+/** 7 rungs, climbed only as far as the task needs. Hard carve-outs always get full treatment
+ *  regardless of rung — the whole point of a minimal-code discipline is a smaller footprint on the
+ *  EASY paths, never on the ones where under-building is a real defect. */
+export const MINIMAL_CODE_BLOCK = [
+	"--- Output discipline: minimal-code ladder ---",
+	"Match the code you write to the size of the problem — climb this ladder only as far as the task needs: " +
+		"(1) no code, just answer or explain; (2) one expression; (3) one function; (4) one function plus one test; " +
+		"(5) a small module; (6) a module plus tests; (7) a full feature with tests and docs. Hard carve-outs — " +
+		"ALWAYS get full treatment no matter the rung: input validation, data-loss handling, and security-sensitive " +
+		"code; every non-trivial path still gets at least one runnable check.",
+].join("\n");
+
+/** The only two recognized `membrane:*` profile-capability tokens (receipts.ts#EFFICIENCY_FLAG_PREFIX). */
+const MEMBRANE_BLOCKS: Readonly<Record<string, string>> = {
+	"membrane:verdict-first": VERDICT_FIRST_BLOCK,
+	"membrane:minimal-code": MINIMAL_CODE_BLOCK,
+};
+
+/** Double gate #2 (DESIGN.md "Membrane placement": "profile opt-in AND OMP_SQUAD_MEMBRANE_PROFILES=1").
+ *  Gate #1 is the profile itself naming a `membrane:*` token; this is the runtime kill switch for the
+ *  WHOLE subsystem, OFF by default (see runtime-settings.ts's `OMP_SQUAD_MEMBRANE_PROFILES` — the SAME
+ *  env var; `RuntimeSettingsStore.setFeatureFlag`/`applyFeatureFlags` writes it, so a persisted setting
+ *  and this live env read never disagree, and the auto-disable breaker flips it here too). */
+export function membraneProfilesEnabled(): boolean {
+	return envBool("OMP_SQUAD_MEMBRANE_PROFILES", false);
+}
+
+/**
+ * Apply double gate #2 plus unknown-token detection to a profile's REQUESTED membrane tokens
+ * (receipts.ts#splitCapabilityTokens's `requested` output — gate #1 already passed by the time that's
+ * non-empty). Gate #2 off ⇒ every membrane token is a silent no-op (an operator disabling the feature
+ * is not a typo — no warning). Gate #2 on ⇒ an unrecognized `membrane:*` string DOES warn (once per
+ * call): a typo would otherwise look like a working feature that silently never does anything. Returns
+ * undefined when nothing survives, so callers can `[a, b, gateMembraneTokens(...), c].filter(Boolean)`
+ * exactly like every other optional appendSystemPrompt segment.
+ */
+export function gateMembraneTokens(requested: string[] | undefined, profileId?: string): string[] | undefined {
+	if (!requested?.length) return undefined;
+	if (!membraneProfilesEnabled()) return undefined;
+	const known = requested.filter((token) => {
+		if (token in MEMBRANE_BLOCKS) return true;
+		console.warn(`[agent-profiles] unrecognized membrane token "${token}"${profileId ? ` on profile "${profileId}"` : ""} — ignored (known tokens: ${Object.keys(MEMBRANE_BLOCKS).join(", ")})`);
+		return false;
+	});
+	return known.length ? known : undefined;
+}
+
+/** Render the discipline text for an ALREADY-GATED token list (see `gateMembraneTokens` — this function
+ *  does not itself re-check gate #2 or warn on unknown tokens, mirroring `toolGrantsPrompt`'s "pure
+ *  render, gating is the caller's job" shape). Undefined for an empty/undefined list. */
+export function membraneDisciplinePrompt(gatedTokens: string[] | undefined): string | undefined {
+	if (!gatedTokens?.length) return undefined;
+	const blocks = [...new Set(gatedTokens)].map((token) => MEMBRANE_BLOCKS[token]).filter((b): b is string => !!b);
+	return blocks.length ? blocks.join("\n\n") : undefined;
 }

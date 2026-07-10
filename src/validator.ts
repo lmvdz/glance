@@ -10,6 +10,7 @@
  * and a per-(commit,tree) cache; it is the seam `SquadManager.landBranch` calls (DESIGN §1).
  */
 
+import { VERDICT_FIRST_BLOCK } from "./agent-profiles.ts";
 import { envBool, envInt } from "./config.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
@@ -81,12 +82,16 @@ function lineageFields(reviewerLineage: ModelLineage, authorModel?: string, auth
 	return { authorLineage, reviewerLineage, sameLineage };
 }
 
-const SYSTEM_PROMPT =
+// v1 membrane placement (eap-borrows concern 05, DESIGN.md): verdict-first ships unconditionally on
+// this output-shaped surface — the judge already emits nothing but a JSON verdict, so the block only
+// reinforces "no reasoning preamble before it", never changes the required schema below.
+export const SYSTEM_PROMPT =
 	"You are an INDEPENDENT validator judging whether a code change satisfies a list of DECLARED acceptance criteria. " +
 	"You did not write this code and must not trust the author's own claims — inspect the diff (and proof output, if given) " +
 	'directly. For EACH criterion, decide satisfied:true only if the diff visibly implements it. Respond with EXACTLY one JSON ' +
 	'object and nothing else: {"perCriterion":[{"id":"<criterion id>","satisfied":true|false,"note":"<short reason>"}],' +
-	'"confidence":0..1,"rationale":"<short overall rationale>"}.';
+	'"confidence":0..1,"rationale":"<short overall rationale>"}.\n\n' +
+	VERDICT_FIRST_BLOCK;
 
 /** Coerce a parsed object into a RawVerdict, or undefined if it has no usable `perCriterion`. */
 function coerceVerdict(obj: Record<string, unknown> | undefined): RawVerdict | undefined {
@@ -215,15 +220,17 @@ function defaultJudge(): Judge {
 // Advisory only, default-off (concern 06 gates it), fail-open by construction: any throw/timeout/garbage
 // degrades to `undefined` (no signal), never a fabricated verdict and never a throw that could reach a land.
 
-/** Per-lens system prompt — single-concern framing, explicitly NOT re-checking the declared criteria. */
-const LENS_SYSTEM_PROMPTS: Record<LensId, string> = {
+/** Per-lens system prompt — single-concern framing, explicitly NOT re-checking the declared criteria.
+ *  Carries `VERDICT_FIRST_BLOCK` too (concern 05: "judges/planner get verdict-first blocks"). */
+export const LENS_SYSTEM_PROMPTS: Record<LensId, string> = {
 	regression:
 		"You are an INDEPENDENT reviewer. You are NOT checking whether declared acceptance criteria are met — " +
 		"assume another reviewer already did that, and do not repeat it. Your ONLY job: does this diff introduce a " +
 		"problem the acceptance criteria would NOT have named — a security regression, a scope violation, data loss, " +
 		"a broken or silently-swallowed failure path, or a resource/performance cliff? Inspect the diff directly and " +
 		"distrust any author description. Respond with EXACTLY one JSON object and nothing else: " +
-		'{"disposition":"accept"|"object","severity":"low"|"high","claim":"<one-line reason; empty string if accept>"}.',
+		'{"disposition":"accept"|"object","severity":"low"|"high","claim":"<one-line reason; empty string if accept>"}.\n\n' +
+		VERDICT_FIRST_BLOCK,
 };
 
 /** Injected lens-judge seam (tests pass a fake). Never throws by contract — a throw/timeout/unparseable
@@ -552,9 +559,10 @@ function lensVerifyEnabled(): boolean {
 	return envBool("OMP_SQUAD_LENS_VERIFY", false);
 }
 
-const LENS_VERIFY_SYSTEM =
+export const LENS_VERIFY_SYSTEM =
 	"You are re-checking ONE specific concern another reviewer raised about a code diff. Decide only whether that " +
-	'concern is substantiated by the diff itself. Respond with EXACTLY one JSON object: {"verdict":"confirmed"|"refuted"|"inconclusive"}.';
+	'concern is substantiated by the diff itself. Respond with EXACTLY one JSON object: {"verdict":"confirmed"|"refuted"|"inconclusive"}.\n\n' +
+	VERDICT_FIRST_BLOCK;
 
 /** Guarded parser — confirmed ⇒ true, refuted/inconclusive ⇒ false (do not escalate on doubt), else undefined. */
 function parseVerifyConfirmed(raw: string): boolean | undefined {

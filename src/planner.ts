@@ -13,6 +13,7 @@
  * `PLANE:` pointer — filing to Plane is an existing, separate pipeline.
  */
 
+import { VERDICT_FIRST_BLOCK } from "./agent-profiles.ts";
 import type { PlanConcern } from "./features.ts";
 
 /** One concern the model wants planned. Field names map 1:1 onto the frontmatter
@@ -123,7 +124,9 @@ Plan ONLY the remaining frontier: the work still needed to reach the objective, 
 Respond with ONLY a strict JSON array (no prose, no markdown code fence) of concern objects, each shaped exactly like:
 {"num": <int>, "slug": "<kebab-case-file-stem>", "title": "<string>", "priority": "p0"|"p1"|"p2"|"p3", "complexity": "mechanical"|"architectural"|"research", "touches": ["<file path>", ...], "blockedBy": [<concern num>, ...], "goal": "<prose>", "approach": "<prose>", "acceptance": ["<criterion>", ...]}
 
-Respond with a JSON array only.`;
+Respond with a JSON array only.
+
+${VERDICT_FIRST_BLOCK}`;
 }
 
 /** Extract the outermost `[...]` JSON array from noisy model output (fences/prose tolerant). */
