@@ -540,11 +540,11 @@ export function renderHarnessTable(rows: HarnessListingRow[], defaultHarness: st
 	return `${lines.join("\n")}\n`;
 }
 
-/** `glance harnesses [--all] [--json]` — the honest capability tier matrix (concern 06): every
+/** `glance harnesses [--json]` — the honest capability tier matrix (concern 06): every
  *  REGISTERED harness (not just the create-surface-visible verified ones) with its tier, a
- *  verified-binary-missing alert, and the usage-verified bit. `--all` mirrors the create API's
- *  `?all=1` (has no effect on what's returned here — this listing is always the full roster —
- *  kept for symmetry/discoverability with `glance add --harness`). */
+ *  verified-binary-missing alert, and the usage-verified bit. Always queries the create API's
+ *  `?all=1` under the hood — this listing is always the full roster, so there is no `--all` flag
+ *  to pass. */
 async function cmdHarnesses(args: string[]): Promise<void> {
 	const { flags } = parseArgs(args);
 	let body: { default: string; harnesses: HarnessListingRow[] };

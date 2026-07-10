@@ -19,6 +19,7 @@
 import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { getStorageBackend } from "./dal/storage.ts";
+import { errText } from "./err-text.ts";
 import { resolveStateDir } from "./state-dir.ts";
 
 let gateLogRoot = path.join(resolveStateDir(), "gate-logs");
@@ -221,7 +222,7 @@ export async function budgetedExcerpt(s: string, budget: number, meta: BudgetedE
 		const omitted = Math.max(0, s.length - body.length);
 		return { text: `${body}\n[${omitted} bytes omitted — full: ${full}]`, path: full };
 	} catch (err) {
-		console.error(`[gate-logs] offload write failed, falling back to plain truncate: ${err instanceof Error ? err.message : String(err)}`);
+		console.error(`[gate-logs] offload write failed, falling back to plain truncate: ${errText(err)}`);
 		return { text: `${s.slice(0, budget)}…` };
 	}
 }
