@@ -59,3 +59,49 @@ export function jsonInit(method: string, body: unknown): RequestInit {
     body: JSON.stringify(body),
   };
 }
+
+// -----------------------------------------------------------------------------------------------
+// Voice lane (webapp-voice-lane/06) — daemon-mint helpers beside `apiJson`, matching its
+// conventions (no separate fetch wiring, no module-level state). The minted `value` (an `ek_...`
+// ephemeral provider token) is returned to the caller and MUST stay memory-only from there:
+// callers must never log it, persist it (no localStorage), or pass it anywhere but the WebRTC SDP
+// exchange (`voiceSession.ts`). This module itself never logs a response body.
+// -----------------------------------------------------------------------------------------------
+
+/** Mirrors `src/voice-token.ts`'s `VoiceMintToken` (the `POST /api/voice/token` response shape). */
+export interface VoiceMintToken {
+  provider: string;
+  value: string;
+  /** Unix epoch SECONDS (not milliseconds) — mirrors the provider's ephemeral-token expiry field.
+   *  Compare against `Date.now() / 1000`, never `Date.now()` directly. */
+  expiresAt: number;
+  transport: "webrtc";
+  pinnedAtMint: boolean;
+}
+
+/** Mint a short-lived voice provider token via the daemon (`POST /api/voice/token`). Defaults to
+ *  `openai` — v1's only registered provider (`./voice/provider.ts`). Throws (via `apiJson`) on a
+ *  non-2xx response — the 404 (feature flag off), 403 (DB/org mode), and 429 (per-actor rate cap)
+ *  cases the daemon route implements all surface as thrown errors here for the caller to catch. */
+export function mintVoiceToken(provider = "openai"): Promise<VoiceMintToken> {
+  return apiJson<VoiceMintToken>("/api/voice/token", jsonInit("POST", { provider }));
+}
+
+/** Mirrors `GET /api/voice/config`'s viewer-vs-operator-scoped response shape — `providers` is
+ *  absent for a viewer-tier actor (the daemon never sends it below operator; see server.ts). */
+export interface VoiceConfigResponse {
+  enabled: boolean;
+  providers?: Array<{ id: string; transport: "webrtc"; model?: string }>;
+}
+
+/** Voice capability probe (`GET /api/voice/config`) — the one honest discovery channel for whether
+ *  voice is enabled/configured (no webapp code consumes `/api/settings` flags; see DESIGN.md's
+ *  "Flagging" row). A 404 means the feature flag is off — that's a normal, expected state (not an
+ *  error the caller should have to catch), so it's mapped to `{enabled:false}` instead of throwing.
+ *  Any other non-2xx (403 DB/org mode, 5xx, etc.) still throws via `apiJson`. */
+export async function getVoiceConfig(): Promise<VoiceConfigResponse> {
+  const response = await apiFetch("/api/voice/config");
+  if (response.status === 404) return { enabled: false };
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<VoiceConfigResponse>;
+}
