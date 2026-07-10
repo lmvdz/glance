@@ -1,5 +1,5 @@
 # Fail-closed wave 2 — the land-path findings + land-path offload (post-G3)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,5 +1,5 @@
 # Membrane disciplines — verdict-first + minimal-code, measured, auto-reverting
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
