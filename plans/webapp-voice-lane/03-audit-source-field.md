@@ -1,5 +1,5 @@
 # ClientCommand `source` field → audit log
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -21,3 +21,6 @@ None. Additive optional field; existing clients that don't send it are unaffecte
 - Test: decode a `{type:"prompt", id, message, source:"voice"}` frame → decoded object retains `source`; applyCommand writes an audit entry containing `source:"voice"`.
 - Test: a frame without `source` behaves exactly as today (field absent in audit entry, not null-polluted).
 - `bun test` green.
+
+## Resolution
+Shipped (commits ec596e6, a16b1b2, and audit-hardening 593bc16). `source` is schema-carried on mutating ClientCommands and reaches the REAL `audit.jsonl` via `recordAudit` (the first pass only hit the DB-mode store — caught in review). Extended in the audit gauntlet to cover `spawn_agent` (SpawnBodySchema + /api/spawn) and `interrupt`, so all 3 mutating voice verbs are tagged, not just `prompt`. Written-line tested.

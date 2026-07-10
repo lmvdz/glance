@@ -1,5 +1,5 @@
 # Voice tool dispatcher (async-ack, human-turn gating, transcript coherence)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -25,3 +25,7 @@ None.
 ## Verify
 - Unit tests: ack within one tick (mock session); duplicate `function_call` for same target while in flight → single dispatch; completion narration queued while userRecording; human-turn gate blocks a mutation from an injected-narration response; dead-agent send → failure output (mock roster); voice prompt carries source:"voice" + caption displayText.
 - Live: speak "ask the agent to list open PRs" → immediate spoken ack → minutes later the completion is narrated when message_end lands → timeline shows the spoken turn with marker; kill the console agent mid-call from Fleet view → next voice command gets the honest "agent is gone" response, not silence.
+
+## Resolution
+Shipped (commit af6ce7d; audit hardening 593bc16). Async-ack tool contract + human-turn injection gate (fail-closed on non-`user` trigger, verified un-bypassable by 3 independent reviewers), 4 tools (admin verbs omitted), structured outputs with agent text fenced as untrusted data, single-flight, dead-agent detection, spawn-response guard. Decision core exhaustively matrix-tested.
+**Live-verification OWED**: real dispatch through a live session (speak → fleet → narrated completion) not run (no key).

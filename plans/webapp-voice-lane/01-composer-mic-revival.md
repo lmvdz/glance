@@ -1,5 +1,5 @@
 # Composer mic revival (chained STT input)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -22,3 +22,6 @@ None.
 ## Verify
 - `bun test` (webapp) green including the flipped assertion and new speech.ts unit tests.
 - Live: `bun run dev`, Chrome — speak into the composer mic, transcript lands in input; deny mic permission → distinct toast, button disabled for session; Firefox → disabled with tooltip.
+
+## Resolution
+Shipped (commit 5c8fc5f; review fixes a16b1b2). `webapp/src/lib/voice/speech.ts` wrapper with the full `onerror` map + multi-segment assembly + unmount abort; mic button on Composer; WorkbenchPane refactored onto the same wrapper (it had none); absence assertion flipped to two presence tests. Fully unit-verified (no live key needed).

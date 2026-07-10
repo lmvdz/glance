@@ -1,5 +1,5 @@
 # Shared send/mint helper (single-flight console mint + prompt builder)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -22,3 +22,6 @@ None.
 - `bun test` green; existing AssistantChat tests unchanged in behavior.
 - New unit test: two concurrent `ensureConsoleAgent` calls for the same session issue exactly one `/api/console` POST (mock fetch, assert call count).
 - Live smoke: typed chat still mints on first send, streams reply, dedupes optimistic echo.
+
+## Resolution
+Shipped (commit 353ab15). `webapp/src/lib/chat/sendCore.ts` — single-flight `ensureConsoleAgent` (with recently-minted grace) + `buildPromptCommand`; pure refactor of the typed path, consumed by the voice dispatcher. Race/malformed-response/guard cases pinned. Fully unit-verified.

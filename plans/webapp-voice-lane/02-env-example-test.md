@@ -1,5 +1,5 @@
 # Env-catalog completeness test (close a standing false claim)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -19,3 +19,6 @@ None.
 ## Verify
 - `bun test tests/env-example.test.ts` green.
 - Mutation check: temporarily add `envBool("OMP_SQUAD_DOES_NOT_EXIST", false)` to a src file → test fails; remove → passes.
+
+## Resolution
+Shipped (commit 541b82a). `tests/env-example.test.ts` is a real bidirectional gate; ~90 pre-existing undocumented env vars cataloged; one intentional gap (`OMP_SQUAD_HEAT_HALFLIFE_MS`) allowlisted with a rot-test. Mutation-checked. The standing false claim at `.env.example:9` is now true.

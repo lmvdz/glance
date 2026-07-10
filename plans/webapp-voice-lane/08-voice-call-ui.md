@@ -1,5 +1,5 @@
 # Voice call UI (affordance, floating pill, pinned-binding banner)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -23,3 +23,7 @@ None.
 ## Verify
 - `bun test` green (static-markup assertions: button hidden when config disabled, pill renders per state).
 - Live end-to-end (scratch daemon, real key): start call from composer → speak → fleet dispatch → close the chat panel mid-call → pill persists, call continues → completion narrated → end call from pill. Switch sessions mid-call → banner shows the pin. Delete the pinned session → call ends with toast.
+
+## Resolution
+Shipped (commit 5d6e60a; audit hardening 593bc16). Provider-owned session above the chat panel (survives close/delete), config-gated call button, floating pill (state/caption/elapsed+cost/PTT) clearing the FAB and above a maximized panel, pinned-binding banner, spoken-summary persistence, honor `fallbackToText`, max-duration + idle caps. Pure HUD/store logic tested.
+**Live-verification OWED**: real end-to-end (mic + WebRTC + audio) not run (no key).

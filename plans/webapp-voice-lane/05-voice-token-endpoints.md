@@ -1,5 +1,5 @@
 # Voice token mint + config endpoints
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -30,3 +30,7 @@ None.
 ## Verify
 - `bun test tests/voice-token.test.ts`: mint-shape mapping (fetch mocked), envBool gate off→404/disabled, DB-mode refusal, rate cap 429 on burst, unknown provider 400s without fetch, restActionTier regression (GET=viewer/POST=operator for /api/voice/*), `ek_` never in any log output.
 - Live (scratch daemon, real key): `curl -X POST :PORT/api/voice/token -H "Authorization: Bearer <op-token>"` → `{value:"ek_...", expiresAt,...}`; viewer token on config gets `{enabled}` only.
+
+## Resolution
+Shipped (commit fc17601; audit hardening 593bc16). `POST /api/voice/token` + `GET /api/voice/config` with every red-team guard, each pinned: envBool gate, DB-mode 403, per-actor mint rate cap (rate<=0 no longer disables it), closed provider registry (400-before-fetch), viewer-scoped config, ek_ never logged, 15s fetch timeout, key trim, malformed-body 400, `input_audio_transcription` enabled at mint, `session.tools` pinned. Both foreign lineages confirmed no SSRF / no secret leak / operator-tier enforced.
+**Live-verification OWED**: the real-key `curl` against OpenAI's `client_secrets` endpoint was not run (no key in the build env). Unit-verified against a mocked provider.

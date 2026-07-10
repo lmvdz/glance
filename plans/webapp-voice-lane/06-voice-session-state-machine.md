@@ -1,5 +1,5 @@
 # Voice session state machine + WebRTC transport (OpenAI)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -27,3 +27,7 @@ None.
 ## Verify
 - Unit tests: state transitions (all events against all states — especially the two arbitration rules), reconnect bounding, re-mint quiescence gating (fake timers), no `response.create` during `userRecording`.
 - Live probe (real key, scratch daemon): hold a session ≥10 minutes fully silent to observe **provider idle-timeout behavior** — the one open research item from design; record the finding in this concern's Resolution (it calibrates the reconnect logic). Then: speak → hear reply; press PTT mid-reply → playback stops immediately; session survives a forced re-mint with context recap.
+
+## Resolution
+Shipped (commits 921447a, 593bc16, 75e7768). Pure 5-state reducer + DI'd impure shell; both barge-in arbitration rules structural. Audit gauntlet hardened the protocol: tool-ack `response.create` deferred until the wrapping `response.done` (a concurrent create is rejected by the Realtime API), playback resumes after barge-in, comprehensive hot-mic guards, trigger fails closed on absent `response_id`, SDP timeout/abort. Focused re-review PASS'd with a proof that `outstandingResponses ∈ {0,1}`.
+**Live-verification OWED**: the mandatory idle-timeout probe (≥10 min silent session against the real endpoint, which calibrates reconnect) and the real WebRTC SDP/mic/barge-in timing were NOT run (no key). The protocol changes are the conservative-correct shape but need a live pass to confirm — this is the single most important owed check.

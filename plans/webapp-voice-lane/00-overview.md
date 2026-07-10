@@ -47,11 +47,18 @@
 - **DB/org-mode voice** — refused at the mint handler in v1; needs per-org keys/enables and per-org attribution first (red-team finding)
 - **GPT-Live models** — ChatGPT-only as of 2026-07-10, no API
 
+## Status: v1 EXECUTED (8/8 concerns done; 09 deferred)
+Concerns 01–08 shipped on the branch (commits 5c8fc5f → 75e7768) — full suite green (root 2588, webapp 1116, 0 fail; both typechecks clean). Every concern passed its inline review, then the whole lane went through a 4-reviewer AUDIT gauntlet (native cross-batch + blind-zero-framing + gpt-5.6-sol + grok-4.5) that found 2 confirmed end-to-end breaks (concurrent `response.create`; barge-in muted playback forever) and ~20 trust/spend/resource residuals — all fixed in 593bc16, with a focused re-review (75e7768) of the two critical protocol fixes that PASS'd on a counter-integrity proof.
+
+**⚠️ LIVE-VERIFICATION OWED (the one gap):** no OpenAI key in the build env, so nothing on the provider-direct realtime path was driven live — concerns 05/06/07/08's live-probe steps are unrun. Highest-value owed check: concern 06's ≥10-min idle-timeout probe (calibrates reconnect) + real WebRTC SDP/mic/barge-in timing. The protocol changes are the conservative-correct shape (defer-until-response.done never sends a concurrent create regardless of provider behavior) but a live pass is needed before trusting the lane in production. Run via the scratch-daemon skill with a real `OMP_SQUAD_VOICE_OPENAI_API_KEY`.
+
 ## Decisions so far
 - [DESIGN.md](DESIGN.md) — browser-executed tools over WebRTC with daemon-minted pinned tokens; async-ack tool contract; voice = mouth/ears only
+- [01](01-composer-mic-revival.md) done · [02](02-env-example-test.md) done · [03](03-audit-source-field.md) done · [04](04-shared-send-mint-helper.md) done · [05](05-voice-token-endpoints.md) done · [06](06-voice-session-state-machine.md) done · [07](07-voice-tool-dispatcher.md) done · [08](08-voice-call-ui.md) done · [09](09-xai-second-provider.md) deferred (needs live feasibility probe)
 
 ## Notes
-- Auto-approved: headless (background job). EXPLORE/DESIGN/DECOMPOSE gates recorded, not user-blocked; EXECUTE not started (needs explicit go).
+- EXECUTED on user "execute" go. Batches ran 1a(01/02/03)→1b(04)→05→06→07→08, worktree-isolated for the parallel batch, review-gated between each, then the AUDIT gauntlet. xAI (09) stays deferred per DESIGN — scouts contradict on Grok WebRTC support; it needs a live probe first.
+- Auto-approved: headless (background job). EXPLORE/DESIGN/DECOMPOSE gates recorded, not user-blocked.
 - WIP snapshot at plan start: 9 plans with open work, 22 open concerns (oldest 2026-07-10) — proceeded per headless rule.
 - Origin: plans/research-voice-agents/BRIEF.md (PR #163). Verified API facts (2026-07-10): OpenAI mint `POST /v1/realtime/client_secrets` → `{value: "ek_...", expires_at, session}`, SDP to `POST /v1/realtime/calls`; models `gpt-realtime-2.1` / `-2.1-mini`. xAI mint mirrors the path but takes only `expires_after.seconds` (no session pinning) and its browser story is WebSocket-with-subprotocol-token; WebRTC support contradicted between scouts → concern 09.
 - DECOMPOSE assumption: concern 04's helper extraction is a pure refactor of AssistantChat.tsx behavior (no user-visible change); if implementation finds coupled behavior, report rather than force.
