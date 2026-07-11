@@ -119,13 +119,16 @@ test("mintVoiceToken maps a successful OpenAI mint to the uniform shape and pins
 		transport: "webrtc",
 		pinnedAtMint: true,
 	});
-	// The browser never chooses model/voice/instructions/tools — asserted against what was actually sent.
+	// GA client_secrets shape (VERIFIED LIVE 2026-07-10): `type:"realtime"` + audio nested under
+	// `audio.input`/`audio.output`. The old flat `session.voice`/`turn_detection`/
+	// `input_audio_transcription` is the beta shape and 400s ("Unknown parameter: 'session.voice'").
+	expect(capturedBody.session.type).toBe("realtime");
 	expect(capturedBody.session.model).toBe("gpt-realtime-test");
-	expect(capturedBody.session.voice).toBe("aria");
-	expect(capturedBody.session.turn_detection).toBeNull(); // push-to-talk v1
+	expect(capturedBody.session.audio.output.voice).toBe("aria");
+	expect(capturedBody.session.audio.input.turn_detection).toBeNull(); // push-to-talk v1
 	// Concern-audit finding 3: without this the browser's user-caption branch is permanently dormant
 	// and the model's own paraphrase would render as the operator's words.
-	expect(capturedBody.session.input_audio_transcription).toEqual({ model: "whisper-1" });
+	expect(capturedBody.session.audio.input.transcription).toEqual({ model: "whisper-1" });
 	expect(typeof capturedBody.session.instructions).toBe("string");
 	expect(capturedBody.session.instructions.length).toBeGreaterThan(0);
 	// Without tools the model could never emit a function_call — the whole lane would be inert
@@ -160,7 +163,7 @@ test("mintVoiceToken defaults model/voice when the env vars are unset", async ()
 	const result = await mintVoiceToken("openai", "sk-key");
 	expect(result.ok).toBe(true);
 	expect(capturedBody.session.model).toBe("gpt-realtime-2.1");
-	expect(capturedBody.session.voice).toBe("marin");
+	expect(capturedBody.session.audio.output.voice).toBe("marin");
 });
 
 test("mintVoiceToken 400s an unknown provider id BEFORE any fetch (SSRF doctrine)", async () => {

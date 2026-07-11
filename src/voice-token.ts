@@ -200,19 +200,30 @@ async function mintOpenAiToken(cfg: VoiceProviderConfig, apiKey: string): Promis
 	// Session params are pinned HERE, server-side, from daemon-controlled env — the browser never
 	// chooses model/voice/instructions/tools (DESIGN.md "Token mint" row). Without `tools` the model
 	// could never emit a function_call at all, so the tool schemas are part of the pinned surface.
+	//
+	// SHAPE: this is the GA `/v1/realtime/client_secrets` session object, VERIFIED LIVE against the
+	// real endpoint (2026-07-10). GA requires `type: "realtime"` and nests the audio params under
+	// `audio.input`/`audio.output` — the flat `voice`/`turn_detection`/`input_audio_transcription` at
+	// the session top level is the older beta `/sessions` shape and is rejected 400 ("Unknown
+	// parameter: 'session.voice'"). Do not "simplify" back to flat without re-probing the live API.
 	const body = {
 		session: {
+			type: "realtime",
 			model: voiceModel(),
-			voice: voiceVoice(),
-			turn_detection: null, // push-to-talk v1 (DESIGN.md "Turn detection" row); semantic_vad deferred
-			// Without this the browser's user-caption branch is permanently dormant — the model's own
-			// paraphrase of what it heard would render as the operator's own words in the transcript.
-			// `whisper-1` is the conservative pick here (not the newer `gpt-4o-transcribe`): it is the
-			// long-stable, narrowly-scoped transcription model, keeping this pinned surface's behavior
-			// as predictable as everything else pinned at mint (DESIGN.md "Token mint" row). Revisit if
-			// a future concern needs higher transcription fidelity.
-			input_audio_transcription: { model: "whisper-1" },
 			instructions: VOICE_INSTRUCTIONS,
+			audio: {
+				input: {
+					// push-to-talk v1 (DESIGN.md "Turn detection" row); semantic_vad deferred
+					turn_detection: null,
+					// Without this the browser's user-caption branch is permanently dormant — the model's
+					// own paraphrase of what it heard would render as the operator's own words in the
+					// transcript. `whisper-1` is the conservative pick (not the newer `gpt-4o-transcribe`):
+					// long-stable, narrowly-scoped, keeping this pinned surface predictable. Revisit if a
+					// future concern needs higher transcription fidelity.
+					transcription: { model: "whisper-1" },
+				},
+				output: { voice: voiceVoice() },
+			},
 			tools: VOICE_SESSION_TOOLS,
 		},
 		expires_after: { anchor: "created_at", seconds: 3600 },
