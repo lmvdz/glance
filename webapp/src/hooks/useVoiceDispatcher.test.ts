@@ -72,6 +72,7 @@ function baseDeps(overrides: Partial<DispatchPromptAgentDeps> = {}): DispatchPro
     features: [],
     audit: [],
     currentProject: null,
+    pageContext: null,
     transcripts: new Map(),
     sendConsoleCommand: () => {},
     subscribeConsole: () => {},
@@ -157,6 +158,27 @@ describe('MAJOR-1: bootstrap prompt_agent single-flight', () => {
     // A follow-up bootstrap call is allowed through decideToolCall, not blocked by a stuck lock.
     const call2 = promptAgentCall('call-2', 'try again');
     expect(decideToolCall(call2, decisionState(refs)).kind).toBe('execute');
+  });
+
+  test('grounding: the live pageContext (what the operator is looking at) is threaded into buildPromptCommand so an ambiguous spoken referent resolves', async () => {
+    const refs = makeRefs({ boundAgentIdRef: { current: 'agent-1' }, hasEverBoundRef: { current: true } });
+    const { session } = makeFakeSession();
+    let capturedPageContext: unknown = 'UNSET';
+    const pageContext = { viewId: 'tasks', title: 'Plan: auth-refactor', entities: [], route: '/plans/auth-refactor' } as unknown as DispatchPromptAgentDeps['pageContext'];
+    const deps = baseDeps({
+      pageContext,
+      buildPromptCommandFn: ((ctx: { pageContext: unknown }) => {
+        capturedPageContext = ctx.pageContext;
+        return { type: 'prompt', id: 'x', message: 'x', displayText: 'x' };
+      }) as unknown as DispatchPromptAgentDeps['buildPromptCommandFn'],
+    });
+
+    // "make the title of the plan short" — the referent lives in the page the operator is viewing.
+    await dispatchPromptAgent(session, 'call-1', 'make the title of the plan short', refs, deps);
+
+    // The forwarded prompt carries the page the operator is looking at, not null — so the fleet
+    // agent can resolve "the plan". (Regression against the shipped `pageContext: null`.)
+    expect(capturedPageContext).toBe(pageContext);
   });
 });
 

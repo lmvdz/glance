@@ -20,6 +20,7 @@ import type { PendingFunctionCall, VoiceSession } from '../lib/voice/voiceSessio
 import type { AgentDTO, AuditEntry, ClientCommand, FeatureDTO, TranscriptEntry } from '../lib/dto';
 import type { Project } from '../types';
 import { useTaskContext } from '../context/TaskContext';
+import { usePageContext, type PageContext } from '../context/PageContext';
 
 /**
  * Voice tool dispatcher hook (webapp-voice-lane concern 07) — the bridge from `VoiceSession`
@@ -173,6 +174,11 @@ export interface DispatchPromptAgentDeps {
   features: FeatureDTO[];
   audit: AuditEntry[];
   currentProject: Project | null;
+  /** What the operator is currently LOOKING AT (the live page-context store, read at speak-time).
+   *  Grounds an ambiguous spoken referent — "make the title of the plan short" needs to carry
+   *  "you're viewing plan X" or the fleet agent can't resolve it. Same value the typed path passes
+   *  (AssistantChat), just wired to the voice dispatcher too. */
+  pageContext: PageContext | null;
   transcripts: Map<string, TranscriptEntry[]>;
   sendConsoleCommand: (command: ClientCommand) => void;
   subscribeConsole: (agentId: string) => void;
@@ -264,7 +270,7 @@ export async function dispatchPromptAgent(
   refs.echoTimersRef.current.set(clientTurnId, echoTimer);
 
   const command = buildPromptCommandFn(
-    { agentId, agents: deps.agents, features: deps.features, audit: deps.audit, selectedTask: undefined, pageContext: null },
+    { agentId, agents: deps.agents, features: deps.features, audit: deps.audit, selectedTask: undefined, pageContext: deps.pageContext },
     message,
     { clientTurnId, source: 'voice', displayText: spokenText || message },
   );
@@ -454,6 +460,11 @@ export function clearAllPendingTimers(refs: TimerCleanupRefs, clearTimerFn: (han
 export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDispatcherResult {
   const { sessionId, agentId: pinnedAgentId, selectedModel = '', onAgentBound, onSpokenSummary } = opts;
   const { agents, features, audit, transcripts, currentProject, sendConsoleCommand, subscribeConsole } = useTaskContext();
+  // The live page-context store (single shared store under the root PageContextProvider, published
+  // by whichever view is mounted). Read here so a spoken prompt grounds to what the operator is
+  // looking at AT SPEAK-TIME — `handleFunctionCallRef.current` is rebuilt every render, so the
+  // value the tool call closes over is always current, not captured at call-start.
+  const pageContext = usePageContext();
 
   const sessionRef = useRef<VoiceSession | null>(null);
 
@@ -562,6 +573,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
       features,
       audit,
       currentProject,
+      pageContext,
       transcripts,
       sendConsoleCommand,
       subscribeConsole,
