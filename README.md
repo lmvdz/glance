@@ -1,5 +1,7 @@
 # glance
 
+![glance — a hooded figure at an ember fire of streaming characters, under the glance lockup](docs/assets/readme-hero.jpg)
+
 **Oversight for a fleet of coding agents running in parallel — one per git worktree, any
 harness — from a terminal TUI and a web dashboard. You glance, and you know.**
 
@@ -145,6 +147,10 @@ opts out.
   workflow race boards, automation and audit trails, fleet health, and a settings surface for
   the daemon's feature flags. It installs as a PWA and **pushes a notification when an agent
   needs you** — supervise from your phone.
+
+![The Graph view — a week of fleet activity on one timeline](docs/assets/glance-graph.png)
+*The Graph — a week of fleet activity on one timeline: commit milestones, spend billed by
+model × harness, the fleet pulse, agent runs, and the loops that shipped them.*
 
 The full-featured web UI is the React app in [`webapp/`](webapp/), served when it's built and
 `GLANCE_WEBAPP=1` is set; [`src/web/index.html`](src/web/index.html) is the zero-build fallback
