@@ -176,3 +176,13 @@ test("REST settings flags: viewer reads, operator denied, admin persists", async
 	expect(await saved.text()).toContain("\"OMP_SQUAD_OBSERVE_AUTOFIX\"");
 	expect(await runtimeSettings.load()).toMatchObject({ featureFlags: { OMP_SQUAD_OBSERVE_AUTOFIX: true } });
 });
+
+/**
+ * `/api/doctor` reports the daemon's autonomy flags and its launch cwd. Not secrets — but "autoland is
+ * armed and the regression gate is off" is a shopping list, and the daemon's cwd names a path on the
+ * host. Operator: the tier of the person who could have set those flags in the first place. A viewer
+ * (a read-only dashboard share) has no business enumerating the factory's safety posture.
+ */
+test("the doctor's facts are operator-only", () => {
+	expect(restActionTier("GET", "/api/doctor")).toBe("operator");
+});

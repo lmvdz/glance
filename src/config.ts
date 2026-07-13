@@ -107,3 +107,19 @@ export function envBool(name: string, fallback: boolean): boolean {
 export function __resetConfigWarnings(): void {
 	warned.clear()
 }
+
+/**
+ * Should the operator's own autonomous factory run alongside the tenant registry?
+ *
+ * Enabling multi-tenancy once silently turned the factory off: the per-org managers behind the registry
+ * are lazy and org-scoped, so nothing owned the global Plane loops (auto-dispatch → build → prove →
+ * auto-land → self-heal). `OMP_SQUAD_ROOT_FACTORY=1` AND at least one configured Plane repo stands up a
+ * single root SquadManager that does. Default OFF — a bare SaaS deployment never silently spins a global
+ * factory.
+ *
+ * Lives here, not in `index.ts`, so the server can report the factory's real state to `glance doctor`
+ * without importing the CLI entrypoint (a cycle). `index.ts` re-exports it for the boot-gate test.
+ */
+export function rootFactoryEnabledWith(repoCount: number): boolean {
+	return envBool("OMP_SQUAD_ROOT_FACTORY", false) && repoCount > 0;
+}

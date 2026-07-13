@@ -8,6 +8,7 @@
  *   glance prompt <id> <message…>
  *   glance rm <id> [--delete-worktree]
  *   glance open
+ *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
  *
  * `up` is the long-lived process that owns the agents. The other verbs are thin
  * HTTP clients that talk to a running daemon's REST surface.
@@ -20,7 +21,9 @@ import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
-import { envBool } from "./config.ts";
+import { renderDoctor, runDoctor } from "./doctor.ts";
+import { makeDoctorProbe } from "./doctor-probe.ts";
+import { envBool, rootFactoryEnabledWith } from "./config.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
@@ -65,7 +68,7 @@ const glanceBin = (): string | undefined => process.env.GLANCE_BIN?.trim() || un
  * silently spins a global factory. Exported for the boot-gate test.
  */
 export function rootFactoryEnabled(repoCount: number = planeRepos().length): boolean {
-	return envBool("OMP_SQUAD_ROOT_FACTORY", false) && repoCount > 0;
+	return rootFactoryEnabledWith(repoCount);
 }
 
 const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
@@ -83,6 +86,7 @@ USAGE
   glance logs <id> [--limit N]                  Print an agent's recent transcript
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   glance open                                   Print the dashboard URL
+  glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
   glance plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
   glance plan-decompose <dir> [--json]          One-shot: decompose <dir>/OBJECTIVE.md into a concern-DAG (needs \`omp\`)
@@ -379,7 +383,10 @@ async function cmdUp(args: string[]): Promise<void> {
 	// registry: the server routes the operator's own org (OMP_SQUAD_ROOT_ORG) + the on-box loopback admin to
 	// the root factory, and every tenant org to its per-org registry manager (server.ts managerFor).
 	const rootOrgId = process.env.OMP_SQUAD_ROOT_ORG?.trim() || undefined;
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId });
+	// Resolved BEFORE the server so `/api/doctor` can report the supervisor that actually runs, not the one
+	// the flag implies: it is also gated on `--no-supervise` and on file mode.
+	const superviseExternal = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId, superviseExternal });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
@@ -389,8 +396,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	// auto-supervision is the per-org, in-process maybeAutoSupervise inside each manager (lifecycle 05).
 	const stopTracker = startExternalSessionTracker();
 	// risk #7: the external supervisor authenticates with the file-mode bearer token; DB mode has none, so file-mode only.
-	const supervise = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
-	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
+	const stopSupervisor = superviseExternal ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
 
 	// Cross-host file leasing: the file-mode daemon now gossips its own leases IN-PROCESS over the
 	// manager's LocalFederationBus (SquadManager, SEAM 1) and mirrors peers' leases the same way — no
@@ -419,13 +425,13 @@ async function cmdUp(args: string[]): Promise<void> {
 	// (the operator watches the factory in the webapp, mapped to OMP_SQUAD_ROOT_ORG / the loopback admin).
 	if (manager && !registry && useTui) {
 		process.stdout.write(`glance dashboard: ${url}\n  access token: ${token}\n`);
-		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${superviseExternal ? "on" : "off"}\n`);
 		const tui = new SquadTui(manager);
 		await tui.run();
 		await shutdown();
 	} else {
 		process.stdout.write(`glance daemon running\n  dashboard: ${url}\n  access token: ${token}\n  open from any device on this network (tap to sign in):\n${access}\n  add an agent: glance add <repo> --task "…"\n`);
-		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${superviseExternal ? "on" : "off"}\n`);
 		await new Promise<void>(() => {}); // run until signal
 	}
 }
@@ -855,6 +861,19 @@ async function cmdAutomation(args: string[]): Promise<void> {
 	}
 }
 
+/**
+ * `glance doctor` — R6's answer. Exit code IS the verdict, so CI and the operator's `&&` both work:
+ * 0 = nothing blocking, 1 = the factory cannot do its job. A warning never fails the command; a warning
+ * that failed the command would be turned off within a week.
+ */
+async function cmdDoctor(args: string[]): Promise<void> {
+	const { flags } = parseArgs(args);
+	const report = await runDoctor(makeDoctorProbe({ base: base(flags), headers: tokenHeader(), cwd: process.cwd() }));
+	process.stdout.write(flags.json ? `${JSON.stringify(report, null, 2)}
+` : renderDoctor(report));
+	if (!report.healthy) process.exit(1);
+}
+
 async function main(): Promise<void> {
 	const [cmd, ...rest] = process.argv.slice(2);
 	switch (cmd) {
@@ -911,6 +930,9 @@ async function main(): Promise<void> {
 			break;
 		case "plan-decompose":
 			await cmdPlanDecompose(rest);
+			break;
+		case "doctor":
+			await cmdDoctor(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

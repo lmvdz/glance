@@ -17,8 +17,10 @@ import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
-import { envBool, envInt } from "./config.ts";
+import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
+import { type AutonomyFacts, doctorHostVisible } from "./doctor.ts";
+import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
 import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses, listHarnessTiers } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
@@ -85,7 +87,7 @@ import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { readModelOutcomes } from "./model-outcomes.ts";
 import { readTaskOutcomes } from "./task-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
-import { fetchIssueDetail, listPlaneIssues, planeRepos } from "./plane.ts";
+import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
 import { all, claim, release, who } from "./presence.ts";
@@ -136,7 +138,7 @@ import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
 import { resolveStateDir } from "./state-dir.ts";
-import { featureFlagStates, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
+import { featureFlagStates, type FeatureFlagKey, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { parsePolicyDoc, type PolicyStore } from "./policy.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
 import type { CapabilityInstallState } from "./capabilities/index.ts";
@@ -358,6 +360,10 @@ export interface SquadServerOptions {
 	 *  When a session's active org equals this, requests/WS route to the root `manager` (the factory) instead
 	 *  of a lazy tenant manager. Unset ⇒ the factory is reachable only via the on-box loopback admin. */
 	rootOrgId?: string;
+	/** Whether the EXTERNAL supervisor client actually started. It is gated on a CLI flag (`--no-supervise`)
+	 *  and on DB mode, neither of which the flag resolver can see — so `glance doctor` would report a
+	 *  supervisor that is not running, or miss one that is. Set by `up`; absent ⇒ fall back to the flag. */
+	superviseExternal?: boolean;
 	/** Runtime feature-flag settings persisted under the state dir and applied to process.env. */
 	runtimeSettings?: RuntimeSettingsStore;
 	/** Operator policy rules (C-RULES) persisted under the state dir; agents read them at tool-call time. */
@@ -590,8 +596,101 @@ export class SquadServer {
 	 *  every live org manager exactly like GET /api/agents does, instead of silently reading empty just
 	 *  because no root factory is configured. Returns undefined for any other pathname/method so the
 	 *  caller falls through to the single-manager route table below. */
+	/**
+	 * The facts only the running daemon knows, for `glance doctor`. Deliberately NOT derived from the
+	 * caller's environment: `envBool` here reads the process the agents actually run in.
+	 *
+	 * `webapp` and `authMode` are the two that have burned the most hours — a legacy-UI daemon and a
+	 * DB-mode daemon each look completely healthy from outside while doing something other than what the
+	 * operator asked for.
+	 */
+	private async doctorFacts(managers: SquadManager[], role: Role): Promise<unknown> {
+		const agents = managers.flatMap((m) => m.list());
+		// In DB mode an org MEMBER is bridged to `operator`, and members did not set this host's env or
+		// choose its cwd. Autonomy posture is theirs to see (it governs their agents); the host's process
+		// identity and filesystem layout are not. File mode has exactly one operator: the person at the
+		// keyboard. (grok-4.5)
+		const host = doctorHostVisible(this.dbMode, roleAtLeast(role, "admin"));
+		return {
+			daemon: {
+				running: true,
+				pid: host ? process.pid : undefined,
+				execPath: host ? process.execPath : undefined,
+				cwd: host ? process.cwd() : undefined,
+				installedRev: process.env.GLANCE_REV || undefined,
+				authMode: this.dbMode ? "db" : "file",
+				rootFactory: rootFactoryEnabledWith(planeRepos().length),
+				// The SAME predicate the request path uses (flag AND a built dist) — a doctor that reports the
+				// flag rather than the behaviour is how "why does 7878 show the old UI" became a live question.
+				webapp: webappEnabled(),
+				// Distinct from `webapp`: the flag can be off while the build exists, and the build can be
+				// missing while the flag is on. Conflating them made "the UI is missing" fire whenever the
+				// operator simply hadn't opted in.
+				webappDist: existsSync(WEBAPP_INDEX),
+				uptimeMs: Math.round(process.uptime() * 1000),
+			},
+			autonomy: await this.autonomyFacts(),
+			// Plane loads its secrets ONCE, at boot, in THIS process. The CLI's shell does not have them, so
+			// only the daemon can answer whether the work queue is connected. (grok-4.5)
+			plane: await this.planeHealth(),
+			// Which image the gate will actually use, and whether it fails closed without docker. The CLI
+			// cannot know: both are read from the DAEMON's environment. (gpt-5.6-sol)
+			gate: { image: process.env.OMP_SQUAD_GATE_SANDBOX?.trim() || process.env.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim() || DERIVED_SANDBOX_IMAGE, strict: envBool("OMP_SQUAD_GATE_SANDBOX_STRICT", false) },
+			projects: [...new Set(managers.flatMap((m) => m.projects().map((p) => p.repo)))],
+			zombieAgents: agents.filter((a) => a.status === "error").length,
+		};
+	}
+
+	/**
+	 * The autonomy the daemon is ACTUALLY running, read from the one registry that resolves it
+	 * (`runtime-settings.ts`: persisted setting > env > `defaultEnabled`).
+	 *
+	 * The first cut of this hand-rolled `envBool(key, false)` for each flag — and EVERY one of these
+	 * defaults to `true`. So on a stock daemon `glance doctor` would have announced "nothing is armed —
+	 * the daemon is a viewer" while that daemon was dispatching, driving, landing, and auto-answering
+	 * approval gates. The command whose entire purpose is to stop the operator from guessing at the
+	 * daemon's posture, guessing at the daemon's posture. Never re-derive a default; ask the resolver.
+	 */
+	private async autonomyFacts(): Promise<AutonomyFacts> {
+		const states = this.opts.runtimeSettings ? await this.opts.runtimeSettings.states() : featureFlagStates();
+		const on = (key: FeatureFlagKey): boolean => states.find((f) => f.key === key)?.enabled ?? false;
+		return {
+			autodispatch: on("OMP_SQUAD_AUTODISPATCH"),
+			autodrive: on("OMP_SQUAD_AUTODRIVE"),
+			autoland: on("OMP_SQUAD_AUTOLAND"),
+			// BOTH spellings. They are not aliases of each other anywhere in the code — one starts the
+			// external supervisor client, the other auto-answers inside each manager — and the one you
+			// forget is the one answering a gate a human was supposed to see.
+			// The in-process auto-supervisor is pure flag. The EXTERNAL one is flag AND `--no-supervise` AND
+			// file mode — `up` knows what it actually started, so believe it when it tells us. Guessing here
+			// is how a doctor tells you a model is answering your gates when it isn't, and vice versa.
+			autosupervise: on("OMP_SQUAD_AUTOSUPERVISE") || (this.opts.superviseExternal ?? on("OMP_SQUAD_AUTO_SUPERVISE")),
+			// Not a feature flag: read straight from the env the orchestrator reads.
+			landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
+			regressionGate: on("OMP_SQUAD_REGRESSION_GATE"),
+		};
+	}
+
+	/** Bounded liveness ping against Plane. Never throws; an unreachable Plane is a finding, not an error. */
+	private async planeHealth(): Promise<{ configured: boolean; reachable: boolean; detail?: string }> {
+		const cfg = planeConfig();
+		if (!cfg) return { configured: false, reachable: false };
+		try {
+			const res = await fetch(`${cfg.baseUrl}/api/v1/users/me/`, { headers: { "x-api-key": cfg.apiKey }, signal: AbortSignal.timeout(3_000) });
+			return { configured: true, reachable: res.ok, detail: res.ok ? undefined : `HTTP ${res.status}` };
+		} catch (err) {
+			return { configured: true, reachable: false, detail: errText(err) };
+		}
+	}
+
 	private async handleObservability(url: URL, req: Request, managers: SquadManager[], role: Role, actor: Actor): Promise<Response | undefined> {
-		if (req.method !== "GET" || managers.length === 0) return undefined;
+		if (req.method !== "GET") return undefined;
+		// `glance doctor` asks the DAEMON what it believes, never the calling shell — `/proc/<pid>/environ`
+		// shows only a process's INITIAL environment, and the operator's terminal has its own. Answered
+		// ABOVE the empty-managers guard: a daemon with no fleet is precisely the daemon you are trying to
+		// diagnose, and 404-ing there made `doctor` report a healthy daemon as unreachable. (grok-4.5)
+		if (url.pathname === "/api/doctor") return Response.json(await this.doctorFacts(managers, role));
+		if (managers.length === 0) return undefined;
 		if (url.pathname === "/api/health") {
 			const h = await aggregateHealth(managers);
 			const projects = new Set(managers.flatMap((m) => m.projects().map((p) => p.repo))).size;
