@@ -29,7 +29,12 @@ export interface WorktreeInfo {
 	worktree: string;
 	/** Local branch checked out there, e.g. "squad/ompsq-35-…". Empty ⇒ detached. */
 	branch: string;
-	/** Commits on `branch` not reachable from the base branch (0 ⇒ merged/empty; <0 ⇒ unknown). */
+	/** Commits on `branch` not reachable from the base branch (0 ⇒ merged/empty; <0 ⇒ unknown — the
+	 *  git read failed, land-mode.ts's `aheadOfBase` -1 sentinel, `aheadUnknown` there). Deliberately
+	 *  left as `number`, not `number | "unknown"`, because `selectReapable` below only ever tests it
+	 *  with EXACT equality (`=== 0`) — any nonzero value, unknown included, already falls into
+	 *  "not merged" without a separate branch, so a union type would buy nothing here and would force
+	 *  every test in this file's suite to stop passing plain numbers. */
 	aheadOfBase: number;
 	/** Worktree dir mtime (ms) — recency guard against reaping a mid-spawn worktree. */
 	mtimeMs: number;
@@ -87,9 +92,10 @@ export function selectReapable(input: ReapInput): ReapDecision[] {
 		if (input.owned.has(w.worktree)) continue; // a live agent owns it
 		if (w.dirty) continue; // OMPSQ-41: uncommitted work — never reap, even once its issue closes
 		if (input.now - w.mtimeMs < input.graceMs) continue; // mid-spawn / recently active — leave it
-		// Clean + past grace. "merged" = every commit already in base (aheadOfBase 0) OR a recorded
-		// DoneProof (proven landed despite a nonzero/unknown count — squash/rebase merges); <0 with no
-		// proof is NOT merged.
+		// Clean + past grace. "merged" = every commit already in base (aheadOfBase EXACTLY 0) OR a
+		// recorded DoneProof (proven landed despite a nonzero/unknown count — squash/rebase merges);
+		// <0 (unknown — the ahead-count git read failed) with no proof is deliberately NOT merged: the
+		// exact-equality test below already fails closed for it, same as any other nonzero value.
 		const merged = w.aheadOfBase === 0 || w.proven === true;
 		const ident = parseIssueIdentifier(w.branch);
 		const issueClosed = input.openIdentifiers !== null && ident !== undefined && !input.openIdentifiers.has(ident);

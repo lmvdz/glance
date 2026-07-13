@@ -69,6 +69,15 @@ export const ProjectRegisterBodySchema = Schema.Struct({
 	repo: Schema.String,
 });
 
+/** POST /api/answers — ask a question of a repo (R5). The unit that answers is an observer: it never
+ *  commits and never lands, so `repo` grants read, not write. */
+export const AskBodySchema = Schema.Struct({
+	repo: Schema.String,
+	question: Schema.String,
+	model: Schema.optional(Schema.String),
+	harness: Schema.optional(Schema.String),
+});
+
 export const JoinRequestDecideBodySchema = Schema.Struct({
 	id: Schema.String,
 	action: Schema.optional(Schema.Unknown),

@@ -231,12 +231,117 @@ async function excerptForDetail(s: string, n: number, agentId?: string): Promise
 
 const FAILURE_DURATION_SUFFIX = /\s*\[[\d.]+\s*(?:ns|[µu]s|ms|s)\]$/;
 
+/**
+ * eap-borrows follow-up 4: `extractGateFailures`'s whole-output fallback (below — a gate with no
+ * `(fail)` lines) uses the ENTIRE trimmed output as the failure identity, so two runs of the exact same
+ * logical failure only compare equal if the output is byte-identical. A leading log-line timestamp and a
+ * trailing elapsed-duration suffix differ run-to-run even when the underlying failure is unchanged,
+ * which silently degraded the red-baseline allowance (`decideRegressionGate`) to always-refuse on any
+ * repo whose gate output carries one of these — indistinguishable from a genuine new regression. That
+ * refusal is a visible, LOGGED, escalatable land block (retry, fix the flake, or edit the branch) — it
+ * is NOT bypassed by force-land (`applyRegressionGate`/`decideRegressionGate` run unconditionally,
+ * regardless of `requireProof`/`staleGate`/`riskOverride`; see the force-land doc on
+ * `landAgentLocked` and `applyRegressionGate` below for the verified call sites).
+ *
+ * FAIL-OPEN FIX #1 (found by a blind cross-lineage review of the original follow-up-4 patch): that
+ * patch stripped its volatile-token patterns ANYWHERE in the line, including a bare interior duration
+ * (`timeout after 30s`) and an interior hex-looking token (`object a1b2c3d missing`). When a gate emits
+ * no `(fail)` lines the WHOLE trimmed output is a single identity token, so over-stripping could
+ * normalize two genuinely DIFFERENT failures (different timeout thresholds, different object ids) down
+ * to the same string — `decideRegressionGate` then reads base==merged and ALLOWS a land that actually
+ * introduced a real regression. Normalization is scoped to boilerplate POSITIONS, never to a token
+ * shape wherever it appears: a LEADING timestamp prefix (the wrapper/runner's log-line banner) and a
+ * TRAILING bracketed duration suffix (`FAILURE_DURATION_SUFFIX`) are the only position-anchored spots
+ * treated as boilerplate. A bare interior duration or a bare interior hex token is deliberately left
+ * UNTOUCHED, even though that means some repos whose gate output embeds a volatile hex id or an
+ * unbracketed elapsed time won't auto-collapse to the same identity across runs and will refuse (a
+ * refusal a human can inspect and escalate). This is an asymmetric trade made on purpose: a false
+ * INEQUALITY here is a visible, escalatable refusal; a false EQUALITY silently merges a regression.
+ * When in doubt, do not collapse two different-looking things into one.
+ *
+ * FAIL-OPEN FIX #2 (a second blind cross-lineage review, on top of fix #1): fix #1 still DELETED the
+ * boilerplate (leading timestamp → "", trailing duration → "") instead of substituting a placeholder.
+ * Deletion has its own fail-open: a failure line that IS, in its entirety, one of these volatile
+ * shapes — e.g. the gate's whole output is a single bare timestamp, or a single bracketed duration —
+ * normalizes to the EMPTY STRING. `uniqueSortedFailures` used to `.filter((f) => f.length > 0)`, so
+ * that failure silently VANISHED from the compared set. A base and a merged run that both hit this
+ * (even for textually different reasons) then both produce an EMPTY failure set, compare equal, and
+ * `decideRegressionGate` ALLOWS the land — including against a green base whose merged run actually
+ * failed. Deletion also risks merging two structurally different messages (a bare timestamp vs. a bare
+ * duration would both delete to "") that were never the same failure.
+ *
+ * Fix: every volatile boilerplate position is replaced with a STABLE PLACEHOLDER, never deleted —
+ * `<ts>` for a leading timestamp, `<dur>` for a trailing duration, `<tmp>` for a temp path, `<pid>`
+ * for `pid N`. Structure survives normalization, so a message that was ONLY a timestamp becomes the
+ * non-empty string `"<ts>"` — never confusable with a message that was only a duration (`"<dur>"`) or
+ * with unrelated content like `"assertion failed"`. `/tmp/...` paths and `pid N` are still collapsed
+ * ANYWHERE they occur in a line (not just at a fixed position) because neither is ever the
+ * distinguishing content of a failure message on its own — `/tmp/build-a/x.ts` vs `/tmp/build-b/x.ts`
+ * failing the same way is the SAME failure surfacing in two different sandboxes, and collapsing them
+ * is the intended behavior (see `normalizeFailureIdentity`'s tests for the corresponding "a message
+ * that is ONLY a temp path is never equal to a real, unrelated message" case, which the placeholder
+ * substitution already guarantees structurally).
+ *
+ * `normalizeFailureIdentity` additionally enforces, and asserts, a NEVER-EMPTY invariant as a second
+ * layer of defense: if normalization ever yields an empty or whitespace-only string (this substitution
+ * scheme shouldn't produce one, but the invariant is cheap and the failure mode is silent data loss),
+ * it falls back to the RAW trimmed failure text rather than let the failure disappear from the set.
+ * Losing a failure from the compared set is itself a fail-open — it is what makes a red run compare
+ * as an empty, "clean" set. Never do that; refuse before you disappear evidence.
+ */
+const VOLATILE_LEADING_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\s*/;
+const VOLATILE_LEADING_CLOCK_TIMESTAMP = /^\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s*/;
+const VOLATILE_TMP_PATH = /\/(?:private\/)?(?:tmp|var\/tmp)\/[^\s"'):,]+/g;
+const VOLATILE_PID = /\bpid[:\s]+\d+\b/gi;
+
+/** Substitute run-to-run volatile BOILERPLATE in a SINGLE line with a stable placeholder — see the
+ *  doc above. Every replacement is a SUBSTITUTION, never a deletion: structure survives so a line that
+ *  was entirely one volatile token normalizes to a non-empty placeholder, not "". Applied per-line
+ *  (never across a whole multi-line blob at once) so the trailing-`$`-anchored `FAILURE_DURATION_SUFFIX`
+ *  below still means "end of THIS line", not "end of the whole output", and the leading-`^`-anchored
+ *  timestamp patterns mean "start of THIS line", never an interior match. */
+function normalizeVolatileLine(line: string): string {
+	return line
+		.replace(FAILURE_DURATION_SUFFIX, " <dur>") // a trailing bracketed duration → placeholder, not deletion
+		.replace(VOLATILE_LEADING_ISO_TIMESTAMP, "<ts> ") // a leading ISO-8601 log-line timestamp → placeholder
+		.replace(VOLATILE_LEADING_CLOCK_TIMESTAMP, "<ts> ") // a leading bare clock timestamp → placeholder
+		.replace(VOLATILE_TMP_PATH, "<tmp>")
+		.replace(VOLATILE_PID, "<pid>");
+}
+
+/**
+ * A failure identity may NEVER be empty — see FAIL-OPEN FIX #2 above. `identity` is the
+ * already-normalized (or raw-fallback) candidate; this throws rather than let an empty identity slip
+ * into the compared set, because an empty identity silently drops a failure from the set (a red run
+ * reading as an empty, "clean" one) instead of refusing loudly. This should be unreachable — every
+ * caller below already falls back to a non-empty placeholder before calling this — but the invariant
+ * is asserted here, at the one choke point every identity passes through, rather than trusted.
+ */
+function assertNonEmptyFailureIdentity(identity: string): string {
+	if (identity.trim().length === 0) {
+		throw new Error("normalizeFailureIdentity invariant violated: produced an empty failure identity (a failure must never disappear from the compared set)");
+	}
+	return identity;
+}
+
 function normalizeFailureIdentity(failure: string): string {
-	return failure.replace(FAILURE_DURATION_SUFFIX, "").trim();
+	const normalized = failure
+		.split("\n")
+		.map(normalizeVolatileLine)
+		.join("\n")
+		.trim();
+	// Never-empty invariant: if placeholder substitution somehow still yields an empty/whitespace-only
+	// string (e.g. a genuinely empty or whitespace-only input failure), fall back to the RAW trimmed
+	// failure text — unnormalized rather than lost — and only as a last resort a fixed, honest label.
+	const identity = normalized.length > 0 ? normalized : failure.trim() || "(unlabeled failure)";
+	return assertNonEmptyFailureIdentity(identity);
 }
 
 function uniqueSortedFailures(failures: Iterable<string>): string[] {
-	return [...new Set([...failures].map(normalizeFailureIdentity).filter((f) => f.length > 0))].sort();
+	// No length filter here on purpose (FAIL-OPEN FIX #2): `normalizeFailureIdentity` is guaranteed
+	// (and asserts) never to return an empty identity, so every failure passed in is represented in the
+	// set — none can silently vanish because its identity happened to normalize away.
+	return [...new Set([...failures].map(normalizeFailureIdentity))].sort();
 }
 
 export function extractGateFailures(output: string, fallback = "gate"): string[] {
@@ -254,8 +359,10 @@ export function extractGateFailures(output: string, fallback = "gate"): string[]
 	// compared set-equal, and silently allowed a red-baseline re-merge that had actually introduced a new
 	// failure. Use the WHOLE trimmed output as the identity instead — a genuinely reproducible, UNCHANGED
 	// brownfield failure (the same check/tsc-only gate failing exactly the same way on base and merged)
-	// still compares byte-identical and allows the red-baseline landing (never wedging that repo), but a
-	// materially different failure no longer collides just because its first line happens to match.
+	// still compares equal (after `normalizeFailureIdentity` collapses run-to-run volatile BOILERPLATE —
+	// follow-up 4, see the doc above `VOLATILE_LEADING_ISO_TIMESTAMP` et al.) and allows the red-baseline landing (never
+	// wedging that repo), but a materially different failure no longer collides just because its first
+	// line happens to match.
 	const trimmed = output.trim();
 	return uniqueSortedFailures([trimmed.length > 0 ? trimmed : fallback]);
 }

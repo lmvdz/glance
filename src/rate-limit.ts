@@ -14,7 +14,7 @@
  * Degradation ladder (concern 06, plans/research-sirvir/06-degradation-ladder.md): a
  * `Map<lineage, until>` alone is a no-op unless the DISPATCHER also checks per prospective
  * unit instead of once globally — see `dispatch.ts`'s per-issue `paused(providerFor(...))`.
- * Buckets are keyed by `ModelLineage` (anthropic/openai/google) — the vendor/subscription
+ * Buckets are keyed by `ModelLineage` (anthropic/openai/google/xai) — the vendor/subscription
  * grain, not the harness name — via `model-lineage.ts`'s `resolveProvider`. An unclassifiable
  * ("unknown") provider folds into `DEFAULT_PROVIDER` (the fleet's dominant subscription)
  * rather than a separate bucket, so it fails SAFE (over-pauses the common case) instead of

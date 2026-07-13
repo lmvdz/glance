@@ -28,9 +28,15 @@ import {
 	RuntimeSettingsStore,
 } from "../src/runtime-settings.ts";
 import type { CellMetrics } from "../src/omp-graph/task-class-matrix.ts";
+import { membraneBreakerCadence } from "../src/membrane-breaker-cadence.ts";
+import { recordSelectedBaseline } from "../src/baseline-tracker.ts";
+import { appendReceipt } from "../src/receipts.ts";
+import { recordTaskOutcome } from "../src/task-outcomes.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
-import { SquadManager } from "../src/squad-manager.ts";
-import type { AgentDTO, AttentionEvent, PersistedAgent, RpcSessionState } from "../src/types.ts";
+import { SquadManager, UNATTACHED_ESCALATION_MARKER } from "../src/squad-manager.ts";
+import { SubagentTracker } from "../src/subagents.ts";
+import type { AgentDTO, AttentionEvent, PersistedAgent, RpcSessionState, RunReceipt } from "../src/types.ts";
+import type { TaskOutcomeRow } from "../src/task-outcomes.ts";
 import type { AutomationLog } from "../src/automation-log.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
@@ -410,7 +416,245 @@ test("SquadManager#fileMembraneBreakerFinding: a breaker trip attaches to the tr
 	// 2. Automation channel: also surfaces in /api/automation + the automation panel, independent of
 	//    whether the triggering unit is still live by the time a human looks.
 	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
-	expect(recent.some((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn")).toBe(true);
+	const finding = recent.find((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn");
+	expect(finding).toBeDefined();
+	// With a LIVE rec, the attention lane above already made this human-visible in the cockpit — the
+	// unattached-only marker must NOT be present (it would misleadingly claim "no UI surface" for an
+	// event that DID reach one).
+	expect(finding?.detail).not.toContain(UNATTACHED_ESCALATION_MARKER);
+
+	await mgr.stop();
+});
+
+// ── Blind review finding #4: the escalation must not die with the triggering unit ──────────────────────
+
+test("SquadManager#fileMembraneBreakerFinding: with NO live record (unit already reaped), the automation channel STILL carries the escalation", async () => {
+	// The cadence check is fire-and-forget (`void membraneBreakerCadence(...).then(...)` in land()) and
+	// may resolve after its triggering unit is reaped off `this.agents` — `rec` is `undefined` in that
+	// case (squad-manager.ts re-resolves liveness at callback time rather than passing a stale closure
+	// reference). This must not throw, and the automation-channel half of the dual-write — the ONE
+	// channel that survives independent of any specific unit's lifecycle — must still fire, so a rotting
+	// baseline is never invisible just because the unit that triggered its measurement is gone.
+	const { mgr, repo } = await makeMgr("membrane-breaker-finding-no-rec");
+
+	const event: AttentionEvent = {
+		id: "membrane-breaker:tdd:heavy:no-rec",
+		summary: 'Membrane profile disciplines auto-disabled — measured success degradation on taskClass "tdd:heavy"',
+		detail: "mergeRate dropped 20.0pt vs baseline (n=5)",
+		source: "notify",
+		createdAt: Date.now(),
+	};
+
+	expect(() =>
+		(mgr as unknown as { fileMembraneBreakerFinding: (rec: unknown, repo: string, event: AttentionEvent) => void }).fileMembraneBreakerFinding(undefined, repo, event),
+	).not.toThrow();
+
+	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
+	const finding = recent.find((e) => e.detail?.includes("Membrane profile disciplines auto-disabled") && e.level === "warn");
+	expect(finding).toBeDefined();
+	// Round-2 review follow-up: with no live `rec`, this write is (as of this fix) the ONLY place the
+	// escalation reaches — no cockpit/graph surface renders it (see the doc comment on
+	// `fileMembraneBreakerFinding`). Proves the write carries the unmistakable, greppable marker rather
+	// than pretending a UI render happened.
+	expect(finding?.detail).toContain(UNATTACHED_ESCALATION_MARKER);
+
+	await mgr.stop();
+});
+
+// ── Baseline-tracker producer wiring (eap-borrows follow-up, concern 01 DESIGN decision 4) ────────────
+
+test("membraneBreakerCadence#onStaleness, wired the SAME way SquadManager.land() wires it, reaches the triggering unit's attention lane AND the land automation channel", async () => {
+	// Proves the FULL chain, not just the private escalation method in isolation: a rotted persisted
+	// baseline surfaces via membraneBreakerCadence's `onStaleness` callback, wired to
+	// `fileMembraneBreakerFinding` exactly as `SquadManager.land()` wires it — a silently-rotting
+	// baseline is this repo's signature failure mode, so this must land on a human-visible channel, not
+	// a function return value nobody reads.
+	const { mgr, repo } = await makeMgr("membrane-baseline-stale-wiring");
+	const dto = await mgr.create({ name: "u", repo, approvalMode: "yolo", autoRoute: false });
+	const rec = (mgr as unknown as InternalHost).agents.get(dto.id)! as unknown as { dto: AgentDTO };
+	expect(rec.dto.attentionEvents ?? []).toEqual([]);
+
+	const stateDir = (mgr as unknown as { stateDir: string }).stateDir;
+
+	// Pretend a PRIOR cadence call already selected+persisted "sonnet" as this taskClass's baseline.
+	recordSelectedBaseline(stateDir, "tdd:heavy", "sonnet", Date.now() - 1000);
+
+	// This round: seed a membrane-flagged "opus" cohort (so the cadence isn't a no-op) but NO unflagged
+	// "sonnet" evidence at all — the persisted baseline has vanished from the current doc entirely.
+	const flaggedIds = ["f1", "f2", "f3", "f4", "f5"];
+	for (const id of flaggedIds) {
+		await recordTaskOutcome(stateDir, { agentId: id, routing: { mode: "tdd", tier: "heavy" }, model: "opus", outcome: "landed", source: "land", ts: Date.now() } satisfies TaskOutcomeRow);
+		await appendReceipt(stateDir, {
+			agentId: id,
+			name: id,
+			repo,
+			runId: `${id}-run`,
+			startedAt: Date.now() - 1000,
+			endedAt: Date.now(),
+			status: "idle",
+			toolCalls: 0,
+			toolTally: {},
+			filesTouched: [],
+			efficiencyFlags: ["membrane:verdict-first"],
+		} satisfies RunReceipt);
+	}
+	const pop = flaggedIds.map((agentId) => ({ agentId, taskClass: { mode: "tdd", tier: "heavy" }, model: "opus" }));
+
+	// The EXACT wiring shape from SquadManager.land(): onStaleness routes to the same escalation the
+	// membrane trip itself uses.
+	await membraneBreakerCadence(stateDir, pop, { mode: "tdd", tier: "heavy" }, {
+		onStaleness: (event) =>
+			(mgr as unknown as { fileMembraneBreakerFinding: (rec: unknown, repo: string, event: AttentionEvent) => void }).fileMembraneBreakerFinding(
+				(mgr as unknown as InternalHost).agents.get(dto.id)!,
+				repo,
+				event,
+			),
+	});
+
+	// 1. Attention lane: the staleness event reached the triggering unit's DTO.
+	expect(rec.dto.attentionEvents).toHaveLength(1);
+	expect(rec.dto.attentionEvents?.[0]?.summary).toContain("sonnet");
+	expect(rec.dto.attentionEvents?.[0]?.summary).toContain("stale");
+
+	// 2. Automation channel: the SAME dual-write, independent of roster state.
+	const recent = (mgr as unknown as { automation: AutomationLog }).automation.recent({ loop: "land" });
+	expect(recent.some((e) => e.detail?.includes("sonnet") && e.detail?.includes("stale") && e.level === "warn")).toBe(true);
+
+	await mgr.stop();
+});
+
+// ── Blind review finding #6: drive the REAL SquadManager.land() wire, not a hand-copied one ────────────
+// Every test above (from "Baseline-tracker producer wiring" onward) calls `membraneBreakerCadence`
+// directly and wires `onStaleness` to `fileMembraneBreakerFinding` by hand — proving the pieces connect
+// the way `land()`'s wiring SAYS it does, but a future edit that drops the cadence call (or the
+// onStaleness wiring) out of `land()` itself would not fail any of them. This test drives the actual
+// `SquadManager.land()` method over a real git repo (the land-blocked-recording.test.ts /
+// land-seam.test.ts convention) so that exact regression fails the suite.
+
+class TestManagerForcedLocalLand extends SquadManager {
+	protected resolveLandModeFor(_repo: string): Promise<{ mode: "pr" | "local"; defaultBranch?: string; reason: string }> {
+		return Promise.resolve({ mode: "local", reason: "forced local for membrane-disciplines land()-wire test" });
+	}
+}
+
+async function git(cwd: string, ...a: string[]): Promise<void> {
+	await Bun.spawn(["git", "-C", cwd, ...a], { stdout: "ignore", stderr: "ignore" }).exited;
+}
+
+async function baseRepo(prefix: string): Promise<string> {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	return repo;
+}
+
+async function branchWorktree(repo: string, branch: string, file: string): Promise<string> {
+	const parent = await fs.mkdtemp(path.join(os.tmpdir(), `${branch.replace(/\//g, "-")}-wt-`));
+	tmps.push(parent);
+	const dir = path.join(parent, "wt");
+	await git(repo, "worktree", "add", "-q", "-b", branch, dir, "main");
+	await fs.writeFile(path.join(dir, file), `${file}\n`);
+	await git(dir, "add", "-A");
+	await git(dir, "commit", "-qm", `add ${file}`);
+	return dir;
+}
+
+function seedFlaggedAgent(mgr: SquadManager, id: string, repo: string, worktree: string, branch: string): void {
+	const dto: AgentDTO = {
+		id,
+		name: id,
+		status: "idle",
+		kind: "omp-operator",
+		repo,
+		worktree,
+		branch,
+		approvalMode: "yolo",
+		pending: [],
+		lastActivity: 0,
+		messageCount: 0,
+	};
+	const options: PersistedAgent = { id, name: id, repo, worktree, approvalMode: "yolo", routing: { mode: "tdd", tier: "heavy", routedAt: Date.now() } };
+	mgr.agents.set(id, {
+		dto,
+		agent: new FakeDriver(),
+		options,
+		transcript: [],
+		assistantBuf: "",
+		streaming: false,
+		subs: new SubagentTracker(),
+		toolEntries: new Map(),
+		efficiencyFlags: ["membrane:verdict-first"],
+	} as never);
+}
+
+/** Poll a condition until true — for asserting on the outcome of the fire-and-forget membrane-breaker
+ *  cadence float that `land()` itself kicks off (mirrors land-seam.test.ts's `waitFor`). */
+async function waitFor(fn: () => boolean, timeoutMs = 4000): Promise<void> {
+	const start = Date.now();
+	while (!fn()) {
+		if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for condition");
+		await new Promise((r) => setTimeout(r, 10));
+	}
+}
+
+test("SquadManager.land(): the REAL land() wire (not a hand-copied cadence call) delivers a rotted-baseline staleness escalation to both channels", async () => {
+	stashEnv("OMP_SQUAD_MEMBRANE_PROFILES");
+	process.env.OMP_SQUAD_MEMBRANE_PROFILES = "1";
+
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "membrane-land-wire-state-"));
+	tmps.push(stateDir);
+	const repo = await baseRepo("membrane-land-wire-repo-");
+	const wt = await branchWorktree(repo, "squad/a1", "x.txt");
+	const mgr = new TestManagerForcedLocalLand({ stateDir });
+	seedFlaggedAgent(mgr, "a1", repo, wt, "squad/a1");
+
+	// A rotted persisted baseline for the taskClass this unit routes under: "sonnet" was selected last
+	// time, but this round's evidence never mentions it at all.
+	recordSelectedBaseline(stateDir, "tdd:heavy", "sonnet", Date.now() - 1000);
+
+	// Real membrane-flagged cohort evidence on disk so membraneBreakerCadence isn't a no-op — the SAME
+	// shape the direct-call test above uses.
+	const flaggedIds = ["f1", "f2", "f3", "f4", "f5"];
+	for (const id of flaggedIds) {
+		await recordTaskOutcome(stateDir, { agentId: id, routing: { mode: "tdd", tier: "heavy" }, model: "opus", outcome: "landed", source: "land", ts: Date.now() } satisfies TaskOutcomeRow);
+		await appendReceipt(stateDir, {
+			agentId: id,
+			name: id,
+			repo,
+			runId: `${id}-run`,
+			startedAt: Date.now() - 1000,
+			endedAt: Date.now(),
+			status: "idle",
+			toolCalls: 0,
+			toolTally: {},
+			filesTouched: [],
+			efficiencyFlags: ["membrane:verdict-first"],
+		} satisfies RunReceipt);
+	}
+
+	// Drive the REAL land() path — a clean local merge, force+reason to skip the deterministic proof
+	// gate (irrelevant to this test), exactly like land-blocked-recording.test.ts's "clean land" case.
+	const result = await mgr.land("a1", undefined, { force: true, reason: "membrane land-wire test" });
+	expect(result.ok).toBe(true);
+
+	// The membrane-breaker cadence call inside land() is fire-and-forget
+	// (`void membraneBreakerCadence(...).then(...).catch(...)`) — poll for its REAL wire (not a
+	// test-driven callback) to deliver the escalation to both channels.
+	const automation = (mgr as unknown as { automation: AutomationLog }).automation;
+	await waitFor(() => automation.recent({ loop: "land" }).some((e) => e.detail?.includes("sonnet") && e.detail?.includes("stale")));
+
+	const recentAfterLand = automation.recent({ loop: "land" });
+	expect(recentAfterLand.some((e) => e.detail?.includes("sonnet") && e.detail?.includes("stale") && e.level === "warn")).toBe(true);
+
+	// The unit is still live (land() doesn't reap on success in this path), so the attention lane also
+	// carries it — the SAME dual-write, driven end to end through production wiring this time.
+	expect(mgr.agents.get("a1")?.dto.attentionEvents?.some((e) => e.summary.includes("sonnet") && e.summary.includes("stale"))).toBe(true);
 
 	await mgr.stop();
 });

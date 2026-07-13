@@ -83,10 +83,29 @@ export interface FeatureCriterionDTO {
   source?: "plan" | "ticket" | "workflow" | "manual";
 }
 
+/** Mirrors backend `LensVerdict` (src/types.ts) — one perspective-diversified advisory lens verdict.
+ *  `lens` mirrors backend `LensId` (src/lens-select.ts), currently the single literal "regression". */
+export interface LensVerdictDTO {
+  lens: "regression";
+  disposition: "accept" | "object";
+  severity: "low" | "high";
+  claim: string;
+}
+
 /** Mirrors backend `ValidationRecord` (src/types.ts) — Epic 3's independent-validator verdict for an
- *  agent's most recent land attempt. */
+ *  agent's most recent land attempt.
+ *
+ *  This is a HAND-MAINTAINED mirror with no compiler edge to the backend type — a field added to (or
+ *  renamed/retyped on) `ValidationRecord` does not fail `tsc` here on its own. `tests/dto-conformance.test-d.ts`
+ *  (wired into the root tsconfig's `include`) is that edge: it asserts every key declared here exists on
+ *  `ValidationRecord` with an IDENTICAL type, so this file drifting out of sync fails `bun run check`,
+ *  not just a runtime read nobody happened to exercise. It is EQUALITY minus an explicit, named omit list
+ *  (`OmittedFromValidationRecordDto`, empty today), not a one-directional subset — a subset check passes
+ *  trivially the moment a new backend field is simply never mirrored, which is exactly how `gateLogPaths`
+ *  went unmirrored for months undetected. A new backend field must now either be mirrored here or named
+ *  in the omit list on purpose; leaving it out of both fails the build. */
 export interface ValidationRecordDTO {
-  verdict: "pass" | "veto" | "abstain" | "skipped";
+  verdict: "pass" | "veto" | "abstain" | "skipped" | "inconclusive";
   agreement: number;
   confidence: number;
   perCriterion: { id: string; satisfied: boolean; note?: string }[];
@@ -94,9 +113,20 @@ export interface ValidationRecordDTO {
   model?: string;
   /** Cross-lineage review: vendor lineage of author vs judge; `sameLineage` true = self-graded
    *  (weaker signal). Mirrors backend ValidationRecord (src/model-lineage.ts). */
-  authorLineage?: "anthropic" | "openai" | "google" | "unknown";
-  reviewerLineage?: "anthropic" | "openai" | "google" | "unknown";
+  authorLineage?: "anthropic" | "openai" | "google" | "xai" | "unknown";
+  reviewerLineage?: "anthropic" | "openai" | "google" | "xai" | "unknown";
   sameLineage?: boolean;
+  /** Perspective-diversified review (plans/perspective-diversified-review/): advisory out-of-criteria
+   *  lens verdicts that ran ALONGSIDE the authoritative criteria judge. Never changes `verdict`. */
+  lensAdvisory?: LensVerdictDTO[];
+  /** The one-shot re-check of a high-severity lens objection. `confirmed:true` maxes the confidence
+   *  penalty; it still never vetoes. */
+  lensVerify?: { lens: "regression"; claim: string; confirmed: boolean };
+  /** Lossless gate-log offload (plans/eap-borrows/ concern 03): pointer path(s) under
+   *  `<stateDir>/gate-logs/<agentId>/` to the FULL diff/proof text when either exceeded the judge's
+   *  excerpt budget. Absent ⇒ nothing was oversized (the common case). Type hygiene only — not rendered
+   *  anywhere in the webapp yet. */
+  gateLogPaths?: string[];
   ranAt: number;
 }
 

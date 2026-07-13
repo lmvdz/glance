@@ -259,6 +259,87 @@ test("HIGH 2 guard-rail: a GENUINE red baseline (gate ran, real failures) still 
 	expect(res.detail).toContain("red baseline");
 });
 
+// ─── Fail-open fix #2 integration coverage (a second blind cross-lineage review) ──────────────────
+//
+// Real applyRegressionGate/verifyMerged integration tests, not just decideRegressionGate on
+// hand-built sets (rank 6 of the review flagged the prior "gate level" test as the same helper path
+// renamed). These drive a genuine git repo + gate script through `landAgent`.
+
+test("CORE DEFECT: a merged run whose ENTIRE failure output is one volatile token (no (fail) markers) must still block a green base — never silently allowed by an empty-identity collapse", async () => {
+	// No `(fail)`-tagged lines at all: this drives extractGateFailures' WHOLE-OUTPUT fallback. The
+	// failing run's entire trimmed output is a single bare ISO-8601 timestamp — a message that IS, in
+	// its entirety, a volatile token. Pre-fix (deletion instead of substitution), that normalizes to
+	// "" and is filtered out of the compared set: base=[] and merged=[] read as equal, and a land that
+	// genuinely broke the gate (exit 1) against a genuinely green base was ALLOWED.
+	process.env.OMP_SQUAD_REGRESSION_GATE = "1";
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rg-emptyid-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { check: "true", test: "sh gate.sh" } }));
+	await fs.writeFile(path.join(repo, "bun.lock"), "");
+	await fs.writeFile(
+		path.join(repo, "gate.sh"),
+		["#!/bin/sh", "[ -f NEW_RED ] && { printf '2026-07-09T12:00:00.000Z\\n'; exit 1; }", "exit 0"].join("\n"),
+	);
+	await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base (green)");
+	const head0 = await gitOut(repo, "rev-parse", "HEAD");
+	const wt = await branchWorktree(repo, "feat", { "NEW_RED": "broken\n", "feature.txt": "new\n" });
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true" });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("regression gate");
+	// main rolled back — the red merge was REFUSED, not silently allowed via an empty-set collapse.
+	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0);
+});
+
+test("ACCEPTANCE-gate level (verifyMerged, not the full-suite regression gate): an already-red base and a merged run failing with a DIFFERENT interior hex id are REFUSED, not landed as a red-baseline re-merge", async () => {
+	// Isolates verifyMerged's OWN red-baseline classifier (land.ts ~line 640) from the separate
+	// full-suite applyRegressionGate — this is the genuine gate-level twin of the helper-level "fail
+	// A vs fail B, different hex id" case in land-regression-decision.test.ts.
+	process.env.OMP_SQUAD_REGRESSION_GATE = "0"; // isolate the ACCEPTANCE path
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rg-hexid-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { check: "true", test: "sh gate.sh" } }));
+	await fs.writeFile(path.join(repo, "bun.lock"), "");
+	// BASE_RED present ⇒ "(fail) object a1b2c3d missing"; NEW_HEX present ⇒ a DIFFERENT failure,
+	// "(fail) object e4f5a6b missing" — not the same object id, a genuinely different regression.
+	await fs.writeFile(
+		path.join(repo, "gate.sh"),
+		[
+			"#!/bin/sh",
+			"[ -f NEW_HEX ] && { printf '(fail) object e4f5a6b missing\\n'; exit 1; }",
+			"[ -f BASE_RED ] && { printf '(fail) object a1b2c3d missing\\n'; exit 1; }",
+			"exit 0",
+		].join("\n"),
+	);
+	await fs.writeFile(path.join(repo, "BASE_RED"), "broken\n");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base (red: hex a1b2c3d)");
+	const head0 = await gitOut(repo, "rev-parse", "HEAD");
+	// Branch removes BASE_RED and adds NEW_HEX — still failing, but a DIFFERENT hex id, not a fix.
+	const wt = await branchWorktree(repo, "feat", { "BASE_RED": null, "NEW_HEX": "broken\n" });
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "sh gate.sh" });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("new failure");
+	expect(res.detail).toContain("e4f5a6b");
+	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0); // main stays at its prior red baseline
+});
+
 test("flag on + autoresolve: conflict-resolved branch that introduces NEW_RED is rolled back before reviewer", async () => {
 	process.env.OMP_SQUAD_REGRESSION_GATE = "1";
 	process.env.OMP_SQUAD_AUTORESOLVE = "1";

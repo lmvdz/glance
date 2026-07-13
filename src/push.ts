@@ -46,7 +46,9 @@ const ab = (b: Buffer | Uint8Array): Uint8Array<ArrayBuffer> => {
 	return out;
 };
 
-/** HKDF-SHA256 (RFC 5869): extract then expand to `length` bytes. */
+/** HKDF-SHA256 (RFC 5869): extract then expand to `length` bytes.
+ *  @substrate exported for tests only — the RFC 5869 vectors assert the KDF directly; weakening
+ *  that to an end-to-end encrypt round-trip would stop pinning the exact expand/extract shape. */
 export function hkdf(salt: Buffer, ikm: Buffer, info: Buffer, length: number): Buffer {
 	const prk = createHmac("sha256", salt).update(ikm).digest();
 	let out = Buffer.alloc(0);

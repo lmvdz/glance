@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envInt, envNumber } from "./config.ts";
+import { envBool, envInt, envNumber } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -39,6 +39,7 @@ import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeInta
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
+import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
 import { errText } from "./err-text.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { normalizeRepoPath, openProjectRegistry, type ProjectRegistry } from "./project-registry.ts";
@@ -68,7 +69,7 @@ import { canTransition, dedupeTransitions, deriveStatus, followLineage, type Der
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
-import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
+import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof, type DoneProof } from "./done-proof.ts";
 import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
@@ -322,6 +323,17 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
  */
 const LAND_BLOCKED_WARN_COOLDOWN_MS = FACTORY_FRESHNESS_FLOOR_MS - 60_000;
 
+/**
+ * Greppable marker for a membrane-breaker/staleness escalation filed with NO live triggering unit
+ * (`fileMembraneBreakerFinding`'s rec-less arm). Verified investigation (blind-review follow-up,
+ * see the doc comment on `fileMembraneBreakerFinding`): as of this fix there is NO rendered UI
+ * surface — cockpit or graph — that a repo/daemon-scoped automation event with no live `agentId`
+ * reaches. This marker exists so the escalation is still trivially findable by anyone grepping
+ * automation.jsonl, `/api/automation`, or `glance automation --loop land`, until a real
+ * repo-scoped attention surface exists to carry it.
+ */
+export const UNATTACHED_ESCALATION_MARKER = "UNATTACHED-ESCALATION (no live triggering unit — CLI/API only, see automation.jsonl)";
+
 function peerMessageBudget(): number {
 	return envInt("OMP_SQUAD_PEERMSG_BUDGET", 5);
 }
@@ -356,6 +368,23 @@ function autoLandFailCap(): number {
  */
 function landBlockedEscalateCap(): number {
 	return envInt("OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP", 20);
+}
+
+/**
+ * Bounded-escalation budget for `agentHasUnlandedWork`'s aheadUnknown streak (finding #1,
+ * cross-lineage review of af3d534). A transient `aheadOfBase` fault costs one wasted acceptance-suite
+ * run (the assume-work-exists polarity af3d534 chose, unchanged here) — but a PERSISTENT fault on the
+ * SAME (repo, branch) used to cost one wasted run PER ORCHESTRATOR TICK, forever, with the only bound
+ * being the unrelated `landBlockedEscalateCap` budget inside `land()` itself, which nothing guarantees
+ * this path ever reaches (a fault narrow to `aheadOfBase`'s own git call may never make `land()` itself
+ * return `retryable`). This is the independent budget for THAT path: how many consecutive
+ * "couldn't determine" reads on the same branch run before `agentHasUnlandedWork` stops re-entering
+ * verify/land and instead files a "Needs you" attention item. Small default (3, not 20) — this gates a
+ * COSTLY suite run every ~30s tick, not a cheap land probe, so the wasted-work budget should be tighter.
+ * 0 disables (pure opt-out, never the default).
+ */
+function aheadUnknownEscalateCap(): number {
+	return envInt("OMP_SQUAD_AHEAD_UNKNOWN_ESCALATE_CAP", 3);
 }
 
 /**
@@ -802,6 +831,11 @@ export class SquadManager extends EventEmitter {
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
 	private readonly learningMetrics: LearningMetrics;
+	/** Per-repo epoch ms until which the cold-start primer is skipped, after a fabric read of THAT repo
+	 *  blew its budget. Per-repo, not global: one repo with thousands of receipts (or a Plane project
+	 *  behind a stalled fetch) must not silently mute priming for every other repo the daemon serves.
+	 *  (gpt-5.6-sol.) Overridable in tests via the protected `now()` seam. */
+	protected primerBreakerUntil = new Map<string, number>();
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -835,6 +869,15 @@ export class SquadManager extends EventEmitter {
 	/** Idempotency for `fileLandBlockedEscalation` — fires the "Needs you" attention item at most once
 	 *  per live episode (mirrors `unverifiedProofEscalated`'s pattern), not once per tick past the cap. */
 	private readonly landBlockedEscalated = new Set<string>();
+	/** Consecutive `aheadUnknown` reads for `agentHasUnlandedWork`'s `${repo}::${branch}` scope (finding
+	 *  #1, cross-lineage review of af3d534). Reset to 0 the INSTANT `aheadOfBase` next returns a real
+	 *  number for that scope — a persistent fault must reach a human, but a transient one must self-clear
+	 *  with no human involvement, and the reset is what makes the self-clear automatic. */
+	private readonly aheadUnknownStreak = new Map<string, number>();
+	/** Idempotency for `fileAheadUnknownEscalation` — fires at most once per unresolved streak (mirrors
+	 *  `landBlockedEscalated`'s pattern). Cleared alongside `aheadUnknownStreak` the moment the scope's
+	 *  git read recovers, so a LATER persistent fault on the same branch can escalate again. */
+	private readonly aheadUnknownEscalated = new Set<string>();
 	/** Deterministic branch agent ids `reconcileParallelResume` just stopped, so the next `spawnFleetBranch`
 	 *  call under the same id knows to append the "resuming after a restart" addendum to the branch's
 	 *  re-prompt. Consumed (deleted) the moment spawnFleetBranch checks it — short-lived, not persisted. */
@@ -1693,7 +1736,7 @@ export class SquadManager extends EventEmitter {
 	 *  proof was recorded falls back to the arithmetic instead of being permanently invisible: a
 	 *  squash/rebase merge landed out-of-band while the daemon was down would otherwise permanently
 	 *  re-adopt an already-landed branch as "has work" on every restart. */
-	private async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
+	protected async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
 		if (!p.worktree) return false;
 		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
@@ -1703,7 +1746,12 @@ export class SquadManager extends EventEmitter {
 		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
 		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
 		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
-		return (await computeAheadOfBase({ repo: p.repo, branch: p.branch, cwd: p.repo })) > 0;
+		const ahead = await this.computeAheadOfBaseFor({ repo: p.repo, branch: p.branch, cwd: p.repo });
+		// -1 ⇒ the git read failed and we genuinely don't know whether this persisted agent still has
+		// work — assume it DOES. The cost of a false positive is one wasted resume/acceptance run; the
+		// cost of a false negative (treating a fault as "clean") is permanently dropping the agent's
+		// work on the floor, unresumed. See aheadOfBase's doc comment in land-mode.ts.
+		return aheadUnknown(ahead) || ahead > 0;
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
@@ -2857,6 +2905,16 @@ export class SquadManager extends EventEmitter {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
+		// An OBSERVER never lands. `is-landing-unit.ts` reads exactly like this rule, but it is only a
+		// metrics DENOMINATOR ("don't count a missing land against a unit that never lands by design") —
+		// no land path ever consulted it. I assumed it was a gate while building `glance ask`, and it was
+		// not: an answer unit runs with `--approval yolo` in a worktree whose origin is the operator's real
+		// repo, so nothing but a prompt ("do not edit") stood between an answer and a merge. `--force`
+		// does not open this door either; refusing to land a unit that was never supposed to produce a
+		// commit is not a safety valve an operator should be able to talk their way past.
+		if (rec.options.executionRole === "observer" || rec.options.ask) {
+			return { ok: false, committed: false, merged: false, message: "observer never lands", detail: `${dto.name} is an answer/observer unit — its deliverable is a report, not a branch` };
+		}
 		const auto = opts.auto ?? true;
 		await this.refreshProofState(rec);
 		if (opts.force && !opts.reason?.trim()) return { ok: false, committed: false, merged: false, message: "force land blocked", detail: "force land requires a reason" };
@@ -2994,9 +3052,23 @@ export class SquadManager extends EventEmitter {
 			// in this block.
 			if (membraneProfilesEnabled() && rec.efficiencyFlags?.some((f) => f.startsWith(EFFICIENCY_FLAG_PREFIX))) {
 				const flaggedTaskClass = { mode: rec.options.routing?.mode ?? "unknown", tier: rec.options.routing?.tier ?? "unknown" };
-				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass)
+				const unitId = rec.dto.id;
+				// finding #4: re-resolve liveness at CALLBACK time, not closure-capture time — this cadence
+				// call is fire-and-forget and may resolve well after `unitId` is reaped off `this.agents`
+				// (a reap racing the async I/O). Passing the stale `rec` reference in that case would attach
+				// the attention event to a detached DTO no client's roster still contains; pass `undefined`
+				// instead so `fileMembraneBreakerFinding` skips the pointless attention-lane write and relies
+				// on its unconditional automation-channel write, which is the whole point of that dual-write.
+				const liveRec = () => this.agents.get(unitId);
+				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass, {
+					// eap-borrows follow-up (concern 01 DESIGN decision 4): this cadence call is also the one
+					// live site that selects+persists a taskClass's baseline (baseline-tracker.ts). Route a
+					// rotted baseline through the SAME escalation `fileMembraneBreakerFinding` uses below — a
+					// silently-rotting baseline is exactly this repo's signature failure mode.
+					onStaleness: (event) => this.fileMembraneBreakerFinding(liveRec(), dto.repo, event),
+				})
 					.then((event) => {
-						if (event) this.fileMembraneBreakerFinding(rec, dto.repo, event);
+						if (event) this.fileMembraneBreakerFinding(liveRec(), dto.repo, event);
 					})
 					.catch((err) => this.log("warn", `membrane-breaker cadence check failed for ${dto.name} (non-fatal): ${errText(err)}`));
 			}
@@ -3217,6 +3289,9 @@ export class SquadManager extends EventEmitter {
 	private markLandReady(id: string): void {
 		const rec = this.agents.get(id);
 		if (!rec) return;
+		// "Ready to land" is meaningless for a unit that must never land, and it is the flag the UI's Land
+		// button and `floatPrOnLandReady` both key off. (grok-4.5)
+		if (rec.options.executionRole === "observer" || rec.options.ask) return;
 		rec.dto.landReady = true;
 		this.emitAgent(rec);
 		this.log("info", `land-confirm: ${id} verified — ready to land`);
@@ -3236,6 +3311,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	private floatPrOnLandReady(rec: AgentRecord): void {
 		const dto = rec.dto;
+		if (rec.options.executionRole === "observer" || rec.options.ask) return; // an answer opens no PR
 		if (!dto.branch || dto.worktree === dto.repo) return; // nothing to land in PR mode
 		void (async () => {
 			try {
@@ -3340,6 +3416,20 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Thin, overridable wrapper around land-mode.ts's `aheadOfBase` — mirrors `resolveLandModeFor`
+	 * immediately above, same reason: `bun test`'s PROCESS-WIDE `mock.module` permanently rebinds
+	 * every consumer's import of `land-mode.ts` the moment ANY test file module-mocks it, regardless
+	 * of which file's tests run when — so a test needing `aheadOfBase`'s REAL git behavior (e.g. a
+	 * PATH-shimmed git-fault repro) can silently get another file's canned mock instead. Every
+	 * "unlanded work?" consumer below routes through this method (never the bare `computeAheadOfBase`
+	 * import directly) so tests inject a fake ahead-count by overriding the method, never by mocking
+	 * the module.
+	 */
+	protected computeAheadOfBaseFor(opts: { repo: string; branch: string; cwd?: string }): Promise<number> {
+		return computeAheadOfBase(opts);
+	}
+
+	/**
 	 * Injection seam (mirrors `resolveLandModeFor` above) so tests can supply a fake independent
 	 * judge without a real `omp` binary on PATH. `undefined` ⇒ `validatorGate`'s own default judge
 	 * (an independent one-shot `omp -p --model opus` call).
@@ -3365,7 +3455,7 @@ export class SquadManager extends EventEmitter {
 		// spec (applyState) on the common omp/pi path; `harness` is the fallback for vendor-pinned ACP
 		// runtimes. Threaded so the ValidationRecord can flag a same-lineage (self-graded) review.
 		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
-		const { record, veto } = await validatorGate({
+		const { record, veto, inconclusive } = await validatorGate({
 			criteria,
 			repo: opts.repo,
 			worktree: opts.worktree,
@@ -3392,6 +3482,21 @@ export class SquadManager extends EventEmitter {
 		}
 		if (veto && !opts.validatorOverride) {
 			return { ok: false, committed: false, merged: false, message: opts.message, detail: veto };
+		}
+		// eap-borrows follow-up 7: a diff-computation FAILURE (git fault) is an ENVIRONMENTAL precondition,
+		// not a branch defect — never a permanent park. `retryable: true` routes it through the exact same
+		// bounded-escalation machinery every other retryable refusal already uses (landBlockedEscalateCap /
+		// fileLandBlockedEscalation in the `land()` outcome-recording block below): it retries at the
+		// orchestrator's ~30s cadence, never bumps the branch's fail streak, and escalates to a "Needs you"
+		// attention item if the SAME episode (headSha+reasonClass) is still stuck after the cap — the same
+		// safety valve that already prevents the dirty-main refusal from wedging forever. Note the
+		// deliberate asymmetry with `veto` just above: a veto has `opts.validatorOverride` as a logged
+		// human bypass, but `inconclusive` has none — this check runs unconditionally, so `opts.force`
+		// (requireProof:false) does NOT skip it either. There is nothing for a human to override: the
+		// diff itself couldn't be computed, so there's no verdict to force through. The only way out is
+		// the retry lane above (or a human fixing the underlying git fault directly).
+		if (inconclusive) {
+			return { ok: false, committed: false, merged: false, message: opts.message, detail: inconclusive, retryable: true };
 		}
 		return undefined;
 	}
@@ -3511,20 +3616,93 @@ export class SquadManager extends EventEmitter {
 	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
+		// Not "unlanded work" — an answer. Saying yes here is what invites the orchestrator to verify it,
+		// sweep it, and try to land it. (grok-4.5)
+		if (rec.options.executionRole === "observer" || rec.options.ask) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
 		if (proof && (await proofCoversTip(proof, rec.dto.branch, rec.dto.repo))) return false;
-		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
+		const ahead = await this.computeAheadOfBaseFor({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree });
+		const scope = `${rec.dto.repo}::${rec.dto.branch}`;
+		// -1 ⇒ the git read failed and we genuinely don't know — assume there IS unlanded work rather
+		// than silently reading a transient git fault as "nothing to land". A false positive costs one
+		// wasted acceptance-suite run; a false negative here is orchestrator.ts:220's `agentHasWork`
+		// gate silently skipping the land for this unit, forever, with no escalation. See aheadOfBase's
+		// doc comment in land-mode.ts. Bounded by `trackAheadUnknown` below: a PERSISTENT fault stops
+		// re-paying for that wasted run every tick once a human has been notified, instead of thrashing
+		// the acceptance suite forever (finding #1, cross-lineage review of af3d534).
+		if (aheadUnknown(ahead)) return this.trackAheadUnknown(rec, scope);
+		this.aheadUnknownStreak.delete(scope);
+		this.aheadUnknownEscalated.delete(scope);
+		return ahead > 0;
+	}
+
+	/**
+	 * Bounded response to a persistent `aheadOfBase` git fault on `agentHasUnlandedWork`'s
+	 * `${repo}::${branch}` scope (finding #1, cross-lineage review of af3d534). Below
+	 * `aheadUnknownEscalateCap()` consecutive unknowns: preserve af3d534's original
+	 * assume-work-exists polarity (a false positive costs one wasted acceptance-suite run — the
+	 * existing, deliberate trade-off, unchanged). At the cap: file a ONE-TIME "Needs you" attention item
+	 * naming the fault (dual-write, mirrors `fileLandBlockedEscalation`'s shape exactly) and return
+	 * `false` so the orchestrator stops re-running the costly suite against a fault that hasn't changed
+	 * since the last tick. This is NOT a return of the pre-fix silent skip: a human has already been
+	 * told (the attention item + automation row are both live before this ever returns `false`), and
+	 * `agentHasUnlandedWork`'s caller resets the streak (see above) the instant `aheadOfBase` next
+	 * returns a real number for this scope — so the unit resumes automatically the moment git recovers,
+	 * with no human action required for the transient case.
+	 */
+	private trackAheadUnknown(rec: AgentRecord, scope: string): boolean {
+		const streak = (this.aheadUnknownStreak.get(scope) ?? 0) + 1;
+		this.aheadUnknownStreak.set(scope, streak);
+		const cap = aheadUnknownEscalateCap();
+		if (cap > 0 && streak >= cap) {
+			if (!this.aheadUnknownEscalated.has(scope)) {
+				this.aheadUnknownEscalated.add(scope);
+				this.fileAheadUnknownEscalation(rec, streak);
+			}
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Dual-write "Needs you" escalation for a persistent `aheadOfBase` fault (finding #1, cross-lineage
+	 * review of af3d534) — mirrors `fileLandBlockedEscalation`'s pattern exactly:
+	 *   1. The attention lane on the live `AgentRecord` (live-pushed to any connected client).
+	 *   2. The "land" automation channel, unconditionally, so /api/automation + the panel see it even if
+	 *      `rec` is reaped before a client observes the attention event.
+	 * Idempotent per streak via the caller's `aheadUnknownEscalated` set (this method itself doesn't
+	 * dedupe). Best-effort; never throws.
+	 */
+	private fileAheadUnknownEscalation(rec: AgentRecord, streak: number): void {
+		const summary = `aheadOfBase has returned "unknown" for ${rec.dto.branch ?? rec.dto.name} on ${streak} consecutive checks — needs a human to look`;
+		const detail = `agentHasUnlandedWork(${rec.dto.id}) — repo ${rec.dto.repo}, branch ${rec.dto.branch ?? "?"}: the underlying git read (aheadOfBase) keeps failing, so the auto-land loop is holding this unit rather than re-running the acceptance suite against an unresolved fault. It resumes automatically the moment aheadOfBase next returns a real count.`;
+		try {
+			const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
+			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.emitAgent(rec);
+		} catch (err) {
+			this.log("warn", `ahead-unknown attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
+		try {
+			this.log("warn", `${summary} — ${detail}`);
+			this.automation.for("land", rec.dto.repo)({ durationMs: 0, level: "warn", detail: `${summary} — ${detail}` });
+		} catch {
+			/* observability must never break the land path */
+		}
 	}
 
 	// ── Observer edges (OMPSQ-52) — read-only git probes + the main gate, injected into Observer. ──
 
 	/** Commits on an agent's branch not in main (origin-aware in PR mode via `aheadOfBase`):
-	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
+	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown git read — test with `aheadUnknown`, never
+	 *  a bare `< 0`/`=== -1`/`> 0` (see aheadOfBase's doc comment in land-mode.ts). Feeds
+	 *  ObserverDeps.gitAheadOfMain — auditLandedSurvivors/auditStaleDone in observer.ts are the callers
+	 *  and both branch on `aheadUnknown` explicitly. */
 	protected async aheadOfMain(a: AgentDTO): Promise<number> {
 		if (!a.branch) return -1;
-		return computeAheadOfBase({ repo: a.repo, branch: a.branch, cwd: a.worktree });
+		return this.computeAheadOfBaseFor({ repo: a.repo, branch: a.branch, cwd: a.worktree });
 	}
 
 	/** Count of uncommitted TRACKED files in a checkout — the land-blocking set (matches the land path's
@@ -3654,30 +3832,64 @@ export class SquadManager extends EventEmitter {
 
 	/**
 	 * Route a membrane-breaker trip — a hard fleet-wide auto-disable of `OMP_SQUAD_MEMBRANE_PROFILES`
-	 * (eap-borrows concern 05) — to where a human actually looks. Dual-write, mirroring how every other
-	 * daemon-scoped escalation in this file records:
+	 * (eap-borrows concern 05) — to where a human actually looks. Also reused verbatim for the
+	 * baseline-tracker's staleness event (concern 01 DESIGN decision 4 follow-up — see the `onStaleness`
+	 * wire-up above): the channel doesn't care what tripped, only that a human sees it. Dual-write,
+	 * mirroring how every other daemon-scoped escalation in this file records:
 	 *   1. The "Needs you" attention lane: attach `event` to `rec.dto.attentionEvents` (the SAME
 	 *      non-blocking channel `squad_attention`/`glance notify` use — squad-manager.ts's `notify`
 	 *      command and `handleAttentionTool`) and `emitAgent(rec)` so it's live-pushed to any connected
-	 *      client. `rec` is the just-landed flagged unit whose land triggered this cadence check.
+	 *      client. `rec` is the flagged unit whose land triggered this cadence check.
 	 *   2. The "land" automation channel (`fileLandBlockedFinding`'s pattern; concern 04's #12 fix uses
 	 *      the equivalent "observer" channel for a gate-unrunnable finding) — surfaces in /api/automation
-	 *      + the automation panel regardless of whether `rec` is still live in `this.agents` by the time
-	 *      this fire-and-forget cadence check resolves (a reap racing the async I/O must not silently
-	 *      swallow a hard auto-disable).
-	 * Never a log line alone — a fleet-wide safety-net trip that only a daemon operator tailing logs
-	 * would ever see defeats the point of having a breaker. Best-effort; never throws.
+	 *      + the automation panel UNCONDITIONALLY, in its own try/catch independent of step 1.
+	 * `rec` is OPTIONAL (blind review follow-up finding #4): the cadence check is fire-and-forget
+	 * (`void membraneBreakerCadence(...).then(...)`), so by the time it resolves the triggering unit may
+	 * already be reaped off `this.agents` — the caller passes `undefined` in that case rather than a
+	 * dangling `AgentRecord` reference that no client's roster still contains (attaching to a detached
+	 * DTO nobody's UI is watching would be indistinguishable from dropping the event). Step 1 is simply
+	 * skipped when `rec` is absent; step 2 (the daemon-scoped automation channel) ALWAYS runs regardless.
+	 *
+	 * HONEST LABEL (2nd round follow-up, blind review): when `rec` is absent, step 2 is — as of today —
+	 * the ONLY place this escalation reaches. It was believed to also surface via the cockpit's
+	 * "Needs you" lane and/or the omp-graph "land" loop node; verified false on both counts:
+	 *   - The Needs-you lane (`attentionItems` in webapp/src/lib/insights.ts) has no daemon/repo-scoped
+	 *     source at all — its `actionItems` fold-in only ever pushes `source: "health"` rows, and the
+	 *     server's `/api/action-items` only ever builds `land`/`error`/`pending` rows FROM a live agent
+	 *     in the roster. An unattached finding has neither.
+	 *   - factory-status.ts's `landBlocked` banner (the one existing repo-scoped warning slot) is
+	 *     hard-coupled to the "land" channel's `skipReason` meaning "a land was refused" — tagging this
+	 *     event that way would misrender as "Fleet cannot land: …" for a condition that has nothing to do
+	 *     with landing. Rejected as dishonest.
+	 *   - The omp-graph "land" loop node is unreachable in the live UI: FleetPulseCanvas only turns a
+	 *     LOOP automation event into a clickable hanging note when it carries `filed`/`spawned` (see
+	 *     `pulse-model.ts`), which no "land"-channel write (this one included) ever sets. The tag `loop:
+	 *     "land"` exists only as event metadata, never as an inspectable/clickable UI element.
+	 * So a rotting baseline or a membrane-breaker trip with no live triggering unit is, right now, only
+	 * findable via `/api/automation`, `glance automation --loop land`, or grepping automation.jsonl — NOT
+	 * "an escalation nobody sees is indistinguishable from no escalation" in the full sense the rest of
+	 * this file achieves elsewhere. Rather than fake a UI render, the detail carries
+	 * `UNATTACHED_ESCALATION_MARKER` so it's trivially greppable until a real repo-scoped attention
+	 * surface exists (tracked as follow-up work, not invented here). Never a log line alone regardless —
+	 * a fleet-wide safety-net trip that only a daemon operator tailing logs would ever see defeats the
+	 * point of having a breaker. Best-effort; never throws.
 	 */
-	private fileMembraneBreakerFinding(rec: AgentRecord, repo: string, event: AttentionEvent): void {
-		try {
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+	private fileMembraneBreakerFinding(rec: AgentRecord | undefined, repo: string, event: AttentionEvent): void {
+		if (rec) {
+			try {
+				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+				this.emitAgent(rec);
+			} catch (err) {
+				this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+			}
 		}
 		try {
-			this.log("warn", `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`);
-			this.automation.for("land", repo)({ durationMs: 0, level: "warn", detail: `${event.summary}${event.detail ? ` — ${event.detail}` : ""}` });
+			const text = `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`;
+			this.log("warn", text);
+			// See the doc comment above: with no live `rec`, this write is the ONLY place the escalation
+			// reaches today — mark it so it's still trivially findable without a UI.
+			const detail = rec ? text : `${UNATTACHED_ESCALATION_MARKER} — ${text}`;
+			this.automation.for("land", repo)({ durationMs: 0, level: "warn", detail });
 		} catch {
 			/* observability must never break the land path */
 		}
@@ -3708,6 +3920,12 @@ export class SquadManager extends EventEmitter {
 	 * Returns true only when a commit was created.
 	 */
 	async commitAgentWip(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
+		// An observer/answer unit produces a REPORT. Sweeping its worktree into a commit is the first step
+		// of a chain that ends in a merge, and this sweep is exactly what made the fleet able to land at
+		// all. `is-landing-unit.ts` looks like it guards this; it does not — it is a metrics denominator
+		// and no land path reads it. The refusal has to live at each door. (grok-4.5)
+		const guard = this.agents.get(id);
+		if (guard && (guard.options.executionRole === "observer" || guard.options.ask)) return false;
 		const rec = this.agents.get(id);
 		if (!rec) return false;
 		const { repo, worktree, branch, status, name } = rec.dto;
@@ -3954,23 +4172,20 @@ export class SquadManager extends EventEmitter {
 		// hasPrimer is hoisted (not re-derived from opts.appendSystemPrompt later) so the harness
 		// scorecard's "instructions" dimension (below, concern 03) can tell "a context primer landed"
 		// apart from "the profile injected unrelated persona text" without re-parsing the joined string.
-		let hasPrimer = false;
-		if (opts.featureId && (opts.task || opts.name)) {
-			try {
-				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
-				const primer = buildContextPrimer(snapshot, [opts.task, opts.name].filter(Boolean).join(" "));
-				this.learningMetrics.record("primer-empty", primer ? 0 : 1);
-				if (primer) {
-					hasPrimer = true;
-					opts = {
-						...opts,
-						appendSystemPrompt: [opts.appendSystemPrompt, primer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
-					};
-				}
-			} catch (err) {
-				this.log("warn", `context primer failed: ${String(err)}`);
-			}
-		}
+		//
+		// R3 (founding brief: "units are context-poor"). This used to be gated on `opts.featureId`, and
+		// NOTHING that dispatch spawns carries one: `dispatchSpawn` calls `create({repo, name, branch,
+		// task, issue})` with no featureId, and neither does `glance add`. Only the feature-linked
+		// `POST /api/features/:id/agents` path set it. So the cold-start primer never ran for a dispatched
+		// or ad-hoc unit — and the `primer-empty` metric, which lives INSIDE that branch, has zero records
+		// across this host's entire learning-metrics log. The instrument was inside the thing it measured.
+		//
+		// Now: any spawn with a repo and something to search on gets the primer. Still best-effort, still
+		// fenced-untrusted by `buildContextPrimer`, still never blocks a spawn.
+		// `OMP_SQUAD_CONTEXT_PRIMER=0` disables it.
+		const primed = await this.primeContext(opts, actor);
+		opts = primed.opts;
+		const primerBuilt = primed.hasPrimer;
 		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
 		// (acceptance criteria / verification / scope) instead of reconstructing intent from an 8-word
 		// title. The body is human/skills-MCP-writable, so fence it as UNTRUSTED data — never let issue
@@ -4221,6 +4436,10 @@ export class SquadManager extends EventEmitter {
 			issue: opts.issue,
 			kind,
 			executionRole: opts.executionRole,
+			// Persisted, not just passed: `captureAnswer` reads `rec.options.ask` at `agent_end`, and a unit
+			// restored after a daemon restart must still know it owes an answer. Without this the unit runs,
+			// answers, and the answer is silently dropped on the floor. (R5)
+			ask: opts.ask,
 			runtime: opts.runtime,
 			harness: harnessDesc?.name,
 			bin: opts.bin,
@@ -4306,9 +4525,28 @@ export class SquadManager extends EventEmitter {
 		// "state": a continuity anchor a restart/crash can reattach to — feature membership, a tracked
 		// work item, or a resumable workflow checkpoint.
 		// "feedback": a real completion loop (verify command or workflow graph), not a bare prompt.
+		// A primer that was BUILT is not a primer that ARRIVED. An ACP unit has no system-prompt channel
+		// (default `contextInjection: "none"`), so it runs unscoped no matter what we assembled above.
+		//
+		// Evaluated HERE, not at primeContext: `routeIntake` (above) can turn an ACP unit into a WORKFLOW
+		// unit, whose inner omp child does have a native channel. Asking before the route gave the wrong
+		// answer for exactly the units dispatch produces — an auto-routed ACP unit would be logged as
+		// undelivered while its primer sailed through to the inner agent. (grok-4.5)
+		const contextDelivers = contextReachesAgent(opts);
+		const primerDelivered = primerBuilt && contextDelivers;
+		if (primerBuilt && !primerDelivered) {
+			// Measured from OUTSIDE the branch it measures — the mistake `primer-empty` made.
+			this.learningMetrics.record("primer-undelivered", 1, { flag: "context-primer", variant: resolveHarnessName(opts) });
+			this.log("warn", `${opts.name ?? "unit"}: context primer built but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running unscoped (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
+		}
 		if (harnessScorecardEnabled()) {
 			dto.harnessScorecard = scoreHarness({
-				hasInstructions: opts.issue ? Boolean(specBlock) || hasPrimer : Boolean(opts.task?.trim()),
+				// The authored spec rides the SAME `appendSystemPrompt` channel as the primer, so an ACP unit
+				// receives neither — scoring it as instructed because a spec was composed is the same lie
+				// the primer told. And a delivered primer IS instructions for an ad-hoc unit: `glance add
+				// <name>` carries no task string, so the primer is its only orientation. (grok-4.5,
+				// gpt-5.6-sol)
+				hasInstructions: opts.issue ? (Boolean(specBlock) && contextDelivers) || primerDelivered : Boolean(opts.task?.trim()) || primerDelivered,
 				toolsScoped: Boolean(toolGrants?.length || opts.requires?.length || produces?.length),
 				isolatedEnvironment: Boolean(resolvedBranch),
 				continuityAnchor: Boolean(opts.featureId || opts.issue || opts.workflowState),
@@ -4376,7 +4614,13 @@ export class SquadManager extends EventEmitter {
 			// "squad-leaky" worktrees). settleSpawnFailure then stops the (possibly half-spawned) driver so no
 			// detached host / ACP child / sandbox container leaks (OMPSQ-163, OMPSQ-146) and marks error — the
 			// SAME shared stop-before-fail path the prompt/set-model/restart sites use.
-			if (!started && createdWorktree) await removeWorktree(repo, cwd).catch(() => {});
+			if (!started && createdWorktree) {
+				// Reaping the worktree here prevents a leak (a failed-start test once orphaned 500+ of them),
+				// but it also destroys the evidence: the operator later finds an errored unit whose worktree
+				// "never existed". Record whether it was there when the spawn failed, before removing it.
+				this.log("warn", `${name}: spawn failed with the worktree ${existsSync(cwd) ? "PRESENT" : "ALREADY GONE"} at ${cwd} — removing it`);
+				await removeWorktree(repo, cwd).catch(() => {});
+			}
 			await this.settleSpawnFailure(rec, err);
 		}
 
@@ -4456,7 +4700,7 @@ export class SquadManager extends EventEmitter {
 				await this.provisioning.get(p.id);
 				return execGatedCommand(script, cwd, { mounts: [p.repo] });
 			};
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold, reflection });
+			return new WorkflowDriver({ id: p.id, appendSystemPrompt: p.appendSystemPrompt, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold, reflection });
 		}
 		// Plain-agent path: resolve the harness (explicit `harness`, else the legacy `runtime` alias,
 		// else GLANCE_HARNESS/"omp"). This is the single migration choke point — a persisted `runtime:"acp"`
@@ -4467,15 +4711,19 @@ export class SquadManager extends EventEmitter {
 			// sandbox × non-omp is a matrix, not a list: SandboxAgentDriver is an omp-RPC client over
 			// `docker exec` stdio and can only speak to omp. create() rejects sandbox+non-omp; this is the
 			// belt-and-suspenders floor (Phase 3 makes containment protocol-aware).
-			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
+			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, appendSystemPrompt: p.appendSystemPrompt, runArgs: p.sandbox.runArgs });
 		}
 		if (harness.protocol === "acp") {
-			const command = harness.acpCommand ? [...harness.acpCommand, ...(p.model ? ["--model", p.model] : [])] : undefined;
+			// The model's argv POSITION is per-harness (grok's --model belongs to `grok agent`, not to its
+			// `stdio` subcommand) — so compose through the registry, never by appending here.
+			const command = resolveAcpCommand(harness, p.model);
 			// ACP has no system-prompt slot, so omp-squad context (fabric primer + tool-grant scoping) is
 			// injected only when the operator opts in (OMP_SQUAD_ACP_CONTEXT=prompt); default "none" runs the
 			// unit UNSCOPED (honest — surfaced via the capability). approvalMode is mapped best-effort to an
 			// ACP session mode inside the driver.
-			const contextInjection = process.env.OMP_SQUAD_ACP_CONTEXT === "prompt" ? "prompt" : "none";
+			// Single-sourced with the scorecard's honesty predicate so the two can never drift: whatever
+			// `contextReachesAgent` promised at create() is exactly what the driver does here.
+			const contextInjection = contextReachesAgent(p) ? "prompt" : "none";
 			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection, mcpServers: p.mcp });
 			acp.on("acpcapabilities", (caps: unknown) => this.log("info", `acp ${harness.name} ${p.id} advertised capabilities: ${JSON.stringify(caps)}`));
 			return acp;
@@ -5540,7 +5788,8 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
-	private onAgentEvent(rec: AgentRecord, frame: { type?: string; [k: string]: unknown }): void {
+	/** Protected so a test can push a real frame through the real handler, rather than reimplementing it. */
+	protected onAgentEvent(rec: AgentRecord, frame: { type?: string; [k: string]: unknown }): void {
 		if (frame.type?.startsWith("subagent_")) {
 			rec.subs.ingest(frame as { type: string; payload?: unknown });
 			rec.run?.onSubagentFrame(frame as { type: string; payload?: unknown });
@@ -5671,6 +5920,10 @@ export class SquadManager extends EventEmitter {
 				this.finishAssistantStream(rec);
 				rec.streaming = false;
 				rec.dto.activity = undefined;
+				// R5: an answer unit's entire deliverable is its final message. Captured AFTER
+				// `finishAssistantStream` has flushed the buffer into the transcript, so the text we persist is
+				// exactly the text the operator sees.
+				void this.captureAnswer(rec);
 				rec.completedTurn = true; // a fully completed turn — see the field comment; feeds the exit classifier
 				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
@@ -6300,6 +6553,150 @@ export class SquadManager extends EventEmitter {
 			return await filesTouchedSinceBase(worktree, baseRef);
 		} catch {
 			return changedFiles(worktree); // never let a receipt fail over a metric
+		}
+	}
+
+	/**
+	 * Ask a question. The deliverable is an ANSWER, not a branch (R5, the founding brief's "half of
+	 * engineering is read/judge/decide work, and glance has no primitive for it").
+	 *
+	 * `executionRole: "observer"` is the whole safety story and it already existed: `is-landing-unit.ts`
+	 * refuses to land an observer, so this unit can never commit, never open a PR, never touch main. It
+	 * still gets a real worktree — an answer that had to read the repo through a keyhole would be worse
+	 * than no answer — and that worktree is simply discarded.
+	 *
+	 * `track: false`: an answer is not work to be dispatched, verified, or landed. `autoRoute: false`: the
+	 * router turns tasks into build workflows, which is exactly what this is not.
+	 */
+	async ask(opts: { repo: string; question: string; model?: string; harness?: string; name?: string }, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		const question = opts.question.trim();
+		if (!question) throw new Error("ask: a question is required");
+		const dto = await this.create(
+			{
+				repo: opts.repo,
+				name: opts.name ?? `ask-${Date.now().toString(36)}`,
+				task: answerBrief(question),
+				ask: question,
+				executionRole: "observer",
+				autoRoute: false,
+				track: false,
+				approvalMode: "yolo",
+				model: opts.model,
+				harness: opts.harness,
+			},
+			actor,
+		);
+		await saveAnswer(this.stateDir, { id: dto.id, question, repo: opts.repo, markdown: "", askedAt: Date.now(), model: dto.model, harness: dto.harness });
+		return dto;
+	}
+
+	/** Answers already given, newest first. */
+	answers(repo?: string): Promise<Answer[]> {
+		return listAnswers(this.stateDir, { repo });
+	}
+
+	answer(id: string): Promise<Answer | undefined> {
+		return readAnswer(this.stateDir, id);
+	}
+
+	/**
+	 * Persist an answer unit's final message. Best-effort and idempotent: a unit may end several turns
+	 * (a steer, a follow-up question), and the LAST one is the answer — re-answering overwrites, because
+	 * an operator who asks again wants the new answer, not two.
+	 *
+	 * Never throws into the frame loop. An answer that fails to save is logged loudly rather than taking
+	 * the ingest path down with it, but it is also NOT reported as saved.
+	 */
+	protected async captureAnswer(rec: AgentRecord): Promise<void> {
+		const question = rec.options.ask;
+		if (!question) return;
+		try {
+			const final = [...rec.transcript].reverse().find((t) => t.kind === "assistant" && t.text.trim().length > 0);
+			if (!final) {
+				this.log("warn", `${rec.dto.name}: answer unit ended with no final message — nothing to save`);
+				return;
+			}
+			const existing = await readAnswer(this.stateDir, rec.dto.id);
+			const askedAt = existing?.askedAt ?? Date.now();
+			const answeredAt = Date.now();
+			const ok = await saveAnswer(this.stateDir, {
+				id: rec.dto.id,
+				question,
+				repo: rec.dto.repo,
+				markdown: final.text.trim(),
+				askedAt,
+				answeredAt,
+				durationMs: answeredAt - askedAt,
+				model: rec.dto.model,
+				harness: rec.dto.harness,
+			});
+			if (!ok) this.log("warn", `${rec.dto.name}: answer could not be persisted (disk write failed)`);
+			else this.log("info", `${rec.dto.name}: answer saved (${final.text.trim().length} chars) — glance answers ${rec.dto.id}`);
+		} catch (err) {
+			this.log("warn", `${rec.dto.name}: capturing the answer failed: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * Attach the cold-start context primer to a spawn's system prompt — the fabric's most relevant prior
+	 * decisions, hot files and peer context, at zero turn cost.
+	 *
+	 * R3 (founding brief: "units are context-poor"). This used to be gated on `opts.featureId`, and
+	 * NOTHING dispatch spawns carries one: `dispatchSpawn` calls `create({repo, name, branch, task,
+	 * issue})` with no featureId, and neither does `glance add`. Only the feature-linked
+	 * `POST /api/features/:id/agents` path set it. So the primer never ran for a dispatched or ad-hoc unit
+	 * — and the `primer-empty` metric, which lives INSIDE that branch, has ZERO records across this host's
+	 * entire learning-metrics log. The instrument was inside the thing it was meant to measure.
+	 *
+	 * Now: any spawn with a repo and something to search on gets it. Best-effort — a failure logs and the
+	 * spawn proceeds unprimed, never blocked. `buildContextPrimer` fences its own output as untrusted, so
+	 * this must not re-fence. `OMP_SQUAD_CONTEXT_PRIMER=0` disables it.
+	 */
+	/** Injection seam for the primer circuit breaker's clock. */
+	protected now(): number {
+		return Date.now();
+	}
+
+	protected async primeContext(opts: CreateAgentOptions, actor: Actor): Promise<{ opts: CreateAgentOptions; hasPrimer: boolean }> {
+		const query = [opts.task, opts.name, opts.issue?.name].filter((t): t is string => typeof t === "string" && t.trim().length > 0).join(" ");
+		if (!contextPrimerEnabled() || !opts.repo || !query) return { opts, hasPrimer: false };
+		// Timing out the RACE does not cancel the READ — `fabric()` keeps enumerating receipts and waiting
+		// on Plane. The dispatcher spawns serially, so a slow fabric makes every unit in the tick start its
+		// own full scan while the last one is still running, and the daemon amplifies its way into the
+		// stall it was supposed to bound. After a timeout, stop asking for a while. (grok-4.5)
+		if (this.now() < (this.primerBreakerUntil.get(opts.repo) ?? 0)) return { opts, hasPrimer: false };
+		try {
+			// BOUNDED. `fabric()` enumerates every receipt file, reads every digest, and calls Plane's issue
+			// list — whose fetch carries no timeout. The dispatcher awaits each spawn serially, so one
+			// stalled fetch or a repo with thousands of historical receipts delays every later issue in the
+			// tick. "Best-effort, never blocks a spawn" was only half true: it never FAILED a spawn, but it
+			// could hang one. Found by cross-lineage review (gpt-5.6-sol).
+			const budgetMs = envInt("OMP_SQUAD_PRIMER_TIMEOUT_MS", 5_000);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const snapshot = await Promise.race([
+				// `Promise.race` subscribes to BOTH, so a fabric() that rejects after the timeout wins is
+				// still handled — no unhandled rejection can take the daemon down.
+				this.fabric(actor, { repos: [opts.repo], includeLeases: true }),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => reject(new Error(`context primer timed out after ${budgetMs}ms`)), budgetMs);
+					timer.unref?.();
+				}),
+			]).finally(() => clearTimeout(timer));
+			const primer = buildContextPrimer(snapshot, query);
+			this.learningMetrics.record("primer-empty", primer ? 0 : 1, { flag: "context-primer", variant: opts.featureId ? "feature" : "dispatch" });
+			if (!primer) return { opts, hasPrimer: false };
+			return {
+				opts: { ...opts, appendSystemPrompt: [opts.appendSystemPrompt, primer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined },
+				hasPrimer: true,
+			};
+		} catch (err) {
+			const timedOut = errText(err).includes("timed out");
+			if (timedOut) {
+				const backoff = envInt("OMP_SQUAD_PRIMER_BACKOFF_MS", 60_000);
+				this.primerBreakerUntil.set(opts.repo, this.now() + backoff);
+				this.log("warn", `context primer timed out for ${opts.repo} — priming paused there for ${backoff}ms (the fabric read is still running behind us)`);
+			} else this.log("warn", `context primer failed: ${errText(err)}`);
+			return { opts, hasPrimer: false };
 		}
 	}
 
@@ -7650,11 +8047,16 @@ export class SquadManager extends EventEmitter {
 						// were landed too.
 						const doneProof = !w.isPrimary && w.branch ? getDoneProofByBranch(this.stateDir, w.branch) : undefined;
 						const proven = !!doneProof && w.branch !== undefined && (await proofCoversTip(doneProof, w.branch, root));
+						// The -1 "unknown" sentinel flows straight into WorktreeInfo.aheadOfBase unmapped, by
+						// design: selectReapable's `merged` test is `w.aheadOfBase === 0`, an EXACT-equality
+						// check, so -1 (or any other nonzero) already falls into "not merged" without any
+						// special-casing here — the fail-safe direction this consumer needs (never reap a
+						// worktree we couldn't verify is landed). Do not change this to `> 0`/`< 0`.
 						return {
 							worktree: w.worktree,
 							branch: w.branch ?? "",
 							isPrimary: w.isPrimary,
-							aheadOfBase: w.isPrimary || !w.branch ? 0 : await computeAheadOfBase({ repo: root, branch: w.branch, cwd: root }),
+							aheadOfBase: w.isPrimary || !w.branch ? 0 : await this.computeAheadOfBaseFor({ repo: root, branch: w.branch, cwd: root }),
 							proven,
 							dirty: !w.isPrimary && (await worktreeStatus(w.worktree)).dirtyFiles.length > 0,
 							mtimeMs: stat ? stat.mtimeMs : 0, // dir gone ⇒ ancient ⇒ eligible (removeWorktree prunes the stale entry)
@@ -8038,6 +8440,12 @@ export class SquadManager extends EventEmitter {
 		}
 		return restoredCount;
 	}
+}
+
+/** The cold-start context primer (R3). On by default: a unit that starts blind re-derives what the
+ *  fabric already knows. `OMP_SQUAD_CONTEXT_PRIMER=0` turns it off. */
+function contextPrimerEnabled(): boolean {
+	return envBool("OMP_SQUAD_CONTEXT_PRIMER", true);
 }
 
 function feedbackMaxImageBytes(): number {
