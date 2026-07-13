@@ -91,7 +91,11 @@ export const PATTERNS: DefectPattern[] = [
 		// review (2026-07-10) caught this ratchet's first description telling authors to do exactly that.
 		// 3 further textual hits are history comments (land-mode.ts:142, land.ts:686, squad-manager.ts:345)
 		// and don't count — see the module doc's comment-skip rationale.
-		baseline: 14,
+		// 15th reviewed 2026-07-13: squad-manager.ts's `inconclusive` land-diff refusal (PR #166) — the
+		// diff itself couldn't be COMPUTED (environmental git fault), so there is no verdict to park on;
+		// the retry lane + the same escalate-cap episode accounting bound it. Correct polarity. #160 and
+		// #166 merged as siblings, so this baseline was locked before the 15th literal existed.
+		baseline: 15,
 	},
 	{
 		id: "raw-truncate-on-judged-path",

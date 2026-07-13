@@ -262,18 +262,6 @@ export async function branchAhead(repo: string, branch: string, base: string): P
 	return r.code === 0 ? Number(r.stdout) || 0 : -1;
 }
 
-/** The repo's primary branch (the main checkout's current branch); falls back to "main". */
-export async function primaryBranch(repo: string): Promise<string> {
-	const r = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], repo);
-	return r.code === 0 && r.stdout && r.stdout !== "HEAD" ? r.stdout : "main";
-}
-
-/** Commit all changes in a worktree to its current branch (preserve abandoned WIP). Best-effort; true on commit. */
-export async function commitWorktreeWip(worktree: string, message: string): Promise<boolean> {
-	if ((await runGit(["add", "-A"], worktree)).code !== 0) return false;
-	return (await runGit(["commit", "--no-verify", "-m", message], worktree)).code === 0;
-}
-
 /** Delete a branch only if it is fully merged — git's `-d` refuses an unmerged branch. Best-effort; true on delete. */
 export async function deleteBranchIfMerged(repo: string, branch: string): Promise<boolean> {
 	const root = await repoRoot(repo).catch(() => repo);
