@@ -48,6 +48,13 @@ test('diffSignal changes when landReady or prState changes (post-land diff refet
   expect(diffSignal({ ...base, prState: 'open' })).not.toBe(diffSignal({ ...base, prState: 'merged' }));
 });
 
+test('diffSignal changes when validationVerdict changes — a validator resolving (or a fresh land getting held) is diff-relevant too', () => {
+  const base = { id: 'x', messageCount: 3, status: 'idle', landReady: true };
+  expect(diffSignal(base)).not.toBe(diffSignal({ ...base, validationVerdict: 'veto' }));
+  expect(diffSignal({ ...base, validationVerdict: 'veto' })).not.toBe(diffSignal({ ...base, validationVerdict: 'inconclusive' }));
+  expect(diffSignal({ ...base, validationVerdict: 'pass' })).not.toBe(diffSignal({ ...base, validationVerdict: undefined }));
+});
+
 test('idsNeedingDiffFetch: fetches an id with no prior signal', () => {
   const agents = [{ id: 'a', messageCount: 1, status: 'working' }];
   expect(idsNeedingDiffFetch(agents, new Map())).toEqual(['a']);

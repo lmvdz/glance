@@ -13,7 +13,9 @@
  * `PLANE:` pointer — filing to Plane is an existing, separate pipeline.
  */
 
+import { VERDICT_FIRST_BLOCK } from "./agent-profiles.ts";
 import type { PlanConcern } from "./features.ts";
+import { extractOutermostJson } from "./json-extract.ts";
 
 /** One concern the model wants planned. Field names map 1:1 onto the frontmatter
  *  `parsePlanConcerns` (features.ts:360) reads back — see plan-writer.ts. */
@@ -123,20 +125,28 @@ Plan ONLY the remaining frontier: the work still needed to reach the objective, 
 Respond with ONLY a strict JSON array (no prose, no markdown code fence) of concern objects, each shaped exactly like:
 {"num": <int>, "slug": "<kebab-case-file-stem>", "title": "<string>", "priority": "p0"|"p1"|"p2"|"p3", "complexity": "mechanical"|"architectural"|"research", "touches": ["<file path>", ...], "blockedBy": [<concern num>, ...], "goal": "<prose>", "approach": "<prose>", "acceptance": ["<criterion>", ...]}
 
-Respond with a JSON array only.`;
+Respond with a JSON array only.
+
+${VERDICT_FIRST_BLOCK}`;
 }
 
-/** Extract the outermost `[...]` JSON array from noisy model output (fences/prose tolerant). */
+/**
+ * Extract the outermost `[...]` JSON array from noisy model output (fences/prose tolerant).
+ *
+ * Anchoring on the FIRST `[` alone is unsafe on this prompt: `buildDecomposePrompt` appends
+ * `VERDICT_FIRST_BLOCK` (DESIGN-directed placement — resident-planner.md's judge/planner surfaces get
+ * it unconditionally), which instructs the model to state its verdict in the first sentence BEFORE the
+ * JSON array. A verdict sentence that itself names a bracketed reference (e.g. "gap coverage: [2 items
+ * remain]") would then win `indexOf("[")`, producing a slice from that false start to the real closing
+ * `]` that fails to parse — silently dropping a well-formed plan.
+ *
+ * Delegates to the shared depth-tracked scanner (`extractOutermostJson`, code-review fixlist finding
+ * #8) so a bracket NESTED inside an earlier truncated structure (e.g. a `"blockedBy": []` inside a
+ * response cut off mid-array) can never be mistaken for the real, complete top-level array — only a
+ * `[` seen at depth 0 is ever a candidate.
+ */
 function extractJsonArray(raw: string): unknown[] | undefined {
-	const start = raw.indexOf("[");
-	const end = raw.lastIndexOf("]");
-	if (start < 0 || end <= start) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
-		return Array.isArray(parsed) ? parsed : undefined;
-	} catch {
-		return undefined;
-	}
+	return extractOutermostJson(raw, "[", (v): v is unknown[] => Array.isArray(v));
 }
 
 function slugify(s: string): string {

@@ -72,13 +72,16 @@ test("BLOCKS a squad branch forked from an operator branch that carries unpushed
 	await git(repo, "checkout", "-qb", "squad/unit-1");
 	await commit(repo, "agent.txt", "agent work\n", "agent: the actual unit");
 
-	const reason = await transplantedCommitsReason(repo, "squad/unit-1", "main");
-	expect(reason).toBeDefined();
-	expect(reason).toContain("transplant gate blocked squad/unit-1");
-	expect(reason).toContain("operator: unpushed WIP");
-	expect(reason).toContain("1 commit(s)");
+	const finding = await transplantedCommitsReason(repo, "squad/unit-1", "main");
+	expect(finding).toBeDefined();
+	expect(finding?.reason).toContain("transplant gate blocked squad/unit-1");
+	expect(finding?.reason).toContain("operator: unpushed WIP");
+	expect(finding?.reason).toContain("1 commit(s)");
 	// The agent's own commit must NOT be named as stolen.
-	expect(reason).not.toContain("agent: the actual unit");
+	expect(finding?.reason).not.toContain("agent: the actual unit");
+	// eap-borrows cross-lineage review: a GENUINE lineage finding is never retryable — retrying can't
+	// change which branch a commit was authored on.
+	expect(finding?.retryable).toBe(false);
 });
 
 test("BLOCKS while naming only the operator commits, and caps the list", async () => {
@@ -88,9 +91,10 @@ test("BLOCKS while naming only the operator commits, and caps the list", async (
 	await git(repo, "checkout", "-qb", "squad/unit-2");
 	await commit(repo, "agent.txt", "a\n", "agent work");
 
-	const reason = await transplantedCommitsReason(repo, "squad/unit-2", "main");
-	expect(reason).toContain("4 commit(s)");
-	expect(reason).toContain("(+1 more)"); // 4 stolen, 3 shown
+	const finding = await transplantedCommitsReason(repo, "squad/unit-2", "main");
+	expect(finding?.reason).toContain("4 commit(s)");
+	expect(finding?.reason).toContain("(+1 more)"); // 4 stolen, 3 shown
+	expect(finding?.retryable).toBe(false);
 });
 
 // ── the negative cases: a false positive here re-breaks landing entirely ────────────────────────
@@ -135,4 +139,63 @@ test("ALLOWS a branch with nothing ahead of origin/<default> (no commits to publ
 test("does not blow up on a nonexistent branch — returns undefined rather than throwing", async () => {
 	const repo = await converged("tp-missing-");
 	expect(await transplantedCommitsReason(repo, "squad/does-not-exist", "main")).toBeUndefined();
+});
+
+// finding #4 (eap-borrows wave 2): the ORIGINAL checks collapsed "rev-list failed for a REAL reason
+// (corrupted objects, permissions, transient git error)" into the SAME `undefined` as "nothing ahead"
+// — a probe failure silently ALLOWED publishing whatever the probe couldn't actually check. Making
+// `.git/objects` unreadable breaks `git rev-list` with a genuine "not a git repository" class error
+// (distinct from "unknown revision", which this fix deliberately still allows — see the negative
+// case above) — the exact probe-failure shape this finding hardens.
+test("finding #4: a rev-list PROBE FAILURE (unreadable .git/objects) BLOCKS — never silently allows publishing", async () => {
+	const repo = await converged("tp-probefail-");
+	await git(repo, "checkout", "-qb", "squad/unit-probe", "origin/main");
+	await commit(repo, "agent.txt", "a\n", "agent work");
+
+	const objectsDir = path.join(repo, ".git", "objects");
+	await fs.chmod(objectsDir, 0o000);
+	try {
+		const finding = await transplantedCommitsReason(repo, "squad/unit-probe", "main");
+		// OLD behavior (fail-open): this returned undefined (allow). NEW behavior: blocks with a distinct
+		// probe-failure reason, never silently allowing a land whose lineage it couldn't actually check.
+		expect(finding).toBeDefined();
+		expect(finding?.reason).toContain("transplant gate");
+		expect(finding?.reason).toContain("could not prove");
+		// eap-borrows cross-lineage review (2nd pass, grok-4.5): a PROBE failure (unreadable objects,
+		// offline fetch, pruned ref) is an environmental precondition, not a lineage fact — it must be
+		// retryable so a transient hiccup never permanently parks a healthy branch.
+		expect(finding?.retryable).toBe(true);
+	} finally {
+		await fs.chmod(objectsDir, 0o755);
+	}
+});
+
+// code-review fixlist finding #1: `git rev-list origin/<default>..<branch>` emits BYTE-IDENTICAL
+// "unknown revision" text whether origin/<default> (pruned/absent — offline, stale fetch) or the
+// branch itself is the missing ref. The OLD `UNKNOWN_REVISION_RE.test(stderr)` carve-out couldn't
+// tell which, so an absent/pruned origin/<default> was misread as "branch doesn't exist — nothing to
+// publish" and ALLOWED the land — exactly the fail-open hazard this gate exists to close (offline +
+// pruned origin ref would have let an operator's transplanted commits publish). Reproduced with a
+// REAL git repo: the branch genuinely exists (with an agent commit) but the origin/<default>
+// remote-tracking ref is deleted out from under it.
+test("finding #1: an ABSENT origin/<default> (pruned/offline) BLOCKS — never misread as 'branch missing'", async () => {
+	const repo = await converged("tp-noorigin-");
+	await git(repo, "checkout", "-qb", "squad/unit-noorigin", "origin/main");
+	await commit(repo, "agent.txt", "a\n", "agent work");
+	// Simulate a pruned/absent remote-tracking ref (offline daemon, stale fetch) — the branch itself
+	// is untouched and fully real.
+	await git(repo, "update-ref", "-d", "refs/remotes/origin/main");
+
+	const finding = await transplantedCommitsReason(repo, "squad/unit-noorigin", "main");
+	// OLD behavior (fail-open bug): this returned undefined (allow) because the "unknown revision"
+	// text is identical whether origin/main or the branch is missing. NEW behavior: the branch is
+	// verified to actually exist before that carve-out is trusted, so an absent origin/<default>
+	// correctly blocks as a probe failure instead.
+	expect(finding).toBeDefined();
+	expect(finding?.reason).toContain("transplant gate");
+	expect(finding?.reason).toContain("could not prove");
+	// eap-borrows cross-lineage review (2nd pass, grok-4.5) — the exact scenario named in the finding:
+	// a pruned/offline origin/<default> is a transient probe failure (a fetch will fix it), not proof
+	// the branch carries transplanted commits. Must be retryable, not a permanent park.
+	expect(finding?.retryable).toBe(true);
 });

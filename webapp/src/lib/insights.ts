@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { isValidatorHeld } from './agent-badges';
 import type { AgentDTO, FeatureDTO, IssueRef } from './dto';
 
 // ───────────────────────────── shared types ─────────────────────────────
@@ -422,7 +423,7 @@ function fmtIdle(ms: number): string {
 // ───────────────────────────── attention items ─────────────────────────────
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
-export type AttentionKind = 'blocked' | 'vetoed' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report' | 'attention';
+export type AttentionKind = 'blocked' | 'vetoed' | 'inconclusive' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report' | 'attention';
 export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer';
 
 /** Epic 5 (HITL safeguards, DESIGN.md D3): a working agent is considered drifting once it's gone
@@ -548,8 +549,29 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
       mark(a.id, 'land-ready'); // suppress the calm land-ready row below for the same agent
     }
 
-    // Ready to land → land. A veto is handled above and must not ALSO show a calm land row.
-    if (a.landReady && a.validation?.verdict !== 'veto') {
+    // Validator inconclusive → hold, not a pass. eap-borrows follow-up 7: the land diff couldn't be
+    // COMPUTED (a git fault), not a semantic rejection — but it is still NOT safe to read as "ready to
+    // land": a bare `verdict !== 'veto'` check below would silently treat this the same as a clean pass
+    // (the fail-open a blind review caught). It auto-retries on the bounded escalation lane; a force-land
+    // does NOT bypass it (there's no diff to grade), so this is informational, not actionable.
+    if (a.landReady && a.validation?.verdict === 'inconclusive') {
+      items.push({
+        id: `inconclusive:${a.id}`,
+        severity: 'warn',
+        kind: 'inconclusive',
+        title: `${a.name}'s land diff is inconclusive`,
+        detail: a.validation.rationale || 'The land diff could not be computed (environmental git fault) — retrying automatically.',
+        agentId: a.id,
+        since: a.lastActivity,
+        action: { label: 'View', kind: 'view' },
+      });
+      mark(a.id, 'inconclusive');
+      mark(a.id, 'land-ready'); // suppress the calm land-ready row below for the same agent
+    }
+
+    // Ready to land → land. A veto/inconclusive hold is handled above and must not ALSO show a calm
+    // land row — a bare `!== 'veto'` check here would silently read an inconclusive hold as a pass.
+    if (a.landReady && !isValidatorHeld(a)) {
       const canLand = a.availableActions === undefined || a.availableActions.includes('land');
       items.push({
         id: `land:${a.id}`,

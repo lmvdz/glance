@@ -77,6 +77,13 @@ export function routeModelForTaskClass(
 	// rather than re-deriving a sample floor here.
 	if (!cheap || cheap.insufficientData) return noShift(`cheap "${currentDefault}" insufficient data for "${tcKey}"`);
 	if (!rival || rival.insufficientData) return noShift(`frontier "${frontier}" insufficient data for "${tcKey}"`);
+	// `reproducible` (eap-borrows concern 01) is the STRICTER gate `insufficientData` alone can't
+	// catch: coverage-thin medians and saturated-tie cells (every collapsed outcome landed, both sides
+	// pinned at 1.0) both pass `insufficientData` but carry no real comparative signal. Same fail-closed
+	// posture as the two checks above — a cell that clears the sample floor but not this one still
+	// means "no basis for comparison", not "shift anyway".
+	if (!cheap.reproducible) return noShift(`cheap "${currentDefault}" not reproducible for "${tcKey}"`);
+	if (!rival.reproducible) return noShift(`frontier "${frontier}" not reproducible for "${tcKey}"`);
 
 	const edge = rival.mergeRate - cheap.mergeRate;
 	if (edge < minEdge) return noShift(`edge ${edge.toFixed(2)} (< floor ${minEdge}) for "${tcKey}"`);
