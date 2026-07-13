@@ -77,7 +77,9 @@ function parseArgs(argv: string[]): RunArgs {
  *  test, or the outer loop — reads the SAME oracle it wrote even when a concurrent process has a
  *  different `GLANCE_STATE_DIR`/`OMP_SQUAD_STATE_DIR` in its environment. The seed's `gap` is a
  *  finite sentinel, not `Infinity`: `Infinity` serializes to `null` in the handoff doc's JSON block
- *  and would make `seedFromHandoff` reject a pre-oracle `--handoff` as unparseable. */
+ *  and would make `seedFromHandoff` reject a pre-oracle `--handoff` as unparseable.
+ *  @substrate exported for tests only — the handoff oracle read is asserted directly across the
+ *  context-window seam (tests/convergence-handoff.test.ts); in-file callers are the real consumers. */
 export function currentState(args: RunArgs, stateDir?: string): Promise<VerifiedState> {
 	return readOracle(stateDir).then(
 		(oracle): VerifiedState =>
