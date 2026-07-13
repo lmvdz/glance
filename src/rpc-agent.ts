@@ -11,6 +11,8 @@
  */
 
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
+import { errText } from "./err-text.ts";
 import * as path from "node:path";
 import type { Socket } from "bun";
 import type { AgentDriver, HostToolDef } from "./agent-driver.ts";
@@ -59,6 +61,32 @@ const HOST_ENTRY = path.join(import.meta.dir, "agent-host-main.ts");
  *                                    to stop suppressing transition/pending recording, instead of
  *                                    guessing with a fixed tick).
  */
+/**
+ * `posix_spawn` returns ENOENT for a missing EXECUTABLE and for a missing WORKING DIRECTORY, and Bun's
+ * error text names the executable either way. So a unit whose worktree vanished reported:
+ *
+ *     ENOENT: no such file or directory, posix_spawn '/…/bun/bin/bun.exe'
+ *
+ * — pointing at a 92 MB binary that plainly exists, and which the daemon itself is running from. The
+ * operator's reasonable next question ("why are we executing bun.exe when we're on WSL?") is a dead end:
+ * the `.exe` is just Volta's filename for a Linux ELF. Meanwhile the real cause — the cwd — is unnamed,
+ * and `create()`'s failed-start cleanup then removes the worktree, destroying the evidence.
+ *
+ * Say which one is missing. An error that misidentifies its own cause costs more than the failure did.
+ */
+export function diagnoseSpawnFailure(err: unknown, exe: string, cwd: string): string {
+	const text = errText(err);
+	if (!text.includes("ENOENT")) return text;
+	const exeMissing = !existsSync(exe);
+	const cwdMissing = !existsSync(cwd);
+	if (cwdMissing && !exeMissing) return `spawn failed: the working directory does not exist — ${cwd} (the executable ${exe} is present; posix_spawn reports ENOENT for a missing cwd but names the executable)`;
+	if (exeMissing && !cwdMissing) return `spawn failed: the executable does not exist — ${exe}`;
+	if (exeMissing && cwdMissing) return `spawn failed: neither the executable (${exe}) nor the working directory (${cwd}) exists`;
+	// Both present: a race (the directory was removed between the check and the spawn), or an ENOENT from
+	// somewhere else entirely. Never claim to know which — say what we verified.
+	return `${text} — but both the executable (${exe}) and the working directory (${cwd}) exist as of this check; the cwd may have been removed concurrently`;
+}
+
 export class RpcAgent extends EventEmitter implements AgentDriver {
 	private sock?: Socket<undefined>;
 	private readonly opts: RpcAgentOptions;
@@ -139,7 +167,12 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		// source (tests/setup.ts's dummy ANTHROPIC_API_KEY) — and any operator tooling that adjusts
 		// env in-process before spawning agents — must reach the host, or omp boots model-less and
 		// every spawn times out inside the gate sandbox while "working" on logged-in hosts.
-		const proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, env: { ...process.env } });
+		let proc: ReturnType<typeof Bun.spawn>;
+		try {
+			proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, env: { ...process.env } });
+		} catch (err) {
+			throw new Error(diagnoseSpawnFailure(err, cmd[0] as string, this.opts.cwd));
+		}
 		proc.unref();
 	}
 

@@ -63,6 +63,21 @@ export function decodeBodyOrEmpty<A extends Record<string, unknown>, I>(schema: 
 // ---------------------------------------------------------------------------
 
 /** POST /api/workos/join-requests/decide — `id` required, everything else soft. */
+/** POST /api/projects — register a repo as a project. `repo` must be an ABSOLUTE path to a git
+ *  worktree; the manager validates that (never resolved against the daemon's cwd). */
+export const ProjectRegisterBodySchema = Schema.Struct({
+	repo: Schema.String,
+});
+
+/** POST /api/answers — ask a question of a repo (R5). The unit that answers is an observer: it never
+ *  commits and never lands, so `repo` grants read, not write. */
+export const AskBodySchema = Schema.Struct({
+	repo: Schema.String,
+	question: Schema.String,
+	model: Schema.optional(Schema.String),
+	harness: Schema.optional(Schema.String),
+});
+
 export const JoinRequestDecideBodySchema = Schema.Struct({
 	id: Schema.String,
 	action: Schema.optional(Schema.Unknown),

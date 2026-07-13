@@ -14,6 +14,7 @@
  * it only says which transport speaks it and what the runtime is capable of.
  */
 
+import * as path from "node:path";
 import { harnessLineage } from "./model-lineage.ts";
 
 export type HarnessProtocol = "omp-rpc" | "acp";
@@ -72,6 +73,13 @@ export interface HarnessDescriptor {
 	 *  unless `OMP_SQUAD_UNVERIFIED_HARNESS=1`. Only a live smoke flips this true — a green fake-server
 	 *  test does not (see concern 08). */
 	verified: boolean;
+	/** Token/usage mapping for this harness is live-verified (field names confirmed against a real
+	 *  session, not just typed against a spec). Absent/false ⇒ honest default: ACP's `parseUsage` is
+	 *  unconfirmed against any live harness (acp-agent-driver.ts:118, "ponytail" note), so every ACP
+	 *  descriptor is unset here until a live smoke confirms its usage_update field names. omp/pi ride
+	 *  the same RPC usage frame omp's own dashboards have always trusted, so they're true. This is a
+	 *  label only — concern 01's per-cell token-coverage publish gate is the actual enforcement. */
+	usageVerified?: boolean;
 	/** Human-facing caveat, e.g. "adapter mid-migration between orgs — pin a version". */
 	note?: string;
 }
@@ -100,6 +108,84 @@ export function unverifiedHarnessesEnabled(): boolean {
  *  OMP_SQUAD_UNVERIFIED_HARNESS=1) — so the create UI/CLI never offers a harness that half-works. */
 export function listHarnesses(includeUnverified = unverifiedHarnessesEnabled()): HarnessDescriptor[] {
 	return [...registry.values()].filter((d) => d.verified || includeUnverified);
+}
+
+// ── Honesty tiers (additive; the four `verified` gate sites above stay byte-identical) ─────────
+
+/** Honest capability tier, computed from static `verified` × live binary detection — never a
+ *  substitute for the `verified` gate, only a truthful label alongside it. */
+export type HarnessTier = "verified" | "detected-unverified" | "registered-unverified";
+
+export interface HarnessTierInfo {
+	name: string;
+	tier: HarnessTier;
+	/** Mirrors the descriptor's static `verified` — the gate's own truth, unchanged. */
+	verified: boolean;
+	/** Binary resolvable on the daemon's actual launch PATH right now (see `resolveSpawnBin`). */
+	binDetected: boolean;
+	/** See `HarnessDescriptor.usageVerified`. */
+	usageVerified: boolean;
+	/** Set only when `verified:true` but the binary can't be found — a verified harness that will
+	 *  fail to spawn is a worse trap than an honestly-unverified one, so this is surfaced loudly
+	 *  instead of silently degrading to a green-looking row. */
+	alert?: string;
+	note?: string;
+}
+
+/** The argv[0] SPAWN actually launches for `d`: `resolveBin` for omp-rpc (per-agent/GLANCE_BIN
+ *  override chain), the ACP command's own argv[0] for acp (squad-manager.ts's makeDriver never
+ *  touches `d.bin` for ACP — see acpCommand usage there). Never `d.bin` unconditionally: that would
+ *  report "codex not found" for the codex descriptor when the real launch is `npx`. */
+export function resolveSpawnBin(d: HarnessDescriptor): string {
+	if (d.protocol === "acp") return d.acpCommand?.[0] ?? d.bin;
+	return resolveBin(d);
+}
+
+/** true when `bin` resolves on a PATH that matches how the daemon actually launches it: the raw
+ *  env PATH, ALSO augmented with `<cwd>/node_modules/.bin` (npm/bun script invocation prepends
+ *  this; a bare `Bun.which` from a differently-invoked process — e.g. this CLI itself — can miss it
+ *  and falsely alarm on `omp`, which is never installed globally, only as a local devDependency). */
+function binResolvable(bin: string, cwd: string = process.cwd()): boolean {
+	const augmentedPath = `${path.join(cwd, "node_modules", ".bin")}${path.delimiter}${process.env.PATH ?? ""}`;
+	return Bun.which(bin, { PATH: augmentedPath, cwd }) !== null;
+}
+
+/** Pure combinator: static `verified` × live `binDetected` → an honest tier + optional alert.
+ *  Never used at a gate site — `verified` stays the sole enforcement bit everywhere it's checked. */
+export function harnessTierInfo(d: HarnessDescriptor, cwd?: string): HarnessTierInfo {
+	const bin = resolveSpawnBin(d);
+	const binDetected = binResolvable(bin, cwd);
+	const usageVerified = d.usageVerified === true;
+	let tier: HarnessTier;
+	let alert: string | undefined;
+	if (d.verified) {
+		tier = "verified";
+		if (!binDetected) alert = `${d.name}: verified but "${bin}" was not found on the daemon PATH`;
+	} else {
+		tier = binDetected ? "detected-unverified" : "registered-unverified";
+	}
+	// npx-shelled acp adapters (claude-code, codex) resolve "npx" — a near-universal binary that says
+	// nothing about the actual `-y @scope/pkg` adapter working. Documented, not hidden.
+	const note = d.protocol === "acp" && (d.acpCommand?.[0] === "npx") ? [d.note, `binary check resolves "npx" only — a weak signal for the shelled ${d.acpCommand?.slice(1).join(" ")} adapter`].filter(Boolean).join("; ") : d.note;
+	return { name: d.name, tier, verified: d.verified, binDetected, usageVerified, alert, note };
+}
+
+let tierCache: { at: number; cwd: string; rows: HarnessTierInfo[] } | undefined;
+const TIER_CACHE_MS = 5_000; // short: cheap to recompute, but per-render `which()` on every list poll is wasteful/flappy
+
+/** All REGISTERED harnesses (verified and not — the honest full roster) with tiers, cached briefly
+ *  so a listing endpoint hit repeatedly (webapp poll, CLI table) doesn't `which()` on every call. */
+export function listHarnessTiers(cwd: string = process.cwd()): HarnessTierInfo[] {
+	const now = Date.now();
+	if (tierCache && tierCache.cwd === cwd && now - tierCache.at < TIER_CACHE_MS) return tierCache.rows;
+	const rows = [...registry.values()].map((d) => harnessTierInfo(d, cwd));
+	tierCache = { at: now, cwd, rows };
+	return rows;
+}
+
+/** Test-only: drop the cache so a test that registers/mutates harnesses sees fresh detection. */
+export function _resetHarnessTierCacheForTests(): void {
+	tierCache = undefined;
 }
 
 /**
@@ -172,6 +258,37 @@ export function resolveAcpCommand(d: HarnessDescriptor, model?: string): string[
 	return [...d.acpCommand, "--model", model];
 }
 
+/**
+ * Will `appendSystemPrompt` (fabric primer, tool-grant scoping, profile memory, authored spec) actually
+ * REACH the agent this record will spawn?
+ *
+ * The registry has always DECLARED this per harness (`capabilities.contextInjection`), but nothing
+ * consulted it: the harness scorecard credited a unit with "instructions" whenever a primer was BUILT,
+ * regardless of whether the driver had any channel to deliver it. An `auggie`/ACP unit scored
+ * `hasInstructions: true` while running with an empty system prompt — the scorecard was measuring our
+ * intent, not the agent's reality. Same class of defect as the `primer-empty` metric that lived inside
+ * the branch it was meant to measure. (gpt-5.6-sol)
+ *
+ * A workflow unit's context reaches its inner omp `RpcAgent`, and a sandboxed unit's reaches the omp
+ * child inside the container — both native. ACP has no system-prompt slot at all; it delivers only when
+ * the operator opts into the lossy first-turn injection (`OMP_SQUAD_ACP_CONTEXT=prompt`).
+ */
+export function contextReachesAgent(p: { harness?: string; runtime?: string; sandbox?: unknown; workflow?: unknown; flue?: unknown }, env: NodeJS.ProcessEnv = process.env): boolean {
+	// A flue-service unit runs `flue run`. It is not an agent harness at all and has no system-prompt
+	// channel of any kind — checked FIRST, because a flue unit may also carry a workflow. (gpt-5.6-sol)
+	if (p.flue) return false;
+	if (p.workflow || p.sandbox) return true; // inner agent is omp over rpc — a native channel
+	let d: HarnessDescriptor;
+	try {
+		d = resolveHarness(p);
+	} catch {
+		return false; // unknown harness ⇒ never CLAIM delivery (create() will throw anyway)
+	}
+	if (d.capabilities.contextInjection === "native") return true;
+	if (d.protocol === "acp") return env.OMP_SQUAD_ACP_CONTEXT === "prompt";
+	return false;
+}
+
 /** Resolve the binary (argv[0]) for a descriptor: per-agent override > GLANCE_BIN for the default
  *  harness > the descriptor's own bin. GLANCE_BIN only overrides the DEFAULT harness (a custom omp
  *  fork at a nonstandard path), never every harness. */
@@ -212,6 +329,7 @@ registerHarness({
 	leaseHook: true,
 	capabilities: NATIVE_CAPS,
 	verified: true,
+	usageVerified: true, // omp's own RPC usage frame — the mapping every daemon dashboard has always trusted
 });
 
 /** pi (@earendil-works/pi-coding-agent): same `--mode rpc` LF-JSONL protocol as omp (omp is a pi
@@ -242,6 +360,7 @@ registerHarness({
 	// frame (host probes it). No host-tool channel, no approval primitive (yolo only). (The one turn that
 	// ran failed on EXPIRED anthropic creds — environmental, not a protocol defect.)
 	verified: true,
+	usageVerified: true, // same RPC usage frame as omp — same live-verified mapping
 	note: "same --mode rpc protocol as omp (live-verified); no host-tool channel, no approval primitive (yolo only)",
 });
 

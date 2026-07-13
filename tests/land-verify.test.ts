@@ -129,3 +129,36 @@ test("landAgent: empty verify string skips the gate (back-compat)", async () => 
 	expect(res.merged).toBe(true);
 	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).toContain("feature.txt");
 });
+
+// finding #10 (eap-borrows wave 2): detectVerify() collapses "genuinely no toolchain" and "package.json
+// exists but is unreadable/malformed" into the SAME undefined — the OLD land path then treated a
+// broken node repo exactly like a legitimate non-node repo ("no acceptance gate", proceed and land
+// unverified). NEW behavior: refused, distinct from the "no verify command at all" case above.
+
+test("landAgent: finding #10 — a malformed package.json refuses the land instead of silently skipping acceptance", async () => {
+	const repo = await baseRepo("land-verify-badpkg-");
+	const wt = await branchWorktree(repo, "feat", "feature.txt");
+	await fs.writeFile(path.join(repo, "package.json"), "{ this is not json");
+	const head0 = await out(repo, "rev-parse", "HEAD");
+
+	// opts.verify left undefined — auto-detect is actually consulted (unlike the "" back-compat case above).
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.retryable).toBe(true);
+	expect(res.detail ?? "").toContain("could not detect");
+	// The merge is never even attempted — main's HEAD never moved and the branch content isn't there.
+	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0);
+	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).not.toContain("feature.txt");
+});
+
+test("landAgent: finding #10 guard-rail — a repo with NO package.json at all still lands with no acceptance gate (never blocks for lacking one)", async () => {
+	const repo = await baseRepo("land-verify-nopkg-");
+	const wt = await branchWorktree(repo, "feat", "feature.txt");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false });
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+});

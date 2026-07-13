@@ -223,6 +223,10 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     tasks,
     projects,
     currentProject,
+    projectDtos,
+    selectProject,
+    addProject,
+    removeProject,
     connected,
     selectedTaskId,
     selectTask,
@@ -267,6 +271,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
   const showTaskScopedBlock = isTaskScopedView(view);
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
+  const [addingProject, setAddingProject] = useState(false);
+  const [newProjectRepo, setNewProjectRepo] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<'all' | Task['category']>('all');
   const [sortBy, setSortBy] = useState<'attention' | 'creation'>('attention');
@@ -558,32 +564,87 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </button>
           {workspaceOpen && (
             <div className="pb-3">
+              {/* A project ROW switches the workspace; the chevron only expands its counts. These used to
+                * be the same button, and it toggled a disclosure — so nothing in the UI could switch
+                * projects at all. Counts come from `projectDtos` (never scoped), because `tasks` is now
+                * scoped to the current project and would report 0 for every other one. */}
               {Object.entries(projects).flatMap(([, teamProjects]) => teamProjects).map((project) => {
                 const isActive = project.id === currentProject?.id;
-                const open = openProjects[project.id] ?? isActive;
-                const projectTasks = tasks.filter((task) => task.properties.project.id === project.id);
-                const planCount = projectTasks.filter((task) => task.contextBundle.spec.startsWith('plans/')).length;
-                const agentCount = projectTasks.filter((task) => /active agent/.test(task.contextBundle.downstream)).length;
+                const open = openProjects[project.id] ?? false;
+                const dto = projectDtos.find((p) => p.id === project.id);
                 return (
                   <div key={project.id}>
-                    <button onClick={() => setOpenProjects((state) => ({ ...state, [project.id]: !open }))} className={`flex min-h-9 w-full items-center justify-between px-3 text-left transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/70'}`}>
-                      <span className="flex min-w-0 items-center gap-2">
-                        {open ? <ChevronDown className="h-3 w-3 flex-shrink-0" aria-hidden="true" /> : <ChevronRight className="h-3 w-3 flex-shrink-0" aria-hidden="true" />}
-                        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${project.colorClass}`} aria-hidden="true" />
-                        <span className="truncate">{project.name}</span>
-                      </span>
-                      <span className="ml-2 flex-shrink-0 text-[10px] text-gray-400">{project.shortCode}</span>
-                    </button>
+                    <div className={`flex min-h-9 w-full items-center ${isActive ? 'bg-gray-50 dark:bg-gray-900/60' : ''}`}>
+                      <button
+                        onClick={() => setOpenProjects((state) => ({ ...state, [project.id]: !open }))}
+                        aria-label={open ? `Collapse ${project.name} details` : `Expand ${project.name} details`}
+                        aria-expanded={open}
+                        className="flex h-9 w-6 flex-shrink-0 items-center justify-center text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-gray-300"
+                      >
+                        {open ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
+                      </button>
+                      <button
+                        onClick={() => selectProject(project.id)}
+                        aria-current={isActive ? 'true' : undefined}
+                        title={project.id}
+                        className={`flex min-h-9 min-w-0 flex-1 items-center justify-between pr-3 text-left transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/70'}`}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${isActive ? project.colorClass : 'bg-transparent ring-1 ring-gray-300 dark:ring-gray-600'}`} aria-hidden="true" />
+                          <span className="truncate">{project.name}</span>
+                        </span>
+                        <span className="ml-2 flex-shrink-0 text-[10px] text-gray-400">{project.shortCode}</span>
+                      </button>
+                    </div>
                     {open && (
                       <div className="ml-8 space-y-1 pb-1 text-xs text-gray-500 dark:text-gray-400">
-                        <div className="flex items-center gap-2"><ListChecks className="h-3 w-3" aria-hidden="true" /> Features <span className="font-mono text-gray-400">{projectTasks.length}</span></div>
-                        <div className="flex items-center gap-2"><ChevronRight className="h-3 w-3" aria-hidden="true" /> Plans <span className="font-mono text-gray-400">{planCount}</span></div>
-                        <div className="flex items-center gap-2"><ChevronRight className="h-3 w-3" aria-hidden="true" /> Agents <span className="font-mono text-gray-400">{agentCount}</span></div>
+                        <div className="flex items-center gap-2"><ListChecks className="h-3 w-3" aria-hidden="true" /> Features <span className="font-mono text-gray-400">{dto?.featureCount ?? 0}</span></div>
+                        <div className="flex items-center gap-2"><ChevronRight className="h-3 w-3" aria-hidden="true" /> Agents <span className="font-mono text-gray-400">{dto?.agentCount ?? 0}</span></div>
+                        <div className="truncate font-mono text-[10px] text-gray-400" title={project.id}>{project.id}</div>
+                        {dto?.registered && (
+                          <button
+                            onClick={() => void removeProject(project.id)}
+                            className="text-[11px] text-gray-400 underline-offset-2 transition-colors hover:text-red-500 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500"
+                          >
+                            Remove from workspace
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
                 );
               })}
+
+              {/* The only add-a-project affordance in the app was FirstRunSetup, gated on having ZERO
+                * projects — so it showed exactly once and was unreachable ever after. */}
+              {addingProject ? (
+                <form
+                  className="mt-1 px-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void addProject(newProjectRepo).then(() => { setNewProjectRepo(''); setAddingProject(false); });
+                  }}
+                >
+                  <label htmlFor="wb-add-project" className="sr-only">Absolute path to a git repository</label>
+                  <input
+                    id="wb-add-project"
+                    autoFocus
+                    value={newProjectRepo}
+                    onChange={(event) => setNewProjectRepo(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Escape') { setAddingProject(false); setNewProjectRepo(''); } }}
+                    placeholder="/absolute/path/to/repo"
+                    className="min-h-9 w-full rounded border border-gray-300 bg-white px-2 text-xs text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+                  />
+                  <p className="mt-1 text-[10px] text-gray-400">Must be an absolute path to a git repository.</p>
+                </form>
+              ) : (
+                <button
+                  onClick={() => setAddingProject(true)}
+                  className="mt-1 flex min-h-9 w-full items-center gap-2 px-3 text-left text-xs text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900/70 dark:hover:text-gray-200"
+                >
+                  <span aria-hidden="true" className="text-sm leading-none">+</span> Add project…
+                </button>
+              )}
             </div>
           )}
         </section>

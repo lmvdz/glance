@@ -12,6 +12,7 @@
  *   - escalation rate       — the run reached the `escalate` node.
  *   - land-failure-streak   — how often observer.ts's ≥N land-failure finding fires.
  *   - primer-empty rate     — buildContextPrimer returned "" at a cold-start call site.
+ *   - primer-undelivered    — a primer was built for a harness that cannot receive one.
  *
  * Flag pattern (reused by concerns 03/04/05/06/07): `learningFlags()` resolves each
  * `OMP_SQUAD_*` flag to "on"/"off", defaulting OFF. `=ab` hashes a caller-supplied id (agent
@@ -95,6 +96,9 @@ export type MetricName =
 	| "escalation"
 	| "land-failure-streak"
 	| "primer-empty"
+	/** A primer was built, but the chosen harness has no channel to deliver it (ACP without
+	 *  OMP_SQUAD_ACP_CONTEXT=prompt). Recorded OUTSIDE the branch it measures. */
+	| "primer-undelivered"
 	| "model-outcome-recorded"
 	| "model-outcome-blocked"
 	| "veto-reprompt"

@@ -1,12 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from 'react';
 import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
-import { projectsByTeam, tasksFromSquad } from '../lib/task-model';
+import { projectsByTeam, resolveCurrentProject, tasksForProject, tasksFromSquad } from '../lib/task-model';
 import { buildReviewHash, parseReviewHash } from '../lib/plan-doc-review';
 import { useSquad } from '../hooks/useSquad';
 import { coerceView, VIEW_STORAGE_KEY } from '../lib/viewAlias';
 import type { TasksListMode } from '../lib/pageContextDerive';
-import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
+import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, FeatureDTO, ProjectDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
 export interface ToastInfo {
   id: string;
@@ -39,6 +39,10 @@ function readStoredView(): string | null {
  *  merely "whatever wasn't 'list'". A pure function so the lazy `useState` initializer and any test
  *  agree on exactly one coercion rule. */
 export const TASKS_VIEW_STORAGE_KEY = 'omp.tasks.view';
+
+/** The operator's selected project, persisted like the view + tasks-mode keys. Absent/stale ⇒ the
+ *  busiest project (projects() sorts by lastActivity), never a dead workspace. */
+export const PROJECT_STORAGE_KEY = 'omp.project';
 export function initialTasksListMode(stored: string | null): TasksListMode {
   return stored === 'canvas' ? 'canvas' : 'list';
 }
@@ -67,9 +71,17 @@ interface ApiComment {
 }
 
 interface TaskContextType {
+  /** Scoped to `currentProject` — what "switching projects" means. */
   tasks: Task[];
+  /** EVERY task, across every project. Deep links (`#/review/:taskId`) and the Fleet's unstaffed-plan
+   *  rows address tasks the current project scope excludes; searching `tasks` there silently found
+   *  nothing. Never render this as a list — it is a lookup table. */
+  allTasks: Task[];
   projects: Record<string, Project[]>;
   currentProject: Project | null;
+  /** Raw per-repo rollups (agent/feature counts, `registered`) — the switcher's data. Unlike `tasks`,
+   *  this is never scoped to the current project. */
+  projectDtos: ProjectDTO[];
   commentEvents: ArtifactCommentDTO[];
   resolvedCommentEvents: Map<string, number>;
   connected: boolean;
@@ -127,6 +139,12 @@ interface TaskContextType {
   openReview: (taskId: string, docPath?: string) => void;
   /** Leave the Design Review screen back to Tasks (keeps the task selected, so TaskDetail resumes). */
   closeReview: () => void;
+  /** Switch the workspace to another project. Persisted; scopes `tasks`, chat and spawn — never the Fleet. */
+  selectProject: (id: string) => void;
+  /** Register a repo as a project (POST /api/projects). Absolute path to a git repo; the daemon validates. */
+  addProject: (repo: string) => Promise<void>;
+  /** Un-register a repo. Deletes nothing; a repo with live agents or features keeps listing. */
+  removeProject: (repo: string) => Promise<void>;
   selectTask: (id: string | null) => void;
   addTask: (task: Partial<Task>) => void;
   deleteTask: (id: string) => void;
@@ -171,9 +189,27 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const squad = useSquad();
   const baseTasks = useMemo(() => tasksFromSquad(squad.features, squad.agents, squad.projects), [squad.features, squad.agents, squad.projects]);
   const [localEdits, setLocalEdits] = useState<Record<string, Partial<Task>>>({});
-  const tasks = useMemo(() => baseTasks.map((task) => ({ ...task, ...localEdits[task.id] })), [baseTasks, localEdits]);
+  const scopedTasks = useMemo(() => baseTasks.map((task) => ({ ...task, ...localEdits[task.id] })), [baseTasks, localEdits]);
   const projects = useMemo(() => projectsByTeam(squad.projects, squad.features), [squad.projects, squad.features]);
+  const [selectedProjectId, setSelectedProjectIdState] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try { return window.localStorage.getItem(PROJECT_STORAGE_KEY); } catch { return null; }
+  });
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+
+  // The operator's EXPLICIT project choice, persisted. `currentProject` used to be
+  // `selectedTask?.properties.project ?? projects[0]` — derived, never settable, so nothing in the UI
+  // could switch projects and the sidebar's project rows only toggled a disclosure. Explicit choice
+  // wins; a stale id (project un-registered, or its repo drained) falls back to the busiest project
+  // rather than stranding the workspace on nothing.
+  const projectList = useMemo(() => Object.values(projects).flat(), [projects]);
+  const currentProject = resolveCurrentProject(projectList, selectedProjectId);
+
+  // Tasks are scoped to the current project — that is what "switching" means. The FLEET is deliberately
+  // NOT scoped: a blocked or errored agent in another repo must never be hidden by a project filter
+  // (GRAPH-FOLD §6(g) — Needs-you is pinned and non-collapsible, and this is the same invariant one
+  // level up). Agents carry their own repo, so the cockpit still shows every one of them.
+  const tasks = useMemo(() => tasksForProject(scopedTasks, currentProject), [scopedTasks, currentProject]);
   const [toasts, setToasts] = useState<ToastInfo[]>([]);
   // Restore + coerce the persisted view in one lazy read (GRAPH-FOLD.md §3 alias/redirect map) —
   // a stale pre-fold key (or garbage) never reaches state as anything but a real AppView.
@@ -223,7 +259,6 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const selectedTask = tasks.find((task) => task.id === selectedTaskId);
-  const currentProject = selectedTask?.properties.project ?? Object.values(projects)[0]?.[0] ?? null;
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     const id = Math.random().toString(36).substr(2, 9);
@@ -267,6 +302,11 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     const applyHash = () => {
       const parsed = parseReviewHash(window.location.hash);
       if (!parsed) return;
+      // A shared/refreshed `#/review/:taskId` may name a task in a DIFFERENT project than the one the
+      // operator last selected. Follow it: without this the review screen scopes to the wrong project,
+      // finds no task, derives an empty repo, and renders nothing. (gpt-5.6-sol)
+      const target = scopedTasks.find((task) => task.id === parsed.taskId);
+      if (target && target.properties.project.id !== selectedProjectId) selectProjectId(target.properties.project.id);
       setReviewTaskId(parsed.taskId);
       setReviewDocPath(parsed.docPath);
       setView('review');
@@ -313,6 +353,51 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     // Mount-only: `view` here is the already-coerced initial state; later writes go through setView.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Switching projects clears the task selection: the selected task belongs to the project you left,
+   *  and `tasks` is about to stop containing it. Leaving it set stranded TaskDetail on a ghost. */
+  /** Persist a project choice without touching the task selection — used by the review deep link, which
+   *  is selecting a task in that very project. */
+  const selectProjectId = (id: string) => {
+    setSelectedProjectIdState(id);
+    if (typeof window !== 'undefined') {
+      try { window.localStorage.setItem(PROJECT_STORAGE_KEY, id); } catch { /* private mode — session-only */ }
+    }
+  };
+
+  const selectProject = (id: string) => {
+    setSelectedProjectIdState(id);
+    setSelectedTaskId(null);
+    if (typeof window !== 'undefined') {
+      try { window.localStorage.setItem(PROJECT_STORAGE_KEY, id); } catch { /* private mode — selection is session-only */ }
+    }
+  };
+
+  const addProject = async (repo: string) => {
+    const trimmed = repo.trim();
+    if (!trimmed) return;
+    try {
+      // Switch to the repo the SERVER canonicalized, not the string that was typed: it resolves symlinks
+      // and walks up to the repo root, so `/repo/src` comes back as `/repo`. Mirroring the input instead
+      // would select a project id that does not exist and strand the workspace.
+      const created = await apiJson<{ repo: string }>('/api/projects', jsonInit('POST', { repo: trimmed }));
+      await squad.reload();
+      selectProject(created.repo);
+      showToast(`Project added: ${created.repo}`);
+    } catch (error) {
+      showToast((error as Error).message || 'Could not add project', 'error');
+    }
+  };
+
+  const removeProject = async (repo: string) => {
+    try {
+      await apiJson(`/api/projects?repo=${encodeURIComponent(repo)}`, { method: 'DELETE' });
+      await squad.reload();
+      showToast(`Project removed: ${repo}`);
+    } catch (error) {
+      showToast((error as Error).message || 'Could not remove project', 'error');
+    }
+  };
 
   const selectTask = (id: string | null) => setSelectedTaskId(id);
 
@@ -449,7 +534,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, allTasks: scopedTasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, projectDtos: squad.projects, selectProject, addProject, removeProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

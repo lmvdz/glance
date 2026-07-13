@@ -7,7 +7,10 @@
  *   glance list
  *   glance prompt <id> <message…>
  *   glance rm <id> [--delete-worktree]
+ *   glance ask "<question>" [--repo …]           answer a question; no branch, nothing to merge
+ *   glance answers [<id>]                        list or read durable answers
  *   glance open
+ *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
  *
  * `up` is the long-lived process that owns the agents. The other verbs are thin
  * HTTP clients that talk to a running daemon's REST surface.
@@ -20,7 +23,9 @@ import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
-import { envBool } from "./config.ts";
+import { renderDoctor, runDoctor } from "./doctor.ts";
+import { makeDoctorProbe } from "./doctor-probe.ts";
+import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
@@ -65,7 +70,7 @@ const glanceBin = (): string | undefined => process.env.GLANCE_BIN?.trim() || un
  * silently spins a global factory. Exported for the boot-gate test.
  */
 export function rootFactoryEnabled(repoCount: number = planeRepos().length): boolean {
-	return envBool("OMP_SQUAD_ROOT_FACTORY", false) && repoCount > 0;
+	return rootFactoryEnabledWith(repoCount);
 }
 
 const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
@@ -74,6 +79,7 @@ USAGE
   glance up [--port N] [--no-tui] [--restore]   Start the daemon (web + TUI)
   glance add <repo> [flags]                     Spawn an agent in a new worktree
   glance list [--json]                          Show the roster
+  glance harnesses [--json]                     Honest capability tiers for every registered harness
   glance prompt <id> <message...>               Send an instruction to an agent
   glance notify <id> <summary...> [--detail x]  Flag an agent needs a human's attention (non-blocking)
   glance kill <id>                              Stop an agent but keep it in the roster
@@ -81,7 +87,10 @@ USAGE
   glance who [repo]                             Who/what is working a repo (any omp agent)
   glance logs <id> [--limit N]                  Print an agent's recent transcript
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
+  glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
+  glance answers [<id>] [--repo R]              List answers, or print one
   glance open                                   Print the dashboard URL
+  glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
   glance plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
   glance plan-decompose <dir> [--json]          One-shot: decompose <dir>/OBJECTIVE.md into a concern-DAG (needs \`omp\`)
@@ -378,7 +387,10 @@ async function cmdUp(args: string[]): Promise<void> {
 	// registry: the server routes the operator's own org (OMP_SQUAD_ROOT_ORG) + the on-box loopback admin to
 	// the root factory, and every tenant org to its per-org registry manager (server.ts managerFor).
 	const rootOrgId = process.env.OMP_SQUAD_ROOT_ORG?.trim() || undefined;
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId });
+	// Resolved BEFORE the server so `/api/doctor` can report the supervisor that actually runs, not the one
+	// the flag implies: it is also gated on `--no-supervise` and on file mode.
+	const superviseExternal = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId, superviseExternal });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
@@ -388,8 +400,7 @@ async function cmdUp(args: string[]): Promise<void> {
 	// auto-supervision is the per-org, in-process maybeAutoSupervise inside each manager (lifecycle 05).
 	const stopTracker = startExternalSessionTracker();
 	// risk #7: the external supervisor authenticates with the file-mode bearer token; DB mode has none, so file-mode only.
-	const supervise = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
-	const stopSupervisor = supervise ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
+	const stopSupervisor = superviseExternal ? startSupervisor({ port, model: process.env.OMP_SQUAD_SUPERVISE_MODEL || undefined }) : undefined;
 
 	// Cross-host file leasing: the file-mode daemon now gossips its own leases IN-PROCESS over the
 	// manager's LocalFederationBus (SquadManager, SEAM 1) and mirrors peers' leases the same way — no
@@ -418,13 +429,13 @@ async function cmdUp(args: string[]): Promise<void> {
 	// (the operator watches the factory in the webapp, mapped to OMP_SQUAD_ROOT_ORG / the loopback admin).
 	if (manager && !registry && useTui) {
 		process.stdout.write(`glance dashboard: ${url}\n  access token: ${token}\n`);
-		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${superviseExternal ? "on" : "off"}\n`);
 		const tui = new SquadTui(manager);
 		await tui.run();
 		await shutdown();
 	} else {
 		process.stdout.write(`glance daemon running\n  dashboard: ${url}\n  access token: ${token}\n  open from any device on this network (tap to sign in):\n${access}\n  add an agent: glance add <repo> --task "…"\n`);
-		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${supervise ? "on" : "off"}\n`);
+		process.stdout.write(`  autonomy: session-tracker on · auto-supervisor ${superviseExternal ? "on" : "off"}\n`);
 		await new Promise<void>(() => {}); // run until signal
 	}
 }
@@ -503,6 +514,62 @@ async function cmdList(args: string[]): Promise<void> {
 		process.exit(1);
 	}
 	process.stdout.write(renderAgentRoster(agents, { json: flags.json === true }));
+}
+
+/** GET /api/harnesses shape (server.ts's noFleet handler) — the tier fields are additive to the
+ *  pre-existing name/protocol/verified/capabilities/note response. */
+interface HarnessListingRow {
+	name: string;
+	protocol: string;
+	verified: boolean;
+	tier?: "verified" | "detected-unverified" | "registered-unverified";
+	binDetected?: boolean;
+	usageVerified?: boolean;
+	alert?: string;
+	note?: string;
+}
+
+const TIER_LABEL: Record<string, string> = {
+	verified: "verified",
+	"detected-unverified": "detected",
+	"registered-unverified": "registered",
+};
+
+export function renderHarnessTable(rows: HarnessListingRow[], defaultHarness: string, opts: { json?: boolean } = {}): string {
+	if (opts.json) return `${JSON.stringify(rows, null, 2)}\n`;
+	if (!rows.length) return "no harnesses registered\n";
+	const nameW = Math.max(4, ...rows.map((r) => r.name.length));
+	const tierW = Math.max(4, ...rows.map((r) => (TIER_LABEL[r.tier ?? ""] ?? "—").length));
+	const lines = rows.map((r) => {
+		const name = (r.name === defaultHarness ? `${r.name}*` : r.name).padEnd(nameW + 1);
+		const tier = (TIER_LABEL[r.tier ?? ""] ?? "—").padEnd(tierW);
+		const usage = r.usageVerified ? "usage-verified" : "usage-unconfirmed";
+		const alert = r.alert ? `  ⚠ ${r.alert}` : "";
+		return `${name} ${tier}  ${r.protocol.padEnd(7)} ${usage}${alert}`;
+	});
+	return `${lines.join("\n")}\n`;
+}
+
+/** `glance harnesses [--json]` — the honest capability tier matrix (concern 06): every
+ *  REGISTERED harness (not just the create-surface-visible verified ones) with its tier, a
+ *  verified-binary-missing alert, and the usage-verified bit. Always queries the create API's
+ *  `?all=1` under the hood — this listing is always the full roster, so there is no `--all` flag
+ *  to pass. */
+async function cmdHarnesses(args: string[]): Promise<void> {
+	const { flags } = parseArgs(args);
+	let body: { default: string; harnesses: HarnessListingRow[] };
+	try {
+		const res = await fetch(`${base(flags)}/api/harnesses?all=1`, { headers: tokenHeader() });
+		if (!res.ok) {
+			process.stderr.write(`harnesses failed: ${res.status} ${await res.text()}\n`);
+			process.exit(1);
+		}
+		body = (await res.json()) as { default: string; harnesses: HarnessListingRow[] };
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	process.stdout.write(renderHarnessTable(body.harnesses, body.default, { json: flags.json === true }));
 }
 
 async function cmdPrompt(args: string[]): Promise<void> {
@@ -798,6 +865,108 @@ async function cmdAutomation(args: string[]): Promise<void> {
 	}
 }
 
+/**
+ * `glance ask "<question>" [--repo <path>] [--json] [--no-wait]`
+ *
+ * R5: the second deliverable. A question in, a written answer out — no branch, no PR, nothing to merge.
+ * The unit is an observer (`is-landing-unit.ts` refuses to land one), so this cannot mutate the repo.
+ *
+ * Waits by default. An `ask` you have to poll for is an `ask` nobody uses: the whole point is that the
+ * answer arrives where the question was asked.
+ */
+async function cmdAsk(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const question = positional.join(" ").trim();
+	if (!question) {
+		process.stderr.write('usage: glance ask "<question>" [--repo <path>] [--model M] [--json] [--no-wait]\n');
+		process.exit(1);
+	}
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
+	const post = await fetch(`${base(flags)}/api/answers`, {
+		method: "POST",
+		headers: { ...tokenHeader(), "content-type": "application/json" },
+		body: JSON.stringify({ repo, question, model: typeof flags.model === "string" ? flags.model : undefined, harness: typeof flags.harness === "string" ? flags.harness : undefined }),
+	}).catch(() => null);
+	if (!post || !post.ok) {
+		process.stderr.write(post ? `ask failed: ${post.status} ${await post.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	const dto = (await post.json()) as AgentDTO;
+	if (flags["no-wait"]) {
+		process.stdout.write(`asked. ${dto.id}\n  read it later: glance ask --read ${dto.id}\n`);
+		return;
+	}
+
+	// Poll the ANSWER, not the agent: the agent row is reaped, the answer is durable. A unit that dies
+	// without answering must not hang the operator forever, so an ended agent ends the wait too.
+	const started = Date.now();
+	const deadline = started + envInt("GLANCE_ASK_TIMEOUT_MS", 30 * 60_000);
+	if (!flags.json) process.stderr.write(`thinking… (${dto.id})\n`);
+	while (Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, 2_000));
+		const res = await fetch(`${base(flags)}/api/answers/${encodeURIComponent(dto.id)}`, { headers: tokenHeader() }).catch(() => null);
+		const answer = res?.ok ? ((await res.json()) as { markdown?: string; answeredAt?: number; durationMs?: number }) : undefined;
+		if (answer?.answeredAt && answer.markdown) {
+			process.stdout.write(flags.json ? `${JSON.stringify(answer, null, 2)}\n` : `\n${answer.markdown}\n`);
+			return;
+		}
+		const agents = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() }).then((r) => (r.ok ? (r.json() as Promise<AgentDTO[]>) : [])).catch(() => []);
+		const live = agents.find((a) => a.id === dto.id);
+		if (!live) {
+			// Gone from the roster with no answer on disk: say so, rather than spinning until the timeout.
+			process.stderr.write(`the unit ended without answering (${dto.id})\n`);
+			process.exit(1);
+		}
+		if (live.status === "error") {
+			process.stderr.write(`the unit failed: ${live.blockedReason ?? "unknown error"}\n`);
+			process.exit(1);
+		}
+	}
+	process.stderr.write(`timed out after ${Math.round((Date.now() - started) / 60_000)}m — the unit is still running; read it later with: glance ask --read ${dto.id}\n`);
+	process.exit(1);
+}
+
+/** `glance answers [--repo R]` / `glance ask --read <id>` — the durable side of the deliverable. */
+async function cmdAnswers(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const id = positional[0] ?? (typeof flags.read === "string" ? flags.read : undefined);
+	const url = id ? `${base(flags)}/api/answers/${encodeURIComponent(id)}` : `${base(flags)}/api/answers${flags.repo ? `?repo=${encodeURIComponent(String(flags.repo))}` : ""}`;
+	const res = await fetch(url, { headers: tokenHeader() }).catch(() => null);
+	if (!res || !res.ok) {
+		process.stderr.write(res ? `${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}\n`);
+		process.exit(1);
+	}
+	const body = await res.json();
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+		return;
+	}
+	if (id) {
+		const a = body as { question: string; markdown: string; answeredAt?: number };
+		process.stdout.write(`${a.question}\n\n${a.answeredAt ? a.markdown : "(not answered yet)"}\n`);
+		return;
+	}
+	const list = body as Array<{ id: string; question: string; answeredAt?: number; repo: string }>;
+	if (list.length === 0) {
+		process.stdout.write('no answers yet. ask one: glance ask "why is dispatch slow?"\n');
+		return;
+	}
+	for (const a of list) process.stdout.write(`${a.answeredAt ? "✔" : "…"} ${a.id.padEnd(34)} ${a.question.slice(0, 60)}\n`);
+}
+
+/**
+ * `glance doctor` — R6's answer. Exit code IS the verdict, so CI and the operator's `&&` both work:
+ * 0 = nothing blocking, 1 = the factory cannot do its job. A warning never fails the command; a warning
+ * that failed the command would be turned off within a week.
+ */
+async function cmdDoctor(args: string[]): Promise<void> {
+	const { flags } = parseArgs(args);
+	const report = await runDoctor(makeDoctorProbe({ base: base(flags), headers: tokenHeader(), cwd: process.cwd() }));
+	process.stdout.write(flags.json ? `${JSON.stringify(report, null, 2)}
+` : renderDoctor(report));
+	if (!report.healthy) process.exit(1);
+}
+
 async function main(): Promise<void> {
 	const [cmd, ...rest] = process.argv.slice(2);
 	switch (cmd) {
@@ -814,6 +983,9 @@ async function main(): Promise<void> {
 		case "list":
 		case "ls":
 			await cmdList(rest);
+			break;
+		case "harnesses":
+			await cmdHarnesses(rest);
 			break;
 		case "prompt":
 		case "say":
@@ -851,6 +1023,16 @@ async function main(): Promise<void> {
 			break;
 		case "plan-decompose":
 			await cmdPlanDecompose(rest);
+			break;
+		case "ask":
+			if (typeof parseArgs(rest).flags.read === "string") await cmdAnswers(rest);
+			else await cmdAsk(rest);
+			break;
+		case "answers":
+			await cmdAnswers(rest);
+			break;
+		case "doctor":
+			await cmdDoctor(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

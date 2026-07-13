@@ -134,18 +134,45 @@ async function probe(repo: string): Promise<ResolvedLandMode> {
 	const dryRun = await hardenedGit(["push", "--dry-run", "origin", `HEAD:${PUSH_PROBE_REF}`], { cwd: repo });
 	if (dryRun.code !== 0) return { mode: "local", reason: `git push --dry-run origin HEAD:${PUSH_PROBE_REF} failed: ${dryRun.stderr.trim()}` };
 
-	// 4. current local branch == remote default — a deliberate non-default checkout always wins.
+	// 4. Which branch the operator has checked out is READ (for the reason string) but never gates the
+	//    mode. A PR-mode unit forks from `origin/<default>` into its own worktree and lands by pushing
+	//    that worktree's branch and merging the PR on the remote: the shared checkout is never merged
+	//    into, never reset, never even read. The old rule inverted this — "a deliberate non-default
+	//    checkout always wins" forced LOCAL mode, whose `landAgent` then refuses on `land.ts`'s
+	//    dirty-checkout guard, `retryable: true`, so it never escalates to a human. The two conditions
+	//    are individually sane and jointly fatal: an operator working in the repo (non-default branch,
+	//    dirty tree) is exactly when glance is useful, and exactly when it silently could not land.
+	//    Measured on this repo before the fix: 1381 of 1686 recorded land attempts (82%) died on that
+	//    guard, and no autonomously-dispatched unit had ever merged. A non-default checkout is an
+	//    argument FOR pr mode — never touch the tree the human is standing on — not against it.
+	//    `OMP_SQUAD_LAND_MODE=local` remains the explicit opt-out for repos with no usable remote.
 	const current = await hardenedGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo });
 	const currentBranch = current.stdout.trim();
-	if (currentBranch !== defaultBranch) return { mode: "local", reason: `checked-out branch ${currentBranch} != remote default ${defaultBranch} — deliberate operator checkout wins` };
 
-	// 5. local default is ancestor of freshly-fetched origin/<default> — divergence forces local + loud log.
-	await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => undefined);
-	const localSha = (await hardenedGit(["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
-	const ancestor = await isAncestor(localSha, `origin/${defaultBranch}`, repo);
-	if (!ancestor) return { mode: "local", reason: `local ${defaultBranch} is NOT an ancestor of origin/${defaultBranch} — diverged, forcing local mode until reconciled (see the operator runbook logged at boot for this repo)` };
+	// 5. The LOCAL DEFAULT BRANCH must not have diverged from freshly-fetched origin/<default>: an
+	//    unpushed local commit there would be silently stranded by merges that now happen on the
+	//    remote. Resolved via `refs/heads/<default>`, NOT `HEAD` — the two were the same ref only
+	//    because probe 4 used to guarantee it, so reading HEAD here was load-bearing on an invariant
+	//    that no longer holds (on a feature branch HEAD is never an ancestor of origin/<default>, which
+	//    re-forced local mode independently of probe 4). A repo with no local `<default>` ref at all
+	//    (cloned straight onto a branch) has nothing to strand → pr.
+	//
+	//    The fetch must SUCCEED. `hardenedGit` reports failure through a nonzero `code` and never
+	//    rejects, so the old `.catch(() => undefined)` was decorative: a failed fetch fell straight
+	//    through to an ancestor test against a STALE `origin/<default>`, which trivially passes and
+	//    resolves pr. The daemon would then gate a scratch merge against the stale base while GitHub
+	//    merges the PR into the real (newer) one — a combination nothing ever tested. Probes 2 and 3
+	//    already proved gh and push work, so a fetch failure here is genuinely anomalous: fail closed.
+	const fetched = await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => ({ code: 1, stdout: "", stderr: "fetch threw" }));
+	if (fetched.code !== 0) return { mode: "local", reason: `could not fetch origin/${defaultBranch} (${fetched.stderr.trim() || `exit ${fetched.code}`}) — refusing to resolve pr mode against a stale base` };
+	const localDefault = await hardenedGit(["rev-parse", "--verify", `refs/heads/${defaultBranch}`], { cwd: repo });
+	if (localDefault.code === 0) {
+		const ancestor = await isAncestor(localDefault.stdout.trim(), `origin/${defaultBranch}`, repo);
+		if (!ancestor) return { mode: "local", reason: `local ${defaultBranch} is NOT an ancestor of origin/${defaultBranch} — diverged, forcing local mode until reconciled (see the operator runbook logged at boot for this repo)` };
+	}
 
-	return { mode: "pr", defaultBranch, reason: `all 5 probes passed (slug ${slug}, default ${defaultBranch})` };
+	const standing = currentBranch === defaultBranch ? "" : `; operator on ${currentBranch}, units fork from origin/${defaultBranch}`;
+	return { mode: "pr", defaultBranch, reason: `all 5 probes passed (slug ${slug}, default ${defaultBranch}${standing})` };
 }
 
 // ── aheadOfBase — ONE origin-aware "ahead" primitive for every consumer ─────────────────────────
@@ -161,8 +188,34 @@ async function throttledFetch(repo: string, defaultBranch: string): Promise<void
 }
 
 /** Commits on `branch` not reachable from the resolved base (PR mode: fetched `origin/<default>`;
- *  local mode: `HEAD`). 0 ⇒ fully landed/empty; -1 ⇒ couldn't determine. The ONE replacement for every
- *  `rev-list <base>..<branch>`-style computation in the codebase. */
+ *  local mode: `HEAD`). 0 ⇒ fully landed/empty; **-1 ⇒ couldn't determine** (the underlying `git
+ *  rev-list` failed — a transient fault, not a measurement). The ONE replacement for every
+ *  `rev-list <base>..<branch>`-style computation in the codebase.
+ *
+ *  -1 is an in-band error sentinel on a numeric channel: a caller that does a bare `> 0` (or compares
+ *  against a specific positive count) silently reads "couldn't determine" as "definitely 0 or
+ *  negative", which for every "does this branch have unlanded work?" consumer means "no work" — a git
+ *  fault then reads as "nothing to land" and the caller moves on as if it were clean. That is exactly
+ *  the interlock shape this codebase has been bitten by before (see aheadOfMain's callers in
+ *  squad-manager.ts and the orchestrator's `agentHasWork` skip). Every WORK-GATING consumer (does this
+ *  branch have something to land/resume?) MUST branch on the unknown case explicitly via the
+ *  `aheadUnknown` guard below rather than a bare `> 0`/`< 0`/`=== -1` — a false negative there silently
+ *  drops real work.
+ *
+ *  This does NOT ban a bare `=== 0` everywhere: an EXACT-equality test against zero is fail-safe by
+ *  construction, because -1 (or any nonzero count) never collapses into it — it stays "not merged"
+ *  without the guard doing any work. `worktree-reaper.ts`'s `WorktreeInfo.aheadOfBase` is the sanctioned
+ *  instance of this: `selectReapable`'s `w.aheadOfBase === 0` reads an unknown git fault as "not merged"
+ *  (the correct, conservative direction for a DESTRUCTIVE decision — reaping a worktree whose ahead-count
+ *  is actually unknown would be the dangerous mistake), so it deliberately skips the named guard and
+ *  compares the raw number directly; do not "fix" it to route through `aheadUnknown`, that would be a
+ *  no-op at best. The guard exists for the OTHER polarity — `> 0`-shaped tests, where -1 quietly reads as
+ *  false — and for `observer.ts`'s `auditStaleDone`/`auditLandedSurvivors`, which branch on `aheadUnknown`
+ *  explicitly so the "unknown vs. genuinely landed" distinction stays legible even though their net
+ *  effect (skip) is similar to the reaper's exact-equality shortcut. `aheadUnknown` also documents what
+ *  each direction of "unknown" should mean: assume-work-exists for anything gating a land/resume
+ *  decision, not-merged for anything gating a destructive/cleanup decision (the worktree reaper).
+ */
 export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: string }): Promise<number> {
 	const cwd = opts.cwd ?? opts.repo;
 	const mode = await resolveLandMode(opts.repo);
@@ -178,4 +231,12 @@ export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: st
 	// costs nothing and restores the pre-refactor `-C <main checkout>` semantics.
 	const r = await hardenedGit(["rev-list", "--count", `HEAD..${opts.branch}`], { cwd: opts.repo });
 	return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+}
+
+/** Named guard for `aheadOfBase`'s -1 sentinel — the one and only correct way to test for "couldn't
+ *  determine". Never compare the raw number against `-1`/`< 0` inline; route through this so the
+ *  intent ("this is the unknown case, not a real count") is legible at every call site and grep-able
+ *  in one place. */
+export function aheadUnknown(n: number): boolean {
+	return n < 0;
 }

@@ -46,7 +46,7 @@ import { useTaskContext } from '../context/TaskContext';
 import { PageContextScope } from '../context/PageContext';
 import { deriveFleetPageContext } from '../lib/pageContextDerive';
 import { AgentLandControls } from './chat/AgentMetaBar';
-import { validationBadge, confidenceBadge, prStateBadgeLabel } from '../lib/agent-badges';
+import { validationBadge, confidenceBadge, prStateBadgeLabel, isValidatorHeld } from '../lib/agent-badges';
 import { canLand, answerCommand, interruptCommand, interruptibleAgents, restartCommand, setModelCommand } from '../lib/agent-control';
 import { apiJson, jsonInit } from '../lib/api';
 import { enablePush, pushPermission } from '../lib/push';
@@ -169,7 +169,8 @@ const RosterAgentRow: React.FC<{
   onSelect: () => void;
   onRowAction: (row: FleetAgentRow) => void;
   onInlineAnswer: (agentId: string, requestId: string, value: string) => void;
-}> = ({ row, selected, diffCounts, mostUrgent = false, onSelect, onRowAction, onInlineAnswer }) => {
+  onIntervene: (agentId: string) => void;
+}> = ({ row, selected, diffCounts, mostUrgent = false, onSelect, onRowAction, onInlineAnswer, onIntervene }) => {
   const { agent, attn, planItem } = row;
   const pending = agent.pending[0];
   const showInlineOptions = attn?.kind === 'blocked' && !!pending?.options?.length;
@@ -191,6 +192,15 @@ const RosterAgentRow: React.FC<{
           status={agent.status}
           variant={!selected && (agent.status === 'working' || agent.status === 'starting') ? 'dim' : undefined}
         />
+        {(agent.status === 'input' || agent.status === 'error') && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onIntervene(agent.id); }}
+            className="flex-shrink-0 rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+            style={{ minHeight: '44px', minWidth: '44px' }}
+          >
+            Step in
+          </button>
+        )}
       </div>
       <div className="flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
         {agent.branch && (
@@ -364,7 +374,18 @@ const LandRail: React.FC<{
     <div className="flex h-full w-80 flex-shrink-0 flex-col gap-2 overflow-y-auto border-l border-gray-200 bg-gray-50/60 p-2 dark:border-ink-border dark:bg-ink">
       <PanelSection
         title="Land"
-        right={agent?.prState ? <StatusChip status={agent.prState} /> : agent?.landReady ? <StatusChip status="done" /> : null}
+        right={
+          agent?.prState ? (
+            <StatusChip status={agent.prState} />
+          ) : agent?.landReady && !isValidatorHeld(agent) ? (
+            <StatusChip status="done" />
+          ) : agent?.landReady && isValidatorHeld(agent) ? (
+            // A vetoed or inconclusive verdict must never read as "done" — the fail-open
+            // isValidatorHeld exists to close (agent-badges.ts). The `validation` pill below already
+            // names the verdict; this chip must not contradict it.
+            <StatusChip status="held" tone="attention" />
+          ) : null
+        }
       >
         <div className="flex flex-col gap-2 p-3">
           {!agent ? (
@@ -445,7 +466,7 @@ const LandRail: React.FC<{
  * land rail.
  */
 export const WorkspaceCockpit: React.FC = () => {
-  const { agents, features, audit, tasks, transcripts, sendConsoleCommand, subscribeConsole, showToast, selectTask, setView, reload } = useTaskContext();
+  const { agents, features, audit, tasks, allTasks, transcripts, sendConsoleCommand, subscribeConsole, showToast, selectTask, setView, reload, openIntervene } = useTaskContext();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([{ label: 'omp default', value: '' }]);
   const [stopPending, setStopPending] = useState(false);
@@ -551,7 +572,15 @@ export const WorkspaceCockpit: React.FC = () => {
   }, [navRows, selectedAgent?.id]);
 
   const diffSignals = useMemo(
-    () => agents.map((a) => ({ id: a.id, messageCount: a.messageCount, status: a.status, landReady: a.landReady, prState: a.prState })),
+    () =>
+      agents.map((a) => ({
+        id: a.id,
+        messageCount: a.messageCount,
+        status: a.status,
+        landReady: a.landReady,
+        prState: a.prState,
+        validationVerdict: a.validation?.verdict,
+      })),
     [agents],
   );
   const diffsById = useAgentDiffs(diffSignals);
@@ -608,9 +637,12 @@ export const WorkspaceCockpit: React.FC = () => {
 
   const openUnstaffed = useCallback((item: ActiveWorkItem) => {
     if (!item.featureId) return;
-    const task = tasks.find((t) => t.sourceId === item.featureId) ?? tasks.find((t) => t.id === item.featureId);
+    // The FLEET is deliberately unscoped — a blocked agent in another repo must never be hidden — so its
+    // unstaffed-plan rows can name a task the current project scope excludes. Look it up in `allTasks`;
+    // searching the scoped list silently found nothing and the click did nothing. (gpt-5.6-sol)
+    const task = allTasks.find((t) => t.sourceId === item.featureId) ?? allTasks.find((t) => t.id === item.featureId);
     if (task) { selectTask(task.id); setView('tasks'); }
-  }, [tasks, selectTask, setView]);
+  }, [allTasks, selectTask, setView]);
 
   const staffPlan = useCallback(async (item: ActiveWorkItem) => {
     if (!item.featureId) return;
@@ -730,6 +762,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
             </div>
@@ -754,6 +787,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
             </>
@@ -771,6 +805,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
               {!workingExpanded && filteredWorking.length > WORKING_VISIBLE_CAP && (
@@ -796,6 +831,7 @@ export const WorkspaceCockpit: React.FC = () => {
                   onSelect={() => setSelectedId(row.agent.id)}
                   onRowAction={onRowAction}
                   onInlineAnswer={sendAnswer}
+                  onIntervene={openIntervene}
                 />
               ))}
             </>

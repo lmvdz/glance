@@ -12,7 +12,9 @@
  *
  * Frame mapping (what the manager already understands):
  *   - one agent_start … agent_end around the whole run (inner per-turn
- *     agent_start/agent_end are swallowed so status stays "working" between stages);
+ *     agent_start/agent_end are swallowed DURING a run so status stays "working" between stages;
+ *     OUTSIDE a run — an operator steering a finished unit — they are forwarded, because they are the
+ *     only thing that can move the unit out of idle while its agent writes. See `prompt()`);
  *   - stage transitions + command output as tool_execution_start / message frames;
  *   - a human gate as an extension_ui_request{select} → the manager's needs-input
  *     path; the inner agent's own approval prompts ride the same channel.
@@ -22,6 +24,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "./agent-driver.ts";
+import { errText } from "./err-text.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
 import type { ReflectLlm } from "./reflection.ts";
@@ -106,6 +109,24 @@ export function deriveBranchAgentId(runId: string, branchKey: string, nodeId: st
 	return `br-${hash8(`${runId}:${branchKey}`)}-${slug(nodeId, 12)}`;
 }
 
+/**
+ * The RpcAgent options for a workflow's inner thread. Pure + exported so the "the inner agent inherits
+ * the unit's system-prompt context" rule is unit-tested — it silently did not, for every workflow unit.
+ * The tester lineage takes its own model but the SAME context: it must know the spec it is writing a
+ * test for.
+ */
+export function innerAgentOptions(opts: { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string }, role: "coder" | "tester", modelOverride?: string): { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string } {
+	return {
+		id: `${opts.id}-${role === "coder" ? "wf" : "tester"}`,
+		cwd: opts.cwd,
+		model: role === "tester" ? modelOverride : opts.model,
+		approvalMode: opts.approvalMode,
+		thinking: opts.thinking,
+		bin: opts.bin,
+		appendSystemPrompt: opts.appendSystemPrompt,
+	};
+}
+
 /** The fleet capability a workflow uses to fan out parallel branches into real, steerable roster agents. */
 export interface WorkflowFleet {
 	runBranch(spec: BranchSpec): Promise<NodeResult>;
@@ -124,6 +145,14 @@ export interface WorkflowDriverOptions {
 	approvalMode?: ApprovalMode;
 	thinking?: ThinkingLevel;
 	bin?: string;
+	/**
+	 * System-prompt context for the inner agent(s): profile memory, tool grants, the cold-start fabric
+	 * primer, and the authored Tier-2 spec. `WorkflowDriverOptions` had NO such field, so a workflow unit
+	 * — which is what `--verify` and every routed dispatch produce — ran with none of it, while
+	 * `RpcAgent` has supported `--append-system-prompt` all along. The unit that most needed its spec was
+	 * the one guaranteed not to get it. Found by cross-lineage review (gpt-5.6-sol).
+	 */
+	appendSystemPrompt?: string;
 	autonomy?: WorkflowAutonomyMode;
 	sessionId?: string;
 	proof?: WorkflowProofState;
@@ -165,6 +194,31 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	private ready = false;
 	private alive = true;
 	private runActive = false;
+	/** A run has been STARTED (it may since have finished). Distinct from `runActive`: `prompt()` uses this
+	 *  to tell "this is the goal" from "this is a steer", so a prompt to a finished unit never re-runs the
+	 *  graph. See `prompt()`. */
+	private hasRun = false;
+	/**
+	 * Busy-ness of a POST-RUN steer, split in two because one boolean cannot express it safely.
+	 * `getState().isStreaming` used to be `runActive` alone, which is false once the graph exits — so a
+	 * unit being steered reported IDLE while its agent was writing files, and the orchestrator could
+	 * sweep-commit, verify and land a half-written tree (grok-4.5).
+	 *
+	 * - `promptInFlight`: set SYNCHRONOUSLY in `prompt()`, before the agent's own `agent_start` can race a
+	 *   poll tick; cleared when `inner.prompt()` settles.
+	 * - `innerTurnOpen`: the coder's turn is live (`agent_start` → `agent_end`).
+	 *
+	 * One flag was wrong both ways (gpt-5.6-sol): clearing it when `inner.prompt()` REJECTS after the
+	 * agent already emitted `agent_start` reports idle over a live turn; never clearing it when
+	 * `agent_end` is missed strands the unit "working" forever, never verified, never landed. Hence:
+	 * a rejection only clears `promptInFlight`, the turn owns `innerTurnOpen`, a dead inner ends it, and
+	 * `execRun`'s finally resets it (the graph owns turns during a run; nothing may leak past it).
+	 * Only the CODER inner drives these — the isolatedLineage `tester` runs solely inside a run, where
+	 * `runActive` already covers it, and letting its delayed `agent_end` clear a later coder steer was a
+	 * real cross-agent bug.
+	 */
+	private promptInFlight = false;
+	private innerTurnOpen = false;
 	private gateSeq = 0;
 	private pendingGate?: PendingGate;
 	private runId = "";
@@ -222,6 +276,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		this.emit("ready");
 		if (this.opts.resumeState) {
 			this.seedBranchIndexFromResume(this.opts.resumeState);
+			this.hasRun = true; // a resumed run has already started — later prompts steer, never re-run the graph
 			this.runActive = true;
 			void this.execRun(this.opts.resumeState.goal, this.opts.resumeState);
 		}
@@ -280,14 +335,51 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		this.tester?.detach?.();
 	}
 
-	/** First prompt starts the run with the goal; later prompts steer the live agent. */
+	/**
+	 * The FIRST prompt is the run's goal and starts it. Every prompt after that — during the run or long
+	 * after it exits — steers the live inner agent. It must never start a second run.
+	 *
+	 * The old guard was `if (!this.runActive)`, which is also true once a run has FINISHED. So an operator
+	 * steering a completed unit silently re-entered `execRun(message)`: a whole new graph traversal with
+	 * the steer text as its "goal". Observed live (2026-07-09) while telling a finished unit it had never
+	 * committed — the workflow re-ran `Implement`, the inner agent (which remembers the original task)
+	 * answered "the goal is complete", `Verify` re-ran, and the run exited. The instruction was never
+	 * executed and nothing reported that it had been swallowed. This is the founding brief's R4 — there
+	 * is no channel for steering, iteration, or taste, "and that's most of the real work".
+	 *
+	 * `hasRun` (not `runActive`) is the latch: once a run has begun, prompts belong to the agent.
+	 */
 	async prompt(message: string): Promise<void> {
-		if (!this.runActive) {
+		if (!this.hasRun) {
+			this.hasRun = true;
 			this.runActive = true;
 			void this.execRun(message);
 			return;
 		}
-		await this.inner?.prompt(message).catch(() => {});
+		// No inner agent to steer (the run never reached an agent node, or it died): starting a run is the
+		// only thing left that can act on the message. Preserves the pre-fix behavior for that one case.
+		if (!this.inner?.isAlive) {
+			if (this.runActive) return; // a run is mid-flight without an agent node yet — dropping is correct
+			this.runActive = true;
+			void this.execRun(message);
+			return;
+		}
+		// Mark busy BEFORE handing the message over: the agent's own `agent_start` arrives asynchronously,
+		// and a poll tick landing in that window would read the unit as idle and let the orchestrator
+		// sweep-commit/verify/land the tree the agent is about to write into.
+		this.promptInFlight = true;
+		try {
+			await this.inner.prompt(message);
+		} catch (err) {
+			// Never black-hole a steer: the operator typed it and is watching for an effect. `.catch(() => {})`
+			// here used to swallow the failure silently. NOTE: only `promptInFlight` clears (in the finally) —
+			// if the agent already emitted `agent_start`, its turn is live and `innerTurnOpen` still holds the
+			// unit "working". A rejected send does not mean a stopped agent.
+			this.emit("event", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `⚠ steer not delivered: ${errText(err)}` } });
+			this.emit("event", { type: "message_end" });
+		} finally {
+			this.promptInFlight = false;
+		}
 	}
 
 	abort(): Promise<unknown> {
@@ -299,7 +391,10 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		const tasks = (this.executor?.rollup ?? []).map((r) => ({ content: r.label, status: r.status }));
 		return Promise.resolve({
 			thinkingLevel: undefined,
-			isStreaming: this.runActive,
+			// `runActive` alone reported IDLE while a post-run steer was mid-turn — see `promptInFlight`/`innerTurnOpen`.
+			// A turn only counts while its agent is alive: a dead inner cannot be mid-turn, and stranding the unit
+			// "working" means it is never swept, verified, or landed.
+			isStreaming: this.runActive || this.promptInFlight || (this.innerTurnOpen && (this.inner?.isAlive ?? false)),
 			isCompacting: false,
 			steeringMode: "all",
 			followUpMode: "all",
@@ -377,6 +472,9 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			}
 		} finally {
 			this.runActive = false;
+			// The graph owned every turn inside the run. A node whose `agent_end` was missed (host crash, lost
+			// frame) must not leak `innerTurnOpen` past the run and strand the unit "working" forever.
+			this.innerTurnOpen = false;
 			this.emit("event", { type: "workflow_done", outcome, proof: this.opts.proof });
 			this.emit("event", { type: "agent_end" });
 		}
@@ -412,7 +510,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		if (this.inner?.isAlive) return this.inner;
 		const inner = this.opts.createInnerDriver
 			? this.opts.createInnerDriver("coder")
-			: new RpcAgent({ id: `${this.opts.id}-wf`, cwd: this.opts.cwd, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking, bin: this.opts.bin });
+			: new RpcAgent(innerAgentOptions(this.opts, "coder"));
 		this.wireInner(inner);
 		this.inner = inner;
 		await inner.start();
@@ -432,8 +530,8 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		const model = process.env.OMP_SQUAD_TDD_TESTER_MODEL || this.opts.model;
 		const tester = this.opts.createInnerDriver
 			? this.opts.createInnerDriver("tester")
-			: new RpcAgent({ id: `${this.opts.id}-tester`, cwd: this.opts.cwd, model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking, bin: this.opts.bin });
-		this.wireInner(tester);
+			: new RpcAgent(innerAgentOptions(this.opts, "tester", model));
+		this.wireInner(tester, "tester");
 		this.tester = tester;
 		await tester.start();
 		if (tester.setSessionName) await tester.setSessionName(`workflow:${this.wf?.name}:test-author`).catch(() => {});
@@ -444,15 +542,32 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 	 * Forward an inner thread's signal to surfaces, but swallow its per-turn agent_start/agent_end so the
 	 * manager sees one continuous working session. Shared by the coder `inner` and the `tester` lineage.
 	 */
-	private wireInner(agent: AgentDriver): void {
+	private wireInner(agent: AgentDriver, role: "coder" | "tester" = "coder"): void {
 		agent.on("event", (frame: { type?: string }) => {
-			if (frame.type === "agent_start" || frame.type === "turn_start" || frame.type === "agent_end") return;
+			// The turn lifecycle is TRACKED (coder only) and FORWARDED only outside a run. During a run the
+			// graph owns the roster lifecycle — execRun emits one agent_start/agent_end per run — so
+			// forwarding per-node turns would flap the unit working↔idle on every node. Outside a run (an
+			// operator steering a finished unit) these frames are the only thing that can move it out of
+			// idle, and `innerTurnOpen` is what keeps the orchestrator off a tree being written into.
+			if (frame.type === "agent_start" || frame.type === "turn_start") {
+				if (role === "coder") this.innerTurnOpen = true;
+				if (!this.runActive) this.emit("event", frame);
+				return;
+			}
+			if (frame.type === "agent_end") {
+				if (role === "coder") this.innerTurnOpen = false;
+				if (!this.runActive) this.emit("event", frame);
+				return;
+			}
 			this.emit("event", frame);
 		});
 		agent.on("ui", (req: RpcExtensionUIRequest) => this.emit("ui", req));
 		agent.on("hosttool", (call: unknown) => this.emit("hosttool", call));
 		agent.on("stderr", (line: string) => this.emit("stderr", line));
 		agent.on("exit", ({ code }: { code: number }) => {
+			// A dead agent has no live turn. Without this a missed `agent_end` (host crash, lost frame)
+			// would strand the unit "working" forever: never idle ⇒ never swept, verified, or landed.
+			if (role === "coder") this.innerTurnOpen = false;
 			if (this.runActive) this.emit("stderr", `inner agent exited (code ${code}) mid-run`);
 		});
 	}

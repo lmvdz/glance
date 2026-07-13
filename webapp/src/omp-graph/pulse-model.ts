@@ -10,6 +10,7 @@
  */
 
 import type { AgentDTO } from '../lib/dto';
+import { isValidatorHeld } from '../lib/agent-badges';
 import type { GraphDoc, GraphTrack } from './types';
 
 export const HOUR_MS = 3_600_000;
@@ -204,7 +205,15 @@ export function buildPulseModel(doc: GraphDoc, agents: AgentDTO[]): PulseModel {
       });
     } else if (a.landReady || a.availableActions?.includes('land')) {
       needsCount++;
-      below.push({ at: nowMs, kind: 'READY', label: `${a.name} · proof green, awaiting land`, big: true, agentId: a.id });
+      // A vetoed or inconclusive verdict must never read as the calm "proof green, awaiting land" —
+      // that's the fail-open isValidatorHeld exists to close (see agent-badges.ts). It still needs a
+      // human, so it stays in the same BLOCKED/READY "needs" inspection lane (FleetPulseCanvas routes
+      // both kinds to the same panel) — just not mislabeled as a clean pass.
+      below.push(
+        isValidatorHeld(a)
+          ? { at: nowMs, kind: 'BLOCKED', label: `${a.name} · validator held (${a.validation?.verdict})`, big: true, agentId: a.id }
+          : { at: nowMs, kind: 'READY', label: `${a.name} · proof green, awaiting land`, big: true, agentId: a.id },
+      );
     }
   }
   below.sort((a, b) => a.at - b.at);

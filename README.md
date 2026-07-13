@@ -1,26 +1,22 @@
 # glance
 
-**Oversight for a fleet of [Oh My Pi](https://omp.sh) coding agents running in parallel — one per git worktree — from a terminal TUI and a web dashboard. You glance, and you know.**
+![glance — a hooded figure at an ember fire of streaming characters, under the glance lockup](docs/assets/readme-hero.jpg)
 
-The end goal is a single **control plane you run wherever development happens**: agents build,
-verify, and land work autonomously; you supervise by exception. Every agent is an isolated
-worktree process; you see at a glance what each is doing and which need input, and you can
-dive into any one and steer it. Cross-operator federation puts your teammates' agents in the
-same roster.
+**Oversight for a fleet of coding agents running in parallel — one per git worktree, any
+harness — from a terminal TUI and a web dashboard. You glance, and you know.**
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ glance  3 agents · 1 need input                            + Add agent  │
-├───────────────────────────────┬──────────────────────────────────────────┤
-│ ⛔ input   bravo  squad/bravo  │ bravo [input]  anthropic/claude-opus      │
-│ ◐ working  alpha  squad/alpha  │ ───────────────────────────────────────  │
-│ ● idle     charlie squad/char  │ USER      refactor the auth module        │
-│                                │ ASSISTANT I'll start by reading auth.ts…  │
-│                                │ TOOL      ▸ edit: src/auth.ts             │
-│                                │ ⛔ Allow tool: bash  [Approve] [Deny]     │
-│                                │ prompt› _                                  │
-└───────────────────────────────┴──────────────────────────────────────────┘
-```
+The end goal is a single **control plane you run wherever development happens**: work goes in
+as an issue or a chat message, a routed agent builds it in an isolated worktree, deterministic
+gates prove it, and it lands on main — with you supervising by exception instead of babysitting
+terminals. The loop is closed today: the daemon dispatches, verifies, commits, and merges
+units of work end-to-end. Agents run on [Oh My Pi](https://omp.sh) by default, but the fleet is
+**harness-agnostic** — any registered agent CLI (opencode, pi, claude-code, codex, gemini, …)
+runs behind the same seam and shows up in the same roster. Cross-operator federation puts your
+teammates' agents there too.
+
+![The glance TUI — three agents in one glance: one held on a bash approval, one working, one idle](docs/assets/tui.png)
+*The actual TUI: bravo is held on a `bash` approval, charlie is working, alpha is idle — and the
+footer tells you one agent is waiting on you.*
 
 > Formerly **omp-squad**. Both binaries are installed (`glance` and `omp-squad`), the canonical
 > env prefix is `GLANCE_*`, and every legacy `OMP_SQUAD_*` variable keeps working unchanged.
@@ -38,37 +34,37 @@ third repo). Without a control plane you lose track of which is busy, which fini
 - **Never miss a blocked agent** — approval prompts, questions, and host-tool calls surface as
   **needs-input** with inline answer controls, and push a notification to your phone.
 - **Steer from anywhere** — prompt, answer, interrupt, restart, or kill any agent from the TUI
-  or the browser; both are thin clients of the same core and stay in sync.
-- **Work lands itself** — a finished branch is verified by deterministic gates and staged (or
-  merged) to main with no one typing; a human is summoned only when the system can't prove its
-  own work.
+  or the browser; a prompt to a busy agent steers its live session rather than restarting it.
+- **Work lands itself** — the daemon commits a finished unit's work, proves it against
+  deterministic gates, and merges (or stages a one-tap Land) with no one typing; a human is
+  summoned only when the system can't prove its own work.
+- **Any harness, one roster** — the fleet doesn't care which agent CLI does the work; every
+  runtime sits behind one driver seam and gets the same status, steering, gates, and landing.
 
 ## How it works
 
-```
-        glance (one process)
-        ┌─────────────────────────────────────────────┐
-        │  SquadManager  ── roster, status, transcript │
-        │     │                                        │
-        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #1) │   each agent =
-        │     ├── RpcAgent ──▶ omp --mode rpc  (wt #2) │   its own worktree
-        │     └── RpcAgent ──▶ omp --mode rpc  (wt #3) │   + RPC child process
-        │     │                                        │
-        │     ├── SquadServer (HTTP + WS) ──▶ browser  │
-        │     └── SquadTui    (terminal)               │
-        └─────────────────────────────────────────────┘
-```
+![glance architecture — SquadManager fans out to AgentDrivers (one worktree each), SquadServer serves the browser, SquadTui the terminal](docs/assets/architecture.png)
 
-Each agent is a real `omp --mode rpc` child speaking omp's newline-JSON RPC protocol. Status is
-derived from its event stream; the TUI consumes the manager in-process and the web dashboard is
-a WebSocket client of the same event stream. Roster state persists under `~/.glance`
-(override with `GLANCE_STATE_DIR`; a legacy `~/.omp/squad` dir keeps working untouched).
-Agents survive daemon restarts: each runs under a detached
-host process the daemon reconnects to.
+Every fleet class — an omp operator, an ACP runtime, a sandboxed agent, a workflow run, a
+commissioned worker — implements one `AgentDriver` seam, so the roster, TUI, web, gates, and
+federation treat them identically; `kind` is the only difference. A **harness registry**
+(`src/harness-registry.ts`) maps a harness name to its wire protocol (omp's newline-JSON RPC or
+[ACP](https://agentclientprotocol.com)) and launch shape: `omp` (the default), `pi`, and
+`opencode` are live-verified; `claude-code`, `codex`, `gemini`, and `auggie` are registered but
+hidden until verified (`GLANCE_UNVERIFIED_HARNESS=1` to opt in). `glance harnesses` prints the
+honest capability tier of every registered harness — verified, detected-but-unverified, or
+merely registered — and the create surfaces only offer what's actually runnable.
+
+Status is derived from each agent's event stream; the TUI consumes the manager in-process and
+the web dashboard is a WebSocket client of the same stream. Roster state persists under
+`~/.glance` (override with `GLANCE_STATE_DIR`; a legacy `~/.omp/squad` dir keeps working
+untouched). Agents survive daemon restarts: each runs under a detached host process the daemon
+reconnects to.
 
 ## Install
 
-Requires [Bun](https://bun.sh) ≥ 1.3.14 and `omp` on your `PATH`.
+Requires [Bun](https://bun.sh) ≥ 1.3.14 and `omp` on your `PATH` (or any other verified
+harness, with `GLANCE_HARNESS` pointing at it).
 
 ```bash
 bun install
@@ -95,6 +91,7 @@ glance add ~/code/myproject --name auth-refactor \
   --task "Refactor the auth module to use the new session API."
 
 glance list                                  # the roster
+glance harnesses                             # which agent CLIs can run, and how trusted
 glance prompt auth-refactor-<id> "Also update the tests."
 glance logs auth-refactor-<id>               # recent transcript
 glance kill auth-refactor-<id>               # emergency stop (keeps the entry)
@@ -102,8 +99,8 @@ glance rm auth-refactor-<id> --delete-worktree
 glance open                                  # print the dashboard URL
 ```
 
-`add` accepts `--model`, `--approval`, `--thinking`, `--branch`, `--workflow`, `--verify`,
-`--sandbox`, `--acp`, and `--plain` — see the
+`add` accepts `--harness`, `--profile`, `--model`, `--approval`, `--thinking`, `--branch`,
+`--workflow`, `--verify`, `--sandbox`, and `--plain` — see the
 [CLI reference](docs-site/content/docs/reference/cli.mdx). With a plain `--task`, an **intake
 router** picks the process for you (verify loop, plan gate, fan-out, or plain agent); `--plain`
 opts out.
@@ -117,11 +114,21 @@ opts out.
 - **TUI** — a two-level, arrow-driven board (list → agent session) with a live stat header
   (branch · model · context % · cost · tokens), transcript scrollback, and slash commands
   (`/stop`, `/restart`, `/kill`). Type a task on the dashboard to spawn an agent.
-- **Web** — an organizational command center: projects, a needs-input **Queue** you answer in
-  place, per-agent transcript/diff/subagent views, a **Features** board with land-readiness and
-  deterministic proof, workflow race boards, automation and audit trails, fleet health, and a
-  settings surface for the daemon's feature flags. It installs as a PWA and **pushes a
-  notification when an agent needs you** — supervise from your phone.
+- **Web** — an organizational command center: a durable **project registry** with a real
+  switcher (projects are owned, not inferred from whatever happens to be running), a
+  needs-input **Queue** you answer in place, per-agent transcript/diff/subagent views, and a
+  **chat lane** that turns a conversation into work — propose → confirm → a routed agent
+  spawns, with image paste and annotation. When an agent stops, the **Intervene** view leads
+  with *why* it stopped and puts the diff at the spine — comment on a line and the comment
+  becomes a steering prompt. Around that: a **Features** board with land-readiness and
+  deterministic proof, plan **vote rounds** (assignees, quorum, commit-on-pass), a task canvas,
+  workflow race boards, automation and audit trails, fleet health, and a settings surface for
+  the daemon's feature flags. It installs as a PWA and **pushes a notification when an agent
+  needs you** — supervise from your phone.
+
+![The Graph view — a week of fleet activity on one timeline](docs/assets/glance-graph.png)
+*The Graph — a week of fleet activity on one timeline: commit milestones, spend billed by
+model × harness, the fleet pulse, agent runs, and the loops that shipped them.*
 
 The full-featured web UI is the React app in [`webapp/`](webapp/), served when it's built and
 `GLANCE_WEBAPP=1` is set; [`src/web/index.html`](src/web/index.html) is the zero-build fallback
@@ -132,7 +139,8 @@ dashboard. See the [web dashboard guide](docs-site/content/docs/guides/web-dashb
 With a [Plane](https://plane.so) workspace configured, the daemon closes the whole loop —
 issue → routed agent → verify → land → close — with bounded background loops, **all on by
 default** (each opts out with `GLANCE_<NAME>=0`; `GET /api/factory/status` shows which are
-armed, fueled, and moving):
+armed, fueled, and moving). Crucially, the daemon **commits the unit's work itself** before
+proving it — a unit never fails to land because its agent forgot to commit.
 
 | Loop | What it does |
 |---|---|
@@ -141,7 +149,7 @@ armed, fueled, and moving):
 | **Observer** | Audits fleet vs. intended state (red gate on main, unreaped survivors, blocked lands) and files fix-issues |
 | **Scout** | Harvests latent work from agent *reasoning* — bugs noticed in passing, deferred follow-ups — into triage-gated issues |
 | **Opportunity** | Clusters recurring Scout items across agents into one pattern issue |
-| **Auto-supervisor** | Answers routine low-risk approvals so agents don't idle; destructive requests always wait for a human |
+| **Auto-supervisor** | Answers routine low-risk approvals so agents don't idle — but only for harnesses whose permission wire it actually understands; destructive requests always wait for a human |
 | **Plan sync** | Reconciles `plans/` doc STATUS lines with tracker state |
 | **Janitors** | Reap landed agents, orphan hosts, and dead worktrees — losslessly, bounded |
 
@@ -149,22 +157,43 @@ Safety posture: every land passes a deterministic verify gate (optionally inside
 container sandbox, optionally a full-suite regression gate); by default a green verify **stages
 a one-tap Land** rather than blind-merging (`GLANCE_LAND_CONFIRM=0` for full auto-merge);
 destructive approvals are never auto-answered; provider rate-limit signals pause dispatch; and
-failure caps live in branch-keyed ledgers that survive restarts. Details:
+failure caps live in branch-keyed ledgers that survive restarts — including a bounded escalation
+cap on repeatedly land-blocked units, so nothing retries forever in silence. Details:
 [Autonomy](docs-site/content/docs/architecture/autonomy.mdx) ·
 [Landing](docs-site/content/docs/guides/landing.mdx) ·
 [Plane integration](docs-site/content/docs/integrations/plane.mdx).
 
+### Honesty as architecture
+
+The failure mode of an autonomous fleet isn't a crash — it's a system that *looks* green while
+doing nothing. glance treats that as an architectural class:
+
+- **Fail-closed checkers** — a gate that cannot run reports failure, never success; probe
+  failures are classified, not swallowed.
+- **Harness honesty tiers** — every registered harness carries a live-verified / detected /
+  merely-registered tier, surfaced in `glance harnesses` and the API, so "supported" always
+  means something checkable.
+- **Success-coupled accounting** — cost attribution is a task-class × model matrix where
+  tokens and dollars are only comparable alongside outcomes, behind a reproducibility gate
+  (sample size, coverage, variance) before any number is published.
+
 ## Landing — getting work back to main
 
-`landAgent` commits an agent's branch and merges it into the main checkout — serialized
-per-repo, gated on the repo's own verify command, rolled back on red, refused when the branch
-is stale against evolved main. Conflicts are resolved by a rebase-based auto-resolver whose
-result must **prove** itself (verify gate + independent reviewer pass) or the land is
-abandoned; a resolved conflict is always staged for a human one-tap Land by default. See
-[Landing](docs-site/content/docs/guides/landing.mdx) for the full gate stack and its env knobs.
+`landAgent` commits an agent's branch and merges it back — serialized per-repo, gated on the
+repo's own verify command, rolled back on red, refused when the branch is stale against evolved
+main. A **land-mode probe** picks the route per repo: merge directly into the main checkout, or
+open a PR with clean automerge-and-retry when the repo's remote calls for it. Conflicts are
+resolved by a rebase-based auto-resolver whose result must **prove** itself (verify gate +
+independent reviewer pass) or the land is abandoned; a resolved conflict is always staged for a
+human one-tap Land by default. See [Landing](docs-site/content/docs/guides/landing.mdx) for the
+full gate stack and its env knobs.
 
 ## Beyond a single agent
 
+- **Agent profiles** — a per-unit capability bundle: profile → harness, binary, model,
+  thinking level, approval mode, MCP bindings, memory. Defined by the operator
+  (`GLANCE_PROFILES`) or committed to the repo (`.glance/profiles.json`, sanitized — a repo can
+  pick a verified harness but can never smuggle in a binary or inline MCP server).
 - **Workflows** — author an agent's *process* as a reviewable graph (fabro's Graphviz/DOT
   dialect): plan gates, verify loops, parallel fan-out where each branch is a real steerable
   roster agent, and per-node model routing via a CSS-like `model_stylesheet`. Bundled:
@@ -175,9 +204,8 @@ abandoned; a resolved conflict is always staged for a human one-tap Land by defa
   a small scoped [Flue](https://flueframework.com) worker, an acceptance gate validates it in a
   secret-scrubbed env, and only a passing worker joins the roster.
   → [Commissioning](docs-site/content/docs/commissioning/index.mdx)
-- **Sandboxed agents** — `--sandbox <image>` runs an agent's omp inside a container (worktree
-  bind-mounted, network optional). **ACP runtimes** — `--acp` drives a non-omp agent
-  (`auggie --acp`, Claude Code, Codex) behind the same seam.
+- **Sandboxed agents** — `--sandbox <image>` runs an agent's harness inside a container
+  (worktree bind-mounted, network optional), composable with any registered harness.
   → [Sandboxing](docs-site/content/docs/guides/sandboxing.mdx)
 - **Federation** — presence, file leases, and shared-branch collision warnings across
   operators; on by default locally, cross-host via a WebSocket coordinator on your tailnet,
@@ -245,11 +273,14 @@ A full model-driven smoke test (spawn → work → artifact) is in the
 | `src/tui.ts` | Terminal dashboard |
 | `webapp/` | React 19 + Vite + Tailwind web dashboard (`GLANCE_WEBAPP=1`) |
 | `src/web/index.html` | Zero-build fallback dashboard |
+| `src/harness-registry.ts` · `src/agent-profiles.ts` | Harness registry + honesty tiers, per-unit profiles |
 | `src/rpc-agent.ts` · `src/agent-host*.ts` | omp RPC child + detached restart-surviving host |
 | `src/acp-agent-driver.ts` · `src/sandbox-agent-driver.ts` · `src/flue-service-driver.ts` · `src/workflow-driver.ts` | The other `AgentDriver` implementations |
 | `src/workflow/` | Graph engine — DOT parser, walker, executors, model stylesheets |
 | `src/intake.ts` · `src/dispatch.ts` · `src/orchestrator.ts` · `src/scheduler.ts` · `src/supervisor.ts` | Autonomy: routing, dispatch, control loop, admission, auto-answer |
-| `src/land.ts` · `src/proof.ts` · `src/land-ledger.ts` · `src/orchestrator-state.ts` | Landing, deterministic proof, restart-safe ledgers |
+| `src/land.ts` · `src/land-mode.ts` · `src/land-pr.ts` · `src/proof.ts` · `src/land-ledger.ts` · `src/orchestrator-state.ts` | Landing (direct or PR), deterministic proof, restart-safe ledgers |
+| `src/project-registry.ts` | Durable project registry behind `/api/projects` |
+| `src/plan-votes.ts` · `src/plan-vote-quorum.ts` | Plan vote rounds — assignees, quorum, commit-on-pass |
 | `src/federation*.ts` · `src/coordinator*.ts` · `src/presence.ts` · `src/leases.ts` | Federation, presence, file leases |
 | `src/architect.ts` · `src/worker-template.ts` · `src/validate.ts` | Commissioning |
 | `src/capabilities/` | Capability packs — schema, import, install, catalog |
@@ -257,7 +288,3 @@ A full model-driven smoke test (spawn → work → artifact) is in the
 | `workflows/` | Bundled workflow graphs (`.fabro`) |
 | `docs-site/` | The documentation site |
 | `tests/` | Deterministic test suite |
-
-Every fleet class implements one `AgentDriver` seam, so the roster, TUI, web, and federation
-treat an omp operator, a workflow run, a sandboxed agent, an ACP runtime, and a commissioned
-worker identically — `kind` is the only difference.

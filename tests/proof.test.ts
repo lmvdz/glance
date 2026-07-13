@@ -98,6 +98,19 @@ test("isFresh: passing + matching fingerprint is fresh; mismatch, dirty, or fail
 	expect(isFresh({ ...b, ok: true, commit: "abc" }, { ...fp, now: 101 })).toBe(false);
 });
 
+// Reproduce-first (eap-borrows finding #14): the OLD string-overload path (`isFresh(proof, headString)`)
+// returned `true` as soon as commit + required fields matched, WITHOUT checking `ttlMs` at all — an
+// expired proof still read as "fresh" for any string-overload caller (today: boost-only
+// `digestReward`, never a land gate — the fingerprint overload used elsewhere already enforces TTL).
+test("isFresh (string overload): now enforces ttlMs — an expired proof is NOT fresh even with a matching commit", () => {
+	const b: Omit<Proof, "ok" | "commit" | "ranAt"> = { tree: "tree", branch: "feat", dirty: false, baseCommit: "base", repo: "/repo", worktree: "/repo-wt", command: "x", commandHash: "cmd", ttlMs: 100, detail: "", artifacts: [] };
+	const now = Date.now();
+	// Within TTL: fresh.
+	expect(isFresh({ ...b, ok: true, commit: "abc", ranAt: now - 50 }, "abc")).toBe(true);
+	// Past TTL: the reproduced bug — must be false, not true.
+	expect(isFresh({ ...b, ok: true, commit: "abc", ranAt: now - 1_000_000 }, "abc")).toBe(false);
+});
+
 test("proofGate: blocks without proof, clears when fresh, goes stale on a new commit, blocks on failure", async () => {
 	const repo = await baseRepo();
 	const wt = await branchWorktree(repo, "feat", "f.txt");

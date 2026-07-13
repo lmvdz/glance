@@ -53,6 +53,13 @@ function readConfig(): PlaneConfig | null {
 	};
 }
 
+/** The resolved Plane config, for `glance doctor`. Plane loads its secrets ONCE, at daemon boot, from
+ *  `~/.claude/secrets/plane.env` — a daemon started before that file existed looks armed and has no fuel
+ *  line. Exported so the doctor can report what the process actually resolved, not what the file says. */
+export function planeConfig(): PlaneConfig | null {
+	return readConfig();
+}
+
 function projectIdFor(repo: string, cfg: PlaneConfig): string | undefined {
 	return cfg.projectMap[repo] ?? cfg.projectMap[path.basename(repo)] ?? cfg.fallbackProjectId;
 }

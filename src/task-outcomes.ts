@@ -39,7 +39,7 @@ export interface TaskOutcomeRow {
 	model?: string;
 	costUsd?: number;
 	confidence?: number;
-	validation?: "pass" | "veto" | "abstain" | "skipped";
+	validation?: "pass" | "veto" | "abstain" | "skipped" | "inconclusive";
 	/**
 	 * Independent, post-hoc difficulty signals (concern 04) — deliberately NOT router outputs. `tier`
 	 * and `mode` above are both things the router CHOSE; grading the router against its own labels is

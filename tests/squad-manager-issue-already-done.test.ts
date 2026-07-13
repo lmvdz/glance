@@ -121,6 +121,43 @@ test("issueAlreadyDone: closes the stale issue in Plane when a DoneProof IS on r
 	}
 });
 
+test("finding #11 (eap-borrows wave 2): issueAlreadyDone suppresses the Plane close for an UNVERIFIED DoneProof (still skips dispatch)", async () => {
+	const { server, patches } = planeStub();
+	try {
+		const { mgr, stateDir, repo } = await freshManager(`http://127.0.0.1:${server.port}`);
+		const rel = await closedConcernRepo(repo);
+		const issue: IssueRef = { id: "iss-5", identifier: "PROJ-5", name: `Implement ${rel} exactly`, projectId: "proj-9" };
+		recordDoneProof(stateDir, {
+			branch: "squad/oob-2",
+			repo: "r",
+			issueId: issue.id,
+			issueIdentifier: issue.identifier,
+			mode: "pr",
+			method: "merge",
+			commit: "c11",
+			baseRef: "origin/main",
+			verified: "unverified",
+			detail: "merged out-of-band via GitHub UI; gate not re-verified by the daemon",
+			provenAt: Date.now(),
+		});
+		const audits: { action: string; outcome: string }[] = [];
+		const overridable: { recordAudit: typeof mgr.recordAudit } = mgr;
+		const original = overridable.recordAudit.bind(mgr);
+		overridable.recordAudit = async (actor, action, target, outcome = "ok", detail) => {
+			audits.push({ action, outcome });
+			return original(actor, action, target, outcome, detail);
+		};
+
+		// OLD behavior (fail-open): ANY recorded proof authorized the close — this would have PATCHed
+		// Plane closed on an out-of-band merge the daemon never re-verified. NEW: suppressed, audited.
+		expect(await mgr.issueAlreadyDone(repo, issue)).toBe(true); // dispatch still skips (unaffected)
+		expect(patches()).toBe(0);
+		expect(audits.some((a) => a.action === "close.suppressed-unverified" && a.outcome === "error")).toBe(true);
+	} finally {
+		server.stop(true);
+	}
+});
+
 test("issueAlreadyDone: returns false (dispatch proceeds) when no concern doc is closed", async () => {
 	const { server } = planeStub();
 	try {

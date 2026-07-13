@@ -5,6 +5,7 @@
  */
 
 import { gitNoSignEnv } from "./git-harden.ts";
+import { extractOutermostJson } from "./json-extract.ts";
 
 const DEFAULT_TIMEOUT_MS = 1_000;
 
@@ -31,17 +32,19 @@ export async function ompOneShot(args: string[], opts: { bin?: string; timeoutMs
 	}
 }
 
-/** Extract the outermost balanced-ish JSON object from noisy model output (handles ```json fences and stray prose). */
+/**
+ * Extract the outermost balanced-ish JSON object from noisy model output (handles ```json fences
+ * and stray prose). Mirrors planner.ts's `extractJsonArray` fix (aff5270): VERDICT_FIRST_BLOCK now
+ * ships on validator/lens SYSTEM prompts, which instructs a prose verdict sentence BEFORE the JSON
+ * — a stray '{' in that prose (e.g. "the object literal is {}. {"verdict":...}") would defeat a
+ * naive first-'{'/last-'}' slice.
+ *
+ * Delegates to the shared depth-tracked scanner (`extractOutermostJson`, code-review fixlist finding
+ * #8) so a brace NESTED inside an earlier truncated structure can never be mistaken for the real,
+ * complete top-level object — only a `{` seen at depth 0 is ever a candidate.
+ */
 export function extractJsonObject(raw: string): Record<string, unknown> | undefined {
-	const start = raw.indexOf("{");
-	const end = raw.lastIndexOf("}");
-	if (start < 0 || end <= start) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
-		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
-	} catch {
-		return undefined;
-	}
+	return extractOutermostJson(raw, "{", (v): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v));
 }
 
 /**

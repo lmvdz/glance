@@ -4,7 +4,7 @@
  */
 
 import { expect, test, describe } from 'bun:test';
-import { isVetoed, validationBadge, confidenceBadge } from './agent-badges';
+import { isVetoed, isValidatorHeld, validationBadge, confidenceBadge } from './agent-badges';
 import type { AgentDTO, ValidationRecordDTO } from './dto';
 
 const val = (verdict: ValidationRecordDTO['verdict'], rationale = 'because'): ValidationRecordDTO => ({
@@ -22,6 +22,20 @@ describe('isVetoed', () => {
     expect(isVetoed({ validation: val('abstain') } as AgentDTO)).toBe(false);
     expect(isVetoed({ validation: val('skipped') } as AgentDTO)).toBe(false);
     expect(isVetoed({} as AgentDTO)).toBe(false);
+  });
+});
+
+describe('isValidatorHeld', () => {
+  // Fail-open fix: a bare `verdict !== 'veto'` check across several land surfaces used to read an
+  // "inconclusive" verdict (the diff couldn't be COMPUTED, an environmental git fault) as safe to land.
+  // This helper is the single source of truth every one of those surfaces now derives from.
+  test('true for veto and inconclusive; false for pass/abstain/skipped/absent', () => {
+    expect(isValidatorHeld({ validation: val('veto') } as AgentDTO)).toBe(true);
+    expect(isValidatorHeld({ validation: val('inconclusive') } as AgentDTO)).toBe(true);
+    expect(isValidatorHeld({ validation: val('pass') } as AgentDTO)).toBe(false);
+    expect(isValidatorHeld({ validation: val('abstain') } as AgentDTO)).toBe(false);
+    expect(isValidatorHeld({ validation: val('skipped') } as AgentDTO)).toBe(false);
+    expect(isValidatorHeld({} as AgentDTO)).toBe(false);
   });
 });
 

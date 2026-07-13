@@ -312,6 +312,10 @@ export interface ProjectDTO {
 	statusCounts: Partial<Record<AgentStatus, number>>;
 	pendingCount: number;
 	lastActivity: number;
+	/** Persisted features in this repo — work that outlives the agent that was doing it. */
+	featureCount: number;
+	/** The operator explicitly registered this repo (vs it merely having agents/features today). */
+	registered: boolean;
 }
 
 /** Lifecycle stage of a feature — derived from observable evidence (plan dir, agents, land status). */
@@ -369,8 +373,15 @@ export interface FeatureCriterion {
  * Epic 3 (independent validator) — the result of scoring a landed diff against its unit's DECLARED
  * `FeatureCriterion[]` with an INDEPENDENT judge lineage (never the executor grading its own work).
  * "skipped" ⇐ no declared criteria (DESIGN §4, scores declared criteria only — never invents them).
- * "abstain" ⇐ the judge was unreachable/unparseable (fail-open, DESIGN §3). "veto"/"pass" ⇐ the judge
- * ran and found at least one unsatisfied / all satisfied criterion respectively (fail-closed on veto).
+ * "abstain" ⇐ the judge was unreachable/unparseable (fail-open, DESIGN §3), OR the diff was genuinely
+ * empty (a real no-op land — never invents a veto for a change the judge never saw). "inconclusive"
+ * (eap-borrows follow-up 7) ⇐ criteria WERE declared but the diff itself could not be COMPUTED (a git
+ * fault, distinct from a computed-and-empty diff) — never silently treated as an abstain-and-land; the
+ * land path (`SquadManager.runValidatorGate`) turns this into a RETRYABLE hold, never a permanent park
+ * and never a silent pass. Unlike "veto", a force-land does NOT bypass "inconclusive" — there is no
+ * diff to grade, so the only way through is the bounded-escalation retry lane (or a human fixing the
+ * underlying git fault). "veto"/"pass" ⇐ the judge ran and found at least one unsatisfied / all
+ * satisfied criterion respectively (fail-closed on veto).
  * Epic 5's confidence scorer reads `agreement` as one input to the aggregate `confidence` it computes
  * separately — this record never computes that aggregate itself (DESIGN §5).
  */
@@ -389,7 +400,7 @@ export interface LensVerdict {
 }
 
 export interface ValidationRecord {
-	verdict: "pass" | "veto" | "abstain" | "skipped";
+	verdict: "pass" | "veto" | "abstain" | "skipped" | "inconclusive";
 	/** 0..1 fraction of declared criteria the judge marked satisfied. */
 	agreement: number;
 	/** 0..1 the judge's own confidence in its verdict. */
@@ -413,6 +424,11 @@ export interface ValidationRecord {
 	/** The one-shot re-check of a high-severity lens objection (concern 05): did a second, claim-scoped
 	 *  look confirm it? `confirmed:true` maxes the confidence penalty; it still never vetoes. */
 	lensVerify?: { lens: LensId; claim: string; confirmed: boolean };
+	/** Lossless gate-log offload (plans/eap-borrows/ concern 03): pointer path(s) under
+	 *  `<stateDir>/gate-logs/<agentId>/` to the FULL diff/proof text when either exceeded the judge's
+	 *  excerpt budget — the judge prompt itself only saw a diff-aware/head+tail excerpt with the same
+	 *  pointer appended. Absent ⇒ nothing was oversized (the common case). */
+	gateLogPaths?: string[];
 	ranAt: number;
 }
 
@@ -936,6 +952,14 @@ export interface RunReceipt {
 	validation?: ValidationRecord;
 	/** Run-end self-confidence 0..1 (src/confidence.ts); absent until computed. */
 	confidence?: number;
+	/** Efficiency-discipline tokens (a profile's `membrane:*` capability tokens, `receipts.ts`'s
+	 *  `splitCapabilityTokens`) CONFIRMED delivered to this run — stamped by `confirmDeliveredFlags`
+	 *  only when the resolved harness's `contextInjection` was `"native"`, i.e. `appendSystemPrompt`
+	 *  actually reached the child process. Requesting a flag on a harness whose contextInjection is
+	 *  `"none"` (ACP default) yields NO flag here, even though the profile asked for one — stamping at
+	 *  request time instead of confirmed-delivery time would measure a placebo, not a real behavior
+	 *  change. Absent ⇒ nothing requested, or nothing delivered. */
+	efficiencyFlags?: string[];
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
@@ -1041,6 +1065,9 @@ export interface PersistedAgent {
 	 *  squad-manager's `unitProviderKey`: routing overrides are out of the gate key by invariant, and
 	 *  the record key must match the gate key). Additive/optional like the rest. */
 	routing?: { mode: string; tier: string; thinking?: ThinkingLevel; routedAt: number; routedModel?: string };
+	/** The question this unit was asked, when it is an answer unit (R5). Persisted so a daemon restart
+	 *  still knows the unit owes an answer. */
+	ask?: string;
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
@@ -1163,6 +1190,10 @@ export interface CreateAgentOptions {
 	/** Carries a persisted run's trace link through the adopt/restore boot paths (topology review finding
 	 *  7) — absent on a genuinely fresh create(), which only ever assigns this once a run actually starts. */
 	traceId?: string;
+	/** This unit's deliverable is an ANSWER, not a branch (R5). Carries the operator's question; the unit's
+	 *  final message is captured verbatim as a durable `Answer`. Implies `executionRole: "observer"`, which
+	 *  already means "never commits, never lands". */
+	ask?: string;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

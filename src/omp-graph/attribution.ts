@@ -41,7 +41,12 @@ export interface AttributionDoc {
 
 /** Collapse a raw model id to a comparable family key. NOTE: `src/model-lineage.ts` `modelLineage()`
  *  is built on top of this — the coarser VENDOR grain of the same mapping. Keep them in sync; a new
- *  family added here must get a lineage there (a test enforces it). */
+ *  family added here must get a lineage there (a test enforces it).
+ *
+ *  `grok`/`xai` are matched as a whole TOKEN (`\b...\b`), not a substring: an early cut of the grok
+ *  harness matched `.includes("grok")`, which misclassified `ollama/my-grokking-model` as xAI — found
+ *  by cross-lineage review (codex, gpt-5.6-sol) of that PR. Token matching closes the same class of
+ *  bug here before it ships. */
 export function modelFamily(model?: string): string {
 	const m = (model ?? "").toLowerCase();
 	if (m.includes("fable") || m.includes("mythos")) return "fable";
@@ -54,8 +59,21 @@ export function modelFamily(model?: string): string {
 	// a TOKEN, not a substring: "grok" is also an English verb, so a bare `includes` would classify
 	// `ollama/my-grokking-model` as xAI — and this family feeds the rate-limit bucket, so a mis-mapped
 	// vendor would route a unit around its real provider's cap.
-	if (/(^|[^a-z])grok([^a-z]|$)/.test(m)) return "grok";
+	if (/\bgrok\b/.test(m) || /\bxai\b/.test(m)) return "xai";
 	return m ? "other" : "unknown";
+}
+
+/** The full model id, verbatim (trimmed, `"unknown"` when absent) — the FINER grain sibling of
+ *  `modelFamily()`. `modelFamily` collapses every OpenAI variant to one `"openai"` bucket, which is
+ *  exactly the right rollup for a display/family view but hides the comparisons the efficiency matrix
+ *  (`omp-graph/task-class-matrix.ts` concern 01) exists to show — `gpt-5.6-sol` vs `gpt-5.6-luna`,
+ *  `grok-4.5` vs any other `"other"`-bucketed model. Deliberately does NOT normalize
+ *  provider-qualified specs (`"anthropic/claude-sonnet-4-5"`) any further than trimming: the efficiency
+ *  matrix wants the id the harness actually reported, not a re-derived canonical form a second parser
+ *  could drift from. */
+export function modelVariant(model?: string): string {
+	const m = (model ?? "").trim();
+	return m || "unknown";
 }
 
 /** The plan config, from env. Absent monthly ⇒ no subscription ⇒ no verdict. */

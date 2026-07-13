@@ -201,3 +201,36 @@ export async function changedFiles(dir: string): Promise<string[]> {
 	}
 	return files;
 }
+
+/**
+ * Every file this unit has touched since it forked from `baseRef` — committed work AND the current
+ * working tree, deduped. The unit's real blast radius.
+ *
+ * `changedFiles` alone (a `git status` probe) sees only UNCOMMITTED paths, so any unit that committed
+ * its own work — or whose work the daemon swept into a commit before verify — reported **zero files
+ * touched**. That number is not decorative: `confidence.ts` scores `filesTouched <= 3` as a
+ * small-blast-radius BONUS (+0.1) and `> 12` as a penalty (−0.2), and confidence gates auto-land. So a
+ * twenty-file change scored as if it had touched nothing, and got the bonus. Measured on this host's
+ * live ledger: 16 of 18 landed/rejected rows carried `filesTouched: 0`, including one that really
+ * touched sixteen.
+ *
+ * Diffed from the MERGE BASE, not from `baseRef` itself: files the base branch changed after this unit
+ * forked are not this unit's blast radius. `git diff --name-only <mergeBase>` compares that commit to
+ * the working tree, so it already spans staged and unstaged edits; untracked files come from
+ * `changedFiles`. Returns `changedFiles(dir)` unchanged when the merge base can't be resolved (no
+ * common history, unknown ref, not a repo) — never fabricate, never throw.
+ */
+export async function filesTouchedSinceBase(dir: string, baseRef: string): Promise<string[]> {
+	// `.omp/` is the daemon's own evidence dir (proof artifacts, vision screenshots). It is excluded from
+	// land()'s sweep and from `changedFilesVsBase`'s produces audit; counting it here would inflate the
+	// blast radius with the daemon's own bookkeeping.
+	const notEvidence = (f: string): boolean => f.length > 0 && !f.startsWith(".omp/");
+	const uncommitted = (await changedFiles(dir)).filter(notEvidence);
+	const mergeBase = await runGit(["-C", dir, "merge-base", "HEAD", baseRef]);
+	if (mergeBase.code !== 0 || !mergeBase.stdout.trim()) return uncommitted;
+	const diff = await runGit(["-C", dir, "diff", "--name-only", mergeBase.stdout.trim()]);
+	if (diff.code !== 0) return uncommitted;
+	const all = new Set(uncommitted);
+	for (const line of diff.stdout.split("\n")) if (notEvidence(line.trim())) all.add(line.trim());
+	return [...all];
+}

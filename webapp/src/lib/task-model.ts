@@ -149,7 +149,45 @@ export function issueIdentifier(task: Pick<Task, "id" | "displayId">): string | 
   return null;
 }
 
+/**
+ * Repo paths reach the client from three places (the project registry, an agent's `repo`, a feature's
+ * `repo`) and only collapse if they are spelled identically. The server keys `ProjectDTO.id` on a
+ * normalized path; a feature carrying `"/srv/app/"` would miss the lookup, get a project whose id is the
+ * raw string, and then never match `currentProject.id` — so its task would silently vanish from the
+ * scoped list. Mirrors the server's `normalizeRepoPath`. Found by cross-lineage review (grok-4.5).
+ */
+export function normalizeRepoKey(repo: string): string {
+  const trimmed = repo.trim().replace(/\/+$/, '');
+  return trimmed.length > 0 ? trimmed : repo.trim();
+}
+
 export function tasksFromSquad(features: FeatureDTO[], agents: AgentDTO[], projects: ProjectDTO[]): Task[] {
-  const projectMap = new Map(projects.map((project, index) => [project.repo, projectForRepo(project.repo, index)]));
-  return features.map((feature, index) => taskFromFeature(feature, agents, projectMap.get(feature.repo) ?? projectForRepo(feature.repo, index)));
+  const projectMap = new Map(projects.map((project, index) => [normalizeRepoKey(project.repo), projectForRepo(normalizeRepoKey(project.repo), index)]));
+  return features.map((feature, index) => taskFromFeature(feature, agents, projectMap.get(normalizeRepoKey(feature.repo)) ?? projectForRepo(normalizeRepoKey(feature.repo), index)));
+}
+
+/**
+ * The project the workspace is pointed at. The operator's EXPLICIT choice wins; a stale id (project
+ * un-registered, or its repo drained of agents and features) falls back to the first project — which
+ * `projects()` sorts busiest-first — rather than stranding the workspace on nothing.
+ *
+ * `currentProject` used to be `selectedTask?.properties.project ?? projects[0]`: derived, never
+ * settable. Nothing in the UI could switch projects, and the sidebar rows only toggled a disclosure.
+ * Pure + exported so the fallback rule is unit-tested.
+ */
+export function resolveCurrentProject(projects: Project[], selectedId: string | null): Project | null {
+  return projects.find((project) => project.id === selectedId) ?? projects[0] ?? null;
+}
+
+/**
+ * Tasks belonging to the current project — what "switching projects" means. With no project at all
+ * (a fresh daemon, nothing registered) every task passes, so an empty workspace shows its work rather
+ * than hiding it.
+ *
+ * The FLEET is deliberately not scoped this way: a blocked or errored agent in another repo must never
+ * be hidden by a project filter (the Needs-you-is-pinned invariant, one level up). Pure + exported.
+ */
+export function tasksForProject(tasks: Task[], project: Project | null): Task[] {
+  if (!project) return tasks;
+  return tasks.filter((task) => task.properties.project.id === project.id);
 }

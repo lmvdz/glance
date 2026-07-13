@@ -82,13 +82,16 @@ async function makeMgr(prefix: string): Promise<{ mgr: SquadManager; repo: strin
 
 /** Seed `n` outcome rows for `(mode, tier, model)`, `landedCount` of which land — enough real rows
  *  populate a task-class-matrix cell without needing a live roster (row-only membership, same as the
- *  reconciler path / task-class-matrix.test.ts's "reconciled row" case). */
+ *  reconciler path / task-class-matrix.test.ts's "reconciled row" case). Every row carries a `costUsd`
+ *  so `costCoveragePct` clears `MIN_COVERAGE_PCT` — the `reproducible` gate (eap-borrows concern 01)
+ *  `routeModelForTaskClass` now honors alongside `insufficientData`. */
 async function seedOutcomes(stateDir: string, mode: string, tier: string, model: string, n: number, landedCount: number): Promise<void> {
 	for (let i = 0; i < n; i++) {
 		await recordTaskOutcome(stateDir, {
 			agentId: `${model}-${mode}-${tier}-${i}`,
 			routing: { mode, tier },
 			model,
+			costUsd: 1,
 			outcome: i < landedCount ? "landed" : "rejected",
 			source: "land",
 			ts: Date.now(),

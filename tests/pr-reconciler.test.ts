@@ -234,7 +234,7 @@ async function withPlane<T>(fn: (patches: () => number) => Promise<T>): Promise<
 
 // ── Out-of-band merge ───────────────────────────────────────────────────────────────────────────
 
-test("prReconcileTick: out-of-band GitHub-UI merge writes DoneProof, clears landReady, closes Plane, updates ledger", async () => {
+test("prReconcileTick: out-of-band GitHub-UI merge writes DoneProof, clears landReady, ESCALATES (not closes) Plane, updates ledger", async () => {
 	await withPlane(async (patches) => {
 		const stateDir = await tmpDir("reconcile-oob-state-");
 		const { repo, origin } = await convergedRepo("reconcile-oob-");
@@ -266,13 +266,18 @@ test("prReconcileTick: out-of-band GitHub-UI merge writes DoneProof, clears land
 		expect(proof?.mode).toBe("pr");
 		expect(proof?.detail).toContain("out-of-band");
 		expect(mgr.agents.get("a1")?.dto.landReady).toBe(false);
-		expect(patches()).toBe(1); // Plane close happened exactly once
+		// finding #11 (eap-borrows wave 2): an UNVERIFIED proof (the daemon's own gate never re-ran) no
+		// longer auto-closes Plane — it ESCALATES to a human instead. OLD fail-open behavior: patches()
+		// was 1 here (closed exactly like a real green land).
+		expect(patches()).toBe(0);
 
 		const entry = getPendingPr(stateDir, "squad/a1");
 		expect(entry?.state).toBe("merged");
 		expect(entry?.mergedAt).toBeDefined();
 		expect(entry?.proofAt).toBeDefined();
-		expect(entry?.issueClosedAt).toBeDefined(); // close succeeded synchronously within this tick
+		// Still resolved within this tick — "escalated to a human" is terminal for the reconciler (no
+		// unbounded retry churn); the Plane issue itself stays open for that human.
+		expect(entry?.issueClosedAt).toBeDefined();
 	});
 });
 
@@ -310,7 +315,7 @@ test("prReconcileTick: method-agnostic assertion — a UI SQUASH merge reconcile
 		expect(proof?.verified).toBe("unverified");
 		expect(proof?.detail).toContain("gh-view");
 		expect(mgr.agents.get("a2")?.dto.landReady).toBe(false);
-		expect(patches()).toBe(1);
+		expect(patches()).toBe(0); // finding #11: unverified proof escalates, never auto-closes Plane
 
 		const entry = getPendingPr(stateDir, "squad/a2");
 		expect(entry?.state).toBe("merged");
@@ -318,7 +323,7 @@ test("prReconcileTick: method-agnostic assertion — a UI SQUASH merge reconcile
 	});
 });
 
-test("prReconcileTick: closes Plane for an ORPHANED entry (its agent removed from the roster) via the ledger's persisted issueProjectId", async () => {
+test("prReconcileTick: resolves an ORPHANED entry (its agent removed from the roster) via the ledger's persisted issueProjectId", async () => {
 	await withPlane(async (patches) => {
 		const stateDir = await tmpDir("reconcile-orphan-state-");
 		const { repo, origin } = await convergedRepo("reconcile-orphan-");
@@ -347,10 +352,13 @@ test("prReconcileTick: closes Plane for an ORPHANED entry (its agent removed fro
 
 		await mgr.tick();
 
-		expect(patches()).toBe(1); // Plane close succeeded via the synthetic IssueRef's persisted projectId
+		// finding #11: the out-of-band merge's proof is unverified ⇒ escalated, never auto-closed. The
+		// persisted issueProjectId still matters — it's what lets the synthetic IssueRef route the
+		// escalation (and any future verified close) for an agent long gone from the roster.
+		expect(patches()).toBe(0);
 		const entry = getPendingPr(stateDir, "squad/a9");
 		expect(entry?.state).toBe("merged");
-		expect(entry?.issueClosedAt).toBeDefined(); // NOT stuck retrying forever
+		expect(entry?.issueClosedAt).toBeDefined(); // NOT stuck retrying forever — escalation is terminal
 	});
 });
 
@@ -487,6 +495,13 @@ test("prReconcileTick: ff-heals a repo strictly behind origin/<default> while ch
 	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(originMain); // healed
 });
 
+/**
+ * Now load-bearing. This used to pass vacuously: `resolveLandMode` refused pr mode outright on a
+ * non-default checkout (old probe 4), so `ffHealOne` bailed at `mode !== "pr"` and never reached its
+ * own `current !== defaultBranch` guard. That interlock was removed — pr mode is valid off-default —
+ * so this test is the ONLY thing standing between a feature checkout and `merge --ff-only`. Verified
+ * by mutation: deleting the guard in `ffHealOne` turns this test red.
+ */
 test("prReconcileTick: does NOT ff-heal a repo checked out on a non-default branch", async () => {
 	const stateDir = await tmpDir("reconcile-ffheal-nondefault-state-");
 	const { repo, origin } = await convergedRepo("reconcile-ffheal-nondefault-");

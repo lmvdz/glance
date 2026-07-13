@@ -138,24 +138,81 @@ test("probe 3 regression: local behind origin (normal PR-mode state) still resol
 	expect(resolved.defaultBranch).toBe("main");
 });
 
-// ── probe 4: checked-out branch != remote default ───────────────────────────────────────────────
+// ── probe 4: checked-out branch is informational, never a gate ──────────────────────────────────
 
-test("probe 4: checked out on a non-default branch ⇒ local, deliberate checkout wins", async () => {
+/**
+ * THE INTERLOCK REGRESSION. The old probe 4 ("a deliberate non-default checkout always wins")
+ * returned `local` here, and local mode's `landAgent` then refuses any repo with a dirty tree
+ * (`land.ts`'s rollback blast-radius guard) with `retryable: true` — a refusal that retries forever
+ * and never escalates. An operator working in the repo trips BOTH conditions, so the fleet could
+ * never land while anyone was using it: 1381/1686 (82%) of all recorded land attempts died there.
+ * A PR-mode unit never touches the shared checkout, so the operator's branch cannot make landing
+ * unsafe — it is precisely the reason to prefer PR mode.
+ */
+test("probe 4: a non-default checkout no longer forces local — the fleet lands as PRs while the operator works", async () => {
 	const repo = await convergedRepo("lm-branchmismatch-");
 	await git(repo, "checkout", "-qb", "feature");
 	const resolved = await resolveLandMode(repo);
-	expect(resolved.mode).toBe("local");
-	expect(resolved.reason).toContain("checked-out branch feature != remote default main");
+	expect(resolved.mode).toBe("pr");
+	expect(resolved.defaultBranch).toBe("main");
+	// The operator's branch is still reported — legibility, not a gate.
+	expect(resolved.reason).toContain("operator on feature");
 });
 
-// ── probe 5: local ahead of / diverged from origin ──────────────────────────────────────────────
+test("probe 4: a dirty working tree is irrelevant to the resolved mode (nothing merges into it)", async () => {
+	const repo = await convergedRepo("lm-dirty-");
+	await git(repo, "checkout", "-qb", "feature");
+	await fs.writeFile(path.join(repo, "a.txt"), "locally modified, uncommitted\n");
+	const resolved = await resolveLandMode(repo);
+	expect(resolved.mode).toBe("pr");
+});
 
-test("probe 5: local has an unpushed commit ahead of origin ⇒ local, diverged", async () => {
+// ── probe 5: the LOCAL DEFAULT BRANCH diverged from origin ──────────────────────────────────────
+
+test("probe 5: local default has an unpushed commit ahead of origin ⇒ local, diverged", async () => {
 	const repo = await convergedRepo("lm-diverged-");
-	await commit(repo, "b.txt", "b\n", "unpushed"); // local now ahead; origin/main lacks this commit
+	await commit(repo, "b.txt", "b\n", "unpushed"); // local main now ahead; origin/main lacks this commit
 	const resolved = await resolveLandMode(repo);
 	expect(resolved.mode).toBe("local");
 	expect(resolved.reason).toContain("is NOT an ancestor of origin/main — diverged");
+});
+
+/** Probe 5 must read `refs/heads/<default>`, not HEAD: the divergence guard has to keep protecting an
+ *  unpushed local `main` even when the operator is standing somewhere else. (Reading HEAD here would
+ *  report the feature branch's divergence instead — always true — and re-force local mode.) */
+test("probe 5: a DIVERGED local default still forces local even from a non-default checkout", async () => {
+	const repo = await convergedRepo("lm-diverged-offbranch-");
+	await commit(repo, "b.txt", "b\n", "unpushed on main");
+	await git(repo, "checkout", "-qb", "feature"); // HEAD moves; refs/heads/main is still ahead of origin
+	const resolved = await resolveLandMode(repo);
+	expect(resolved.mode).toBe("local");
+	expect(resolved.reason).toContain("local main is NOT an ancestor of origin/main");
+});
+
+/** Converse: a CONVERGED local default with the operator parked on a feature branch is the exact
+ *  shape of this repo during normal use. It must resolve pr — that is the whole point of the fix. */
+test("probe 5: a converged local default + non-default checkout ⇒ pr", async () => {
+	const repo = await convergedRepo("lm-converged-offbranch-");
+	await git(repo, "checkout", "-qb", "feature");
+	await commit(repo, "b.txt", "b\n", "work on the feature branch only");
+	const resolved = await resolveLandMode(repo);
+	expect(resolved.mode).toBe("pr");
+});
+
+test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒ pr, nothing to strand", async () => {
+	const seed = await convergedRepo("lm-nolocaldefault-");
+	const originUrl = (await git(seed, "remote", "get-url", "origin")).stdout;
+	const clonesRoot = await tmpDir("lm-nolocaldefault-clones-");
+	const clone = path.join(clonesRoot, "clone");
+	await git(clonesRoot, "clone", "-q", originUrl, clone);
+	await git(clone, "config", "user.email", "t@t");
+	await git(clone, "config", "user.name", "t");
+	await git(clone, "checkout", "-qb", "work");
+	await git(clone, "branch", "-D", "main"); // no refs/heads/main remains
+
+	const resolved = await resolveLandMode(clone);
+	expect(resolved.mode).toBe("pr");
+	expect(resolved.defaultBranch).toBe("main");
 });
 
 // ── all 5 pass ───────────────────────────────────────────────────────────────────────────────────

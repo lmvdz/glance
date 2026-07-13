@@ -15,13 +15,16 @@
  * reconcile from (concern 07's backstop loop).
  */
 
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import { hardenedGit } from "./git-harden.ts";
-import { gateExec } from "./gate-runner.ts";
-import { detectVerify } from "./intake.ts";
+import { budgetedExcerpt } from "./gate-logs.ts";
+import { gateExec, greenGateUnproven } from "./gate-runner.ts";
+import { detectVerify, packageManifestError } from "./intake.ts";
 import { proofGate } from "./proof.ts";
 import { gh, ghJson } from "./gh.ts";
 import { isAncestor, recordDoneProof } from "./done-proof.ts";
@@ -47,7 +50,7 @@ async function git(args: string[], cwd: string): Promise<GitRun> {
 	return { code: r.code, stdout: r.stdout.trim(), stderr: r.stderr.trim() };
 }
 
-async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string }> {
+async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{ code: number; output: string; degraded?: boolean }> {
 	let plan: Awaited<ReturnType<typeof gateExec>>;
 	try {
 		plan = await gateExec(cmd, cwd);
@@ -62,15 +65,36 @@ async function runGate(cmd: string, cwd: string, timeoutMs = 600_000): Promise<{
 			new Response(proc.stderr).text(),
 			proc.exited,
 		]);
-		return { code, output: `${stdout}${stderr}`.trim() };
+		// degraded (finding #9's context note): PR mode's own runGate used to drop `plan.degraded` on the
+		// floor entirely (land.ts's private runGate captures it; this one didn't) — a scratch merge that
+		// fell back to the bare sandbox image and happened to exit 0 anyway had no way to say so.
+		return { code, output: `${stdout}${stderr}`.trim(), degraded: plan.degraded };
 	} finally {
 		clearTimeout(timer);
 	}
 }
 
-function truncate(s: string, n: number): string {
-	return s.length <= n ? s : `${s.slice(0, n)}…`;
+/**
+ * Lossless offload half (eap-borrows concern 07, applying concern 03's `budgetedExcerpt`/
+ * `writeGateLog` to the PR land path): the scratch-merge acceptance gate's output used to be
+ * plain-truncated to 600 chars on FAILURE and DISCARDED ENTIRELY on success — a green PR-mode
+ * land recorded no gate evidence at all, and a red one lost everything past the cap. Full output is
+ * now always durably persisted (small dumps — the common case — cost nothing extra); the returned
+ * excerpt carries a `[N bytes omitted — full: <path>]` pointer whenever it had to cut anything, so
+ * the pointer lands directly in the LandResult detail / DoneProof detail text.
+ */
+async function excerptForDetail(s: string, n: number, agentId?: string): Promise<string> {
+	const { text } = await budgetedExcerpt(s, n, { kind: "log", agentId });
+	return text;
 }
+
+// ── green-run classification (finding #9) ──────────────────────────────────────────────────────────
+// `gate-runner.ts`'s `gateRunUnrunnable` is reds-only by design ("code === 0 ⇒ green is green") — a
+// deliberate short-circuit so a real green run is never second-guessed. That leaves the PR acceptance
+// path unable to tell "the gate ran and passed" from "the gate exited 0 without exercising anything"
+// (a broken verify script, or a test glob that matched zero files). `greenGateUnproven` (code-review
+// finding #3) now lives in gate-runner.ts beside `gateRunUnrunnable` and its ZERO_TESTS_RE/TESTS_RAN_RE
+// twins — imported here rather than re-declared, and shared with the local land path (land.ts).
 
 /**
  * Provision `node_modules` in the disposable scratch worktree before any gate runs.
@@ -89,8 +113,20 @@ function truncate(s: string, n: number): string {
  * null on success/skip — deps that can't install mean the gate can't be trusted.
  */
 export async function installScratchDeps(scratch: string): Promise<string | null> {
-	const err = await installNodeModules(scratch);
-	return err ? `scratch dep install failed: ${err}` : null;
+	// Nested, non-workspace packages need their own install — `worktree.ts`'s `provisionWorktreeDeps`
+	// already provisions `<dir>` AND `<dir>/webapp` for exactly this reason. This path used to install
+	// only the root, which was invisible while the repo's gate (`bun run check && bun run test`) never
+	// entered `webapp/`. The moment the gate started typechecking and testing the webapp, a PR-mode
+	// scratch merge would fail on missing `webapp/node_modules` (react-markdown, recharts, …) and return
+	// a NON-retryable acceptance failure — parking an otherwise-green branch. Found by cross-lineage
+	// review (gpt-5.6-sol) of the gate-coverage change; the two provisioners must stay in step.
+	//
+	// Fail CLOSED and concurrently, unlike `provisionWorktreeDeps`: deps that can't install here mean the
+	// gate about to run cannot be trusted, and the caller surfaces this string as a gate failure.
+	const pkgDirs = [scratch, path.join(scratch, "webapp")].filter((d) => existsSync(path.join(d, "package.json")));
+	const errs = (await Promise.all(pkgDirs.map(async (d) => ({ dir: d, err: await installNodeModules(d) })))).filter((r) => r.err);
+	if (errs.length === 0) return null;
+	return `scratch dep install failed: ${errs.map((e) => `${e.dir}: ${e.err}`).join("; ")}`;
 }
 
 /** "owner/repo" from repoIdentity()'s "host/owner/repo" key — gh must be addressed by slug, not host
@@ -472,6 +508,106 @@ async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, sta
 	return result;
 }
 
+/**
+ * Refuse to publish commits the operator never asked us to publish.
+ *
+ * A unit branch normally forks from `origin/<default>`, so everything in `origin/<default>..<branch>`
+ * is the agent's own work. But `resolveWorktree` REUSES an existing branch ref verbatim and ignores
+ * the caller's start point (`worktree.ts`'s `exists ? ["worktree","add",dir,branch] : …startPoint`),
+ * so a `squad/*` branch created back when the daemon forked from the operator's local HEAD still
+ * carries that operator's commits. Local mode used to merge such a branch back into the same checkout
+ * it came from — a no-op for those commits. PR mode pushes the whole branch and merges it into the
+ * REMOTE default, which would publish the operator's private, unpushed work as a side effect of
+ * landing an unrelated unit.
+ *
+ * Guard: any commit this PR would publish that is also reachable from a local branch OUTSIDE
+ * `refs/heads/squad/` is a transplant. Stacked `squad/*` branches are deliberately allowed (a unit
+ * forked from another unit is still fleet work). A GENUINE finding is NOT retryable — retrying cannot
+ * fix lineage, and a silent retry loop is exactly how the dirty-main interlock stayed invisible for
+ * 1,381 attempts. Found by cross-lineage review (gpt-5.6-sol + grok-4.5) of the probe-4 removal.
+ *
+ * A second cross-lineage pass (grok-4.5, eap-borrows) on THIS fix found the polarity re-introduced one
+ * probe over: a probe FAILURE (offline daemon, pruned `origin/<default>`) is not a lineage finding —
+ * see `TransplantFinding`/`transplantedCommitsReason` below for the retryable split.
+ */
+/** git's own wording when a REF doesn't exist at all — distinct from a genuine probe failure (a
+ *  nonexistent branch has nothing to publish, full stop; that's not the same claim as "couldn't tell
+ *  whether it's safe to publish"). Matched narrowly so an actual tool/repo failure still blocks. */
+const UNKNOWN_REVISION_RE = /unknown revision|bad revision|bad object|not a valid object name/i;
+
+/**
+ * Why `branch` is blocked from publishing to `origin/<default>`, and whether that's a genuine lineage
+ * FINDING or a PROBE that couldn't run — mirrors `StaleBranchFinding` (land.ts) exactly, and for the
+ * same reason (cross-lineage review, eap-borrows): a real transplanted-commit finding means retrying
+ * cannot help (the lineage doesn't change on its own), so `retryable: false` there is correct and was
+ * always correct. But a git PROBE FAILURE (offline daemon, `origin/<default>` pruned by a transient
+ * fetch, a corrupted `.git/objects`) proves NOTHING about lineage either way — hardcoding
+ * `retryable: false` for THAT case turned a transient hiccup into a PERMANENT park (`SquadManager.land`
+ * never re-tries a non-retryable refusal and never bumps the auto-land fail streak back down), exactly
+ * the interlock pathology this repo is named after, just re-introduced one probe over. Both cases still
+ * BLOCK — only the retry polarity differs.
+ */
+export interface TransplantFinding {
+	reason: string;
+	retryable: boolean;
+}
+
+export async function transplantedCommitsReason(repo: string, branch: string, defaultBranch: string): Promise<TransplantFinding | undefined> {
+	const probeFailed = (step: string, r: GitRun): TransplantFinding => {
+		const { reason } = classifyProbeFailure({ kind: "spawn-error", detail: `${step} failed: ${r.stderr || r.stdout || "no output"}` });
+		return { reason: `transplant gate ${reason} — could not prove ${branch}'s lineage; refusing to publish it`, retryable: true };
+	};
+	// Finding #4 (eap-borrows wave 2): the ORIGINAL checks collapsed "probe failed (nonzero git exit)"
+	// and "probe succeeded, legitimately nothing to compare" into the SAME `undefined` — a transient git
+	// error during either rev-list silently ALLOWED a land that could publish an operator's private
+	// commits, exactly the hazard this gate exists to catch. A probe failure can prove neither lineage
+	// claim, so it now blocks (never allows) with a distinct reason — retrying cannot fix a GENUINE
+	// lineage claim, but a probe failure is its own, retryable, category (see `probeFailed` above). A
+	// branch that doesn't exist AT ALL is a separate, legitimate case (nothing to publish), not a probe
+	// failure — a false-block here is as bad as the false-allow this finding fixes (see this file's
+	// negative-case tests).
+	const publishing = await git(["rev-list", `origin/${defaultBranch}..${branch}`], repo);
+	if (publishing.code !== 0) {
+		// Finding #1 (code-review fixlist): `git rev-list a..b` emits BYTE-IDENTICAL "unknown revision"
+		// text whether `a` (origin/<default>, pruned/absent) or `b` (the branch) is the missing ref —
+		// UNKNOWN_REVISION_RE alone can't tell which. The carve-out below is only sound for the branch
+		// case ("nothing to publish"); an absent origin/<default> must never take it (that's offline /
+		// stale-fetch, not "nothing to compare"). Anchor on the branch specifically before trusting the
+		// error text — this was fail-open: offline + pruned origin ref allowed publishing transplanted
+		// commits.
+		if (UNKNOWN_REVISION_RE.test(publishing.stderr)) {
+			const branchRef = await git(["rev-parse", "--verify", "--quiet", branch], repo);
+			if (branchRef.code !== 0) return undefined; // confirmed: the branch itself doesn't exist — nothing to publish
+		}
+		return probeFailed(`git rev-list origin/${defaultBranch}..${branch}`, publishing);
+	}
+	if (!publishing.stdout) return undefined; // nothing ahead of origin/<default> ⇒ nothing to publish
+	// `--exclude` patterns are interpreted the way the FOLLOWING ref option interprets its own pattern:
+	// for `--branches` that means relative to `refs/heads/`, so a fully-qualified `refs/heads/squad/*`
+	// silently matches nothing and every branch — including this one — counts as foreign. (Caught by a
+	// negative test: the gate flagged the agent's own commit.)
+	const foreign = await git(["rev-list", "--exclude=squad/*", `--exclude=${branch}`, "--branches", "--not", `origin/${defaultBranch}`], repo);
+	if (foreign.code !== 0) return probeFailed(`git rev-list --branches --not origin/${defaultBranch}`, foreign);
+	if (!foreign.stdout) return undefined; // no local non-fleet branches to compare against
+	const foreignShas = new Set(foreign.stdout.split("\n").filter(Boolean));
+	const stolen = publishing.stdout.split("\n").filter((s) => s && foreignShas.has(s));
+	if (stolen.length === 0) return undefined;
+	const shown = await Promise.all(
+		stolen.slice(0, 3).map(async (sha) => {
+			const subj = await git(["log", "-1", "--format=%h %s", sha], repo);
+			return subj.code === 0 ? subj.stdout : sha.slice(0, 8);
+		}),
+	);
+	const more = stolen.length > 3 ? ` (+${stolen.length - 3} more)` : "";
+	return {
+		reason:
+			`transplant gate blocked ${branch}: it would publish ${stolen.length} commit(s) to origin/${defaultBranch} that belong to a ` +
+			`local non-fleet branch, not to this unit — ${shown.join("; ")}${more}. This branch was forked from an operator branch ` +
+			`(pre-PR-mode units forked from the local checkout's HEAD). Rebase it onto origin/${defaultBranch} and re-verify, or delete it.`,
+		retryable: false,
+	};
+}
+
 async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, onOrphan?: AutomationRecorder): Promise<LandResult> {
 	const { repo, worktree, branch, message } = opts;
 
@@ -515,6 +651,13 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		};
 	}
 
+	// Lineage gate — BEFORE the first push. Everything below this line is remote-visible.
+	// Cross-lineage review (grok-4.5, eap-borrows): `transplant.retryable` threads a genuine finding
+	// (retrying can't fix lineage) apart from a probe failure (offline fetch / pruned origin ref — an
+	// environmental hiccup, not a branch defect) so the latter never permanently parks a healthy branch.
+	const transplant = await transplantedCommitsReason(repo, branch, opts.defaultBranch);
+	if (transplant) return { ok: false, retryable: transplant.retryable, committed, merged: false, message, mode: "pr", detail: transplant.reason };
+
 	const ensure = await ensurePr({
 		repo,
 		branch,
@@ -545,6 +688,9 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	} catch (e) {
 		return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `scratch worktree setup failed: ${e instanceof Error ? e.message : String(e)}` };
 	}
+	// Carries the acceptance gate's excerpt (full text always persisted — see excerptForDetail) past the
+	// scratch-worktree try/finally so a GREEN land's DoneProof records it too, not just a refusal's detail.
+	let acceptanceGateExcerpt: string | undefined;
 	try {
 		// Scratch-merge gate: disposable detached worktree of freshly-fetched origin/<default>, merge
 		// the branch into it, run acceptance + the (default-ON, concern 03) regression gate THERE —
@@ -571,7 +717,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		if (opts.staleGate !== false && staleGateEnabled()) {
 			const staleReason = await staleBranchReason(repo, branch, `origin/${opts.defaultBranch}`);
 			if (staleReason) {
-				return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: staleReason };
+				return { ok: false, committed, merged: false, retryable: staleReason.retryable, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: staleReason.reason };
 			}
 		}
 
@@ -583,9 +729,55 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		if (installErr) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${installErr}` };
 
 		const verify = opts.verify ?? (await detectVerify(repo));
+		// Finding #10 (eap-borrows wave 2): detectVerify(repo) collapses "genuinely no toolchain" and
+		// "package.json exists but is unreadable/malformed" into the same undefined — only intervene when
+		// the caller didn't already make an explicit choice (opts.verify undefined ⇒ auto-detect was
+		// actually consulted). Never blocks a repo for lacking package.json.
+		if (opts.verify === undefined && !verify) {
+			const manifestError = await packageManifestError(repo);
+			if (manifestError) {
+				return {
+					ok: false,
+					committed,
+					merged: false,
+					retryable: true,
+					message,
+					mode: "pr",
+					pushed: true,
+					prUrl: ensure.prUrl,
+					prNumber: ensure.prNumber,
+					detail: `could not detect ${repo}'s verification command (${manifestError}) — refusing to land ${branch} without a gate rather than silently skipping acceptance; fix package.json or pass an explicit verify command`,
+				};
+			}
+		}
 		if (verify) {
 			const gateResult = await runGate(verify, scratch);
-			if (gateResult.code !== 0) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${truncate(gateResult.output, 600)}` };
+			// Offload half (eap-borrows concern 07 / concern 03's budgetedExcerpt+writeGateLog): the full
+			// gate output is now durably persisted on BOTH outcomes, not just truncated-and-dropped on
+			// failure and silently discarded entirely on success (the ORIGINAL gap — a green PR-mode land
+			// recorded zero gate evidence). Computed once, reused for the failure detail below AND (via
+			// `acceptanceGateExcerpt`) the eventual green DoneProof.
+			acceptanceGateExcerpt = await excerptForDetail(gateResult.output, 600, opts.agentId);
+			if (gateResult.code !== 0) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${acceptanceGateExcerpt}` };
+			// Finding #9 (eap-borrows wave 2): a GREEN exit code alone was never classified — a broken
+			// verify script that exits 0 without running anything, or a zero-matched test glob, landed
+			// exactly like a real pass. Refuse (retryable — the environment/script is the problem, not
+			// necessarily the branch) rather than merge on an unproven "pass".
+			const unproven = greenGateUnproven(gateResult, verify);
+			if (unproven) {
+				return {
+					ok: false,
+					committed,
+					merged: false,
+					retryable: true,
+					message,
+					mode: "pr",
+					pushed: true,
+					prUrl: ensure.prUrl,
+					prNumber: ensure.prNumber,
+					detail: `acceptance gate could not be trusted (${unproven}): ${verify} — refusing to merge on an unproven pass`,
+				};
+			}
 		}
 
 		const head0 = (await git(["rev-parse", `origin/${opts.defaultBranch}`], repo)).stdout;
@@ -636,7 +828,11 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		mergeCommit: assertion.mergeCommit,
 		baseRef: `origin/${opts.defaultBranch}`,
 		verified: "green",
-		detail: "PR merged, scratch gate green",
+		// Offload half (eap-borrows concern 07): the acceptance gate's excerpt (full text always
+		// persisted — see excerptForDetail) rides along on the DoneProof detail too, not just a refusal's.
+		// Undefined only when there was no acceptance command to run at all (opts.verify === "" or no
+		// toolchain detected — an honest "nothing to show").
+		detail: acceptanceGateExcerpt ? `PR merged, scratch gate green\n${acceptanceGateExcerpt}` : "PR merged, scratch gate green",
 		provenAt: Date.now(),
 		prNumber: ensure.prNumber,
 		prUrl: ensure.prUrl,
