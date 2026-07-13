@@ -39,6 +39,7 @@ import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeInta
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
+import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
 import { errText } from "./err-text.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { normalizeRepoPath, openProjectRegistry, type ProjectRegistry } from "./project-registry.ts";
@@ -2898,6 +2899,16 @@ export class SquadManager extends EventEmitter {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
+		// An OBSERVER never lands. `is-landing-unit.ts` reads exactly like this rule, but it is only a
+		// metrics DENOMINATOR ("don't count a missing land against a unit that never lands by design") —
+		// no land path ever consulted it. I assumed it was a gate while building `glance ask`, and it was
+		// not: an answer unit runs with `--approval yolo` in a worktree whose origin is the operator's real
+		// repo, so nothing but a prompt ("do not edit") stood between an answer and a merge. `--force`
+		// does not open this door either; refusing to land a unit that was never supposed to produce a
+		// commit is not a safety valve an operator should be able to talk their way past.
+		if (rec.options.executionRole === "observer" || rec.options.ask) {
+			return { ok: false, committed: false, merged: false, message: "observer never lands", detail: `${dto.name} is an answer/observer unit — its deliverable is a report, not a branch` };
+		}
 		const auto = opts.auto ?? true;
 		await this.refreshProofState(rec);
 		if (opts.force && !opts.reason?.trim()) return { ok: false, committed: false, merged: false, message: "force land blocked", detail: "force land requires a reason" };
@@ -3272,6 +3283,9 @@ export class SquadManager extends EventEmitter {
 	private markLandReady(id: string): void {
 		const rec = this.agents.get(id);
 		if (!rec) return;
+		// "Ready to land" is meaningless for a unit that must never land, and it is the flag the UI's Land
+		// button and `floatPrOnLandReady` both key off. (grok-4.5)
+		if (rec.options.executionRole === "observer" || rec.options.ask) return;
 		rec.dto.landReady = true;
 		this.emitAgent(rec);
 		this.log("info", `land-confirm: ${id} verified — ready to land`);
@@ -3291,6 +3305,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	private floatPrOnLandReady(rec: AgentRecord): void {
 		const dto = rec.dto;
+		if (rec.options.executionRole === "observer" || rec.options.ask) return; // an answer opens no PR
 		if (!dto.branch || dto.worktree === dto.repo) return; // nothing to land in PR mode
 		void (async () => {
 			try {
@@ -3595,6 +3610,9 @@ export class SquadManager extends EventEmitter {
 	protected async agentHasUnlandedWork(id: string): Promise<boolean> {
 		const rec = this.agents.get(id);
 		if (!rec?.dto.branch) return false;
+		// Not "unlanded work" — an answer. Saying yes here is what invites the orchestrator to verify it,
+		// sweep it, and try to land it. (grok-4.5)
+		if (rec.options.executionRole === "observer" || rec.options.ask) return false;
 		const st = await worktreeStatus(rec.dto.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
 		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
@@ -3896,6 +3914,12 @@ export class SquadManager extends EventEmitter {
 	 * Returns true only when a commit was created.
 	 */
 	async commitAgentWip(id: string, actor: Actor = AUTO_ACTOR): Promise<boolean> {
+		// An observer/answer unit produces a REPORT. Sweeping its worktree into a commit is the first step
+		// of a chain that ends in a merge, and this sweep is exactly what made the fleet able to land at
+		// all. `is-landing-unit.ts` looks like it guards this; it does not — it is a metrics denominator
+		// and no land path reads it. The refusal has to live at each door. (grok-4.5)
+		const guard = this.agents.get(id);
+		if (guard && (guard.options.executionRole === "observer" || guard.options.ask)) return false;
 		const rec = this.agents.get(id);
 		if (!rec) return false;
 		const { repo, worktree, branch, status, name } = rec.dto;
@@ -4406,6 +4430,10 @@ export class SquadManager extends EventEmitter {
 			issue: opts.issue,
 			kind,
 			executionRole: opts.executionRole,
+			// Persisted, not just passed: `captureAnswer` reads `rec.options.ask` at `agent_end`, and a unit
+			// restored after a daemon restart must still know it owes an answer. Without this the unit runs,
+			// answers, and the answer is silently dropped on the floor. (R5)
+			ask: opts.ask,
 			runtime: opts.runtime,
 			harness: harnessDesc?.name,
 			bin: opts.bin,
@@ -5749,7 +5777,8 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
-	private onAgentEvent(rec: AgentRecord, frame: { type?: string; [k: string]: unknown }): void {
+	/** Protected so a test can push a real frame through the real handler, rather than reimplementing it. */
+	protected onAgentEvent(rec: AgentRecord, frame: { type?: string; [k: string]: unknown }): void {
 		if (frame.type?.startsWith("subagent_")) {
 			rec.subs.ingest(frame as { type: string; payload?: unknown });
 			rec.run?.onSubagentFrame(frame as { type: string; payload?: unknown });
@@ -5880,6 +5909,10 @@ export class SquadManager extends EventEmitter {
 				this.finishAssistantStream(rec);
 				rec.streaming = false;
 				rec.dto.activity = undefined;
+				// R5: an answer unit's entire deliverable is its final message. Captured AFTER
+				// `finishAssistantStream` has flushed the buffer into the transcript, so the text we persist is
+				// exactly the text the operator sees.
+				void this.captureAnswer(rec);
 				rec.completedTurn = true; // a fully completed turn — see the field comment; feeds the exit classifier
 				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
@@ -6509,6 +6542,87 @@ export class SquadManager extends EventEmitter {
 			return await filesTouchedSinceBase(worktree, baseRef);
 		} catch {
 			return changedFiles(worktree); // never let a receipt fail over a metric
+		}
+	}
+
+	/**
+	 * Ask a question. The deliverable is an ANSWER, not a branch (R5, the founding brief's "half of
+	 * engineering is read/judge/decide work, and glance has no primitive for it").
+	 *
+	 * `executionRole: "observer"` is the whole safety story and it already existed: `is-landing-unit.ts`
+	 * refuses to land an observer, so this unit can never commit, never open a PR, never touch main. It
+	 * still gets a real worktree — an answer that had to read the repo through a keyhole would be worse
+	 * than no answer — and that worktree is simply discarded.
+	 *
+	 * `track: false`: an answer is not work to be dispatched, verified, or landed. `autoRoute: false`: the
+	 * router turns tasks into build workflows, which is exactly what this is not.
+	 */
+	async ask(opts: { repo: string; question: string; model?: string; harness?: string; name?: string }, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
+		const question = opts.question.trim();
+		if (!question) throw new Error("ask: a question is required");
+		const dto = await this.create(
+			{
+				repo: opts.repo,
+				name: opts.name ?? `ask-${Date.now().toString(36)}`,
+				task: answerBrief(question),
+				ask: question,
+				executionRole: "observer",
+				autoRoute: false,
+				track: false,
+				approvalMode: "yolo",
+				model: opts.model,
+				harness: opts.harness,
+			},
+			actor,
+		);
+		await saveAnswer(this.stateDir, { id: dto.id, question, repo: opts.repo, markdown: "", askedAt: Date.now(), model: dto.model, harness: dto.harness });
+		return dto;
+	}
+
+	/** Answers already given, newest first. */
+	answers(repo?: string): Promise<Answer[]> {
+		return listAnswers(this.stateDir, { repo });
+	}
+
+	answer(id: string): Promise<Answer | undefined> {
+		return readAnswer(this.stateDir, id);
+	}
+
+	/**
+	 * Persist an answer unit's final message. Best-effort and idempotent: a unit may end several turns
+	 * (a steer, a follow-up question), and the LAST one is the answer — re-answering overwrites, because
+	 * an operator who asks again wants the new answer, not two.
+	 *
+	 * Never throws into the frame loop. An answer that fails to save is logged loudly rather than taking
+	 * the ingest path down with it, but it is also NOT reported as saved.
+	 */
+	protected async captureAnswer(rec: AgentRecord): Promise<void> {
+		const question = rec.options.ask;
+		if (!question) return;
+		try {
+			const final = [...rec.transcript].reverse().find((t) => t.kind === "assistant" && t.text.trim().length > 0);
+			if (!final) {
+				this.log("warn", `${rec.dto.name}: answer unit ended with no final message — nothing to save`);
+				return;
+			}
+			const existing = await readAnswer(this.stateDir, rec.dto.id);
+			const askedAt = existing?.askedAt ?? Date.now();
+			const answeredAt = Date.now();
+			const ok = await saveAnswer(this.stateDir, {
+				id: rec.dto.id,
+				question,
+				repo: rec.dto.repo,
+				markdown: final.text.trim(),
+				askedAt,
+				answeredAt,
+				durationMs: answeredAt - askedAt,
+				model: rec.dto.model,
+				harness: rec.dto.harness,
+			});
+			if (!ok) this.log("warn", `${rec.dto.name}: answer could not be persisted (disk write failed)`);
+			else this.log("info", `${rec.dto.name}: answer saved (${final.text.trim().length} chars) — glance answers ${rec.dto.id}`);
+		} catch (err) {
+			this.log("warn", `${rec.dto.name}: capturing the answer failed: ${errText(err)}`);
 		}
 	}
 

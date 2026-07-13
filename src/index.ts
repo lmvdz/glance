@@ -7,6 +7,8 @@
  *   glance list
  *   glance prompt <id> <message…>
  *   glance rm <id> [--delete-worktree]
+ *   glance ask "<question>" [--repo …]           answer a question; no branch, nothing to merge
+ *   glance answers [<id>]                        list or read durable answers
  *   glance open
  *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
  *
@@ -23,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { renderDoctor, runDoctor } from "./doctor.ts";
 import { makeDoctorProbe } from "./doctor-probe.ts";
-import { envBool, rootFactoryEnabledWith } from "./config.ts";
+import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
@@ -85,6 +87,8 @@ USAGE
   glance who [repo]                             Who/what is working a repo (any omp agent)
   glance logs <id> [--limit N]                  Print an agent's recent transcript
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
+  glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
+  glance answers [<id>] [--repo R]              List answers, or print one
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
@@ -862,6 +866,95 @@ async function cmdAutomation(args: string[]): Promise<void> {
 }
 
 /**
+ * `glance ask "<question>" [--repo <path>] [--json] [--no-wait]`
+ *
+ * R5: the second deliverable. A question in, a written answer out — no branch, no PR, nothing to merge.
+ * The unit is an observer (`is-landing-unit.ts` refuses to land one), so this cannot mutate the repo.
+ *
+ * Waits by default. An `ask` you have to poll for is an `ask` nobody uses: the whole point is that the
+ * answer arrives where the question was asked.
+ */
+async function cmdAsk(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const question = positional.join(" ").trim();
+	if (!question) {
+		process.stderr.write('usage: glance ask "<question>" [--repo <path>] [--model M] [--json] [--no-wait]\n');
+		process.exit(1);
+	}
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
+	const post = await fetch(`${base(flags)}/api/answers`, {
+		method: "POST",
+		headers: { ...tokenHeader(), "content-type": "application/json" },
+		body: JSON.stringify({ repo, question, model: typeof flags.model === "string" ? flags.model : undefined, harness: typeof flags.harness === "string" ? flags.harness : undefined }),
+	}).catch(() => null);
+	if (!post || !post.ok) {
+		process.stderr.write(post ? `ask failed: ${post.status} ${await post.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	const dto = (await post.json()) as AgentDTO;
+	if (flags["no-wait"]) {
+		process.stdout.write(`asked. ${dto.id}\n  read it later: glance ask --read ${dto.id}\n`);
+		return;
+	}
+
+	// Poll the ANSWER, not the agent: the agent row is reaped, the answer is durable. A unit that dies
+	// without answering must not hang the operator forever, so an ended agent ends the wait too.
+	const started = Date.now();
+	const deadline = started + envInt("GLANCE_ASK_TIMEOUT_MS", 30 * 60_000);
+	if (!flags.json) process.stderr.write(`thinking… (${dto.id})\n`);
+	while (Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, 2_000));
+		const res = await fetch(`${base(flags)}/api/answers/${encodeURIComponent(dto.id)}`, { headers: tokenHeader() }).catch(() => null);
+		const answer = res?.ok ? ((await res.json()) as { markdown?: string; answeredAt?: number; durationMs?: number }) : undefined;
+		if (answer?.answeredAt && answer.markdown) {
+			process.stdout.write(flags.json ? `${JSON.stringify(answer, null, 2)}\n` : `\n${answer.markdown}\n`);
+			return;
+		}
+		const agents = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() }).then((r) => (r.ok ? (r.json() as Promise<AgentDTO[]>) : [])).catch(() => []);
+		const live = agents.find((a) => a.id === dto.id);
+		if (!live) {
+			// Gone from the roster with no answer on disk: say so, rather than spinning until the timeout.
+			process.stderr.write(`the unit ended without answering (${dto.id})\n`);
+			process.exit(1);
+		}
+		if (live.status === "error") {
+			process.stderr.write(`the unit failed: ${live.blockedReason ?? "unknown error"}\n`);
+			process.exit(1);
+		}
+	}
+	process.stderr.write(`timed out after ${Math.round((Date.now() - started) / 60_000)}m — the unit is still running; read it later with: glance ask --read ${dto.id}\n`);
+	process.exit(1);
+}
+
+/** `glance answers [--repo R]` / `glance ask --read <id>` — the durable side of the deliverable. */
+async function cmdAnswers(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const id = positional[0] ?? (typeof flags.read === "string" ? flags.read : undefined);
+	const url = id ? `${base(flags)}/api/answers/${encodeURIComponent(id)}` : `${base(flags)}/api/answers${flags.repo ? `?repo=${encodeURIComponent(String(flags.repo))}` : ""}`;
+	const res = await fetch(url, { headers: tokenHeader() }).catch(() => null);
+	if (!res || !res.ok) {
+		process.stderr.write(res ? `${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}\n`);
+		process.exit(1);
+	}
+	const body = await res.json();
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+		return;
+	}
+	if (id) {
+		const a = body as { question: string; markdown: string; answeredAt?: number };
+		process.stdout.write(`${a.question}\n\n${a.answeredAt ? a.markdown : "(not answered yet)"}\n`);
+		return;
+	}
+	const list = body as Array<{ id: string; question: string; answeredAt?: number; repo: string }>;
+	if (list.length === 0) {
+		process.stdout.write('no answers yet. ask one: glance ask "why is dispatch slow?"\n');
+		return;
+	}
+	for (const a of list) process.stdout.write(`${a.answeredAt ? "✔" : "…"} ${a.id.padEnd(34)} ${a.question.slice(0, 60)}\n`);
+}
+
+/**
  * `glance doctor` — R6's answer. Exit code IS the verdict, so CI and the operator's `&&` both work:
  * 0 = nothing blocking, 1 = the factory cannot do its job. A warning never fails the command; a warning
  * that failed the command would be turned off within a week.
@@ -930,6 +1023,13 @@ async function main(): Promise<void> {
 			break;
 		case "plan-decompose":
 			await cmdPlanDecompose(rest);
+			break;
+		case "ask":
+			if (typeof parseArgs(rest).flags.read === "string") await cmdAnswers(rest);
+			else await cmdAsk(rest);
+			break;
+		case "answers":
+			await cmdAnswers(rest);
 			break;
 		case "doctor":
 			await cmdDoctor(rest);
