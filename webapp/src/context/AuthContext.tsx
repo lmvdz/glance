@@ -27,7 +27,8 @@ export interface Me {
 
 type Status =
   | 'loading' // fetching mode/session
-  | 'file' // file mode — no login page, legacy bearer-token behavior
+  | 'file' // file mode — a bearer token the daemon actually accepts
+  | 'file-anon' // file mode, and the daemon rejects our token (or we have none) — show <FileSignIn/>
   | 'authed' // db mode, valid session
   | 'pending' // db mode, join request awaiting an org admin's approval
   | 'anon'; // db mode, no session — show <Login/>
@@ -51,6 +52,23 @@ interface AuthState {
   signOut: () => Promise<void>;
 }
 
+/**
+ * Does a file-mode daemon accept the token this browser is holding?
+ *
+ * `/api/auth/mode` is unauthenticated, so learning "this daemon is in file mode" said NOTHING about
+ * whether we can talk to it — and the SPA reported 'file' regardless. Every authenticated call then 401'd,
+ * and the dashboard rendered an empty roster, zero projects, and an "Add project…" form whose only
+ * feedback was the word `unauthorized`. An empty fleet and a rejected token looked identical.
+ *
+ * `null` means the probe itself failed (no daemon answered). That is not authentication's problem, so it
+ * resolves to 'file' and the dashboard's own loading/error states speak — inventing a sign-in screen for a
+ * daemon that is simply down would be a second lie.
+ */
+export function fileModeStatus(probeStatus: number | null): 'file' | 'file-anon' {
+  if (probeStatus === 401 || probeStatus === 403) return 'file-anon';
+  return 'file';
+}
+
 const AuthContext = React.createContext<AuthState | null>(null);
 
 export const useAuth = (): AuthState => {
@@ -71,7 +89,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const resolveSession = React.useCallback(async (mode: AuthMode): Promise<void> => {
     if (mode.mode === 'file') {
       setMe(null);
-      setStatus('file');
+      // Probe a route that actually requires the bearer token, and believe the answer (see fileModeStatus).
+      const probe = await apiFetch('/api/health').catch(() => null);
+      setStatus(fileModeStatus(probe ? probe.status : null));
       return;
     }
     // db mode — a valid cookie session yields /api/me; 401 means we need to log in.
