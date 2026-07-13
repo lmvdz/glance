@@ -52,7 +52,9 @@ export async function install(repoSrc: string, dir = extensionsDir()): Promise<s
 	return file;
 }
 
-/** Best-effort removal of the installed extension dir. */
+/** Best-effort removal of the installed extension dir.
+ *  @substrate the installer's reversal primitive — no CLI wiring yet (named gap, not hidden);
+ *  exercised directly by tests/install-hooks.test.ts. */
 export async function uninstall(dir = extensionsDir()): Promise<boolean> {
 	await fsp.rm(path.join(dir, EXT_NAME), { recursive: true, force: true }).catch(() => {});
 	return true;
