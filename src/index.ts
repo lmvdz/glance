@@ -76,6 +76,7 @@ USAGE
   glance up [--port N] [--no-tui] [--restore]   Start the daemon (web + TUI)
   glance add <repo> [flags]                     Spawn an agent in a new worktree
   glance list [--json]                          Show the roster
+  glance harnesses [--json]                     Honest capability tiers for every registered harness
   glance prompt <id> <message...>               Send an instruction to an agent
   glance notify <id> <summary...> [--detail x]  Flag an agent needs a human's attention (non-blocking)
   glance kill <id>                              Stop an agent but keep it in the roster
@@ -509,6 +510,62 @@ async function cmdList(args: string[]): Promise<void> {
 	process.stdout.write(renderAgentRoster(agents, { json: flags.json === true }));
 }
 
+/** GET /api/harnesses shape (server.ts's noFleet handler) — the tier fields are additive to the
+ *  pre-existing name/protocol/verified/capabilities/note response. */
+interface HarnessListingRow {
+	name: string;
+	protocol: string;
+	verified: boolean;
+	tier?: "verified" | "detected-unverified" | "registered-unverified";
+	binDetected?: boolean;
+	usageVerified?: boolean;
+	alert?: string;
+	note?: string;
+}
+
+const TIER_LABEL: Record<string, string> = {
+	verified: "verified",
+	"detected-unverified": "detected",
+	"registered-unverified": "registered",
+};
+
+export function renderHarnessTable(rows: HarnessListingRow[], defaultHarness: string, opts: { json?: boolean } = {}): string {
+	if (opts.json) return `${JSON.stringify(rows, null, 2)}\n`;
+	if (!rows.length) return "no harnesses registered\n";
+	const nameW = Math.max(4, ...rows.map((r) => r.name.length));
+	const tierW = Math.max(4, ...rows.map((r) => (TIER_LABEL[r.tier ?? ""] ?? "—").length));
+	const lines = rows.map((r) => {
+		const name = (r.name === defaultHarness ? `${r.name}*` : r.name).padEnd(nameW + 1);
+		const tier = (TIER_LABEL[r.tier ?? ""] ?? "—").padEnd(tierW);
+		const usage = r.usageVerified ? "usage-verified" : "usage-unconfirmed";
+		const alert = r.alert ? `  ⚠ ${r.alert}` : "";
+		return `${name} ${tier}  ${r.protocol.padEnd(7)} ${usage}${alert}`;
+	});
+	return `${lines.join("\n")}\n`;
+}
+
+/** `glance harnesses [--json]` — the honest capability tier matrix (concern 06): every
+ *  REGISTERED harness (not just the create-surface-visible verified ones) with its tier, a
+ *  verified-binary-missing alert, and the usage-verified bit. Always queries the create API's
+ *  `?all=1` under the hood — this listing is always the full roster, so there is no `--all` flag
+ *  to pass. */
+async function cmdHarnesses(args: string[]): Promise<void> {
+	const { flags } = parseArgs(args);
+	let body: { default: string; harnesses: HarnessListingRow[] };
+	try {
+		const res = await fetch(`${base(flags)}/api/harnesses?all=1`, { headers: tokenHeader() });
+		if (!res.ok) {
+			process.stderr.write(`harnesses failed: ${res.status} ${await res.text()}\n`);
+			process.exit(1);
+		}
+		body = (await res.json()) as { default: string; harnesses: HarnessListingRow[] };
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	process.stdout.write(renderHarnessTable(body.harnesses, body.default, { json: flags.json === true }));
+}
+
 async function cmdPrompt(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	const id = positional[0];
@@ -907,6 +964,9 @@ async function main(): Promise<void> {
 		case "list":
 		case "ls":
 			await cmdList(rest);
+			break;
+		case "harnesses":
+			await cmdHarnesses(rest);
 			break;
 		case "prompt":
 		case "say":

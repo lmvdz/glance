@@ -5,11 +5,21 @@
  * of change a human should glance at before it merges. This computes the BRANCH'S OWN change set
  * (`<merge-base(HEAD,branch)>..<branch>`) — a different axis from `staleBranchReason` (which measures
  * OVERLAP with newer main work) and from the post-merge regression gate (which measures test
- * monotonicity). Off by default; fail-open (any probe failure ⇒ no block); bypassed by the human Land
- * path via `LandOpts.riskOverride`, so the button always works (the "ASK" = a human resolves).
+ * monotonicity). Off by default; bypassed by the human Land path via `LandOpts.riskOverride`, so the
+ * button always works (the "ASK" = a human resolves).
+ *
+ * FAIL-CLOSED on a probe failure (eap-borrows/04-fail-closed-wave-1, finding #7): a git probe that
+ * can't compute the diff proves NOTHING about blast radius either way — the OLD behavior returned
+ * `undefined` (no block) on ANY error, so a corrupted git dir or a bogus branch name silently gave
+ * every branch a clean bill of health. Now a probe failure blocks auto-land exactly like a genuine
+ * risk finding (`riskOverride` still the human hatch; the gate is still off by default). It routes
+ * through the SAME `landFailureCount`/observer-bug-filing path a real risk finding does, so a
+ * persistently failing probe surfaces to a human instead of retrying forever unseen.
  */
 
 import { envBool, envInt } from "./config.ts";
+import { classifyProbeFailure } from "./classify-probe-failure.ts";
+import { errText } from "./err-text.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 /** OFF by default — an operator opts in during rollout, like OMP_SQUAD_REGRESSION_GATE. */
@@ -35,17 +45,74 @@ function git(args: string[], cwd: string): Promise<{ code: number; stdout: strin
 	return Promise.all([new Response(proc.stdout).text(), proc.exited]).then(([stdout, code]) => ({ code, stdout: stdout.trim() }));
 }
 
+/** A blocking reason wrapping a probe failure — never blames the branch, always names the gate as the
+ *  source of the refusal and points at the human hatches (force-land, disabling the gate). */
+function probeFailureReason(detail: string): string {
+	const { reason } = classifyProbeFailure({ kind: "spawn-error", detail });
+	return `land-risk gate: could not compute a blast radius (${reason}) — refusing to auto-land rather than guessing it's safe. (OMP_SQUAD_LAND_RISK_GATE=0 disables this gate; force-land bypasses it.)`;
+}
+
+/**
+ * Cross-lineage review (grok-4.5) of the merge-base carve-out below: `git merge-base` signals BOTH
+ * "genuinely unrelated histories" AND "truncated history on a shallow clone" via the SAME exit-1 +
+ * empty-stdout pair — nothing distinguishes them from the caller's side. A shallow clone can never
+ * trust the carve-out below, since the "missing" ancestor may simply not have been fetched; treat that
+ * case as an ordinary probe failure (fail closed) instead of guessing which one it is.
+ */
+async function isShallowRepo(repo: string): Promise<boolean> {
+	const r = await git(["rev-parse", "--is-shallow-repository"], repo);
+	return r.code === 0 && r.stdout === "true";
+}
+
+/**
+ * Cross-lineage review (grok-4.5) of the merge-base carve-out below: this gate exists to bound a
+ * branch's BLAST RADIUS before an unattended merge, so "no common ancestor" is the opposite of safe —
+ * with no merge base, `<merge-base>..<branch>` is uncomputable and the honest reading is MAXIMUM
+ * uncertainty (the diff could be the entire branch). Unlike `land.ts`'s `staleBranchReason` (where no
+ * common ancestor genuinely means no silent-clobber risk — the merge itself will surface the problem),
+ * this gate runs BEFORE any merge is attempted specifically to catch a risky diff early, so it must
+ * block rather than wave an unknowable branch through. Worded distinctly from `probeFailureReason` on
+ * purpose: this is a branch/history property (an orphan or grafted branch), not a git spawn/tool
+ * failure, so `retryable: false` at the call site is correct — retrying won't grow a shared history.
+ */
+function unknownBlastRadiusReason(branch: string, baseRef: string): string {
+	return (
+		`land-risk gate: ${branch} has no common ancestor with ${baseRef} — the blast radius is UNKNOWABLE ` +
+		`(the diff is uncomputable), so this gate treats it as the maximum: the whole branch. Left for a ` +
+		`human Land review — force-land to override. (OMP_SQUAD_LAND_RISK_GATE=0 disables this gate.)`
+	);
+}
+
 /**
  * A human-readable reason this branch is too large / too sensitive to AUTO-land, or `undefined` when
- * it's safe (or the gate can't compute a verdict — never blocks on its own probe failures). `baseRef`
- * defaults to `HEAD` (local mode's main tip); PR mode can pass `origin/<default>`.
+ * it's genuinely safe. A probe failure (git couldn't compute the diff) ALSO returns a reason — see
+ * the fail-closed note above; it is never conflated with "safe" again. `baseRef` defaults to `HEAD`
+ * (local mode's main tip); PR mode can pass `origin/<default>`.
  */
 export async function landRiskReason(repo: string, branch: string, baseRef = "HEAD"): Promise<string | undefined> {
 	try {
 		const mb = await git(["merge-base", baseRef, branch], repo);
-		if (mb.code !== 0 || !mb.stdout) return undefined;
+		// Finding #5 (code-review fixlist, same shape as land.ts's staleBranchReason finding #4):
+		// `git merge-base` signals "no common ancestor" via EXIT 1 + empty stdout — it never exits 0
+		// with empty stdout. Folding that into `mb.code !== 0` treated a genuine orphan/grafted branch
+		// exactly like a real probe failure, hardcoding a "spawn-error" refusal that told the operator
+		// to disable the gate for a branch that was never unsafe to begin with. Only a bare exit 1 with
+		// nothing on stdout is that carve-out; any other nonzero exit (deleted ref, corrupt repo, etc.)
+		// still fails closed below.
+		//
+		// Cross-lineage review (grok-4.5, eap-borrows) on the line this replaced (`return undefined`):
+		// for THIS gate specifically, "not a probe failure" does not mean "safe" — see
+		// `unknownBlastRadiusReason`'s doc above. A shallow clone gets the SAME exit-1/empty-stdout
+		// signal for a merely-unfetched ancestor, so it is routed through the ordinary probe-failure
+		// path instead (can't discriminate ⇒ fail closed, not "maximum blast radius" wording, since the
+		// ambiguity here is a git-plumbing limitation, not a property of the branch's own history).
+		if (mb.code === 1 && !mb.stdout) {
+			if (await isShallowRepo(repo)) return probeFailureReason(`merge-base(${baseRef}, ${branch}) reported no common ancestor in a SHALLOW clone — cannot distinguish an unrelated history from an unfetched one`);
+			return unknownBlastRadiusReason(branch, baseRef);
+		}
+		if (mb.code !== 0 || !mb.stdout) return probeFailureReason(`merge-base(${baseRef}, ${branch}) exited ${mb.code} with no output`);
 		const diff = await git(["diff", "--no-ext-diff", "--name-only", `${mb.stdout}..${branch}`], repo);
-		if (diff.code !== 0) return undefined;
+		if (diff.code !== 0) return probeFailureReason(`diff ${mb.stdout}..${branch} exited ${diff.code}`);
 		const files = diff.stdout.split("\n").filter(Boolean);
 		if (files.length === 0) return undefined;
 
@@ -60,7 +127,7 @@ export async function landRiskReason(repo: string, branch: string, baseRef = "HE
 			return `land-risk gate: ${branch} changes ${files.length} files (≥ ${cap}) — a large unattended merge. Left for a human Land review — force-land to override. (OMP_SQUAD_LAND_MAX_DIFF_FILES raises the cap; OMP_SQUAD_LAND_RISK_GATE=0 disables this gate.)`;
 		}
 		return undefined;
-	} catch {
-		return undefined;
+	} catch (err) {
+		return probeFailureReason(errText(err));
 	}
 }

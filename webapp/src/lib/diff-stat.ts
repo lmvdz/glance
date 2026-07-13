@@ -42,17 +42,25 @@ export function aggregateDiffCounts(diffs: { diff?: string }[]): DiffCounts {
 /** One agent's diff-fetch invalidation signal — a new turn (messageCount), a status flip
  *  (e.g. working -> idle, files just settled), or a land/PR-state change (branch just merged,
  *  the worktree diff vs main collapsed — live-drive-found: the Changes panel kept showing the
- *  pre-land diff after a successful one-tap Land) all mean "the diff may be stale, refetch". */
+ *  pre-land diff after a successful one-tap Land) all mean "the diff may be stale, refetch".
+ *
+ *  `landReady` alone is never a "safe to land" signal here or anywhere else in the webapp (see
+ *  agent-badges.ts's `isValidatorHeld`) — it is used ONLY as one ingredient of a cache key, never
+ *  rendered. `validationVerdict` is threaded through for the same reason every other `landReady`
+ *  consumer routes through the validator: a veto/inconclusive resolving (or a fresh one landing)
+ *  is itself a land-relevant state transition — e.g. a rejected auto-resolve rolls main back and
+ *  the worktree diff may change under it — so the cache key must not go stale across it either. */
 export interface DiffSignalInput {
   id: string;
   messageCount?: number;
   status: string;
   landReady?: boolean;
   prState?: string;
+  validationVerdict?: string;
 }
 
 export function diffSignal(agent: DiffSignalInput): string {
-  return `${agent.messageCount ?? 0}:${agent.status}:${agent.landReady ? 1 : 0}:${agent.prState ?? ''}`;
+  return `${agent.messageCount ?? 0}:${agent.status}:${agent.landReady ? 1 : 0}:${agent.prState ?? ''}:${agent.validationVerdict ?? ''}`;
 }
 
 /** Pure selection of which agent ids need a fresh diff fetch, given the signals already seen.

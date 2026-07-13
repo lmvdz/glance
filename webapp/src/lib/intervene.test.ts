@@ -51,6 +51,20 @@ describe('whyStopped', () => {
     expect(r.tone).toBe('success');
   });
 
+  // Fail-open fix (blind review): a `verdict !== 'veto'` gate reads an "inconclusive" validator hold
+  // (eap-borrows follow-up 7 — the land diff couldn't be COMPUTED, an environmental git fault) as a
+  // clean pass, so a landReady+inconclusive agent showed the calm "Ready to land" success line even
+  // though the last land attempt was actually BLOCKED and retryable.
+  it('reports a validator "inconclusive" as a warn hold, never the calm "Ready to land" success line', () => {
+    const r = whyStopped(agent({
+      status: 'idle',
+      landReady: true,
+      validation: { verdict: 'inconclusive', agreement: 0, confidence: 0, perCriterion: [], rationale: 'diff fault', ranAt: 0 },
+    }));
+    expect(r.label).not.toContain('Ready to land');
+    expect(r.tone).not.toBe('success');
+  });
+
   it('is calm for a plain working agent', () => {
     expect(whyStopped(agent({ status: 'working', activity: 'editing server.ts' })).label).toBe('Working — editing server.ts');
     expect(whyStopped(agent({ status: 'working' })).tone).toBe('info');
@@ -70,6 +84,16 @@ describe('intervenePrimaryAction', () => {
     expect(intervenePrimaryAction(agent({
       status: 'idle', landReady: true,
       validation: { verdict: 'veto', agreement: 1, confidence: 1, perCriterion: [], rationale: '', ranAt: 0 },
+    }))).toBe('steer');
+  });
+
+  // Fail-open fix: an inconclusive verdict must not offer the "land" primary action either — the last
+  // land attempt was actually blocked (retryable), so a `!isVetoed` check alone silently offered "land"
+  // on a hold that a force-land can't even bypass.
+  it('does not offer "land" on an inconclusive hold', () => {
+    expect(intervenePrimaryAction(agent({
+      status: 'idle', landReady: true,
+      validation: { verdict: 'inconclusive', agreement: 0, confidence: 0, perCriterion: [], rationale: '', ranAt: 0 },
     }))).toBe('steer');
   });
   it('steers a live working agent', () => {

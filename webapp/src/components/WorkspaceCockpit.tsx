@@ -46,7 +46,7 @@ import { useTaskContext } from '../context/TaskContext';
 import { PageContextScope } from '../context/PageContext';
 import { deriveFleetPageContext } from '../lib/pageContextDerive';
 import { AgentLandControls } from './chat/AgentMetaBar';
-import { validationBadge, confidenceBadge, prStateBadgeLabel } from '../lib/agent-badges';
+import { validationBadge, confidenceBadge, prStateBadgeLabel, isValidatorHeld } from '../lib/agent-badges';
 import { canLand, answerCommand, interruptCommand, interruptibleAgents, restartCommand, setModelCommand } from '../lib/agent-control';
 import { apiJson, jsonInit } from '../lib/api';
 import { enablePush, pushPermission } from '../lib/push';
@@ -374,7 +374,18 @@ const LandRail: React.FC<{
     <div className="flex h-full w-80 flex-shrink-0 flex-col gap-2 overflow-y-auto border-l border-gray-200 bg-gray-50/60 p-2 dark:border-ink-border dark:bg-ink">
       <PanelSection
         title="Land"
-        right={agent?.prState ? <StatusChip status={agent.prState} /> : agent?.landReady ? <StatusChip status="done" /> : null}
+        right={
+          agent?.prState ? (
+            <StatusChip status={agent.prState} />
+          ) : agent?.landReady && !isValidatorHeld(agent) ? (
+            <StatusChip status="done" />
+          ) : agent?.landReady && isValidatorHeld(agent) ? (
+            // A vetoed or inconclusive verdict must never read as "done" — the fail-open
+            // isValidatorHeld exists to close (agent-badges.ts). The `validation` pill below already
+            // names the verdict; this chip must not contradict it.
+            <StatusChip status="held" tone="attention" />
+          ) : null
+        }
       >
         <div className="flex flex-col gap-2 p-3">
           {!agent ? (
@@ -561,7 +572,15 @@ export const WorkspaceCockpit: React.FC = () => {
   }, [navRows, selectedAgent?.id]);
 
   const diffSignals = useMemo(
-    () => agents.map((a) => ({ id: a.id, messageCount: a.messageCount, status: a.status, landReady: a.landReady, prState: a.prState })),
+    () =>
+      agents.map((a) => ({
+        id: a.id,
+        messageCount: a.messageCount,
+        status: a.status,
+        landReady: a.landReady,
+        prState: a.prState,
+        validationVerdict: a.validation?.verdict,
+      })),
     [agents],
   );
   const diffsById = useAgentDiffs(diffSignals);

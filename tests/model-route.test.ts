@@ -24,14 +24,16 @@ const unit = (over: Partial<DenominatorUnit>): DenominatorUnit => ({
 });
 
 /** Build a cell with `n` denominator members, `landedCount` of which land, all tagged with `model`
- *  (a raw model string that `modelFamily` folds to the matrix's family key). */
+ *  (a raw model string that `modelFamily` folds to the matrix's family key). Every row carries a
+ *  `costUsd` so `costCoveragePct` clears `MIN_COVERAGE_PCT` — the `reproducible` gate (eap-borrows
+ *  concern 01) `routeModelForTaskClass` now honors alongside `insufficientData`. */
 function seedCell(model: string, n: number, landedCount: number): { denom: DenominatorUnit[]; rows: TaskOutcomeRow[] } {
 	const denom: DenominatorUnit[] = [];
 	const rows: TaskOutcomeRow[] = [];
 	for (let i = 0; i < n; i++) {
 		const agentId = `${model}-${i}`;
 		denom.push(unit({ agentId }));
-		rows.push(row({ agentId, model, outcome: i < landedCount ? "landed" : "rejected" }));
+		rows.push(row({ agentId, model, costUsd: 1, outcome: i < landedCount ? "landed" : "rejected" }));
 	}
 	return { denom, rows };
 }
@@ -110,5 +112,44 @@ describe("routeModelForTaskClass", () => {
 		// Sanity check the fixture matches the matrix's real gate so the "insufficient" tests above are
 		// exercising the intended boundary, not an accidental one.
 		expect(MIN_SAMPLES).toBe(3);
+	});
+
+	// ── Code-review finding #7: the `reproducible` gate permanently disabled the live router ────────
+
+	test("a SATURATED (1.0) frontier champion still shifts — the champion-self-exclusion fix", () => {
+		// Before the fix: the frontier cell IS its taskClass's auto-champion (best mergeRate), and
+		// `reproducible` compared its variance against ITSELF — `hasVarianceBetween(x, x)` is false at a
+		// saturated mergeRate, so a perfect-record champion was never `reproducible` and the router
+		// returned `noShift()` on every dispatch for any taskClass whose best model ever landed 100%.
+		const cheap = seedCell("claude-sonnet-5", 10, 5); // 0.5 — well-measured, not saturated
+		const frontier = seedCell("claude-opus-4-8", 10, 10); // 1.0 — saturated champion
+		const doc = buildTaskClassMatrix([...cheap.rows, ...frontier.rows], [...cheap.denom, ...frontier.denom], range);
+		expect(doc.champions["tdd:heavy"]).toBe(ROUTE_FRONTIER_FAMILY);
+		expect(doc.cells["tdd:heavy"][ROUTE_FRONTIER_FAMILY].reproducible).toBe(true);
+		const decision = routeModelForTaskClass(taskClass, doc);
+		expect(decision.model).toBe(ROUTE_FRONTIER_MODEL);
+	});
+
+	test("a null-cost fleet (no row carries costUsd) still shifts on mergeRate evidence alone", () => {
+		// Before the fix: `isSampleSufficient` folded a `costCoveragePct >= 0.5` floor into champion
+		// selection — on a fleet whose outcome rows mostly lack `costUsd` (true of this fleet
+		// historically), NO cell was ever sample-sufficient, no champion ever existed, and routing was
+		// dead fleet-wide with a "not reproducible" reason that actually meant "missing cost data".
+		const denomC: DenominatorUnit[] = [];
+		const rowsC: TaskOutcomeRow[] = [];
+		const denomF: DenominatorUnit[] = [];
+		const rowsF: TaskOutcomeRow[] = [];
+		for (let i = 0; i < 10; i++) {
+			denomC.push(unit({ agentId: `c-${i}` }));
+			rowsC.push(row({ agentId: `c-${i}`, model: "claude-sonnet-5", outcome: i < 2 ? "landed" : "rejected" })); // 0.2, no costUsd
+			denomF.push(unit({ agentId: `f-${i}` }));
+			rowsF.push(row({ agentId: `f-${i}`, model: "claude-opus-4-8", outcome: i < 9 ? "landed" : "rejected" })); // 0.9, no costUsd
+		}
+		const doc = buildTaskClassMatrix([...rowsC, ...rowsF], [...denomC, ...denomF], range);
+		expect(doc.cells["tdd:heavy"][ROUTE_CHEAP_FAMILY].costCoveragePct).toBe(0);
+		expect(doc.cells["tdd:heavy"][ROUTE_FRONTIER_FAMILY].costCoveragePct).toBe(0);
+		expect(doc.champions["tdd:heavy"]).toBe(ROUTE_FRONTIER_FAMILY);
+		const decision = routeModelForTaskClass(taskClass, doc);
+		expect(decision.model).toBe(ROUTE_FRONTIER_MODEL);
 	});
 });

@@ -10,6 +10,7 @@ import React, { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { apiFetch, apiJson } from '../lib/api';
 import { answerCommand, canLand, landToast, type LandResultDTO } from '../lib/agent-control';
+import { isValidatorHeld } from '../lib/agent-badges';
 import { useTaskContext } from '../context/TaskContext';
 import { CommitView } from '../components/GraphDetail';
 import type { AgentDTO } from '../lib/dto';
@@ -120,7 +121,12 @@ const NeedsBody: React.FC = () => {
   const [reply, setReply] = useState<Record<string, string>>({});
   const [landing, setLanding] = useState<string | null>(null);
   const blocked = agents.filter((a) => a.status === 'input');
-  const ready = agents.filter((a) => a.status !== 'input' && (a.landReady || a.availableActions?.includes('land')));
+  const landCandidates = agents.filter((a) => a.status !== 'input' && (a.landReady || a.availableActions?.includes('land')));
+  // A vetoed or inconclusive verdict must never read as "proof green, awaiting land" — the fail-open
+  // isValidatorHeld exists to close (agent-badges.ts). It still needs a human, so it stays in the
+  // decision queue, just under its own HELD step rather than the LAND READY one.
+  const ready = landCandidates.filter((a) => !isValidatorHeld(a));
+  const held = landCandidates.filter(isValidatorHeld);
 
   const land = async (id: string): Promise<void> => {
     setLanding(id);
@@ -140,7 +146,7 @@ const NeedsBody: React.FC = () => {
     <>
       <div className="text-[13px] font-semibold text-[#ECE7DC]">Decision queue — the fleet is waiting on you</div>
       <Meta>
-        {blocked.length + ready.length} item{blocked.length + ready.length === 1 ? '' : 's'} · everything else is running clean
+        {blocked.length + ready.length + held.length} item{blocked.length + ready.length + held.length === 1 ? '' : 's'} · everything else is running clean
       </Meta>
       {blocked.map((a) => {
         const req = a.pending[0];
@@ -190,7 +196,17 @@ const NeedsBody: React.FC = () => {
           </div>
         </div>
       ))}
-      {!blocked.length && !ready.length && <Meta>nothing needs you — the marks leave the canvas the moment the fleet unblocks.</Meta>}
+      {held.map((a) => (
+        <div key={a.id} className="mt-3 border-b border-[#171B23] pb-3">
+          <Step
+            color="#E5484D"
+            k={`HELD · ${a.name}`}
+            v={a.branch ?? a.worktree}
+            s={`validator ${a.validation?.verdict ?? 'held'} — needs a human decision before it can land`}
+          />
+        </div>
+      ))}
+      {!blocked.length && !ready.length && !held.length && <Meta>nothing needs you — the marks leave the canvas the moment the fleet unblocks.</Meta>}
     </>
   );
 };
