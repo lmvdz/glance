@@ -168,4 +168,29 @@ describe('validator veto downgrades "ready to land"', () => {
     expect(s.headline).toContain('ready to land');
     expect(s.vetoed).toHaveLength(0);
   });
+
+  // Fail-open fix (blind review): the original code counted any non-"veto" verdict — including
+  // "inconclusive" (eap-borrows follow-up 7: the land diff couldn't be COMPUTED, an environmental git
+  // fault) — as a calm "ready to land" row. An inconclusive land attempt was actually BLOCKED
+  // (retryable, and a force-land does not bypass it), so it must surface as its own hold, never fold
+  // into the calm "ready to land" headline.
+  test('a land-ready agent with an INCONCLUSIVE verdict surfaces as its own hold, never a calm "ready to land"', () => {
+    const inconclusive = { ...veto, verdict: 'inconclusive' as const };
+    const s = summarizeTask([agent('a', 'idle', { landReady: true, validation: inconclusive })]);
+    expect(s.headline).not.toContain('ready to land');
+    expect(s.headline).toContain('inconclusive');
+    expect(s.inconclusive.map((a) => a.id)).toEqual(['a']);
+    expect(s.vetoed).toHaveLength(0);
+  });
+
+  test('a vetoed agent takes priority over an inconclusive one when both are present', () => {
+    const inconclusive = { ...veto, verdict: 'inconclusive' as const };
+    const s = summarizeTask([
+      agent('a', 'idle', { landReady: true, validation: veto }),
+      agent('b', 'idle', { landReady: true, validation: inconclusive }),
+    ]);
+    expect(s.verdict).toBe('critical');
+    expect(s.headline).toContain('vetoed');
+    expect(s.vetoed.map((a) => a.id)).toEqual(['a']);
+  });
 });

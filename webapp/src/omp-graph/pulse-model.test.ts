@@ -85,6 +85,20 @@ describe('buildPulseModel', () => {
     expect(m.below.find((e) => e.kind === 'BLOCKED')?.requestId).toBe('q1');
   });
 
+  test('a vetoed/inconclusive landReady agent never reads as READY "proof green, awaiting land" — it still counts as needing you, just under a HELD label', () => {
+    const m = buildPulseModel(doc(), [
+      agent({ id: 'v', status: 'idle', landReady: true, validation: { verdict: 'veto', agreement: 0, confidence: 0.9, perCriterion: [], rationale: 'nope' } }),
+      agent({ id: 'i', status: 'idle', landReady: true, validation: { verdict: 'inconclusive', agreement: 0, confidence: 0, perCriterion: [], rationale: 'no diff' } }),
+      agent({ id: 'r', status: 'idle', landReady: true }), // genuinely clear — still reads READY
+    ]);
+    expect(m.needsCount).toBe(3); // all three still need a human, none silently dropped
+    const readyEntries = m.below.filter((e) => e.kind === 'READY');
+    const blockedEntries = m.below.filter((e) => e.kind === 'BLOCKED');
+    expect(readyEntries.map((e) => e.agentId)).toEqual(['r']);
+    expect(blockedEntries.map((e) => e.agentId).sort()).toEqual(['i', 'v']);
+    expect(blockedEntries.every((e) => !e.label.includes('proof green'))).toBe(true);
+  });
+
   test('milestones carry sha and big-ness; closed tickets land below', () => {
     const d = doc({
       tracks: [

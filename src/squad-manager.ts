@@ -3404,7 +3404,7 @@ export class SquadManager extends EventEmitter {
 		// spec (applyState) on the common omp/pi path; `harness` is the fallback for vendor-pinned ACP
 		// runtimes. Threaded so the ValidationRecord can flag a same-lineage (self-graded) review.
 		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
-		const { record, veto } = await validatorGate({
+		const { record, veto, inconclusive } = await validatorGate({
 			criteria,
 			repo: opts.repo,
 			worktree: opts.worktree,
@@ -3431,6 +3431,21 @@ export class SquadManager extends EventEmitter {
 		}
 		if (veto && !opts.validatorOverride) {
 			return { ok: false, committed: false, merged: false, message: opts.message, detail: veto };
+		}
+		// eap-borrows follow-up 7: a diff-computation FAILURE (git fault) is an ENVIRONMENTAL precondition,
+		// not a branch defect — never a permanent park. `retryable: true` routes it through the exact same
+		// bounded-escalation machinery every other retryable refusal already uses (landBlockedEscalateCap /
+		// fileLandBlockedEscalation in the `land()` outcome-recording block below): it retries at the
+		// orchestrator's ~30s cadence, never bumps the branch's fail streak, and escalates to a "Needs you"
+		// attention item if the SAME episode (headSha+reasonClass) is still stuck after the cap — the same
+		// safety valve that already prevents the dirty-main refusal from wedging forever. Note the
+		// deliberate asymmetry with `veto` just above: a veto has `opts.validatorOverride` as a logged
+		// human bypass, but `inconclusive` has none — this check runs unconditionally, so `opts.force`
+		// (requireProof:false) does NOT skip it either. There is nothing for a human to override: the
+		// diff itself couldn't be computed, so there's no verdict to force through. The only way out is
+		// the retry lane above (or a human fixing the underlying git fault directly).
+		if (inconclusive) {
+			return { ok: false, committed: false, merged: false, message: opts.message, detail: inconclusive, retryable: true };
 		}
 		return undefined;
 	}

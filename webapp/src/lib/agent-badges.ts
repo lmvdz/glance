@@ -62,6 +62,20 @@ export function isVetoed(agent: Pick<AgentDTO, 'validation'>): boolean {
   return agent.validation?.verdict === 'veto';
 }
 
+/**
+ * True on a validator verdict that must read as a HOLD, never "safe to land" — a `veto` (semantic
+ * rejection) or an `inconclusive` (eap-borrows follow-up 7: the land diff couldn't be COMPUTED, an
+ * environmental git fault, distinct from a genuinely empty diff). Both can coexist with
+ * `landReady:true`: the land attempt that produced the verdict doesn't clear the staged flag on a
+ * blocked/retryable outcome — only a successful land does. Every surface that gates a "ready to land" /
+ * "Land" affordance on `landReady` must exclude both, not just `veto` — a bare `verdict !== 'veto'`
+ * check silently reads an `inconclusive` hold as a pass (the fail-open this helper closes).
+ */
+export function isValidatorHeld(agent: Pick<AgentDTO, 'validation'>): boolean {
+  const v = agent.validation?.verdict;
+  return v === 'veto' || v === 'inconclusive';
+}
+
 /** A rendered pill for the independent-validator verdict, or `null` when there's no verdict worth
  *  showing (`skipped` = no declared criteria to judge against). Title carries the judge's rationale. */
 export function validationBadge(agent: Pick<AgentDTO, 'validation'>): { label: string; cls: string; title: string } | null {
@@ -83,6 +97,11 @@ export function validationBadge(agent: Pick<AgentDTO, 'validation'>): { label: s
       return { label: 'validated', cls: 'bg-emerald-100 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400', title };
     case 'abstain':
       return { label: 'unjudged', cls: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400', title };
+    case 'inconclusive':
+      // eap-borrows follow-up 7: the land diff couldn't be COMPUTED (a git fault), so the declared
+      // criteria were never evaluated — a retryable hold, NOT a pass and NOT a veto. Amber like a
+      // held state so it never reads as "ready to land".
+      return { label: 'inconclusive', cls: 'bg-amber-100 font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-400', title };
   }
 }
 

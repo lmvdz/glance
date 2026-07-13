@@ -74,6 +74,18 @@ export interface BoardState {
 	frame: number;
 }
 
+/** True on a validator verdict that must read as a HOLD, never a calm "ready to land" — a `veto`
+ *  (semantic rejection) or an `inconclusive` (eap-borrows follow-up 7: the land diff couldn't be
+ *  COMPUTED, an environmental git fault). Both can coexist with `landReady:true` (the land attempt that
+ *  produced the verdict doesn't clear the staged flag on a blocked/retryable outcome — only a
+ *  successful land does), so every "is this actually landable right now" check must exclude both, not
+ *  just `veto`. Fail-open fix: treating `verdict !== "veto"` as "safe to land" silently read an
+ *  `inconclusive` hold as a pass. */
+function isValidatorHeld(a: Pick<AgentDTO, "validation">): boolean {
+	const v = a.validation?.verdict;
+	return v === "veto" || v === "inconclusive";
+}
+
 /**
  * Exception-first ordering — the whole point of the board is "glance and know where to look", so
  * the rows that need a human float up. Ranks on the AGENT, not just its lifecycle status, so an
@@ -83,7 +95,7 @@ export interface BoardState {
 function agentRank(a: AgentDTO): number {
 	if (a.status === "input") return 0; // blocked on your answer
 	if (a.status === "error") return 1; // crashed — must not sink below idle
-	if (a.landReady && a.validation?.verdict === "veto") return 2; // green but the judge said no → review
+	if (a.landReady && isValidatorHeld(a)) return 2; // green but the judge said no / couldn't say → review
 	if (a.landReady) return 3; // one keystroke from landing
 	const rest: Record<AgentStatus, number> = { working: 4, idle: 5, starting: 6, stopped: 7, input: 0, error: 1 };
 	return rest[a.status] ?? 5;
@@ -166,6 +178,7 @@ function landHeader(sel: AgentDTO): string {
 	const v = sel.validation;
 	if (v && v.verdict !== "skipped") {
 		if (v.verdict === "veto") parts.push(c("red", `⛔ VETOED${v.rationale ? `: ${v.rationale}` : ""}`));
+		else if (v.verdict === "inconclusive") parts.push(c("yellow", "⏳ inconclusive — diff fault, retrying"));
 		else if (v.verdict === "pass") parts.push(c("green", "validated ✓"));
 		else parts.push(c("dim", "unjudged"));
 	}
@@ -174,7 +187,7 @@ function landHeader(sel: AgentDTO): string {
 		parts.push(c(low ? "yellow" : "dim", `conf ${Math.round(sel.confidence * 100)}%${low ? " · propose-only" : ""}`));
 	}
 	if (sel.effectiveMode) parts.push(c("dim", sel.effectiveMode));
-	if (sel.landReady && v?.verdict !== "veto") parts.push(c("green", "· ready to land"));
+	if (sel.landReady && !isValidatorHeld(sel)) parts.push(c("green", "· ready to land"));
 	else if (sel.blockedReason) parts.push(c("yellow", `· held: ${sel.blockedReason}`));
 	return parts.join(c("gray", " · "));
 }
@@ -182,6 +195,7 @@ function landHeader(sel: AgentDTO): string {
 /** Compact right-of-status marker for a list row — the one exception token that most wants a human. */
 function rowBadge(a: AgentDTO): string {
 	if (a.landReady && a.validation?.verdict === "veto") return c("red", "⛔VETO ");
+	if (a.landReady && a.validation?.verdict === "inconclusive") return c("yellow", "⏳HOLD ");
 	if (a.landReady) return c("green", "✓LAND ");
 	if (a.blockedReason) return c("yellow", "‖HELD ");
 	return "";
@@ -193,7 +207,7 @@ export function buildBoard(state: BoardState): string[] {
 	const agents = sortAgents(state.agents);
 	const need = agents.filter((a) => a.status === "input").length;
 	const vetoed = agents.filter((a) => a.landReady && a.validation?.verdict === "veto").length;
-	const ready = agents.filter((a) => a.landReady && a.validation?.verdict !== "veto").length;
+	const ready = agents.filter((a) => a.landReady && !isValidatorHeld(a)).length;
 	const lines: string[] = [];
 
 	const title = `${c("bold", c("cyan", "omp-squad"))}  ${c("dim", `${agents.length} agents`)}${
