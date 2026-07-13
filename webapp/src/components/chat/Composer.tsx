@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, ImagePlus, Loader2, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
+import { Camera, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
 import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
 import { ImageAnnotator, type Annotation } from './ImageAnnotator';
@@ -11,6 +11,8 @@ import {
   nextImageAttachmentId,
   uploadChatAttachment,
 } from '../../lib/imageAttachment';
+import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession } from '../../lib/voice/speech';
+import { VoiceCallButton } from './VoiceCallButton';
 import type { AgentDTO } from '../../lib/dto';
 import type { Task } from '../../types';
 
@@ -147,6 +149,15 @@ export function assembleSendText(typedText: string, chips: PasteChip[]): string 
   if (chips.length === 0) return typedText;
   const fenced = chips.map((chip) => `\`\`\`\n${chip.content}\n\`\`\``).join('\n\n');
   return typedText ? `${typedText}\n\n${fenced}` : fenced;
+}
+
+/** Fold one finalized speech segment into the draft — space-joined onto whatever's already there.
+ *  Voice input always appends at the end and never auto-sends; the operator reviews the assembled
+ *  draft (typed + dictated, in whatever order they arrived) before it goes anywhere. */
+export function appendVoiceTranscript(current: string, segment: string): string {
+  if (!segment) return current;
+  if (!current) return segment;
+  return /\s$/.test(current) ? `${current}${segment}` : `${current} ${segment}`;
 }
 
 /** A single paste-as-chip attachment: label + preview (hover `title`, click-to-expand) + remove,
@@ -309,6 +320,9 @@ export const Composer = ({
   agent,
   placeholder,
   focusKey,
+  voiceCallEnabled = false,
+  voiceCallActive = false,
+  onStartVoiceCall,
 }: {
   tasks: Task[];
   suggestionChips: SuggestionChip[];
@@ -329,6 +343,15 @@ export const Composer = ({
   /** Changing this value refocuses the composer — used to snap focus onto the box the instant a
    *  new pending request appears, without stomping whatever the operator is mid-typing. */
   focusKey?: string | number;
+  /** webapp-voice-lane concern 08: `GET /api/voice/config`'s `{enabled}`, read by `AssistantChat`
+   *  via `useVoiceCall()` — `VoiceCallButton` itself renders nothing when this is false. */
+  voiceCallEnabled?: boolean;
+  /** A voice call (for any session) is already live — disables (doesn't hide) the button. */
+  voiceCallActive?: boolean;
+  /** Pins a new call to THIS composer's active session at click time. Absent when there's no
+   *  active session to pin to (`AssistantChat`'s session-list screen never renders a `Composer`
+   *  at all, so this is only ever absent defensively). */
+  onStartVoiceCall?: () => void;
 }) => {
   const [input, setInput] = useState('');
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -360,6 +383,46 @@ export const Composer = ({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Voice input (chained STT): browser Web Speech API transcribes into `input` — reviewed then
+  // sent like any typed draft, never auto-sent. `speechSupported` gates the button itself rather
+  // than being re-checked on click, so an unsupported browser sees a disabled button with an
+  // honest tooltip instead of a click that silently does nothing (the exact defect that got the
+  // previous mic button removed as a "misleading no-op").
+  const speechSupported = isSpeechRecognitionSupported();
+  const [isListening, setIsListening] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  // Latched once the browser reports 'not-allowed' — a denied mic permission doesn't clear itself
+  // mid-session, so re-clicking the button would just re-fail with the same error forever. Disabling
+  // it for the rest of this mount is the honest state instead of an infinite click-fail loop.
+  const [voiceDenied, setVoiceDenied] = useState(false);
+  const voiceSessionRef = useRef<VoiceInputSession | null>(null);
+
+  useEffect(() => () => { voiceSessionRef.current?.abort(); }, []); // stop listening on unmount
+
+  const toggleVoiceInput = () => {
+    if (isListening) {
+      voiceSessionRef.current?.abort();
+      return;
+    }
+    setVoiceError(null);
+    const session = startVoiceInput({
+      continuous: true, // chained: keep listening across multiple sentences until toggled off
+      onListeningChange: setIsListening,
+      onTranscript: (text) => setInput((prev) => appendVoiceTranscript(prev, text)),
+      onError: (info) => {
+        setVoiceError(info.message);
+        if (info.code === 'not-allowed') setVoiceDenied(true);
+      },
+    });
+    if (!session) {
+      // Support can vanish between render and click (isSpeechRecognitionSupported() gates the
+      // button, but a race — or a skipped check — must never look like a silent no-op).
+      setVoiceError("Voice input isn't available right now — try again or type instead.");
+      return;
+    }
+    voiceSessionRef.current = session;
+  };
 
   const addImageFromSource = async (source: Blob | string) => {
     try {
@@ -644,6 +707,12 @@ export const Composer = ({
           </div>
         )}
 
+        {voiceError && (
+          <div className="px-2.5 pt-2 text-[11px] text-red-600 dark:text-red-400" role="alert">
+            {voiceError}
+          </div>
+        )}
+
         <textarea
           ref={composerTextareaRef}
           value={input}
@@ -689,6 +758,27 @@ export const Composer = ({
             >
               {isCapturing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Camera className="h-4 w-4" aria-hidden />}
             </button>
+            <button
+              type="button"
+              aria-label="Voice input"
+              title={
+                voiceDenied
+                  ? 'Microphone access was denied — allow it in your browser settings to use voice input'
+                  : speechSupported
+                    ? "Voice input — your browser may send audio to its speech-recognition service to transcribe it (Chrome does)"
+                    : "Voice input isn't supported in this browser"
+              }
+              disabled={!speechSupported || voiceDenied}
+              onClick={toggleVoiceInput}
+              className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
+                isListening
+                  ? 'bg-red-100 text-red-500 dark:bg-red-900/30'
+                  : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+              }`}
+            >
+              <Mic className="h-4 w-4" aria-hidden />
+            </button>
+            <VoiceCallButton enabled={voiceCallEnabled} active={voiceCallActive} onStart={() => onStartVoiceCall?.()} />
           </div>
           <ComposerSendButton
             isStopShown={isStopShown}

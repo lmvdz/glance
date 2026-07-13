@@ -36,6 +36,36 @@ test("accepts every scalar variant and preserves fields", () => {
 	expect(ok({ type: "set-mode", id: "a", mode: "observe", reason: "paused" })).toEqual({ type: "set-mode", id: "a", mode: "observe", reason: "paused" });
 });
 
+test("source: retained when present on a mutating variant, absent otherwise (no null pollution)", () => {
+	// concern 03: a voice-originated command must be distinguishable from a typed one in
+	// audit.jsonl. `Schema.Struct` strips unknown keys, so without an explicit `source` field on
+	// each mutating variant's schema this tag would be silently dropped right here.
+	const decoded = ok({ type: "prompt", id: "x", message: "m", source: "voice" });
+	expect(decoded).toEqual({ type: "prompt", id: "x", message: "m", source: "voice" });
+	expect((decoded as { source?: string }).source).toBe("voice");
+
+	// A frame without `source` behaves exactly as before: no key appears at all (not `source: null`
+	// or `source: undefined` leaking into the decoded object).
+	const noSource = ok({ type: "prompt", id: "x", message: "m" }) as Record<string, unknown>;
+	expect("source" in noSource).toBe(false);
+
+	expect(ok({ type: "interrupt", id: "a", source: "composer" })).toEqual({ type: "interrupt", id: "a", source: "composer" });
+	expect(ok({ type: "interrupt", id: "a" })).toEqual({ type: "interrupt", id: "a" });
+
+	const commissionSpec = { name: "x", purpose: "y" };
+	expect(ok({ type: "commission", spec: commissionSpec, source: "voice" })).toEqual({ type: "commission", spec: commissionSpec, source: "voice" });
+
+	expect(ok({ type: "create", options: { repo: "/r" }, source: "voice" })).toEqual({ type: "create", options: { repo: "/r" }, source: "voice" });
+
+	// source stays an open string (not a closed literal union) — anything unexpected still decodes.
+	expect(ok({ type: "prompt", id: "x", message: "m", source: "some-future-surface" })).toEqual({
+		type: "prompt",
+		id: "x",
+		message: "m",
+		source: "some-future-surface",
+	});
+});
+
 test("create: a realistic full options payload decodes and preserves every modeled field", () => {
 	const options = {
 		repo: "/r",
@@ -153,6 +183,7 @@ test("rejects missing / mistyped required fields", () => {
 	expect(rejected({ type: "fork", id: "a", seq: "3" })).toBe(true); // seq not a number
 	expect(rejected({ type: "create" })).toBe(true); // no options
 	expect(rejected({ type: "commission" })).toBe(true); // no spec
+	expect(rejected({ type: "prompt", id: "a", message: "hi", source: 5 })).toBe(true); // source must be a string
 });
 
 test("rejects set-mode with an out-of-range autonomy mode", () => {

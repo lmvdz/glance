@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   buildTranscriptRenderEntries,
@@ -13,7 +13,7 @@ import {
   type Message,
 } from "./AssistantChat";
 import { AgentLandControls, AgentMetaBar } from "./chat/AgentMetaBar";
-import { ComposerSendButton } from "./chat/Composer";
+import { Composer, ComposerSendButton } from "./chat/Composer";
 import { ComposerStats } from "./chat/AgentMetaBar";
 import { DiffReviewPanel } from "./chat/DiffReviewPanel";
 import { GateWidget } from "./chat/GateWidget";
@@ -21,6 +21,25 @@ import { RunStatusHeader, TranscriptEntryView, TranscriptTimeline, runStatusLabe
 import { TodoPanel } from "./chat/TodoPanel";
 import { ScrollToLatestPill } from "./chat/ScrollToLatestPill";
 import type { AgentDTO, PendingRequest, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
+
+const originalWindow = (globalThis as any).window;
+
+afterEach(() => {
+  Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+});
+
+const composerBaseProps = {
+  tasks: [],
+  suggestionChips: [],
+  isLoading: false,
+  isStopShown: false,
+  stopPending: false,
+  onStop: () => {},
+  onSend: () => {},
+  selectedModel: "",
+  modelOptions: [],
+  onModelChange: () => {},
+} as const;
 
 test("TranscriptEntryView renders human-first tool output with raw payload tucked away", () => {
   const entry: TranscriptEntry = {
@@ -424,6 +443,12 @@ test("ComposerSendButton swaps to a stop affordance while the agent is running, 
   expect(pending).toContain("disabled");
 });
 
+test("ComposerSendButton's own rendered subtree carries no attach/mic decoration (those live on Composer itself, not the send/stop control)", () => {
+  const html = renderToStaticMarkup(<ComposerSendButton isStopShown={false} stopPending={false} canSend={false} onSend={() => {}} onStop={() => {}} />);
+  expect(html).not.toContain('aria-label="Attach file"');
+  expect(html).not.toContain('aria-label="Voice input"');
+});
+
 test("ChatMessagesViewport's scroll container is an announced log region, aria-busy while a real transcript entry is running, while a send is loading, or while a pendingSend is in flight (review finding 2 — these are computed separately from the work-fold's own running)", () => {
   const runningEntries: TranscriptEntry[] = [{ id: "e1", kind: "assistant", text: "working…", ts: 1, status: "running" }];
   const settledEntries: TranscriptEntry[] = [{ id: "e2", kind: "assistant", text: "done", ts: 1, status: "ok" }];
@@ -525,12 +550,27 @@ test("TranscriptTimeline stamps data-kind=\"tool\" on a collapsed tool-call grou
   expect(html).toContain('data-status="running"');
 });
 
-test("attach and mic buttons are gone from the composer's rendered subtree (no more misleading no-ops)", () => {
-  // The composer's send/stop control no longer ships alongside decorative attach/mic buttons;
-  // ComposerSendButton is the sole action rendered in that slot.
-  const html = renderToStaticMarkup(<ComposerSendButton isStopShown={false} stopPending={false} canSend={false} onSend={() => {}} onStop={() => {}} />);
-  expect(html).not.toContain('aria-label="Attach file"');
-  expect(html).not.toContain('aria-label="Voice input"');
+test("Composer renders a real, enabled mic button when the browser supports speech recognition (the mic revival — chained STT input, not the old no-op)", () => {
+  // This suite is renderToStaticMarkup-only (no jsdom) — this test asserts presence + enabled
+  // state on the rendered markup; the actual listening/transcription/error-handling behavior is
+  // covered by the unit tests in lib/voice/speech.test.ts.
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { SpeechRecognition: class {} } });
+  const html = renderToStaticMarkup(<Composer {...composerBaseProps} />);
+  const micButton = html.match(/<button[^>]*aria-label="Voice input"[^>]*>/);
+  expect(micButton).not.toBeNull();
+  // Checks the rendered `disabled=""` boolean attribute, not the `disabled:opacity-40` Tailwind
+  // variant that's always present in the className regardless of state.
+  expect(micButton![0]).not.toMatch(/\sdisabled="/);
+});
+
+test("Composer's mic button is disabled with an honest tooltip when the browser has no speech recognition support", () => {
+  Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
+  const html = renderToStaticMarkup(<Composer {...composerBaseProps} />);
+  const micButton = html.match(/<button[^>]*aria-label="Voice input"[^>]*>/);
+  expect(micButton).not.toBeNull();
+  expect(micButton![0]).toMatch(/\sdisabled="/);
+  expect(html).toContain("Voice input isn");
+  expect(html).toContain("supported in this browser");
 });
 
 test("a running assistant entry with an unclosed table header holds it back until the separator arrives", () => {
@@ -734,6 +774,57 @@ test("clearEchoedPendingSends does NOT clear a pending send when a gate answer e
   const next = clearEchoedPendingSends(pendingSends, transcriptEntries);
   expect(next).toHaveLength(1);
   expect(next[0]?.clientTurnId).toBe("turn-a");
+});
+
+// ── MAJOR-2: voice-authored spoken summaries must not double-render or render as the wrong speaker ──
+
+test("partitionSessionMessages: a voice prompt persisted as role:'user' with the dispatch's clientTurnId is covered by the matching transcript echo — renders once, as the USER, not a model bubble (MAJOR-2a)", () => {
+  const messages: Message[] = [{ role: "user", text: "check the fleet status", timestamp: 5, clientTurnId: "voice:1" }];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "user", text: "check the fleet status", ts: 6, status: "ok", clientTurnId: "voice:1" },
+  ];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries).toHaveLength(1);
+  expect(entries[0]!.kind).toBe("user"); // not "assistant" — the wrong-speaker bug this fixes
+  expect(trailingEntries).toEqual([]);
+});
+
+test("partitionSessionMessages: a persisted voice completion summary (role:'model') that exactly matches a FINISHED assistant transcript entry is suppressed — no double-render (MAJOR-2b)", () => {
+  const messages: Message[] = [{ role: "model", text: "Fixed the flaky test and pushed.", timestamp: 10 }];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "assistant", text: "Fixed the flaky test and pushed.", ts: 5, status: "ok" },
+  ];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  expect(entries.map((e) => e.text)).toEqual(["Fixed the flaky test and pushed."]);
+  expect(trailingEntries).toEqual([]); // NOT rendered a second time as a trailing durable Message
+});
+
+test("partitionSessionMessages: a role:'model' message is NOT covered by a still-running assistant entry, even with identical text (MAJOR-2b: only a FINISHED entry counts as an echo)", () => {
+  const messages: Message[] = [{ role: "model", text: "still thinking", timestamp: 10 }];
+  const transcriptEntries: TranscriptEntry[] = [
+    { id: "t1", kind: "assistant", text: "still thinking", ts: 5, status: "running" },
+  ];
+
+  const { trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  // Uncovered (the running entry doesn't count) and newer than the transcript's only entry ->
+  // trailing, same as any other uncovered model message.
+  expect(trailingEntries.map((e) => e.text)).toEqual(["still thinking"]);
+});
+
+test("partitionSessionMessages: two role:'model' messages with the same text each consume their OWN finished assistant entry (consumed-once, not double-matched against a single entry)", () => {
+  const messages: Message[] = [
+    { role: "model", text: "done", timestamp: 10 },
+    { role: "model", text: "done", timestamp: 20 },
+  ];
+  const transcriptEntries: TranscriptEntry[] = [{ id: "t1", kind: "assistant", text: "done", ts: 5, status: "ok" }];
+
+  const { entries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, []);
+  // Only ONE "done" transcript entry exists — it covers the first message; the second is
+  // genuinely uncovered and renders trailing (not silently dropped).
+  expect(entries.map((e) => e.text)).toEqual(["done"]);
+  expect(trailingEntries.map((e) => e.text)).toEqual(["done"]);
 });
 
 test("clearEchoedPendingSends ignores non-user-kind entries even if they somehow share a clientTurnId", () => {

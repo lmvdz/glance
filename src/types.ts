@@ -1388,24 +1388,31 @@ export interface AuditEntry {
 	outcome: "ok" | "error";
 	/** Optional human-readable detail (truncated message, error text). */
 	detail?: string;
+	/** Optional provenance tag ("voice" | "composer", kept as an open string) carried from the
+	 *  originating ClientCommand — observability-only, never consulted for authz/tier decisions. */
+	source?: string;
 }
 
 // ── Surface → manager commands ──────────────────────────────────────────────
 
 export type ClientCommand =
-	| { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string }
+	// `source` (intended values "voice" | "composer", kept as an open string) is observability-only —
+	// it rides along to the audit trail so a voice-originated command is distinguishable from a typed
+	// one in audit.jsonl, and must never influence authz/tier decisions (see authz.ts). Threaded on the
+	// mutating variants only.
+	| { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string; source?: string }
 	| { type: "set-model"; id: string; model: string }
 	| { type: "answer"; id: string; requestId: string; value: string }
-	| { type: "interrupt"; id: string }
+	| { type: "interrupt"; id: string; source?: string }
 	| { type: "kill"; id: string }
 	| { type: "restart"; id: string }
 	| { type: "fork"; id: string; seq?: number }
 	| { type: "remove"; id: string; deleteWorktree?: boolean }
-	| { type: "create"; options: CreateAgentOptions }
+	| { type: "create"; options: CreateAgentOptions; source?: string }
 	| { type: "message"; to: string; text: string }
 	| { type: "snapshot" } // request a full roster + recent transcript replay
 	| { type: "subscribe"; id: string } // ask for transcript replay of one agent
-	| { type: "commission"; spec: CommissionSpec }
+	| { type: "commission"; spec: CommissionSpec; source?: string }
 	| { type: "set-mode"; id: string; mode: AutonomyMode; reason?: string }
 	| { type: "notify"; id: string; summary: string; detail?: string };
 

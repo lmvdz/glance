@@ -68,6 +68,7 @@ import {
 	AskBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
+	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
@@ -105,6 +106,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { hasAnyVoiceKey, isKnownVoiceProvider, mintVoiceToken, voiceConnectSrcOrigins, voiceProviderApiKey, voiceProviderPublicInfo } from "./voice-token.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -388,11 +390,16 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
 
 // ponytail: 'unsafe-inline' is forced by the single-file inline-script/style SPA;
 // connect-src 'self' is the compensating control (blocks token exfil to other origins).
-/** Security response headers stamped on every dashboard + API response (finding F-3). */
+/** Security response headers stamped on every dashboard + API response (finding F-3).
+ *  Voice (webapp-voice-lane): the ONLY sanctioned widening of `connect-src` — the keyed provider's
+ *  origin, and only while the lane is armed (flag AND key). Every other daemon keeps the tight
+ *  exfil-blocking default. Read per-call so a flag flip doesn't need a restart to tighten back. */
 export function securityHeaders(): Record<string, string> {
+	const voiceOrigins = envBool("OMP_SQUAD_VOICE_ENABLED", false) ? voiceConnectSrcOrigins() : [];
+	const connectSrc = ["'self'", ...voiceOrigins].join(" ");
 	return {
 		"Content-Security-Policy":
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+			`default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src ${connectSrc}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
 		"X-Content-Type-Options": "nosniff",
 		"X-Frame-Options": "DENY",
 		"Referrer-Policy": "no-referrer",
@@ -402,6 +409,28 @@ export function securityHeaders(): Record<string, string> {
 /** True if a socket peer address is loopback (IPv4, IPv6, or IPv4-mapped). */
 function isLoopbackAddr(ip: string): boolean {
 	return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+const VOICE_MINT_RATE_DEFAULT_PER_MIN = 6;
+let voiceMintRateLimitWarned = false;
+
+/** OMP_SQUAD_VOICE_MINT_RATE_PER_MIN is the ONLY spend brake on voice mint (audio never transits
+ *  the daemon, so the mint count is the daemon's only signal). `envInt` faithfully returns a
+ *  configured `0` or negative value rather than silently substituting the default — correct for
+ *  every OTHER env reader, but here a non-positive value must never be read as "unlimited": that's
+ *  the same absence-as-success shape as an empty array meaning "nothing to report" (the audit
+ *  gauntlet's naming). Clamp to the default and warn once (not on every request) so a misconfigured
+ *  `0` can't silently remove the only cap on cost abuse. */
+function resolveVoiceMintRatePerMin(): number {
+	const configured = envInt("OMP_SQUAD_VOICE_MINT_RATE_PER_MIN", VOICE_MINT_RATE_DEFAULT_PER_MIN);
+	if (configured > 0) return configured;
+	if (!voiceMintRateLimitWarned) {
+		voiceMintRateLimitWarned = true;
+		console.warn(
+			`[server] OMP_SQUAD_VOICE_MINT_RATE_PER_MIN="${configured}" is not a positive rate — the voice mint cap cannot be disabled this way; falling back to the default (${VOICE_MINT_RATE_DEFAULT_PER_MIN}/min)`,
+		);
+	}
+	return VOICE_MINT_RATE_DEFAULT_PER_MIN;
 }
 
 export class SquadServer {
@@ -447,6 +476,10 @@ export class SquadServer {
 	private readonly trustedOrigins: Set<string>;
 	/** ponytail: in-process public intake limiter; restart resets it, campaign token + origin + byte caps are the real controls. */
 	private readonly feedbackRate = new Map<string, { minute: number; count: number }>();
+	/** Per-actor voice mint rate cap (webapp-voice-lane/05): audio never transits the daemon, so the
+	 *  mint count is the daemon's ONLY spend signal — this cap is load-bearing, not hygiene. Restart
+	 *  resets it, same ponytail as `feedbackRate` above. */
+	private readonly voiceMintRate = new Map<string, { minute: number; count: number }>();
 
 	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
 		this.singleManager = manager;
@@ -515,6 +548,22 @@ export class SquadServer {
 		const rec = this.feedbackRate.get(key);
 		if (!rec || rec.minute !== minute) {
 			this.feedbackRate.set(key, { minute, count: 1 });
+			return true;
+		}
+		rec.count++;
+		return rec.count <= limit;
+	}
+
+	/** Per-actor mint rate cap (webapp-voice-lane/05), mirroring `feedbackRateAllowed`'s shape exactly
+	 *  but keyed by `actor.id` (not IP) — voice mint is authenticated, so the actor identity is the
+	 *  natural per-caller bucket, same as everywhere else RBAC-scoped state is keyed. */
+	private voiceMintRateAllowed(actor: Actor): boolean {
+		const limit = resolveVoiceMintRatePerMin();
+		const minute = Math.floor(Date.now() / 60_000);
+		const key = actor.id || "unknown";
+		const rec = this.voiceMintRate.get(key);
+		if (!rec || rec.minute !== minute) {
+			this.voiceMintRate.set(key, { minute, count: 1 });
 			return true;
 		}
 		rec.count++;
@@ -1248,6 +1297,68 @@ export class SquadServer {
 					? { ...actorForRole(role), orgId }
 					: actorForRole(role);
 		const manager = await this.managerFor(actor);
+		// Voice token mint + capability probe (webapp-voice-lane/05, DESIGN.md "Token mint" row).
+		// Deliberately placed BEFORE the `!manager` gate below: minting is independent of any specific
+		// fleet manager, and the DB-mode refusal must fire even for a DB-mode session with no active
+		// org (which would otherwise hit `noFleet` first and never see the real reason). Both routes
+		// are gated by `restActionTier`'s existing default (GET=viewer/POST=operator for `/api/voice/*`,
+		// pinned by a regression test) — no new authz branch.
+		if (url.pathname === "/api/voice/config" && req.method === "GET") {
+			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
+			// MEDIUM-4: POST /api/voice/token 403s in DB mode (no per-org attribution/budget in v1)
+			// and 501s when no provider key is configured — a flag-on daemon in either shape would
+			// otherwise advertise {enabled:true} and show a voice button that dies at the very first
+			// mint attempt (the "old mic scar" this capability probe exists to prevent). Fold both
+			// into the SAME honest signal the flag represents, for every role tier, before any
+			// provider-posture detail is even considered.
+			if (this.dbMode || !hasAnyVoiceKey()) return Response.json({ enabled: false });
+			// Viewer tier gets the bare capability probe only — provider posture (which keys are
+			// configured) is never leaked below operator (DESIGN.md red-team: "leaks provider posture").
+			if (role === "viewer") return Response.json({ enabled: true });
+			return Response.json({ enabled: true, providers: voiceProviderPublicInfo() });
+		}
+		if (url.pathname === "/api/voice/token" && req.method === "POST") {
+			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
+			// A single shared provider key with no per-org attribution or budget is the uncapped-shared-
+			// dollar shape (DESIGN.md "Token mint" row) — refuse outright in DB/org mode rather than
+			// silently pooling spend across tenants. `dbMode` is `!!this.auth`, true regardless of
+			// whether this particular session resolved an org/manager.
+			if (this.dbMode) return new Response("voice token mint is unavailable in multi-tenant (DB) mode in v1 — file mode only", { status: 403 });
+			// Per-actor mint rate cap: audio never transits the daemon, so the mint count is the ONLY
+			// spend signal the daemon has — this cap is load-bearing, not hygiene (DESIGN.md).
+			if (!this.voiceMintRateAllowed(actor)) return new Response("rate limited", { status: 429 });
+			// A genuinely-empty body (nothing sent) is a lenient default-to-openai case, same as every
+			// other `decodeBodyOrEmpty` endpoint. But `req.json().catch(() => null)` used to collapse a
+			// body that WAS sent but is malformed/unparseable into that exact same `null` — silently
+			// minting a cost-bearing default-provider token off a request that was actually broken. Read
+			// the raw text first so "nothing sent" and "sent but broken" are distinguishable: only the
+			// former may fall through to the empty-body default.
+			const rawBody = await req.text();
+			let bodyJson: unknown = null;
+			if (rawBody.trim().length > 0) {
+				try {
+					bodyJson = JSON.parse(rawBody);
+				} catch {
+					return new Response("malformed request body", { status: 400 });
+				}
+			}
+			const decoded = decodeBody(VoiceTokenBodySchema, bodyJson);
+			if (rawBody.trim().length > 0 && Result.isFailure(decoded)) {
+				// Valid JSON but not struct-shaped (e.g. a bare string/array/number) — still a body that
+				// was sent and is invalid, not a legitimately-absent one.
+				return new Response("invalid voice token request body", { status: 400 });
+			}
+			const body = Result.isSuccess(decoded) ? decoded.success : ({} as { provider?: unknown });
+			const providerId = typeof body.provider === "string" && body.provider ? body.provider : "openai";
+			// Mint via the SAME trimmed key `hasAnyVoiceKey`/`voiceProviderApiKey`/`GET /api/voice/config`
+			// already read — a newline/space-padded env value used to make the config probe advertise
+			// `enabled:true` while every mint 502s against the untrimmed, invalid key (config-honesty and
+			// mint disagreeing on the same env var).
+			const apiKey = isKnownVoiceProvider(providerId) ? voiceProviderApiKey(providerId) : undefined;
+			const result = await mintVoiceToken(providerId, apiKey);
+			if (!result.ok) return new Response(result.message, { status: result.status });
+			return Response.json(result.token);
+		}
 		// Seed identity for features created this request: a real signed-in user's `db:<userId>` when
 		// there's a session, else undefined ⇒ the manager falls back to its own operator identity
 		// (file mode, or an on-box bootstrap admin with no session). Never seeds a role-derived id.
@@ -1825,6 +1936,9 @@ export class SquadServer {
 			const prompt = Result.isSuccess(decoded) ? decoded.success.prompt.trim() : "";
 			if (prompt.length === 0) return new Response("empty prompt", { status: 400 });
 			const profileId = Result.isSuccess(decoded) && typeof decoded.success.profileId === "string" ? decoded.success.profileId : undefined;
+			// Observability-only provenance (e.g. "voice") threaded to recordAudit/audit.jsonl —
+			// contain-or-omit, same as every other `source` in audit.ts: never consulted for authz.
+			const source = Result.isSuccess(decoded) && typeof decoded.success.source === "string" ? decoded.success.source : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -1834,7 +1948,7 @@ export class SquadServer {
 			const scoreboard = envBool("OMP_SQUAD_MODEL_OUTCOMES", false) ? await manager.spawnScoreboard() : undefined;
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked), scoreboard });
 			try {
-				const dto = await manager.create({ ...plan, profileId, track: true }, actor);
+				const dto = await manager.create({ ...plan, profileId, track: true }, actor, source);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });

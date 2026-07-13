@@ -328,10 +328,14 @@ export const FederationCommandBodySchema = Schema.Struct({
 	cmd: Schema.optional(Schema.Unknown),
 });
 
-/** POST /api/spawn — `prompt` required (empty-after-trim stays a post-decode check). */
+/** POST /api/spawn — `prompt` required (empty-after-trim stays a post-decode check). `source` is
+ *  optional observability-only provenance (e.g. "voice") threaded to `recordAudit`/audit.jsonl —
+ *  `Schema.Struct` strips unknown keys, so without naming it here a caller-supplied `source` would
+ *  be silently dropped before it ever reached the manager. */
 export const SpawnBodySchema = Schema.Struct({
 	prompt: Schema.String,
 	profileId: Schema.optional(Schema.Unknown),
+	source: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/console — no required field. */
@@ -365,6 +369,13 @@ export const AgentVisionBodySchema = Schema.Struct({
  *  `decodeChatAttachmentDataUrl` — this schema only asserts the envelope shape. */
 export const ChatAttachmentCreateBodySchema = Schema.Struct({
 	dataUrl: Schema.String,
+});
+
+/** POST /api/voice/token — no required field (`provider` defaults to `"openai"` downstream in
+ *  `voice-token.ts`; an unknown provider id 400s post-decode, not here — the SSRF-doctrine closed
+ *  switch lives in `mintVoiceToken`, not in schema validation). */
+export const VoiceTokenBodySchema = Schema.Struct({
+	provider: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/tasks/:id/start — no required field (`repo` falls back to `process.cwd()`). */
