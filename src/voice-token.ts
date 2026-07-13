@@ -92,6 +92,18 @@ export function voiceProviderApiKey(id: VoiceProviderId): string | undefined {
 	return undefined;
 }
 
+/** The browser-facing origins CSP `connect-src` must name for each KEYED provider — the voice
+ *  session POSTs its WebRTC SDP offer to the provider from the BROWSER (audio never transits the
+ *  daemon), so a `connect-src 'self'` webapp cannot place a call at all: the failure is silent and
+ *  happens AFTER a successful mint (live-found 2026-07-13 — every reviewer missed it because
+ *  nothing drove the served page against the real endpoint). Only providers whose key is actually
+ *  configured contribute an origin; an unkeyed provider must not widen the exfil-blocking default. */
+export function voiceConnectSrcOrigins(): string[] {
+	const origins: string[] = [];
+	if (voiceProviderApiKey("openai")) origins.push("https://api.openai.com");
+	return origins;
+}
+
 /** Whether ANY registered voice provider has an API key configured (MEDIUM-4). `GET
  *  /api/voice/config` uses this — alongside the caller's DB-mode check — to decide whether
  *  `enabled` is honestly `true`: `POST /api/voice/token` 403s in DB mode and 501s when no provider

@@ -30,4 +30,23 @@ None.
 
 ## Resolution
 Shipped (commits 921447a, 593bc16, 75e7768). Pure 5-state reducer + DI'd impure shell; both barge-in arbitration rules structural. Audit gauntlet hardened the protocol: tool-ack `response.create` deferred until the wrapping `response.done` (a concurrent create is rejected by the Realtime API), playback resumes after barge-in, comprehensive hot-mic guards, trigger fails closed on absent `response_id`, SDP timeout/abort. Focused re-review PASS'd with a proof that `outstandingResponses ∈ {0,1}`.
-**Live-verification OWED**: the mandatory idle-timeout probe (≥10 min silent session against the real endpoint, which calibrates reconnect) and the real WebRTC SDP/mic/barge-in timing were NOT run (no key). The protocol changes are the conservative-correct shape but need a live pass to confirm — this is the single most important owed check.
+**Live-verification 2026-07-13 (real key, scratch daemon, headless Chrome with fake-mic-from-WAV):**
+- **SHIP-BLOCKER found live and fixed**: the daemon's CSP served `connect-src 'self'`, so the browser
+  could NEVER post the SDP offer to the provider — every call died silently right after a successful
+  mint. Nothing in four reviews caught it because nothing drove the served page against the real
+  endpoint. Fixed in `securityHeaders()`: the keyed provider's origin joins `connect-src` only while
+  `OMP_SQUAD_VOICE_ENABLED` AND a key are both present (`voiceConnectSrcOrigins()`), regression-pinned
+  in both directions (tests/ws-auth.test.ts).
+- **Verified live**: capability probe (`{enabled:true, providers:[openai/webrtc/gpt-realtime-2.1]}`),
+  `POST /api/voice/token` through the real route → 200 + real `ek_`; the `ek_` is ACCEPTED by
+  `POST /v1/realtime/calls` (a malformed probe offer draws `400 invalid_offer`, not 401 — auth and
+  session config are sound).
+- **UX gap found live (open)**: an SDP-phase failure surfaces NO toast and no pill — the button
+  visibly does nothing (instrumented DOM watch caught zero notices across mint→429→data-channel-close).
+  `errorToastMessage`/`onError` covers in-call errors; the pre-live connect path needs the same surface.
+- **Still owed, now blocked on ACCOUNT FUNDING, not code**: the provider answered every real SDP offer
+  `429 insufficient_quota` (the key's OpenAI account has no billing credit). The ≥10-min idle probe,
+  speak→reply, PTT barge-in, and forced re-mint runs need a funded key. NOTE for the idle probe:
+  the client's own MEDIUM-6 spend cap ends a PTT-idle call at 10:00 with a toast — so the probe's
+  question is precisely "does the provider close a silent session BEFORE our own cap fires", and
+  either outcome calibrates reconnect.

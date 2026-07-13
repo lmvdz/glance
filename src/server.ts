@@ -106,7 +106,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { hasAnyVoiceKey, isKnownVoiceProvider, mintVoiceToken, voiceProviderApiKey, voiceProviderPublicInfo } from "./voice-token.ts";
+import { hasAnyVoiceKey, isKnownVoiceProvider, mintVoiceToken, voiceConnectSrcOrigins, voiceProviderApiKey, voiceProviderPublicInfo } from "./voice-token.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -390,11 +390,16 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
 
 // ponytail: 'unsafe-inline' is forced by the single-file inline-script/style SPA;
 // connect-src 'self' is the compensating control (blocks token exfil to other origins).
-/** Security response headers stamped on every dashboard + API response (finding F-3). */
+/** Security response headers stamped on every dashboard + API response (finding F-3).
+ *  Voice (webapp-voice-lane): the ONLY sanctioned widening of `connect-src` — the keyed provider's
+ *  origin, and only while the lane is armed (flag AND key). Every other daemon keeps the tight
+ *  exfil-blocking default. Read per-call so a flag flip doesn't need a restart to tighten back. */
 export function securityHeaders(): Record<string, string> {
+	const voiceOrigins = envBool("OMP_SQUAD_VOICE_ENABLED", false) ? voiceConnectSrcOrigins() : [];
+	const connectSrc = ["'self'", ...voiceOrigins].join(" ");
 	return {
 		"Content-Security-Policy":
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+			`default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src ${connectSrc}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
 		"X-Content-Type-Options": "nosniff",
 		"X-Frame-Options": "DENY",
 		"Referrer-Policy": "no-referrer",

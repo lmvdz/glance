@@ -26,3 +26,27 @@ test("securityHeaders sets the hardening set with an inline-safe, exfil-blocking
 	expect(csp).toContain("connect-src 'self'"); // compensating control: no cross-origin exfil
 	expect(csp).toContain("frame-ancestors 'none'");
 });
+
+// webapp-voice-lane: connect-src names the keyed provider ONLY while the lane is armed — the SDP
+// offer is a browser-origin fetch, so 'self' alone kills every call silently after a good mint
+// (live-found). Both directions pinned: flag+key widens; flag-off or keyless stays tight.
+test("CSP connect-src widens to the voice provider origin only when flag AND key are both present", () => {
+	const stash = { flag: process.env.OMP_SQUAD_VOICE_ENABLED, key: process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY };
+	try {
+		process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+		process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+		expect(securityHeaders()["Content-Security-Policy"]).toContain("connect-src 'self' https://api.openai.com;");
+
+		process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "";
+		expect(securityHeaders()["Content-Security-Policy"]).toContain("connect-src 'self';"); // keyless: tight
+
+		process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
+		process.env.OMP_SQUAD_VOICE_ENABLED = "0";
+		expect(securityHeaders()["Content-Security-Policy"]).toContain("connect-src 'self';"); // flag-off: tight
+	} finally {
+		if (stash.flag === undefined) delete process.env.OMP_SQUAD_VOICE_ENABLED;
+		else process.env.OMP_SQUAD_VOICE_ENABLED = stash.flag;
+		if (stash.key === undefined) delete process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY;
+		else process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = stash.key;
+	}
+});

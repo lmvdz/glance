@@ -50,7 +50,16 @@
 ## Status: v1 EXECUTED (8/8 concerns done; 09 deferred)
 Concerns 01–08 shipped on the branch (commits 5c8fc5f → 75e7768) — full suite green (root 2588, webapp 1116, 0 fail; both typechecks clean). Every concern passed its inline review, then the whole lane went through a 4-reviewer AUDIT gauntlet (native cross-batch + blind-zero-framing + gpt-5.6-sol + grok-4.5) that found 2 confirmed end-to-end breaks (concurrent `response.create`; barge-in muted playback forever) and ~20 trust/spend/resource residuals — all fixed in 593bc16, with a focused re-review (75e7768) of the two critical protocol fixes that PASS'd on a counter-integrity proof.
 
-**⚠️ LIVE-VERIFICATION OWED (the one gap):** no OpenAI key in the build env, so nothing on the provider-direct realtime path was driven live — concerns 05/06/07/08's live-probe steps are unrun. Highest-value owed check: concern 06's ≥10-min idle-timeout probe (calibrates reconnect) + real WebRTC SDP/mic/barge-in timing. The protocol changes are the conservative-correct shape (defer-until-response.done never sends a concurrent create regardless of provider behavior) but a live pass is needed before trusting the lane in production. Run via the scratch-daemon skill with a real `OMP_SQUAD_VOICE_OPENAI_API_KEY`.
+**⚠️ LIVE-VERIFICATION — first live pass ran 2026-07-13** (real key, scratch daemon, headless Chrome
+with fake mic). It found and fixed the lane's actual ship-blocker: **CSP `connect-src 'self'` made
+every call die silently at the SDP fetch, right after a successful mint** — the exact class of defect
+a live pass exists to catch, invisible to all four reviewers because nobody drove the served page.
+Now verified live: capability probe, route-level mint (200 + real `ek_`), and provider-side `ek_`
+acceptance at `/v1/realtime/calls`. **Remaining owed checks are blocked on account funding, not
+code**: every real SDP offer drew `429 insufficient_quota` (the key's OpenAI account has no credit).
+Once funded: concern 06's ≥10-min idle probe (bounded by our own MEDIUM-6 10-min PTT-idle cap — the
+question is which fires first), speak→reply, PTT barge-in, forced re-mint. One new open UX finding:
+a pre-live SDP failure surfaces no toast/pill (details in concern 06's Resolution).
 
 ## Decisions so far
 - [DESIGN.md](DESIGN.md) — browser-executed tools over WebRTC with daemon-minted pinned tokens; async-ack tool contract; voice = mouth/ears only
