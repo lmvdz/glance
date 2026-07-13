@@ -46,14 +46,37 @@ describe("modelLineage", () => {
 			haiku: "claude-haiku-4-5",
 			openai: "gpt-5.5",
 			gemini: "gemini-2.5-pro",
+			xai: "grok-4.5",
 			other: "mistral-large",
 			unknown: "",
 		};
 		const seen = new Set(Object.values(probes).map((m) => modelFamily(m)));
-		expect(seen).toEqual(new Set(["fable", "opus", "sonnet", "haiku", "openai", "gemini", "other", "unknown"]));
+		expect(seen).toEqual(new Set(["fable", "opus", "sonnet", "haiku", "openai", "gemini", "xai", "other", "unknown"]));
 		for (const m of Object.values(probes)) {
-			expect(["anthropic", "openai", "google", "unknown"]).toContain(modelLineage(m));
+			expect(["anthropic", "openai", "google", "xai", "unknown"]).toContain(modelLineage(m));
 		}
+	});
+
+	test("xai/grok: both provider spellings, the bare family, and concrete model ids", () => {
+		// openrouter's catalog ships `x-ai/…`; xAI's first-party spec is `xai/…`. Both are real.
+		expect(modelLineage("x-ai/grok-4.5")).toBe("xai");
+		expect(modelLineage("xai/grok-4.5")).toBe("xai");
+		// bare family name (the family-keyed scoreboard shape) and concrete ids
+		expect(modelLineage("grok")).toBe("xai");
+		expect(modelLineage("grok-4.5")).toBe("xai");
+		expect(modelLineage("grok-composer-2.5-fast")).toBe("xai");
+	});
+
+	test("'grok' is matched as a TOKEN, not a substring — an English verb must not fabricate a vendor", () => {
+		// This family feeds the rate-limit bucket: mis-mapping a vendor routes a unit around its real
+		// provider's cap. `includes("grok")` would have called all of these xAI.
+		expect(modelFamily("ollama/my-grokking-model")).toBe("other");
+		expect(modelLineage("ollama/my-grokking-model")).toBe("unknown");
+		expect(modelLineage("mistral/grokking-experiment")).toBe("unknown");
+		expect(modelLineage("some-grokked-model")).toBe("unknown");
+		// ...while every real xAI id shape still resolves.
+		expect(modelLineage("x-ai/grok-4.5")).toBe("xai");
+		expect(modelLineage("grok_4_5")).toBe("xai"); // underscore is a token boundary too
 	});
 });
 
@@ -62,6 +85,9 @@ describe("harnessLineage", () => {
 		expect(harnessLineage("gemini")).toBe("google");
 		expect(harnessLineage("claude-code")).toBe("anthropic");
 		expect(harnessLineage("codex")).toBe("openai");
+		// grok's CLI serves only xAI models, so the harness name alone is a sound vendor claim.
+		expect(harnessLineage("grok")).toBe("xai");
+		expect(harnessLineage("GROK")).toBe("xai"); // case-insensitive, like the others
 	});
 	test("multi-model runtimes do not imply a vendor", () => {
 		expect(harnessLineage("omp")).toBe("unknown");

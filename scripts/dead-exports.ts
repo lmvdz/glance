@@ -58,8 +58,11 @@ export interface DeadExport {
  *  723 exported function/const-arrow-fn candidates in src/, 6 exempted as src/index.ts CLI handlers,
  *  3 exempted via `@substrate` (isCostReproducible/detectBaselineStaleness/flagEfficiencyRegression —
  *  plans/eap-borrows/00-overview.md's named follow-ups), 219 with no reference outside their own
- *  defining file. */
-export const BASELINE = 219;
+ *  defining file.
+ *  2026-07-13 (grok harness PR): 218 — parseCodexVerdict left the counted-dead list via an honest
+ *  @substrate (exported-for-tests, live caller in-file), and its new grok twin enters exempt the same
+ *  way, so the ceiling tightens by one instead of quietly absorbing a new entry. */
+export const BASELINE = 218;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;

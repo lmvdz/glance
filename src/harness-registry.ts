@@ -52,6 +52,12 @@ export interface HarnessDescriptor {
 	/** ACP-only: the full launch command, e.g. `["gemini","--acp"]`, `["opencode","acp"]`,
 	 *  `["npx","-y","@zed-industries/claude-code-acp"]`. omp-rpc harnesses leave this undefined. */
 	acpCommand?: string[];
+	/** ACP-only: how a pinned model joins the launch argv. The DEFAULT appends `--model <m>` to the end
+	 *  of `acpCommand`, which is right for flag-style entrypoints (`auggie --acp --model m`). It is WRONG
+	 *  for harnesses whose model flag belongs to a PARENT command rather than the ACP subcommand — grok's
+	 *  `--model` is an option of `grok agent`, so `grok agent stdio --model m` dies with "unexpected
+	 *  argument '--model'" (live-verified). Such harnesses override this to place the flag correctly. */
+	acpModelArgv?: (model: string) => string[];
 	/** omp-rpc-only: the approval-flag dialect (omp uses `--approval-mode <mode>`, pi uses
 	 *  `--approve`/`--no-approve`). Kept here so the arg builder never hardcodes per-harness knowledge. */
 	approvalArgs?: (mode: string) => string[];
@@ -188,9 +194,13 @@ export function _resetHarnessTierCacheForTests(): void {
  * plans/research-sirvir/06-degradation-ladder.md) to have any real differentiation to act on. omp/pi/
  * opencode are multi-model runtimes with NO static vendor pin (`harnessLineage` reads "unknown" for
  * all three — see model-lineage.ts), so this stays false until a vendor-pinned ACP harness (claude-code,
- * gemini, codex) is BOTH registered `verified:true` AND distinct from the default harness's lineage.
- * Today none of the three are verified, so this is false and dispatch.ts logs the ladder as inert
- * instead of silently no-oping (the concern's explicit "name it, don't fake it" requirement).
+ * gemini, codex, grok) is BOTH registered `verified:true` AND distinct from the default harness's lineage.
+ *
+ * As of the grok registration (2026-07-09) this is TRUE on a default `omp` fleet: grok is `verified:true`
+ * (live ACP smoke) and pinned to `xai`, which differs from omp's `unknown` baseline. The ladder is
+ * therefore ACTIVE, not inert — dispatch.ts now has a real second subscription lane to pause against,
+ * which is exactly what concern 06 was built for. Removing grok (or flipping it back to `verified:false`)
+ * returns this to false and the ladder to its logged-inert state.
  *
  * VERIFIED-ONLY by contract: `listHarnesses(false)` — the OMP_SQUAD_UNVERIFIED_HARNESS=1 escape hatch
  * (which lets `listHarnesses()`' default surface unverified harnesses on create UIs) must NOT let an
@@ -232,6 +242,20 @@ export function resolveHarness(p: { harness?: string; runtime?: string }): Harne
 	const d = registry.get(name);
 	if (!d) throw new Error(`unknown harness "${name}" — registered: ${[...registry.keys()].join(", ") || "(none)"}`);
 	return d;
+}
+
+/**
+ * The full ACP launch argv for a descriptor, with an optional pinned model folded in. THE one place
+ * that knows how a model joins an ACP command line — call sites must never re-append `--model`
+ * themselves, because the flag's correct POSITION is per-harness (see `acpModelArgv`).
+ *
+ * Returns undefined for non-ACP (omp-rpc) harnesses, which carry no acpCommand.
+ */
+export function resolveAcpCommand(d: HarnessDescriptor, model?: string): string[] | undefined {
+	if (!d.acpCommand) return undefined;
+	if (!model) return [...d.acpCommand];
+	if (d.acpModelArgv) return d.acpModelArgv(model);
+	return [...d.acpCommand, "--model", model];
 }
 
 /**
@@ -358,3 +382,44 @@ registerHarness({ name: "claude-code", protocol: "acp", bin: "npx", acpCommand: 
 /** codex — via the `codex-acp` adapter over `codex app-server`. Adapter is mid-migration between
  *  orgs; pin a version before relying on it. */
 registerHarness({ name: "codex", protocol: "acp", bin: "npx", acpCommand: ["npx", "-y", "@agentclientprotocol/codex-acp"], capabilities: ACP_CAPS, verified: false, note: "adapter mid-migration between orgs — pin a version" });
+
+/**
+ * grok (xAI Grok Build) — native first-party ACP, no adapter: `grok agent stdio`.
+ *
+ * LIVE-VERIFIED 2026-07-09 against grok v0.2.93 (the bar opencode had to clear — a green fake-server
+ * test does not count, see concern 08): `initialize` returns protocolVersion 1 with
+ * `agentCapabilities:{loadSession:true, promptCapabilities:{embeddedContext:true}, mcpCapabilities:
+ * {http:true,sse:true}}`, and `session/new` returns a real sessionId plus `models.availableModels:
+ * [grok-4.5 (500k ctx, supportsReasoningEffort), grok-composer-2.5-fast]`.
+ *
+ * This is glance's FIRST vendor-pinned VERIFIED harness, so it is what flips
+ * `hasSecondVerifiedProviderLane()` true and activates the degradation ladder (see that doc).
+ *
+ * Capabilities are deliberately conservative, matching what the ACP driver actually drives — not what
+ * grok advertises:
+ *  - `resumable:false` even though grok advertises `loadSession:true`, because SquadManager does not
+ *    drive `session/load` yet (identical call to opencode's). Claiming true would feed the reattach
+ *    path an agent it cannot actually restore.
+ *  - `thinking:false` even though grok exposes `supportsReasoningEffort`, because AcpAgentDriver has no
+ *    thinking-level channel to carry it.
+ *  - `contextInjection:"none"`: grok's MCP capabilities are real (http+sse) and are the eventual
+ *    concern-06 route, but we don't wire an MCP context server yet. Named, not faked.
+ *
+ * Auth is a cached token (`grok login` → ~/.grok/auth.json), NOT an env API key — so a spawned unit
+ * inherits the operator's session and no key needs to reach the worktree.
+ */
+registerHarness({
+	name: "grok",
+	protocol: "acp",
+	bin: "grok",
+	acpCommand: ["grok", "agent", "stdio"],
+	// `--model` is an option of `grok agent`, NOT of its `stdio` subcommand: the default trailing-append
+	// would spawn `grok agent stdio --model m`, which exits with "unexpected argument '--model'".
+	// LIVE-VERIFIED both ways (v0.2.93) — the flag must precede the subcommand. Found by an adversarial
+	// cross-lineage review of this very commit; the initial `initialize` smoke passed no model and so
+	// never exercised the argv a modeled unit actually spawns.
+	acpModelArgv: (model) => ["grok", "agent", "--model", model, "stdio"],
+	capabilities: ACP_CAPS,
+	verified: true,
+	note: "native first-party ACP (grok agent stdio); initialize + session/new live-verified; vendor-pinned xai — activates the degradation ladder",
+});

@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -4708,7 +4708,9 @@ export class SquadManager extends EventEmitter {
 			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, appendSystemPrompt: p.appendSystemPrompt, runArgs: p.sandbox.runArgs });
 		}
 		if (harness.protocol === "acp") {
-			const command = harness.acpCommand ? [...harness.acpCommand, ...(p.model ? ["--model", p.model] : [])] : undefined;
+			// The model's argv POSITION is per-harness (grok's --model belongs to `grok agent`, not to its
+			// `stdio` subcommand) — so compose through the registry, never by appending here.
+			const command = resolveAcpCommand(harness, p.model);
 			// ACP has no system-prompt slot, so omp-squad context (fabric primer + tool-grant scoping) is
 			// injected only when the operator opts in (OMP_SQUAD_ACP_CONTEXT=prompt); default "none" runs the
 			// unit UNSCOPED (honest — surfaced via the capability). approvalMode is mapped best-effort to an

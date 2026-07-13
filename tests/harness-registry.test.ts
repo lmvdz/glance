@@ -26,12 +26,14 @@ import {
 	listHarnesses,
 	listHarnessTiers,
 	registerHarness,
+	resolveAcpCommand,
 	resolveBin,
 	resolveHarness,
 	resolveHarnessName,
 	resolveSpawnBin,
 	runtimeToHarness,
 } from "../src/harness-registry.ts";
+import { harnessLineage } from "../src/model-lineage.ts";
 import type { PersistedAgent } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
@@ -286,11 +288,24 @@ function withHarnessOverride<T>(name: string, over: Partial<Parameters<typeof re
 	}
 }
 
-test("hasSecondVerifiedProviderLane: false today — the only vendor-pinned harnesses (claude-code/gemini/codex) are unverified", () => {
+test("hasSecondVerifiedProviderLane: TRUE today — grok is verified and vendor-pinned to xai", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
-	// omp (default), pi, opencode are all verified but multi-model (unknown lineage) — no differentiation.
-	expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+	// grok passed a live ACP smoke (initialize + session/new) and pins to `xai`, which differs from
+	// omp's `unknown` baseline ⇒ the degradation ladder has a real second subscription lane to act on.
+	// This is the assertion that would catch someone silently un-verifying grok and quietly re-inerting
+	// the ladder — the exact class of "system lies about its own state" this registry exists to prevent.
+	expect(hasSecondVerifiedProviderLane("omp")).toBe(true);
+});
+
+test("hasSecondVerifiedProviderLane: false when grok is the only pinned lane and it is unverified", () => {
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
+	// Roll back to the pre-grok world: omp/pi/opencode are verified but multi-model (unknown lineage),
+	// and claude-code/gemini/codex are registered-but-unsmoked ⇒ no differentiation for the ladder.
+	withHarnessOverride("grok", { verified: false }, () => {
+		expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+	});
 });
 
 test("hasSecondVerifiedProviderLane: OMP_SQUAD_UNVERIFIED_HARNESS=1 does NOT fabricate a lane (verified-only contract)", () => {
@@ -298,30 +313,75 @@ test("hasSecondVerifiedProviderLane: OMP_SQUAD_UNVERIFIED_HARNESS=1 does NOT fab
 	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1"; // surfaces unverified harnesses on create UIs...
 	// ...but an unsmoked codex/gemini/claude-code registration is NOT a real second subscription lane:
 	// telling the dispatcher otherwise would trade the fleet-safety freeze for a lane that half-works.
-	expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+	// grok is held unverified here so the ONLY thing that could flip this true is the env escape hatch.
+	withHarnessOverride("grok", { verified: false }, () => {
+		expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+	});
 });
 
 test("hasSecondVerifiedProviderLane: true once a vendor-pinned harness is actually verified and differs from the default", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
 	// Simulate claude-code having passed a live smoke (verified:true) — registry override, restored after.
-	withHarnessOverride("claude-code", { verified: true }, () => {
-		expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // anthropic-pinned lane, distinct from omp's unknown
+	withHarnessOverride("grok", { verified: false }, () => {
+		withHarnessOverride("claude-code", { verified: true }, () => {
+			expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // anthropic-pinned lane, distinct from omp's unknown
+		});
+		expect(hasSecondVerifiedProviderLane("omp")).toBe(false); // override restored — back to the pre-grok world
 	});
-	expect(hasSecondVerifiedProviderLane("omp")).toBe(false); // override restored — back to reality
 });
 
 test("hasSecondVerifiedProviderLane: a vendor-pinned DEFAULT harness needs a genuinely different vendor to count", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
-	withHarnessOverride("claude-code", { verified: true }, () => {
-		// default = claude-code (anthropic); the only other verified vendor-pinned harness is itself ⇒ false.
-		expect(hasSecondVerifiedProviderLane("claude-code")).toBe(false);
-		// A verified GOOGLE lane appears ⇒ genuinely different vendor ⇒ true.
-		withHarnessOverride("gemini", { verified: true }, () => {
-			expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+	withHarnessOverride("grok", { verified: false }, () => {
+		withHarnessOverride("claude-code", { verified: true }, () => {
+			// default = claude-code (anthropic); the only other verified vendor-pinned harness is itself ⇒ false.
+			expect(hasSecondVerifiedProviderLane("claude-code")).toBe(false);
+			// A verified GOOGLE lane appears ⇒ genuinely different vendor ⇒ true.
+			withHarnessOverride("gemini", { verified: true }, () => {
+				expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+			});
 		});
 	});
+});
+
+test("grok: registered as a verified first-party ACP harness pinned to xai", () => {
+	const d = getHarness("grok");
+	expect(d).toBeDefined();
+	expect(d?.protocol).toBe("acp");
+	expect(d?.bin).toBe("grok");
+	expect(d?.acpCommand).toEqual(["grok", "agent", "stdio"]); // no npx adapter — native ACP
+	expect(d?.verified).toBe(true); // live smoke: initialize + session/new (see registry doc)
+	expect(harnessLineage("grok")).toBe("xai");
+	// Capabilities stay conservative: grok ADVERTISES loadSession:true, but SquadManager does not drive
+	// session/load, so claiming resumable would hand the reattach path an agent it cannot restore.
+	expect(d?.capabilities.resumable).toBe(false);
+	expect(d?.capabilities.hostTools).toBe(false);
+	// A verified harness must be offered without the unverified escape hatch.
+	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
+	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
+	expect(listHarnesses().map((h) => h.name)).toContain("grok");
+});
+
+test("resolveAcpCommand: grok's --model precedes the `stdio` subcommand, or the CLI rejects it", () => {
+	// LIVE: `grok agent stdio --model grok-4.5` ⇒ exit with "unexpected argument '--model'".
+	//       `grok agent --model grok-4.5 stdio` ⇒ a real ACP initialize response.
+	// This is the regression guard for that: a modeled grok unit must never be spawned with a trailing
+	// --model. The bug was invisible to the initialize smoke, which passes no model at all.
+	const grok = getHarness("grok")!;
+	expect(resolveAcpCommand(grok, "grok-4.5")).toEqual(["grok", "agent", "--model", "grok-4.5", "stdio"]);
+	expect(resolveAcpCommand(grok, "grok-4.5")).not.toEqual(["grok", "agent", "stdio", "--model", "grok-4.5"]);
+	// No model pinned ⇒ the plain launch command, untouched.
+	expect(resolveAcpCommand(grok, undefined)).toEqual(["grok", "agent", "stdio"]);
+});
+
+test("resolveAcpCommand: the DEFAULT trailing-append still holds for flag-style ACP harnesses", () => {
+	const opencode = getHarness("opencode")!;
+	expect(resolveAcpCommand(opencode, "some-model")).toEqual(["opencode", "acp", "--model", "some-model"]);
+	expect(resolveAcpCommand(opencode, undefined)).toEqual(["opencode", "acp"]);
+	// omp-rpc harnesses carry no acpCommand ⇒ undefined, never a fabricated argv.
+	expect(resolveAcpCommand(getHarness("omp")!, "opus")).toBeUndefined();
 });
 
 // ── honesty tiers (concern 06) ────────────────────────────────────────────────
@@ -402,9 +462,11 @@ test("gate byte-identity: listHarnesses/hasSecondVerifiedProviderLane read only 
 	_resetHarnessTierCacheForTests();
 	listHarnessTiers(); // exercise tier computation first
 	const visible = listHarnesses().map((d) => d.name);
-	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode"]));
+	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode", "grok"]));
 	expect(visible).not.toContain("gemini");
-	expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+	// grok (vendor-pinned xai, verified) is exactly the second provider lane this gate waits for —
+	// registering it flips the ladder live. The tier machinery still must not perturb the inputs.
+	expect(hasSecondVerifiedProviderLane("omp")).toBe(true);
 });
 
 test("globalDefaultHarness honors GLANCE_HARNESS, else omp", () => {
