@@ -41,9 +41,12 @@ Shipped (commits 921447a, 593bc16, 75e7768). Pure 5-state reducer + DI'd impure 
   `POST /api/voice/token` through the real route → 200 + real `ek_`; the `ek_` is ACCEPTED by
   `POST /v1/realtime/calls` (a malformed probe offer draws `400 invalid_offer`, not 401 — auth and
   session config are sound).
-- **UX gap found live (open)**: an SDP-phase failure surfaces NO toast and no pill — the button
-  visibly does nothing (instrumented DOM watch caught zero notices across mint→429→data-channel-close).
-  `errorToastMessage`/`onError` covers in-call errors; the pre-live connect path needs the same surface.
+- **UX gap found live (open)**: an SDP-phase failure surfaces NO visible feedback — the button just
+  does nothing (instrumented 500ms DOM watch caught zero notices across mint→429→data-channel-close,
+  while TaskContext's toasts auto-expire at 3s, well inside the watch). The emit path EXISTS and fires
+  (`voiceSession` onError 'connect-failed' → `showToast(errorToastMessage(...))`), so the break is in
+  toast RENDER scope for the chat surface — likely the toast list isn't mounted on the route/pane the
+  call starts from. Root-cause + fix still open.
 - **Still owed, now blocked on ACCOUNT FUNDING, not code**: the provider answered every real SDP offer
   `429 insufficient_quota` (the key's OpenAI account has no billing credit). The ≥10-min idle probe,
   speak→reply, PTT barge-in, and forced re-mint runs need a funded key. NOTE for the idle probe:
