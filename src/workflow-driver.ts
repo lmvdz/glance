@@ -109,6 +109,24 @@ export function deriveBranchAgentId(runId: string, branchKey: string, nodeId: st
 	return `br-${hash8(`${runId}:${branchKey}`)}-${slug(nodeId, 12)}`;
 }
 
+/**
+ * The RpcAgent options for a workflow's inner thread. Pure + exported so the "the inner agent inherits
+ * the unit's system-prompt context" rule is unit-tested — it silently did not, for every workflow unit.
+ * The tester lineage takes its own model but the SAME context: it must know the spec it is writing a
+ * test for.
+ */
+export function innerAgentOptions(opts: { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string }, role: "coder" | "tester", modelOverride?: string): { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string } {
+	return {
+		id: `${opts.id}-${role === "coder" ? "wf" : "tester"}`,
+		cwd: opts.cwd,
+		model: role === "tester" ? modelOverride : opts.model,
+		approvalMode: opts.approvalMode,
+		thinking: opts.thinking,
+		bin: opts.bin,
+		appendSystemPrompt: opts.appendSystemPrompt,
+	};
+}
+
 /** The fleet capability a workflow uses to fan out parallel branches into real, steerable roster agents. */
 export interface WorkflowFleet {
 	runBranch(spec: BranchSpec): Promise<NodeResult>;
@@ -127,6 +145,14 @@ export interface WorkflowDriverOptions {
 	approvalMode?: ApprovalMode;
 	thinking?: ThinkingLevel;
 	bin?: string;
+	/**
+	 * System-prompt context for the inner agent(s): profile memory, tool grants, the cold-start fabric
+	 * primer, and the authored Tier-2 spec. `WorkflowDriverOptions` had NO such field, so a workflow unit
+	 * — which is what `--verify` and every routed dispatch produce — ran with none of it, while
+	 * `RpcAgent` has supported `--append-system-prompt` all along. The unit that most needed its spec was
+	 * the one guaranteed not to get it. Found by cross-lineage review (gpt-5.6-sol).
+	 */
+	appendSystemPrompt?: string;
 	autonomy?: WorkflowAutonomyMode;
 	sessionId?: string;
 	proof?: WorkflowProofState;
@@ -484,7 +510,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		if (this.inner?.isAlive) return this.inner;
 		const inner = this.opts.createInnerDriver
 			? this.opts.createInnerDriver("coder")
-			: new RpcAgent({ id: `${this.opts.id}-wf`, cwd: this.opts.cwd, model: this.opts.model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking, bin: this.opts.bin });
+			: new RpcAgent(innerAgentOptions(this.opts, "coder"));
 		this.wireInner(inner);
 		this.inner = inner;
 		await inner.start();
@@ -504,7 +530,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		const model = process.env.OMP_SQUAD_TDD_TESTER_MODEL || this.opts.model;
 		const tester = this.opts.createInnerDriver
 			? this.opts.createInnerDriver("tester")
-			: new RpcAgent({ id: `${this.opts.id}-tester`, cwd: this.opts.cwd, model, approvalMode: this.opts.approvalMode, thinking: this.opts.thinking, bin: this.opts.bin });
+			: new RpcAgent(innerAgentOptions(this.opts, "tester", model));
 		this.wireInner(tester, "tester");
 		this.tester = tester;
 		await tester.start();
