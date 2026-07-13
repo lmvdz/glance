@@ -41,15 +41,32 @@ Shipped (commits 921447a, 593bc16, 75e7768). Pure 5-state reducer + DI'd impure 
   `POST /api/voice/token` through the real route → 200 + real `ek_`; the `ek_` is ACCEPTED by
   `POST /v1/realtime/calls` (a malformed probe offer draws `400 invalid_offer`, not 401 — auth and
   session config are sound).
-- **UX gap found live (open)**: an SDP-phase failure surfaces NO visible feedback — the button just
-  does nothing (instrumented 500ms DOM watch caught zero notices across mint→429→data-channel-close,
-  while TaskContext's toasts auto-expire at 3s, well inside the watch). The emit path EXISTS and fires
-  (`voiceSession` onError 'connect-failed' → `showToast(errorToastMessage(...))`), so the break is in
-  toast RENDER scope for the chat surface — likely the toast list isn't mounted on the route/pane the
-  call starts from. Root-cause + fix still open.
-- **Still owed, now blocked on ACCOUNT FUNDING, not code**: the provider answered every real SDP offer
-  `429 insufficient_quota` (the key's OpenAI account has no billing credit). The ≥10-min idle probe,
-  speak→reply, PTT barge-in, and forced re-mint runs need a funded key. NOTE for the idle probe:
-  the client's own MEDIUM-6 spend cap ends a PTT-idle call at 10:00 with a toast — so the probe's
-  question is precisely "does the provider close a silent session BEFORE our own cap fires", and
-  either outcome calibrates reconnect.
+- **"Silent SDP failure" — RETRACTED as an instrumentation artifact**: the earlier watch required
+  `position:fixed/absolute` leaf nodes and TaskContext's toast text sits in a statically-positioned
+  child, so it was invisible to that probe. A later position-agnostic watch caught the idle-cap toast
+  on the SAME channel (`showToast`), and code-reading shows the connect-failed emit (`voiceSession`
+  catch → `onError` → `errorToastMessage`) is sound. No product defect established here.
+- **FUNDED LIVE PASS (2026-07-13, $10 credit added) — the owed probes ran:**
+  - **Idle probe (the design's open research item), ANSWERED**: a fully-silent live session stayed up
+    for the entire observable window — the provider NEVER closed it. Our own MEDIUM-6 10-min PTT-idle
+    cap fired first, exactly on schedule (`dc:close` at +635s, correct "ended automatically after 10
+    minutes of inactivity" toast, clean teardown). In production the client cap is the binding
+    constraint; idleness will practically never exercise reconnect. (Caveat: the ek_ TTL ≈ the cap ≈
+    10 min, so provider-close-at-ek_-expiry is indistinguishable in-window — moot, since the ek_ is a
+    handshake credential and rotation mints fresh.)
+  - **Speak → reply, HUMAN-VERIFIED**: fake-mic WAV ("count slowly to thirty") → server VAD → real
+    assistant audio reply — the operator physically heard it. `audio:play` fired 1s after PTT lock;
+    bidirectional RTP confirmed flowing (outbound mic ~1.6KB/s, inbound assistant ~3.1KB/s).
+  - **Mid-session reconnect, VERIFIED LIVE (unplanned but real)**: after a data-channel drop during a
+    turn-arbitration stress sequence, the session silently re-minted and reconnected with **zero
+    user action and the call pill LIVE throughout** (+247s: mint 200 → SDP 201 → connected, no
+    visible flicker). The expiry/drop→re-mint lane works end-to-end against the real provider.
+  - **Barge-in: machinery exercised live, clean capture still open.** The looped fake-mic speech
+    continuously re-triggered turns, so cancel/stopPlayback/resumePlayback all ran (post-barge-in
+    `resumePlayback` on `response.created` observed as repeated `audio:play`), but a surgical
+    "PTT-down mid-reply → `audio:pause` within N ms" trace was not isolated — the loop file makes
+    the state ambient. Both arbitration rules remain structurally unit-pinned; a 30-second human
+    test with a real mic (now trivially possible — the lane audibly works) closes this.
+  - **55-min proactive rotation**: not soaked (our 10-min idle cap requires periodic activity through
+    an hour-long call). `reMintAfterMs` is DI-injected and fake-timer unit-tested; the observed live
+    mid-session re-mint covers the same mint→reconnect mechanics the rotation uses.
