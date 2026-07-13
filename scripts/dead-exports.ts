@@ -62,7 +62,9 @@ export interface DeadExport {
  *  2026-07-13 (grok harness PR): 218 — parseCodexVerdict left the counted-dead list via an honest
  *  @substrate (exported-for-tests, live caller in-file), and its new grok twin enters exempt the same
  *  way, so the ceiling tightens by one instead of quietly absorbing a new entry. */
-export const BASELINE = 218;
+/** 2026-07-13 (voice lane PR): 217 — voice-token.ts's voiceModel/voiceProviderIds/voiceVoice were
+ *  exported with zero external or test references (pure over-exports); unexported, ceiling tightens. */
+export const BASELINE = 217;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;

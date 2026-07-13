@@ -55,7 +55,7 @@ for (const cfg of Object.values(VOICE_PROVIDERS)) {
 	}
 }
 
-export function voiceProviderIds(): VoiceProviderId[] {
+function voiceProviderIds(): VoiceProviderId[] {
 	return Object.keys(VOICE_PROVIDERS) as VoiceProviderId[];
 }
 
@@ -63,11 +63,11 @@ export function isKnownVoiceProvider(id: string): id is VoiceProviderId {
 	return Object.hasOwn(VOICE_PROVIDERS, id);
 }
 
-export function voiceModel(): string {
+function voiceModel(): string {
 	return process.env.OMP_SQUAD_VOICE_MODEL?.trim() || "gpt-realtime-2.1";
 }
 
-export function voiceVoice(): string {
+function voiceVoice(): string {
 	return process.env.OMP_SQUAD_VOICE_VOICE?.trim() || "marin";
 }
 
