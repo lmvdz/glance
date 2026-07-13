@@ -322,6 +322,17 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
  */
 const LAND_BLOCKED_WARN_COOLDOWN_MS = FACTORY_FRESHNESS_FLOOR_MS - 60_000;
 
+/**
+ * Greppable marker for a membrane-breaker/staleness escalation filed with NO live triggering unit
+ * (`fileMembraneBreakerFinding`'s rec-less arm). Verified investigation (blind-review follow-up,
+ * see the doc comment on `fileMembraneBreakerFinding`): as of this fix there is NO rendered UI
+ * surface — cockpit or graph — that a repo/daemon-scoped automation event with no live `agentId`
+ * reaches. This marker exists so the escalation is still trivially findable by anyone grepping
+ * automation.jsonl, `/api/automation`, or `glance automation --loop land`, until a real
+ * repo-scoped attention surface exists to carry it.
+ */
+export const UNATTACHED_ESCALATION_MARKER = "UNATTACHED-ESCALATION (no live triggering unit — CLI/API only, see automation.jsonl)";
+
 function peerMessageBudget(): number {
 	return envInt("OMP_SQUAD_PEERMSG_BUDGET", 5);
 }
@@ -3019,9 +3030,23 @@ export class SquadManager extends EventEmitter {
 			// in this block.
 			if (membraneProfilesEnabled() && rec.efficiencyFlags?.some((f) => f.startsWith(EFFICIENCY_FLAG_PREFIX))) {
 				const flaggedTaskClass = { mode: rec.options.routing?.mode ?? "unknown", tier: rec.options.routing?.tier ?? "unknown" };
-				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass)
+				const unitId = rec.dto.id;
+				// finding #4: re-resolve liveness at CALLBACK time, not closure-capture time — this cadence
+				// call is fire-and-forget and may resolve well after `unitId` is reaped off `this.agents`
+				// (a reap racing the async I/O). Passing the stale `rec` reference in that case would attach
+				// the attention event to a detached DTO no client's roster still contains; pass `undefined`
+				// instead so `fileMembraneBreakerFinding` skips the pointless attention-lane write and relies
+				// on its unconditional automation-channel write, which is the whole point of that dual-write.
+				const liveRec = () => this.agents.get(unitId);
+				void membraneBreakerCadence(this.stateDir, this.landingRosterRouting(), flaggedTaskClass, {
+					// eap-borrows follow-up (concern 01 DESIGN decision 4): this cadence call is also the one
+					// live site that selects+persists a taskClass's baseline (baseline-tracker.ts). Route a
+					// rotted baseline through the SAME escalation `fileMembraneBreakerFinding` uses below — a
+					// silently-rotting baseline is exactly this repo's signature failure mode.
+					onStaleness: (event) => this.fileMembraneBreakerFinding(liveRec(), dto.repo, event),
+				})
 					.then((event) => {
-						if (event) this.fileMembraneBreakerFinding(rec, dto.repo, event);
+						if (event) this.fileMembraneBreakerFinding(liveRec(), dto.repo, event);
 					})
 					.catch((err) => this.log("warn", `membrane-breaker cadence check failed for ${dto.name} (non-fatal): ${errText(err)}`));
 			}
@@ -3778,30 +3803,64 @@ export class SquadManager extends EventEmitter {
 
 	/**
 	 * Route a membrane-breaker trip — a hard fleet-wide auto-disable of `OMP_SQUAD_MEMBRANE_PROFILES`
-	 * (eap-borrows concern 05) — to where a human actually looks. Dual-write, mirroring how every other
-	 * daemon-scoped escalation in this file records:
+	 * (eap-borrows concern 05) — to where a human actually looks. Also reused verbatim for the
+	 * baseline-tracker's staleness event (concern 01 DESIGN decision 4 follow-up — see the `onStaleness`
+	 * wire-up above): the channel doesn't care what tripped, only that a human sees it. Dual-write,
+	 * mirroring how every other daemon-scoped escalation in this file records:
 	 *   1. The "Needs you" attention lane: attach `event` to `rec.dto.attentionEvents` (the SAME
 	 *      non-blocking channel `squad_attention`/`glance notify` use — squad-manager.ts's `notify`
 	 *      command and `handleAttentionTool`) and `emitAgent(rec)` so it's live-pushed to any connected
-	 *      client. `rec` is the just-landed flagged unit whose land triggered this cadence check.
+	 *      client. `rec` is the flagged unit whose land triggered this cadence check.
 	 *   2. The "land" automation channel (`fileLandBlockedFinding`'s pattern; concern 04's #12 fix uses
 	 *      the equivalent "observer" channel for a gate-unrunnable finding) — surfaces in /api/automation
-	 *      + the automation panel regardless of whether `rec` is still live in `this.agents` by the time
-	 *      this fire-and-forget cadence check resolves (a reap racing the async I/O must not silently
-	 *      swallow a hard auto-disable).
-	 * Never a log line alone — a fleet-wide safety-net trip that only a daemon operator tailing logs
-	 * would ever see defeats the point of having a breaker. Best-effort; never throws.
+	 *      + the automation panel UNCONDITIONALLY, in its own try/catch independent of step 1.
+	 * `rec` is OPTIONAL (blind review follow-up finding #4): the cadence check is fire-and-forget
+	 * (`void membraneBreakerCadence(...).then(...)`), so by the time it resolves the triggering unit may
+	 * already be reaped off `this.agents` — the caller passes `undefined` in that case rather than a
+	 * dangling `AgentRecord` reference that no client's roster still contains (attaching to a detached
+	 * DTO nobody's UI is watching would be indistinguishable from dropping the event). Step 1 is simply
+	 * skipped when `rec` is absent; step 2 (the daemon-scoped automation channel) ALWAYS runs regardless.
+	 *
+	 * HONEST LABEL (2nd round follow-up, blind review): when `rec` is absent, step 2 is — as of today —
+	 * the ONLY place this escalation reaches. It was believed to also surface via the cockpit's
+	 * "Needs you" lane and/or the omp-graph "land" loop node; verified false on both counts:
+	 *   - The Needs-you lane (`attentionItems` in webapp/src/lib/insights.ts) has no daemon/repo-scoped
+	 *     source at all — its `actionItems` fold-in only ever pushes `source: "health"` rows, and the
+	 *     server's `/api/action-items` only ever builds `land`/`error`/`pending` rows FROM a live agent
+	 *     in the roster. An unattached finding has neither.
+	 *   - factory-status.ts's `landBlocked` banner (the one existing repo-scoped warning slot) is
+	 *     hard-coupled to the "land" channel's `skipReason` meaning "a land was refused" — tagging this
+	 *     event that way would misrender as "Fleet cannot land: …" for a condition that has nothing to do
+	 *     with landing. Rejected as dishonest.
+	 *   - The omp-graph "land" loop node is unreachable in the live UI: FleetPulseCanvas only turns a
+	 *     LOOP automation event into a clickable hanging note when it carries `filed`/`spawned` (see
+	 *     `pulse-model.ts`), which no "land"-channel write (this one included) ever sets. The tag `loop:
+	 *     "land"` exists only as event metadata, never as an inspectable/clickable UI element.
+	 * So a rotting baseline or a membrane-breaker trip with no live triggering unit is, right now, only
+	 * findable via `/api/automation`, `glance automation --loop land`, or grepping automation.jsonl — NOT
+	 * "an escalation nobody sees is indistinguishable from no escalation" in the full sense the rest of
+	 * this file achieves elsewhere. Rather than fake a UI render, the detail carries
+	 * `UNATTACHED_ESCALATION_MARKER` so it's trivially greppable until a real repo-scoped attention
+	 * surface exists (tracked as follow-up work, not invented here). Never a log line alone regardless —
+	 * a fleet-wide safety-net trip that only a daemon operator tailing logs would ever see defeats the
+	 * point of having a breaker. Best-effort; never throws.
 	 */
-	private fileMembraneBreakerFinding(rec: AgentRecord, repo: string, event: AttentionEvent): void {
-		try {
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+	private fileMembraneBreakerFinding(rec: AgentRecord | undefined, repo: string, event: AttentionEvent): void {
+		if (rec) {
+			try {
+				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+				this.emitAgent(rec);
+			} catch (err) {
+				this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+			}
 		}
 		try {
-			this.log("warn", `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`);
-			this.automation.for("land", repo)({ durationMs: 0, level: "warn", detail: `${event.summary}${event.detail ? ` — ${event.detail}` : ""}` });
+			const text = `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`;
+			this.log("warn", text);
+			// See the doc comment above: with no live `rec`, this write is the ONLY place the escalation
+			// reaches today — mark it so it's still trivially findable without a UI.
+			const detail = rec ? text : `${UNATTACHED_ESCALATION_MARKER} — ${text}`;
+			this.automation.for("land", repo)({ durationMs: 0, level: "warn", detail });
 		} catch {
 			/* observability must never break the land path */
 		}

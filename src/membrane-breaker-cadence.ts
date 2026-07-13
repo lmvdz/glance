@@ -34,13 +34,19 @@
  * live-roster intersection meant a slow trickle of flagged units that land-then-reap one at a time
  * could NEVER accumulate `MEMBRANE_BREAKER_MIN_UNITS` concurrently live evidence, even with a large
  * total flagged population sitting in history.
+ *
+ * Baseline producer (eap-borrows follow-up, concern 01 DESIGN decision 4): this module is the ONE live
+ * caller of `task-class-matrix.ts`'s baseline-selection contract, so it is also where
+ * `baseline-tracker.ts#selectAndTrackBaseline` persists the selected champion and surfaces staleness —
+ * see that call below and its own module doc.
  */
 
 import { unitEfficiencyFlags, readAllReceipts, EFFICIENCY_FLAG_PREFIX } from "./receipts.ts";
 import { readTaskOutcomes } from "./task-outcomes.ts";
-import { buildTaskClassMatrix, selectBaseline, type DenominatorUnit } from "./omp-graph/task-class-matrix.ts";
+import { buildTaskClassMatrix, type DenominatorUnit } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
 import { runMembraneBreaker, RuntimeSettingsStore } from "./runtime-settings.ts";
+import { selectAndTrackBaseline } from "./baseline-tracker.ts";
 import type { AttentionEvent, RunReceipt } from "./types.ts";
 
 /** Local-only model-key sentinel the flagged cohort is bucketed under so `buildTaskClassMatrix`
@@ -88,7 +94,7 @@ export async function membraneBreakerCadence(
 	stateDir: string,
 	denominatorPopulation: DenominatorUnit[],
 	taskClass: { mode: string; tier: string },
-	opts: { minEdge?: number; minUnits?: number; minSamples?: number; now?: number; store?: RuntimeSettingsStore } = {},
+	opts: { minEdge?: number; minUnits?: number; minSamples?: number; now?: number; store?: RuntimeSettingsStore; onStaleness?: (event: AttentionEvent) => void } = {},
 ): Promise<AttentionEvent | undefined> {
 	const now = opts.now ?? Date.now();
 	const range = { start: now - 30 * DAY_MS, end: now };
@@ -103,8 +109,15 @@ export async function membraneBreakerCadence(
 	const unflaggedPopulation = denominatorPopulation.filter((u) => !flagged.has(u.agentId));
 	const unflaggedRows = rows.filter((r) => !flagged.has(r.agentId));
 	const baselineDoc = buildTaskClassMatrix(unflaggedRows, unflaggedPopulation, range);
-	const baseline = selectBaseline(baselineDoc, tcKey);
-	if (!baseline) return undefined; // no auto-champion for this taskClass yet — nothing to compare against
+	// eap-borrows follow-up (concern 01 DESIGN decision 4): this is the ONE live selection site for a
+	// taskClass's baseline — `selectAndTrackBaseline` (baseline-tracker.ts) wraps the pure `selectBaseline`
+	// with the missing producer: it persists whatever it picks and, when a previously-persisted (or
+	// operator-pinned) baseline has rotted, reports it via `onStaleness` rather than silently swapping to
+	// a new one or comparing against a ghost. A caller that doesn't wire `onStaleness` (e.g. tests that
+	// only care about the membrane trip) simply drops the staleness signal on the floor — never a crash.
+	const { baseline, staleness } = selectAndTrackBaseline(stateDir, baselineDoc, tcKey, { now });
+	for (const event of staleness) opts.onStaleness?.(event);
+	if (!baseline) return undefined; // no auto-champion (or valid pin) for this taskClass yet — nothing to compare against
 
 	// Flagged population: the UNION of the live roster (flagged agentIds still in flight, possibly with
 	// no outcome row yet) and historical task-outcomes rows (flagged agentIds that already landed and
