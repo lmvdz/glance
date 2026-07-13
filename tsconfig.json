@@ -20,5 +20,12 @@
       }
     ]
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    // Type-level DTO conformance (tests/dto-conformance.test-d.ts): a single file, not the whole
+    // tests/ tree — kept out of "src" to live alongside the rest of the test suite, but this repo's
+    // tests/ directory has never been part of the tsc program, so it's named explicitly rather than
+    // widening "include" to "tests" (which would newly type-check ~100 untyped test files at once).
+    "tests/dto-conformance.test-d.ts"
+  ]
 }

@@ -19,6 +19,7 @@
 import type { AgentDTO, TranscriptEntry } from './dto';
 import type { StatusChipTone } from '../components/kit/StatusChip';
 import { attachedImagePromptRef } from './imageAttachment';
+import { isValidatorHeld } from './agent-badges';
 
 /** Mirrors `imageAttachment.ts`'s `attachedImagePromptRef` fence exactly — both sides of this
  *  feature (the outgoing-message writer and this proposal-detector reading it back out of the
@@ -175,6 +176,12 @@ export function spawnCardStatus(agent: AgentDTO | undefined): SpawnCardStatus {
   }
   if (agent.status === 'working' || agent.status === 'starting') return { status: 'working', detail: 'Building the unit…' };
   if (agent.status === 'input') return { status: 'input', detail: 'Waiting on you — open the run to answer.' };
+  if ((agent.verificationState === 'fresh' || agent.landReady) && isValidatorHeld(agent)) {
+    // A vetoed or inconclusive verdict must never read as "ready to land" — the fail-open
+    // isValidatorHeld exists to close (agent-badges.ts). Green proof + a held verdict is a hold,
+    // not a pass.
+    return { status: 'held', tone: 'attention', detail: `Verified, but the validator ${agent.validation?.verdict ?? 'held'} it — open the run to review.` };
+  }
   if (agent.verificationState === 'fresh' || agent.landReady) return { status: 'done', tone: 'success', detail: 'Verified — ready to land.' };
   return { status: agent.status, detail: 'Stopped before opening a PR.' };
 }

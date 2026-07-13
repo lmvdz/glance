@@ -113,6 +113,38 @@ test("autoresolve ON: a resolver that gives up aborts cleanly", async () => {
 	expect(await mainFile(repo)).toBe("main"); // rebase aborted, main intact
 });
 
+// finding #3 (eap-borrows wave 2): the ORIGINAL check only read `stdout.length === 0`, never `code`
+// — a FAILED worktree `git status` (empty stdout on a nonzero exit is common) read as "clean" and let
+// the rebase-based autoresolve proceed straight over whatever live agent WIP the probe couldn't see.
+// Corrupting the WORKTREE's own index (linked worktrees keep a separate index at
+// `.git/worktrees/<name>/index`) makes `git status --porcelain` fail there specifically, without
+// touching the main repo's own git state, so the conflict-abort mechanics upstream still work fine.
+test("finding #3: a git-status PROBE FAILURE in the worktree skips autoresolve (treated as dirty), not attempted as if clean", async () => {
+	process.env.OMP_SQUAD_AUTORESOLVE = "1";
+	const { repo, wt } = await conflictRepo();
+
+	const gitDir = (await new Response(Bun.spawn(["git", "-C", wt, "rev-parse", "--git-dir"], { stdout: "pipe" }).stdout).text()).trim();
+	const absGitDir = path.isAbsolute(gitDir) ? gitDir : path.join(wt, gitDir);
+	await fs.writeFile(path.join(absGitDir, "index"), "garbage garbage garbage\n");
+
+	let resolverCalled = false;
+	const watchResolver: ConflictResolver = async (input) => {
+		resolverCalled = true;
+		return writeResolution(input);
+	};
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true", resolver: watchResolver, reviewer: approve });
+
+	// OLD behavior (fail-open): empty stdout on the failed status read as "clean" ⇒ autoresolve attempted
+	// anyway. NEW behavior: the probe failure is treated as dirty ⇒ autoresolve is skipped entirely, and
+	// the land falls through to the plain conflict refusal (same as autoresolve-off).
+	expect(resolverCalled).toBe(false);
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail ?? "").toContain("merge failed");
+	expect(await mainFile(repo)).toBe("main"); // untouched
+});
+
 test("confirmResolved: a resolved conflict is STAGED, not merged — main untouched, then operator land fast-forwards (OMPSQ-138)", async () => {
 	process.env.OMP_SQUAD_AUTORESOLVE = "1";
 	const { repo, wt } = await conflictRepo();

@@ -79,6 +79,30 @@ test("landAgent still lands cleanly when the main checkout is clean (guard does 
 	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).toContain("y.txt");
 });
 
+// finding #2 (eap-borrows wave 2): the ORIGINAL guard only blocked on `code === 0 && stdout.length >
+// 0` — a git status probe that fails outright (corrupted gitdir, sandbox, permissions) read as
+// "clean" (empty stdout on a nonzero exit is common) and let the land proceed toward the failed-gate
+// rollback path, which could then destroy whatever the probe couldn't see. Corrupting `.git/index`
+// makes `git status --porcelain` fail (nonzero exit) while leaving `rev-parse`/`rev-list` — the OTHER
+// git calls on this path — working, so the test isolates the exact probe this finding hardens.
+test("finding #2: landAgent refuses when the main checkout's git-status PROBE ITSELF fails (not just when it reports dirty)", async () => {
+	const repo = await baseRepo("land-dirty-probe-");
+	const wt = await branchWorktree(repo, "feat-probe", "p.txt");
+	const head0 = await out(repo, "rev-parse", "HEAD");
+
+	await fs.writeFile(path.join(repo, ".git", "index"), "garbage garbage garbage\n");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat-probe", message: "land probe", commitWip: false });
+
+	// OLD behavior (fail-open): this read as clean and merged. NEW behavior: refused, retryable.
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.retryable).toBe(true);
+	expect(res.detail ?? "").toContain("dirty-main");
+	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0);
+	expect((await out(repo, "ls-tree", "-r", "--name-only", "HEAD")).split("\n")).not.toContain("p.txt");
+});
+
 test("landAgent lands despite an untracked file in main (untracked is not destroyed by reset --hard)", async () => {
 	const repo = await baseRepo("land-untracked-");
 	const wt = await branchWorktree(repo, "feat-z", "z.txt");

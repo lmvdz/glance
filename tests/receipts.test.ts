@@ -8,7 +8,8 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { appendReceipt, ingest, readAllReceipts, readReceipts, receiptPath, RunAccumulator } from "../src/receipts.ts";
+import { appendReceipt, confirmDeliveredFlags, ingest, readAllReceipts, readReceipts, receiptPath, RunAccumulator, splitCapabilityTokens, unitEfficiencyFlags } from "../src/receipts.ts";
+import type { RunReceipt } from "../src/types.ts";
 
 const tmps: string[] = [];
 
@@ -179,6 +180,90 @@ test("readReceipts parses a pre-attribution-fix receipt (no model/harness fields
 	expect(back[0].model).toBeUndefined();
 	expect(back[0].harness).toBeUndefined();
 	expect(back[0].agentId).toBe("ag-legacy");
+});
+
+// ── concern 02: delivery-confirmed efficiencyFlags ──────────────────────────────────────────────
+
+test("splitCapabilityTokens: separates membrane:* tokens from real tool grants", () => {
+	const { toolGrants, requested } = splitCapabilityTokens(["read", "membrane:verdict-first", "bash", "membrane:minimal-code"]);
+	expect(toolGrants).toEqual(["read", "bash"]);
+	expect(requested).toEqual(["membrane:verdict-first", "membrane:minimal-code"]);
+});
+
+test("splitCapabilityTokens: an all-tools capabilities array leaves requested undefined (no behavior change)", () => {
+	const { toolGrants, requested } = splitCapabilityTokens(["read", "bash"]);
+	expect(toolGrants).toEqual(["read", "bash"]);
+	expect(requested).toBeUndefined();
+});
+
+test("splitCapabilityTokens: an all-membrane capabilities array leaves toolGrants undefined (isolation)", () => {
+	const { toolGrants, requested } = splitCapabilityTokens(["membrane:verdict-first"]);
+	expect(toolGrants).toBeUndefined();
+	expect(requested).toEqual(["membrane:verdict-first"]);
+});
+
+test("splitCapabilityTokens: undefined/empty capabilities → both undefined", () => {
+	expect(splitCapabilityTokens(undefined)).toEqual({ toolGrants: undefined, requested: undefined });
+	expect(splitCapabilityTokens([])).toEqual({ toolGrants: undefined, requested: undefined });
+});
+
+test("confirmDeliveredFlags: native contextInjection confirms the requested flags", () => {
+	expect(confirmDeliveredFlags(["membrane:verdict-first"], "native")).toEqual(["membrane:verdict-first"]);
+});
+
+test("confirmDeliveredFlags: ACP contextInjection \"none\" drops the request — never a placebo stamp", () => {
+	expect(confirmDeliveredFlags(["membrane:verdict-first"], "none")).toBeUndefined();
+});
+
+test("confirmDeliveredFlags: \"mcp\" contextInjection also does not confirm an appendSystemPrompt-delivered flag", () => {
+	expect(confirmDeliveredFlags(["membrane:verdict-first"], "mcp")).toBeUndefined();
+});
+
+test("confirmDeliveredFlags: nothing requested → undefined regardless of contextInjection", () => {
+	expect(confirmDeliveredFlags(undefined, "native")).toBeUndefined();
+	expect(confirmDeliveredFlags([], "native")).toBeUndefined();
+});
+
+function receipt(overrides: Partial<RunReceipt>): RunReceipt {
+	return { agentId: "unit-1", name: "unit", repo: "/repo", runId: "r", startedAt: 0, status: "idle", toolCalls: 0, toolTally: {}, filesTouched: [], ...overrides };
+}
+
+test("unitEfficiencyFlags: every run confirms the same flag → that flag, no mixed marker", () => {
+	const runs = [receipt({ efficiencyFlags: ["membrane:verdict-first"] }), receipt({ efficiencyFlags: ["membrane:verdict-first"] })];
+	expect(unitEfficiencyFlags(runs)).toEqual(["membrane:verdict-first"]);
+});
+
+test("unitEfficiencyFlags: no run ever had a flag → empty array, not mixed", () => {
+	const runs = [receipt({}), receipt({})];
+	expect(unitEfficiencyFlags(runs)).toEqual([]);
+});
+
+test("unitEfficiencyFlags: a mixed-run unit (one confirmed, one not) gets the mixed marker", () => {
+	const runs = [receipt({ efficiencyFlags: ["membrane:verdict-first"] }), receipt({ efficiencyFlags: undefined })];
+	expect(unitEfficiencyFlags(runs)).toEqual(["mixed"]);
+});
+
+test("unitEfficiencyFlags: two runs confirming DIFFERENT flag sets also get the mixed marker", () => {
+	const runs = [receipt({ efficiencyFlags: ["membrane:verdict-first"] }), receipt({ efficiencyFlags: ["membrane:minimal-code"] })];
+	expect(unitEfficiencyFlags(runs)).toEqual(["mixed"]);
+});
+
+test("unitEfficiencyFlags: no runs → empty array", () => {
+	expect(unitEfficiencyFlags([])).toEqual([]);
+});
+
+test("RunAccumulator: seed.efficiencyFlags rides through snapshot() onto the receipt (native harness)", () => {
+	const acc = new RunAccumulator({ agentId: "ag7", name: "eta", repo: "/repo", efficiencyFlags: ["membrane:verdict-first"] });
+	feed(acc, [{ type: "agent_start" }, { type: "agent_end" }]);
+	acc.finish("idle", []);
+	expect(acc.snapshot().efficiencyFlags).toEqual(["membrane:verdict-first"]);
+});
+
+test("RunAccumulator: an unset seed.efficiencyFlags (ACP-none delivery) leaves the receipt flagless", () => {
+	const acc = new RunAccumulator({ agentId: "ag8", name: "theta", repo: "/repo" });
+	feed(acc, [{ type: "agent_start" }, { type: "agent_end" }]);
+	acc.finish("idle", []);
+	expect(acc.snapshot().efficiencyFlags).toBeUndefined();
 });
 
 test("graceful no-usage case: tokens/costUsd omitted", () => {

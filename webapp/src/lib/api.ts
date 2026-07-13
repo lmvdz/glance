@@ -13,6 +13,15 @@ export function captureToken(): void {
   }
 }
 
+/** Persist a bearer token pasted by the operator (file mode's sign-in). */
+export function setToken(value: string): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, value.trim());
+  } catch {
+    // storage blocked (private mode) — the token lives only for this page's lifetime.
+  }
+}
+
 export function token(): string {
   try {
     return localStorage.getItem(TOKEN_KEY) ?? "";

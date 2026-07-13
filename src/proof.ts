@@ -134,7 +134,11 @@ export function isFresh(proof: Proof | undefined, headOrFingerprint: string | Pr
 	if (head === "" || proof.commit !== head) return false;
 	// Back-compat: old proof records are commit-only, so they are never fresh for a tree-aware gate.
 	if (!proof.tree || !proof.branch || !proof.baseCommit || !proof.repo || !proof.worktree || !proof.commandHash || proof.ttlMs === undefined || proof.dirty) return false;
-	if (!fp) return true;
+	// Fail-closed (eap-borrows finding #14): the string-only path used to short-circuit `true` here,
+	// skipping the TTL check the fingerprint path enforces below — an EXPIRED proof still read as
+	// "fresh" for any string-overload caller (today: boost-only `digestReward`, never a land gate;
+	// tightened anyway so a future caller doesn't inherit a silently-stale freshness check).
+	if (!fp) return Date.now() - proof.ranAt <= proof.ttlMs;
 	if (proof.tree !== fp.tree) return false;
 	if (proof.branch !== fp.branch) return false;
 	if (proof.baseCommit !== fp.baseCommit) return false;

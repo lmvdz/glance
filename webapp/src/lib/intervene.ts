@@ -9,7 +9,7 @@
  */
 
 import type { AgentDTO } from './dto';
-import { isVetoed } from './agent-badges';
+import { isValidatorHeld, isVetoed } from './agent-badges';
 
 export type InterveneTone = 'critical' | 'warn' | 'info' | 'neutral' | 'success';
 
@@ -27,6 +27,9 @@ export function whyStopped(agent: Pick<AgentDTO, 'status' | 'pending' | 'error' 
   if (agent.blockedReason) return { label: `Blocked — ${agent.blockedReason}`, tone: 'critical' };
   if (agent.status === 'input') return { label: 'Awaiting input', tone: 'warn' };
   if (isVetoed(agent)) return { label: 'Validator vetoed the last land — review the change', tone: 'warn' };
+  if (agent.validation?.verdict === 'inconclusive') {
+    return { label: 'Validator diff inconclusive (git fault) — retrying automatically', tone: 'warn' };
+  }
   if (agent.landReady) return { label: 'Ready to land — needs your go', tone: 'success' };
   if (agent.status === 'working') return { label: agent.activity ? `Working — ${agent.activity}` : 'Working', tone: 'info' };
   if (agent.status === 'stopped') return { label: 'Stopped', tone: 'neutral' };
@@ -43,7 +46,7 @@ export type IntervenePrimaryAction = 'answer' | 'steer' | 'restart' | 'land' | '
 export function intervenePrimaryAction(agent: Pick<AgentDTO, 'status' | 'pending' | 'validation' | 'landReady'>): IntervenePrimaryAction {
   if (agent.pending?.length) return 'answer';
   if (agent.status === 'error' || agent.status === 'stopped') return 'restart';
-  if (agent.landReady && !isVetoed(agent)) return 'land';
+  if (agent.landReady && !isValidatorHeld(agent)) return 'land';
   if (agent.status === 'working' || agent.status === 'input' || agent.status === 'idle' || agent.status === 'starting') return 'steer';
   return 'none';
 }

@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { arm, armPath, convergenceDir, disarm, isArmed, oraclePath, readOracle, writeOracle } from "../src/convergence-oracle.ts";
+import { arm, armPath, convergenceDir, disarm, failuresPath, isArmed, oraclePath, readFailures, readOracle, writeFailures, writeOracle } from "../src/convergence-oracle.ts";
 import type { VerifiedState } from "../src/types.ts";
 
 function tmp(): string {
@@ -132,5 +132,49 @@ describe("convergenceDir", () => {
 	test("defaults to resolveStateDir() when no stateDir is passed", () => {
 		// tests/setup.ts pins OMP_SQUAD_STATE_DIR for the whole suite.
 		expect(convergenceDir()).toBe(path.join(process.env.OMP_SQUAD_STATE_DIR!, "convergence"));
+	});
+});
+
+describe("readFailures / writeFailures (eap-borrows finding #16)", () => {
+	test("no sidecar yet ⇒ null (the legitimate baseline turn)", async () => {
+		const dir = tmp();
+		try {
+			expect(await readFailures(dir)).toBeNull();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("round-trips a written failure set", async () => {
+		const dir = tmp();
+		try {
+			await writeFailures(["a.test.ts > x", "b.test.ts > y"], dir);
+			expect(await readFailures(dir)).toEqual(["a.test.ts > x", "b.test.ts > y"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// Reproduce-first: the OLD `readFailures` mapped ANY read/parse error to `null` — INDISTINGUISHABLE
+	// from "no prior turn". A corrupt sidecar silently became this turn's fresh baseline, discarding
+	// whatever real prior failure set the ratchet needed to compare against.
+	test("a corrupt sidecar (bad JSON) THROWS — never silently collapses to the baseline null", async () => {
+		const dir = tmp();
+		try {
+			await Bun.write(failuresPath(dir), "{ not json at all");
+			await expect(readFailures(dir)).rejects.toThrow();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a sidecar that parses but isn't an array THROWS too", async () => {
+		const dir = tmp();
+		try {
+			await Bun.write(failuresPath(dir), JSON.stringify({ not: "an array" }));
+			await expect(readFailures(dir)).rejects.toThrow();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

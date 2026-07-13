@@ -17,15 +17,19 @@ import { RpcAgent } from "../src/rpc-agent.ts";
 import { AcpAgentDriver } from "../src/acp-agent-driver.ts";
 import { SandboxAgentDriver } from "../src/sandbox-agent-driver.ts";
 import {
+	_resetHarnessTierCacheForTests,
 	DEFAULT_HARNESS,
 	getHarness,
 	globalDefaultHarness,
+	harnessTierInfo,
 	hasSecondVerifiedProviderLane,
 	listHarnesses,
+	listHarnessTiers,
 	registerHarness,
 	resolveBin,
 	resolveHarness,
 	resolveHarnessName,
+	resolveSpawnBin,
 	runtimeToHarness,
 } from "../src/harness-registry.ts";
 import type { PersistedAgent } from "../src/types.ts";
@@ -318,6 +322,89 @@ test("hasSecondVerifiedProviderLane: a vendor-pinned DEFAULT harness needs a gen
 			expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
 		});
 	});
+});
+
+// ── honesty tiers (concern 06) ────────────────────────────────────────────────
+
+test("harnessTierInfo truth table: verified×detected 2×2 including the verified-binary-missing alert cell", () => {
+	// omp: verified:true, binary IS on this repo's node_modules/.bin — verified, no alert.
+	const omp = harnessTierInfo(getHarness("omp")!);
+	expect(omp.tier).toBe("verified");
+	expect(omp.verified).toBe(true);
+	expect(omp.binDetected).toBe(true);
+	expect(omp.alert).toBeUndefined();
+
+	// gemini: verified:false, binary absent — registered-unverified, no alert (alert is verified-only).
+	const gemini = harnessTierInfo(getHarness("gemini")!);
+	expect(gemini.tier).toBe("registered-unverified");
+	expect(gemini.verified).toBe(false);
+	expect(gemini.binDetected).toBe(false);
+	expect(gemini.alert).toBeUndefined();
+
+	// detected-unverified: verified:false but the binary happens to resolve (e.g. `bun` is always present).
+	withHarnessOverride("gemini", { verified: false, bin: "bun", acpCommand: ["bun", "--acp"] }, () => {
+		const detected = harnessTierInfo(getHarness("gemini")!);
+		expect(detected.tier).toBe("detected-unverified");
+		expect(detected.binDetected).toBe(true);
+	});
+
+	// the alert cell: verified:true but the binary can't be resolved — a verified harness that will
+	// actually fail to spawn, surfaced loudly instead of reading as a clean "verified" row.
+	withHarnessOverride("gemini", { verified: true, bin: "definitely-not-a-real-binary-xyz", acpCommand: ["definitely-not-a-real-binary-xyz", "--acp"] }, () => {
+		const missing = harnessTierInfo(getHarness("gemini")!);
+		expect(missing.tier).toBe("verified");
+		expect(missing.binDetected).toBe(false);
+		expect(missing.alert).toMatch(/not found on the daemon PATH/);
+	});
+});
+
+test("resolveSpawnBin: acp harnesses resolve their acpCommand[0] (e.g. npx), never the bare descriptor bin unconditionally for a differently-shelled adapter", () => {
+	expect(resolveSpawnBin(getHarness("omp")!)).toBe("omp"); // omp-rpc → resolveBin
+	expect(resolveSpawnBin(getHarness("codex")!)).toBe("npx"); // acp, npx-shelled — real launch argv[0]
+	expect(resolveSpawnBin(getHarness("opencode")!)).toBe("opencode"); // acp, direct binary
+});
+
+test("npx-shelled acp adapters (codex/claude-code) get a weak-signal note on their tier row", () => {
+	const codex = harnessTierInfo(getHarness("codex")!);
+	expect(codex.note).toMatch(/weak signal/);
+});
+
+test("usageVerified: omp/pi are true (native RPC usage frame); ACP harnesses default false (ACP parseUsage unconfirmed)", () => {
+	expect(harnessTierInfo(getHarness("omp")!).usageVerified).toBe(true);
+	expect(harnessTierInfo(getHarness("pi")!).usageVerified).toBe(true);
+	expect(harnessTierInfo(getHarness("gemini")!).usageVerified).toBe(false);
+	expect(harnessTierInfo(getHarness("opencode")!).usageVerified).toBe(false);
+});
+
+test("listHarnessTiers covers every REGISTERED harness (not just the verified/create-visible subset)", () => {
+	_resetHarnessTierCacheForTests();
+	const names = listHarnessTiers().map((t) => t.name);
+	expect(names).toEqual(expect.arrayContaining(["omp", "pi", "opencode", "gemini", "auggie", "claude-code", "codex"]));
+});
+
+test("listHarnessTiers caches briefly: a registry override made between two calls within the TTL is not reflected", () => {
+	_resetHarnessTierCacheForTests();
+	const first = listHarnessTiers().find((t) => t.name === "gemini")!;
+	expect(first.tier).toBe("registered-unverified");
+	withHarnessOverride("gemini", { verified: true }, () => {
+		const second = listHarnessTiers().find((t) => t.name === "gemini")!;
+		expect(second.tier).toBe("registered-unverified"); // cache still holds the pre-override snapshot
+		_resetHarnessTierCacheForTests();
+		const third = listHarnessTiers().find((t) => t.name === "gemini")!;
+		expect(third.tier).toBe("verified"); // cache dropped — fresh detection sees the override
+	});
+	_resetHarnessTierCacheForTests();
+});
+
+test("gate byte-identity: listHarnesses/hasSecondVerifiedProviderLane read only `verified`, unaffected by tier machinery", () => {
+	// Same assertions as the pre-existing gate tests above, re-run after tier computation has run —
+	// proves harnessTierInfo/listHarnessTiers never mutate descriptors or the `verified` gate's inputs.
+	_resetHarnessTierCacheForTests();
+	listHarnessTiers(); // exercise tier computation first
+	const visible = listHarnesses().map((d) => d.name);
+	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode"]));
+	expect(visible).not.toContain("gemini");
+	expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
 });
 
 test("globalDefaultHarness honors GLANCE_HARNESS, else omp", () => {

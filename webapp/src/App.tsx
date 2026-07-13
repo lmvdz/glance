@@ -29,6 +29,7 @@ import { DesignReviewView } from './components/DesignReviewView';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
 import { FactoryStatusStrip } from './components/FactoryStatusStrip';
 import { OrgSettings } from './components/OrgSettings';
+import { FileSignIn } from './components/FileSignIn';
 import { FirstRunSetup } from './components/FirstRunSetup';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
@@ -186,6 +187,9 @@ const AuthGate = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (status === 'anon') return <Login />;
+  // File mode's own signed-out state. Without it the SPA rendered the whole dashboard against a daemon
+  // that was 401ing every call, so an unauthenticated browser saw an empty fleet instead of a sign-in.
+  if (status === 'file-anon') return <FileSignIn />;
   if (status === 'pending') return <PendingApproval />;
   return <>{children}</>;
 };

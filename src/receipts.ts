@@ -34,6 +34,66 @@ export interface RunSeed {
 	org?: string;
 	/** Which harness drove the run; the daemon stamps "omp". */
 	harness?: string;
+	/** Confirmed-delivered efficiency flags (squad-manager's `confirmDeliveredFlags`, computed once at
+	 *  spawn from `rec.efficiencyFlags`) — carried into the seed so a restarted-and-resumed run's
+	 *  accumulator stamps the SAME confirmed set the whole run, not whatever is live on the record at
+	 *  finish() time. */
+	efficiencyFlags?: string[];
+}
+
+/** Marker prefix for `AgentProfile.capabilities` tokens that request a PROMPT-DELIVERED discipline
+ *  (concern 05's `membrane:verdict-first` / `membrane:minimal-code`) rather than a real host-tool
+ *  grant. `capabilities[]` is also the tool allow-list source (squad-manager.ts's `toolGrants`), so a
+ *  membrane token left in that array would either wrongly narrow the grant or be denied as an
+ *  unrecognized tool at the `onHostTool` gate — `splitCapabilityTokens` pulls it out before either
+ *  happens. */
+export const EFFICIENCY_FLAG_PREFIX = "membrane:";
+
+/** Split a profile's raw `capabilities[]` into real tool grants and requested efficiency-flag tokens
+ *  (`EFFICIENCY_FLAG_PREFIX`-prefixed). The ONLY site that turns `capabilities` into `toolGrants` —
+ *  every downstream consumer (`toolGrantsPrompt`, the `onHostTool` hard-deny gate, the harness
+ *  scorecard's `toolsScoped`) sees the filtered list, never a membrane token. */
+export function splitCapabilityTokens(capabilities: string[] | undefined): { toolGrants: string[] | undefined; requested: string[] | undefined } {
+	if (!capabilities?.length) return { toolGrants: undefined, requested: undefined };
+	const tools = new Set<string>();
+	const flags = new Set<string>();
+	for (const token of capabilities) {
+		if (token.startsWith(EFFICIENCY_FLAG_PREFIX)) flags.add(token);
+		else tools.add(token);
+	}
+	return { toolGrants: tools.size ? [...tools] : undefined, requested: flags.size ? [...flags] : undefined };
+}
+
+/**
+ * Delivery confirmation for requested efficiency-flag tokens. `--append-system-prompt` content only
+ * reaches the child process when the resolved harness's `contextInjection` capability is `"native"`
+ * (the omp/pi families) — ACP's default `"none"` silently drops the whole appended string
+ * (`acp-agent-driver.ts`), so a request routed there was never delivered. Stamping at REQUEST time
+ * (when the profile is merged) instead of here would measure a placebo, not a real behavior change —
+ * the mistake this function exists to prevent (DESIGN.md "Membrane measurement").
+ */
+export function confirmDeliveredFlags(requested: string[] | undefined, contextInjection: "native" | "none" | "mcp" | undefined): string[] | undefined {
+	if (!requested?.length) return undefined;
+	return contextInjection === "native" ? requested : undefined;
+}
+
+/**
+ * Per-unit flag identity across all its runs. `RunReceipt` is one line per run and a unit can restart,
+ * so a single agentId can accumulate several receipts with independently-stamped `efficiencyFlags`.
+ * When every run agrees exactly (the common case — same profile, same harness, every run), the
+ * identity is that shared set. When runs disagree (a mid-flight profile edit, or a harness swap
+ * between a native and an ACP-none run), returns `["mixed"]` instead of silently unioning a
+ * confirmed-delivered run with a non-delivered one — a future flagSet-vs-baseline comparison (concern
+ * 01's `task-class-matrix.ts`) can exclude `mixed` populations rather than reading their blended signal
+ * as clean.
+ */
+export function unitEfficiencyFlags(receipts: RunReceipt[]): string[] {
+	if (receipts.length === 0) return [];
+	const canonical = (flags?: string[]) => [...new Set(flags ?? [])].sort().join(" ");
+	const first = canonical(receipts[0].efficiencyFlags);
+	const allAgree = receipts.every((r) => canonical(r.efficiencyFlags) === first);
+	if (!allAgree) return ["mixed"];
+	return [...new Set(receipts[0].efficiencyFlags ?? [])].sort();
 }
 
 /**
@@ -154,6 +214,7 @@ export class RunAccumulator {
 			featureId: this.seed.featureId,
 			parentId: this.seed.parentId,
 			harness: this.seed.harness ?? "omp",
+			efficiencyFlags: this.seed.efficiencyFlags,
 		};
 		receipt.spans = tools ? this.spans.snapshot(opts.maxSpans ?? traceMaxSpans()) : this.spans.structuralSnapshot();
 		receipt.sampled = !tools && this.spans.hasToolSpans();

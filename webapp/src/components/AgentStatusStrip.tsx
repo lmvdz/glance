@@ -12,7 +12,7 @@
  */
 
 import React, { useState } from 'react';
-import { Bot, RotateCcw, CornerDownLeft, CircleDot, ShieldAlert } from 'lucide-react';
+import { Bot, RotateCcw, CornerDownLeft, CircleDot, ShieldAlert, Clock } from 'lucide-react';
 import { VerdictBadge, toneClasses } from './ui';
 import type { TaskStatus } from '../lib/taskStatus';
 
@@ -193,7 +193,25 @@ export const AgentStatusStrip: React.FC<AgentStatusStripProps> = ({ status, hasP
           ))}
         </div>
       )}
-      {status.primaryAction === 'land' && status.vetoed.length === 0 && (
+      {/* Inconclusive is a HOLD, not a pass (eap-borrows follow-up 7 + the fail-open fix that closed
+          the "any non-veto reads as ready" gap): the land diff couldn't be COMPUTED (an environmental
+          git fault), so it must never render the same calm "verification passed" copy as an actual
+          ready-to-land agent — it auto-retries, and a force-land does NOT bypass it. */}
+      {status.primaryAction === 'land' && status.vetoed.length === 0 && status.inconclusive.length > 0 && (
+        <div className="space-y-1 border-t border-amber-200/70 bg-white/60 px-4 py-3 text-xs text-amber-700 dark:border-amber-900/40 dark:bg-gray-950/40 dark:text-amber-400">
+          <div className="flex items-center gap-2 font-semibold">
+            <Clock className="h-3.5 w-3.5" aria-hidden="true" />
+            Validator diff inconclusive — retrying automatically (a force-land will not skip this).
+          </div>
+          {status.inconclusive.map((a) => (
+            <div key={a.id} className="pl-6 text-gray-600 dark:text-gray-400">
+              <span className="font-medium text-gray-800 dark:text-gray-200">{a.name}</span>
+              {a.validation?.rationale ? ` — ${a.validation.rationale}` : ' — the land diff could not be computed (environmental git fault).'}
+            </div>
+          ))}
+        </div>
+      )}
+      {status.primaryAction === 'land' && status.vetoed.length === 0 && status.inconclusive.length === 0 && (
         <div className="flex items-center gap-2 border-t border-amber-200/70 bg-white/60 px-4 py-3 text-xs text-gray-600 dark:border-amber-900/40 dark:bg-gray-950/40 dark:text-gray-400">
           <CircleDot className="h-3.5 w-3.5 text-amber-500" aria-hidden="true" />
           Verification passed — open the agent console to review the proof and land.
