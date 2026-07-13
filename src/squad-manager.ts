@@ -25,11 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-<<<<<<< HEAD
-import { type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
-=======
-import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
->>>>>>> origin/main
+import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";

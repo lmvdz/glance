@@ -121,6 +121,8 @@ function parseRawVerdict(raw: string): RawVerdict | undefined {
  * last line that yields a usable verdict, and only fall back to a whole-blob `extractJsonObject` when
  * no line matched (the plain-stdout case). We deliberately never `extractJsonObject` the whole stream
  * first: its outermost-`{`-to-last-`}` slice spans multiple events on a JSONL stream and throws.
+ * @substrate exported for tests only — the parser is fuzzed directly against envelope shapes
+ * (tests/validator-codex.test.ts); its live caller is codexJudge() in this file.
  */
 export function parseCodexVerdict(raw: string): RawVerdict | undefined {
 	let found: RawVerdict | undefined;
@@ -156,6 +158,8 @@ export function parseCodexVerdict(raw: string): RawVerdict | undefined {
  * So we take `structuredOutput` directly (the already-parsed object), fall back to parsing the `text`
  * mirror, and only then to a whole-blob extract. NOTE the envelope is multi-line pretty JSON, so a
  * line-by-line scan (parseCodexVerdict's strategy) would never match — deliberately whole-blob first.
+ * @substrate exported for tests only — the parser is fuzzed directly against envelope shapes
+ * (tests/validator-grok.test.ts); its live caller is grokJudge() in this file.
  */
 export function parseGrokVerdict(raw: string): RawVerdict | undefined {
 	const envelope = extractJsonObject(raw);

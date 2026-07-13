@@ -58,8 +58,9 @@ export function modelFamily(model?: string): string {
 	// xAI: `grok-4.5`, `grok-composer-2.5-fast`, `x-ai/grok-4.5` (the openrouter spec shape). Matched as
 	// a TOKEN, not a substring: "grok" is also an English verb, so a bare `includes` would classify
 	// `ollama/my-grokking-model` as xAI — and this family feeds the rate-limit bucket, so a mis-mapped
-	// vendor would route a unit around its real provider's cap.
-	if (/\bgrok\b/.test(m) || /\bxai\b/.test(m)) return "xai";
+	// vendor would route a unit around its real provider's cap. Non-letter boundaries rather than `\b`:
+	// `grok_4_5` must match (underscore is a \w char, so `\bgrok\b` misses it) while `grokking` must not.
+	if (/(^|[^a-z])grok([^a-z]|$)/.test(m) || /(^|[^a-z])xai([^a-z]|$)/.test(m)) return "xai";
 	return m ? "other" : "unknown";
 }
 

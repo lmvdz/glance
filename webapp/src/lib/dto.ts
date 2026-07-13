@@ -113,8 +113,8 @@ export interface ValidationRecordDTO {
   model?: string;
   /** Cross-lineage review: vendor lineage of author vs judge; `sameLineage` true = self-graded
    *  (weaker signal). Mirrors backend ValidationRecord (src/model-lineage.ts). */
-  authorLineage?: "anthropic" | "openai" | "google" | "unknown";
-  reviewerLineage?: "anthropic" | "openai" | "google" | "unknown";
+  authorLineage?: "anthropic" | "openai" | "google" | "xai" | "unknown";
+  reviewerLineage?: "anthropic" | "openai" | "google" | "xai" | "unknown";
   sameLineage?: boolean;
   /** Perspective-diversified review (plans/perspective-diversified-review/): advisory out-of-criteria
    *  lens verdicts that ran ALONGSIDE the authoritative criteria judge. Never changes `verdict`. */

@@ -46,12 +46,12 @@ describe("modelLineage", () => {
 			haiku: "claude-haiku-4-5",
 			openai: "gpt-5.5",
 			gemini: "gemini-2.5-pro",
-			grok: "grok-4.5",
+			xai: "grok-4.5",
 			other: "mistral-large",
 			unknown: "",
 		};
 		const seen = new Set(Object.values(probes).map((m) => modelFamily(m)));
-		expect(seen).toEqual(new Set(["fable", "opus", "sonnet", "haiku", "openai", "gemini", "grok", "other", "unknown"]));
+		expect(seen).toEqual(new Set(["fable", "opus", "sonnet", "haiku", "openai", "gemini", "xai", "other", "unknown"]));
 		for (const m of Object.values(probes)) {
 			expect(["anthropic", "openai", "google", "xai", "unknown"]).toContain(modelLineage(m));
 		}

@@ -40,6 +40,9 @@ const FAMILY_LINEAGE: Record<string, ModelLineage> = {
 	fable: "anthropic",
 	openai: "openai",
 	gemini: "google",
+	// `xai` is what modelFamily() emits for the vendor; `grok` stays as a bare-family alias
+	// (model-outcomes ledger rows and humans both write it).
+	xai: "xai",
 	grok: "xai",
 };
 
