@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envInt, envNumber } from "./config.ts";
+import { envBool, envInt, envNumber } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -824,6 +824,11 @@ export class SquadManager extends EventEmitter {
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
 	private readonly learningMetrics: LearningMetrics;
+	/** Per-repo epoch ms until which the cold-start primer is skipped, after a fabric read of THAT repo
+	 *  blew its budget. Per-repo, not global: one repo with thousands of receipts (or a Plane project
+	 *  behind a stalled fetch) must not silently mute priming for every other repo the daemon serves.
+	 *  (gpt-5.6-sol.) Overridable in tests via the protected `now()` seam. */
+	protected primerBreakerUntil = new Map<string, number>();
 	/** OMP_SQUAD_AUTOCLOSE (default ON): close a tracking issue when its branch LANDS — never on a bare gate-pass. */
 	private readonly closeOnDone = process.env.OMP_SQUAD_AUTOCLOSE !== "0";
 	private llmClassify?: Classify;
@@ -4137,23 +4142,20 @@ export class SquadManager extends EventEmitter {
 		// hasPrimer is hoisted (not re-derived from opts.appendSystemPrompt later) so the harness
 		// scorecard's "instructions" dimension (below, concern 03) can tell "a context primer landed"
 		// apart from "the profile injected unrelated persona text" without re-parsing the joined string.
-		let hasPrimer = false;
-		if (opts.featureId && (opts.task || opts.name)) {
-			try {
-				const snapshot = await this.fabric(actor, { repos: [opts.repo], includeLeases: true });
-				const primer = buildContextPrimer(snapshot, [opts.task, opts.name].filter(Boolean).join(" "));
-				this.learningMetrics.record("primer-empty", primer ? 0 : 1);
-				if (primer) {
-					hasPrimer = true;
-					opts = {
-						...opts,
-						appendSystemPrompt: [opts.appendSystemPrompt, primer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
-					};
-				}
-			} catch (err) {
-				this.log("warn", `context primer failed: ${String(err)}`);
-			}
-		}
+		//
+		// R3 (founding brief: "units are context-poor"). This used to be gated on `opts.featureId`, and
+		// NOTHING that dispatch spawns carries one: `dispatchSpawn` calls `create({repo, name, branch,
+		// task, issue})` with no featureId, and neither does `glance add`. Only the feature-linked
+		// `POST /api/features/:id/agents` path set it. So the cold-start primer never ran for a dispatched
+		// or ad-hoc unit — and the `primer-empty` metric, which lives INSIDE that branch, has zero records
+		// across this host's entire learning-metrics log. The instrument was inside the thing it measured.
+		//
+		// Now: any spawn with a repo and something to search on gets the primer. Still best-effort, still
+		// fenced-untrusted by `buildContextPrimer`, still never blocks a spawn.
+		// `OMP_SQUAD_CONTEXT_PRIMER=0` disables it.
+		const primed = await this.primeContext(opts, actor);
+		opts = primed.opts;
+		const primerBuilt = primed.hasPrimer;
 		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
 		// (acceptance criteria / verification / scope) instead of reconstructing intent from an 8-word
 		// title. The body is human/skills-MCP-writable, so fence it as UNTRUSTED data — never let issue
@@ -4489,9 +4491,28 @@ export class SquadManager extends EventEmitter {
 		// "state": a continuity anchor a restart/crash can reattach to — feature membership, a tracked
 		// work item, or a resumable workflow checkpoint.
 		// "feedback": a real completion loop (verify command or workflow graph), not a bare prompt.
+		// A primer that was BUILT is not a primer that ARRIVED. An ACP unit has no system-prompt channel
+		// (default `contextInjection: "none"`), so it runs unscoped no matter what we assembled above.
+		//
+		// Evaluated HERE, not at primeContext: `routeIntake` (above) can turn an ACP unit into a WORKFLOW
+		// unit, whose inner omp child does have a native channel. Asking before the route gave the wrong
+		// answer for exactly the units dispatch produces — an auto-routed ACP unit would be logged as
+		// undelivered while its primer sailed through to the inner agent. (grok-4.5)
+		const contextDelivers = contextReachesAgent(opts);
+		const primerDelivered = primerBuilt && contextDelivers;
+		if (primerBuilt && !primerDelivered) {
+			// Measured from OUTSIDE the branch it measures — the mistake `primer-empty` made.
+			this.learningMetrics.record("primer-undelivered", 1, { flag: "context-primer", variant: resolveHarnessName(opts) });
+			this.log("warn", `${opts.name ?? "unit"}: context primer built but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running unscoped (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
+		}
 		if (harnessScorecardEnabled()) {
 			dto.harnessScorecard = scoreHarness({
-				hasInstructions: opts.issue ? Boolean(specBlock) || hasPrimer : Boolean(opts.task?.trim()),
+				// The authored spec rides the SAME `appendSystemPrompt` channel as the primer, so an ACP unit
+				// receives neither — scoring it as instructed because a spec was composed is the same lie
+				// the primer told. And a delivered primer IS instructions for an ad-hoc unit: `glance add
+				// <name>` carries no task string, so the primer is its only orientation. (grok-4.5,
+				// gpt-5.6-sol)
+				hasInstructions: opts.issue ? (Boolean(specBlock) && contextDelivers) || primerDelivered : Boolean(opts.task?.trim()) || primerDelivered,
 				toolsScoped: Boolean(toolGrants?.length || opts.requires?.length || produces?.length),
 				isolatedEnvironment: Boolean(resolvedBranch),
 				continuityAnchor: Boolean(opts.featureId || opts.issue || opts.workflowState),
@@ -4645,7 +4666,7 @@ export class SquadManager extends EventEmitter {
 				await this.provisioning.get(p.id);
 				return execGatedCommand(script, cwd, { mounts: [p.repo] });
 			};
-			return new WorkflowDriver({ id: p.id, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold, reflection });
+			return new WorkflowDriver({ id: p.id, appendSystemPrompt: p.appendSystemPrompt, workflow, workflowPath: p.workflow.path ? resolveWorkflowPath(p.workflow.path) : undefined, cwd: p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, bin: this.bin, fleet, resumeState, decoratePrompt, execCommand, cold, reflection });
 		}
 		// Plain-agent path: resolve the harness (explicit `harness`, else the legacy `runtime` alias,
 		// else GLANCE_HARNESS/"omp"). This is the single migration choke point — a persisted `runtime:"acp"`
@@ -4656,7 +4677,7 @@ export class SquadManager extends EventEmitter {
 			// sandbox × non-omp is a matrix, not a list: SandboxAgentDriver is an omp-RPC client over
 			// `docker exec` stdio and can only speak to omp. create() rejects sandbox+non-omp; this is the
 			// belt-and-suspenders floor (Phase 3 makes containment protocol-aware).
-			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, runArgs: p.sandbox.runArgs });
+			return new SandboxAgentDriver({ id: p.id, image: p.sandbox.image, workdir: p.sandbox.workdir, mount: p.sandbox.mountWorktree === false ? undefined : p.worktree, model: p.model, approvalMode: p.approvalMode, thinking: p.thinking, appendSystemPrompt: p.appendSystemPrompt, runArgs: p.sandbox.runArgs });
 		}
 		if (harness.protocol === "acp") {
 			const command = harness.acpCommand ? [...harness.acpCommand, ...(p.model ? ["--model", p.model] : [])] : undefined;
@@ -4664,7 +4685,9 @@ export class SquadManager extends EventEmitter {
 			// injected only when the operator opts in (OMP_SQUAD_ACP_CONTEXT=prompt); default "none" runs the
 			// unit UNSCOPED (honest — surfaced via the capability). approvalMode is mapped best-effort to an
 			// ACP session mode inside the driver.
-			const contextInjection = process.env.OMP_SQUAD_ACP_CONTEXT === "prompt" ? "prompt" : "none";
+			// Single-sourced with the scorecard's honesty predicate so the two can never drift: whatever
+			// `contextReachesAgent` promised at create() is exactly what the driver does here.
+			const contextInjection = contextReachesAgent(p) ? "prompt" : "none";
 			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection, mcpServers: p.mcp });
 			acp.on("acpcapabilities", (caps: unknown) => this.log("info", `acp ${harness.name} ${p.id} advertised capabilities: ${JSON.stringify(caps)}`));
 			return acp;
@@ -6489,6 +6512,69 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Attach the cold-start context primer to a spawn's system prompt — the fabric's most relevant prior
+	 * decisions, hot files and peer context, at zero turn cost.
+	 *
+	 * R3 (founding brief: "units are context-poor"). This used to be gated on `opts.featureId`, and
+	 * NOTHING dispatch spawns carries one: `dispatchSpawn` calls `create({repo, name, branch, task,
+	 * issue})` with no featureId, and neither does `glance add`. Only the feature-linked
+	 * `POST /api/features/:id/agents` path set it. So the primer never ran for a dispatched or ad-hoc unit
+	 * — and the `primer-empty` metric, which lives INSIDE that branch, has ZERO records across this host's
+	 * entire learning-metrics log. The instrument was inside the thing it was meant to measure.
+	 *
+	 * Now: any spawn with a repo and something to search on gets it. Best-effort — a failure logs and the
+	 * spawn proceeds unprimed, never blocked. `buildContextPrimer` fences its own output as untrusted, so
+	 * this must not re-fence. `OMP_SQUAD_CONTEXT_PRIMER=0` disables it.
+	 */
+	/** Injection seam for the primer circuit breaker's clock. */
+	protected now(): number {
+		return Date.now();
+	}
+
+	protected async primeContext(opts: CreateAgentOptions, actor: Actor): Promise<{ opts: CreateAgentOptions; hasPrimer: boolean }> {
+		const query = [opts.task, opts.name, opts.issue?.name].filter((t): t is string => typeof t === "string" && t.trim().length > 0).join(" ");
+		if (!contextPrimerEnabled() || !opts.repo || !query) return { opts, hasPrimer: false };
+		// Timing out the RACE does not cancel the READ — `fabric()` keeps enumerating receipts and waiting
+		// on Plane. The dispatcher spawns serially, so a slow fabric makes every unit in the tick start its
+		// own full scan while the last one is still running, and the daemon amplifies its way into the
+		// stall it was supposed to bound. After a timeout, stop asking for a while. (grok-4.5)
+		if (this.now() < (this.primerBreakerUntil.get(opts.repo) ?? 0)) return { opts, hasPrimer: false };
+		try {
+			// BOUNDED. `fabric()` enumerates every receipt file, reads every digest, and calls Plane's issue
+			// list — whose fetch carries no timeout. The dispatcher awaits each spawn serially, so one
+			// stalled fetch or a repo with thousands of historical receipts delays every later issue in the
+			// tick. "Best-effort, never blocks a spawn" was only half true: it never FAILED a spawn, but it
+			// could hang one. Found by cross-lineage review (gpt-5.6-sol).
+			const budgetMs = envInt("OMP_SQUAD_PRIMER_TIMEOUT_MS", 5_000);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const snapshot = await Promise.race([
+				// `Promise.race` subscribes to BOTH, so a fabric() that rejects after the timeout wins is
+				// still handled — no unhandled rejection can take the daemon down.
+				this.fabric(actor, { repos: [opts.repo], includeLeases: true }),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => reject(new Error(`context primer timed out after ${budgetMs}ms`)), budgetMs);
+					timer.unref?.();
+				}),
+			]).finally(() => clearTimeout(timer));
+			const primer = buildContextPrimer(snapshot, query);
+			this.learningMetrics.record("primer-empty", primer ? 0 : 1, { flag: "context-primer", variant: opts.featureId ? "feature" : "dispatch" });
+			if (!primer) return { opts, hasPrimer: false };
+			return {
+				opts: { ...opts, appendSystemPrompt: [opts.appendSystemPrompt, primer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined },
+				hasPrimer: true,
+			};
+		} catch (err) {
+			const timedOut = errText(err).includes("timed out");
+			if (timedOut) {
+				const backoff = envInt("OMP_SQUAD_PRIMER_BACKOFF_MS", 60_000);
+				this.primerBreakerUntil.set(opts.repo, this.now() + backoff);
+				this.log("warn", `context primer timed out for ${opts.repo} — priming paused there for ${backoff}ms (the fabric read is still running behind us)`);
+			} else this.log("warn", `context primer failed: ${errText(err)}`);
+			return { opts, hasPrimer: false };
+		}
+	}
+
 	private async finalizeRun(rec: AgentRecord): Promise<void> {
 		const run = rec.run;
 		if (!run || run.finalized) return;
@@ -8229,6 +8315,12 @@ export class SquadManager extends EventEmitter {
 		}
 		return restoredCount;
 	}
+}
+
+/** The cold-start context primer (R3). On by default: a unit that starts blind re-derives what the
+ *  fabric already knows. `OMP_SQUAD_CONTEXT_PRIMER=0` turns it off. */
+function contextPrimerEnabled(): boolean {
+	return envBool("OMP_SQUAD_CONTEXT_PRIMER", true);
 }
 
 function feedbackMaxImageBytes(): number {
