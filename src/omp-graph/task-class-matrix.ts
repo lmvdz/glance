@@ -186,6 +186,10 @@ export function isSampleSufficient(cell: CellMetrics, minSamples: number): boole
  * slice — but unlike the old `isSampleSufficient`, it is opt-in for callers that are actually reading
  * `medianCostUsd`/`medianTokensTotal` (e.g. a future `flagEfficiencyRegression` publish-gated view),
  * not folded into mergeRate-only comparisons that never touch cost.
+ *
+ * @substrate no production caller yet — sanctioned by DESIGN's "schema-before-router (G4)" posture;
+ * wire when G4's ledger fills (plans/eap-borrows/00-overview.md, "Follow-ups (named, not silently
+ * dropped)").
  */
 export function isCostReproducible(cell: CellMetrics, minSamples: number, tokenGateApplies: boolean): boolean {
 	return (
@@ -434,6 +438,9 @@ export function selectBaseline(doc: TaskClassMatrixDoc, taskClass: string, opts:
  * baseline (from a persisted pin, or the last time `selectBaseline` resolved one); returns an
  * `AttentionEvent` when that baseline can no longer support a comparison, `undefined` when it's still
  * healthy. Pure — delivering the event (attaching it somewhere a human sees it) is the caller's job.
+ *
+ * @substrate no producer yet — decision 4 is 1/3 live, needs a persisted previous-baseline to be
+ * meaningful (plans/eap-borrows/00-overview.md, "Follow-ups (named, not silently dropped)").
  */
 export function detectBaselineStaleness(
 	taskClass: string,
@@ -469,6 +476,10 @@ export function detectBaselineStaleness(
  * `reproducible` itself. Callers building a publish-gated view should still filter to
  * `reproducible`-cells before calling this; that gate gets skipped for a candidate-vs-champion
  * comparison a caller runs directly against `champions`, this function alone.
+ *
+ * @substrate no production caller yet — sanctioned by DESIGN's "schema-before-router (G4)" posture;
+ * wire when G4's ledger fills (plans/eap-borrows/00-overview.md, "Follow-ups (named, not silently
+ * dropped)").
  */
 export function flagEfficiencyRegression(candidate: CellMetrics, baseline: CellMetrics): boolean {
 	const cheaperCost = candidate.medianCostUsd !== undefined && baseline.medianCostUsd !== undefined && candidate.medianCostUsd < baseline.medianCostUsd;
