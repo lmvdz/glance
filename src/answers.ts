@@ -76,7 +76,7 @@ function file(stateDir: string, id: string): string {
 
 /** Ids come from agent ids (`ompsq-445-mre9s8ze-1-158946d8`), but an id reaching a path join is a path
  *  traversal waiting to happen. Only the characters agent ids actually use survive. */
-export function sanitizeId(id: string): string {
+function sanitizeId(id: string): string {
 	return id.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 

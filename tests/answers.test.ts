@@ -15,7 +15,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { answerBrief, listAnswers, readAnswer, sanitizeId, saveAnswer } from "../src/answers.ts";
+import { answerBrief, listAnswers, readAnswer, saveAnswer } from "../src/answers.ts";
 import { isLandingUnit } from "../src/is-landing-unit.ts";
 import type { AgentDTO, PersistedAgent, TranscriptEntry } from "../src/types.ts";
 
@@ -75,10 +75,18 @@ test("a missing or corrupt answer reads as absent — never a crashed daemon", a
 	expect(await listAnswers(dir)).toEqual([]); // the corrupt one is skipped, not fatal
 });
 
-/** Ids come from agent ids, and an id reaching a `path.join` is a traversal waiting to happen. */
-test("an id cannot escape the answers directory", () => {
-	expect(sanitizeId("../../etc/passwd")).toBe(".._.._etc_passwd");
-	expect(sanitizeId("ompsq-445-mre9s8ze-1-158946d8")).toBe("ompsq-445-mre9s8ze-1-158946d8"); // real ids untouched
+/** Ids come from agent ids, and an id reaching a `path.join` is a traversal waiting to happen.
+ *  Proven through the public surface: a hostile id is written INSIDE the answers dir under a
+ *  defanged name, and reads back through the same raw id. */
+test("an id cannot escape the answers directory", async () => {
+	const dir = await tmpDir();
+	const evil = "../../etc/passwd";
+	expect(await saveAnswer(dir, { id: evil, question: "q", repo: "/r", markdown: "m", askedAt: 1 })).toBe(true);
+	expect(await fs.readdir(path.join(dir, "answers"))).toEqual([".._.._etc_passwd.json"]);
+	expect((await readAnswer(dir, evil))?.markdown).toBe("m"); // round-trips via the raw id
+	// a real agent id survives untouched
+	expect(await saveAnswer(dir, { id: "ompsq-445-mre9s8ze-1-158946d8", question: "q", repo: "/r", markdown: "m", askedAt: 1 })).toBe(true);
+	expect((await readAnswer(dir, "ompsq-445-mre9s8ze-1-158946d8"))?.markdown).toBe("m");
 });
 
 // ── capture: the unit's final message IS the deliverable ────────────────────────────────────────
