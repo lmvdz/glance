@@ -3,11 +3,20 @@
  * covers the arithmetic itself (local-mode regression guard + PR-mode origin-aware counting); this
  * file's job is narrower per the concern's own Verify wording: prove every consumer — SquadManager's
  * `aheadOfMain`, `agentHasUnlandedWork`, and the worktree reaper — routes through the SAME shared
- * function rather than re-implementing the arithmetic, via a module-mock spy (not re-testing counts
- * four times over).
+ * function rather than re-implementing the arithmetic.
+ *
+ * Injected via `SquadManager.computeAheadOfBaseFor` (the TestManager subclass below overrides it),
+ * NOT `mock.module("../src/land-mode.ts", ...)`: bun's `mock.module` overwrites that module's exports
+ * PROCESS-WIDE the moment it's called (per bun-types' own doc comment: "If the module is already
+ * loaded, exports are overwritten...") and stays swapped for as long as it's registered, regardless
+ * of which OTHER test file's tests happen to run meanwhile in the same `bun test` invocation — a
+ * silent false pass/fail with no error for any file that needs `aheadOfBase`'s REAL git behavior
+ * (e.g. `ahead-of-base-unknown.test.ts`'s PATH-shimmed git-fault repro). This is the SAME hazard
+ * `resolveLandModeFor`'s own doc comment already flags for `resolveLandMode` — `computeAheadOfBaseFor`
+ * is its sibling seam.
  */
 
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,24 +29,24 @@ interface AheadCall {
 }
 let calls: AheadCall[] = [];
 let canned = 0;
-mock.module("../src/land-mode.ts", () => ({
-	aheadOfBase: async (opts: AheadCall): Promise<number> => {
-		calls.push(opts);
-		return canned;
-	},
-	resolveLandMode: async () => ({ mode: "local", reason: "mocked — not under test here" }),
-}));
 
 const { SquadManager } = await import("../src/squad-manager.ts");
 const { SubagentTracker } = await import("../src/subagents.ts");
 import type { AgentDTO, PersistedAgent } from "../src/types.ts";
 
 class TestManager extends SquadManager {
+	protected computeAheadOfBaseFor(opts: AheadCall): Promise<number> {
+		calls.push(opts);
+		return Promise.resolve(canned);
+	}
 	callAheadOfMain(a: AgentDTO): Promise<number> {
 		return this.aheadOfMain(a);
 	}
 	callAgentHasUnlandedWork(id: string): Promise<boolean> {
 		return this.agentHasUnlandedWork(id);
+	}
+	callPersistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
+		return this.persistedHasWork(p);
 	}
 	callReap(): Promise<void> {
 		return this.reapDeadWorktrees();
@@ -217,6 +226,31 @@ test("agentHasUnlandedWork regression: a proof recorded at T1 does NOT cover a l
 
 	expect(await mgr.callAgentHasUnlandedWork("a1")).toBe(true); // T1 proof doesn't cover T2 ⇒ falls back to arithmetic
 	expect(calls).toEqual([{ repo, branch: "squad/a1", cwd: "/nonexistent-clean-dir-xyz" }]);
+});
+
+// ── -1 polarity lock (finding #3a/#3b, cross-lineage review of af3d534) — cheap, canned, no PATH
+//    shim needed: routes the -1 sentinel straight through the `computeAheadOfBaseFor` seam so the
+//    "unknown ⇒ assume work exists" polarity is locked for BOTH consumers independently of any real
+//    git fault (ahead-of-base-unknown.test.ts already covers the real-git-fault repro for
+//    agentHasUnlandedWork; this covers the polarity itself, cheaply, and extends it to persistedHasWork,
+//    which the real-git repro file never touched). ─────────────────────────────────────────────────
+
+test("polarity lock: agentHasUnlandedWork reads a canned -1 from aheadOfBase as unlanded work (true)", async () => {
+	canned = -1;
+	const mgr = new TestManager({ stateDir: await tmpDir("polarity-ahw-") });
+	seed(mgr, "a1", { repo: "/r", worktree: "/nonexistent-clean-dir-xyz", branch: "squad/a1" });
+	expect(await mgr.callAgentHasUnlandedWork("a1")).toBe(true);
+	expect(calls).toEqual([{ repo: "/r", branch: "squad/a1", cwd: "/nonexistent-clean-dir-xyz" }]);
+});
+
+test("polarity lock: persistedHasWork reads a canned -1 from aheadOfBase as unlanded work (true) — gates resume/adopt, not just the auto-land loop", async () => {
+	canned = -1;
+	const mgr = new TestManager({ stateDir: await tmpDir("polarity-phw-") });
+	const has = await mgr.callPersistedHasWork({ repo: "/r", branch: "squad/p1", worktree: "/nonexistent-clean-dir-xyz" });
+	expect(has).toBe(true);
+	// persistedHasWork's `cwd` is `p.repo` (not `p.worktree`) — the persisted record has no live
+	// worktree relationship the way a roster agent does; see its doc comment above the call site.
+	expect(calls).toEqual([{ repo: "/r", branch: "squad/p1", cwd: "/r" }]);
 });
 
 // ── reapDeadWorktrees routes through the shared primitive ──────────────────────────────────────

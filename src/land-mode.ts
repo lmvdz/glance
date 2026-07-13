@@ -188,8 +188,34 @@ async function throttledFetch(repo: string, defaultBranch: string): Promise<void
 }
 
 /** Commits on `branch` not reachable from the resolved base (PR mode: fetched `origin/<default>`;
- *  local mode: `HEAD`). 0 ⇒ fully landed/empty; -1 ⇒ couldn't determine. The ONE replacement for every
- *  `rev-list <base>..<branch>`-style computation in the codebase. */
+ *  local mode: `HEAD`). 0 ⇒ fully landed/empty; **-1 ⇒ couldn't determine** (the underlying `git
+ *  rev-list` failed — a transient fault, not a measurement). The ONE replacement for every
+ *  `rev-list <base>..<branch>`-style computation in the codebase.
+ *
+ *  -1 is an in-band error sentinel on a numeric channel: a caller that does a bare `> 0` (or compares
+ *  against a specific positive count) silently reads "couldn't determine" as "definitely 0 or
+ *  negative", which for every "does this branch have unlanded work?" consumer means "no work" — a git
+ *  fault then reads as "nothing to land" and the caller moves on as if it were clean. That is exactly
+ *  the interlock shape this codebase has been bitten by before (see aheadOfMain's callers in
+ *  squad-manager.ts and the orchestrator's `agentHasWork` skip). Every WORK-GATING consumer (does this
+ *  branch have something to land/resume?) MUST branch on the unknown case explicitly via the
+ *  `aheadUnknown` guard below rather than a bare `> 0`/`< 0`/`=== -1` — a false negative there silently
+ *  drops real work.
+ *
+ *  This does NOT ban a bare `=== 0` everywhere: an EXACT-equality test against zero is fail-safe by
+ *  construction, because -1 (or any nonzero count) never collapses into it — it stays "not merged"
+ *  without the guard doing any work. `worktree-reaper.ts`'s `WorktreeInfo.aheadOfBase` is the sanctioned
+ *  instance of this: `selectReapable`'s `w.aheadOfBase === 0` reads an unknown git fault as "not merged"
+ *  (the correct, conservative direction for a DESTRUCTIVE decision — reaping a worktree whose ahead-count
+ *  is actually unknown would be the dangerous mistake), so it deliberately skips the named guard and
+ *  compares the raw number directly; do not "fix" it to route through `aheadUnknown`, that would be a
+ *  no-op at best. The guard exists for the OTHER polarity — `> 0`-shaped tests, where -1 quietly reads as
+ *  false — and for `observer.ts`'s `auditStaleDone`/`auditLandedSurvivors`, which branch on `aheadUnknown`
+ *  explicitly so the "unknown vs. genuinely landed" distinction stays legible even though their net
+ *  effect (skip) is similar to the reaper's exact-equality shortcut. `aheadUnknown` also documents what
+ *  each direction of "unknown" should mean: assume-work-exists for anything gating a land/resume
+ *  decision, not-merged for anything gating a destructive/cleanup decision (the worktree reaper).
+ */
 export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: string }): Promise<number> {
 	const cwd = opts.cwd ?? opts.repo;
 	const mode = await resolveLandMode(opts.repo);
@@ -205,4 +231,12 @@ export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: st
 	// costs nothing and restores the pre-refactor `-C <main checkout>` semantics.
 	const r = await hardenedGit(["rev-list", "--count", `HEAD..${opts.branch}`], { cwd: opts.repo });
 	return r.code === 0 ? Number(r.stdout.trim()) || 0 : -1;
+}
+
+/** Named guard for `aheadOfBase`'s -1 sentinel — the one and only correct way to test for "couldn't
+ *  determine". Never compare the raw number against `-1`/`< 0` inline; route through this so the
+ *  intent ("this is the unknown case, not a real count") is legible at every call site and grep-able
+ *  in one place. */
+export function aheadUnknown(n: number): boolean {
+	return n < 0;
 }

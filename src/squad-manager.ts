@@ -68,7 +68,7 @@ import { canTransition, dedupeTransitions, deriveStatus, followLineage, type Der
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
-import { aheadOfBase as computeAheadOfBase, resolveLandMode } from "./land-mode.ts";
+import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof, type DoneProof } from "./done-proof.ts";
 import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
@@ -350,6 +350,23 @@ function autoLandFailCap(): number {
  */
 function landBlockedEscalateCap(): number {
 	return envInt("OMP_SQUAD_LAND_BLOCKED_ESCALATE_CAP", 20);
+}
+
+/**
+ * Bounded-escalation budget for `agentHasUnlandedWork`'s aheadUnknown streak (finding #1,
+ * cross-lineage review of af3d534). A transient `aheadOfBase` fault costs one wasted acceptance-suite
+ * run (the assume-work-exists polarity af3d534 chose, unchanged here) — but a PERSISTENT fault on the
+ * SAME (repo, branch) used to cost one wasted run PER ORCHESTRATOR TICK, forever, with the only bound
+ * being the unrelated `landBlockedEscalateCap` budget inside `land()` itself, which nothing guarantees
+ * this path ever reaches (a fault narrow to `aheadOfBase`'s own git call may never make `land()` itself
+ * return `retryable`). This is the independent budget for THAT path: how many consecutive
+ * "couldn't determine" reads on the same branch run before `agentHasUnlandedWork` stops re-entering
+ * verify/land and instead files a "Needs you" attention item. Small default (3, not 20) — this gates a
+ * COSTLY suite run every ~30s tick, not a cheap land probe, so the wasted-work budget should be tighter.
+ * 0 disables (pure opt-out, never the default).
+ */
+function aheadUnknownEscalateCap(): number {
+	return envInt("OMP_SQUAD_AHEAD_UNKNOWN_ESCALATE_CAP", 3);
 }
 
 /**
@@ -829,6 +846,15 @@ export class SquadManager extends EventEmitter {
 	/** Idempotency for `fileLandBlockedEscalation` — fires the "Needs you" attention item at most once
 	 *  per live episode (mirrors `unverifiedProofEscalated`'s pattern), not once per tick past the cap. */
 	private readonly landBlockedEscalated = new Set<string>();
+	/** Consecutive `aheadUnknown` reads for `agentHasUnlandedWork`'s `${repo}::${branch}` scope (finding
+	 *  #1, cross-lineage review of af3d534). Reset to 0 the INSTANT `aheadOfBase` next returns a real
+	 *  number for that scope — a persistent fault must reach a human, but a transient one must self-clear
+	 *  with no human involvement, and the reset is what makes the self-clear automatic. */
+	private readonly aheadUnknownStreak = new Map<string, number>();
+	/** Idempotency for `fileAheadUnknownEscalation` — fires at most once per unresolved streak (mirrors
+	 *  `landBlockedEscalated`'s pattern). Cleared alongside `aheadUnknownStreak` the moment the scope's
+	 *  git read recovers, so a LATER persistent fault on the same branch can escalate again. */
+	private readonly aheadUnknownEscalated = new Set<string>();
 	/** Deterministic branch agent ids `reconcileParallelResume` just stopped, so the next `spawnFleetBranch`
 	 *  call under the same id knows to append the "resuming after a restart" addendum to the branch's
 	 *  re-prompt. Consumed (deleted) the moment spawnFleetBranch checks it — short-lived, not persisted. */
@@ -1687,7 +1713,7 @@ export class SquadManager extends EventEmitter {
 	 *  proof was recorded falls back to the arithmetic instead of being permanently invisible: a
 	 *  squash/rebase merge landed out-of-band while the daemon was down would otherwise permanently
 	 *  re-adopt an already-landed branch as "has work" on every restart. */
-	private async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
+	protected async persistedHasWork(p: { repo: string; branch?: string; worktree?: string }): Promise<boolean> {
 		if (!p.worktree) return false;
 		const st = await worktreeStatus(p.worktree).catch(() => ({ branch: undefined, dirtyFiles: [] as string[] }));
 		if (st.dirtyFiles.length > 0) return true;
@@ -1697,7 +1723,12 @@ export class SquadManager extends EventEmitter {
 		// Routed through the shared `aheadOfBase` primitive (not a bespoke `HEAD..branch` rev-list) so
 		// squash/rebase-merged persisted branches are judged the same origin-aware way as every other
 		// "still ahead?" check in the codebase, per land-mode.ts's ONE-primitive intent.
-		return (await computeAheadOfBase({ repo: p.repo, branch: p.branch, cwd: p.repo })) > 0;
+		const ahead = await this.computeAheadOfBaseFor({ repo: p.repo, branch: p.branch, cwd: p.repo });
+		// -1 ⇒ the git read failed and we genuinely don't know whether this persisted agent still has
+		// work — assume it DOES. The cost of a false positive is one wasted resume/acceptance run; the
+		// cost of a false negative (treating a fault as "clean") is permanently dropping the agent's
+		// work on the floor, unresumed. See aheadOfBase's doc comment in land-mode.ts.
+		return aheadUnknown(ahead) || ahead > 0;
 	}
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
@@ -3334,6 +3365,20 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Thin, overridable wrapper around land-mode.ts's `aheadOfBase` — mirrors `resolveLandModeFor`
+	 * immediately above, same reason: `bun test`'s PROCESS-WIDE `mock.module` permanently rebinds
+	 * every consumer's import of `land-mode.ts` the moment ANY test file module-mocks it, regardless
+	 * of which file's tests run when — so a test needing `aheadOfBase`'s REAL git behavior (e.g. a
+	 * PATH-shimmed git-fault repro) can silently get another file's canned mock instead. Every
+	 * "unlanded work?" consumer below routes through this method (never the bare `computeAheadOfBase`
+	 * import directly) so tests inject a fake ahead-count by overriding the method, never by mocking
+	 * the module.
+	 */
+	protected computeAheadOfBaseFor(opts: { repo: string; branch: string; cwd?: string }): Promise<number> {
+		return computeAheadOfBase(opts);
+	}
+
+	/**
 	 * Injection seam (mirrors `resolveLandModeFor` above) so tests can supply a fake independent
 	 * judge without a real `omp` binary on PATH. `undefined` ⇒ `validatorGate`'s own default judge
 	 * (an independent one-shot `omp -p --model opus` call).
@@ -3509,16 +3554,86 @@ export class SquadManager extends EventEmitter {
 		if (st.dirtyFiles.length > 0) return true;
 		const proof = getDoneProofByBranch(this.stateDir, rec.dto.branch);
 		if (proof && (await proofCoversTip(proof, rec.dto.branch, rec.dto.repo))) return false;
-		return (await computeAheadOfBase({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree })) > 0;
+		const ahead = await this.computeAheadOfBaseFor({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree });
+		const scope = `${rec.dto.repo}::${rec.dto.branch}`;
+		// -1 ⇒ the git read failed and we genuinely don't know — assume there IS unlanded work rather
+		// than silently reading a transient git fault as "nothing to land". A false positive costs one
+		// wasted acceptance-suite run; a false negative here is orchestrator.ts:220's `agentHasWork`
+		// gate silently skipping the land for this unit, forever, with no escalation. See aheadOfBase's
+		// doc comment in land-mode.ts. Bounded by `trackAheadUnknown` below: a PERSISTENT fault stops
+		// re-paying for that wasted run every tick once a human has been notified, instead of thrashing
+		// the acceptance suite forever (finding #1, cross-lineage review of af3d534).
+		if (aheadUnknown(ahead)) return this.trackAheadUnknown(rec, scope);
+		this.aheadUnknownStreak.delete(scope);
+		this.aheadUnknownEscalated.delete(scope);
+		return ahead > 0;
+	}
+
+	/**
+	 * Bounded response to a persistent `aheadOfBase` git fault on `agentHasUnlandedWork`'s
+	 * `${repo}::${branch}` scope (finding #1, cross-lineage review of af3d534). Below
+	 * `aheadUnknownEscalateCap()` consecutive unknowns: preserve af3d534's original
+	 * assume-work-exists polarity (a false positive costs one wasted acceptance-suite run — the
+	 * existing, deliberate trade-off, unchanged). At the cap: file a ONE-TIME "Needs you" attention item
+	 * naming the fault (dual-write, mirrors `fileLandBlockedEscalation`'s shape exactly) and return
+	 * `false` so the orchestrator stops re-running the costly suite against a fault that hasn't changed
+	 * since the last tick. This is NOT a return of the pre-fix silent skip: a human has already been
+	 * told (the attention item + automation row are both live before this ever returns `false`), and
+	 * `agentHasUnlandedWork`'s caller resets the streak (see above) the instant `aheadOfBase` next
+	 * returns a real number for this scope — so the unit resumes automatically the moment git recovers,
+	 * with no human action required for the transient case.
+	 */
+	private trackAheadUnknown(rec: AgentRecord, scope: string): boolean {
+		const streak = (this.aheadUnknownStreak.get(scope) ?? 0) + 1;
+		this.aheadUnknownStreak.set(scope, streak);
+		const cap = aheadUnknownEscalateCap();
+		if (cap > 0 && streak >= cap) {
+			if (!this.aheadUnknownEscalated.has(scope)) {
+				this.aheadUnknownEscalated.add(scope);
+				this.fileAheadUnknownEscalation(rec, streak);
+			}
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Dual-write "Needs you" escalation for a persistent `aheadOfBase` fault (finding #1, cross-lineage
+	 * review of af3d534) — mirrors `fileLandBlockedEscalation`'s pattern exactly:
+	 *   1. The attention lane on the live `AgentRecord` (live-pushed to any connected client).
+	 *   2. The "land" automation channel, unconditionally, so /api/automation + the panel see it even if
+	 *      `rec` is reaped before a client observes the attention event.
+	 * Idempotent per streak via the caller's `aheadUnknownEscalated` set (this method itself doesn't
+	 * dedupe). Best-effort; never throws.
+	 */
+	private fileAheadUnknownEscalation(rec: AgentRecord, streak: number): void {
+		const summary = `aheadOfBase has returned "unknown" for ${rec.dto.branch ?? rec.dto.name} on ${streak} consecutive checks — needs a human to look`;
+		const detail = `agentHasUnlandedWork(${rec.dto.id}) — repo ${rec.dto.repo}, branch ${rec.dto.branch ?? "?"}: the underlying git read (aheadOfBase) keeps failing, so the auto-land loop is holding this unit rather than re-running the acceptance suite against an unresolved fault. It resumes automatically the moment aheadOfBase next returns a real count.`;
+		try {
+			const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
+			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.emitAgent(rec);
+		} catch (err) {
+			this.log("warn", `ahead-unknown attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
+		try {
+			this.log("warn", `${summary} — ${detail}`);
+			this.automation.for("land", rec.dto.repo)({ durationMs: 0, level: "warn", detail: `${summary} — ${detail}` });
+		} catch {
+			/* observability must never break the land path */
+		}
 	}
 
 	// ── Observer edges (OMPSQ-52) — read-only git probes + the main gate, injected into Observer. ──
 
 	/** Commits on an agent's branch not in main (origin-aware in PR mode via `aheadOfBase`):
-	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown. */
+	 *  0 ⇒ landed; >0 ⇒ unlanded; -1 ⇒ no branch / unknown git read — test with `aheadUnknown`, never
+	 *  a bare `< 0`/`=== -1`/`> 0` (see aheadOfBase's doc comment in land-mode.ts). Feeds
+	 *  ObserverDeps.gitAheadOfMain — auditLandedSurvivors/auditStaleDone in observer.ts are the callers
+	 *  and both branch on `aheadUnknown` explicitly. */
 	protected async aheadOfMain(a: AgentDTO): Promise<number> {
 		if (!a.branch) return -1;
-		return computeAheadOfBase({ repo: a.repo, branch: a.branch, cwd: a.worktree });
+		return this.computeAheadOfBaseFor({ repo: a.repo, branch: a.branch, cwd: a.worktree });
 	}
 
 	/** Count of uncommitted TRACKED files in a checkout — the land-blocking set (matches the land path's
@@ -7641,11 +7756,16 @@ export class SquadManager extends EventEmitter {
 						// were landed too.
 						const doneProof = !w.isPrimary && w.branch ? getDoneProofByBranch(this.stateDir, w.branch) : undefined;
 						const proven = !!doneProof && w.branch !== undefined && (await proofCoversTip(doneProof, w.branch, root));
+						// The -1 "unknown" sentinel flows straight into WorktreeInfo.aheadOfBase unmapped, by
+						// design: selectReapable's `merged` test is `w.aheadOfBase === 0`, an EXACT-equality
+						// check, so -1 (or any other nonzero) already falls into "not merged" without any
+						// special-casing here — the fail-safe direction this consumer needs (never reap a
+						// worktree we couldn't verify is landed). Do not change this to `> 0`/`< 0`.
 						return {
 							worktree: w.worktree,
 							branch: w.branch ?? "",
 							isPrimary: w.isPrimary,
-							aheadOfBase: w.isPrimary || !w.branch ? 0 : await computeAheadOfBase({ repo: root, branch: w.branch, cwd: root }),
+							aheadOfBase: w.isPrimary || !w.branch ? 0 : await this.computeAheadOfBaseFor({ repo: root, branch: w.branch, cwd: root }),
 							proven,
 							dirty: !w.isPrimary && (await worktreeStatus(w.worktree)).dirtyFiles.length > 0,
 							mtimeMs: stat ? stat.mtimeMs : 0, // dir gone ⇒ ancient ⇒ eligible (removeWorktree prunes the stale entry)

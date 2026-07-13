@@ -36,6 +36,7 @@ import type { ComplianceFinding } from "./compliance.ts";
 import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
 import { errText } from "./err-text.ts";
 import type { LandLedger } from "./land-ledger.ts";
+import { aheadUnknown } from "./land-mode.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
 export type Severity = "low" | "high" | "structural";
@@ -78,7 +79,8 @@ export interface ObserverDeps {
 	 *  confirm-retries it and `auditTestsGreen` files it as `gate-unrunnable`, not `regression:`. */
 	runGate: () => Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }>;
 	/** Commits on the agent's branch not in main (origin-aware in PR mode — see `aheadOfBase`):
-	 *  0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown. Async: PR mode fetches the origin default branch. */
+	 *  0 ⇒ landed; >0 ⇒ unlanded; <0 ⇒ unknown (git read failed) — test with `aheadUnknown`, never a
+	 *  bare `< 0`/`=== -1`/`> 0`. Async: PR mode fetches the origin default branch. */
 	gitAheadOfMain: (agent: AgentDTO) => Promise<number>;
 	/** Untracked file paths in the main checkout. */
 	untrackedInMain: () => string[];
@@ -237,7 +239,16 @@ export async function auditLandedSurvivors(
 		if ((a.status !== "idle" && a.status !== "stopped") || !a.issue) continue;
 		if (openIds.has(a.issue.id)) continue; // issue still open ⇒ not Done
 		const proven = await hasProof(a);
-		if (!proven && (await aheadOf(a)) !== 0) continue; // >0 ⇒ unlanded (stale-done); <0 ⇒ unknown — leave it
+		// DoneProof-first, same short-circuit contract as before: `aheadOf` must NEVER be called once
+		// `proven` is true (a cheap in-memory proof check must not pay for a git round-trip it doesn't
+		// need — see the "never call aheadOf when already proven" regression guard in observer.test.ts).
+		// >0 ⇒ genuinely unlanded (stale-done, not a reap candidate); unknown (git read failed) ⇒ we
+		// can't PROVE it's safe to reap, so treat it the same as ">0" and leave it — reaping is a
+		// destructive autofix, never taken on an unverifiable read.
+		if (!proven) {
+			const ahead = await aheadOf(a);
+			if (aheadUnknown(ahead) || ahead !== 0) continue;
+		}
 		out.push({
 			fingerprint: `survivor:${a.issue.identifier ?? a.issue.id}`,
 			title: `reap landed survivor ${a.id}`,
@@ -274,7 +285,14 @@ export async function auditStaleDone(agents: AgentDTO[], openIds: Set<string>, a
 	for (const a of agents) {
 		if (!a.issue || openIds.has(a.issue.id)) continue; // no issue, or issue still open ⇒ not a Done candidate
 		if (await hasProof(a)) continue; // proven landed ⇒ never stale, regardless of the arithmetic
-		if ((await aheadOf(a)) > 0) stale.push(a);
+		const ahead = await aheadOf(a);
+		// unknown (git read failed) ⇒ we can't PROVE the issue is falsely Done, so never reopen it on an
+		// unverifiable read — reopening dispatches a real re-do of the ticket; a false reopen from a
+		// transient git fault is its own kind of noise. This is the conservative direction for THIS
+		// consumer specifically (contrast persistedHasWork/agentHasUnlandedWork, where unknown ⇒ assume
+		// work exists — there the cost of being wrong is a wasted acceptance run, not a spurious reopen).
+		if (aheadUnknown(ahead)) continue;
+		if (ahead > 0) stale.push(a);
 	}
 	if (stale.length === 0) return [];
 	const ident = (a: AgentDTO): string => a.issue!.identifier ?? a.issue!.id;
