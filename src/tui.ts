@@ -196,7 +196,7 @@ export function buildBoard(state: BoardState): string[] {
 	const ready = agents.filter((a) => a.landReady && a.validation?.verdict !== "veto").length;
 	const lines: string[] = [];
 
-	const title = `${c("bold", c("cyan", "omp-squad"))}  ${c("dim", `${agents.length} agents`)}${
+	const title = `${c("bold", c("cyan", "glance"))}  ${c("dim", `${agents.length} agents`)}${
 		need ? c("red", ` · ${need} need input`) : ""
 	}${vetoed ? c("red", ` · ${vetoed} vetoed`) : ""}${ready ? c("green", ` · ${ready} ready`) : ""}${state.connected ? "" : c("red", "  [disconnected]")}`;
 	lines.push(pad(title, width));

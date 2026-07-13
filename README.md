@@ -14,19 +14,9 @@ units of work end-to-end. Agents run on [Oh My Pi](https://omp.sh) by default, b
 runs behind the same seam and shows up in the same roster. Cross-operator federation puts your
 teammates' agents there too.
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ glance  3 agents · 1 need input                            + Add agent  │
-├───────────────────────────────┬──────────────────────────────────────────┤
-│ ⛔ input   bravo  squad/bravo  │ bravo [input]  anthropic/claude-opus      │
-│ ◐ working  alpha  squad/alpha  │ ───────────────────────────────────────  │
-│ ● idle     charlie squad/char  │ USER      refactor the auth module        │
-│                                │ ASSISTANT I'll start by reading auth.ts…  │
-│                                │ TOOL      ▸ edit: src/auth.ts             │
-│                                │ ⛔ Allow tool: bash  [Approve] [Deny]     │
-│                                │ prompt› _                                  │
-└───────────────────────────────┴──────────────────────────────────────────┘
-```
+![The glance TUI — three agents in one glance: one held on a bash approval, one working, one idle](docs/assets/tui.png)
+*The actual TUI: bravo is held on a `bash` approval, charlie is working, alpha is idle — and the
+footer tells you one agent is waiting on you.*
 
 > Formerly **omp-squad**. Both binaries are installed (`glance` and `omp-squad`), the canonical
 > env prefix is `GLANCE_*`, and every legacy `OMP_SQUAD_*` variable keeps working unchanged.
@@ -53,19 +43,7 @@ third repo). Without a control plane you lose track of which is busy, which fini
 
 ## How it works
 
-```
-        glance (one process)
-        ┌──────────────────────────────────────────────────┐
-        │  SquadManager  ── roster, status, transcript     │
-        │     │                                            │
-        │     ├── AgentDriver ──▶ omp --mode rpc    (wt 1) │   each agent =
-        │     ├── AgentDriver ──▶ opencode (ACP)    (wt 2) │   its own worktree
-        │     ├── AgentDriver ──▶ workflow graph    (wt 3) │   + child process
-        │     │                                            │
-        │     ├── SquadServer (HTTP + WS) ──▶ browser      │
-        │     └── SquadTui    (terminal)                   │
-        └──────────────────────────────────────────────────┘
-```
+![glance architecture — SquadManager fans out to AgentDrivers (one worktree each), SquadServer serves the browser, SquadTui the terminal](docs/assets/architecture.png)
 
 Every fleet class — an omp operator, an ACP runtime, a sandboxed agent, a workflow run, a
 commissioned worker — implements one `AgentDriver` seam, so the roster, TUI, web, gates, and

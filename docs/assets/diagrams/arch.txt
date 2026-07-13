@@ -1,0 +1,11 @@
+glance (one process)
+┌──────────────────────────────────────────────────┐
+│  SquadManager  ── roster, status, transcript     │
+│     │                                            │
+│     ├── AgentDriver ──▸ omp --mode rpc    (wt 1) │   each agent =
+│     ├── AgentDriver ──▸ opencode (ACP)    (wt 2) │   its own worktree
+│     ├── AgentDriver ──▸ workflow graph    (wt 3) │   + child process
+│     │                                            │
+│     ├── SquadServer (HTTP + WS) ──▸ browser      │
+│     └── SquadTui    (terminal)                   │
+└──────────────────────────────────────────────────┘
