@@ -1,5 +1,5 @@
 # CSP arming in DB mode + end the call when the org changes
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

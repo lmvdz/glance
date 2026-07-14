@@ -200,11 +200,25 @@ export async function voiceProviderPublicInfo(scope: VoiceKeyScope): Promise<Arr
  *  nothing drove the served page against the real endpoint). Only providers whose key is actually
  *  configured contribute an origin; an unkeyed provider must not widen the exfil-blocking default.
  *  Deliberately stays env-only / non-org-aware (see `envVoiceApiKey` doc comment) — kept
- *  synchronous because `securityHeaders()` is called on every response and must stay nullary. */
+ *  synchronous because `securityHeaders()` is called on every response and must stay nullary.
+ *  FILE MODE ONLY (`server.ts`'s `securityHeaders()`): DB mode has no env key to check at all — see
+ *  `voiceProviderOrigins` below, plans/voice-db-mode/07-csp-and-org-switch.md. */
 export function voiceConnectSrcOrigins(): string[] {
 	const origins: string[] = [];
 	if (envVoiceApiKey("openai")) origins.push("https://api.openai.com");
 	return origins;
+}
+
+/** Every REGISTERED voice provider's origin, independent of any key (DB mode's CSP widening,
+ *  plans/voice-db-mode/07-csp-and-org-switch.md, DESIGN.md CSP row). `securityHeaders()` is nullary
+ *  and per-org CSP was rejected outright — the origin is identical for every org, only the *key*
+ *  differs, and the key never touches CSP — so DB mode cannot gate the header on any one org's key
+ *  the way file mode gates it on the env key (`voiceConnectSrcOrigins`). It arms on the flag alone:
+ *  an org with no key gets a slightly looser `connect-src` than it strictly needs and no voice
+ *  button, a legibility cost accepted in exchange for not shipping the silent-dead-call class found
+ *  live 2026-07-13 (see `voiceConnectSrcOrigins`'s doc comment). */
+export function voiceProviderOrigins(): string[] {
+	return Object.values(VOICE_PROVIDERS).map((cfg) => new URL(cfg.baseUrl).origin);
 }
 
 /** Whether ANY registered voice provider resolves a key in `scope` (MEDIUM-4, rewritten for

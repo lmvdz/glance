@@ -116,6 +116,7 @@ import {
 	voiceConnectSrcOrigins,
 	voiceKeyFor,
 	voiceProviderMaxSessionWindowMs,
+	voiceProviderOrigins,
 	voiceProviderPublicInfo,
 	VOICE_MINT_AUDIT_ACTION,
 	type VoiceKeyScope,
@@ -147,7 +148,7 @@ function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "own
 }
 import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
-import type { DbHandle } from "./db/index.ts";
+import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import type { PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
@@ -405,11 +406,22 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
 // ponytail: 'unsafe-inline' is forced by the single-file inline-script/style SPA;
 // connect-src 'self' is the compensating control (blocks token exfil to other origins).
 /** Security response headers stamped on every dashboard + API response (finding F-3).
- *  Voice (webapp-voice-lane): the ONLY sanctioned widening of `connect-src` — the keyed provider's
- *  origin, and only while the lane is armed (flag AND key). Every other daemon keeps the tight
- *  exfil-blocking default. Read per-call so a flag flip doesn't need a restart to tighten back. */
+ *  Voice (webapp-voice-lane, plans/voice-db-mode/07-csp-and-org-switch.md): the ONLY sanctioned
+ *  widening of `connect-src` — the keyed provider's origin, only while the lane is armed. CSP stays
+ *  GLOBAL and this function stays NULLARY (DESIGN.md CSP row rejected per-org widening outright: the
+ *  origin is identical for every org, only the *key* differs, and the key never touches CSP — and
+ *  the response-header path runs with no session/org in scope anyway). That forces the two modes to
+ *  arm on different signals: FILE mode is unchanged from before this concern — flag AND the env key
+ *  actually being configured (byte-identical output; `tests/ws-auth.test.ts`'s pinned substrings
+ *  depend on this exact condition). DB mode cannot see any one org's key here, so it arms on the
+ *  flag ALONE — an org with no key gets a slightly looser `connect-src` than it strictly needs and
+ *  no voice button, a legibility cost accepted in exchange for not shipping the silent-dead-call
+ *  class found live 2026-07-13 (a mint succeeds, then the browser's own SDP POST dies silently
+ *  against a tight 'self'). Every other daemon keeps the tight exfil-blocking default. Read per-call
+ *  so a flag flip doesn't need a restart to tighten back. */
 export function securityHeaders(): Record<string, string> {
-	const voiceOrigins = envBool("OMP_SQUAD_VOICE_ENABLED", false) ? voiceConnectSrcOrigins() : [];
+	const flagOn = envBool("OMP_SQUAD_VOICE_ENABLED", false);
+	const voiceOrigins = flagOn ? (voiceDbBootMode() === "db" ? voiceProviderOrigins() : voiceConnectSrcOrigins()) : [];
 	const connectSrc = ["'self'", ...voiceOrigins].join(" ");
 	return {
 		"Content-Security-Policy":
