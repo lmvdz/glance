@@ -318,6 +318,57 @@ A malicious or compromised pack is a supply-chain attack on every buyer that ins
   only" and then attempts egress is *blocked by the buyer's sandbox*, not trusted. Declaration + least-privilege
   grant + sandbox enforcement is the trust model (§5).
 
+### 7a. Fingerprinting mechanics — how attribution actually works
+
+A glance flow is a capability pack of DOT workflow graphs, profiles (harness/model/thinking/MCP config), and
+recipe markdown — so the fingerprintable surface is *structure + prompts + routing*, richest on workflows.
+Three layers catch progressively harder copying; none *prevents* it — they make it attributable and prosecutable.
+
+**Layer 1 — Provenance (artifact identity).** Canonicalize the pack (stable serialization — sorted keys,
+normalized whitespace, a pinned canonical DOT/JSON form), hash it, sign with the seller's key (Ed25519 /
+sigstore), seller pubkeys registered to their marketplace identity. Proves *this exact artifact* came from
+seller X. Brittle (any edit breaks the hash) — provenance of an unmodified pack, not a survivable fingerprint.
+Cheap; extends the existing checksum-pinning.
+
+**Layer 2 — Static watermark, minted per-licensee (traitor tracing).** The marketplace does not hand out one
+identical artifact — when it issues flow F to buyer B it mints **F_B**, carrying a payload encoded in
+*behavior-inert degrees of freedom*, and records the `B → payload` map. Degrees of freedom in a glance flow:
+node ids / variable names / independent-branch ordering (encode bits via a per-licensee codebook);
+semantically-inert structure (a no-op node, a never-firing guard — mapmaker's-trap-street features);
+prompt-level canaries (a distinctive-but-benign phrasing, or zero-width/homoglyph marks — cheap, but
+normalization strips them). Spread the payload across N independent dimensions with a collusion-resistant,
+error-correcting code (Boneh–Shaw style) so scrubbing some marks, or two licensees diffing their copies, still
+recovers *which licensee leaked it*. Catches lazy copy-and-relist and survives verbatim redistribution; an
+LLM "rewrite this to do the same thing" defeats text/naming marks.
+
+**Layer 3 — Behavioral fingerprint + planted canary (survives laundering).** The flow is a function
+(input → output + tool-call trace); characterize it black-box so it survives reformatting, renaming, even
+partial re-implementation. A secret **probe battery** of unusual inputs where the flow makes idiosyncratic,
+stable choices (decision path, tool sequence, edge-case branch/refusal — not exact tokens); a suspected copy is
+run and scored. Stronger: a **planted behavioral canary** — a secret *trigger → benign-but-distinctive
+response* authored into the flow, with no legitimate reason to exist (borrowed from ML backdoor-watermarking).
+A match is near-conclusive, because an independently-built flow would never reproduce your arbitrary secret
+trigger; keyed per-licensee, it is *also* traitor tracing, and removal requires finding a trigger buried in a
+large prompt/graph that only fires on an input the copier doesn't know. Caveat: a plain behavioral match cannot
+distinguish "copied you" from "convergently built something similar" (and convergence rises as models improve) —
+the planted canary is what makes it decisive.
+
+**The enforcement pipeline (without which fingerprints are decorative).** A **secret fingerprint registry**
+(probe batteries, canary triggers, watermark codebooks, the per-licensee payload map) — secret, because
+publishing the probes lets copiers evade them. A **publish-time originality gate** — run every new listing
+against the registry and flag/reject a behavioral match *before* it ships; the highest-leverage detection point,
+because the marketplace controls execution there, and it kills the common copy-and-relist abuse. Detection *in
+the wild* needs a runnable or observable suspect (Layer 2 works on the artifact alone — scan a listing; Layer 3
+needs to run the copy or see its outputs). **Attribution → response**: the per-licensee payload names the
+leaker; response is entitlement revocation plus the legal path, where the fingerprint match is the evidence.
+
+**Build order.** Layer 1 (signing) and Layer 2 (per-licensee minting + static marks) are small extensions of the
+capability-pack system and ship in Phase 3 cheaply. Layer 3 + the pipeline is the real project — a probe-battery
+format, a fingerprint runner (glance already executes flows), a similarity metric robust to LLM stochasticity,
+per-licensee canary auto-injection at mint time, and the publish-time gate. Honest ceiling: none of it stops a
+determined adversary who rebuilds the behavior from scratch — but that is independent creation, not theft, and
+it does not acquire the durable moat (data, integrations, trust — §6).
+
 ---
 
 ## 8. Compliance framework stack
