@@ -1,6 +1,6 @@
 # C01 — repo bootstrap: fork terax into glance-desktop
 
-STATUS: in-review (glance-desktop#2; cargo gate + WSLg launch proof owed on system deps)
+STATUS: in-review (glance-desktop#2 — ALL acceptance met: cargo green, WSLg window mapped)
 PRIORITY: p1
 REPOS: glance-desktop (new)
 COMPLEXITY: mechanical
